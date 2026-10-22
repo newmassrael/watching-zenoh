@@ -99,7 +99,7 @@ use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session::{
     InterestForm, LocalDeliveryDrain, MatchingInterestHold, MatchingListener, MatchingStatus,
     PublishAliasError, PublishError, PublishOptions, QueryOptions, Queryable, QueryableOptions,
-    RetractionKey, SubscribeOptions, Subscriber, TokioSession,
+    RetractionKey, SubscribeOptions, Subscriber, TokioQueryHolder, TokioSession,
 };
 use wz_runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
@@ -158,8 +158,12 @@ pub type LivelinessSink =
 /// what keeps the escape bound to the ONE face the query arrived on; for the
 /// local plane that face is the session itself, and the held query answers
 /// into its own pending GET (R2953).
+///
+/// The session is handed as a [`TokioQueryHolder`] rather than a `TokioSession` because a
+/// group face's session is a multicast one, and a query that came over the group escapes on
+/// the group (open-debt item 913).
 pub type QueryableSink = Arc<
-    dyn Fn(&TokioSession) -> Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static>
+    dyn Fn(&TokioQueryHolder) -> Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static>
         + Send
         + Sync,
 >;
@@ -2153,7 +2157,7 @@ impl SharedSession {
                 &entry.wire,
                 queryable_options(entry.complete, entry.allowed_origin)
                     .with_retraction_naming(entry.retraction.clone()),
-                (entry.sink)(&session),
+                (entry.sink)(&TokioQueryHolder::Unicast(session.clone())),
             ) {
                 qbls.insert(entry.id, qbl);
             }
@@ -4808,7 +4812,7 @@ impl SharedSession {
         // deferred replies and its `ResponseFinal` to the session the query
         // arrived on, and for a local query that session is the plane's.
         for face in guard.declaration_targets() {
-            let callback = sink(&face.session);
+            let callback = sink(&TokioQueryHolder::Unicast(face.session.clone()));
             if let Some(qbl) = declare_queryable_on(
                 &face.session,
                 &keyexpr,

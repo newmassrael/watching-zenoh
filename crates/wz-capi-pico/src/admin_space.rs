@@ -67,7 +67,7 @@ use wz_capi_core::faces::{FaceSnapshot, QueryableSink, SharedSession};
 use wz_runtime_tokio::keyexpr_match::keyexpr_intersects_text;
 use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
 use wz_runtime_tokio::sample::EncodingHint;
-use wz_runtime_tokio::session::TokioSession;
+use wz_runtime_tokio::session::TokioQueryHolder;
 use wz_runtime_tokio::session_glue::{LinkKind, WhatAmI};
 
 use crate::ffi::guarded;
@@ -152,7 +152,7 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
             session: Arc::downgrade(&state.shared),
             identity,
         });
-        let sink: QueryableSink = Arc::new(move |_face: &TokioSession| {
+        let sink: QueryableSink = Arc::new(move |_face: &TokioQueryHolder| {
             let answerer = Arc::clone(&answerer);
             Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
                 answerer.answer(query, out)

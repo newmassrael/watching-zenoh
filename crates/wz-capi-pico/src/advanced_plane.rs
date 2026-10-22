@@ -30,7 +30,7 @@ use wz_runtime_tokio::advanced_publisher::{
 use wz_runtime_tokio::node_clock::NodeHlc;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::sample::SampleKind;
-use wz_runtime_tokio::session::{PublishError, PublishOptions, TokioSession};
+use wz_runtime_tokio::session::{PublishError, PublishOptions, TokioQueryHolder};
 use wz_runtime_tokio::Reliability;
 
 use crate::liveliness::TokenState;
@@ -143,7 +143,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         // One handler per face: each is a fresh closure over the same ring, and
         // none needs the face's session — a reply goes out on the query's own.
         let sink: QueryableSink =
-            Arc::new(move |_face: &TokioSession| Box::new(store.query_handler()) as Box<_>);
+            Arc::new(move |_face: &TokioQueryHolder| Box::new(store.query_handler()) as Box<_>);
         // INCOMPLETE, which is the only honest answer a bounded ring can give
         // (R2556, [`wz_runtime_tokio::advanced_cache::AdvancedCache::declare`]).
         PlainQueryable::declare(&self.session, keyexpr, None, false, sink)

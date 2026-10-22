@@ -36,7 +36,9 @@ use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
 use wz_runtime_tokio::query_sink::{QueryView, ReplyMeta, ReplyOut};
-use wz_runtime_tokio::session::{HeldQuery, TokioSession};
+#[cfg(doc)]
+use wz_runtime_tokio::session::HeldQuery;
+use wz_runtime_tokio::session::{TokioHeldQuery, TokioQueryHolder};
 
 use crate::abi::{
     z_closure_drop_callback_t, z_closure_query_callback_t, z_loaned_bytes_t, z_loaned_keyexpr_t,
@@ -141,7 +143,7 @@ enum PendingReply {
 /// uses, so the deferred and immediate legs cannot drift. Until R2953 this
 /// crate carried its own wire-only responder, so a query the session asked of
 /// ITSELF could be escaped but not answered or waited for.
-fn emit_held(held: &HeldQuery, reply: PendingReply) {
+fn emit_held(held: &TokioHeldQuery, reply: PendingReply) {
     let qos = held.qos();
     held.reply(|out| {
         let mut out = out;
@@ -358,9 +360,9 @@ pub(crate) struct QueryMarshal {
     is_local: bool,
     /// The FACE's session, on a marshal the dispatch built. `None` on one built
     /// outside a dispatch, which is exactly the case that cannot be escaped.
-    session: Option<TokioSession>,
+    session: Option<TokioQueryHolder>,
     /// Present only on an ESCAPED marshal: the query held past its dispatch.
-    deferred: Option<HeldQuery>,
+    deferred: Option<TokioHeldQuery>,
     /// Reply accumulator.
     ///
     /// `UnsafeCell` because the accessors receive `*const z_loaned_query_t` and
@@ -446,7 +448,7 @@ impl QueryMarshal {
 
     /// Bind the FACE's session, so this marshal can be escaped. Called only by
     /// the dispatch; a marshal without it is un-escapable by construction.
-    fn with_session(mut self, session: TokioSession) -> Self {
+    fn with_session(mut self, session: TokioQueryHolder) -> Self {
         self.session = Some(session);
         self
     }
@@ -455,7 +457,7 @@ impl QueryMarshal {
     /// back. The reply accumulator starts EMPTY rather than copied: replies the
     /// callback already asked for belong to the borrowed marshal's flush, and
     /// duplicating them here would send each one twice.
-    fn deep_copy_deferred(&self, held: HeldQuery) -> Self {
+    fn deep_copy_deferred(&self, held: TokioHeldQuery) -> Self {
         Self {
             keyexpr: self.keyexpr.clone(),
             parameters: self.parameters.clone(),
@@ -520,7 +522,7 @@ impl QueryMarshal {
 }
 
 /// R2953 — the marshal IS the query the dispatch handed the callback, so it is
-/// what an escape holds ([`TokioSession::hold_query`]).
+/// what an escape holds ([`TokioQueryHolder::hold_query`]).
 impl QueryView for QueryMarshal {
     fn keyexpr(&self) -> &str {
         &self.keyexpr
@@ -561,7 +563,7 @@ unsafe fn query_marshal<'a>(query: *const z_loaned_query_t) -> Option<&'a QueryM
 /// Build the wz-side queryable callback for ONE face from a shared C closure.
 fn make_queryable_callback(
     closure: Arc<CQueryClosure>,
-    session: TokioSession,
+    session: TokioQueryHolder,
 ) -> impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static {
     move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
         let Some(call) = closure.call else {
@@ -795,7 +797,7 @@ pub unsafe extern "C" fn z_declare_queryable(
             .shared
             .declare_queryable(ke, complete, allowed_origin, {
                 let closure = Arc::new(cclosure);
-                Arc::new(move |face: &TokioSession| {
+                Arc::new(move |face: &TokioQueryHolder| {
                     Box::new(make_queryable_callback(closure.clone(), face.clone())) as Box<_>
                 })
             });
@@ -1983,7 +1985,9 @@ mod tests {
             source_info: Some(wz_runtime_tokio::sample::SourceInfo::new(&[4u8; 16], 1, 2)),
         };
         let borrowed = QueryMarshal::new(&view);
-        let mut escaped = borrowed.deep_copy_deferred(shared.local_session().hold_query(&borrowed));
+        let mut escaped = borrowed.deep_copy_deferred(TokioHeldQuery::Unicast(
+            shared.local_session().hold_query(&borrowed),
+        ));
         escaped.bind();
         let loaned = &escaped as *const QueryMarshal as *const z_loaned_query_t;
         // SAFETY: `loaned` aims at a live, bound marshal on this frame.

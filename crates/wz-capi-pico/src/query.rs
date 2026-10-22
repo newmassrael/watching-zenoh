@@ -68,7 +68,9 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 use wz_runtime_tokio::query_sink::{QueryView, ReplyMeta, ReplyOut};
-use wz_runtime_tokio::session::{HeldQuery, TokioSession};
+#[cfg(doc)]
+use wz_runtime_tokio::session::HeldQuery;
+use wz_runtime_tokio::session::{TokioHeldQuery, TokioQueryHolder};
 
 use crate::abi::{
     handle_ref, impl_handle_ownership7, z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t,
@@ -182,7 +184,11 @@ enum PendingReply {
 /// GET for a query it asked of itself) and releases the Final on drop. This ABI
 /// only formats the reply, through the same [`flush_one`] the in-dispatch flush
 /// uses. Until R2953 it carried its own wire-only responder.
-fn emit_held(held: &HeldQuery, reply: PendingReply, query_qos: wz_runtime_tokio::sample::QosLevel) {
+fn emit_held(
+    held: &TokioHeldQuery,
+    reply: PendingReply,
+    query_qos: wz_runtime_tokio::sample::QosLevel,
+) {
     held.reply(|out| {
         let mut out = out;
         flush_one(&mut out, reply, query_qos);
@@ -303,10 +309,11 @@ struct QueryMarshal {
     /// has no pico accessor; it is carried only so the escaped responder can
     /// seed its replies from it.
     qos: wz_runtime_tokio::sample::QosLevel,
-    /// The FACE's session, on a marshal the dispatch built. `None` on one built
-    /// outside a dispatch (a test fixture), which is exactly the case that
-    /// cannot be escaped — see [`clone_query_marshal`].
-    session: Option<TokioSession>,
+    /// The FACE's session, on a marshal the dispatch built: a link's, the local
+    /// plane's or a group's. `None` on one built outside a dispatch (a test
+    /// fixture), which is exactly the case that cannot be escaped — see
+    /// [`clone_query_marshal`].
+    session: Option<TokioQueryHolder>,
     /// R2953 — whether the session asked this query of itself: the half of
     /// the query's route the rid alone does not name ([`HeldQuery`]).
     is_local: bool,
@@ -315,7 +322,7 @@ struct QueryMarshal {
     /// marshal is the ordinary borrowed one, whose replies are accumulated and
     /// flushed by the dispatch. Each escape is its own hold (pushing the same
     /// query into two channels is legal), released on its own drop.
-    deferred: Option<HeldQuery>,
+    deferred: Option<TokioHeldQuery>,
     /// The node's closed latch ([`SharedSession::closed_latch`]), on a marshal the dispatch
     /// built and on every copy escaped from it. A reply on a query whose session has been
     /// closed answers `_Z_ERR_SESSION_CLOSED`, as pico's `z_query_reply*` do before anything else
@@ -399,7 +406,7 @@ impl QueryMarshal {
 
     /// Bind the FACE's session, so this marshal can be escaped. Called only by
     /// the dispatch; a marshal without it is un-escapable by construction.
-    fn with_session(mut self, session: TokioSession) -> Self {
+    fn with_session(mut self, session: TokioQueryHolder) -> Self {
         self.session = Some(session);
         self
     }
@@ -427,7 +434,7 @@ impl QueryMarshal {
     /// created EMPTY rather than copied: replies the callback already asked for
     /// belong to the borrowed marshal's flush, and duplicating them here would
     /// send each one twice.
-    fn deep_copy_deferred(&self, held: HeldQuery) -> Self {
+    fn deep_copy_deferred(&self, held: TokioHeldQuery) -> Self {
         Self {
             keyexpr: self.keyexpr.clone(),
             parameters: self.parameters.clone(),
@@ -521,7 +528,7 @@ impl QueryMarshal {
 }
 
 /// R2953 — the marshal IS the query the dispatch handed the callback, so it is
-/// what an escape holds ([`TokioSession::hold_query`]). Only what the hold
+/// what an escape holds ([`TokioQueryHolder::hold_query`]). Only what the hold
 /// reads is answered from the marshal's own fields; an empty payload or
 /// attachment reads as absent, as the view it was built from would.
 impl QueryView for QueryMarshal {
@@ -642,7 +649,7 @@ unsafe impl Sync for CQueryClosure {}
 /// must copy anything it keeps.
 pub(crate) fn make_queryable_callback(
     closure: Arc<CQueryClosure>,
-    session: TokioSession,
+    session: TokioQueryHolder,
     closed: Arc<std::sync::atomic::AtomicBool>,
 ) -> impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static {
     move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
@@ -1153,7 +1160,7 @@ unsafe fn declare_queryable_inner(
             // registry calls the factory per face, the C drop(context) is unmoved.
             let closure = Arc::new(cclosure);
             let closed = state.shared.closed_latch();
-            Arc::new(move |session: &TokioSession| {
+            Arc::new(move |session: &TokioQueryHolder| {
                 Box::new(make_queryable_callback(
                     closure.clone(),
                     session.clone(),

@@ -229,6 +229,64 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Drop for HeldQu
     }
 }
 
+/// A [`HeldQuery`] that does not name its transport, as [`TokioQueryHolder::hold_query`]
+/// makes it: the one type a C ABI keeps in an escaped query.
+#[non_exhaustive]
+pub enum TokioHeldQuery {
+    /// Held on a unicast session.
+    Unicast(HeldQuery),
+    /// Held on a group.
+    #[cfg(feature = "transport-multicast")]
+    Group(HeldQuery<TokioRuntime, TokioTime, Multicast>),
+}
+
+impl TokioHeldQuery {
+    /// The request id the query carries.
+    pub fn rid(&self) -> u64 {
+        match self {
+            Self::Unicast(held) => held.rid(),
+            #[cfg(feature = "transport-multicast")]
+            Self::Group(held) => held.rid(),
+        }
+    }
+
+    /// Whether the session asked the query of itself.
+    pub fn is_local(&self) -> bool {
+        match self {
+            Self::Unicast(held) => held.is_local(),
+            #[cfg(feature = "transport-multicast")]
+            Self::Group(held) => held.is_local(),
+        }
+    }
+
+    /// The key expression the query was asked under.
+    pub fn keyexpr(&self) -> &str {
+        match self {
+            Self::Unicast(held) => held.keyexpr(),
+            #[cfg(feature = "transport-multicast")]
+            Self::Group(held) => held.keyexpr(),
+        }
+    }
+
+    /// The query's own QoS, which a reply inherits.
+    pub fn qos(&self) -> QosLevel {
+        match self {
+            Self::Unicast(held) => held.qos(),
+            #[cfg(feature = "transport-multicast")]
+            Self::Group(held) => held.qos(),
+        }
+    }
+
+    /// Answer the query now, on its own route; see [`HeldQuery::reply`].
+    pub fn reply(&self, answer: impl FnOnce(&mut dyn ReplyOut)) {
+        match self {
+            Self::Unicast(held) => held.reply(answer),
+            #[cfg(feature = "transport-multicast")]
+            Self::Group(held) => held.reply(answer),
+        }
+    }
+}
+
 /// The hold a local query's deferred handler job keeps on the query's own
 /// `ResponseFinal`, released when the job has delivered its replies.
 ///

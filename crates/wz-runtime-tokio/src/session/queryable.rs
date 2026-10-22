@@ -387,6 +387,34 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
 /// the captured `SessionLinkActions<R, T>` would otherwise name.
 pub(super) type QueryableRetraction = Box<dyn FnMut() + Send + 'static>;
 
+/// A session a query can be held on, whichever transport it came over: what a C ABI's
+/// queryable is handed for each session it is declared on, and keeps for a handler that may
+/// let its query escape (zenoh-pico's `z_query_take_from_loaned`, zenoh-c's `z_query_clone`).
+/// The escape then holds the query on the session it arrived on, a link's or a group's
+/// (open-debt item 913: the shims kept a unicast session, so a group query could not escape).
+#[derive(Clone)]
+#[non_exhaustive]
+pub enum TokioQueryHolder {
+    /// A unicast session: a face, or the local plane.
+    Unicast(super::TokioSession),
+    /// A multicast session: a group.
+    #[cfg(feature = "transport-multicast")]
+    Group(super::TokioMulticastSession),
+}
+
+impl TokioQueryHolder {
+    /// Keep the query `view` describes past its handler, on this session; see
+    /// [`Session::hold_query`].
+    #[cfg(feature = "query-queryable")]
+    pub fn hold_query(&self, view: &dyn QueryView) -> TokioHeldQuery {
+        match self {
+            Self::Unicast(session) => TokioHeldQuery::Unicast(session.hold_query(view)),
+            #[cfg(feature = "transport-multicast")]
+            Self::Group(session) => TokioHeldQuery::Group(session.hold_query(view)),
+        }
+    }
+}
+
 #[non_exhaustive]
 pub struct Queryable<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
     // R311ek — `observer` is read only by the `query-queryable`-gated

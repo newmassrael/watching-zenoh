@@ -515,7 +515,7 @@ mod transport;
 #[cfg(feature = "transport-unicast")]
 pub use decl_listener::*;
 #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
-pub use held_query::HeldQuery;
+pub use held_query::{HeldQuery, TokioHeldQuery};
 #[cfg(feature = "transport-unicast")]
 pub use liveliness::*;
 #[cfg(feature = "transport-unicast")]
