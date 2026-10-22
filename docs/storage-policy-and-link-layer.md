@@ -222,11 +222,33 @@ stays a limit on what a frame may carry that upstream does not have (upstream
 and zenoh-pico accept any number of extensions).
 The declared stack of the fixed client is now 9,216 B (a third free at the
 peak), which takes 7,168 B out of bss against the 16 KB of before: data and bss
-118.0 KB to 110.8 KB, against 114 KB of zenoh-pico's. The peak of 5.9 KB is
-about twice pico's 2.9 KB. What is left in it is the network dispatch (2,104 B;
-the codec's `Response` is 1,104 B and is probably encoded inside it, which the
+118.0 KB to 110.8 KB, against 114 KB of zenoh-pico's smallest working
+configuration. What is left in the peak is the network dispatch (2,104 B; the
+codec's `Response` is 1,104 B and is probably encoded inside it, which the
 disassembly has not been read for), `lend_declare` and `lend_push`, the other
 records still read as their eager forms, and the application layer's closure.
+
+Against zenoh-pico on the same board, bench and network buffers (2026-10-22, the
+two documents answered 2000 times each with no wrong answer by both). Stack is
+the sum of the application threads, because pico runs a read task of its own
+beside `main` (an earlier comparison set pico's `main` alone, 2,944 B, against
+wz's one thread, and read as a factor of two that is not there). pico is built
+as `deploy/zephyr-pico-compare` with its heap pool and its two stacks cut to
+what it uses (16 KB pool, 4 KB stacks), and it still serves the same queries:
+
+| | zenoh-pico (tuned) | wz fixed client |
+|---|---|---|
+| stack used | 2,944 + 2,736 = 5,680 B | 5,928 B |
+| stack reserved | 2 x 4,096 B | 9,216 B |
+| heap used | 9,416 B (pool 16,384 B) | 0 |
+| data and bss | 154,649 B | 110,826 B |
+| text | 164,396 B | 157,088 B |
+
+The two are not the same program: that pico build enables publication,
+subscription and query as well as the queryable, and the wz client is a client
+that answers queries; the kernel configurations differ beyond the network
+buffers. So the table is a measurement of two builds, not of the two libraries'
+cost for one feature set. No ordering is claimed from it.
 
 ## 6. Open
 
