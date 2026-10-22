@@ -280,7 +280,7 @@ struct Row<P: Storage> {
 
 /// The replies a queryable has staged for one peer, over a storage policy.
 ///
-/// On a policy that enforces its capacity ([`Static`](crate::bounded::Static)) the
+/// On a policy that enforces its capacity ([`Static`]) the
 /// stage holds [`caps::MAX_PENDING_REPLIES`] rows and [`caps::REPLY_STAGE_BYTES`] of
 /// bytes, no more: a full stage refuses and counts, and does not grow. On one that
 /// does not ([`Heap`](crate::bounded::Heap)) the same rows and the same arena grow
@@ -683,7 +683,7 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
 
 /// The `Final`s owed to one peer, as `(rid, the query's QoS)`: up to
 /// [`caps::MAX_PENDING_FINALS`] rows on a policy that enforces the capacity
-/// ([`Static`](crate::bounded::Static)), where a full table refuses the REQUEST that
+/// ([`Static`]), where a full table refuses the REQUEST that
 /// would have needed one ([`Self::refusals`] counts them) and does not grow; and as
 /// many as are owed on one that does not ([`Heap`](crate::bounded::Heap)), which
 /// refuses nothing and counts nothing, as it always did.
@@ -691,7 +691,7 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
 /// One algorithm for both: the table is a [`BoundedVec`] of its storage policy,
 /// `has_room` asks it how many pushes are still guaranteed, and the heap policy
 /// answers `usize::MAX`. The policy defaults to this build's
-/// [`Profile`](crate::bounded::Profile), so `FinalStage` alone is the build's table.
+/// [`Profile`], so `FinalStage` alone is the build's table.
 pub struct FinalStage<P: Storage = Profile> {
     rows: BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
     refused_requests: u32,

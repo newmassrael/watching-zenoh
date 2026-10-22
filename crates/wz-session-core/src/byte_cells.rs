@@ -11,7 +11,7 @@
 //! value that is made, moved into a session's slot and moved again on the way: every move is a
 //! copy on the stack the node is running on, so the stack the node needs grows with the buffers
 //! it moves rather than with anything it computes. Here the buffers stay where the image put
-//! them, in `.bss`, and the driver holds a [`ByteBuf`]: a pointer, a length and a flag to clear,
+//! them, in `.bss`, and the driver holds a [`ByteBuf`](crate::byte_cells::ByteBuf): a pointer, a length and a flag to clear,
 //! a few words however large the batch is.
 //!
 //! It is also where the size of a buffer is a decision of the image and not of the code that

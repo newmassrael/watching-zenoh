@@ -310,7 +310,7 @@ pub struct MappingSpaces<'a> {
 
 /// The peer's id space as a [`MappingSpaces`] reads it: a plain map (a router
 /// face, a multicast peer, a test) or the table a session of the static storage
-/// policy keeps ([`PeerAliases`] of [`Static`](crate::bounded::Static)).
+/// policy keeps ([`PeerAliases`] of [`Static`]).
 ///
 /// Closed, and not a trait object: the two tables are the two representations a
 /// storage policy has, and which of them a given [`PeerAliases`] is the policy

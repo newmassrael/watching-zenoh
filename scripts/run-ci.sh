@@ -13062,6 +13062,20 @@ layer_c1bz_docs_resolve() {
     # rewritten paragraph. The links the new modules' `//!` docs make are full
     # paths, because lib.rs also documents each module from outside and the
     # merged text resolves against the crate root.
+    # Storage policy -- wz-session-core 499 -> 495 and wz 2 -> 4, both COUNTED on this lane's
+    # command. The policy work put 13 findings into wz-session-core (the `bounded` module doc's
+    # links to `Heap`, `Static`, `Profile`, `Storage`, `CapacityFull`, `ENFORCES_CAPACITY` and
+    # `BoundedVec::push` resolve against the crate root once lib.rs merges the module docs, so
+    # they are full paths now; four redundant explicit targets where the name is in scope; one
+    # link from a public type to the private `STACK_KEY_CHUNKS`, a code span now) and one into
+    # wz-runtime-tokio (`QueryReply`, which lost its `use` when the reply stage moved: a full
+    # path). All were fixed, DIFFED against the last green tree (`e08a10799`), and the lane
+    # then reads four BELOW the old budget, which is why it is lowered here. wz moves 2 -> 4 for
+    # another reason and not one of this work's: the four are this crate's own `compile_error!`
+    # guards (`git blame`: June and August), which `--all-features` is MEANT to raise. Why the
+    # budget stood at 2 is not established here: a capture at `e08a10799` on a build host
+    # stopped earlier, in sce-rust-runtime's `no_std` + `http-send` guard (two lines), and the
+    # hosted run of `8e4fac0cf` read the four.
     # Duty bodies made causal -- wz-session-core 505 -> 499, by removal, DIFFED:
     # the sorted `error` lines of this lane's command at `4d27b4de` (505) and
     # on the tree (499) differ by six removals and no addition. The multicast
@@ -13074,7 +13088,7 @@ layer_c1bz_docs_resolve() {
     # the multicast glue's new `//!` links are full paths, and the three
     # `MulticastOutcome` links of the same module doc went with them.
     budget="
-        wz:2
+        wz:4
         wz-ap-demo:25
         wz-capi-c:40
         wz-capi-core:7
@@ -13084,7 +13098,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:5
         wz-runtime-coop:7
         wz-runtime-tokio:475
-        wz-session-core:499
+        wz-session-core:495
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
     "

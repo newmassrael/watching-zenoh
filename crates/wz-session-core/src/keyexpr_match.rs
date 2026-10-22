@@ -80,7 +80,7 @@ pub const MAX_KEYEXPR_CHUNKS: usize = 32;
 const STACK_KEY_CHUNKS: usize = 16;
 
 /// A keyexpr split on `/` into a view of its chunks, held on the stack when it has at most
-/// [`STACK_KEY_CHUNKS`] of them.
+/// `STACK_KEY_CHUNKS` of them.
 ///
 /// Every scan in this crate splits the key it is asked about, and on the growable (AP and
 /// heap-MCU) backing a [`BoundedVec`] of chunks is a `Vec` that grows as it is pushed to: a split

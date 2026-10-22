@@ -4141,7 +4141,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// * [`Locality::allows_local`] → loopback fan via
     ///   [`crate::query::QueryableRegistry::local_query`] (R238)
     ///   into every locally-registered queryable that matches the
-    ///   keyexpr pattern. Each emitted [`QueryReply`] projects into
+    ///   keyexpr pattern. Each emitted [`QueryReply`](crate::query::QueryReply) projects into
     ///   an [`InboundReply`] (via `From<QueryReply>`) and routes
     ///   through [`crate::reply::ReplyRegistry::deliver_local_reply`]
     ///   so the same callback fires regardless of wire vs loopback

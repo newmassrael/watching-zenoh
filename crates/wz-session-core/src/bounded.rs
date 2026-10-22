@@ -15,37 +15,39 @@
 //!
 //! # The storage policy
 //!
-//! The backing is a type parameter, a [`Storage`] policy, not a feature that
-//! selects code (`docs/storage-policy-and-link-layer.md`, D1). There are two
+//! The backing is a type parameter, a [`Storage`](crate::bounded::Storage) policy, not a feature
+//! that selects code (`docs/storage-policy-and-link-layer.md`, D1). There are two
 //! policies, because "an allocator is linked" and "the declared capacities are
 //! hard" are different facts about a build:
 //!
-//! - [`Heap`] (needs `alloc`) -- backed by `alloc::vec::Vec<T>` and
-//!   `alloc::string::String`. [`push`](BoundedVec::push) never fails; the
+//! - [`Heap`](crate::bounded::Heap) (needs `alloc`) -- backed by `alloc::vec::Vec<T>` and
+//!   `alloc::string::String`. [`push`](crate::bounded::BoundedVec::push) never fails; the
 //!   declared capacity `N` is advisory (AP is the dynamic-opt-in side and may
 //!   exceed it).
-//! - [`Static`] -- backed by `heapless::Vec<T, N>` and `heapless::String<N>`.
-//!   [`push`](BoundedVec::push) returns [`CapacityFull`] when the declared
+//! - [`Static`](crate::bounded::Static) -- backed by `heapless::Vec<T, N>` and
+//!   `heapless::String<N>`. [`push`](crate::bounded::BoundedVec::push) returns
+//!   [`CapacityFull`](crate::bounded::CapacityFull) when the declared
 //!   capacity `N` is full. There is no silent drop: the caller decides what to
 //!   do with the rejected value, mirroring zenoh-pico's table-full reject (and
 //!   the §2.1 build-time-enforced bounded declared-subscription table).
 //!
 //! A container names its policy as its last parameter and defaults it to
-//! [`Profile`], the policy this build's features choose (`alloc` on and
-//! `bounded-heapless` off selects [`Heap`]; `alloc` off, or `bounded-heapless`
-//! on, selects [`Static`]). Every existing `BoundedVec<T, N>` is therefore the
+//! [`Profile`](crate::bounded::Profile), the policy this build's features choose (`alloc` on and
+//! `bounded-heapless` off selects [`Heap`](crate::bounded::Heap); `alloc` off, or
+//! `bounded-heapless` on, selects [`Static`](crate::bounded::Static)). Every existing
+//! `BoundedVec<T, N>` is therefore the
 //! build's profile and reads as before. A test that wants BOTH policies in one
 //! build writes the algorithm once, generic over `P: Storage`, and runs it on
 //! each (see the tests at the end of this file).
 //!
 //! `bounded-heapless` is what lets an MCU build keep `alloc` for the rest of the
 //! session machinery and still get every [`crate::caps`] limit as a hard bound.
-//! [`ENFORCES_CAPACITY`] states which policy the profile is, for a consumer that
-//! must refuse to build on the wrong one.
+//! [`ENFORCES_CAPACITY`](crate::bounded::ENFORCES_CAPACITY) states which policy the profile is,
+//! for a consumer that must refuse to build on the wrong one.
 //!
 //! The fallible-push signature is identical on both policies, so the caller
-//! writes one capacity-aware code path; the [`Heap`] build's `Ok(())` arm is
-//! simply never taken on the failure side. `N` is the deploy-declared capacity.
+//! writes one capacity-aware code path; the [`Heap`](crate::bounded::Heap) build's `Ok(())` arm
+//! is simply never taken on the failure side. `N` is the deploy-declared capacity.
 
 use core::fmt;
 use core::ops::{Deref, DerefMut};
