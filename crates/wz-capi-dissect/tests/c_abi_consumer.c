@@ -903,6 +903,160 @@ static int check_custom_options_door(void) {
     return 0;
 }
 
+/* (ABI 49) -- THE LOCAL-USE OPTIONS OF THE PACKETS OF ONE LINK TYPE, driven from
+ * C over containers assembled HERE, byte by byte, as above. One section in each
+ * byte order, each with a LINKTYPE_USER0 (147) interface and one packet of four
+ * bytes whose block carries ONE option with a code for local use: 0x8001, a value
+ * of sixteen bytes -- the marker "WZLO", the number 0x01020304 written in the
+ * section's own byte order, and eight bytes of 0x0B. */
+static const unsigned char local_option_le[] = {
+    0x0A, 0x0D, 0x0D, 0x0A, 0x1C, 0x00, 0x00, 0x00, 0x4D, 0x3C, 0x2B, 0x1A,
+    0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x1C, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x93, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x01, 0x00, 0x06, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
+    0x06, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04,
+    /* the option: 0x8001, length 16, "WZLO", the number, eight bytes, end */
+    0x01, 0x80, 0x10, 0x00, 0x57, 0x5A, 0x4C, 0x4F, 0x04, 0x03, 0x02, 0x01,
+    0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x00, 0x00, 0x00, 0x00,
+    0x3C, 0x00, 0x00, 0x00,
+};
+
+static const unsigned char local_option_be[] = {
+    0x0A, 0x0D, 0x0D, 0x0A, 0x00, 0x00, 0x00, 0x1C, 0x1A, 0x2B, 0x3C, 0x4D,
+    0x00, 0x01, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x00, 0x00, 0x00, 0x1C,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x20, 0x00, 0x93, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x01, 0x06, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20,
+    0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04,
+    0x00, 0x00, 0x00, 0x04, 0x01, 0x02, 0x03, 0x04,
+    0x80, 0x01, 0x00, 0x10, 0x57, 0x5A, 0x4C, 0x4F, 0x01, 0x02, 0x03, 0x04,
+    0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x0B, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x3C,
+};
+
+static int check_local_options_container(const unsigned char *file,
+                                        size_t file_len, const char *order,
+                                        unsigned char want_big_endian) {
+    wz_dissect_local_option rows[2];
+    size_t needed = 99;
+    size_t malformed = 99;
+    int partial = 99;
+    const unsigned char *value;
+    unsigned long number;
+    int rc;
+
+    rc = wz_dissect_pcap_local_options_of_link_type(
+        file, file_len, 147, NULL, 0, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_OK && needed == 1 && malformed == 0 && partial == 0,
+          "%s: sizing rc=%d needed=%zu malformed=%zu partial=%d", order, rc, needed,
+          malformed, partial);
+
+    rc = wz_dissect_pcap_local_options_of_link_type(
+        file, file_len, 147, rows, 2, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_OK && needed == 1, "%s: reading rc=%d needed=%zu",
+          order, rc, needed);
+    CHECK(rows[0].packet == 0 && rows[0].index == 0, "%s: packet %llu index %u",
+          order, (unsigned long long)rows[0].packet, (unsigned)rows[0].index);
+    CHECK(rows[0].code == 0x8001, "%s: code 0x%x", order, (unsigned)rows[0].code);
+    CHECK(rows[0].len == 16 && rows[0].offset + rows[0].len <= file_len,
+          "%s: len %u offset %llu", order, (unsigned)rows[0].len,
+          (unsigned long long)rows[0].offset);
+    CHECK(rows[0].big_endian == want_big_endian, "%s: big_endian %u, expected %u",
+          order, (unsigned)rows[0].big_endian, (unsigned)want_big_endian);
+    CHECK(rows[0].reserved[0] == 0 && rows[0].reserved[4] == 0,
+          "%s: the reserved bytes are not zero", order);
+
+    /* The value is where the record says, and the number in it is read in the
+     * order the record gives: the consumer's whole use of big_endian. */
+    value = file + rows[0].offset;
+    CHECK(memcmp(value, "WZLO", 4) == 0, "%s: the marker is not where the record says",
+          order);
+    if (rows[0].big_endian) {
+        number = ((unsigned long)value[4] << 24) | ((unsigned long)value[5] << 16) |
+                 ((unsigned long)value[6] << 8) | (unsigned long)value[7];
+    } else {
+        number = ((unsigned long)value[7] << 24) | ((unsigned long)value[6] << 16) |
+                 ((unsigned long)value[5] << 8) | (unsigned long)value[4];
+    }
+    CHECK(number == 0x01020304ul, "%s: the number reads 0x%lx", order, number);
+
+    /* A buffer with no room is not written to, and still says how many. */
+    rows[0].packet = 77;
+    rc = wz_dissect_pcap_local_options_of_link_type(
+        file, file_len, 147, rows, 0, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_OK && needed == 1 && rows[0].packet == 77,
+          "%s: a buffer with no room was written: rc=%d needed=%zu", order, rc,
+          needed);
+
+    /* The control: no packet is on Ethernet, so no option is. */
+    rc = wz_dissect_pcap_local_options_of_link_type(
+        file, file_len, 1, NULL, 0, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_OK && needed == 0, "%s: another link type rc=%d needed=%zu",
+          order, rc, needed);
+
+    /* Cut inside the packet's block: the cut is said, and nothing is invented. */
+    rc = wz_dissect_pcap_local_options_of_link_type(
+        file, file_len - 2, 147, NULL, 0, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_OK && needed == 0 && partial == 1,
+          "%s: a cut container rc=%d needed=%zu partial=%d", order, rc, needed,
+          partial);
+
+    /* The Custom Option door does not return it: its set is the four codes. */
+    rc = wz_dissect_pcap_custom_options_of_link_type(
+        file, file_len, 147, NULL, 0, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_OK && needed == 0,
+          "%s: the custom door returned a local option, needed=%zu", order, needed);
+    return 0;
+}
+
+static int check_local_options_door(void) {
+    static const unsigned char not_a_container[32] = {0xde, 0xad, 0xbe, 0xef};
+    wz_dissect_local_option rows[1];
+    size_t needed = 99;
+    size_t malformed = 99;
+    int partial = 99;
+    int rc;
+
+    CHECK(sizeof(wz_dissect_local_option) == 32, "record size %zu",
+          sizeof(wz_dissect_local_option));
+    CHECK(offsetof(wz_dissect_local_option, offset) == 8, "offset offset");
+    CHECK(offsetof(wz_dissect_local_option, len) == 16, "len offset");
+    CHECK(offsetof(wz_dissect_local_option, index) == 20, "index offset");
+    CHECK(offsetof(wz_dissect_local_option, code) == 24, "code offset");
+    CHECK(offsetof(wz_dissect_local_option, big_endian) == 26, "big_endian offset");
+    CHECK(offsetof(wz_dissect_local_option, reserved) == 27, "reserved offset");
+
+    if (check_local_options_container(local_option_le, sizeof local_option_le,
+                                      "little-endian", 0) != 0) {
+        return 1;
+    }
+    if (check_local_options_container(local_option_be, sizeof local_option_be,
+                                      "big-endian", 1) != 0) {
+        return 1;
+    }
+
+    rc = wz_dissect_pcap_local_options_of_link_type(
+        not_a_container, sizeof not_a_container, 147, rows, 1, &needed, &malformed,
+        &partial);
+    CHECK(rc == WZ_DISSECT_ERR_BAD_CAPTURE && needed == 0 && malformed == 0 &&
+              partial == 0,
+          "not a container rc=%d", rc);
+    rc = wz_dissect_pcap_local_options_of_link_type(
+        not_a_container, sizeof not_a_container, 147, NULL, 1, &needed, &malformed,
+        &partial);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a NULL buffer with capacity rc=%d", rc);
+    rc = wz_dissect_pcap_local_options_of_link_type(
+        NULL, 0, 147, NULL, 0, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null bytes rc=%d", rc);
+    return 0;
+}
+
 /* (ABI 43) -- THE BOUNDED OPEN, driven from C: the two ceilings on decoded
  * messages are the caller's. Twelve keepalives on ONE flow under a per-flow
  * ceiling of 4 and a total of 5 leave four held (the per-flow ceiling is the
@@ -4229,6 +4383,11 @@ int main(void) {
 
     /* (ABI 47) -- and the Custom Options of those packets. */
     if (check_custom_options_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 49) -- and the options of those packets that are for local use. */
+    if (check_local_options_door() != 0) {
         return 1;
     }
 

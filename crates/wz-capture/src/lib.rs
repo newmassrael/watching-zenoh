@@ -8394,6 +8394,72 @@ pub fn captured_custom_options_of_link_type(
     })
 }
 
+/// One local-use option of one packet of a capture container, with the number
+/// every other door gives that packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PacketLocalOption<'a> {
+    /// The packet's number in the container; the one [`CapturedFrame::index`]
+    /// carries.
+    pub packet: usize,
+    /// The option itself. Its value is a window of the container.
+    pub option: pcapng::LocalOption<'a>,
+}
+
+/// The local-use options of the packets of one link type, and what was lost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalOptionsOfLinkType<'a> {
+    /// Every local-use option, packet by packet in container order and within a
+    /// packet in the order its block listed them, repeats included.
+    pub options: Vec<PacketLocalOption<'a>>,
+    /// Lists that ended inside an option, over all the packets. Counted and not
+    /// dropped in silence, because a list that is short for a reason is not the
+    /// list that was written.
+    pub malformed: u64,
+    /// `true` when the container was cut off inside a block, which a longer
+    /// prefix may complete; the options before the cut are all here.
+    pub partial: bool,
+}
+
+/// The options whose code is reserved for local use (most significant bit one) of
+/// every packet whose interface declared `link_type`, in container order.
+///
+/// # What it is for
+///
+/// An application that records what it knows about a packet in an option of its
+/// own, without a registered organization number, uses a local-use code and must
+/// read it back. The walk is [`captured_custom_options_of_link_type`]'s, which is
+/// [`captured_frames_of_link_type`]'s, so a packet has the number here that every
+/// other door gives it and the lists are joined on that number. What an option's
+/// value means is its writer's; this carries it and does not look.
+///
+/// # What it does not do
+///
+/// It reads no option whose code has the top bit clear: the Custom Options have
+/// [`captured_custom_options_of_link_type`], and the others have typed fields
+/// where the format defines them. A classic pcap has no options, so its list is
+/// empty.
+pub fn captured_local_options_of_link_type(
+    bytes: &[u8],
+    link_type: u32,
+) -> Result<LocalOptionsOfLinkType<'_>, CaptureError> {
+    let (frames, partial) = captured_frames_of_link_type(bytes, link_type)?;
+    let mut options = Vec::new();
+    let mut malformed = 0u64;
+    for frame in &frames {
+        let mut local = frame.options.local();
+        options.extend(local.by_ref().map(|option| PacketLocalOption {
+            packet: frame.index,
+            option,
+        }));
+        malformed += u64::from(local.malformed());
+    }
+    Ok(LocalOptionsOfLinkType {
+        options,
+        malformed,
+        partial,
+    })
+}
+
 // ── A packet out of a container, by number ──
 #[cfg(test)]
 mod captured_frame_tests {
@@ -8891,6 +8957,203 @@ mod captured_frame_tests {
                 (1, 0x0102_0304, ByteOrder::Big)
             ]
         );
+    }
+
+    /// The local-use options of one link type come back joined to their packets
+    /// by the number every other door gives them, in container order and within a
+    /// packet in list order, with the Custom Options, the comment and the packets
+    /// of another link type left out; the value is a window of the container; a
+    /// cut container says so; a classic pcap has none.
+    #[test]
+    fn the_local_options_of_a_link_type_are_joined_to_their_packets_by_number() {
+        use crate::pcapng::{
+            custom_option_value, write_with_options, ByteOrder, PacketSpec,
+            OPT_CUSTOM_BINARY_NONCOPYABLE,
+        };
+        let order = ByteOrder::Little;
+        let ethernet = [0xEEu8; 8];
+        let mark_a = [0x57, 0x5A, 0x4C, 0x4F, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1];
+        let mark_b = [0x57, 0x5A, 0x4C, 0x4F, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2];
+        let custom = custom_option_value(order, 0xCAFE, &[9; 12]);
+        let file = write_with_options(
+            order,
+            &[(crate::link::LINKTYPE_ETHERNET, 6), (147, 6)],
+            &[
+                // The other link type: its option must not appear here.
+                PacketSpec {
+                    interface: 0,
+                    ticks: 100,
+                    data: &ethernet,
+                    options: &[(0x8001, &mark_a)],
+                },
+                PacketSpec {
+                    interface: 1,
+                    ticks: 1_000,
+                    data: &[1, 2, 3, 4],
+                    options: &[(0x8001, &mark_a)],
+                },
+                PacketSpec {
+                    interface: 1,
+                    ticks: 2_000,
+                    data: &[5, 6, 7],
+                    options: &[
+                        (1, b"hi"),
+                        (OPT_CUSTOM_BINARY_NONCOPYABLE, &custom),
+                        (0x8001, &mark_b),
+                        (0xC000, &[7]),
+                    ],
+                },
+                PacketSpec {
+                    interface: 1,
+                    ticks: 3_000,
+                    data: &[8, 8],
+                    options: &[],
+                },
+            ],
+        );
+
+        let found = captured_local_options_of_link_type(&file, 147).expect("the file reads");
+        assert!(!found.partial);
+        assert_eq!(found.malformed, 0);
+        let seen: Vec<(usize, u32, u16, ByteOrder, Vec<u8>)> = found
+            .options
+            .iter()
+            .map(|o| {
+                (
+                    o.packet,
+                    o.option.index,
+                    o.option.code,
+                    o.option.byte_order,
+                    o.option.value.to_vec(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            alloc::vec![
+                (1, 0, 0x8001, order, mark_a.to_vec()),
+                (2, 2, 0x8001, order, mark_b.to_vec()),
+                (2, 3, 0xC000, order, alloc::vec![7]),
+            ]
+        );
+
+        // The numbers are the frames door's, and the value is a window of the
+        // container.
+        let (frames, _) = captured_frames_of_link_type(&file, 147).expect("the file reads");
+        let numbers: Vec<usize> = frames.iter().map(|f| f.index).collect();
+        assert_eq!(numbers, alloc::vec![1, 2, 3]);
+        for o in &found.options {
+            assert!(numbers.contains(&o.packet));
+            let at = o.option.value.as_ptr() as usize - file.as_ptr() as usize;
+            assert_eq!(&file[at..at + o.option.value.len()], o.option.value);
+        }
+
+        // The Custom Option of that packet is the other door's, not this one's.
+        let custom_found =
+            captured_custom_options_of_link_type(&file, 147).expect("the file reads");
+        assert_eq!(custom_found.options.len(), 1);
+        assert_eq!(custom_found.options[0].option.index, 1);
+
+        // The control: the other link type's packet has its own option.
+        let ether = captured_local_options_of_link_type(&file, 1).expect("the file reads");
+        assert_eq!(ether.options.len(), 1);
+        assert_eq!(ether.options[0].packet, 0);
+
+        // Cut inside the last block: the options before it are all here, and the
+        // cut is said.
+        let cut = captured_local_options_of_link_type(&file[..file.len() - 2], 147)
+            .expect("the prefix reads");
+        assert!(cut.partial);
+        assert_eq!(cut.options.len(), 3);
+
+        // A classic pcap has no options at all.
+        let classic = crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &[(1, 0, &ethernet[..])]);
+        let none = captured_local_options_of_link_type(&classic, crate::link::LINKTYPE_ETHERNET)
+            .expect("the file reads");
+        assert_eq!(
+            (none.options.len(), none.malformed, none.partial),
+            (0, 0, false)
+        );
+    }
+
+    /// Two sections in one file may differ in byte order, and each option says the
+    /// order of the section its packet is in: the value bytes are carried as they
+    /// are, and the order beside them is the reader's only way to know how a
+    /// number in them is to be read.
+    #[test]
+    fn a_local_option_says_the_byte_order_of_its_own_section() {
+        use crate::pcapng::{write_with_options, ByteOrder, PacketSpec};
+        let section = |order| {
+            write_with_options(
+                order,
+                &[(147, 6)],
+                &[PacketSpec {
+                    interface: 0,
+                    ticks: 1,
+                    data: &[9, 9, 9, 9],
+                    options: &[(0x8002, &[0, 0, 0, 1])],
+                }],
+            )
+        };
+        let mut file = section(ByteOrder::Little);
+        file.extend_from_slice(&section(ByteOrder::Big));
+        let found = captured_local_options_of_link_type(&file, 147).expect("the file reads");
+        let seen: Vec<(usize, ByteOrder, Vec<u8>)> = found
+            .options
+            .iter()
+            .map(|o| (o.packet, o.option.byte_order, o.option.value.to_vec()))
+            .collect();
+        assert_eq!(
+            seen,
+            alloc::vec![
+                (0, ByteOrder::Little, alloc::vec![0, 0, 0, 1]),
+                (1, ByteOrder::Big, alloc::vec![0, 0, 0, 1]),
+            ]
+        );
+    }
+
+    /// A list that ends inside a local-use option is counted across the packets
+    /// and does not hide the next packet's option: the first packet's option
+    /// claims more bytes than its list has left (its length field is patched in
+    /// the written file), and the second packet's is read.
+    #[test]
+    fn a_local_list_cut_inside_an_option_is_counted_and_the_next_packet_is_still_read() {
+        use crate::pcapng::{write_with_options, ByteOrder, PacketSpec};
+        let order = ByteOrder::Little;
+        let mark = [0x57, 0x5A, 0x4C, 0x4F, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3];
+        let mut file = write_with_options(
+            order,
+            &[(147, 6)],
+            &[
+                PacketSpec {
+                    interface: 0,
+                    ticks: 1,
+                    data: &[1, 1, 1, 1],
+                    options: &[(0x8003, &mark)],
+                },
+                PacketSpec {
+                    interface: 0,
+                    ticks: 2,
+                    data: &[2, 2, 2, 2],
+                    options: &[(0x8004, &mark)],
+                },
+            ],
+        );
+        // The first option header: code 0x8003 and length 16 in little-endian.
+        let header = [0x03, 0x80, 16, 0];
+        let at = file
+            .windows(header.len())
+            .position(|w| w == header)
+            .expect("the first option is in the file");
+        file[at + 2] = 200; // longer than the block has left
+        let found = captured_local_options_of_link_type(&file, 147).expect("the file reads");
+        assert_eq!(found.malformed, 1);
+        let seen: Vec<(usize, u16)> = found
+            .options
+            .iter()
+            .map(|o| (o.packet, o.option.code))
+            .collect();
+        assert_eq!(seen, alloc::vec![(1, 0x8004)]);
     }
 
     /// Options that cannot be read are counted across the packets and do not hide

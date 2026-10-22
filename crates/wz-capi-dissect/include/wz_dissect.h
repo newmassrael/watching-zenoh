@@ -1571,7 +1571,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 48
+#define WZ_DISSECT_ABI_REVISION 49
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -5511,6 +5511,101 @@ typedef struct wz_dissect_custom_option {
 int wz_dissect_pcap_custom_options_of_link_type(
     const unsigned char *bytes, size_t len, uint32_t link_type,
     wz_dissect_custom_option *out, size_t cap, size_t *needed,
+    size_t *malformed, int *partial);
+
+/* (ABI 49) -- one local-use option of one packet, as
+ * wz_dissect_pcap_local_options_of_link_type hands it out. 32 bytes, 8-aligned,
+ * no compiler padding. */
+typedef struct wz_dissect_local_option {
+    uint64_t packet;       /* the packet's number: the same number
+                            * wz_dissect_raw_packet.packet carries for it */
+    uint64_t offset;       /* the value is bytes[offset .. offset + len] */
+    uint32_t len;          /* bytes of the value; the padding to four is not
+                            * counted */
+    uint32_t index;        /* the option's place in its block's list, 0 first;
+                            * options this door does not return take a place */
+    uint16_t code;         /* the option code, 0x8000 and above */
+    uint8_t big_endian;    /* 1 when the section the packet is in is big-endian,
+                            * 0 when little-endian: the order its byte-order
+                            * magic states. The format gives the value no order
+                            * of its own, so a number the application wrote in
+                            * it is in this order unless the application's own
+                            * definition says otherwise. Two sections of one
+                            * container may differ, so it is per record. */
+    uint8_t reserved[5];   /* zero */
+} wz_dissect_local_option;
+
+/* (ABI 49) -- THE LOCAL-USE OPTIONS OF THE PACKETS OF ONE LINK TYPE IN A CAPTURE
+ * CONTAINER, as records into a buffer you sized.
+ *
+ * WHAT IT IS FOR. A Custom Option needs a Private Enterprise Number. A writer
+ * that has none records what it knows about a packet in an option whose code the
+ * pcapng format reserves for local use, the code's top bit set, and reads it back
+ * here. The container is resolved by this library, so a second reader of the
+ * block layout in your code would be a second opinion about where an option
+ * ends. The options come from the same walk wz_dissect_pcap_packets_of_link_type
+ * makes, so a record's `packet` is the packet of that number in the other list:
+ * join on it.
+ *
+ * WHAT IT RETURNS. Every option of a packet whose interface declared `link_type`
+ * with a code of 0x8000 or above, in container order and, within a packet, in the
+ * order its block listed them; a repeat is a record each. What the value MEANS is
+ * its writer's; it is carried and not looked at. The format says a local-use code
+ * is not guaranteed to be unique among files written by other applications and is
+ * not portable, so the code alone names nothing: the value, or a marker you put
+ * inside it, is how you know an option is yours. No option with the top bit clear
+ * is returned: the four Custom Option codes are
+ * wz_dissect_pcap_custom_options_of_link_type's, and the others have typed fields
+ * where the format defines them (epb_flags is wz_dissect_raw_packet.flags).
+ *
+ * NO ORGANIZATION, NO COPY RULE. A local-use option has no organization number,
+ * and the record has no `copyable`: the format states a rule for carrying a
+ * Custom Option over to a new file and none for a local-use code, so a field here
+ * would invent one.
+ *
+ * ON THE WIRE. The format lays an option out as the code, a length that does not
+ * count the padding, and the value padded to four. A 16-byte value is a length of
+ * 16. `len` here is the 16.
+ *
+ * NOT A COPY. The value is bytes[offset .. offset + len] of the container you
+ * passed, so it lives as long as it does.
+ *
+ *     size_t n = 0, bad = 0;
+ *     int partial = 0;
+ *     wz_dissect_pcap_local_options_of_link_type(file, file_len, 147, NULL, 0,
+ *                                                &n, &bad, &partial);   // size
+ *     wz_dissect_local_option *opts = malloc(n * sizeof *opts);
+ *     wz_dissect_pcap_local_options_of_link_type(file, file_len, 147, opts, n,
+ *                                                &n, &bad, &partial);   // read
+ *     // opts[i].packet joins wz_dissect_raw_packet.packet
+ *
+ * THE BUFFER. *needed always receives the number of records; when cap is at
+ * least that, out holds them, and when it is less NOTHING is written to out. out
+ * may be NULL with cap 0, to ask for the count alone. One pass over the
+ * container per call, copying nothing.
+ *
+ * WHAT COULD NOT BE READ. *malformed receives how many option lists ended inside
+ * an option, whose code is not known. They are counted and not dropped in
+ * silence, because a list that is short for a reason is not the list that was
+ * written. A local-use option has no structure of its own to be too short for,
+ * so a list cut off is the only way one is unreadable. A well-formed capture
+ * answers 0.
+ *
+ * A CONTAINER STILL BEING WRITTEN. *partial is 1 when the walk ended inside a
+ * block a longer prefix may complete, 0 when it ended on a boundary; the options
+ * before the cut are written either way.
+ *
+ * WZ_DISSECT_ERR_BAD_CAPTURE when the container does not read;
+ * WZ_DISSECT_ERR_INVALID_ARG for a NULL bytes, needed, malformed or partial, or
+ * out NULL with cap non-zero. *needed, *malformed and *partial are 0 on every
+ * failure (when they are not NULL).
+ *
+ * @bound cap buffer-capacity -- the size of YOUR array. This library imposes
+ * no ceiling of its own on the list: a short `cap` writes nothing and *needed
+ * says how many to make room for. */
+int wz_dissect_pcap_local_options_of_link_type(
+    const unsigned char *bytes, size_t len, uint32_t link_type,
+    wz_dissect_local_option *out, size_t cap, size_t *needed,
     size_t *malformed, int *partial);
 
 /* ── R2453 (ABI 16) — THE ANALYSIS PLANES OVER A LIVE HANDLE ─────────────

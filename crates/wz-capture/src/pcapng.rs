@@ -103,6 +103,12 @@ pub const OPT_CUSTOM_UTF8_NONCOPYABLE: u16 = 19372;
 /// A Custom Option holding binary octets that should NOT be copied to a new
 /// file when an application rewrites the capture.
 pub const OPT_CUSTOM_BINARY_NONCOPYABLE: u16 = 19373;
+/// The smallest option code reserved for local use: a code whose most
+/// significant bit is one (pcapng, Options). The format says such a code is not
+/// guaranteed to be unique among capture files written by other applications and
+/// is not portable, so the code alone names nothing; the application that wrote
+/// it knows what it means. The four Custom Option codes are all below this.
+pub const OPT_LOCAL_USE_MIN: u16 = 0x8000;
 /// `isb_ifrecv` — packets the interface RECEIVED over the capture.
 const OPT_ISB_IFRECV: u16 = 4;
 /// `isb_ifdrop` — packets the capture tool DROPPED and nobody ever saw.
@@ -719,6 +725,12 @@ impl<'a> OptionList<'a> {
             malformed: 0,
         }
     }
+
+    /// The options of this list whose code is reserved for local use, in list
+    /// order, repeats included. See [`LocalOptions`].
+    pub fn local(&self) -> LocalOptions<'a> {
+        LocalOptions { inner: self.iter() }
+    }
 }
 
 impl<'a> Iterator for OptionIter<'a> {
@@ -876,6 +888,75 @@ impl<'a> Iterator for CustomOptions<'a> {
                 byte_order,
                 data,
             });
+        }
+    }
+}
+
+/// Whether an option code is reserved for local use: its most significant bit is
+/// one. The ONE place the rule is applied, so the reader that yields these
+/// options and a test that pins the rule cannot part.
+pub const fn is_local_use(code: u16) -> bool {
+    code >= OPT_LOCAL_USE_MIN
+}
+
+/// One option of a block whose code is reserved for local use.
+///
+/// The format gives such an option no structure beyond the option's own: a code,
+/// a length and a value padded to four. What the value means, and whether the
+/// code means what its reader thinks, is the writing application's; this carries
+/// the value and does not look. There is no organization number to read (that is
+/// the Custom Option's), and no rule about copying it to a new file, because the
+/// format states none for a local code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalOption<'a> {
+    /// Where the option sits in its block's list; see [`RawOption::index`].
+    pub index: u32,
+    /// The option code, with its most significant bit set.
+    pub code: u16,
+    /// The byte order of the section the option's block is in. The format gives
+    /// the value no order of its own, so a number the application wrote in it is
+    /// in this order unless that application's own definition says otherwise.
+    pub byte_order: ByteOrder,
+    /// The value, exactly as long as the option's length field says: the padding
+    /// to four bytes is not part of it.
+    pub value: &'a [u8],
+}
+
+/// The local-use options of one block's list, in list order.
+///
+/// A local-use option has no inner structure, so the only thing that can keep
+/// one from being read is the list itself ending inside an option, where the
+/// code of what was lost is not known. That is COUNTED, as for
+/// [`CustomOptions::malformed`], so a short list is not reported as a whole one.
+#[derive(Debug, Clone, Copy)]
+pub struct LocalOptions<'a> {
+    inner: OptionIter<'a>,
+}
+
+impl LocalOptions<'_> {
+    /// How many options this walk could not read: `1` when the list ended inside
+    /// an option and `0` when it ended where a list may. Complete only once the
+    /// iterator has returned `None`.
+    pub fn malformed(&self) -> u32 {
+        u32::from(self.inner.ended_inside_an_option())
+    }
+}
+
+impl<'a> Iterator for LocalOptions<'a> {
+    type Item = LocalOption<'a>;
+
+    fn next(&mut self) -> Option<LocalOption<'a>> {
+        let byte_order = self.inner.list.byte_order();
+        loop {
+            let option = self.inner.next()?;
+            if is_local_use(option.code) {
+                return Some(LocalOption {
+                    index: option.index,
+                    code: option.code,
+                    byte_order,
+                    value: option.value,
+                });
+            }
         }
     }
 }
@@ -3815,5 +3896,150 @@ mod custom_option_tests {
         for kept in [2988u16, 2989] {
             assert_eq!(custom_kind(kept).map(|k| k.copyable), Some(true));
         }
+    }
+
+    /// The rule is the format's: a code whose top bit is one is for local use.
+    /// Pinned over every 16-bit code, and the four Custom Option codes sit below
+    /// it, so the two doors that read them return sets that cannot overlap.
+    #[test]
+    fn a_local_use_code_is_one_with_its_top_bit_set_and_no_custom_code_is() {
+        assert_eq!(OPT_LOCAL_USE_MIN, 0x8000);
+        for code in 0..=u16::MAX {
+            assert_eq!(is_local_use(code), code & 0x8000 != 0, "{code:#06x}");
+            assert!(
+                !(is_local_use(code) && custom_kind(code).is_some()),
+                "{code:#06x} is both"
+            );
+        }
+        assert!(!is_local_use(0x7FFF) && is_local_use(0x8000) && is_local_use(0xFFFF));
+        for custom in [2988u16, 2989, 19372, 19373] {
+            assert!(!is_local_use(custom), "{custom}");
+        }
+    }
+
+    /// The local options are the list's options whose code has the top bit set,
+    /// in list order, and nothing else: against the plain walk, over lists that
+    /// lie about their lengths, with a terminator in the middle, stray bytes after
+    /// the end and cuts at any byte, in both byte orders. The count of options
+    /// found is asserted well above zero so that equal silence cannot pass, and
+    /// what was lost is the plain walk's own account of where it stopped.
+    #[test]
+    fn the_local_options_are_the_lists_options_with_the_top_bit_set_and_nothing_else() {
+        let mut rng = Rng(0x10CA_1000_0000_0001);
+        let mut found = 0usize;
+        let mut lost = 0usize;
+        for round in 0..60_000 {
+            let (order, swapped) = order_of(round);
+            let list = wild_list(&mut rng, order);
+            let raw = OptionList::new(&list, swapped);
+            let expected: Vec<(u32, u16, Vec<u8>)> = raw
+                .iter()
+                .filter(|o| o.code & 0x8000 != 0)
+                .map(|o| (o.index, o.code, o.value.to_vec()))
+                .collect();
+            let mut local = raw.local();
+            let got: Vec<(u32, u16, Vec<u8>)> = local
+                .by_ref()
+                .map(|o| {
+                    assert_eq!(o.byte_order, order, "the order of the list it came from");
+                    (o.index, o.code, o.value.to_vec())
+                })
+                .collect();
+            assert_eq!(got, expected, "round {round}");
+            let mut walk = raw.iter();
+            for _ in walk.by_ref() {}
+            let malformed = local.malformed();
+            assert_eq!(malformed, u32::from(walk.ended_inside_an_option()));
+            found += got.len();
+            lost += malformed as usize;
+        }
+        assert!(found > 10_000, "only {found} local options were generated");
+        assert!(lost > 500, "only {lost} lists ended inside an option");
+    }
+
+    /// A local-use option written in either byte order reads back with its place
+    /// in the list, its code, the section's order and its value without the
+    /// padding. The list holds, around the local ones, a Custom Option, a comment
+    /// and an unregistered code with the top bit clear, none of which is returned
+    /// but all of which take a place; one local value is five bytes, so the
+    /// padding that follows it is not in it; a code is repeated.
+    #[test]
+    fn a_local_option_written_in_either_order_reads_back_with_its_place_and_order() {
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            let mut sixteen = vec![0x57, 0x5A, 0x4C, 0x4F];
+            sixteen.extend_from_slice(&order.u32(0x0102_0304));
+            sixteen.extend_from_slice(&order.u64(0x1122_3344_5566_7788));
+            let five = [1u8, 2, 3, 4, 5];
+            let custom = custom_option_value(order, 0x0102_0304, &[0xAA; 12]);
+            let file = write_with_options(
+                order,
+                &[(147, 6)],
+                &[PacketSpec {
+                    interface: 0,
+                    ticks: 7,
+                    data: &[9, 9, 9, 9],
+                    options: &[
+                        (OPT_CUSTOM_BINARY_COPYABLE, &custom),
+                        (0x8001, &sixteen),
+                        (1, b"hi"),
+                        (0xFFFF, &five),
+                        (0x8001, &sixteen),
+                        (0x7FFF, &five),
+                    ],
+                }],
+            );
+            let mut read = Vec::new();
+            PcapngCursor::new()
+                .advance_with(&file, |y| {
+                    if let PcapngYieldRef::Packet(p) = y {
+                        let mut local = p.options.local();
+                        read.extend(
+                            local
+                                .by_ref()
+                                .map(|o| (o.index, o.code, o.byte_order, o.value.to_vec())),
+                        );
+                        assert_eq!(local.malformed(), 0);
+                    }
+                    ControlFlow::Continue(())
+                })
+                .expect("the fixture reads");
+            assert_eq!(
+                read,
+                vec![
+                    (1, 0x8001, order, sixteen.clone()),
+                    (3, 0xFFFF, order, five.to_vec()),
+                    (4, 0x8001, order, sixteen.clone()),
+                ],
+                "{order:?}"
+            );
+        }
+    }
+
+    /// A list that ends inside a local-use option is counted and gives nothing for
+    /// that option; a clean list answers zero; `opt_endofopt` ends the walk, so an
+    /// option written after it is not read.
+    #[test]
+    fn a_local_list_cut_inside_an_option_is_counted_and_a_terminator_ends_the_walk() {
+        // Code 0x8001, length 16, and only two value bytes.
+        let cut = [0x01, 0x80, 16, 0, 1, 2];
+        let mut local = OptionList::new(&cut, false).local();
+        assert!(local.next().is_none());
+        assert_eq!(local.malformed(), 1);
+
+        // Code 0x8001, length 4, value, then opt_endofopt and an option past it.
+        let ended = [0x01, 0x80, 4, 0, 1, 2, 3, 4, 0, 0, 0, 0, 0x02, 0x80, 0, 0];
+        let mut local = OptionList::new(&ended, false).local();
+        let first = local.next().expect("the option before the terminator");
+        assert_eq!(
+            (first.index, first.code, first.value),
+            (0, 0x8001, &[1, 2, 3, 4][..])
+        );
+        assert!(local.next().is_none(), "nothing past opt_endofopt");
+        assert_eq!(local.malformed(), 0);
+
+        // An empty list has none and loses none.
+        let mut empty = OptionList::empty().local();
+        assert!(empty.next().is_none());
+        assert_eq!(empty.malformed(), 0);
     }
 }
