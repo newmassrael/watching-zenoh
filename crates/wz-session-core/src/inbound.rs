@@ -1012,6 +1012,14 @@ pub(crate) fn parse_fragment_in_place(
 /// [`parse_inbound_consuming_in`]. `origin`, when there is one, is the
 /// [`RxBytes`] that `bytes` was taken from, and is only consulted by the arm
 /// whose payload is a tail of the unit (`Frame`).
+///
+/// Out of line, for the stack: a handshake body is read into a few temporaries (the borrowed
+/// body, its owned form, the extension chain and the `Result` it comes back in, each hundreds of
+/// bytes on the fixed profile) before the frame is built. Inlined into the dispatch of a unit
+/// those slots stay live while the session machine runs on the frame the parse returned, so
+/// they add to the deepest point of the stack; as a function of its own they are gone when it
+/// returns, and only the 720 bytes of its result stay.
+#[inline(never)]
 fn parse_unit(
     bytes: &[u8],
     #[cfg(feature = "alloc")] origin: Option<&RxBytes>,

@@ -8180,7 +8180,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         bytes: &[u8],
     ) -> Result<(InboundFrame, usize), InboundParseError> {
-        Ok(self.observe_inbound(parse_inbound_consuming(bytes)?))
+        let parsed = parse_inbound_consuming(bytes)?;
+        self.observe_inbound(&parsed.0);
+        Ok(parsed)
     }
 
     /// [`Self::handle_inbound_consuming`] over a unit that can be shared: the
@@ -8192,15 +8194,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         unit: &crate::link::RxBytes,
     ) -> Result<(InboundFrame, usize), InboundParseError> {
-        Ok(self.observe_inbound(crate::inbound::parse_inbound_consuming_in(unit)?))
+        let parsed = crate::inbound::parse_inbound_consuming_in(unit)?;
+        self.observe_inbound(&parsed.0);
+        Ok(parsed)
     }
 
     /// What the link records about one decoded transport message: the
     /// handshake facts it carries and the RX-activity stamp. Total: a parsed
-    /// frame is always taken, so it cannot fail and takes the frame by value.
-    fn observe_inbound(&self, parsed: (InboundFrame, usize)) -> (InboundFrame, usize) {
-        let (frame, consumed) = parsed;
-        match &frame {
+    /// frame is always taken, so it cannot fail. It reads the frame where it lies:
+    /// an `InboundFrame` is 712 bytes on the fixed profile, and a by-value pass
+    /// (a parameter, a destructuring, a returned tuple) is one more such slot in
+    /// the frame of the dispatch that inlines it.
+    fn observe_inbound(&self, frame: &InboundFrame) {
+        match frame {
             #[cfg(feature = "codec-init-body")]
             InboundFrame::Init {
                 is_ack: true, body, ..
@@ -8330,7 +8336,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if !matches!(frame, InboundFrame::Unknown { .. }) {
             self.stamp_rx_activity();
         }
-        (frame, consumed)
     }
 
     /// The RX-activity stamp [`Self::observe_inbound`] takes for every decoded

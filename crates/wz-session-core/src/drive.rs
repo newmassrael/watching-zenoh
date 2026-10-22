@@ -416,8 +416,10 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
             }
         }
     }
-    match parsed.map(|(frame, _)| frame) {
-        Ok(frame) => match inbound_to_fsm_event(&frame) {
+    // Destructured where it lies: `Result::map` would take the 720-byte result by value
+    // and hand the frame on through a closure, a slot of the frame each time.
+    match parsed {
+        Ok((frame, _)) => match inbound_to_fsm_event(&frame) {
             Some(event) => {
                 // R311kc — initiator InitAck params validation (zenoh-pico
                 // unicast/transport.c:123-140): an InitAck whose size
