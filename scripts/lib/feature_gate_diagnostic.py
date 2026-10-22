@@ -433,7 +433,9 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # R3397 -- `timestamp-wall-clock` gates the SAME `pub mod timestamp_source`
                 # as `time-hlc` above, whose cfg is an `any(..)` over four features.
                 "timestamp-wall-clock",
-                "transport-link-raweth",
+                # Open-debt item 911 -- `transport-link-raweth` LEFT this list when the
+                # `raweth_link` re-export gave it a public site under a SIMPLE cfg
+                # (`lib.rs`), so a probe can now name it, as `session-close-ingress` above.
                 "transport-link-unixpipe",
                 # R2973 — `transport-link-unixsock` JOINED this list, and the
                 # round that made it true is this one: `pub mod unixsock_pipeline`

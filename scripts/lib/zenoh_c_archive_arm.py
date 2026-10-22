@@ -258,6 +258,8 @@ CAPABILITY_FEATURES = frozenset({
     "transport_tls", "transport_unixsock-stream", "transport_ws",
     "transport_serial", "transport_unixpipe", "transport_vsock", "stats",
     "e2e-sender", "transport_compression", "auth_usrpwd", "interceptors",
+    # Open-debt item 913: a multicast listen endpoint joins a group, a door and not a footprint.
+    "multicast-transport",
 })
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"
