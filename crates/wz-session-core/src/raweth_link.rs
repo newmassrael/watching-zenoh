@@ -350,73 +350,168 @@ impl MacWhitelist {
     }
 }
 
-/// A parsed `reth/` locator.
+/// One entry of a raweth endpoint's `mapping`: the frames of a message whose key meets
+/// `keyexpr` go to `dmac`, tagged with `vlan` when there is one (`_zp_raweth_mapping_entry_t`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RethLocator {
-    /// The destination MAC the address names.
+pub struct RawEthMapping {
+    /// The key the entry serves; the default entry's is empty and serves none by name.
+    pub keyexpr: String,
+    /// The destination MAC.
     pub dmac: [u8; MAC_LEN],
-    /// `iface=` — the interface to bind, [`DEFAULT_INTERFACE`] when absent.
-    pub interface: String,
-    /// `ethtype=` (hex), [`DEFAULT_ETHTYPE`] when absent.
-    pub ethtype: u16,
-    /// `vlan=` (hex) — the tag, absent for the 16-byte header form.
+    /// The VLAN tag, which selects the 20-byte header; `None` for the 16-byte one.
     pub vlan: Option<u16>,
 }
 
-/// Parse `reth/<dmac>[?k=v;k=v]`.
+impl RawEthMapping {
+    /// `_ZP_RAWETH_DEFAULT_MAPPING`: [`DEFAULT_DMAC`], no VLAN, no key.
+    pub fn default_entry() -> Self {
+        Self {
+            keyexpr: String::new(),
+            dmac: DEFAULT_DMAC,
+            vlan: None,
+        }
+    }
+}
+
+/// A parsed `reth/` endpoint, as zenoh-pico opens a raweth link from one
+/// (`vendor/zenoh-pico/src/transport/raweth/link.c` @
+/// `static z_result_t _z_f_link_open_raweth(_z_link_t *self) {`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RethLocator {
+    /// The SOURCE MAC this link sends from: the endpoint's address. pico takes the address
+    /// as the link's own MAC, and the destinations from [`Self::mapping`].
+    pub smac: [u8; MAC_LEN],
+    /// `iface=` — the interface to bind, [`DEFAULT_INTERFACE`] when absent.
+    pub interface: String,
+    /// `ethtype=` (hex), [`DEFAULT_ETHTYPE`] when absent or not an ethertype.
+    pub ethtype: u16,
+    /// `mapping=` — where each message's frames go by its key, the first entry also being
+    /// where a message with no key, or a key no entry meets, goes. Never empty: an absent or
+    /// invalid mapping is the one [`RawEthMapping::default_entry`].
+    pub mapping: Vec<RawEthMapping>,
+    /// `whitelist=` — the source MACs a frame is admitted from; empty (admit all) when absent
+    /// or invalid.
+    pub whitelist: MacWhitelist,
+}
+
+impl RethLocator {
+    /// The mapping entry a message on `keyexpr` is sent by: the first whose key meets it, or the
+    /// first entry when none does or the message names no key
+    /// (`vendor/zenoh-pico/src/transport/raweth/tx.c` @
+    /// `static z_result_t _zp_raweth_set_socket(const _z_keyexpr_t *keyexpr, _z_raweth_socket_t *sock) {`).
+    pub fn mapping_for(&self, keyexpr: Option<&str>) -> &RawEthMapping {
+        keyexpr
+            .and_then(|key| {
+                self.mapping.iter().find(|entry| {
+                    crate::keyexpr_match::keyexpr_intersects_text(key, &entry.keyexpr)
+                })
+            })
+            .unwrap_or(&self.mapping[0])
+    }
+}
+
+/// Parse a `reth/<smac>[#key=value;...]` endpoint as zenoh-pico does.
 ///
-/// Recognised keys are `iface`, `ethtype` and `vlan`. pico's endpoint config
-/// also carries `mapping` and `whitelist` list values (link.c:36-46); those are
-/// NOT parsed here and their absence is deliberate — a keyexpr-to-MAC mapping
-/// table is a routing policy, and inventing a half of one that silently
-/// ignored the entries it could not represent would be worse than not having
-/// it. [`MacWhitelist`] is configured through its own API instead.
+/// The address is the link's own MAC. The config, after the endpoint's `#`
+/// (`ENDPOINT_CONFIG_SEPARATOR`), holds `iface`, `ethtype` (hex), `mapping` (a `,` list of
+/// `keyexpr#mac#[vlan]`) and `whitelist` (a `,` list of MACs). pico is lenient past the scheme
+/// and so is this: an address that is not a MAC is [`DEFAULT_SMAC`], an ethertype at or below
+/// `0x600` on the wire is [`DEFAULT_ETHTYPE`], a mapping with one malformed entry is the default
+/// one, a whitelist with one malformed MAC is none, and a key it does not know is ignored. Only
+/// a locator that is not `reth/` is refused.
 pub fn parse_reth_locator(locator: &str) -> Result<RethLocator, RawEthError> {
     let rest = locator
         .strip_prefix(RAWETH_SCHEMA)
         .and_then(|r| r.strip_prefix('/'))
         .ok_or(RawEthError::NotRawEth)?;
-    let (address, config) = match rest.split_once('?') {
-        Some((a, c)) => (a, Some(c)),
-        None => (rest, None),
+    let (locator_part, config) = match rest.split_once('#') {
+        Some((l, c)) => (l, c),
+        None => (rest, ""),
     };
-    let mut out = RethLocator {
-        dmac: parse_mac(address)?,
-        interface: String::from(DEFAULT_INTERFACE),
-        ethtype: DEFAULT_ETHTYPE,
-        vlan: None,
+    let address = locator_part
+        .split_once('?')
+        .map_or(locator_part, |(a, _)| a);
+    let value_of = |wanted: &str| {
+        config
+            .split(';')
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(key, _)| *key == wanted)
+            .map(|(_, value)| value)
     };
-    for pair in config.into_iter().flat_map(|c| c.split(';')) {
-        if pair.is_empty() {
-            continue;
-        }
-        let (key, value) = pair
-            .split_once('=')
-            .ok_or_else(|| RawEthError::MalformedConfig {
-                pair: String::from(pair),
-            })?;
-        let hex = |v: &str| {
-            u16::from_str_radix(v.trim_start_matches("0x"), 16).map_err(|_| {
-                RawEthError::MalformedConfig {
-                    pair: String::from(pair),
-                }
-            })
-        };
-        match key {
-            "iface" => out.interface = String::from(value),
-            // pico reads this key with `strtol(.., 16)` (link.c:107), so the
-            // value is hex WITHOUT a `0x` — accepted either way here, since a
-            // prefix that pico's strtol also tolerates cannot be a divergence.
-            "ethtype" => out.ethtype = hex(value)?,
-            "vlan" => out.vlan = Some(hex(value)?),
-            _ => {
-                return Err(RawEthError::MalformedConfig {
-                    pair: String::from(pair),
+    let smac = if valid_mac(address) {
+        parse_mac(address).unwrap_or(DEFAULT_SMAC)
+    } else {
+        DEFAULT_SMAC
+    };
+    let interface = value_of("iface").map_or_else(|| String::from(DEFAULT_INTERFACE), String::from);
+    let ethtype = value_of("ethtype")
+        .map(strtol_hex)
+        .filter(|ethtype| (*ethtype as u16).to_be() > 0x600)
+        .map_or(DEFAULT_ETHTYPE, |ethtype| ethtype as u16);
+    let mapping = value_of("mapping")
+        .and_then(|list| {
+            list.split(',')
+                .filter(|entry| !entry.is_empty())
+                .map(mapping_entry)
+                .collect::<Option<Vec<_>>>()
+        })
+        .filter(|entries| !entries.is_empty())
+        .unwrap_or_else(|| alloc::vec![RawEthMapping::default_entry()]);
+    let whitelist = value_of("whitelist")
+        .and_then(|list| {
+            list.split(',')
+                .filter(|entry| !entry.is_empty())
+                .map(|mac| {
+                    Some(mac)
+                        .filter(|m| valid_mac(m))
+                        .and_then(|m| parse_mac(m).ok())
                 })
-            }
-        }
+                .collect::<Option<Vec<_>>>()
+        })
+        .map(|macs| {
+            macs.into_iter()
+                .fold(MacWhitelist::new(), MacWhitelist::allow)
+        })
+        .unwrap_or_default();
+    Ok(RethLocator {
+        smac,
+        interface,
+        ethtype,
+        mapping,
+        whitelist,
+    })
+}
+
+/// `strtol(value, NULL, 16)`: the leading hex digits after an optional `0x`, `0` when there
+/// are none, as pico reads an ethertype and a VLAN tag.
+fn strtol_hex(value: &str) -> i64 {
+    let digits = value.trim_start_matches("0x").trim_start_matches("0X");
+    let end = digits
+        .find(|c: char| !c.is_ascii_hexdigit())
+        .unwrap_or(digits.len());
+    i64::from_str_radix(&digits[..end], 16).unwrap_or(0)
+}
+
+/// `_z_valid_address_raweth`: six two-digit hex octets and five colons, seventeen characters.
+fn valid_mac(s: &str) -> bool {
+    s.len() == 17 && parse_mac(s).is_ok()
+}
+
+/// One `keyexpr#mac#[vlan]` mapping entry, or `None` for one pico refuses
+/// (`vendor/zenoh-pico/src/transport/raweth/link.c` @ `static bool _z_valid_mapping_entry(char *entry) {`):
+/// it needs both `#`s and a valid MAC between them. The tag is read when at least two
+/// characters follow the second `#`, as pico's `p_start >= entry_end` test reads it.
+fn mapping_entry(entry: &str) -> Option<RawEthMapping> {
+    let (keyexpr, rest) = entry.split_once('#')?;
+    let (mac, vlan) = rest.split_once('#')?;
+    if !valid_mac(mac) {
+        return None;
     }
-    Ok(out)
+    Some(RawEthMapping {
+        keyexpr: String::from(keyexpr),
+        dmac: parse_mac(mac).ok()?,
+        vlan: (vlan.len() >= 2).then(|| strtol_hex(vlan) as u16),
+    })
 }
 
 /// Parse `aa:bb:cc:dd:ee:ff`.
@@ -553,34 +648,70 @@ mod tests {
         assert_eq!(list.len(), 1);
     }
 
+    /// An endpoint names the link's OWN MAC, and everything it does not name, or names in a form
+    /// pico refuses, is pico's default (`_z_f_link_open_raweth`).
     #[test]
-    fn a_reth_locator_carries_the_defaults_it_does_not_name() {
-        let l = parse_reth_locator("reth/aa:bb:cc:dd:ee:ff").unwrap();
-        assert_eq!(l.dmac, DEFAULT_DMAC);
+    fn a_reth_endpoint_carries_the_defaults_it_does_not_name() {
+        let l = parse_reth_locator("reth/01:02:03:04:05:06").unwrap();
+        assert_eq!(l.smac, A, "the address is the source MAC");
         assert_eq!(l.interface, DEFAULT_INTERFACE);
         assert_eq!(l.ethtype, DEFAULT_ETHTYPE);
-        assert_eq!(l.vlan, None);
+        assert_eq!(l.mapping, [RawEthMapping::default_entry()]);
+        assert!(l.whitelist.is_empty());
 
-        let l = parse_reth_locator("reth/01:02:03:04:05:06?iface=eth0;ethtype=1234;vlan=0x0102")
-            .unwrap();
-        assert_eq!(l.dmac, A);
+        let l = parse_reth_locator(
+            "reth/01:02:03:04:05:06#iface=eth0;ethtype=1234;\
+             mapping=demo/a#11:12:13:14:15:16#,demo/b/**#01:02:03:04:05:06#0102;\
+             whitelist=11:12:13:14:15:16",
+        )
+        .unwrap();
         assert_eq!(l.interface, "eth0");
         assert_eq!(l.ethtype, 0x1234);
-        assert_eq!(l.vlan, Some(0x0102));
+        assert_eq!(
+            l.mapping,
+            [
+                RawEthMapping {
+                    keyexpr: String::from("demo/a"),
+                    dmac: B,
+                    vlan: None
+                },
+                RawEthMapping {
+                    keyexpr: String::from("demo/b/**"),
+                    dmac: A,
+                    vlan: Some(0x0102)
+                },
+            ]
+        );
+        assert!(l.whitelist.accepts(&B) && !l.whitelist.accepts(&A));
+        assert_eq!(l.mapping_for(Some("demo/b/x")).dmac, A);
+        assert_eq!(
+            l.mapping_for(Some("other")).dmac,
+            B,
+            "a key no entry meets goes by the first entry"
+        );
+        assert_eq!(l.mapping_for(None).dmac, B);
 
         assert_eq!(
             parse_reth_locator("tcp/1.2.3.4:7447"),
             Err(RawEthError::NotRawEth)
         );
+        let lenient = parse_reth_locator(
+            "reth/aa:bb#ethtype=0500;mapping=demo#11:12:13:14:15:16;whitelist=zz",
+        )
+        .unwrap();
+        assert_eq!(lenient.smac, DEFAULT_SMAC, "an address that is not a MAC");
         assert_eq!(
-            parse_reth_locator("reth/aa:bb"),
-            Err(RawEthError::MalformedMac)
+            lenient.ethtype, DEFAULT_ETHTYPE,
+            "an ethertype pico refuses"
         );
         assert_eq!(
-            parse_reth_locator("reth/01:02:03:04:05:06?mapping=x"),
-            Err(RawEthError::MalformedConfig {
-                pair: String::from("mapping=x")
-            })
+            lenient.mapping,
+            [RawEthMapping::default_entry()],
+            "an entry without its second `#`"
+        );
+        assert!(
+            lenient.whitelist.is_empty(),
+            "a whitelist with a malformed MAC"
         );
     }
 
