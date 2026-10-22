@@ -277628,6 +277628,44 @@
         "Item 910: the Rust API compatibility crate. Item 912: bt and USB CDC serial need hardware."
       ]
     },
+    "Round 3414": {
+      "decision_summary": "The one red of run 39758930599 that Round 3413 carried is repaid. The validate + verify + test job took 97 percent of its clock after a lock change: its cargo cache missed, the cold build crossed the alarm, and because rust-cache saves only for a job that succeeded, the red kept the next run cold, and with it every job reading that cache. Every cache saver in ci.yml now saves on failure, as the Platform savers already did: a saved entry holds dependencies only, so what a red run built is as valid as a green run's. And the job's budget is judged on its cold run, which follows every lock change: four lanes moved to feature-gates, which restores the same cache and engine, landing the job near 85 percent cold and 75 percent warm. Layer C1 itself is the next step if it keeps growing.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml: cache-on-failure: true on the nine rust-cache savers (ci, codegen-verify, verdict-legs, footprint, interop, zephyr-mcu, zephyr-admin, isolated-crates, capi-c-arms), the reason written once on the ci job's step; .github/cache-classes.json states it in the rust-ci note.",
+        ".github/workflows/ci.yml: Layers C1i, C2, C4 and C4b move from the ci job to feature-gates, with the measurement on the ci job's Budget margin step; their run-ci bodies are unchanged and C2's deploy arm declines in both jobs alike."
+      ],
+      "verification_bullets": [
+        "From run 39758930599's job logs: the ci job missed its exact cache key and restored the previous lock's entry; Layer C1 took 853 s against 615 s warm in run 39733003983; C1i, C2, C4 and C4b took 31, 78, 59 and 45 s; feature-gates ended at 1505 s of 2700 s (55 percent) with 66 GB free. Both jobs install the same apt packages.",
+        "actionlint on ci.yml; workflow_cache_budget_gate, apt_package_census, job_budget_binding, unwired_lane_lint, store_reader_lane_lint, decline_arming_gate, armed_oracle_census, gate_provenance_lint and lane_locality_claim_gate pass in their supported modes.",
+        "The hosted run of this push is the measurement of the new margin."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the ci job's and feature-gates' Budget margin lines on this push's hosted run; if the ci job's cold run stays above 85 percent, Layer C1 moves next, together with the rust-ci save, since C1 is what builds the dependency set the readers restore.",
+        "C2's deploy arm declines in every job (no arm-none-eabi-gcc is installed anywhere it runs), so the mcu-qemu deploy clippy has no hosted lane.",
+        "Item 913 next: the group face in capi-core, then the pico door witnessed by upstream's z_test_peer_multicast, then zenoh-c's, then multicast declarations."
+      ],
+      "publishable_decision_summary": "The one red of run 39758930599 that Round 3413 carried is repaid. The validate + verify + test job took 97 percent of its clock after a lock change: its cargo cache missed, the cold build crossed the alarm, and because rust-cache saves only for a job that succeeded, the red kept the next run cold, and with it every job reading that cache. Every cache saver in ci.yml now saves on failure, as the Platform savers already did: a saved entry holds dependencies only, so what a red run built is as valid as a green run's. And the job's budget is judged on its cold run, which follows every lock change: four lanes moved to feature-gates, which restores the same cache and engine, landing the job near 85 percent cold and 75 percent warm. Layer C1 itself is the next step if it keeps growing.",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml: cache-on-failure: true on the nine rust-cache savers (ci, codegen-verify, verdict-legs, footprint, interop, zephyr-mcu, zephyr-admin, isolated-crates, capi-c-arms), the reason written once on the ci job's step; .github/cache-classes.json states it in the rust-ci note.",
+        ".github/workflows/ci.yml: Layers C1i, C2, C4 and C4b move from the ci job to feature-gates, with the measurement on the ci job's Budget margin step; their run-ci bodies are unchanged and C2's deploy arm declines in both jobs alike."
+      ],
+      "publishable_verification_bullets": [
+        "From run 39758930599's job logs: the ci job missed its exact cache key and restored the previous lock's entry; Layer C1 took 853 s against 615 s warm in run 39733003983; C1i, C2, C4 and C4b took 31, 78, 59 and 45 s; feature-gates ended at 1505 s of 2700 s (55 percent) with 66 GB free. Both jobs install the same apt packages.",
+        "actionlint on ci.yml; workflow_cache_budget_gate, apt_package_census, job_budget_binding, unwired_lane_lint, store_reader_lane_lint, decline_arming_gate, armed_oracle_census, gate_provenance_lint and lane_locality_claim_gate pass in their supported modes.",
+        "The hosted run of this push is the measurement of the new margin."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the ci job's and feature-gates' Budget margin lines on this push's hosted run; if the ci job's cold run stays above 85 percent, Layer C1 moves next, together with the rust-ci save, since C1 is what builds the dependency set the readers restore.",
+        "C2's deploy arm declines in every job (no arm-none-eabi-gcc is installed anywhere it runs), so the mcu-qemu deploy clippy has no hosted lane.",
+        "Item 913 next: the group face in capi-core, then the pico door witnessed by upstream's z_test_peer_multicast, then zenoh-c's, then multicast declarations."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
