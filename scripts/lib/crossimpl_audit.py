@@ -1115,7 +1115,13 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # and the wz leg is tagged `router-multicast-faces zenohd->wz partial`; zenohd is the adjudicator
 # of whether a router relays a group's Put to a unicast peer of its own region. The zenohd leg is
 # a calibration and claims nothing. Measured by `scripts/audit-crossimpl-proof.sh`.
-FOREIGN_ADJUDICATOR_LINKS = 1058
+# Item 913 -- 1058 -> 1071, RISING by thirteen: the C ABI group legs and the open-failure probe.
+# In `pico_peer_multicast_on_wz_capi.rs` the real pico library adjudicates what wz's drop-in puts
+# on a group (declarations, interests, puts, the member listing) and the cross pub/sub legs; in
+# `zenoh_c_peer_multicast_on_wz_capi.rs` libzenohc adjudicates the group pub/sub both ways and the
+# subscriber announcement, and zenohd the member wz reports; `pico_open_failure_on_wz_capi.rs`
+# holds wz's `z_open` codes to the real pico's. Measured by Layer A4, not counted by hand.
+FOREIGN_ADJUDICATOR_LINKS = 1071
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #
