@@ -278598,6 +278598,48 @@
         "One shared fixed-client application for the kit and the host node (near copies) and the runtime axis in the generated configuration; build-switch steps 4, 7 and 13 are not started."
       ]
     },
+    "Round 3435": {
+      "decision_summary": "The CI run that carried item 913 went on to four more reds, each read from its own log; two are item 913's and two are not, and this round repays all four. Item 911's raweth door test in the capi-pico crate compiles only with raweth-transport, which no leg turned on; a leg now runs it. The multicast glue module gained a group face case, and its four pinned counts move by one, each printed on a build host. The session core's doc links went over budget through another session's two commits, a module doc that linked its own items by short name and a link that named the wrong type for a method; both are written as the sibling modules write theirs. The posix runtime, another session's, has no bare form because the session tier it names needs a task pool and only its alloc default chooses one; it is graded with its slot profile in the tier the zephyr runtime is in.",
+      "changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: a hook leg runs wz-capi-pico with raweth-transport over --test=raweth_door.",
+        "scripts/run-ci.sh: Layer C1q pins multicast_glue at 36, 40 and 42, and Layer C1AX at 39.",
+        "scripts/lib/reduced-features-gate.sh: wz-runtime-posix joins tier 4 with session-slot.",
+        "crates/wz-session-core/src/lent_request.rs and driver_loop.rs: three module doc links by full path and one link naming SessionLinkActions.",
+        "docs/hosted-red-acks.md: the row for the four further reds of run 39860923670."
+      ],
+      "verification_bullets": [
+        "On a build host: the raweth door test passes with raweth-transport; multicast_glue runs 36, 40, 42 and 39 tests under the four feature sets; Layer C1bz passes for wz-session-core after the rebase; clippy of wz-runtime-posix with session-slot and no defaults is clean.",
+        "The count-guard oracle over the push range measures the four moved pins and finds them right.",
+        "Each red was read from its job's log and attributed by the gate's own sentence and the commit that moved its subject; the other session was told of both of its reds."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "carry_forward_bullets": [
+        "Read the CI and Platform runs of this push job by job, and the four jobs of run 39860923670 still running.",
+        "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
+      ],
+      "publishable_decision_summary": "The CI run that carried item 913 went on to four more reds, each read from its own log; two are item 913's and two are not, and this round repays all four. Item 911's raweth door test in the capi-pico crate compiles only with raweth-transport, which no leg turned on; a leg now runs it. The multicast glue module gained a group face case, and its four pinned counts move by one, each printed on a build host. The session core's doc links went over budget through another session's two commits, a module doc that linked its own items by short name and a link that named the wrong type for a method; both are written as the sibling modules write theirs. The posix runtime, another session's, has no bare form because the session tier it names needs a task pool and only its alloc default chooses one; it is graded with its slot profile in the tier the zephyr runtime is in.",
+      "publishable_changes_bullets": [
+        "scripts/lib/nondefault-tests-gate.sh: a hook leg runs wz-capi-pico with raweth-transport over --test=raweth_door.",
+        "scripts/run-ci.sh: Layer C1q pins multicast_glue at 36, 40 and 42, and Layer C1AX at 39.",
+        "scripts/lib/reduced-features-gate.sh: wz-runtime-posix joins tier 4 with session-slot.",
+        "crates/wz-session-core/src/lent_request.rs and driver_loop.rs: three module doc links by full path and one link naming SessionLinkActions.",
+        "docs/hosted-red-acks.md: the row for the four further reds of run 39860923670."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the raweth door test passes with raweth-transport; multicast_glue runs 36, 40, 42 and 39 tests under the four feature sets; Layer C1bz passes for wz-session-core after the rebase; clippy of wz-runtime-posix with session-slot and no defaults is clean.",
+        "The count-guard oracle over the push range measures the four moved pins and finds them right.",
+        "Each red was read from its job's log and attributed by the gate's own sentence and the commit that moved its subject; the other session was told of both of its reds."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the CI and Platform runs of this push job by job, and the four jobs of run 39860923670 still running.",
+        "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
