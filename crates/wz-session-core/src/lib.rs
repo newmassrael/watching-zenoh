@@ -1029,6 +1029,13 @@ pub mod lent_control;
 #[cfg(all(feature = "storage-profile", feature = "codec-response"))]
 pub mod lent_response;
 
+/// A `get` written as the codec's BORROWED `Request` from the caller's own text, where
+/// `send_request_query` builds the owned mirror and so refuses on a node with no
+/// allocator. Byte-equal to the owned builder, which the module's tests hold for every
+/// combination its description can state.
+#[cfg(all(feature = "storage-profile", feature = "codec-request"))]
+pub mod lent_request;
+
 /// R310.5a / R311di-13 — `resolve_wireexpr` peer-keyexpr-table
 /// lookup shared across the four remote-declaration registries.
 /// Pure HashMap + Wireexpr projection; alloc-gated (returns

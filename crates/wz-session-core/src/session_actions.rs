@@ -12688,20 +12688,75 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendWireError> {
-        // The request is the owned `RequestOwned`; a session with no allocator has no
-        // writer for it yet, so it refuses with the typed error a build without the
-        // codec gives, and the refusal is the thing to look for when one is wanted.
         #[cfg(all(feature = "codec-request", feature = "alloc"))]
         {
             let request = build_request_query(rid, keyexpr_mapping_id, keyexpr_suffix)?;
             self.dispatch_request(request, /*reliable=*/ true)?;
             Ok(())
         }
-        #[cfg(not(all(feature = "codec-request", feature = "alloc")))]
+        // With no allocator the query is written from the caller's own text through the
+        // borrowed writer, which names a LITERAL keyexpr: a request that names a mapping
+        // id has no owned mirror to build, and is refused as a build without the codec
+        // refuses.
+        #[cfg(all(
+            feature = "codec-request",
+            feature = "storage-profile",
+            not(feature = "alloc")
+        ))]
+        {
+            match (keyexpr_mapping_id, keyexpr_suffix) {
+                (0, Some(keyexpr)) => self.send_get_parts(crate::lent_request::GetParts {
+                    rid,
+                    keyexpr,
+                    parameters: &[],
+                    consolidation: None,
+                    target: None,
+                    timeout_ms: 0,
+                    qos: crate::sample::QosLevel::DEFAULT,
+                }),
+                _ => Err(SendWireError::FeatureDisabled),
+            }
+        }
+        #[cfg(not(all(
+            feature = "codec-request",
+            any(feature = "alloc", feature = "storage-profile")
+        )))]
         {
             let _ = (rid, keyexpr_mapping_id, keyexpr_suffix);
             Err(SendWireError::FeatureDisabled)
         }
+    }
+
+    /// A `get` written from the caller's own text, as the codec's borrowed `Request`,
+    /// straight into the slot the link lends ([`crate::lent_request::RequestWriter`]): no
+    /// owned request, no `String`, no `Vec`, so a session with no allocator can ask. The wire
+    /// is the owned builder's for the same description, which the writer's tests hold.
+    ///
+    /// Reliable, as every query is, and routed on the data plane at the band the request's QoS
+    /// names. An empty keyexpr is refused as `Codec(PresentIfMismatch)`: the same typed refusal
+    /// the owned builders give a description that contradicts itself.
+    #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
+    pub fn send_get_parts(
+        &self,
+        parts: crate::lent_request::GetParts<'_>,
+    ) -> Result<(), SendWireError> {
+        let writer = crate::lent_request::RequestWriter::new(parts).map_err(|_| {
+            SendWireError::Codec(sce_forge_runtime::codec::CodecError::PresentIfMismatch)
+        })?;
+        let qos = parts.qos;
+        self.dispatch_network_message(
+            qos.priority(),
+            /*reliable=*/ true,
+            qos,
+            wz_codecs::request::Request::MAX_ENCODED_BYTES,
+            crate::stats::NetworkStatsClass::unread(),
+            |sink| writer.encode(sink),
+        )?;
+        #[cfg(feature = "transport-batching")]
+        if qos.is_express() {
+            self.flush_open_batch();
+        }
+        Ok(())
     }
 
     /// R240 — metadata-bearing counterpart of [`Self::send_request_query`].
