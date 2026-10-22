@@ -277722,6 +277722,50 @@
         "What the 12 bytes of the consumer's option mean is the consumer's adapter's; the door does not look at them."
       ]
     },
+    "Round 3416": {
+      "decision_summary": "The two risks Round 3414 left standing are closed. The ci job's margin: Layer 0 and its two pinned linter installs move to validate-codegen, which compiles nothing, so the ci job lands near 75 percent cold and 64 percent warm. The mcu-qemu deploy clippy declined in every job because nothing installed arm-none-eabi-gcc; it becomes Layer C2m in cross-mcu, which provisions that compiler, and refuses rather than declines when the target or compiler is missing. Three validate-codegen reds the move exposed are repaid: A5 excludes the unbuilt api-compat-rust atom; the feature surface census holds wz-capi-pico's admin-space to the ABI contract, as wz-capi-c's features are; and the pico option-field gate, blind to a field behind a cfg attribute since the header arms, now reads past attributes and through the struct's own methods, which surfaced one field nothing reads, single_read, now listed with its reason.",
+      "changes_bullets": [
+        ".github/workflows/ci.yml: the shellcheck and actionlint installs and Layer 0 move from the ci job to validate-codegen; cross-mcu runs the new Layer C2m after Layer G.",
+        "scripts/run-ci.sh: Layer C2 is the workspace clippy only; Layer C2m clippies deploy/mcu-qemu-demo on thumbv7m-none-eabi and fails without the target or arm-none-eabi-gcc.",
+        "scripts/lib: apt_package_census lists Layer 0 as bindgen-free; apfull_membership excludes api-compat-rust; feature_public_surface_census holds wz-capi-pico to ABI_CONTRACT; pico_option_field_reader_gate skips field attributes, counts reads through an options struct's own methods, and lists zp_read_options_t.single_read.",
+        "crates/wz-capi-pico/src/admin_space.rs: one doc sentence reworded."
+      ],
+      "verification_bullets": [
+        "From run 39758930599's job steps: Layer 0 took 177 s of the ci job's cold run and its two installs 1 s each.",
+        "Locally: Layer 0 with WZ_LINT_REQUIRE=1 passed (fmt over eleven workspaces, shellcheck, actionlint); Layer C2m passed on a build host (one clippy run of deploy/mcu-qemu-demo on thumbv7m-none-eabi); the bindgen-free measurement of validate-codegen passed all fifteen layers with only fmt, metadata and tree cargo calls, and is recorded in apt_package_census.",
+        "feature_public_surface_census and pico_option_field_reader_gate pass --check and --selftest, the latter with new controls for an attributed field and a method read; apt_package_census and actionlint pass.",
+        "The hosted run of this push measures the new margins."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the ci job's, validate-codegen's and cross-mcu's Budget margin lines on this push's hosted run, and Layer C2m's verdict in cross-mcu.",
+        "feature_public_surface_census: both workspace consumers of wz-capi-core are now held to ABI_CONTRACT, so its PROSE_ONLY row can be retired by a predicate over the dependency graph.",
+        "Item 913 next: the group face in capi-core, then the pico door witnessed by upstream's z_test_peer_multicast, then zenoh-c's, then multicast declarations."
+      ],
+      "publishable_decision_summary": "The two risks Round 3414 left standing are closed. The ci job's margin: Layer 0 and its two pinned linter installs move to validate-codegen, which compiles nothing, so the ci job lands near 75 percent cold and 64 percent warm. The mcu-qemu deploy clippy declined in every job because nothing installed arm-none-eabi-gcc; it becomes Layer C2m in cross-mcu, which provisions that compiler, and refuses rather than declines when the target or compiler is missing. Three validate-codegen reds the move exposed are repaid: A5 excludes the unbuilt api-compat-rust atom; the feature surface census holds wz-capi-pico's admin-space to the ABI contract, as wz-capi-c's features are; and the pico option-field gate, blind to a field behind a cfg attribute since the header arms, now reads past attributes and through the struct's own methods, which surfaced one field nothing reads, single_read, now listed with its reason.",
+      "publishable_changes_bullets": [
+        ".github/workflows/ci.yml: the shellcheck and actionlint installs and Layer 0 move from the ci job to validate-codegen; cross-mcu runs the new Layer C2m after Layer G.",
+        "scripts/run-ci.sh: Layer C2 is the workspace clippy only; Layer C2m clippies deploy/mcu-qemu-demo on thumbv7m-none-eabi and fails without the target or arm-none-eabi-gcc.",
+        "scripts/lib: apt_package_census lists Layer 0 as bindgen-free; apfull_membership excludes api-compat-rust; feature_public_surface_census holds wz-capi-pico to ABI_CONTRACT; pico_option_field_reader_gate skips field attributes, counts reads through an options struct's own methods, and lists zp_read_options_t.single_read.",
+        "crates/wz-capi-pico/src/admin_space.rs: one doc sentence reworded."
+      ],
+      "publishable_verification_bullets": [
+        "From run 39758930599's job steps: Layer 0 took 177 s of the ci job's cold run and its two installs 1 s each.",
+        "Locally: Layer 0 with WZ_LINT_REQUIRE=1 passed (fmt over eleven workspaces, shellcheck, actionlint); Layer C2m passed on a build host (one clippy run of deploy/mcu-qemu-demo on thumbv7m-none-eabi); the bindgen-free measurement of validate-codegen passed all fifteen layers with only fmt, metadata and tree cargo calls, and is recorded in apt_package_census.",
+        "feature_public_surface_census and pico_option_field_reader_gate pass --check and --selftest, the latter with new controls for an attributed field and a method read; apt_package_census and actionlint pass.",
+        "The hosted run of this push measures the new margins."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the ci job's, validate-codegen's and cross-mcu's Budget margin lines on this push's hosted run, and Layer C2m's verdict in cross-mcu.",
+        "feature_public_surface_census: both workspace consumers of wz-capi-core are now held to ABI_CONTRACT, so its PROSE_ONLY row can be retired by a predicate over the dependency graph.",
+        "Item 913 next: the group face in capi-core, then the pico door witnessed by upstream's z_test_peer_multicast, then zenoh-c's, then multicast declarations."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
