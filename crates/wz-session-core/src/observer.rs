@@ -2037,6 +2037,53 @@ mod sub_interest_reply_tests {
     /// thread, the undeclare on the application's), so the peer re-inserts the
     /// entry it was just told to drop and its matching verdict flips back to
     /// `true` for the rest of the link's life.
+    /// Open-debt item 913 — a member's subscriber interest, keyed by an alias the member
+    /// declared in the SAME batch, is answered: the subscription that matches and the final.
+    /// This is a zenoh-pico write filter's interest on a group (MEASURED off the wire:
+    /// `decl_kexpr(1, demo/mc/cross)` then `Interest(3, [current,subscribers,restricted], 1:)`).
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn a_member_interest_on_its_own_alias_is_answered() {
+        let mut observer = ApplicationLayerObserver::new();
+        let _ = observer.subscribers.register("demo/mc/**", |_| {});
+        let kexpr = crate::declare_build::build_declare_kexpr(1, "demo/mc/cross")
+            .expect("a literal key builds");
+        let interest = crate::interest_build::build_interest_subscribers(3, true, false, 1, None)
+            .expect("an alias builds");
+        // In two frames, as the member sends them: the alias outlives the batch that declared it.
+        let frame = |message| crate::driver_loop::DriverLoopOutcome::FramePayload {
+            priority: crate::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: alloc::vec![message],
+            has_ext: false,
+            extensions: Vec::new(),
+        };
+        observer.dispatch_event(IterationEvent::Poll(&frame(
+            crate::network_message::NetworkMessage::Declare(alloc::boxed::Box::new(kexpr)),
+        )));
+        observer.dispatch_event(IterationEvent::Poll(&frame(
+            crate::network_message::NetworkMessage::Interest(interest),
+        )));
+        let sink = RecordingSink::default();
+        observer.flush_declare_replies(&sink);
+        assert_eq!(
+            sink.subscriber_replies
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, key, interest)| (key.clone(), *interest))
+                .collect::<Vec<_>>(),
+            alloc::vec![("demo/mc/**".to_string(), 3)],
+            "the matching subscription is the answer"
+        );
+        assert_eq!(
+            *sink.finals.lock().unwrap(),
+            alloc::vec![3],
+            "and the final ends it"
+        );
+    }
+
     #[test]
     fn an_aggregate_reply_is_not_emitted_once_its_subscription_is_undeclared() {
         let (mut observer, id) = staged(/*aggregate=*/ true);

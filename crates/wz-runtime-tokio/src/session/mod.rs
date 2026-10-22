@@ -592,6 +592,24 @@ pub enum LocalDeliveryDrain {
     DriveTask,
 }
 
+/// Open-debt item 913 — whether `event` carries an interest a member's session answers now: one
+/// with the CURRENT bit, whose answer is the declarations held at this moment and a final.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "codec-push",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+fn asks_for_declarations(event: &wz_session_core::driver_loop::IterationEvent<'_>) -> bool {
+    use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+    use wz_session_core::network_message::NetworkMessage;
+    match event {
+        IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) => messages
+            .iter()
+            .any(|message| matches!(message, NetworkMessage::Interest(interest) if interest.c())),
+        _ => false,
+    }
+}
+
 /// Open-debt item 913 — the kind of entity a group session announces or retracts
 /// ([`Session::announce`], [`Session::retract`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2628,6 +2646,29 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         #[cfg(feature = "codec-push")] tx: crate::multicast_pipeline::MulticastTxProducer,
     ) -> Self {
         let local_live = R::with_mutex_mut(&observer, |o| o.subscribers.local_live());
+        // Open-debt item 913 — a member's interest is answered after a JOIN, as zenoh-pico
+        // answers one (`vendor/zenoh-pico/src/session/interest.c` @
+        // `// Push a join in case it's a new node`): the dispatch that stages the answer asks the
+        // loop for a JOIN (`Self::dispatch_multicast_iteration_event`), and the loop runs this
+        // right after queueing it, so a sender that had not admitted this member yet does admit
+        // it before the answer arrives. Weak, as the producer holds the hook.
+        #[cfg(all(
+            feature = "codec-push",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        ))]
+        {
+            let observer = observer.clone();
+            let producer = tx.downgrade();
+            tx.set_after_join(Arc::new(move || {
+                let Some(producer) = producer.upgrade() else {
+                    return;
+                };
+                let sink = wz_session_core::multicast_reply_sink::MulticastReplySink::new(
+                    crate::multicast_glue::TokioReplyBacking::new(producer),
+                );
+                R::with_mutex_mut(&observer, |obs| obs.flush_declare_replies(&sink));
+            }));
+        }
         Self::from_inner(SessionInner {
             local_delivery: LocalDeliveryDrain::default(),
             local_stage_wake: None,
@@ -2862,6 +2903,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         &self,
         event: wz_session_core::driver_loop::IterationEvent<'_>,
     ) {
+        // Open-debt item 913 — a member's interest is answered on the group: the session's
+        // subscribers, queryables and tokens that match it, then its final, staged by the
+        // dispatch below. zenoh-pico answers an interest on a multicast transport whatever its
+        // declarations switch, a JOIN first, which is what lets a member's write filter open on
+        // this session's subscriber; the answer leaves right after that JOIN (the hook
+        // `Self::new_multicast` installs).
+        #[cfg(all(
+            feature = "codec-push",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        ))]
+        if asks_for_declarations(&event) {
+            self.transport.tx.request_join();
+        }
         R::with_mutex_mut(&self.observer, |obs| {
             obs.dispatch_event(event);
             #[cfg(all(

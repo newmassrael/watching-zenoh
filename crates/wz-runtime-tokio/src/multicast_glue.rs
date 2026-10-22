@@ -1114,6 +1114,9 @@ where
             // pin counts its JOIN after `link.send` returns.
             tx.enqueue_control(dgram);
             next_join_ms = now.saturating_add(params.join_interval_ms);
+            // What must leave after a JOIN (a member's answer to an interest) goes now, behind
+            // it on the wire.
+            tx.after_join();
         }
 
         tokio::select! {

@@ -164,6 +164,27 @@ struct Shared {
     /// A JOIN asked for ahead of the beacon's cadence ([`MulticastTxProducer::request_join`]).
     /// A `Notify` keeps one permit, so requests made before the loop looks fold into one JOIN.
     join_now: tokio::sync::Notify,
+    /// What runs right after each JOIN is queued ([`MulticastTxProducer::set_after_join`]).
+    after_join: RwLock<Option<AfterJoin>>,
+}
+
+/// What a group's loop runs right after it queues a JOIN, on the loop's own thread
+/// ([`MulticastTxProducer::set_after_join`]).
+pub type AfterJoin = Arc<dyn Fn() + Send + Sync>;
+
+/// A [`MulticastTxProducer`] that does not keep it alive ([`MulticastTxProducer::downgrade`]).
+#[derive(Clone)]
+pub struct WeakMulticastTxProducer {
+    shared: std::sync::Weak<Shared>,
+}
+
+impl WeakMulticastTxProducer {
+    /// The producer, while anything else still holds it.
+    pub fn upgrade(&self) -> Option<MulticastTxProducer> {
+        self.shared
+            .upgrade()
+            .map(|shared| MulticastTxProducer { shared })
+    }
 }
 
 /// The handle a multicast group's producers push through: an application's
@@ -197,6 +218,7 @@ impl MulticastTxProducer {
                 link: RwLock::new(None),
                 linked,
                 join_now: tokio::sync::Notify::new(),
+                after_join: RwLock::new(None),
             }),
         }
     }
@@ -230,6 +252,40 @@ impl MulticastTxProducer {
     /// its link.
     pub(crate) async fn join_requested(&self) {
         self.shared.join_now.notified().await;
+    }
+
+    /// Run `after` right after each JOIN the group's loop queues, on the loop's thread, in place
+    /// of any earlier one. What is sent from it leaves after that JOIN: the JOIN is queued on the
+    /// Control lane before it runs, and the transmit task writes the highest lane first. It is
+    /// how a member answers an interest as zenoh-pico does, a JOIN first so that a sender that
+    /// has not admitted it yet does admit it before the answer
+    /// (`vendor/zenoh-pico/src/session/interest.c` @ `// Push a join in case it's a new node`).
+    pub fn set_after_join(&self, after: AfterJoin) {
+        *self
+            .shared
+            .after_join
+            .write()
+            .expect("multicast producer poisoned") = Some(after);
+    }
+
+    /// A handle that does not keep this producer alive, for a hook the producer itself holds.
+    pub fn downgrade(&self) -> WeakMulticastTxProducer {
+        WeakMulticastTxProducer {
+            shared: Arc::downgrade(&self.shared),
+        }
+    }
+
+    /// Run the hook [`Self::set_after_join`] installed, if any, cloned out of its lock first.
+    pub(crate) fn run_after_join(&self) {
+        let after = self
+            .shared
+            .after_join
+            .read()
+            .expect("multicast producer poisoned")
+            .clone();
+        if let Some(after) = after {
+            after();
+        }
     }
 
     /// Push `item` onto the attached pipeline, on the caller's thread: ask its
@@ -595,6 +651,11 @@ impl MulticastTxPlane {
     /// ([`MulticastTxProducer::request_join`]).
     pub(crate) async fn join_requested(&self) {
         self.producer.join_requested().await;
+    }
+
+    /// Run the producer's after-JOIN hook ([`MulticastTxProducer::set_after_join`]).
+    pub(crate) fn after_join(&self) {
+        self.producer.run_after_join();
     }
 
     /// Queue a datagram that carries no SN — a JOIN or a Close — on the
