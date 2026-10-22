@@ -12,7 +12,8 @@
 //! 2. [`PosixEntropy`] -- the session core's `EntropySource`, over `getrandom(2)`.
 //! 3. [`PosixEpoch`] -- the session core's `EpochSource`, over `clock_gettime(CLOCK_REALTIME)`.
 //! 4. [`net`] -- UDP over the kernel's sockets ([`net::PosixUdpSocket`]), the socket the shared
-//!    link is written against.
+//!    link is written against; and, under `session-slot`, [`slot`], the stack the slot profile's
+//!    session host is given over it.
 //! 5. [`glue`] -- the console line and the sleep, and [`posix_image_no_heap!`], the image glue
 //!    (a `critical_section` implementation and the panic handler) of a `#![no_std]`
 //!    `#![no_main]` program.
@@ -37,6 +38,8 @@ extern crate std;
 
 pub mod glue;
 pub mod net;
+#[cfg(feature = "session-slot")]
+pub mod slot;
 
 use wz_runtime_coop::ClockSource;
 

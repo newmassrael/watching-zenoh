@@ -565,6 +565,21 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "Zephyr firmware images built with a fixed feature set",
         frozenset({"session-slot"}),
     ),
+    # The host cooperative single-thread profile with no allocator: the Zephyr profile's
+    # shape over a POSIX libc. Its one feature that gates a public item is `session-slot`,
+    # which builds `net::PosixStack` and `net::PosixUdpDriver`, the stack the slot
+    # profile's session host is given. The default (`alloc`) only lets the crate compile
+    # beside the crates that need the heap form of the cooperative runtime in a
+    # workspace-wide build; it has no heap code of its own. Its one consumer is
+    # `deploy/host-slot-node`, a crate outside this workspace built with a fixed feature
+    # set (`--no-default-features --features session-slot`), so no probe of this
+    # workspace can name the gated items.
+    "wz-runtime-posix": (
+        "the host cooperative runtime profile with no allocator; its consumer is "
+        "`deploy/host-slot-node`, a crate outside this workspace built with a fixed "
+        "feature set",
+        frozenset({"session-slot"}),
+    ),
     "wz-tls-record": (
         "`publish = false`, and the only workspace edge that turns `fixtures` "
         "on is a `dev-dependency`; no feature definition anywhere in this "
@@ -980,6 +995,9 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     ),
     "wz-runtime-core": frozenset({"alloc"}),
     "wz-runtime-zephyr": frozenset({"session-slot"}),
+    # The host profile: `session-slot` gates one crate-root `pub mod slot`, the simple shape
+    # the axis names, so the row is excused only while the axis could take it for free.
+    "wz-runtime-posix": frozenset({"session-slot"}),
     # Fixed-memory step S9c -- `wz-mcu-session-acceptor` joins. Its one row,
     # `fixed-memory`, gates `pub mod fixed` and its re-export behind
     # `all(feature = .., lwip_real_build)`, a compound the derivation reads.

@@ -44,7 +44,7 @@ use wz_runtime_coop::session_drive::{DriverPump, PumpSlots};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_runtime_posix::glue::{log, log_args, yield_us};
-use wz_runtime_posix::net::{PosixStack, PosixUdpDriver};
+use wz_runtime_posix::slot::{PosixStack, PosixUdpDriver};
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::connect_endpoints::{ConnectEndpoints, ConnectEntry, EndpointText};

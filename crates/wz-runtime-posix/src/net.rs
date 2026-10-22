@@ -5,8 +5,8 @@
 //!
 //! [`PosixUdpSocket`] is the socket `wz_runtime_coop::udp_link` is written against
 //! ([`DatagramSocket`]); the session's link over it is that module's `UdpDriver`, and
-//! [`PosixStack`] is its `UdpStack` at this socket, the stack the slot profile's session host is
-//! given. Nothing here allocates: the socket is a file descriptor and four words.
+//! `slot::PosixStack` is its `UdpStack` at this socket, the stack the slot profile's session host
+//! is given. Nothing here allocates: the socket is a file descriptor and four words.
 //!
 //! Where Zephyr's socket cannot read `errno` (the FFI has no portable reach for it), this one can,
 //! so a non-blocking receive is one `recvfrom` with `MSG_DONTWAIT` and "nothing yet" is the
@@ -243,17 +243,6 @@ impl Drop for PosixUdpSocket {
         unsafe { libc::close(self.fd) };
     }
 }
-
-/// The host's sockets as a stack of the slot profile's session host: `wz_runtime_coop::udp_link`'s
-/// `UdpStack` at [`PosixUdpSocket`]. The driver in the session's slot claims its receive buffer
-/// and the buffer its frames are encoded into from two tables the image declares.
-#[cfg(feature = "session-slot")]
-pub type PosixStack = wz_runtime_coop::udp_link::UdpStack<PosixUdpSocket>;
-
-/// The driver a [`PosixStack`] opens: the session's link in its slot, with both buffers claimed
-/// from the image's tables.
-#[cfg(feature = "session-slot")]
-pub type PosixUdpDriver = wz_runtime_coop::udp_link::FixedUdpDriver<PosixUdpSocket>;
 
 #[cfg(test)]
 mod tests {
