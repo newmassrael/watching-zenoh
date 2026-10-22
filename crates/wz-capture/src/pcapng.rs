@@ -91,6 +91,18 @@ const OPT_IF_TSRESOL: u16 = 9;
 /// `epb_flags` on an Enhanced Packet Block, and `pack_flags` on the obsolete
 /// Packet Block: the same 32-bit word under the same code.
 const OPT_EPB_FLAGS: u16 = 2;
+/// A Custom Option holding a UTF-8 string that can be copied to a new file when
+/// an application rewrites the capture (`opt_custom`, pcapng, Custom Options).
+pub const OPT_CUSTOM_UTF8_COPYABLE: u16 = 2988;
+/// A Custom Option holding binary octets that can be copied to a new file when
+/// an application rewrites the capture.
+pub const OPT_CUSTOM_BINARY_COPYABLE: u16 = 2989;
+/// A Custom Option holding a UTF-8 string that should NOT be copied to a new
+/// file when an application rewrites the capture.
+pub const OPT_CUSTOM_UTF8_NONCOPYABLE: u16 = 19372;
+/// A Custom Option holding binary octets that should NOT be copied to a new
+/// file when an application rewrites the capture.
+pub const OPT_CUSTOM_BINARY_NONCOPYABLE: u16 = 19373;
 /// `isb_ifrecv` — packets the interface RECEIVED over the capture.
 const OPT_ISB_IFRECV: u16 = 4;
 /// `isb_ifdrop` — packets the capture tool DROPPED and nobody ever saw.
@@ -346,8 +358,18 @@ pub struct PacketRef<'a> {
     /// The same instant in nanoseconds; [`Self::ts_millis`] is this divided by
     /// a million, rounded down.
     pub ts_nanos: Option<u64>,
-    /// The block's `epb_flags` word; see [`Packet::flags`].
+    /// The block's `epb_flags` word; see [`Packet::flags`]. It is read out of
+    /// [`Self::options`], the one list this and every other option of the block
+    /// is read from.
     pub flags: Option<u32>,
+    /// The block's option list, borrowed from the container: empty for a block
+    /// that has none (a Simple Packet Block never does).
+    ///
+    /// Held rather than read out piece by piece so that an option nobody asked
+    /// about when the block was walked, a Custom Option for one, is still there
+    /// for a reader that asks afterwards, and is read by the same code that
+    /// read `epb_flags`.
+    pub options: OptionList<'a>,
     /// Bytes actually stored, link header included.
     pub data: &'a [u8],
     /// Length the packet had on the wire.
@@ -359,13 +381,14 @@ impl<'a> PacketRef<'a> {
     /// the interface that recorded it is still in hand.
     ///
     /// The one constructor the walk uses, so the three block types that carry a
-    /// packet cannot resolve it three ways.
+    /// packet cannot resolve it three ways. Its `epb_flags` word is read from
+    /// `options` here, for the same reason.
     fn resolved(
         index: usize,
         interface_id: u32,
         iface: &Interface,
         ts_ticks: Option<u64>,
-        flags: Option<u32>,
+        options: OptionList<'a>,
         data: &'a [u8],
         orig_len: u32,
     ) -> Self {
@@ -376,7 +399,8 @@ impl<'a> PacketRef<'a> {
             ts_ticks,
             ts_millis: ticks_to_millis(ts_ticks, iface),
             ts_nanos: ticks_to_nanos(ts_ticks, iface),
-            flags,
+            flags: options.u32_option(OPT_EPB_FLAGS),
+            options,
             data,
             orig_len,
         }
@@ -558,94 +582,318 @@ fn u16_at(b: &[u8], off: usize, swapped: bool) -> u16 {
     }
 }
 
+/// A block's option list, borrowed from the container, in the byte order of the
+/// section the block is in.
+///
+/// # The one reader of options
+///
+/// Every block that carries options carries them in one shape: `[code u16]
+/// [length u16][value, padded to 4]`, repeated, ended by code 0
+/// (`opt_endofopt`). This reader used to walk that shape three times over, once
+/// for `if_tsresol`, once for the 64-bit counters of an Interface Statistics
+/// Block and once for `epb_flags`, each a copy of the same loop that could drift
+/// from the others. They are all [`OptionList::iter`] now, and so is the Custom
+/// Option reader: there is no second opinion about where an option ends.
+///
+/// Copying nothing: an option's value is a window of the container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OptionList<'a> {
+    bytes: &'a [u8],
+    swapped: bool,
+}
+
+/// One option of a block's list, as the block stored it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawOption<'a> {
+    /// Where the option sits in its block's list: `0` for the first. The list's
+    /// terminator is not an option and takes no place.
+    pub index: u32,
+    /// The option code.
+    pub code: u16,
+    /// The value, exactly as long as the option's length field says: the
+    /// padding to four bytes is not part of it.
+    pub value: &'a [u8],
+}
+
+/// How an option walk ended, which is more than "it ended".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptionsEnd {
+    /// Still walking.
+    Running,
+    /// `opt_endofopt`: the list said it was over.
+    Terminated,
+    /// Fewer than four bytes were left, too few for an option header. A block's
+    /// length is a multiple of four, so this is the list ending without a
+    /// terminator, which writers do.
+    Exhausted,
+    /// An option's length ran past the end of the list. What follows cannot be
+    /// found, because the next option starts where this one ends.
+    Overran,
+}
+
+/// The walk over an [`OptionList`]. Yields each option in order and stops at
+/// `opt_endofopt`, at the end of the list, or at an option that runs past it.
+#[derive(Debug, Clone, Copy)]
+pub struct OptionIter<'a> {
+    list: OptionList<'a>,
+    off: usize,
+    next_index: u32,
+    end: OptionsEnd,
+}
+
+impl<'a> OptionList<'a> {
+    /// A block with no options.
+    pub const fn empty() -> Self {
+        Self {
+            bytes: &[],
+            swapped: false,
+        }
+    }
+
+    /// The options in `bytes`, written in `swapped` byte order (a section whose
+    /// byte order is not this machine's reading of its magic).
+    const fn new(bytes: &'a [u8], swapped: bool) -> Self {
+        Self { bytes, swapped }
+    }
+
+    /// Every option, in order. See [`OptionIter`] for where the walk stops.
+    pub fn iter(&self) -> OptionIter<'a> {
+        OptionIter {
+            list: *self,
+            off: 0,
+            next_index: 0,
+            end: OptionsEnd::Running,
+        }
+    }
+
+    /// The first option with this `code` whose value is exactly `N` bytes.
+    ///
+    /// The width is checked exactly, as it always was: a writer that emitted a
+    /// 4-byte counter where eight were owed is not zero-extended into a number
+    /// a reader would then quote. An option of the right code and the wrong
+    /// width is passed over, and a later one of the right width is found.
+    fn fixed_option<const N: usize>(&self, code: u16) -> Option<[u8; N]> {
+        self.iter()
+            .find(|o| o.code == code && o.value.len() == N)
+            .and_then(|o| <[u8; N]>::try_from(o.value).ok())
+    }
+
+    /// The first `want` option holding a `u32`, in the section's byte order.
+    fn u32_option(&self, want: u16) -> Option<u32> {
+        self.fixed_option::<4>(want).map(|raw| {
+            if self.swapped {
+                u32::from_be_bytes(raw)
+            } else {
+                u32::from_le_bytes(raw)
+            }
+        })
+    }
+
+    /// The first `want` option holding a `u64`, in the section's byte order.
+    fn u64_option(&self, want: u16) -> Option<u64> {
+        self.fixed_option::<8>(want).map(|raw| {
+            if self.swapped {
+                u64::from_be_bytes(raw)
+            } else {
+                u64::from_le_bytes(raw)
+            }
+        })
+    }
+
+    /// The Custom Options of this list: the four codes the format reserves for
+    /// them, in list order, repeats included. See [`CustomOptions`].
+    pub fn custom(&self) -> CustomOptions<'a> {
+        CustomOptions {
+            inner: self.iter(),
+            malformed: 0,
+        }
+    }
+}
+
+impl<'a> Iterator for OptionIter<'a> {
+    type Item = RawOption<'a>;
+
+    fn next(&mut self) -> Option<RawOption<'a>> {
+        if self.end != OptionsEnd::Running {
+            return None;
+        }
+        let OptionList { bytes, swapped } = self.list;
+        if self.off + 4 > bytes.len() {
+            self.end = OptionsEnd::Exhausted;
+            return None;
+        }
+        let code = u16_at(bytes, self.off, swapped);
+        let len = u16_at(bytes, self.off + 2, swapped) as usize;
+        if code == 0 {
+            self.end = OptionsEnd::Terminated;
+            return None;
+        }
+        let start = self.off + 4;
+        let Some(value) = bytes.get(start..start + len) else {
+            self.end = OptionsEnd::Overran;
+            return None;
+        };
+        // Every option's value is padded to a 4-byte boundary.
+        self.off = start + ((len + 3) & !3);
+        let index = self.next_index;
+        self.next_index = self.next_index.saturating_add(1);
+        Some(RawOption { index, code, value })
+    }
+}
+
+impl OptionIter<'_> {
+    /// Whether the walk stopped because an option's length ran past the end of
+    /// the list, as opposed to the list ending. Meaningful once the iterator has
+    /// returned `None`.
+    pub fn ended_inside_an_option(&self) -> bool {
+        self.end == OptionsEnd::Overran
+    }
+}
+
+/// What the format says about one of the four Custom Option codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CustomKind {
+    /// The Custom Data is a UTF-8 string (`2988`, `19372`) and not binary
+    /// octets (`2989`, `19373`).
+    pub text: bool,
+    /// The option can be safely copied to a new file when an application
+    /// rewrites the capture (`2988`, `2989`). The other two should not be.
+    pub copyable: bool,
+}
+
+/// The kind of a Custom Option code, or `None` for a code that is not one.
+///
+/// The ONE place the four codes are classified: a record that carries a code
+/// and also its flags carries them from here, so the two cannot disagree. The
+/// table is the pcapng format's Custom Options section and the test that pins
+/// it quotes that text.
+pub const fn custom_kind(code: u16) -> Option<CustomKind> {
+    match code {
+        OPT_CUSTOM_UTF8_COPYABLE => Some(CustomKind {
+            text: true,
+            copyable: true,
+        }),
+        OPT_CUSTOM_BINARY_COPYABLE => Some(CustomKind {
+            text: false,
+            copyable: true,
+        }),
+        OPT_CUSTOM_UTF8_NONCOPYABLE => Some(CustomKind {
+            text: true,
+            copyable: false,
+        }),
+        OPT_CUSTOM_BINARY_NONCOPYABLE => Some(CustomKind {
+            text: false,
+            copyable: false,
+        }),
+        _ => None,
+    }
+}
+
+/// One Custom Option of a block.
+///
+/// The format lays it out as the option code, the option length (which
+/// INCLUDES the four bytes of the next field), a Private Enterprise Number in
+/// the byte order of the section, and the Custom Data padded to four. What the
+/// data means is the organization's; this carries it and does not look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CustomOption<'a> {
+    /// Where the option sits in its block's list; see [`RawOption::index`].
+    pub index: u32,
+    /// `2988`, `2989`, `19372` or `19373`.
+    pub code: u16,
+    /// What the format says of [`Self::code`], classified once, where the option
+    /// was found, so that nobody has to look the code up again.
+    pub kind: CustomKind,
+    /// The Private Enterprise Number of the organization that defined the
+    /// option, as the section's byte order reads it.
+    pub organization: u32,
+    /// The Custom Data: the option's value after the number, without the
+    /// padding.
+    pub data: &'a [u8],
+}
+
+/// The Custom Options of one block's list, in list order.
+///
+/// An option with a Custom Option's code but no room for the organization
+/// number (a length under four) cannot be read, and is COUNTED rather than
+/// skipped without a word: [`Self::malformed`]. The same goes for a list that
+/// ends inside an option, where the code of what was lost is not known. A
+/// reader that dropped these silently would report a short list as if it were
+/// whole.
+#[derive(Debug, Clone, Copy)]
+pub struct CustomOptions<'a> {
+    inner: OptionIter<'a>,
+    malformed: u32,
+}
+
+impl CustomOptions<'_> {
+    /// How many options this walk could not read: a Custom Option too short for
+    /// its organization number, and one for a list cut off inside an option.
+    /// Complete only once the iterator has returned `None`.
+    pub fn malformed(&self) -> u32 {
+        self.malformed + u32::from(self.inner.ended_inside_an_option())
+    }
+}
+
+impl<'a> Iterator for CustomOptions<'a> {
+    type Item = CustomOption<'a>;
+
+    fn next(&mut self) -> Option<CustomOption<'a>> {
+        let swapped = self.inner.list.swapped;
+        loop {
+            let option = self.inner.next()?;
+            let Some(kind) = custom_kind(option.code) else {
+                continue;
+            };
+            let Some((number, data)) = option.value.split_first_chunk::<4>() else {
+                self.malformed = self.malformed.saturating_add(1);
+                continue;
+            };
+            return Some(CustomOption {
+                index: option.index,
+                code: option.code,
+                kind,
+                organization: if swapped {
+                    u32::from_be_bytes(*number)
+                } else {
+                    u32::from_le_bytes(*number)
+                },
+                data,
+            });
+        }
+    }
+}
+
 /// Scan a block's option list for `if_tsresol`.
 ///
-/// Options are `[code u16][length u16][value padded to 4]`, terminated by code
-/// 0 (`opt_endofopt`) or by the end of the block. An absent or malformed list
-/// leaves the default — an option list is metadata, and refusing a whole
-/// capture over one is the wrong trade.
+/// An absent or malformed list leaves the default — an option list is
+/// metadata, and refusing a whole capture over one is the wrong trade.
 fn scan_tsresol(body: &[u8], swapped: bool) -> Option<u8> {
-    let mut off = 0usize;
-    while off + 4 <= body.len() {
-        let code = u16_at(body, off, swapped);
-        let len = u16_at(body, off + 2, swapped) as usize;
-        off += 4;
-        if code == 0 {
-            return None;
-        }
-        if off + len > body.len() {
-            return None;
-        }
-        if code == OPT_IF_TSRESOL && len >= 1 {
-            return Some(body[off]);
-        }
-        // Every option's value is padded to a 4-byte boundary.
-        off += (len + 3) & !3;
-    }
-    None
+    OptionList::new(body, swapped)
+        .iter()
+        .find(|o| o.code == OPT_IF_TSRESOL && !o.value.is_empty())
+        .map(|o| o.value[0])
 }
 
 /// R311y607 — read one u64 option out of an option list.
 ///
-/// Separate from [`scan_tsresol`] rather than generalised over it, because the
-/// two disagree on width for a reason: `if_tsresol` is ONE byte and the ISB
-/// counters are eight, and a shared helper would have to guess. Length is
-/// checked exactly: a writer that emitted a 4-byte counter is not silently
+/// Separate from [`scan_tsresol`] because the two disagree on width for a
+/// reason: `if_tsresol` is ONE byte and the ISB counters are eight, so the
+/// width is the caller's to state and a shared helper must not guess it. Length
+/// is checked exactly: a writer that emitted a 4-byte counter is not silently
 /// zero-extended into a number a reader would then quote.
 fn scan_u64_option(body: &[u8], swapped: bool, want: u16) -> Option<u64> {
-    let mut off = 0usize;
-    while off + 4 <= body.len() {
-        let code = u16_at(body, off, swapped);
-        let len = u16_at(body, off + 2, swapped) as usize;
-        off += 4;
-        if code == 0 {
-            return None;
-        }
-        if off + len > body.len() {
-            return None;
-        }
-        if code == want && len == 8 {
-            let mut raw = [0u8; 8];
-            raw.copy_from_slice(&body[off..off + 8]);
-            return Some(if swapped {
-                u64::from_be_bytes(raw)
-            } else {
-                u64::from_le_bytes(raw)
-            });
-        }
-        off += (len + 3) & !3;
-    }
-    None
+    OptionList::new(body, swapped).u64_option(want)
 }
 
-/// Read one u32 option out of an option list, on [`scan_u64_option`]'s rule:
-/// the length must be exactly the width, or the option is not read.
-fn scan_u32_option(body: &[u8], swapped: bool, want: u16) -> Option<u32> {
-    let mut off = 0usize;
-    while off + 4 <= body.len() {
-        let code = u16_at(body, off, swapped);
-        let len = u16_at(body, off + 2, swapped) as usize;
-        off += 4;
-        if code == 0 {
-            return None;
-        }
-        if off + len > body.len() {
-            return None;
-        }
-        if code == want && len == 4 {
-            return Some(u32_at(body, off, swapped));
-        }
-        off += (len + 3) & !3;
-    }
-    None
-}
-
-/// The `epb_flags` word of a packet block whose fixed part is `fixed` bytes and
-/// whose data is `captured` bytes: the options start past the data, padded to
-/// four.
-fn packet_flags(body: &[u8], fixed: usize, captured: usize, swapped: bool) -> Option<u32> {
-    let options = body.get(fixed + ((captured + 3) & !3)..)?;
-    scan_u32_option(options, swapped, OPT_EPB_FLAGS)
+/// The option list of a packet block whose fixed part is `fixed` bytes and whose
+/// data is `captured` bytes: the options start past the data, padded to four.
+/// A block with nothing past the data has an empty list.
+fn packet_options(body: &[u8], fixed: usize, captured: usize, swapped: bool) -> OptionList<'_> {
+    body.get(fixed + ((captured + 3) & !3)..)
+        .map_or(OptionList::empty(), |options| {
+            OptionList::new(options, swapped)
+        })
 }
 
 /// R311y607 — what the CAPTURE TOOL said about one interface, as opposed to
@@ -1205,7 +1453,7 @@ impl PcapngCursor {
                         // first. Reading them as a seconds/fraction pair — which
                         // the classic layout invites — is wrong by construction.
                         Some((ts_high << 32) | ts_low),
-                        packet_flags(body, 20, captured as usize, swapped),
+                        packet_options(body, 20, captured as usize, swapped),
                         &body[20..20 + captured as usize],
                         orig_len,
                     )))
@@ -1238,7 +1486,7 @@ impl PcapngCursor {
                         // what travels rather than a plausible zero (R311y625).
                         None,
                         // Nor any option: an SPB has no option list.
-                        None,
+                        OptionList::empty(),
                         &body[4..4 + stored],
                         orig_len,
                     )))
@@ -1305,7 +1553,7 @@ impl PcapngCursor {
                         interface_id,
                         &iface,
                         Some((ts_high << 32) | ts_low),
-                        packet_flags(body, 20, captured as usize, swapped),
+                        packet_options(body, 20, captured as usize, swapped),
                         &body[20..20 + captured as usize],
                         orig_len,
                     )))
@@ -1536,6 +1784,130 @@ pub fn write_flagged(
             out.extend_from_slice(&0u16.to_le_bytes()); // opt_endofopt length
         }
         out.extend_from_slice(&(total as u32).to_le_bytes());
+    }
+    out
+}
+
+/// The byte order a section is written in. A pcapng file says which in its
+/// Section Header Block, and a reader that handled only its own would pass every
+/// fixture made on its own machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteOrder {
+    /// Least significant byte first.
+    Little,
+    /// Most significant byte first.
+    Big,
+}
+
+impl ByteOrder {
+    fn u16(self, v: u16) -> [u8; 2] {
+        match self {
+            Self::Little => v.to_le_bytes(),
+            Self::Big => v.to_be_bytes(),
+        }
+    }
+
+    fn u32(self, v: u32) -> [u8; 4] {
+        match self {
+            Self::Little => v.to_le_bytes(),
+            Self::Big => v.to_be_bytes(),
+        }
+    }
+
+    fn u64(self, v: u64) -> [u8; 8] {
+        match self {
+            Self::Little => v.to_le_bytes(),
+            Self::Big => v.to_be_bytes(),
+        }
+    }
+}
+
+/// One packet for [`write_with_options`]: an Enhanced Packet Block whose option
+/// list is exactly `options`.
+#[derive(Debug, Clone, Copy)]
+pub struct PacketSpec<'a> {
+    /// The interface it arrived on.
+    pub interface: u32,
+    /// Its 64-bit tick count.
+    pub ticks: u64,
+    /// The bytes it stored.
+    pub data: &'a [u8],
+    /// The option list, in order, as `(code, value)`. The writer pads each value
+    /// to four bytes and ends a non-empty list with `opt_endofopt`; an empty
+    /// slice writes no list at all.
+    pub options: &'a [(u16, &'a [u8])],
+}
+
+/// The value of a Custom Option: the Private Enterprise Number in `order`, then
+/// the Custom Data. The option LENGTH a writer states for it is this value's
+/// length, which includes the four bytes of the number.
+pub fn custom_option_value(order: ByteOrder, organization: u32, data: &[u8]) -> Vec<u8> {
+    let mut value = order.u32(organization).to_vec();
+    value.extend_from_slice(data);
+    value
+}
+
+/// A pcapng file in `order` whose packets carry the option lists they are given.
+///
+/// What [`write_flagged`] is for one option in native order, this is for any
+/// list in either: the fixture for Custom Options, repeated options, odd value
+/// lengths that need padding, and a big-endian section. Laid out from the format
+/// and not through the reader under test, and the tests pair it with byte-level
+/// assertions for the same reason [`write`] is.
+pub fn write_with_options(
+    order: ByteOrder,
+    interfaces: &[(u32, u8)],
+    packets: &[PacketSpec<'_>],
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    // SHB: type, length, BOM, major, minor, section length (-1 = unknown).
+    out.extend_from_slice(&order.u32(BT_SHB));
+    out.extend_from_slice(&order.u32(28));
+    out.extend_from_slice(&order.u32(BOM));
+    out.extend_from_slice(&order.u16(1));
+    out.extend_from_slice(&order.u16(0));
+    out.extend_from_slice(&order.u64(u64::MAX));
+    out.extend_from_slice(&order.u32(28));
+
+    for (link_type, ts_resol) in interfaces {
+        out.extend_from_slice(&order.u32(BT_IDB));
+        out.extend_from_slice(&order.u32(32));
+        out.extend_from_slice(&order.u16(*link_type as u16));
+        out.extend_from_slice(&order.u16(0));
+        out.extend_from_slice(&order.u32(0));
+        out.extend_from_slice(&order.u16(OPT_IF_TSRESOL));
+        out.extend_from_slice(&order.u16(1));
+        out.extend_from_slice(&[*ts_resol, 0, 0, 0]);
+        out.extend_from_slice(&order.u16(0));
+        out.extend_from_slice(&order.u16(0));
+        out.extend_from_slice(&order.u32(32));
+    }
+
+    for packet in packets {
+        let pad = (4 - (packet.data.len() % 4)) % 4;
+        let mut list = Vec::new();
+        for (code, value) in packet.options {
+            list.extend_from_slice(&order.u16(*code));
+            list.extend_from_slice(&order.u16(value.len() as u16));
+            list.extend_from_slice(value);
+            list.extend_from_slice(&alloc::vec![0u8; (4 - (value.len() % 4)) % 4]);
+        }
+        if !list.is_empty() {
+            list.extend_from_slice(&order.u16(0)); // opt_endofopt code
+            list.extend_from_slice(&order.u16(0)); // opt_endofopt length
+        }
+        let total = 32 + packet.data.len() + pad + list.len();
+        out.extend_from_slice(&order.u32(BT_EPB));
+        out.extend_from_slice(&order.u32(total as u32));
+        out.extend_from_slice(&order.u32(packet.interface));
+        out.extend_from_slice(&order.u32((packet.ticks >> 32) as u32));
+        out.extend_from_slice(&order.u32(packet.ticks as u32));
+        out.extend_from_slice(&order.u32(packet.data.len() as u32));
+        out.extend_from_slice(&order.u32(packet.data.len() as u32));
+        out.extend_from_slice(packet.data);
+        out.extend_from_slice(&alloc::vec![0u8; pad]);
+        out.extend_from_slice(&list);
+        out.extend_from_slice(&order.u32(total as u32));
     }
     out
 }
@@ -2776,5 +3148,628 @@ mod tests {
             file.len(),
             "the cursor must stand past the whole block"
         );
+    }
+}
+
+/// The option reader: the three loops it replaced, the Custom Options it reads
+/// and the lists it must survive.
+#[cfg(test)]
+mod custom_option_tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use core::ops::ControlFlow;
+
+    /// The three scanners as they were before they shared one reader, kept here
+    /// as the REFERENCE the shared reader is graded against: the claim of the
+    /// change is "no list reads differently", and a claim like that is only as
+    /// good as the oracle it is compared with. Copied, not reimplemented.
+    mod before {
+        use super::super::{u16_at, u32_at, OPT_IF_TSRESOL};
+
+        pub fn scan_tsresol(body: &[u8], swapped: bool) -> Option<u8> {
+            let mut off = 0usize;
+            while off + 4 <= body.len() {
+                let code = u16_at(body, off, swapped);
+                let len = u16_at(body, off + 2, swapped) as usize;
+                off += 4;
+                if code == 0 {
+                    return None;
+                }
+                if off + len > body.len() {
+                    return None;
+                }
+                if code == OPT_IF_TSRESOL && len >= 1 {
+                    return Some(body[off]);
+                }
+                off += (len + 3) & !3;
+            }
+            None
+        }
+
+        pub fn scan_u64_option(body: &[u8], swapped: bool, want: u16) -> Option<u64> {
+            let mut off = 0usize;
+            while off + 4 <= body.len() {
+                let code = u16_at(body, off, swapped);
+                let len = u16_at(body, off + 2, swapped) as usize;
+                off += 4;
+                if code == 0 {
+                    return None;
+                }
+                if off + len > body.len() {
+                    return None;
+                }
+                if code == want && len == 8 {
+                    let mut raw = [0u8; 8];
+                    raw.copy_from_slice(&body[off..off + 8]);
+                    return Some(if swapped {
+                        u64::from_be_bytes(raw)
+                    } else {
+                        u64::from_le_bytes(raw)
+                    });
+                }
+                off += (len + 3) & !3;
+            }
+            None
+        }
+
+        pub fn scan_u32_option(body: &[u8], swapped: bool, want: u16) -> Option<u32> {
+            let mut off = 0usize;
+            while off + 4 <= body.len() {
+                let code = u16_at(body, off, swapped);
+                let len = u16_at(body, off + 2, swapped) as usize;
+                off += 4;
+                if code == 0 {
+                    return None;
+                }
+                if off + len > body.len() {
+                    return None;
+                }
+                if code == want && len == 4 {
+                    return Some(u32_at(body, off, swapped));
+                }
+                off += (len + 3) & !3;
+            }
+            None
+        }
+    }
+
+    /// A deterministic generator: xorshift64*, so a failure reproduces.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    fn order_of(round: usize) -> (ByteOrder, bool) {
+        if round & 1 == 0 {
+            (ByteOrder::Little, false)
+        } else {
+            (ByteOrder::Big, true)
+        }
+    }
+
+    /// One option, laid out as the format does: code, length, the value, padded.
+    fn put(list: &mut Vec<u8>, order: ByteOrder, code: u16, length: u16, value: &[u8]) {
+        list.extend_from_slice(&order.u16(code));
+        list.extend_from_slice(&order.u16(length));
+        list.extend_from_slice(value);
+        if value.len() == usize::from(length) {
+            list.extend_from_slice(&vec![0u8; (4 - value.len() % 4) % 4]);
+        }
+    }
+
+    /// A list that lies: lengths longer than the bytes, terminators in the
+    /// middle, stray bytes after the end and cuts at any byte. The population the
+    /// old loops had to survive and the new reader must agree with them on.
+    fn wild_list(rng: &mut Rng, order: ByteOrder) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..rng.below(7) {
+            let code = match rng.below(12) {
+                0 => 0,
+                1 => 2,
+                2 => 4,
+                3 => 5,
+                4 => 9,
+                5 => OPT_CUSTOM_UTF8_COPYABLE,
+                6 => OPT_CUSTOM_BINARY_COPYABLE,
+                7 => OPT_CUSTOM_UTF8_NONCOPYABLE,
+                8 => OPT_CUSTOM_BINARY_NONCOPYABLE,
+                9 => 1,
+                _ => rng.below(65_536) as u16,
+            };
+            let length = if rng.below(8) == 0 {
+                rng.below(70) as u16
+            } else {
+                [0u16, 1, 2, 3, 4, 5, 8, 12, 16][rng.below(9) as usize]
+            };
+            let have = if rng.below(10) == 0 {
+                rng.below(u64::from(length) + 1) as usize
+            } else {
+                usize::from(length)
+            };
+            let value: Vec<u8> = (0..have).map(|_| rng.next() as u8).collect();
+            put(&mut out, order, code, length, &value);
+        }
+        match rng.below(4) {
+            0 => out.extend_from_slice(&[0; 4]),
+            1 => out.extend_from_slice(&[7, 7]),
+            _ => {}
+        }
+        if rng.below(6) == 0 && !out.is_empty() {
+            let cut = rng.below(out.len() as u64) as usize;
+            out.truncate(cut);
+        }
+        out
+    }
+
+    /// The change moved three loops into one reader, and the claim is that no
+    /// list reads differently. 60 000 lists in both byte orders, among them the
+    /// ones that lie, are read by the reference loops and by the shared reader,
+    /// and every answer is the same. The counts at the end say the population
+    /// held lists the readers actually found something in, so equal silence is
+    /// not what passed.
+    #[test]
+    fn the_shared_reader_reads_every_list_as_the_three_loops_did() {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let mut found = [0usize; 3];
+        for round in 0..60_000 {
+            let (order, swapped) = order_of(round);
+            let list = wild_list(&mut rng, order);
+            let shared = OptionList::new(&list, swapped);
+            assert_eq!(
+                scan_tsresol(&list, swapped),
+                before::scan_tsresol(&list, swapped),
+                "if_tsresol over {list:?} ({order:?})"
+            );
+            found[0] += usize::from(scan_tsresol(&list, swapped).is_some());
+            for want in [2u16, 4, 5] {
+                let (u64_new, u64_old) = (
+                    shared.u64_option(want),
+                    before::scan_u64_option(&list, swapped, want),
+                );
+                assert_eq!(u64_new, u64_old, "u64 {want} over {list:?} ({order:?})");
+                let (u32_new, u32_old) = (
+                    shared.u32_option(want),
+                    before::scan_u32_option(&list, swapped, want),
+                );
+                assert_eq!(u32_new, u32_old, "u32 {want} over {list:?} ({order:?})");
+                found[1] += usize::from(u64_new.is_some());
+                found[2] += usize::from(u32_new.is_some());
+            }
+        }
+        assert!(
+            found.iter().all(|&n| n > 500),
+            "the lists must hold options the readers find: {found:?}"
+        );
+    }
+
+    /// The list a writer lays out is the list the reader reads back, option by
+    /// option: for any mix of Custom Options of the four codes among others, in
+    /// either byte order, repeats and empty data and every padding included. The
+    /// truth is the structure that generated the bytes, not the reader.
+    #[test]
+    fn a_written_list_reads_back_as_it_was_generated() {
+        let mut rng = Rng(0xC0FF_EE00_1234_5678);
+        let codes = [
+            OPT_CUSTOM_UTF8_COPYABLE,
+            OPT_CUSTOM_BINARY_COPYABLE,
+            OPT_CUSTOM_UTF8_NONCOPYABLE,
+            OPT_CUSTOM_BINARY_NONCOPYABLE,
+        ];
+        let mut seen = 0usize;
+        for round in 0..20_000 {
+            let (order, swapped) = order_of(round);
+            let mut list = Vec::new();
+            let mut expected: Vec<(u32, u16, u32, Vec<u8>)> = Vec::new();
+            for index in 0..rng.below(7) as u32 {
+                if rng.below(3) == 0 {
+                    // An option that is not a Custom Option, which must be
+                    // stepped over without disturbing the index of the rest.
+                    let value: Vec<u8> = (0..rng.below(9)).map(|_| rng.next() as u8).collect();
+                    put(
+                        &mut list,
+                        order,
+                        [1u16, 2, 9][rng.below(3) as usize],
+                        value.len() as u16,
+                        &value,
+                    );
+                } else {
+                    let code = codes[rng.below(4) as usize];
+                    let organization = rng.next() as u32;
+                    let data: Vec<u8> = (0..rng.below(21)).map(|_| rng.next() as u8).collect();
+                    let value = custom_option_value(order, organization, &data);
+                    put(&mut list, order, code, value.len() as u16, &value);
+                    expected.push((index, code, organization, data));
+                }
+            }
+            if rng.below(2) == 0 {
+                list.extend_from_slice(&[0; 4]);
+            }
+            let mut custom = OptionList::new(&list, swapped).custom();
+            let read: Vec<(u32, u16, u32, Vec<u8>)> = custom
+                .by_ref()
+                .map(|o| (o.index, o.code, o.organization, o.data.to_vec()))
+                .collect();
+            assert_eq!(read, expected, "list {list:?} ({order:?})");
+            assert_eq!(
+                custom.malformed(),
+                0,
+                "a well-formed list has nothing malformed"
+            );
+            seen += read.len();
+        }
+        assert!(
+            seen > 20_000,
+            "the population must hold Custom Options: {seen}"
+        );
+    }
+
+    /// Bytes that are not a list at all. Nothing may panic, and what the reader
+    /// does hand out is inside the list: each Custom Option's data lies within
+    /// the bytes it was read from, directly after the four bytes of the number
+    /// that was decoded, its code is one of the four, and the positions rise.
+    #[test]
+    fn any_bytes_read_without_a_panic_and_every_range_stays_inside() {
+        let mut rng = Rng(0xDEAD_BEEF_0BAD_F00D);
+        for round in 0..60_000 {
+            let (_, swapped) = order_of(round);
+            let len = rng.below(90) as usize;
+            let mut list: Vec<u8> = (0..len).map(|_| rng.next() as u8).collect();
+            // Steer a share of them toward real options so that the walk goes
+            // past the first header.
+            if len >= 8 && rng.below(2) == 0 {
+                let code = [2988u16, 2989, 19372, 19373][rng.below(4) as usize];
+                let (hi, lo) = (code >> 8, code & 0xFF);
+                let length = rng.below(40) as u16;
+                if swapped {
+                    list[..4].copy_from_slice(&[
+                        hi as u8,
+                        lo as u8,
+                        (length >> 8) as u8,
+                        length as u8,
+                    ]);
+                } else {
+                    list[..4].copy_from_slice(&[
+                        lo as u8,
+                        hi as u8,
+                        length as u8,
+                        (length >> 8) as u8,
+                    ]);
+                }
+            }
+            let base = list.as_ptr() as usize;
+            let mut previous: Option<u32> = None;
+            let mut custom = OptionList::new(&list, swapped).custom();
+            for option in custom.by_ref() {
+                assert!(custom_kind(option.code).is_some());
+                if let Some(before) = previous {
+                    assert!(option.index > before, "positions rise");
+                }
+                previous = Some(option.index);
+                let at = option.data.as_ptr() as usize;
+                assert!(at >= base + 4, "the number comes first");
+                assert!(
+                    at + option.data.len() <= base + list.len(),
+                    "inside the list"
+                );
+                let number = &list[at - base - 4..at - base];
+                let expected = if swapped {
+                    u32::from_be_bytes(number.try_into().unwrap())
+                } else {
+                    u32::from_le_bytes(number.try_into().unwrap())
+                };
+                assert_eq!(option.organization, expected);
+            }
+            let _ = custom.malformed();
+            for (expected_index, option) in OptionList::new(&list, swapped).iter().enumerate() {
+                assert_eq!(
+                    option.index as usize, expected_index,
+                    "positions are consecutive"
+                );
+                let at = option.value.as_ptr() as usize;
+                assert!(at >= base && at + option.value.len() <= base + list.len());
+            }
+        }
+    }
+
+    /// The four codes and what the format says of each.
+    ///
+    /// The pcapng format's Custom Options section, read for this table:
+    ///
+    /// - 2988: "a Custom Option containing a UTF-8 string in the Custom Data
+    ///   portion", of which "This Custom Option can be safely copied to a new
+    ///   file if the pcapng file is manipulated by an application; otherwise
+    ///   19372 should be used instead."
+    /// - 2989: the same for "binary octets", copyable.
+    /// - 19372, 19373: the string and the binary kind of which "This Custom
+    ///   Option should not be copied to a new file if the pcapng file is
+    ///   manipulated by an application."
+    ///
+    /// A table that changed would change what a writer's option is called
+    /// copyable, so it is pinned here, and the structure under it is checked too:
+    /// the non-copyable code of each kind is the copyable one plus 16384.
+    #[test]
+    fn the_four_custom_codes_are_classified_as_the_formats_text_says() {
+        let kind = |text, copyable| Some(CustomKind { text, copyable });
+        assert_eq!(custom_kind(2988), kind(true, true));
+        assert_eq!(custom_kind(2989), kind(false, true));
+        assert_eq!(custom_kind(19372), kind(true, false));
+        assert_eq!(custom_kind(19373), kind(false, false));
+        assert_eq!(
+            OPT_CUSTOM_UTF8_NONCOPYABLE - OPT_CUSTOM_UTF8_COPYABLE,
+            16_384
+        );
+        assert_eq!(
+            OPT_CUSTOM_BINARY_NONCOPYABLE - OPT_CUSTOM_BINARY_COPYABLE,
+            16_384
+        );
+        for code in [0u16, 1, 2, 9, 2987, 2990, 19371, 19374, 0x8000, 0xFFFF] {
+            assert_eq!(
+                custom_kind(code),
+                None,
+                "code {code} is not a Custom Option"
+            );
+        }
+    }
+
+    /// The writer lays a Custom Option out as the format does, asserted at the
+    /// BYTE level against the format and not against the reader, in both byte
+    /// orders, and the reader finds it in each. The option length is 16 for a
+    /// 12-byte datum because it counts the four bytes of the number.
+    #[test]
+    fn the_writer_lays_a_custom_option_out_as_the_format_does_and_both_orders_read_it() {
+        let data = [0xAAu8; 12];
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            let value = custom_option_value(order, 0x0102_0304, &data);
+            assert_eq!(value.len(), 16);
+            let file = write_with_options(
+                order,
+                &[(147, 6)],
+                &[PacketSpec {
+                    interface: 0,
+                    ticks: 5,
+                    data: &[1, 2, 3, 4],
+                    options: &[(OPT_CUSTOM_BINARY_NONCOPYABLE, &value)],
+                }],
+            );
+            // The byte-order magic is the section's own statement of its order.
+            let bom: &[u8] = match order {
+                ByteOrder::Little => &[0x4D, 0x3C, 0x2B, 0x1A],
+                ByteOrder::Big => &[0x1A, 0x2B, 0x3C, 0x4D],
+            };
+            assert_eq!(&file[8..12], bom);
+            // SHB 28, one IDB 32, the packet block's fixed part 28 and 4 data.
+            let at = 28 + 32 + 28 + 4;
+            let header: &[u8] = match order {
+                ByteOrder::Little => &[0xAD, 0x4B, 16, 0, 4, 3, 2, 1],
+                ByteOrder::Big => &[0x4B, 0xAD, 0, 16, 1, 2, 3, 4],
+            };
+            assert_eq!(&file[at..at + 8], header, "{order:?}");
+            assert_eq!(&file[at + 8..at + 20], &data);
+            assert_eq!(&file[at + 20..at + 24], &[0, 0, 0, 0], "opt_endofopt");
+
+            let mut read = Vec::new();
+            PcapngCursor::new()
+                .advance_with(&file, |y| {
+                    if let PcapngYieldRef::Packet(p) = y {
+                        read.extend(
+                            p.options
+                                .custom()
+                                .map(|o| (o.index, o.code, o.organization, o.data.to_vec())),
+                        );
+                    }
+                    ControlFlow::Continue(())
+                })
+                .expect("the fixture reads");
+            assert_eq!(
+                read,
+                vec![(0, 19373, 0x0102_0304, data.to_vec())],
+                "{order:?}"
+            );
+        }
+    }
+
+    /// Repeats come out in list order, every one of them, with their place in
+    /// the block's list counting the options between them that are not Custom
+    /// Options; an option of exactly four bytes is an organization with no data.
+    #[test]
+    fn repeated_options_come_out_in_order_with_their_place_in_the_list() {
+        let order = ByteOrder::Little;
+        let mut list = Vec::new();
+        put(&mut list, order, 1, 3, b"hi!"); // opt_comment, padded
+        let first = custom_option_value(order, 7, b"one");
+        put(
+            &mut list,
+            order,
+            OPT_CUSTOM_UTF8_COPYABLE,
+            first.len() as u16,
+            &first,
+        );
+        let second = custom_option_value(order, 7, b"");
+        put(&mut list, order, OPT_CUSTOM_UTF8_COPYABLE, 4, &second);
+        let third = custom_option_value(order, 9, &[0xEE; 5]);
+        put(
+            &mut list,
+            order,
+            OPT_CUSTOM_BINARY_COPYABLE,
+            third.len() as u16,
+            &third,
+        );
+        list.extend_from_slice(&[0; 4]);
+        let mut custom = OptionList::new(&list, false).custom();
+        let read: Vec<(u32, u16, u32, usize)> = custom
+            .by_ref()
+            .map(|o| (o.index, o.code, o.organization, o.data.len()))
+            .collect();
+        assert_eq!(
+            read,
+            vec![(1, 2988, 7, 3), (2, 2988, 7, 0), (3, 2989, 9, 5)]
+        );
+        assert_eq!(custom.malformed(), 0);
+    }
+
+    /// What cannot be read is COUNTED, and what can be is still read. A Custom
+    /// Option with no room for its number is passed over and counted, and the
+    /// option after it is found. A list cut off inside an option stops there and
+    /// counts that, whatever the option's code was. The list ending without a
+    /// terminator, with stray bytes too few to be a header, and with bytes after a
+    /// terminator, are none of them malformed.
+    #[test]
+    fn what_cannot_be_read_is_counted_and_the_rest_still_is() {
+        let order = ByteOrder::Little;
+        let good = custom_option_value(order, 3, b"ok");
+
+        // Too short for the number: 2 bytes where 4 are owed.
+        let mut list = Vec::new();
+        put(&mut list, order, OPT_CUSTOM_BINARY_COPYABLE, 2, &[1, 2]);
+        put(
+            &mut list,
+            order,
+            OPT_CUSTOM_BINARY_COPYABLE,
+            good.len() as u16,
+            &good,
+        );
+        let mut custom = OptionList::new(&list, false).custom();
+        let read: Vec<u32> = custom.by_ref().map(|o| o.index).collect();
+        assert_eq!((read, custom.malformed()), (vec![1], 1));
+
+        // Cut inside the option: it says 16 and 6 bytes follow.
+        let mut cut = Vec::new();
+        put(&mut cut, order, OPT_CUSTOM_BINARY_NONCOPYABLE, 16, &[0; 6]);
+        let mut custom = OptionList::new(&cut, false).custom();
+        assert_eq!(custom.by_ref().count(), 0);
+        assert_eq!(custom.malformed(), 1);
+
+        // Cut inside an option that is not a Custom Option: the lost option may
+        // have been one, so it is counted all the same.
+        let mut other = Vec::new();
+        put(
+            &mut other,
+            order,
+            OPT_CUSTOM_BINARY_COPYABLE,
+            good.len() as u16,
+            &good,
+        );
+        put(&mut other, order, OPT_ISB_IFDROP, 8, &[0; 3]);
+        let mut custom = OptionList::new(&other, false).custom();
+        assert_eq!(custom.by_ref().count(), 1);
+        assert_eq!(custom.malformed(), 1);
+
+        // Not malformed: no terminator, stray bytes too few for a header, and
+        // bytes after the terminator, which are not read.
+        let mut tidy = Vec::new();
+        put(
+            &mut tidy,
+            order,
+            OPT_CUSTOM_BINARY_COPYABLE,
+            good.len() as u16,
+            &good,
+        );
+        let mut no_terminator = tidy.clone();
+        no_terminator.extend_from_slice(&[7, 7]);
+        let mut after_terminator = tidy.clone();
+        after_terminator.extend_from_slice(&[0; 4]);
+        put(
+            &mut after_terminator,
+            order,
+            OPT_CUSTOM_BINARY_COPYABLE,
+            good.len() as u16,
+            &good,
+        );
+        for (name, bytes) in [
+            ("none", &tidy),
+            ("stray", &no_terminator),
+            ("after", &after_terminator),
+        ] {
+            let mut custom = OptionList::new(bytes, false).custom();
+            assert_eq!(custom.by_ref().count(), 1, "{name}");
+            assert_eq!(custom.malformed(), 0, "{name}");
+        }
+    }
+
+    /// A file written by ANOTHER implementation of the format, read here.
+    ///
+    /// Every other fixture in this module comes from this crate's writer or from
+    /// bytes laid out by the same author, and a reader and a writer that agree
+    /// prove only that they share a belief. These bytes are what Wireshark's
+    /// `editcap` 4.2.2 wrote (`editcap -F pcapng`, the same bytes from a
+    /// little-endian and a big-endian input) when given a pcapng built by a
+    /// separate script: one packet whose block listed a comment and the four
+    /// Custom Option codes, the organization number 0x01020304 and, for the
+    /// binary ones, twelve bytes of 0xAA.
+    ///
+    /// It is also the format's own copy rule, applied by a different program:
+    /// `editcap` carried 2988 and 2989 into the new file and DROPPED 19372 and
+    /// 19373, which the format says should not be copied. So the codes this crate
+    /// classes as copyable are the ones that program copies. The bytes show its
+    /// layout too: a section header carrying its own options (the name of the
+    /// program), a byte order it normalised to little-endian, and an option list
+    /// that begins with a comment, so the index of the first Custom Option is 1.
+    #[test]
+    fn a_file_another_program_wrote_reads_as_the_format_says() {
+        const WRITTEN_BY_EDITCAP: &[u8] = &[
+            0x0A, 0x0D, 0x0D, 0x0A, 0x68, 0x00, 0x00, 0x00, 0x4D, 0x3C, 0x2B, 0x1A, 0x01, 0x00,
+            0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x04, 0x00, 0x42, 0x00,
+            0x45, 0x64, 0x69, 0x74, 0x63, 0x61, 0x70, 0x20, 0x28, 0x57, 0x69, 0x72, 0x65, 0x73,
+            0x68, 0x61, 0x72, 0x6B, 0x29, 0x20, 0x34, 0x2E, 0x32, 0x2E, 0x32, 0x20, 0x28, 0x47,
+            0x69, 0x74, 0x20, 0x76, 0x34, 0x2E, 0x32, 0x2E, 0x32, 0x20, 0x70, 0x61, 0x63, 0x6B,
+            0x61, 0x67, 0x65, 0x64, 0x20, 0x61, 0x73, 0x20, 0x34, 0x2E, 0x32, 0x2E, 0x32, 0x2D,
+            0x31, 0x2E, 0x31, 0x62, 0x75, 0x69, 0x6C, 0x64, 0x33, 0x29, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x68, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x01, 0x00, 0x06, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00,
+            0x88, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE8, 0x03,
+            0x00, 0x00, 0x3C, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03,
+            0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11,
+            0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F,
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D,
+            0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B,
+            0x01, 0x00, 0x02, 0x00, 0x68, 0x69, 0x00, 0x00, 0xAC, 0x0B, 0x07, 0x00, 0x04, 0x03,
+            0x02, 0x01, 0x61, 0x62, 0x63, 0x00, 0xAD, 0x0B, 0x10, 0x00, 0x04, 0x03, 0x02, 0x01,
+            0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0x00, 0x00,
+            0x00, 0x00, 0x88, 0x00, 0x00, 0x00,
+        ];
+        assert_eq!(WRITTEN_BY_EDITCAP.len(), 272);
+
+        let mut seen = Vec::new();
+        let mut flags = None;
+        PcapngCursor::new()
+            .advance_with(WRITTEN_BY_EDITCAP, |y| {
+                if let PcapngYieldRef::Packet(p) = y {
+                    flags = Some((p.link_type, p.data.len(), p.flags));
+                    let mut custom = p.options.custom();
+                    for o in custom.by_ref() {
+                        seen.push((o.index, o.code, o.organization, o.data.to_vec()));
+                    }
+                    assert_eq!(custom.malformed(), 0);
+                }
+                ControlFlow::Continue(())
+            })
+            .expect("the file another program wrote reads");
+        assert_eq!(flags, Some((1, 60, None)));
+        assert_eq!(
+            seen,
+            vec![
+                (1, 2988, 0x0102_0304, b"abc".to_vec()),
+                (2, 2989, 0x0102_0304, vec![0xAA; 12]),
+            ]
+        );
+        // What the other program dropped is what the format says not to copy.
+        for dropped in [19372u16, 19373] {
+            assert_eq!(custom_kind(dropped).map(|k| k.copyable), Some(false));
+        }
+        for kept in [2988u16, 2989] {
+            assert_eq!(custom_kind(kept).map(|k| k.copyable), Some(true));
+        }
     }
 }

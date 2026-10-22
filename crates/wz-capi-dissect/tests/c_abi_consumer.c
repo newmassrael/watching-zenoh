@@ -749,6 +749,150 @@ static int check_packets_of_link_type_door(void) {
     return 0;
 }
 
+/* (ABI 47) -- THE CUSTOM OPTIONS OF THE PACKETS OF ONE LINK TYPE, driven from C
+ * over containers assembled HERE, byte by byte, from the pcapng layout and not by
+ * the library's own writer: a reader and a writer that agree prove only that
+ * they share a belief. One section in each byte order, each with a LINKTYPE_USER0
+ * (147) interface and one packet of four bytes whose block carries ONE Custom
+ * Option: code 2989 (binary, can be copied), organization 0x01020304, twelve
+ * bytes of 0xAA. The option's length is 16 because it counts the four bytes of
+ * the organization number. */
+static const unsigned char custom_option_le[] = {
+    /* Section Header: type, length 28, byte-order magic, 1.0, length unknown */
+    0x0A, 0x0D, 0x0D, 0x0A, 0x1C, 0x00, 0x00, 0x00, 0x4D, 0x3C, 0x2B, 0x1A,
+    0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x1C, 0x00, 0x00, 0x00,
+    /* Interface Description: link type 147, snaplen 0, if_tsresol 6, end */
+    0x01, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x93, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x01, 0x00, 0x06, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00,
+    /* Enhanced Packet: length 60, interface 0, time 1, captured 4, original 4 */
+    0x06, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04,
+    /* the option: 2989, length 16, organization, twelve bytes of data, end */
+    0xAD, 0x0B, 0x10, 0x00, 0x04, 0x03, 0x02, 0x01, 0xAA, 0xAA, 0xAA, 0xAA,
+    0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0x00, 0x00, 0x00, 0x00,
+    0x3C, 0x00, 0x00, 0x00,
+};
+
+static const unsigned char custom_option_be[] = {
+    0x0A, 0x0D, 0x0D, 0x0A, 0x00, 0x00, 0x00, 0x1C, 0x1A, 0x2B, 0x3C, 0x4D,
+    0x00, 0x01, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+    0x00, 0x00, 0x00, 0x1C,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x20, 0x00, 0x93, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x09, 0x00, 0x01, 0x06, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20,
+    0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x04,
+    0x00, 0x00, 0x00, 0x04, 0x01, 0x02, 0x03, 0x04,
+    0x0B, 0xAD, 0x00, 0x10, 0x01, 0x02, 0x03, 0x04, 0xAA, 0xAA, 0xAA, 0xAA,
+    0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x3C,
+};
+
+static int check_custom_options_container(const unsigned char *file,
+                                         size_t file_len, const char *order) {
+    wz_dissect_custom_option rows[2];
+    size_t needed = 99;
+    size_t malformed = 99;
+    int partial = 99;
+    unsigned char twelve[12];
+    int rc;
+
+    memset(twelve, 0xAA, sizeof twelve);
+
+    rc = wz_dissect_pcap_custom_options_of_link_type(
+        file, file_len, 147, NULL, 0, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_OK && needed == 1 && malformed == 0 && partial == 0,
+          "%s: sizing rc=%d needed=%zu malformed=%zu partial=%d", order, rc, needed,
+          malformed, partial);
+
+    rc = wz_dissect_pcap_custom_options_of_link_type(
+        file, file_len, 147, rows, 2, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_OK && needed == 1, "%s: reading rc=%d needed=%zu",
+          order, rc, needed);
+    CHECK(rows[0].packet == 0 && rows[0].index == 0, "%s: packet %llu index %u",
+          order, (unsigned long long)rows[0].packet, (unsigned)rows[0].index);
+    CHECK(rows[0].organization == 0x01020304u, "%s: organization 0x%x", order,
+          (unsigned)rows[0].organization);
+    CHECK(rows[0].code == 2989 && rows[0].copyable == 1 && rows[0].text == 0,
+          "%s: code %u copyable %u text %u", order, (unsigned)rows[0].code,
+          (unsigned)rows[0].copyable, (unsigned)rows[0].text);
+    CHECK(rows[0].len == 12 && rows[0].offset + rows[0].len <= file_len,
+          "%s: len %u offset %llu", order, (unsigned)rows[0].len,
+          (unsigned long long)rows[0].offset);
+    CHECK(memcmp(file + rows[0].offset, twelve, sizeof twelve) == 0,
+          "%s: the data is not where the record says", order);
+
+    /* A buffer with no room is not written to, and still says how many. */
+    rows[0].packet = 77;
+    rc = wz_dissect_pcap_custom_options_of_link_type(
+        file, file_len, 147, rows, 0, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_OK && needed == 1 && rows[0].packet == 77,
+          "%s: a buffer with no room was written: rc=%d needed=%zu", order, rc,
+          needed);
+
+    /* The control: no packet is on Ethernet, so no option is. */
+    rc = wz_dissect_pcap_custom_options_of_link_type(
+        file, file_len, 1, NULL, 0, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_OK && needed == 0, "%s: another link type rc=%d needed=%zu",
+          order, rc, needed);
+
+    /* Cut inside the packet's block: the cut is said, and nothing is invented. */
+    rc = wz_dissect_pcap_custom_options_of_link_type(
+        file, file_len - 2, 147, NULL, 0, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_OK && needed == 0 && partial == 1,
+          "%s: a cut container rc=%d needed=%zu partial=%d", order, rc, needed,
+          partial);
+    return 0;
+}
+
+static int check_custom_options_door(void) {
+    /* A whole classic header long, with a magic no container has. */
+    static const unsigned char not_a_container[32] = {0xde, 0xad, 0xbe, 0xef};
+    wz_dissect_custom_option rows[1];
+    size_t needed = 99;
+    size_t malformed = 99;
+    int partial = 99;
+    int rc;
+
+    CHECK(sizeof(wz_dissect_custom_option) == 32, "record size %zu",
+          sizeof(wz_dissect_custom_option));
+    CHECK(offsetof(wz_dissect_custom_option, offset) == 8, "offset offset");
+    CHECK(offsetof(wz_dissect_custom_option, len) == 16, "len offset");
+    CHECK(offsetof(wz_dissect_custom_option, organization) == 20,
+          "organization offset");
+    CHECK(offsetof(wz_dissect_custom_option, index) == 24, "index offset");
+    CHECK(offsetof(wz_dissect_custom_option, code) == 28, "code offset");
+    CHECK(offsetof(wz_dissect_custom_option, copyable) == 30, "copyable offset");
+    CHECK(offsetof(wz_dissect_custom_option, text) == 31, "text offset");
+
+    if (check_custom_options_container(custom_option_le, sizeof custom_option_le,
+                                       "little-endian") != 0) {
+        return 1;
+    }
+    if (check_custom_options_container(custom_option_be, sizeof custom_option_be,
+                                       "big-endian") != 0) {
+        return 1;
+    }
+
+    rc = wz_dissect_pcap_custom_options_of_link_type(
+        not_a_container, sizeof not_a_container, 147, rows, 1, &needed, &malformed,
+        &partial);
+    CHECK(rc == WZ_DISSECT_ERR_BAD_CAPTURE && needed == 0 && malformed == 0 &&
+              partial == 0,
+          "not a container rc=%d", rc);
+    rc = wz_dissect_pcap_custom_options_of_link_type(
+        not_a_container, sizeof not_a_container, 147, NULL, 1, &needed, &malformed,
+        &partial);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a NULL buffer with capacity rc=%d", rc);
+    rc = wz_dissect_pcap_custom_options_of_link_type(
+        NULL, 0, 147, NULL, 0, &needed, &malformed, &partial);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null bytes rc=%d", rc);
+    return 0;
+}
+
 /* (ABI 43) -- THE BOUNDED OPEN, driven from C: the two ceilings on decoded
  * messages are the caller's. Twelve keepalives on ONE flow under a per-flow
  * ceiling of 4 and a total of 5 leave four held (the per-flow ceiling is the
@@ -4070,6 +4214,11 @@ int main(void) {
 
     /* (ABI 46) -- and every packet of one link type in a container. */
     if (check_packets_of_link_type_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 47) -- and the Custom Options of those packets. */
+    if (check_custom_options_door() != 0) {
         return 1;
     }
 

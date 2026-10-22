@@ -570,6 +570,17 @@ ONLY_CAPI = {
         "know, so it has nothing to print from them.",
         (),
     ),
+    # (ABI 47) -- filed in the round that added the symbol.
+    "the custom options of the packets of one link type in a container": (
+        "wz_dissect_pcap_custom_options_of_link_type",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "records what it knows about a packet in a Custom Option of the packet's "
+        "block, and must read it back without a second reader of the container "
+        "deciding where an option ends. What the option means is its "
+        "organization's, so the command line, which dissects zenoh, has "
+        "nothing to print from it.",
+        (),
+    ),
     "how many bytes of a followed container were consumed": (
         "wz_dissect_live_followed",
         "DELIBERATE. The door exists because a consumer that LINKS this library "

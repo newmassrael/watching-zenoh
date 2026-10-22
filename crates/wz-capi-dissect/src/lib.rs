@@ -428,6 +428,10 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // 46, for `wz_dissect_pcap_packets_of_link_type`: every packet of one link
     // type in a container, as 48-byte records into a buffer the caller sized,
     // each naming where its bytes are in the caller's own container.
+    // 47, for `wz_dissect_pcap_custom_options_of_link_type`: the Custom Options
+    // of those packets, as 32-byte records into a buffer the caller sized, each
+    // joined to its packet by number and naming where its data is in the
+    // caller's own container.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -445,7 +449,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 46;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 47;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -711,6 +715,14 @@ enum Door {
     /// joins nothing: `FrameBytes` hands out one packet by number, this one the
     /// packets of a link type, and neither answers the other's question.
     PacketsOfLinkType,
+    /// (ABI 47) — the Custom Options of the packets of one link type, as records
+    /// joined to those packets by their number.
+    ///
+    /// In this walk because the population is derived from the header. It
+    /// joins nothing: `PacketsOfLinkType` says what each packet is and where its
+    /// bytes are, this one what a writer attached to it, and neither answers
+    /// the other's question.
+    CustomOptionsOfLinkType,
 }
 
 impl Door {
@@ -734,6 +746,7 @@ impl Door {
             Door::FrameBytes => "wz_dissect_pcap_frame_bytes",
             Door::SessionTable => "wz_dissect_pcap_session_table",
             Door::PacketsOfLinkType => "wz_dissect_pcap_packets_of_link_type",
+            Door::CustomOptionsOfLinkType => "wz_dissect_pcap_custom_options_of_link_type",
         }
     }
 
@@ -777,7 +790,8 @@ impl Door {
             // Like `Replay`, it emits no document and joins nothing.
             | Door::FrameBytes
             | Door::SessionTable
-            | Door::PacketsOfLinkType => None,
+            | Door::PacketsOfLinkType
+            | Door::CustomOptionsOfLinkType => None,
         }
     }
 
@@ -797,7 +811,8 @@ impl Door {
             Door::Replay => Some(Door::FrameBytes),
             Door::FrameBytes => Some(Door::SessionTable),
             Door::SessionTable => Some(Door::PacketsOfLinkType),
-            Door::PacketsOfLinkType => None,
+            Door::PacketsOfLinkType => Some(Door::CustomOptionsOfLinkType),
+            Door::CustomOptionsOfLinkType => None,
         }
     }
 }
@@ -3987,6 +4002,172 @@ pub unsafe extern "C" fn wz_dissect_pcap_packets_of_link_type(
             flags: frame.flags.unwrap_or(0),
             has_flags: u8::from(frame.flags.is_some()),
             reserved: [0; 7],
+        };
+    }
+    WZ_DISSECT_OK
+}
+
+/// (ABI 47) — one Custom Option of one packet, as
+/// [`wz_dissect_pcap_custom_options_of_link_type`] hands it out: which packet it
+/// is on, who defined it, and where its data is in the CALLER's container.
+///
+/// 32 bytes, 8-aligned: two `uint64_t`, three `uint32_t`, a `uint16_t` and two
+/// bytes. There is no padding and no reserved byte to be told apart from data.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WzDissectCustomOption {
+    /// The packet's number in the container: the number
+    /// [`WzDissectRawPacket::packet`] and every other door give it, so the two
+    /// lists are joined on it.
+    pub packet: u64,
+    /// Where the Custom Data starts in the container the caller passed: it is
+    /// `bytes[offset .. offset + len]`, not a copy.
+    pub offset: u64,
+    /// How many bytes the Custom Data is. The option's own length counts the four
+    /// bytes of the organization number as well, and the padding to four is no
+    /// part of either.
+    pub len: u32,
+    /// The Private Enterprise Number of the organization that defined the option,
+    /// read in the byte order of the section the packet is in.
+    pub organization: u32,
+    /// Where the option sits in its block's option list: `0` for the first
+    /// option. Options that are not Custom Options take a place too, so a gap
+    /// between two records of one packet is an option this door does not return.
+    pub index: u32,
+    /// The option code: `2988`, `2989`, `19372` or `19373`.
+    pub code: u16,
+    /// `1` when the format says the option can be safely copied to a new file
+    /// when an application rewrites the capture (`2988`, `2989`), `0` when it
+    /// should not be (`19372`, `19373`). Derived from [`Self::code`] in one
+    /// place, so the two cannot disagree.
+    pub copyable: u8,
+    /// `1` when the Custom Data is a UTF-8 string (`2988`, `19372`), `0` when it
+    /// is binary octets (`2989`, `19373`).
+    pub text: u8,
+}
+
+/// (ABI 47) — THE CUSTOM OPTIONS OF THE PACKETS OF ONE LINK TYPE IN A CAPTURE
+/// CONTAINER, as records into a buffer the caller sized.
+///
+/// # What a consumer storing its own facts in a pcapng was missing
+///
+/// A writer that records what it knows about a packet in a Custom Option of the
+/// packet's block (the time the packet had before it was replayed, say) must read
+/// it back, and the container is the only place it is. This library resolves
+/// the container, so nothing outside it can: a second reader of the block layout
+/// is a second opinion about where an option ends. This door reads them with the
+/// reader every door here uses.
+///
+/// It returns the four Custom Option codes the format reserves (`2988`, `2989`,
+/// `19372`, `19373`), on the packets whose interface declared `link_type`, in
+/// container order and within a packet in the order the block listed them,
+/// repeats included. What an option's data means is its organization's; it is
+/// carried and not looked at. No other option is returned: the ones the format
+/// defines have typed fields where they belong (`epb_flags` is
+/// [`WzDissectRawPacket::flags`]).
+///
+/// # The join
+///
+/// A record's `packet` is the number [`wz_dissect_pcap_packets_of_link_type`]
+/// gives the same packet, and the two doors walk the container with one reader,
+/// so a number from one is the packet of that number in the other.
+///
+/// # The buffer
+///
+/// [`wz_dissect_pcap_packets_of_link_type`]'s rule: `*needed` always receives
+/// the number of records; when `cap` is at least that, `out` holds them, and
+/// when it is less NOTHING is written to `out`. `out` may be null with `cap`
+/// zero. The data is not copied: each record says where it is in `bytes`.
+///
+/// # What could not be read
+///
+/// `*malformed` receives how many options the walk could not read: a Custom
+/// Option too short to hold its organization number, and a list cut off inside
+/// an option, whose code is not known. They are counted and not dropped in
+/// silence, because a list that is short for a reason is not the list that was
+/// written. A well-formed capture answers zero.
+///
+/// # A container still being written
+///
+/// `*partial` is `1` when the walk ended inside a block, which a longer prefix
+/// may complete, and `0` when it ended on a boundary; the options before the cut
+/// are all written either way.
+///
+/// # Answers
+///
+/// [`WZ_DISSECT_OK`]; [`WZ_DISSECT_ERR_BAD_CAPTURE`] when the container does
+/// not read; [`WZ_DISSECT_ERR_INVALID_ARG`] for a null pointer. `*needed`,
+/// `*malformed` and `*partial` are zero on every failure, each when it is not
+/// null.
+///
+/// # Safety
+/// `bytes` must point to at least `len` readable bytes, `needed` and `malformed`
+/// must be writable `size_t` and `partial` a writable `int`, and `out` must point
+/// to at least `cap` writable [`WzDissectCustomOption`] or be null with `cap`
+/// zero.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_custom_options_of_link_type(
+    bytes: *const u8,
+    len: usize,
+    link_type: u32,
+    out: *mut WzDissectCustomOption,
+    cap: usize,
+    needed: *mut usize,
+    malformed: *mut usize,
+    partial: *mut c_int,
+) -> c_int {
+    if !needed.is_null() {
+        // SAFETY: non-null, and writable by the caller contract.
+        unsafe { *needed = 0 };
+    }
+    if !malformed.is_null() {
+        // SAFETY: non-null, and writable by the caller contract.
+        unsafe { *malformed = 0 };
+    }
+    if !partial.is_null() {
+        // SAFETY: non-null, and writable by the caller contract.
+        unsafe { *partial = 0 };
+    }
+    if bytes.is_null()
+        || needed.is_null()
+        || malformed.is_null()
+        || partial.is_null()
+        || (out.is_null() && cap != 0)
+    {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let input = unsafe { core::slice::from_raw_parts(bytes, len) };
+    let Ok(found) = wz_capture::captured_custom_options_of_link_type(input, link_type) else {
+        return WZ_DISSECT_ERR_BAD_CAPTURE;
+    };
+    // SAFETY: null-checked above.
+    unsafe {
+        *needed = found.options.len();
+        *malformed = usize::try_from(found.malformed).unwrap_or(usize::MAX);
+        *partial = c_int::from(found.partial);
+    }
+    if found.options.is_empty() || cap < found.options.len() {
+        return WZ_DISSECT_OK;
+    }
+    // SAFETY: `out` is writable for `cap >= found.options.len()` records by the
+    // caller contract, and non-null because `cap` is non-zero here.
+    let records = unsafe { core::slice::from_raw_parts_mut(out, found.options.len()) };
+    for (record, item) in records.iter_mut().zip(&found.options) {
+        let option = &item.option;
+        // The reader only ever hands out a window of `input`, so the offset
+        // always exists; a pointer that is not inside it reads as zero rather
+        // than as an address.
+        let offset = (option.data.as_ptr() as usize).saturating_sub(input.as_ptr() as usize);
+        *record = WzDissectCustomOption {
+            packet: item.packet as u64,
+            offset: offset as u64,
+            len: option.data.len() as u32,
+            organization: option.organization,
+            index: option.index,
+            code: option.code,
+            copyable: u8::from(option.kind.copyable),
+            text: u8::from(option.kind.text),
         };
     }
     WZ_DISSECT_OK
@@ -8740,7 +8921,10 @@ mod tests {
         // `uint64_t` the caller sized and an 80-byte struct of counts it owns.
         // 46, for `wz_dissect_pcap_packets_of_link_type`: one symbol, 48-byte
         // records into a buffer the caller sized; nothing copied or retained.
-        assert_eq!(wz_dissect_abi_version(), 46);
+        // 47, for `wz_dissect_pcap_custom_options_of_link_type`: one symbol,
+        // 32-byte records into a buffer the caller sized, joined to the packets
+        // of the 46 door by number; nothing copied or retained.
+        assert_eq!(wz_dissect_abi_version(), 47);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -14298,6 +14482,311 @@ mod tests {
         assert_eq!(core::mem::offset_of!(WzDissectRawPacket, len), 24);
         assert_eq!(core::mem::offset_of!(WzDissectRawPacket, flags), 36);
         assert_eq!(core::mem::offset_of!(WzDissectRawPacket, has_flags), 40);
+    }
+
+    /// `wz_dissect_pcap_custom_options_of_link_type` the way C calls it: once to
+    /// size, once to read. Returns the records, the malformed count and whether
+    /// the container was cut.
+    fn custom_options_of_link_type(
+        bytes: &[u8],
+        link_type: u32,
+    ) -> Result<(Vec<WzDissectCustomOption>, usize, c_int), c_int> {
+        let (mut needed, mut malformed, mut partial) = (usize::MAX, usize::MAX, 7 as c_int);
+        let rc = unsafe {
+            wz_dissect_pcap_custom_options_of_link_type(
+                bytes.as_ptr(),
+                bytes.len(),
+                link_type,
+                core::ptr::null_mut(),
+                0,
+                &mut needed,
+                &mut malformed,
+                &mut partial,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert_eq!(
+                (needed, malformed, partial),
+                (0, 0, 0),
+                "a refusal leaves zeros"
+            );
+            return Err(rc);
+        }
+        let mut out = vec![WzDissectCustomOption::default(); needed];
+        let rc = unsafe {
+            wz_dissect_pcap_custom_options_of_link_type(
+                bytes.as_ptr(),
+                bytes.len(),
+                link_type,
+                out.as_mut_ptr(),
+                out.len(),
+                &mut needed,
+                &mut malformed,
+                &mut partial,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK);
+        assert_eq!(needed, out.len());
+        Ok((out, malformed, partial))
+    }
+
+    /// A writer's own facts in Custom Options of its packets come back joined to
+    /// the packets by number, with who defined each, what the format says of its
+    /// code, and its data found in the caller's own container. Both byte orders,
+    /// the four codes, a repeat and a packet with none. A short buffer is not
+    /// written, a cut container says so, and a container that does not read is
+    /// refused with zeros.
+    #[test]
+    fn the_custom_options_of_a_link_type_come_back_joined_to_their_packets() {
+        use wz_capture::pcapng::{
+            custom_option_value, write_with_options, ByteOrder, PacketSpec,
+            OPT_CUSTOM_BINARY_COPYABLE, OPT_CUSTOM_BINARY_NONCOPYABLE, OPT_CUSTOM_UTF8_COPYABLE,
+            OPT_CUSTOM_UTF8_NONCOPYABLE,
+        };
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            let twelve = custom_option_value(order, 0x0001_E240, &[0x5A; 12]);
+            let word = custom_option_value(order, 0x0001_E240, b"note");
+            let other = custom_option_value(order, 0x0000_0042, &[1, 2, 3]);
+            let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+            let file = write_with_options(
+                order,
+                &[(LINKTYPE_ETHERNET, 6), (147, 6)],
+                &[
+                    PacketSpec {
+                        interface: 0,
+                        ticks: 1_000,
+                        data: &packet,
+                        options: &[(OPT_CUSTOM_BINARY_NONCOPYABLE, &twelve)],
+                    },
+                    PacketSpec {
+                        interface: 1,
+                        ticks: 2_000,
+                        data: b"first",
+                        options: &[(OPT_CUSTOM_BINARY_NONCOPYABLE, &twelve)],
+                    },
+                    PacketSpec {
+                        interface: 1,
+                        ticks: 3_000,
+                        data: b"second!!",
+                        options: &[],
+                    },
+                    PacketSpec {
+                        interface: 1,
+                        ticks: 4_000,
+                        data: b"3rd",
+                        options: &[
+                            (OPT_CUSTOM_UTF8_COPYABLE, &word),
+                            (OPT_CUSTOM_BINARY_COPYABLE, &other),
+                            (OPT_CUSTOM_UTF8_NONCOPYABLE, &word),
+                            (OPT_CUSTOM_UTF8_NONCOPYABLE, &word),
+                        ],
+                    },
+                ],
+            );
+            let (rows, malformed, partial) = custom_options_of_link_type(&file, 147).expect("ok");
+            assert_eq!((malformed, partial), (0, 0), "{order:?}");
+            let seen: Vec<(u64, u32, u32, u16, u8, u8, u32)> = rows
+                .iter()
+                .map(|r| {
+                    (
+                        r.packet,
+                        r.index,
+                        r.organization,
+                        r.code,
+                        r.copyable,
+                        r.text,
+                        r.len,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                seen,
+                vec![
+                    (1, 0, 0x0001_E240, 19373, 0, 0, 12),
+                    (3, 0, 0x0001_E240, 2988, 1, 1, 4),
+                    (3, 1, 0x0000_0042, 2989, 1, 0, 3),
+                    (3, 2, 0x0001_E240, 19372, 0, 1, 4),
+                    (3, 3, 0x0001_E240, 19372, 0, 1, 4),
+                ],
+                "{order:?}"
+            );
+            // The data is in the caller's container, at the offset the record
+            // names.
+            for row in &rows {
+                let at = row.offset as usize;
+                let data = &file[at..at + row.len as usize];
+                match row.code {
+                    19373 => assert_eq!(data, &[0x5A; 12]),
+                    2988 | 19372 => assert_eq!(data, b"note"),
+                    _ => assert_eq!(data, &[1, 2, 3]),
+                }
+            }
+
+            // The join: every record's packet is one the packets door lists.
+            let (packets, _) = packets_of_link_type(&file, 147).expect("ok");
+            let numbers: Vec<u64> = packets.iter().map(|p| p.packet).collect();
+            assert_eq!(numbers, vec![1, 2, 3]);
+            assert!(rows.iter().all(|r| numbers.contains(&r.packet)));
+
+            // The other link type's packet has its own option, not these.
+            let (ether, _, _) = custom_options_of_link_type(&file, LINKTYPE_ETHERNET).expect("ok");
+            assert_eq!(ether.iter().map(|r| r.packet).collect::<Vec<_>>(), vec![0]);
+
+            // A buffer one short is not written, and still says how many.
+            let mut short = [WzDissectCustomOption {
+                packet: 99,
+                ..Default::default()
+            }; 4];
+            let (mut needed, mut malformed, mut partial) = (0usize, 0usize, 0 as c_int);
+            let rc = unsafe {
+                wz_dissect_pcap_custom_options_of_link_type(
+                    file.as_ptr(),
+                    file.len(),
+                    147,
+                    short.as_mut_ptr(),
+                    short.len(),
+                    &mut needed,
+                    &mut malformed,
+                    &mut partial,
+                )
+            };
+            assert_eq!((rc, needed, short[0].packet), (WZ_DISSECT_OK, 5, 99));
+
+            let (cut, _, cut_partial) =
+                custom_options_of_link_type(&file[..file.len() - 2], 147).expect("ok");
+            assert_eq!(cut_partial, 1, "a cut container says so");
+            assert_eq!(cut.len(), 1, "the options before the cut are all here");
+        }
+        // A whole classic header long, with a magic no container has.
+        let mut garbage = vec![0u8; 32];
+        garbage[..4].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(
+            custom_options_of_link_type(&garbage, 147),
+            Err(WZ_DISSECT_ERR_BAD_CAPTURE)
+        );
+    }
+
+    /// An option the reader cannot read is COUNTED where the caller can see it,
+    /// and does not hide the ones it can: a Custom Option too short for its
+    /// organization number, then a good one.
+    #[test]
+    fn what_could_not_be_read_is_counted_beside_the_records() {
+        use wz_capture::pcapng::{
+            custom_option_value, write_with_options, ByteOrder, PacketSpec,
+            OPT_CUSTOM_BINARY_COPYABLE,
+        };
+        let good = custom_option_value(ByteOrder::Little, 5, b"fine");
+        let file = write_with_options(
+            ByteOrder::Little,
+            &[(147, 6)],
+            &[PacketSpec {
+                interface: 0,
+                ticks: 1,
+                data: &[1, 1, 1, 1],
+                options: &[
+                    (OPT_CUSTOM_BINARY_COPYABLE, &[1, 2]),
+                    (OPT_CUSTOM_BINARY_COPYABLE, &good),
+                ],
+            }],
+        );
+        let (rows, malformed, partial) = custom_options_of_link_type(&file, 147).expect("ok");
+        assert_eq!((rows.len(), malformed, partial), (1, 1, 0));
+        assert_eq!((rows[0].index, rows[0].organization), (1, 5));
+    }
+
+    /// The null checks, and the zeros a refusal leaves, whichever argument is the
+    /// null one.
+    #[test]
+    fn the_custom_options_door_refuses_a_null_argument_with_zeros() {
+        let file = wz_capture::pcapng::write(&[(147, 6)], &[(0, 1, &[1, 2, 3, 4])]);
+        // One call with the named arguments null and every result slot set to 9
+        // beforehand: the answer, and what each slot holds afterwards.
+        let refuse = |bytes_null: bool,
+                      out_null: bool,
+                      needed_null: bool,
+                      malformed_null: bool,
+                      partial_null: bool| {
+            let (mut needed, mut malformed, mut partial) = (9usize, 9usize, 9 as c_int);
+            let mut out = [WzDissectCustomOption::default(); 1];
+            let rc = unsafe {
+                wz_dissect_pcap_custom_options_of_link_type(
+                    if bytes_null {
+                        core::ptr::null()
+                    } else {
+                        file.as_ptr()
+                    },
+                    file.len(),
+                    147,
+                    if out_null {
+                        core::ptr::null_mut()
+                    } else {
+                        out.as_mut_ptr()
+                    },
+                    1,
+                    if needed_null {
+                        core::ptr::null_mut()
+                    } else {
+                        &mut needed
+                    },
+                    if malformed_null {
+                        core::ptr::null_mut()
+                    } else {
+                        &mut malformed
+                    },
+                    if partial_null {
+                        core::ptr::null_mut()
+                    } else {
+                        &mut partial
+                    },
+                )
+            };
+            (rc, needed, malformed, partial)
+        };
+        let refused = WZ_DISSECT_ERR_INVALID_ARG;
+        // Every slot that can be written is zeroed, whatever it held; the one
+        // that is null is not touched, and stays what it was.
+        assert_eq!(refuse(true, false, false, false, false), (refused, 0, 0, 0));
+        assert_eq!(refuse(false, true, false, false, false), (refused, 0, 0, 0));
+        assert_eq!(refuse(false, false, true, false, false), (refused, 9, 0, 0));
+        assert_eq!(refuse(false, false, false, true, false), (refused, 0, 9, 0));
+        assert_eq!(refuse(false, false, false, false, true), (refused, 0, 0, 9));
+        // The control: nothing null, and a buffer with room, is not a refusal.
+        assert_eq!(refuse(false, false, false, false, false).0, WZ_DISSECT_OK);
+
+        // A null buffer with a zero capacity is the sizing call, and is fine.
+        let (mut needed, mut malformed, mut partial) = (9usize, 9usize, 9 as c_int);
+        let rc = unsafe {
+            wz_dissect_pcap_custom_options_of_link_type(
+                file.as_ptr(),
+                file.len(),
+                147,
+                core::ptr::null_mut(),
+                0,
+                &mut needed,
+                &mut malformed,
+                &mut partial,
+            )
+        };
+        assert_eq!((rc, needed, malformed, partial), (WZ_DISSECT_OK, 0, 0, 0));
+    }
+
+    /// The record's layout is the header's: 32 bytes, no padding, the two
+    /// `uint64_t` first.
+    #[test]
+    fn the_custom_option_record_is_32_bytes_in_order() {
+        assert_eq!(core::mem::size_of::<WzDissectCustomOption>(), 32);
+        assert_eq!(core::mem::align_of::<WzDissectCustomOption>(), 8);
+        assert_eq!(core::mem::offset_of!(WzDissectCustomOption, packet), 0);
+        assert_eq!(core::mem::offset_of!(WzDissectCustomOption, offset), 8);
+        assert_eq!(core::mem::offset_of!(WzDissectCustomOption, len), 16);
+        assert_eq!(
+            core::mem::offset_of!(WzDissectCustomOption, organization),
+            20
+        );
+        assert_eq!(core::mem::offset_of!(WzDissectCustomOption, index), 24);
+        assert_eq!(core::mem::offset_of!(WzDissectCustomOption, code), 28);
+        assert_eq!(core::mem::offset_of!(WzDissectCustomOption, copyable), 30);
+        assert_eq!(core::mem::offset_of!(WzDissectCustomOption, text), 31);
     }
 
     /// The `health` key of a live handle's document is the summary's `health`

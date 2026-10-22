@@ -1571,7 +1571,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 46
+#define WZ_DISSECT_ABI_REVISION 47
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -5415,6 +5415,93 @@ int wz_dissect_pcap_packets_of_link_type(const unsigned char *bytes, size_t len,
                                          uint32_t link_type,
                                          wz_dissect_raw_packet *out, size_t cap,
                                          size_t *needed, int *partial);
+
+/* (ABI 47) -- one Custom Option of one packet, as
+ * wz_dissect_pcap_custom_options_of_link_type hands it out. 32 bytes, 8-aligned,
+ * no padding. */
+typedef struct wz_dissect_custom_option {
+    uint64_t packet;       /* the packet's number: the same number
+                            * wz_dissect_raw_packet.packet carries for it */
+    uint64_t offset;       /* the data is bytes[offset .. offset + len] */
+    uint32_t len;          /* bytes of Custom Data; the organization number and
+                            * the padding to four are not counted */
+    uint32_t organization; /* Private Enterprise Number, read in the byte order
+                            * of the section the packet is in */
+    uint32_t index;        /* the option's place in its block's list, 0 first;
+                            * options that are not Custom Options take a place */
+    uint16_t code;         /* 2988, 2989, 19372 or 19373 */
+    uint8_t copyable;      /* 1 for 2988 and 2989, 0 for 19372 and 19373 */
+    uint8_t text;          /* 1 for 2988 and 19372 (UTF-8 string), 0 for 2989
+                            * and 19373 (binary octets) */
+} wz_dissect_custom_option;
+
+/* (ABI 47) -- THE CUSTOM OPTIONS OF THE PACKETS OF ONE LINK TYPE IN A CAPTURE
+ * CONTAINER, as records into a buffer you sized.
+ *
+ * WHAT IT IS FOR. A writer that records what it knows about a packet in a Custom
+ * Option of the packet's block (the time the packet had before it was replayed,
+ * say) reads it back here. The container is resolved by this library, so a
+ * second reader of the block layout in your code would be a second opinion about
+ * where an option ends. The options come from the same walk
+ * wz_dissect_pcap_packets_of_link_type makes, so a record's `packet` is the
+ * packet of that number in the other list: join on it.
+ *
+ * WHAT IT RETURNS. The four option codes the pcapng format reserves for custom
+ * use -- 2988 (UTF-8 string, can be copied), 2989 (binary, can be copied), 19372
+ * (UTF-8 string, should not be copied) and 19373 (binary, should not be copied)
+ * -- of the packets whose interface declared `link_type`, in container order
+ * and, within a packet, in the order its block listed them; a repeat is a
+ * record each. "Copied" is the format's word for what an application does when
+ * it writes a new file from a capture it read: `copyable` says whether it may
+ * carry the option over. What the data MEANS is its organization's; it is
+ * carried and not looked at. No other option is returned: the ones the format
+ * defines have typed fields where they belong (epb_flags is
+ * wz_dissect_raw_packet.flags).
+ *
+ * ON THE WIRE. The format lays a Custom Option out as the code, a length that
+ * INCLUDES the four bytes of the next field, the organization's Private
+ * Enterprise Number in the byte order of the section, and the data padded to
+ * four. A 12-byte datum is a length of 16. `len` here is the 12.
+ *
+ * NOT A COPY. The data is bytes[offset .. offset + len] of the container you
+ * passed, so it lives as long as it does.
+ *
+ *     size_t n = 0, bad = 0;
+ *     int partial = 0;
+ *     wz_dissect_pcap_custom_options_of_link_type(file, file_len, 147, NULL, 0,
+ *                                                 &n, &bad, &partial);   // size
+ *     wz_dissect_custom_option *opts = malloc(n * sizeof *opts);
+ *     wz_dissect_pcap_custom_options_of_link_type(file, file_len, 147, opts, n,
+ *                                                 &n, &bad, &partial);   // read
+ *     // opts[i].packet joins wz_dissect_raw_packet.packet
+ *
+ * THE BUFFER. *needed always receives the number of records; when cap is at
+ * least that, out holds them, and when it is less NOTHING is written to out. out
+ * may be NULL with cap 0, to ask for the count alone. One pass over the
+ * container per call, copying nothing.
+ *
+ * WHAT COULD NOT BE READ. *malformed receives how many options the walk could
+ * not read: a Custom Option too short to hold its organization number, and a
+ * list cut off inside an option, whose code is not known. They are counted and
+ * not dropped in silence, because a list that is short for a reason is not the
+ * list that was written. A well-formed capture answers 0.
+ *
+ * A CONTAINER STILL BEING WRITTEN. *partial is 1 when the walk ended inside a
+ * block a longer prefix may complete, 0 when it ended on a boundary; the options
+ * before the cut are written either way.
+ *
+ * WZ_DISSECT_ERR_BAD_CAPTURE when the container does not read;
+ * WZ_DISSECT_ERR_INVALID_ARG for a NULL bytes, needed, malformed or partial, or
+ * out NULL with cap non-zero. *needed, *malformed and *partial are 0 on every
+ * failure (when they are not NULL).
+ *
+ * @bound cap buffer-capacity -- the size of YOUR array. This library imposes
+ * no ceiling of its own on the list: a short `cap` writes nothing and *needed
+ * says how many to make room for. */
+int wz_dissect_pcap_custom_options_of_link_type(
+    const unsigned char *bytes, size_t len, uint32_t link_type,
+    wz_dissect_custom_option *out, size_t cap, size_t *needed,
+    size_t *malformed, int *partial);
 
 /* ── R2453 (ABI 16) — THE ANALYSIS PLANES OVER A LIVE HANDLE ─────────────
  *
