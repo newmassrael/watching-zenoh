@@ -277766,6 +277766,68 @@
         "Item 913 next: the group face in capi-core, then the pico door witnessed by upstream's z_test_peer_multicast, then zenoh-c's, then multicast declarations."
       ]
     },
+    "Round 3417": {
+      "decision_summary": "Record the host client comparison and what it led to (11 commits). On one build host with a pinned zenohd and 2000 sequential GETs of a 1 KiB reply, the median was 77.9 us for zenoh-pico, 86.2 for wz, 92.3 for zenoh-c and 92.5 for zenoh; with every client cut to client, TCP and query only, pico was 79.6 and wz 86.7. wz allocated 85 KB a GET (a 49 KB batch and a 64 KB frame) and now allocates 7 KB in 45.8 calls, but its latency did not move (shuffled order, 25 runs: 91.5, 91.7 and 91.4 us before, between and after, against pico 83.5), so the remaining gap is not allocation volume. e2e-sender, compression, usrpwd and interceptors became capabilities of the C ABI (the stripped host library fell from 2.79 MB to 1.95 MB), and a gate now holds the fixed client's worst stack chain. No order against pico is claimed in size or speed.",
+      "changes_bullets": [
+        "wz-runtime-tokio: the tx spare buffer keeps the size take_buffer asks for (up to 64 KiB); RecyclingArena::take hands out a one-shot buffer of the size wanted when its pool is dry.",
+        "wz-capi-c and wz-capi-core: e2e-sender, transport_compression, auth_usrpwd and interceptors are capabilities (deploy/capabilities.toml, Kconfig.capabilities, the archive-arm gate, the switch map); a config that asks for one that is off is refused.",
+        "wz-session-core: dispatch_network_message_at is generic over its encoder on the slot profile and one copy elsewhere; the key canonizer has a fast path for a key with no wild chunk; BoundedVec::drain_partition works in place through SeqBacking::remove.",
+        "stack_frame_gate holds the fixed client's worst chain (6,808 B, tolerance 128 B); a BUILT board row zeth-sockets-client-fixed with its devicetree overlay; Layer Qzb runs the gate on it.",
+        "configs/profiles/host-client-tcp-query.conf: the comparison's build as a preset.",
+        "docs/storage-policy-and-link-layer.md: the stack peak is the handshake path, and the gate that holds it."
+      ],
+      "verification_bullets": [
+        "Build host pc3, loopback TCP, cores pinned, 2000 GETs after 200 warm-up, interleaved runs: default features pico 77.9, wz 86.2, zenoh-c 92.3, zenoh 92.5 us; client, TCP and query only pico 79.6, wz 86.7, zenoh 94.2, zenoh-c 95.7 us. Peak RSS (kB) 2,240, 5,048, 8,068, 9,976; threads 2, 6, 7, 9 in the order pico, wz, zenoh-c, zenoh.",
+        "Latency by stage, order shuffled every run, 25 runs: wz before any fix 91.5, after the buffer fixes 91.7, now 91.4 us; pico 83.5. A fixed order had shown a false rise from 86.9 to 94.4 us; shuffling removed it.",
+        "Allocations a GET by call stack: 47.99 calls before the last two changes, 45.76 after; callgrind on a second host: 42,590 instructions a GET before the key fast path, 42,351 after, pico 10,830.",
+        "Tests: wz-session-core bounded, reply and liveliness-get tests (72 passed) and keyexpr_canon (34 passed); each new test failed under a deliberate mutation of the code it holds and passed without it; clippy of wz-session-core with all targets and of wz-capi-c in the query-only build, -D warnings, clean.",
+        "Kit, fixed client: stack_frame_gate passes, worst chain 6,808 B, largest frame 2,408 B; image 173,468 B after the last change (172,940 B before the canonizer and drain changes).",
+        "validate-workspace: T1 orphan 14, unchanged; ledger entries 3409 before this one.",
+        "Not run here: the full local CI sweep, host tests of crates other than wz-session-core after the rebase onto the 22 commits ahead, Layer Q after the rebase, and any host measurement of a heap-free single-thread build."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run for this push per job at the start of the next round; a red is its own round.",
+        "The gap to pico on the host (about 8 us at the median, 3.9 times the instructions) is not allocation volume and has no single hotspot. The structural answer is a heap-free single-thread host build of the slot profile; three pieces do not exist: a socket link for the coop runtime (only wz-link-lwip exists), a C ABI face over it (wz-capi-c and wz-capi-pico both depend on wz-runtime-tokio), and a runtime axis in deploy/capabilities.toml. The first step is to run the kit's session as a Linux process and measure it against pico.",
+        "The receive-side extension depth cap (max-depth 8, on-overflow reject) rejects a message that zenoh and zenoh-pico accept; it is a declared choice, not yet a registered debt, and a probe that sends nine extensions should come first.",
+        "Not compared and not claimed: pico against wz in speed or size on the host, and any heap-free host build."
+      ],
+      "publishable_decision_summary": "Record the host client comparison and what it led to (11 commits). On one build host with a pinned zenohd and 2000 sequential GETs of a 1 KiB reply, the median was 77.9 us for zenoh-pico, 86.2 for wz, 92.3 for zenoh-c and 92.5 for zenoh; with every client cut to client, TCP and query only, pico was 79.6 and wz 86.7. wz allocated 85 KB a GET (a 49 KB batch and a 64 KB frame) and now allocates 7 KB in 45.8 calls, but its latency did not move (shuffled order, 25 runs: 91.5, 91.7 and 91.4 us before, between and after, against pico 83.5), so the remaining gap is not allocation volume. e2e-sender, compression, usrpwd and interceptors became capabilities of the C ABI (the stripped host library fell from 2.79 MB to 1.95 MB), and a gate now holds the fixed client's worst stack chain. No order against pico is claimed in size or speed.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio: the tx spare buffer keeps the size take_buffer asks for (up to 64 KiB); RecyclingArena::take hands out a one-shot buffer of the size wanted when its pool is dry.",
+        "wz-capi-c and wz-capi-core: e2e-sender, transport_compression, auth_usrpwd and interceptors are capabilities (deploy/capabilities.toml, Kconfig.capabilities, the archive-arm gate, the switch map); a config that asks for one that is off is refused.",
+        "wz-session-core: dispatch_network_message_at is generic over its encoder on the slot profile and one copy elsewhere; the key canonizer has a fast path for a key with no wild chunk; BoundedVec::drain_partition works in place through SeqBacking::remove.",
+        "stack_frame_gate holds the fixed client's worst chain (6,808 B, tolerance 128 B); a BUILT board row zeth-sockets-client-fixed with its devicetree overlay; Layer Qzb runs the gate on it.",
+        "configs/profiles/host-client-tcp-query.conf: the comparison's build as a preset.",
+        "docs/storage-policy-and-link-layer.md: the stack peak is the handshake path, and the gate that holds it."
+      ],
+      "publishable_verification_bullets": [
+        "Build host pc3, loopback TCP, cores pinned, 2000 GETs after 200 warm-up, interleaved runs: default features pico 77.9, wz 86.2, zenoh-c 92.3, zenoh 92.5 us; client, TCP and query only pico 79.6, wz 86.7, zenoh 94.2, zenoh-c 95.7 us. Peak RSS (kB) 2,240, 5,048, 8,068, 9,976; threads 2, 6, 7, 9 in the order pico, wz, zenoh-c, zenoh.",
+        "Latency by stage, order shuffled every run, 25 runs: wz before any fix 91.5, after the buffer fixes 91.7, now 91.4 us; pico 83.5. A fixed order had shown a false rise from 86.9 to 94.4 us; shuffling removed it.",
+        "Allocations a GET by call stack: 47.99 calls before the last two changes, 45.76 after; callgrind on a second host: 42,590 instructions a GET before the key fast path, 42,351 after, pico 10,830.",
+        "Tests: wz-session-core bounded, reply and liveliness-get tests (72 passed) and keyexpr_canon (34 passed); each new test failed under a deliberate mutation of the code it holds and passed without it; clippy of wz-session-core with all targets and of wz-capi-c in the query-only build, -D warnings, clean.",
+        "Kit, fixed client: stack_frame_gate passes, worst chain 6,808 B, largest frame 2,408 B; image 173,468 B after the last change (172,940 B before the canonizer and drain changes).",
+        "validate-workspace: T1 orphan 14, unchanged; ledger entries 3409 before this one.",
+        "Not run here: the full local CI sweep, host tests of crates other than wz-session-core after the rebase onto the 22 commits ahead, Layer Q after the rebase, and any host measurement of a heap-free single-thread build."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run for this push per job at the start of the next round; a red is its own round.",
+        "The gap to pico on the host (about 8 us at the median, 3.9 times the instructions) is not allocation volume and has no single hotspot. The structural answer is a heap-free single-thread host build of the slot profile; three pieces do not exist: a socket link for the coop runtime (only wz-link-lwip exists), a C ABI face over it (wz-capi-c and wz-capi-pico both depend on wz-runtime-tokio), and a runtime axis in deploy/capabilities.toml. The first step is to run the kit's session as a Linux process and measure it against pico.",
+        "The receive-side extension depth cap (max-depth 8, on-overflow reject) rejects a message that zenoh and zenoh-pico accept; it is a declared choice, not yet a registered debt, and a probe that sends nine extensions should come first.",
+        "Not compared and not claimed: pico against wz in speed or size on the host, and any heap-free host build."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
