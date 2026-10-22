@@ -493,11 +493,24 @@ def _helper_chunks() -> dict[str, str]:
     """
     src = strip_code(LIB_RS.read_text())
     chunks: dict[str, str] = {}
-    parts = re.split(r"\n    (?:pub )?fn ", src)
+    # An item at the module's indent starts a piece: a `fn` is a helper of its own
+    # name, and an `impl` block is a helper of its TYPE's name. The type is the unit
+    # a call through a value reaches: `arm.wz_cdylib()` names `PicoHeaderArm` in its
+    # caller's signature and never names a free function, so before R3413, when only
+    # `fn` started a piece, `compile_pico_example_against_wz_capi_in` reached no wz
+    # binary once it went through the header arm, and every claim of its callers was
+    # checked against the test crate's own closure (A4-5, 38 tests). The same split
+    # also let an `impl` block's text fall into whichever `fn` came before it, which
+    # was then credited with what the methods reach. Blocks of one type merge.
+    parts = re.split(r"\n    (?=(?:pub )?fn |impl\b)", src)
     for part in parts[1:]:
-        m = re.match(r"([A-Za-z0-9_]+)", part)
-        if m:
-            chunks[m.group(1)] = part
+        fn = re.match(r"(?:pub )?fn ([A-Za-z0-9_]+)", part)
+        if fn:
+            chunks[fn.group(1)] = part[fn.start(1):]
+            continue
+        ty = re.match(r"impl(?:<[^>]*>)?\s+(?:[A-Za-z0-9_:<>']+\s+for\s+)?([A-Za-z0-9_]+)", part)
+        if ty:
+            chunks[ty.group(1)] = chunks.get(ty.group(1), "") + "\n" + part
     return chunks
 
 

@@ -182,7 +182,6 @@ fn run_probe(headers: PicoHeaderArm, library: PicoHeaderArm, dir: &Path) -> (boo
     (out.status.success(), text)
 }
 
-// wz-proves: none -- the header arm and the wz build a C program links, paired
 #[test]
 #[ignore = "compiles against the CMake-configured pico headers of every arm and links \
             every wz build; run by run-ci Layer E"]

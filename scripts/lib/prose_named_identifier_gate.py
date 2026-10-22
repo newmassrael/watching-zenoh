@@ -305,9 +305,6 @@ UPSTREAM_UNCARRIED = frozenset(
         # hit the same wall and was reworded instead of classified, because for
         # a `scripts/lib` file this gate asks for ABSENT rather than this set.)
         "Z_RUNTIME_IDLE_READ_TASK_SLEEP",
-        "Z_LOCALITY_ANY",
-        "Z_LOCALITY_REMOTE",
-        "Z_LOCALITY_SESSION_LOCAL",
         # The protocol version byte is wz's own `PROTOCOL_VERSION` (codecs and
         # the wire fixtures), not pico's config macro. Entered when the
         # acceptor's version refusal replaced the demo's version knob and the
