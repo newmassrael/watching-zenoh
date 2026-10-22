@@ -54,9 +54,9 @@ use std::time::Duration;
 use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     compile_pico_example_against_wz_capi, compile_pico_example_against_wz_capi_in,
-    compile_pico_source, graceful_terminate, group_declarations, project_root, read_captured,
-    wait_for_substring, zenoh_pico_cli_binary, zenoh_pico_include_dirs, zenoh_pico_library_dir,
-    zenoh_pico_mcdecl_cli_binary, ChildGuard, PicoHeaderArm,
+    compile_pico_source, graceful_terminate, group_declarations, group_puts, project_root,
+    read_captured, wait_for_substring, zenoh_pico_cli_binary, zenoh_pico_include_dirs,
+    zenoh_pico_library_dir, zenoh_pico_mcdecl_cli_binary, ChildGuard, PicoHeaderArm,
 };
 
 /// The program sleeps 5 s, puts for 5 s, gets for 5 s and sleeps 5 s more in each of its
@@ -367,6 +367,60 @@ fn upstream_examples_with_multicast_declarations_declare_on_a_group_as_the_real_
         "upstream's examples on wz declare on the group otherwise than on the real library \
          at Z_FEATURE_MULTICAST_DECLARATIONS=1:\n{}",
         differ.join("\n")
+    );
+}
+
+/// With pico's `Z_FEATURE_MULTICAST_DECLARATIONS=1`, upstream's `z_pub` puts on the group on
+/// wz's drop-in as on the real library: nothing while its write filter has no answer, since the
+/// switch makes a multicast transport obey the filter (`vendor/zenoh-pico/src/api/api.c` @
+/// `session->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE ||`, compiled only at the default), and
+/// once a subscriber is on the group, each put naming its key by the declaration the group was
+/// told (`vendor/zenoh-pico/src/session/keyexpr.c` @ `#if Z_FEATURE_MULTICAST_DECLARATIONS == 0`).
+///
+/// # Control
+///
+/// The real `z_pub` with a subscriber on the group must put something, or the empty set
+/// alone would compare equal for a host that carries nothing.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
+fn upstream_zpub_with_multicast_declarations_puts_on_a_group_as_the_real_library_does() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled example");
+    let real_pub = zenoh_pico_mcdecl_cli_binary("z_pub");
+    let real_sub = zenoh_pico_mcdecl_cli_binary("z_sub");
+    let wz_pub = compile_pico_example_against_wz_capi_in(
+        "z_pub",
+        dir.path(),
+        PicoHeaderArm::McastDeclarations,
+    )
+    .unwrap_or_else(|diag| panic!("z_pub.c does not build against wz's mcdecl arm\n{diag}"));
+    let pub_args: &[&str] = &["-k", "demo/mc/zp"];
+    let sub_args: &[&str] = &["-k", "demo/mc/**"];
+    let alone =
+        |label: &str, exe: &Path| group_puts(&recorded_while_running(&[(label, exe, pub_args)]));
+    let heard = |label: &str, exe: &Path| {
+        group_puts(&recorded_while_running(&[
+            (
+                "real zenoh-pico z_sub (multicast declarations)",
+                real_sub.as_path(),
+                sub_args,
+            ),
+            (label, exe, pub_args),
+        ]))
+    };
+    let real_alone = alone("real zenoh-pico z_pub (multicast declarations)", &real_pub);
+    let wz_alone = alone("z_pub.c on wz-capi-pico (multicast declarations)", &wz_pub);
+    let real_heard = heard("real zenoh-pico z_pub (multicast declarations)", &real_pub);
+    let wz_heard = heard("z_pub.c on wz-capi-pico (multicast declarations)", &wz_pub);
+    assert!(
+        !real_heard.is_empty(),
+        "the real z_pub put nothing with a subscriber on the group: {real_heard:?}"
+    );
+    assert_eq!(
+        (wz_alone, wz_heard),
+        (real_alone, real_heard),
+        "z_pub on wz puts on the group otherwise than on the real library at \
+         Z_FEATURE_MULTICAST_DECLARATIONS=1 (alone, then with a subscriber)"
     );
 }
 

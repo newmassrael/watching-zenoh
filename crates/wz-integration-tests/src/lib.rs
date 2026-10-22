@@ -7039,6 +7039,55 @@ pub mod common {
         out
     }
 
+    /// Open-debt item 913 — every put and delete the datagrams of a group carry, each as
+    /// `Push(scope:suffix)`: the key it names, by the keyexpr id it is scoped to and the suffix
+    /// after it, as [`group_declarations`] names a declaration's. A set, as that one is.
+    pub fn group_puts(datagrams: &[Vec<u8>]) -> std::collections::BTreeSet<String> {
+        use wz_session_core::dissect::{Field, FieldValue};
+
+        fn uint(field: Option<&Field>) -> String {
+            match field.map(|f| &f.value) {
+                Some(FieldValue::Uint(n)) => n.to_string(),
+                _ => String::new(),
+            }
+        }
+
+        fn text(field: Option<&Field>) -> &str {
+            match field.map(|f| &f.value) {
+                Some(FieldValue::Text(text)) => text.as_str(),
+                _ => "",
+            }
+        }
+
+        fn walk(field: &Field, out: &mut std::collections::BTreeSet<String>) {
+            let FieldValue::Nested(children) = &field.value else {
+                return;
+            };
+            if field.name == "Push" {
+                let key = match field.find("keyexpr") {
+                    Some(keyexpr) => format!(
+                        "{}:{}",
+                        uint(keyexpr.find("id")),
+                        text(keyexpr.find("suffix"))
+                    ),
+                    None => text(field.find("suffix")).to_owned(),
+                };
+                out.insert(format!("Push({key})"));
+            }
+            for child in children {
+                walk(child, out);
+            }
+        }
+
+        let mut out = std::collections::BTreeSet::new();
+        for datagram in datagrams {
+            if let Ok(message) = wz_session_core::dissect::dissect_transport_message(datagram, 0) {
+                walk(&message, &mut out);
+            }
+        }
+        out
+    }
+
     /// The default-route interface name, e.g. `wlp0s20f3`. This is the
     /// interface wz's `INADDR_ANY` multicast egress/join selects (no
     /// explicit `224.0.0.0/4` route → kernel uses the default route), so
