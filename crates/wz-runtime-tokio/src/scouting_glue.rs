@@ -484,8 +484,10 @@ pub fn new_scouting_engine(
         inner: actions.clone(),
     };
     Engine::new(
-        ScoutingPolicy::new_with_session_id(SCOUTING_SESSION_ID, binding)
-            .expect("the scouting session id is a constant Nmtoken"),
+        wz_session_core::constant_session_id::built_under_constant_id(
+            ScoutingPolicy::new_with_session_id(SCOUTING_SESSION_ID, binding),
+            "the scouting session id",
+        ),
     )
 }
 

@@ -18,6 +18,7 @@
 //! from `actions.inbound_peer_zid` through `R::with_mutex_mut` (the AP
 //! `std::sync::Mutex` and the MCU `critical_section` mutex behind one seam).
 
+use crate::constant_session_id::built_under_constant_id;
 use sce_rust_runtime::Engine;
 
 use wz_runtime_core::TimeSource;
@@ -2724,15 +2725,19 @@ const UNICAST_SESSION_ID: &str = "wz-session-unicast";
 
 impl<A: SessionFsmUnicastActions + 'static> BuildSessionPolicy<A> for PolicyConstructor<true> {
     fn build(self, actions: A) -> SessionFsmUnicastPolicy<A> {
-        SessionFsmUnicastPolicy::new_with_session_id(UNICAST_SESSION_ID, actions)
-            .expect("the unicast session id is a constant Nmtoken")
+        built_under_constant_id(
+            SessionFsmUnicastPolicy::new_with_session_id(UNICAST_SESSION_ID, actions),
+            "the unicast session id",
+        )
     }
 }
 
 impl<A: SessionFsmUnicastActions + 'static> BuildSessionPolicy<A> for PolicyConstructor<false> {
     fn build(self, actions: A) -> SessionFsmUnicastPolicy<A> {
-        SessionFsmUnicastPolicy::new_simulated_with_session_id(UNICAST_SESSION_ID, actions)
-            .expect("the unicast session id is a constant Nmtoken")
+        built_under_constant_id(
+            SessionFsmUnicastPolicy::new_simulated_with_session_id(UNICAST_SESSION_ID, actions),
+            "the unicast session id",
+        )
     }
 }
 

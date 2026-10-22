@@ -96,6 +96,7 @@
 //! `sce-rust-runtime`.
 
 use crate::chain_staging::{BuildsOwnStorage, ChainStaging, HeapStaging};
+use crate::constant_session_id::built_under_constant_id;
 use crate::qos::Priority;
 use crate::reassembly_slot::{
     ReassemblySlotActions, ReassemblySlotEvent, ReassemblySlotFragmentChunkPayload,
@@ -539,13 +540,13 @@ struct Slot<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> {
 
 impl<const SLOTS: usize, const CAP: usize, S: ChainStaging<SLOTS, CAP>> Slot<SLOTS, CAP, S> {
     fn new() -> Self {
-        let mut engine = Engine::new(
+        let mut engine = Engine::new(built_under_constant_id(
             ReassemblySlotPolicy::new_with_session_id(
                 REASSEMBLY_SLOT_SESSION_ID,
                 SlotBinding::default(),
-            )
-            .expect("the reassembly slot session id is a constant Nmtoken"),
-        );
+            ),
+            "the reassembly slot session id",
+        ));
         // W3C SCXML 3.3: enter the initial `Empty` leaf.
         engine.initialize();
         Self {

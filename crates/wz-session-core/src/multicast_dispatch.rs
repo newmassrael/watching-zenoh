@@ -113,6 +113,7 @@ use crate::multicast_peer::{
 // where they live BECAUSE of this line: `driver_loop` is alloc-gated and this
 // module is not, so the original import through it was an E0432 on the
 // no-alloc MCU profile (run-ci Layer G.12).
+use crate::constant_session_id::built_under_constant_id;
 use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason};
 #[cfg(all(feature = "reassembly", feature = "storage-profile"))]
 use crate::reassembly_dispatch::Fragment as ReassemblyFragment;
@@ -610,13 +611,13 @@ struct PeerSlot {
 
 impl PeerSlot {
     fn new() -> Self {
-        let mut engine = Engine::new(
+        let mut engine = Engine::new(built_under_constant_id(
             MulticastPeerPolicy::new_with_session_id(
                 MULTICAST_PEER_SESSION_ID,
                 PeerBinding::default(),
-            )
-            .expect("the multicast peer session id is a constant Nmtoken"),
-        );
+            ),
+            "the multicast peer session id",
+        ));
         // W3C SCXML 3.3: enter the initial `Free` leaf.
         engine.initialize();
         Self {
@@ -842,13 +843,13 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     /// Build a Router with an Idle session and `MAX_PEERS` free slots over
     /// `config`.
     pub fn new(config: MulticastConfig) -> Self {
-        let mut session = Engine::new(
+        let mut session = Engine::new(built_under_constant_id(
             SessionFsmMulticastPolicy::new_with_session_id(
                 MULTICAST_SESSION_ID,
                 SessionBinding::default(),
-            )
-            .expect("the multicast session id is a constant Nmtoken"),
-        );
+            ),
+            "the multicast session id",
+        ));
         // W3C SCXML 3.3: enter the initial `Idle` leaf.
         session.initialize();
         Self {
