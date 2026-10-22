@@ -205,17 +205,28 @@ their own took the peak to 7,476 B, and the network message dispatch
 The SCE pin `c244f4e171` (the engine built in its slot, its call chain kept
 small) took the dial path to 4,820 B and the engine's frames on it from 1,800 to
 840 B, at +880 / +896 B of text in the multicast image and none in the
-`qemu-demo` one; the peak did not move. The declared stack of the fixed client
-is now 10,752 B (a third free at the peak), which takes 5,632 B out of bss
-against the 16 KB of before: data and bss 118.0 KB to 112.4 KB (plain image,
-text 154,896 B), against 114 KB of zenoh-pico's. The peak of 7.1 KB is still
-about 2.5 times pico's 2.9 KB. What sets it now is the receive path of a query:
-`lend_request` (1,976 B; the codec's `Request` is 1,792 B, 1,416 of it its
-extension chain), the network dispatch (2,104 B; the codec's `Response` is
-1,104 B and is probably encoded inside it, which the disassembly has not been
-read for) and the application layer's closure. The codec sizes follow from the
-extension-chain depth the generated codecs are declared with, so a further cut
-there is a change to the codecs, not a move of a temporary.
+`qemu-demo` one; the peak did not move. What set it then was the receive path of
+a query, `lend_request` (1,976 B), because the codec's `Request` is 1,792 B and
+1,416 of that is its Query's extension chain, held inline for the declared depth
+of 8 whatever the wire carried. An experiment that only cut that depth to 3
+moved the peak by exactly the 880 B it took out of the frame. The generated
+codecs now also carry their views (`xtask` generates the whole set with
+`views: true`, SCE ADR 0049), and the lent Request is read as a `RequestView`: a
+few words and the bytes its chains occupy, walked where they lie. The readers of
+a chain (QoS, target, attachment, value, source info, the admission verdict)
+take the entries a chain yields, by reference or by value, and the held forms
+are calls of them. That took the peak to 5,928 B, at +2,192 B of text in the
+plain image (157,088 B), the code of the view's decode and walk. The depth of 8
+no longer sets any size on that path (the view does not move with it), and
+stays a limit on what a frame may carry that upstream does not have (upstream
+and zenoh-pico accept any number of extensions).
+The declared stack of the fixed client is now 9,216 B (a third free at the
+peak), which takes 7,168 B out of bss against the 16 KB of before: data and bss
+118.0 KB to 110.8 KB, against 114 KB of zenoh-pico's. The peak of 5.9 KB is
+about twice pico's 2.9 KB. What is left in it is the network dispatch (2,104 B;
+the codec's `Response` is 1,104 B and is probably encoded inside it, which the
+disassembly has not been read for), `lend_declare` and `lend_push`, the other
+records still read as their eager forms, and the application layer's closure.
 
 ## 6. Open
 
