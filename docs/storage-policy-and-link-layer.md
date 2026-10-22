@@ -190,8 +190,16 @@ ranges of the heap client and of zenoh-pico overlap; no ordering between them
 is claimed). The step 5 image is 52 bytes larger in text (221,248 B) and the
 same in data and bss. Against a zenoh-pico built in its smallest working
 configuration: text 155 KB against 162 KB, data and bss 118 KB against 114 KB.
-Main stack peak 9.8 KB of 16 KB; splitting the observer's planes into frames of
-their own did not move it, so what sets it is not the part that was split.
+Main stack peak was 9.8 KB of 16 KB; splitting the observer's planes into
+frames of their own did not move it, so what sets it is not the part that was
+split. What did: the handshake parse (`parse_unit`) out of line, so its
+temporaries leave with it (`dispatch_copied` frame 4,824 to 2,408 B), peak
+9,856 to 8,432 B, text 155,344 to 155,004 B. The declared stack of the fixed
+client is now 13,312 B (a third free at the peak), which takes 3,072 B out of
+bss: data and bss 118.0 KB to 114.9 KB, against 114 KB of zenoh-pico's. The
+peak of 8.4 KB is still about three times pico's 2.9 KB; the next frames are
+`SessionLinkActions`, `SessionPump` and the engine (2,024, 1,336 and 1,184 B),
+built on the stack and then moved into the static slot.
 
 ## 6. Open
 
