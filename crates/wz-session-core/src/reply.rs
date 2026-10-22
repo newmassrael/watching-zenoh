@@ -103,7 +103,7 @@ use alloc::vec::Vec;
 
 // R311gb (Track 2) — bounded backing + the capacity SSOT for the no-alloc
 // pending table.
-use crate::bounded::BoundedVec;
+use crate::bounded::{BoundedVec, Profile, Storage};
 use crate::caps;
 use crate::registry_error::RegisterError;
 use crate::reply_acceptance::{ReplyAcceptance, ReplyAcceptanceStored};
@@ -828,7 +828,7 @@ impl ReplyHandle {
     }
 }
 
-struct Pending<C: ReplySink> {
+struct Pending<C: ReplySink, P: Storage = Profile> {
     rid: u64,
     /// R239 — number of `Final` records this pending entry expects
     /// before it fires `on_final` and drops from the table. Mirrors
@@ -879,7 +879,7 @@ struct Pending<C: ReplySink> {
     /// and only then consolidates at `:130`. A reply the caller may never see
     /// must not be able to displace one it may, which is exactly what a gate
     /// installed INSIDE [`ConsolidatingSink`] would allow.
-    accept: ReplyAcceptanceStored,
+    accept: ReplyAcceptanceStored<P>,
 }
 
 /// Reply table backing the inbound `Response(Reply|Err)` and
@@ -892,8 +892,12 @@ struct Pending<C: ReplySink> {
 /// `fire_final_for` / `sweep_timed_out`) form the no-alloc control plane.
 /// The owned-retention `deliver_local_reply` + the wire-dispatch methods
 /// carry `alloc` / `codec-*` gates per-method below.
-pub struct ReplyRegistry<C: ReplySink> {
-    pending: BoundedVec<Pending<C>, { caps::MAX_PENDING_QUERIES }>,
+///
+/// The storage policy `P` is the build's [`Profile`] unless a caller names another:
+/// the pending table is a [`BoundedVec`] of the policy, so one body serves the
+/// hard-capped table and the growable one.
+pub struct ReplyRegistry<C: ReplySink, P: Storage = Profile> {
+    pending: BoundedVec<Pending<C, P>, { caps::MAX_PENDING_QUERIES }, P>,
     /// transport-shm -- the receive side of shared memory for a reply: the same
     /// state a push has (the negotiated capability, the resolver, the means of
     /// acknowledging the peer's slices, the drop counters, the un-swap). Upstream
@@ -907,9 +911,13 @@ pub struct ReplyRegistry<C: ReplySink> {
     shm: crate::extshm::ShmReceiveState,
 }
 
-impl<C: ReplySink> Default for ReplyRegistry<C> {
+impl<C: ReplySink, P: Storage> Default for ReplyRegistry<C, P> {
     fn default() -> Self {
-        Self::with_sink_backing()
+        Self {
+            pending: BoundedVec::default(),
+            #[cfg(feature = "transport-shm")]
+            shm: crate::extshm::ShmReceiveState::default(),
+        }
     }
 }
 
@@ -918,7 +926,7 @@ impl<C: ReplySink> Default for ReplyRegistry<C> {
 #[cfg(all(feature = "storage-profile", feature = "codec-response"))]
 mod in_place;
 
-impl<C: ReplySink> ReplyRegistry<C> {
+impl<C: ReplySink> ReplyRegistry<C, Profile> {
     /// New empty registry over an explicit sink backing `C`. Pending
     /// entries are stored in a `Vec` so duplicate-rid registrations (an
     /// application registering two independent z_gets that happen to
@@ -931,13 +939,11 @@ impl<C: ReplySink> ReplyRegistry<C> {
     /// which fixes `C = BoxedReplySink`; mirrors
     /// [`crate::pubsub::SubscriberRegistry::with_sink_backing`].
     pub fn with_sink_backing() -> Self {
-        Self {
-            pending: BoundedVec::new(),
-            #[cfg(feature = "transport-shm")]
-            shm: crate::extshm::ShmReceiveState::default(),
-        }
+        Self::default()
     }
+}
 
+impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// transport-shm -- install the resolver a reply's shared-memory slices are read
     /// through. Shared with the subscriber registry by the session, so a reply is
     /// read by the same resolver a push is. Without one a reply whose slice names a

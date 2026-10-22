@@ -100,6 +100,100 @@ fn subscriber_unregister_frees_a_slot<P: Storage>() {
     assert_eq!(reg.len(), caps::MAX_SUBSCRIPTIONS);
 }
 
+struct NoopReplySink;
+impl wz_session_core::reply_sink::ReplySink for NoopReplySink {
+    fn on_reply(&mut self, _reply: &dyn wz_session_core::reply_sink::ReplyView) {}
+    fn on_final(&mut self, _rid: u64) {}
+}
+
+/// The requester's pending-query table: the entry past `MAX_PENDING_QUERIES` is
+/// refused where the capacity is hard and taken where it is not, and an
+/// unregistered slot is taken again.
+fn pending_queries_fill_to_n_and_refuse_at_n_plus_one<P: Storage>() {
+    use wz_session_core::reply::ReplyRegistry;
+    use wz_session_core::reply_acceptance::ReplyAcceptance;
+    let mut reg: ReplyRegistry<NoopReplySink, P> = ReplyRegistry::default();
+    for rid in 0..caps::MAX_PENDING_QUERIES as u64 {
+        assert!(reg
+            .register_sink(
+                rid,
+                1,
+                None,
+                ReplyAcceptance::Matching("svc/a"),
+                NoopReplySink
+            )
+            .is_ok());
+    }
+    assert_eq!(reg.len(), caps::MAX_PENDING_QUERIES);
+
+    let past = reg.register_sink(
+        caps::MAX_PENDING_QUERIES as u64,
+        1,
+        None,
+        ReplyAcceptance::Any,
+        NoopReplySink,
+    );
+    if P::ENFORCES_CAPACITY {
+        assert_eq!(past.err(), Some(RegisterError::TableFull));
+        assert_eq!(reg.len(), caps::MAX_PENDING_QUERIES);
+        assert!(reg.unregister(0));
+        assert!(reg
+            .register_sink(99, 1, None, ReplyAcceptance::Any, NoopReplySink)
+            .is_ok());
+    } else {
+        assert!(past.is_ok());
+        assert_eq!(reg.len(), caps::MAX_PENDING_QUERIES + 1);
+    }
+}
+
+/// The keyexpr a pending query is gated on is refused, never truncated, past
+/// `MAX_KEYEXPR_BYTES` where the capacity is hard: a truncated gate would withhold
+/// replies the caller is owed.
+fn pending_query_keyexpr_past_the_bound<P: Storage>() {
+    use wz_session_core::reply::ReplyRegistry;
+    use wz_session_core::reply_acceptance::ReplyAcceptance;
+    let long = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
+    let mut reg: ReplyRegistry<NoopReplySink, P> = ReplyRegistry::default();
+    let outcome = reg.register_sink(1, 1, None, ReplyAcceptance::Matching(&long), NoopReplySink);
+    if P::ENFORCES_CAPACITY {
+        assert_eq!(outcome.err(), Some(RegisterError::KeyexprTooLong));
+        assert_eq!(reg.len(), 0);
+    } else {
+        assert!(outcome.is_ok());
+        assert_eq!(reg.len(), 1);
+    }
+}
+
+/// The liveliness get table: a duplicate interest id is a no-op, and the table is
+/// full when the pending gets reach the capacity.
+#[cfg(feature = "liveliness-get")]
+fn liveliness_gets_fill_to_n_and_refuse_at_n_plus_one<P: Storage>() {
+    use wz_session_core::declare::liveliness_get::LivelinessGetRegistry;
+    let mut reg: LivelinessGetRegistry<NoopReplySink, P> = LivelinessGetRegistry::default();
+    for id in 1..=caps::MAX_PENDING_LIVELINESS_GETS as u64 {
+        assert_eq!(reg.register(id, None, NoopReplySink), Ok(true));
+    }
+    assert_eq!(reg.len(), caps::MAX_PENDING_LIVELINESS_GETS);
+    assert_eq!(
+        reg.register(1, None, NoopReplySink),
+        Ok(false),
+        "a duplicate interest id is a no-op"
+    );
+
+    let past = reg.register(
+        caps::MAX_PENDING_LIVELINESS_GETS as u64 + 1,
+        None,
+        NoopReplySink,
+    );
+    if P::ENFORCES_CAPACITY {
+        assert_eq!(past, Err(RegisterError::TableFull));
+        assert_eq!(reg.len(), caps::MAX_PENDING_LIVELINESS_GETS);
+    } else {
+        assert_eq!(past, Ok(true));
+        assert_eq!(reg.len(), caps::MAX_PENDING_LIVELINESS_GETS + 1);
+    }
+}
+
 #[cfg(feature = "codec-declare")]
 mod declarations {
     use super::*;
@@ -360,6 +454,19 @@ case!(
 case!(
     subscriber_unregister_frees_a_slot_case,
     subscriber_unregister_frees_a_slot
+);
+case!(
+    pending_queries_fill_case,
+    pending_queries_fill_to_n_and_refuse_at_n_plus_one
+);
+case!(
+    pending_query_keyexpr_case,
+    pending_query_keyexpr_past_the_bound
+);
+#[cfg(feature = "liveliness-get")]
+case!(
+    liveliness_gets_fill_case,
+    liveliness_gets_fill_to_n_and_refuse_at_n_plus_one
 );
 #[cfg(feature = "codec-declare")]
 case!(

@@ -64,7 +64,7 @@
 //!    [`wz_codecs::declare::DeclareOwned`] + resolve its keyexpr through
 //!    the shared peer table, then funnel through the no-heap SSOT.
 
-use crate::bounded::BoundedVec;
+use crate::bounded::{BoundedVec, Profile, Storage};
 use crate::caps;
 use crate::registry_error::RegisterError;
 use crate::reply_sink::{BorrowedReply, ReplyKind, ReplySink};
@@ -125,8 +125,11 @@ struct PendingGet<C: ReplySink> {
 /// its [`ReplySink::on_final`] (after which the pending entry is
 /// removed). See module-level docs for why this is a declaration-plane
 /// sibling of [`crate::reply::ReplyRegistry`] rather than a reuse of it.
-pub struct LivelinessGetRegistry<C: ReplySink> {
-    pending: BoundedVec<PendingGet<C>, { caps::MAX_PENDING_LIVELINESS_GETS }>,
+///
+/// The storage policy `P` is the build's [`Profile`] unless a caller names another;
+/// the pending table and the finalized markers are [`BoundedVec`]s of that policy.
+pub struct LivelinessGetRegistry<C: ReplySink, P: Storage = Profile> {
+    pending: BoundedVec<PendingGet<C>, { caps::MAX_PENDING_LIVELINESS_GETS }, P>,
     /// F3 — interest ids whose get terminated since the last
     /// [`take_finalized`](Self::take_finalized) drain (inbound
     /// `DeclFinal` or local timeout sweep). The observer's
@@ -145,7 +148,7 @@ pub struct LivelinessGetRegistry<C: ReplySink> {
     /// one staged batch is bounded by the pending table and the shared
     /// capacity cannot overflow (a dropped marker would be a PERMANENT
     /// replay-leak: this drain is the entry's only prune).
-    finalized: BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }>,
+    finalized: BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }, P>,
     /// How many token replies were NOT delivered because their keyexpr is longer
     /// than the bounded buffer the slot profile's receive path resolves into
     /// ([`Self::oversize`]). Stays zero on every build that reads the owned
@@ -153,26 +156,28 @@ pub struct LivelinessGetRegistry<C: ReplySink> {
     oversize: u32,
 }
 
-impl<C: ReplySink> Default for LivelinessGetRegistry<C> {
+impl<C: ReplySink, P: Storage> Default for LivelinessGetRegistry<C, P> {
     fn default() -> Self {
-        Self::with_sink_backing()
+        Self {
+            pending: BoundedVec::default(),
+            finalized: BoundedVec::default(),
+            oversize: 0,
+        }
     }
 }
 
-impl<C: ReplySink> LivelinessGetRegistry<C> {
+impl<C: ReplySink> LivelinessGetRegistry<C, Profile> {
     /// New empty registry over an explicit sink backing `C` (the
     /// no-`alloc` / MCU entry point, paired with
     /// [`register`](Self::register)). AP callers use the inferring
     /// [`new`](LivelinessGetRegistry::new) shorthand, which fixes
     /// `C = BoxedReplySink`.
     pub fn with_sink_backing() -> Self {
-        Self {
-            pending: BoundedVec::new(),
-            finalized: BoundedVec::new(),
-            oversize: 0,
-        }
+        Self::default()
     }
+}
 
+impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// How many token replies were refused for a keyexpr past the bounded buffer
     /// ([`crate::wireexpr_resolve::KeyexprBuf`]) and so not delivered. Only the slot
     /// profile's receive path, which resolves into that buffer, can refuse; a
@@ -188,7 +193,7 @@ impl<C: ReplySink> LivelinessGetRegistry<C> {
     /// session-reconnect declaration cache drops the finished one-shot
     /// Interest (see the `finalized` field docs). Returns the staged ids
     /// by value, leaving the staging empty.
-    pub fn take_finalized(&mut self) -> BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }> {
+    pub fn take_finalized(&mut self) -> BoundedVec<u64, { caps::MAX_PENDING_LIVELINESS_GETS }, P> {
         core::mem::take(&mut self.finalized)
     }
 

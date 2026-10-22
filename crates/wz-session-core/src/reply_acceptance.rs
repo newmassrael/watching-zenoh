@@ -40,7 +40,9 @@
 //! (`session.rs:2790-2825`), and it cannot — an Err result carries no keyexpr
 //! of its own to test. See `ReplyAcceptanceStored::admits`.
 
-use crate::bounded::BoundedString;
+use core::fmt;
+
+use crate::bounded::{BoundedString, Profile, Storage};
 use crate::caps;
 use crate::keyexpr_match;
 use crate::reply_sink::{ReplyKind, ReplyView};
@@ -115,12 +117,12 @@ impl<'a> ReplyAcceptance<'a> {
     /// dropping direction — silently withholding replies the caller is owed.
     /// The subscriber / queryable registries already refuse an over-long
     /// pattern at register time for the same reason.
-    pub(crate) fn store(
+    pub(crate) fn store<P: Storage>(
         self,
-    ) -> Result<ReplyAcceptanceStored, crate::registry_error::RegisterError> {
+    ) -> Result<ReplyAcceptanceStored<P>, crate::registry_error::RegisterError> {
         let mut stored = ReplyAcceptanceStored {
             mode: ReplyKeyExpr::Any,
-            keyexpr: BoundedString::new(),
+            keyexpr: BoundedString::default(),
         };
         if let Self::Matching(keyexpr) = self {
             stored.mode = ReplyKeyExpr::MatchingQuery;
@@ -145,16 +147,24 @@ impl<'a> ReplyAcceptance<'a> {
 /// see it — and Layer C1cf, which is exactly that build, is where it surfaced.
 /// The struct form is the same size as the enum's largest variant, so nothing
 /// is paid for the change, and it is closer to the upstream it ports.
-#[derive(Debug)]
-pub(crate) struct ReplyAcceptanceStored {
+pub(crate) struct ReplyAcceptanceStored<P: Storage = Profile> {
     /// pico's `_anyke`. [`ReplyKeyExpr::Any`] leaves `keyexpr` empty and unread.
     mode: ReplyKeyExpr,
     /// pico's `_key` — the expression the query was asked under. Empty and
     /// meaningless when `mode` is [`ReplyKeyExpr::Any`].
-    keyexpr: BoundedString<{ caps::MAX_KEYEXPR_BYTES }>,
+    keyexpr: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
 }
 
-impl ReplyAcceptanceStored {
+impl<P: Storage> fmt::Debug for ReplyAcceptanceStored<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReplyAcceptanceStored")
+            .field("mode", &self.mode)
+            .field("keyexpr", &self.keyexpr)
+            .finish()
+    }
+}
+
+impl<P: Storage> ReplyAcceptanceStored<P> {
     /// Whether this pending registration may deliver `reply` to its caller.
     ///
     /// Three arms, and the Err one is not an afterthought: an Err reply is

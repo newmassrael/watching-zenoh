@@ -37,6 +37,7 @@ use wz_codecs::response::{Response, ResponseVariant};
 use wz_codecs::timestamp::Timestamp;
 
 use super::ReplyRegistry;
+use crate::bounded::Storage;
 use crate::reply_sink::{ReplyKind, ReplySink, ReplyView};
 use crate::sample::SourceInfo;
 #[cfg(feature = "alloc")]
@@ -266,7 +267,7 @@ fn lent_body<'r>(response: &'r Response<'r>) -> Result<Option<LentBody<'r>>, Fal
     }
 }
 
-impl<C: ReplySink> ReplyRegistry<C> {
+impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// Deliver a Response the in-place receive path lent: the pending-get side
     /// of [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace).
     /// See the module docs for what it delivers and what it hands to the owned
