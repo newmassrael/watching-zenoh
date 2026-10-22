@@ -251,6 +251,7 @@ where
         {
             let now_ms = wz_runtime_core::TimeSource::now_monotonic_ms(&self.handle.clock);
             self.requesters.replies.sweep_timed_out(now_ms);
+            self.publish_wake_deadline();
         }
     }
 }
@@ -346,6 +347,10 @@ where
                 sink,
             )
             .map_err(GetError::Register)?;
+        // The deadline is the loop's to wake for from now on, before the request is even sent: a
+        // loop that went to sleep between this call and the next event would otherwise sleep past it.
+        self.publish_wake_deadline();
+        let actions = &*self.handle;
         let sent = actions.send_get_parts(wz_session_core::lent_request::GetParts {
             rid,
             keyexpr: request.keyexpr,
@@ -357,9 +362,17 @@ where
         });
         if let Err(why) = sent {
             self.requesters.replies.unregister(rid);
+            self.publish_wake_deadline();
             return Err(GetError::Send(why));
         }
         Ok(handle)
+    }
+
+    /// State the earliest pending deadline to the drive loop, which budgets its wait by it
+    /// together with the transport's own. Called wherever the pending table changes.
+    fn publish_wake_deadline(&self) {
+        self.handle
+            .set_app_wake_deadline_ms(self.requesters.replies.next_deadline_ms());
     }
 
     /// Whether the session has completed its handshake and not yet lost its transport: a `get`

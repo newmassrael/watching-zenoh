@@ -1835,6 +1835,12 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// is sufficient — id uniqueness is the only invariant and
     /// `fetch_add` is atomic under every ordering.
     pub next_outbound_request_id: AtomicU64,
+    /// The earliest moment the application layer needs the drive loop awake for, in this
+    /// session's clock (`u64::MAX`: none). The layer owns deadlines the transport does not know
+    /// (a pending query's), and a loop whose link sleeps while the session is idle must wake no
+    /// later than the earliest of them or the query ends late by as much as the sleep. Written by
+    /// the layer ([`Self::set_app_wake_deadline_ms`]), read by the pump when it budgets a wait.
+    app_wake_deadline_ms: AtomicU64,
     /// R248 — monotonic outbound liveliness `token_id` allocator.
     /// Mirrors zenoh-pico's `_z_get_entity_id`
     /// (`vendor/zenoh-pico/src/net/liveliness.c:58` — the entity-id
@@ -3195,6 +3201,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "alloc")]
                 plain_put_lane: core::sync::atomic::AtomicBool::new(false),
                 next_outbound_request_id: AtomicU64::new(0),
+                app_wake_deadline_ms: AtomicU64::new(u64::MAX),
                 next_outbound_token_id: AtomicU64::new(0),
                 next_outbound_interest_id: AtomicU64::new(0),
                 next_outbound_entity_id: AtomicU32::new(0),
@@ -10778,6 +10785,22 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn alloc_next_request_id(&self) -> u64 {
         self.next_outbound_request_id
             .fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Tell the drive loop the earliest moment the application layer needs it awake, in this
+    /// session's clock; `None` withdraws the request. Replaces the previous value: the layer
+    /// states the earliest of ALL its deadlines each time, which keeps one writer per session.
+    pub fn set_app_wake_deadline_ms(&self, deadline_ms: Option<u64>) {
+        self.app_wake_deadline_ms
+            .store(deadline_ms.unwrap_or(u64::MAX), Ordering::Relaxed);
+    }
+
+    /// The deadline the application layer asked the loop to wake for, if it did.
+    pub fn app_wake_deadline_ms(&self) -> Option<u64> {
+        match self.app_wake_deadline_ms.load(Ordering::Relaxed) {
+            u64::MAX => None,
+            deadline_ms => Some(deadline_ms),
+        }
     }
 
     /// R248 — outbound liveliness `token_id` generator. Returns the

@@ -698,6 +698,10 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
         if let Some(deadline_ms) = keepalive_wake_deadline(&self.actions) {
             due_ms = due_ms.min(deadline_ms);
         }
+        // The application layer's own (a pending query's), which the transport cannot know.
+        if let Some(deadline_ms) = self.actions.app_wake_deadline_ms() {
+            due_ms = due_ms.min(deadline_ms);
+        }
         let mut wait_ms = due_ms.saturating_sub(now_ms);
         if let Some(timer_us) = self.runtime.time_to_next_timer_us() {
             wait_ms = wait_ms.min(timer_us.div_ceil(1000));
@@ -1284,4 +1288,130 @@ where
     local
         .spawn_local(pump_task(pump, on_event))
         .map_err(|refused| SessionSpawnRefused::Task(refused.why))
+}
+
+#[cfg(all(
+    test,
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+mod wake_budget_tests {
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use core::cell::RefCell;
+    use wz_session_core::link::{LinkSendOutcome, RxFrame};
+    use wz_session_core::reliability::Reliability;
+    use wz_session_core::session_init_params::SessionInitParams;
+    use wz_session_core::session_timeouts::SessionTimeouts;
+    use wz_session_core::signing_key::SigningKey;
+
+    use crate::session_runtime::new_session_actions;
+    use crate::time::{ClockSource, CoopTime};
+    use crate::CoopRuntime;
+
+    #[derive(Clone, Copy)]
+    struct Stopped;
+    impl ClockSource for Stopped {
+        fn now_us(&self) -> u64 {
+            1_000_000
+        }
+    }
+
+    /// A link that takes the permission to wait and records what it was told it could wait.
+    #[derive(Default)]
+    struct Recording {
+        budgets: RefCell<Vec<u64>>,
+    }
+
+    impl SessionDatagramLink for Recording {
+        fn service(&self) {}
+        fn service_within(&self, max_wait_ms: u64) {
+            self.budgets.borrow_mut().push(max_wait_ms);
+        }
+        fn uses_wake_budget(&self) -> bool {
+            true
+        }
+        fn try_recv(&self) -> Option<RxFrame> {
+            None
+        }
+    }
+
+    struct Null;
+    impl BoxedLinkDriver for Null {
+        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            LinkSendOutcome::Sent
+        }
+        fn open_blocking(&self) {}
+        fn close_blocking(&self) {}
+    }
+
+    struct Counting(u8);
+    impl wz_session_core::entropy::EntropySource for Counting {
+        fn try_fill_bytes(
+            &mut self,
+            buf: &mut [u8],
+        ) -> Result<(), wz_session_core::entropy::EntropyUnavailable> {
+            for slot in buf.iter_mut() {
+                *slot = self.0;
+                self.0 = self.0.wrapping_add(1);
+            }
+            Ok(())
+        }
+    }
+
+    fn params() -> SessionInitParams {
+        SessionInitParams {
+            whatami: wz_session_core::WhatAmI::Peer,
+            zid: vec![0x0A, 0x0B, 0x0C, 0x0D],
+            seq_num_res: 2,
+            req_id_res: 2,
+            batch_size: 1024,
+            lease_ms: 10_000,
+            initial_sn: 0,
+            cookie: vec![0u8; 16],
+            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect(">=32-byte key"),
+        }
+    }
+
+    /// What one step of an acceptor pump tells its link it may wait, after the application layer
+    /// stated a deadline `in_ms` from now (or nothing).
+    fn waited(in_ms: Option<u64>) -> u64 {
+        let runtime = CoopRuntime::new(Stopped);
+        let clock = CoopTime::new(&runtime);
+        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        // The session's own clock, whose epoch is its runtime's and not the board's.
+        let now_ms = clock.now_monotonic_ms();
+        actions.set_app_wake_deadline_ms(in_ms.map(|ms| now_ms + ms));
+        let link = Rc::new(Recording::default());
+        let config = SessionDriveConfig {
+            timeouts: SessionTimeouts::spec_defaults(),
+            role: SessionRole::Acceptor,
+            max_iters: None,
+        };
+        let mut pump = SessionPump::new(runtime, link.clone(), actions, clock, config);
+        let _ = pump.step(&mut |_event| {});
+        let waited = *link.budgets.borrow().last().expect("the link was serviced");
+        waited
+    }
+
+    #[test]
+    fn the_application_layers_deadline_bounds_what_the_link_may_wait() {
+        // An idle acceptor with no peer has no deadline of its own nearer than its handshake's.
+        let free = waited(None);
+        let bounded = waited(Some(7));
+        assert!(
+            bounded <= 7,
+            "a deadline 7 ms away allows at most 7 ms, and the link was told {bounded}"
+        );
+        assert!(
+            free > 7,
+            "without the layer's deadline the same session may wait longer, and was told {free}"
+        );
+        // A deadline that is now is a wait of nothing.
+        assert_eq!(waited(Some(0)), 0);
+    }
 }
