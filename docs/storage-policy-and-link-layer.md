@@ -404,8 +404,9 @@ their extremes. On CPU the wz node and the single-thread pico are one figure: no
 order between them is claimed. Both are below the two-thread pico by a margin
 the noise does not explain, and far below zenoh.
 
-What this does not show: other payload sizes, a real network, TCP for the wz node
-(it has no stream link on the host), or a node with more than one query in flight.
+What this does not show: other payload sizes, a real network, or TCP for the wz
+node (it has no stream link on the host). More than one query in flight is
+measured below.
 
 The deadline of a pending query is the application layer's, and a link that sleeps
 while the session is idle would sleep past it. `SessionCore` holds one value for it
@@ -414,6 +415,62 @@ while the session is idle would sleep past it. `SessionCore` holds one value for
 changes, and the pump folds it into the budget it hands the link. The pump's test
 runs an acceptor over a link that records the wait it is told, and fails under a
 mutation that ignores the layer's deadline.
+
+A deadline in a table is not yet an event. The session's steady state raises
+none, so on an idle session an expired pending query was swept only when some
+other event happened to arrive. The pump now raises `IterationEvent::AppWake`
+when the layer's deadline has come due, once and before it reads the link, so
+`SlotDispatch::on_event` sweeps at that moment; the test spends the deadline and
+fails if the event is raised twice. A wait budget of zero also waits for nothing
+now (`UdpDriver::service_within(0)` used to wait one tick).
+
+**Several queries in flight, and asking from outside the session.**
+`host-slot-node --inflight K` keeps up to 8 queries pending (`MAX_INFLIGHT`,
+`WZ_LIMIT_MAX_PENDING_QUERIES` 9). `--mailbox` asks the other way: a second
+thread posts its queries to a `GetMailbox` (fixed rows by value, no allocation),
+wakes the session with `SlotClientNode::wake`, and the session's own thread
+drains the rows into `SlotDispatch::get` (`drain_mailbox`); a row the table
+cannot take yet is left for the next drain, and one it will never take is
+refused with a reason. The results, against the same responder behind zenohd,
+6,200 queries a run, median of 9 runs:
+
+| in flight | event, round trip | event, queries a second | mailbox, round trip |
+|---|---|---|---|
+| 1 | 76 us | 12,700 | 76 us |
+| 2 | 88 us | 20,900 | 89 us |
+| 4 | 113 us | 31,600 | 112 us |
+| 8 | 164 us | 41,800 | 164 us |
+
+The mailbox costs nothing that this measures. The latency rises with the number
+in flight because the router and the responder serialise them; the rate rises
+because the round trips overlap.
+
+Two things the runs showed, neither settled:
+
+- Against zenohd 1.10.1 a run with four or more queries in flight sometimes
+  never finishes: the router stops writing responses to the node for good
+  (event, 4 in flight: 9 of 30 runs; 8: 5 of 30; mailbox, 4: 6 of 30; one in
+  flight: 0 of 30). Its log has just dropped a Response "over the deadline"; the
+  node's socket queue is empty and its sequence numbers are contiguous. The
+  repository's own router did not stop in 60 such runs. That is the router's
+  behaviour under this load; whether this node's request pattern provokes it is
+  not known, and nothing here has been reported upstream.
+- Against the repository's own router, 4 of those 60 runs lost one to four
+  queries of 6,200 (a timeout at the getter), always the fourth of four requests
+  sent back to back. The router had received every response; some did not leave
+  on the UDP face. The likely cause is the congestion rule it takes from the
+  reference (a droppable message meets a queue past its slot budget and is
+  dropped at once), but no counter sits at that point, so it is a hypothesis. It
+  is a defect candidate and is registered as a debt, not accepted as the
+  reference's behaviour.
+
+The two routers were also compared with one query and two in flight, shuffled,
+15 runs each, router, responder and getter pinned: zenohd 394 us and 2,328
+queries a second against 325 us and 2,843 for the repository's router at one in
+flight, 441 us and 4,114 against 336 us and 5,401 at two, with no query lost or
+stuck in any of the 60 runs. These medians are about five times those of the
+table above, which was not taken pinned; why is not established, so only the
+order within one table is a finding.
 
 ## 5.3 The kit client sleeps when idle, and batches (2026-10-23)
 
