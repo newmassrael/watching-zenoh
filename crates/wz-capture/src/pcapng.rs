@@ -1481,9 +1481,9 @@ pub fn write(interfaces: &[(u32, u8)], packets: &[(u32, u64, &[u8])]) -> Vec<u8>
     write_flagged(interfaces, &flagged)
 }
 
-/// [`write`], with an `epb_flags` option (code 2, four bytes) on each packet
+/// [`write()`], with an `epb_flags` option (code 2, four bytes) on each packet
 /// whose fourth element is `Some`, then `opt_endofopt`. A packet with `None`
-/// has no option list, byte for byte what [`write`] emits.
+/// has no option list, byte for byte what [`write()`] emits.
 pub fn write_flagged(
     interfaces: &[(u32, u8)],
     packets: &[(u32, u64, &[u8], Option<u32>)],

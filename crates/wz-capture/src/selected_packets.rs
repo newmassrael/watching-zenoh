@@ -58,7 +58,8 @@
 //!
 //! # What the counts say
 //!
-//! [`SelectedPacketsSummary`] counts the rows by the word they got, the rows the
+//! [`SelectedPacketsSummary`](crate::selected_packets::SelectedPacketsSummary)
+//! counts the rows by the word they got, the rows the
 //! message ceilings took before this walk (so a list made short is never read as
 //! whole), the picked rows whose bytes are no longer held, and what context
 //! added and could not place. An empty selector asks nothing: every row is
