@@ -69,6 +69,9 @@ SINGLE_THREADED = r"^(zp_spin_once|zp_read)$"
 # pico's connectivity plane (`connectivity`), which the default build has and a build of
 # upstream's default header does not.
 CONNECTIVITY = r"^(z_info_transports|z_declare_transport_events_listener)$"
+# The multicast transport (`multicast-transport`, open-debt item 913): the group face and its
+# pipeline, which pico's default build has (`Z_FEATURE_MULTICAST_TRANSPORT`) and zenoh-c's too.
+MULTICAST = r"multicast_glue|multicast_pipeline|MulticastLinkDriver"
 
 
 @dataclass(frozen=True)
@@ -88,35 +91,41 @@ class Case:
 CASES: tuple[Case, ...] = (
     Case("pico-client", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_830_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
-                 CONNECTIVITY),
+                 CONNECTIVITY, MULTICAST),
          require=(SINGLE_THREADED,),
          note="a single-threaded pub/sub client that dials TCP: no listener, no scouting, "
               "no UDP, no clock, no unstable API. 1,794,085 measured, down from 1,868,267 "
               "with the unstable API and the connectivity plane"),
     Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_892_000,
-         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY),
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
+                 MULTICAST),
          require=(UDP, SINGLE_THREADED)),
     Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_946_000,
-         forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY),
+         forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
          note="peer implies scout and with it the UDP group"),
-    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_030_000,
+    Case("pico-default", "wz-capi-pico", "libwz_capi_pico.so", None, 4_300_000,
          forbid=(SINGLE_THREADED,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
-                  CONNECTIVITY),
+                  CONNECTIVITY, MULTICAST),
          exports=802,
          note="every capability on: the symbol count is the drop-in's. 809 -> 802 when the "
-              "seven single-threaded entry points left the multi-threaded arm"),
+              "seven single-threaded entry points left the multi-threaded arm. 4,216,542 "
+              "measured with the multicast transport pico's default has (open-debt item 913), "
+              "3,790,610 without it"),
     Case("capic-client", "wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
-         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED)),
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST)),
     Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_275_000,
-         forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED), require=(SCOUTING, UDP)),
+         forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED, MULTICAST),
+         require=(SCOUTING, UDP)),
     Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_065_000,
-         forbid=(GOSSIP, CLOCK, ADVANCED), require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_045_000,
-         require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED), exports=835,
+         forbid=(GOSSIP, CLOCK, ADVANCED, MULTICAST), require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_210_000,
+         require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
+         exports=835,
          note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
-              "rsa): 8,866,359 measured, up from about 5.1 MB without them"),
+              "rsa): 8,866,359 measured, up from about 5.1 MB without them; 9,029,823 with "
+              "the multicast transport (open-debt item 913)"),
 )
 
 
