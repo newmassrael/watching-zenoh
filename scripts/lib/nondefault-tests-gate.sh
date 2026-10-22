@@ -276,6 +276,11 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     # `admin_space_roundtrip` target are reached only by that feature.
     "wz-capi-pico|hook|admin-space,transport-link-quic,transport-link-serial,transport-link-tls,\
 transport-link-unixpipe,transport-link-ws|"
+    # pico's session-local delivery, a row of its own rather than two more features on
+    # the row above: with them a session's own put reaches its own subscribers, which
+    # every other test of the crate is written against pico's default build NOT doing.
+    # `--test=local_delivery` covers that target by construction.
+    "wz-capi-pico|hook|local-subscriber,local-queryable|--test=local_delivery"
     # The two node-config features the zenoh-c ABI turns on: the usrpwd
     # credential machinery and the interceptor chain (`access_control`,
     # `low_pass_filter`, `downsampling`). Both are off here by default, so the

@@ -17,8 +17,9 @@
 #
 # `implies` is a capability that must be on when this one is. `abis` is where the capability is
 # exported (core is the model under both ABIs and always has it). `default` is whether a build
-# that names nothing has it (every capability is on by default: the drop-in exports what the
-# reference build does). `pico_flag` is zenoh-pico's own switch for it, where it has one, so a
+# that names nothing has it: on unless declared `default = "off"`, so the drop-in exports what
+# the reference build does, and `off` is for a switch the reference library itself leaves off.
+# `pico_flag` is zenoh-pico's own switch for it, where it has one, so a
 # deployer who already writes a pico `config.h` can state the same intent. `pico_flags_all` is
 # for a capability pico has no switch of its own for but has whenever several switches are all
 # on (the liveliness get, which pico declares inside both the liveliness and the query switch).
@@ -138,6 +139,43 @@ abis = ["core", "pico"]
 pico_flag = "Z_FEATURE_CONNECTIVITY"
 implies = ["unstable-api"]
 help = "pico's connectivity plane: transport and link snapshots, and their event listeners."
+
+# pico's admin space (`Z_FEATURE_ADMIN_SPACE`, off in upstream's default and in the reference
+# build): `zp_start_admin_space` / `zp_stop_admin_space`, a queryable answering pico's
+# `@/<zid>/pico/**` documents, and the open options' `auto_start_admin_space`. pico's CMake
+# turns it off without the queryable and without the unstable API.
+[[capability]]
+id = "admin-space"
+kconfig = "WZ_CAP_ADMIN_SPACE"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_ADMIN_SPACE"
+default = "off"
+implies = ["queryable", "unstable-api"]
+help = "pico's admin space: zp_start_admin_space, zp_stop_admin_space and the @/<zid>/pico/** documents."
+
+# pico's session-local delivery (`Z_FEATURE_LOCAL_SUBSCRIBER`, `Z_FEATURE_LOCAL_QUERYABLE`, both
+# off upstream). On, a session's own put reaches its own subscribers, and its own get its own
+# queryables, inside the call and on the caller's thread as pico delivers them; the option
+# structs gain `allowed_origin` and `allowed_destination`, so the layouts differ from the
+# default arm's; and a publisher's or querier's write filter and matching status count the
+# session's own entities.
+[[capability]]
+id = "local-subscriber"
+kconfig = "WZ_CAP_LOCAL_SUBSCRIBER"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_LOCAL_SUBSCRIBER"
+default = "off"
+implies = []
+help = "pico's session-local subscriptions: a session's own put reaches its own subscribers."
+
+[[capability]]
+id = "local-queryable"
+kconfig = "WZ_CAP_LOCAL_QUERYABLE"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_LOCAL_QUERYABLE"
+default = "off"
+implies = []
+help = "pico's session-local queryables: a session's own get reaches its own queryables."
 
 # pico's header arm for its tasks. On, the C ABI is the one pico's multi-threaded headers declare:
 # the read and lease task doors, the host mutex, condvar and task, and the channel collections

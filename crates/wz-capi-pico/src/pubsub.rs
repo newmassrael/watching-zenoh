@@ -448,21 +448,27 @@ pub(crate) type CClosure = FfiClosure<z_closure_sample_callback_t>;
 // Written per-plane rather than blanket-implemented on the generic, because the
 // argument below is specific to THIS plane (see `crate::ffi::CClosure`).
 //
-// Sharing `&CClosure` is sound because `call` is only ever invoked from the
-// session's single drive task: every face of a session is driven on ONE task
-// (the accept loop multiplexes its faces there via one `select!`; a dialed
-// session has exactly one drive loop), and inbound dispatch is the ONLY caller
-// of `call`. It is load-bearing that the C application thread never invokes
-// `call`: the fan-out publishes are `Locality::Remote` (see `put_options`), so
-// `z_put` stages NO loopback fire and never drains a callback on the C thread.
-// Were the publishes local-capable, a C-thread `z_put` whose keyexpr matched a
-// subscription would drain that face's loopback fire on the C thread
-// concurrently with the drive thread's inbound dispatch on another face —
-// two `call(context)`s at once on one C context, the exact data race the pico
-// single-threaded-callback contract forbids. `drop` runs only when the last
-// `Arc` is released, which cannot overlap a live `call` (a running callback
-// holds a reference). That is pico's closure contract: the callback fires from
-// the read task, the drop from teardown, never concurrently.
+// Sharing `&CClosure` is sound because the closure is two C pointers that Rust
+// only reads, and WHO calls `call` is pico's contract, which this ABI keeps in
+// each arm:
+//
+// - Without `local-subscriber`, `call` is only ever invoked from the session's
+//   drive task: inbound dispatch is the ONLY caller, because every publish is
+//   `Locality::Remote` (see `put_options`) and `z_put` stages no loopback fire.
+//   That is pico's default build, whose callbacks run on its read task alone.
+// - With `local-subscriber`, a session's own put also delivers to its own
+//   subscriber inside the call, on the calling thread, while the drive task may
+//   be delivering a peer's sample to the same subscriber. pico does exactly
+//   that: `_z_session_deliver_push_locally` runs on the thread that called
+//   `z_put`, and `_z_trigger_subscriptions_impl` calls the callback after
+//   releasing the session mutex (`vendor/zenoh-pico/src/session/subscription.c`
+//   @ `sub_info->_callback(&sample, sub_info->_arg);`), so the read task can be
+//   in the same callback at once. A program built with that switch is written
+//   for it; what it shares between the two calls is its own to guard, as it is
+//   against pico.
+//
+// `drop` runs only when the last `Arc` is released, which cannot overlap a live
+// `call` (a running callback holds a reference).
 unsafe impl Sync for CClosure {}
 
 /// Build the wz-side subscriber callback for ONE face from a shared C closure.
@@ -785,6 +791,9 @@ pub(crate) struct PublisherQos {
     priority: wz_runtime_tokio::qos::Priority,
     is_express: bool,
     reliability: Reliability,
+    /// Where its samples may go: `allowed_destination` with `local-subscriber`
+    /// (`publisher->_allowed_destination` upstream), remote only without it.
+    destination: Locality,
 }
 
 impl PublisherQos {
@@ -799,7 +808,15 @@ impl PublisherQos {
             priority: crate::qos::priority_from_pico(crate::qos::Z_PRIORITY_DEFAULT),
             is_express: false,
             reliability: reliability_from_pico(Z_RELIABILITY_RELIABLE),
+            destination: crate::locality::default_locality!("local-subscriber"),
         }
+    }
+
+    /// Whether the publisher's write filter and matching status count the session's
+    /// own subscribers: pico's `ctx->allow_local`, which only a publisher whose
+    /// destination admits session-local traffic has.
+    pub(crate) fn counts_local(&self) -> bool {
+        self.destination.allows_local()
     }
 
     /// What one C `z_publisher_options_t` declares, consuming its moved
@@ -821,6 +838,7 @@ impl PublisherQos {
             priority: crate::qos::priority_from_pico(options.priority),
             is_express: options.is_express,
             reliability: reliability_from_pico(options.reliability()),
+            destination: options.allowed_destination(),
         }
     }
 
@@ -832,7 +850,8 @@ impl PublisherQos {
             .with_priority(self.priority)
             .with_congestion_control(self.congestion_control)
             .with_express(self.is_express)
-            .with_reliability(self.reliability);
+            .with_reliability(self.reliability)
+            .with_locality(self.destination);
         if out.encoding.is_none() {
             if let Some(encoding) = self.encoding.clone() {
                 out = out.with_encoding(encoding);
@@ -859,7 +878,12 @@ impl PlainPublisher {
         // R2962 — the filter is created AFTER the key, because its Interest names
         // the key's declaration (pico's order: `_z_declared_keyexpr_declare`, then
         // `_z_write_filter_create`, in `z_declare_publisher`).
-        let filter = WriteFilter::declare(session, FilterPlane::Subscribers, &key);
+        let filter = WriteFilter::declare(
+            session,
+            FilterPlane::Subscribers,
+            &key,
+            declared.counts_local(),
+        );
         let plain = declared
             .apply(&put_options())
             .plain_put_params()
@@ -943,6 +967,18 @@ impl PlainPublisher {
     pub(crate) fn key(&self) -> &DeclaredKeyexpr {
         &self.key
     }
+
+    /// Whether its write filter and matching status count the session's own
+    /// subscribers ([`PublisherQos::counts_local`]).
+    pub(crate) fn counts_local(&self) -> bool {
+        self.declared.counts_local()
+    }
+
+    /// pico's matching status of the publisher: whether its write filter has a match
+    /// (`!_z_write_filter_active`).
+    pub(crate) fn filter_matches(&self) -> bool {
+        !self.filter.active()
+    }
 }
 
 /// Behind a `z_owned_publisher_t` handle: a keyexpr bound to the session's
@@ -998,6 +1034,18 @@ impl PublisherState {
     /// The declared keyexpr — what the MATCHING plane watches.
     pub(crate) fn keyexpr(&self) -> &str {
         self.core.key.literal()
+    }
+
+    /// Whether the publisher's matching status counts the session's own
+    /// subscribers ([`PublisherQos::counts_local`]).
+    pub(crate) fn counts_local(&self) -> bool {
+        self.core.counts_local()
+    }
+
+    /// pico's matching status: whether the write filter has a match, which is
+    /// `!_z_write_filter_active`.
+    pub(crate) fn filter_matches(&self) -> bool {
+        self.core.filter_matches()
     }
 
     /// The session registry this publisher publishes through. Cloned rather
@@ -1277,24 +1325,20 @@ unsafe fn publisher_put_options(
     (opts, carried)
 }
 
+/// The options a put starts from: reliable, and the destination
+/// `z_put_options_default` gives, which is what a NULL options pointer means.
+///
+/// The destination is `Locality::Remote` without `local-subscriber`: a pico session's
+/// own put reaches its own subscribers only through `_z_session_deliver_push_locally`,
+/// which `_z_write` calls only when `Z_FEATURE_LOCAL_SUBSCRIBER` compiles it in
+/// (`vendor/zenoh-pico/src/net/primitives.c` @ `_z_session_deliver_push_locally`). With the
+/// switch it is `Any`, and the session's own subscribers are reached ONCE, through the
+/// registry's local plane (faces take the remote half, the plane the local one), inside
+/// the call and on the calling thread, which is where pico delivers them.
 fn put_options() -> PublishOptions {
-    // `Locality::Remote`, not the `Any` default. A pico session's own `z_put`
-    // is delivered to its OWN local subscribers at most ONCE
-    // (`_z_write` -> `_z_session_deliver_push_locally`, gated on
-    // `Z_FEATURE_LOCAL_SUBSCRIBER`, `~/zenoh-pico/src/net/primitives.c:198-201`).
-    // Here the C session is N per-face wz sessions, each with its own observer
-    // carrying a replica of the subscription — so a local-capable publish would
-    // (a) fire the one C callback ONCE PER FACE (N duplicate local deliveries
-    // for a single `z_put`), and (b) drain that fire on the C thread, racing the
-    // drive thread's inbound dispatch on another face (see the `CClosure` Sync
-    // note). Remote-only sidesteps both: the fan-out reaches every PEER over the
-    // wire, and self-delivery to local subscribers is deferred as a named
-    // divergence (this crate has never implemented `Z_FEATURE_LOCAL_SUBSCRIBER`;
-    // a faithful build would deliver locally exactly once, at the registry
-    // level, serialized against inbound dispatch).
     let mut opts = PublishOptions::default()
         .with_reliability(Reliability::Reliable)
-        .with_locality(Locality::Remote);
+        .with_locality(crate::locality::default_locality!("local-subscriber"));
     opts.kind = SampleKind::Put;
     opts
 }
@@ -1326,11 +1370,15 @@ pub struct z_put_options_t {
     pub timestamp: *mut z_timestamp_t,
     pub is_express: bool,
     pub attachment: *mut z_moved_bytes_t,
+    #[cfg(feature = "local-subscriber")]
+    pub allowed_destination: crate::locality::z_locality_t,
     #[cfg(feature = "unstable-api")]
     pub reliability: c_int,
     #[cfg(feature = "unstable-api")]
     pub source_info: *mut z_source_info_t,
 }
+
+crate::locality::locality_option_field!(z_put_options_t, allowed_destination, "local-subscriber");
 
 unstable_option_fields!(z_put_options_t {
     reliability: c_int = Z_RELIABILITY_RELIABLE,
@@ -1347,11 +1395,19 @@ pub struct z_delete_options_t {
     pub priority: c_int,
     pub is_express: bool,
     pub timestamp: *mut z_timestamp_t,
+    #[cfg(feature = "local-subscriber")]
+    pub allowed_destination: crate::locality::z_locality_t,
     #[cfg(feature = "unstable-api")]
     pub reliability: c_int,
     #[cfg(feature = "unstable-api")]
     pub source_info: *mut z_source_info_t,
 }
+
+crate::locality::locality_option_field!(
+    z_delete_options_t,
+    allowed_destination,
+    "local-subscriber"
+);
 
 unstable_option_fields!(z_delete_options_t {
     reliability: c_int = Z_RELIABILITY_RELIABLE,
@@ -1386,6 +1442,8 @@ pub unsafe extern "C" fn z_put_options_default(options: *mut z_put_options_t) {
         timestamp: std::ptr::null_mut(),
         is_express: false,
         attachment: std::ptr::null_mut(),
+        #[cfg(feature = "local-subscriber")]
+        allowed_destination: crate::locality::Z_LOCALITY_ANY,
         #[cfg(feature = "unstable-api")]
         reliability: Z_RELIABILITY_RELIABLE,
         #[cfg(feature = "unstable-api")]
@@ -1407,6 +1465,8 @@ pub unsafe extern "C" fn z_delete_options_default(options: *mut z_delete_options
         priority: crate::qos::Z_PRIORITY_DEFAULT,
         is_express: false,
         timestamp: std::ptr::null_mut(),
+        #[cfg(feature = "local-subscriber")]
+        allowed_destination: crate::locality::Z_LOCALITY_ANY,
         #[cfg(feature = "unstable-api")]
         reliability: Z_RELIABILITY_RELIABLE,
         #[cfg(feature = "unstable-api")]
@@ -1533,10 +1593,11 @@ pub(crate) unsafe fn source_info_hint_of(
 /// ownership transfer is unconditional once the call is made — and a NULL
 /// `options` is the plain default, which is what pico does too.
 ///
-/// `allowed_destination` is absent from the struct (see [`z_put_options_t`]),
-/// so the locality stays [`put_options`]'s `Remote`: a default pico build does
-/// not deliver a session's own put to its own subscriber, and there is no field
-/// through which a program could ask it to.
+/// `allowed_destination` is the struct's own with `local-subscriber`. Without it
+/// the field is absent (see [`z_put_options_t`]) and the locality stays
+/// [`put_options`]'s `Remote`: a default pico build does not deliver a session's
+/// own put to its own subscriber, and there is no field through which a program
+/// could ask it to.
 ///
 /// # Safety
 /// `options` must be null or a valid put-options struct.
@@ -1552,7 +1613,8 @@ unsafe fn session_put_options(options: *const z_put_options_t) -> PublishOptions
         .with_priority(crate::qos::priority_from_pico((*options).priority))
         .with_congestion_control(push_congestion_from_pico((*options).congestion_control))
         .with_express((*options).is_express)
-        .with_reliability(reliability_from_pico((*options).reliability()));
+        .with_reliability(reliability_from_pico((*options).reliability()))
+        .with_locality((*options).allowed_destination());
     if let Some(attachment) = attachment {
         opts = opts.with_attachment(attachment.to_vec());
     }
@@ -1583,7 +1645,8 @@ unsafe fn session_delete_options(options: *const z_delete_options_t) -> PublishO
         .with_priority(crate::qos::priority_from_pico((*options).priority))
         .with_congestion_control(push_congestion_from_pico((*options).congestion_control))
         .with_express((*options).is_express)
-        .with_reliability(reliability_from_pico((*options).reliability()));
+        .with_reliability(reliability_from_pico((*options).reliability()))
+        .with_locality((*options).allowed_destination());
     if let Some(ts) = timestamp_hint_of((*options).timestamp) {
         opts = opts.with_timestamp(ts);
     }
@@ -1746,11 +1809,19 @@ pub struct z_publisher_options_t {
     pub is_express: bool,
     #[cfg(feature = "unstable-api")]
     pub reliability: c_int,
+    #[cfg(feature = "local-subscriber")]
+    pub allowed_destination: crate::locality::z_locality_t,
 }
 
 unstable_option_fields!(z_publisher_options_t {
     reliability: c_int = Z_RELIABILITY_RELIABLE,
 });
+
+crate::locality::locality_option_field!(
+    z_publisher_options_t,
+    allowed_destination,
+    "local-subscriber"
+);
 
 /// Default publisher options (pico `z_publisher_options_default`,
 /// `vendor/zenoh-pico/src/api/api.c` @
@@ -1772,6 +1843,8 @@ pub unsafe extern "C" fn z_publisher_options_default(options: *mut z_publisher_o
         is_express: false,
         #[cfg(feature = "unstable-api")]
         reliability: Z_RELIABILITY_RELIABLE,
+        #[cfg(feature = "local-subscriber")]
+        allowed_destination: crate::locality::Z_LOCALITY_ANY,
     };
 }
 
@@ -1983,6 +2056,20 @@ unsafe fn subscriber_wire(
     Some(wire.keeping(anchor))
 }
 
+/// The traffic a subscriber declared with `options` admits: its `allowed_origin` with
+/// `local-subscriber`, `Z_LOCALITY_ANY` for NULL options there (what
+/// `z_subscriber_options_default` writes), and remote only without the switch.
+///
+/// # Safety
+/// `options` must be null or valid.
+unsafe fn subscriber_origin(options: *const crate::session::z_subscriber_options_t) -> Locality {
+    if options.is_null() {
+        crate::locality::default_locality!("local-subscriber")
+    } else {
+        (*options).allowed_origin()
+    }
+}
+
 /// Declare a subscriber (pico `z_declare_subscriber`). Consumes the moved
 /// closure.
 #[no_mangle]
@@ -1991,7 +2078,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
     subscriber: *mut z_owned_subscriber_t,
     keyexpr: *const z_loaned_keyexpr_t,
     callback: *mut z_moved_closure_sample_t,
-    _options: *const c_void,
+    options: *const crate::session::z_subscriber_options_t,
 ) -> ZResult {
     guarded(|| {
         if subscriber.is_null() || callback.is_null() {
@@ -2032,14 +2119,13 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // records the entry (pico's declare-before-peer); each face replays the
         // SSOT as it comes up. Recording the local entry always succeeds
         // (mirrors pico's `_z_register_subscriber`).
-        // R311y554 — `Locality::Remote`, and unlike the zenoh-c sibling this is
-        // a FIDELITY choice with a measured source rather than a soundness
-        // workaround: `Z_FEATURE_LOCAL_SUBSCRIBER` defaults to 0
-        // (`vendor/zenoh-pico/CMakeLists.txt:343`), which is why pico's own
-        // `z_subscriber_options_t` has no `allowed_origin` field in a default
-        // build and why this crate's mirror of it has none either. A default
-        // pico build never delivers a session's own put to its own subscriber,
-        // so neither does this ABI.
+        // R311y554 — the origin is the caller's `allowed_origin` with
+        // `local-subscriber`, and `Locality::Remote` without it: a FIDELITY
+        // choice with a measured source rather than a soundness workaround.
+        // `Z_FEATURE_LOCAL_SUBSCRIBER` defaults to 0 upstream, which is why
+        // pico's own `z_subscriber_options_t` has no `allowed_origin` field in a
+        // default build; a default pico build never delivers a session's own
+        // put to its own subscriber, so neither does that arm of this ABI.
         // R2959 — pico's two keys for one subscriber, and they are NOT the same
         // one. The subscription's own key gets the NON-WILD PREFIX declared,
         // and that declaration goes on the wire FIRST
@@ -2065,12 +2151,16 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // (`_z_undeclare_subscriber`), which is the prefix declaration above and
         // not the caller's key the announce went out on.
         let retraction = key.retraction_naming(&PicoSession::of(state));
-        let id = state
-            .shared
-            .declare_subscriber_on_wire(ke, wire, Locality::Remote, retraction, {
+        let id = state.shared.declare_subscriber_on_wire(
+            ke,
+            wire,
+            subscriber_origin(options),
+            retraction,
+            {
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-            });
+            },
+        );
         let mut boxed = Box::new(SubscriberState {
             shared: state.shared.clone(),
             id,
@@ -2105,7 +2195,7 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
     zs: *const z_loaned_session_t,
     keyexpr: *const z_loaned_keyexpr_t,
     callback: *mut z_moved_closure_sample_t,
-    _options: *const c_void,
+    options: *const crate::session::z_subscriber_options_t,
 ) -> ZResult {
     guarded(|| {
         if callback.is_null() {
@@ -2148,12 +2238,16 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         // declared for as long as the entry can retract.
         let retraction = key.retraction_naming(&PicoSession::of(state));
         drop(key);
-        let _ = state
-            .shared
-            .declare_subscriber_on_wire(ke, wire, Locality::Remote, retraction, {
+        let _ = state.shared.declare_subscriber_on_wire(
+            ke,
+            wire,
+            subscriber_origin(options),
+            retraction,
+            {
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-            });
+            },
+        );
         Z_OK
     })
 }

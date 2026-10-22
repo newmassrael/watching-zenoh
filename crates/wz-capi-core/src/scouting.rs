@@ -124,6 +124,39 @@ pub fn run_scout(
     budget_ms: u64,
     on_hello: impl FnMut(&ScoutedHello),
 ) -> usize {
+    // The survey arm — report every responder, do not stop at one.
+    let hellos = scout_window(group, port, what, zid, budget_ms, false);
+    deliver_in_upstream_order(&hellos, on_hello)
+}
+
+/// Scout for `budget_ms` and answer the FIRST node that replies, or `None` when none does in
+/// the window: zenoh-pico's open-time lookup, which `_z_open` runs when its config names no
+/// locator (`vendor/zenoh-pico/src/net/session.c` @
+/// `_z_hello_slist_t *hellos = _z_scout_inner(what, *zid, &mcast_locator, timeout, true);`).
+/// The `true` is `exit_on_first`: the window ends at the first Hello, which is this function's
+/// whole answer. A bind failure is `None`, as a window nobody answers is.
+pub fn scout_first(
+    group: IpAddr,
+    port: u16,
+    what: u8,
+    zid: Vec<u8>,
+    budget_ms: u64,
+) -> Option<ScoutedHello> {
+    scout_window(group, port, what, zid, budget_ms, true)
+        .into_iter()
+        .next()
+}
+
+/// One scouting window: bind the group, send one Scout, and collect the Hellos that answer
+/// within `budget_ms`, in arrival order, ending at the first when `exit_on_first`.
+fn scout_window(
+    group: IpAddr,
+    port: u16,
+    what: u8,
+    zid: Vec<u8>,
+    budget_ms: u64,
+    exit_on_first: bool,
+) -> Vec<ScoutedHello> {
     use wz_runtime_tokio::scouting_fanout::{
         bind_scout_sockets, scout_interface_addresses, ScoutFanOut,
     };
@@ -137,10 +170,10 @@ pub fn run_scout(
         .enable_all()
         .build()
     else {
-        return 0;
+        return Vec::new();
     };
 
-    let hellos = runtime.block_on(async move {
+    runtime.block_on(async move {
         // `None`: the scouting group is deliberately NOT interface-narrowed — a
         // discovery beacon must reach every interface a peer could answer on.
         //
@@ -180,8 +213,7 @@ pub fn run_scout(
             // `timeout` straight to `__z_scout_loop`'s `while elapsed <
             // period` (`src/session/scout.c:60-63`).
             timeout_ms: budget_ms,
-            // The survey arm — report every responder, do not stop at one.
-            exit_on_first: false,
+            exit_on_first,
         });
         let mut engine = new_scouting_engine(&actions);
         let clock = wz_runtime_tokio::runtime_impl::TokioTime::new();
@@ -196,8 +228,7 @@ pub fn run_scout(
         )
         .await;
         actions.scouted_hellos()
-    });
-    deliver_in_upstream_order(&hellos, on_hello)
+    })
 }
 
 #[cfg(test)]

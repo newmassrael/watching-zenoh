@@ -634,6 +634,37 @@ if grep -qE "^#define Z_FEATURE_UNSTABLE_API" "$GENERATED_CONFIG_DEFAULT"; then
     exit 1
 fi
 
+# --- the LOCAL-DELIVERY header arm -------------------------------------------
+#
+# A fourth CONFIGURE (no build): the reference arm with both session-local switches on.
+# Its headers add `allowed_origin` / `allowed_destination` to seven option structs, and
+# upstream's own tests of the switches (`tests/z_api_local_subscriber_test.c`,
+# `tests/z_api_local_queryable_test.c`) have a body only under it. wz builds the drop-in
+# for this arm from its config.h, as for the other arms (open-debt item 914).
+cmake -B "${BUILD_DIR}-local" -S "$EXAMPLES_DIR" \
+    -DCMAKE_C_STANDARD=11 \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DZ_FEATURE_UNSTABLE_API=ON \
+    -DZ_FEATURE_ADVANCED_PUBLICATION=1 \
+    -DZ_FEATURE_ADVANCED_SUBSCRIPTION=1 \
+    -DZ_FEATURE_LINK_SERIAL=1 \
+    -DZ_FEATURE_LINK_TLS=1 \
+    -DZ_FEATURE_CONNECTIVITY=1 \
+    -DZ_FEATURE_LOCAL_SUBSCRIBER=1 \
+    -DZ_FEATURE_LOCAL_QUERYABLE=1 >&2
+
+GENERATED_CONFIG_LOCAL="${BUILD_DIR}-local/zenohpico/include/zenoh-pico/config.h"
+if [[ ! -f "$GENERATED_CONFIG_LOCAL" ]]; then
+    echo "build-zenoh-pico-cli: local-arm config.h missing: $GENERATED_CONFIG_LOCAL" >&2
+    exit 1
+fi
+for switch in Z_FEATURE_LOCAL_SUBSCRIBER Z_FEATURE_LOCAL_QUERYABLE; do
+    if ! grep -qx "#define $switch 1" "$GENERATED_CONFIG_LOCAL"; then
+        echo "build-zenoh-pico-cli: the local arm did NOT take $switch" >&2
+        exit 1
+    fi
+done
+
 # Build only the curated CLI targets (avoids the full examples target
 # set; faster + smaller install surface).
 cmake --build "$BUILD_DIR" --target "${TARGETS[@]}" -j"$(nproc)" >&2

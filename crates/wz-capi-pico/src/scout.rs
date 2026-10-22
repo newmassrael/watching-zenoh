@@ -535,6 +535,57 @@ fn parse_multicast_locator(locator: &str) -> Option<(std::net::Ipv4Addr, u16)> {
     Some((addr.parse().ok()?, port.parse().ok()?))
 }
 
+/// What a scout reads from a pico config: each key's value, or pico's default for it.
+/// `z_scout` with NULL options and `z_open`'s lookup read the same four keys
+/// (`vendor/zenoh-pico/src/net/session.c` @ `static z_result_t _z_locators_by_scout(`), so
+/// they read them here, once.
+struct ScoutConfig {
+    what: u8,
+    budget_ms: u64,
+    locator: String,
+    /// The identity the Scout announces. A responder that logs the scouter names the zid
+    /// configured for the session; an unparseable one falls back to a fresh random one
+    /// rather than scouting as all-zeros (which a peer may read as unset).
+    zid: Vec<u8>,
+}
+
+impl ScoutConfig {
+    fn read(cfg: Option<&ConfigState>) -> Self {
+        let get = |key: u8| cfg.and_then(|c| c.get(key)).map(|s| s.trim().to_string());
+        Self {
+            what: get(Z_CONFIG_SCOUTING_WHAT_KEY)
+                .and_then(|s| s.parse::<u8>().ok())
+                .unwrap_or(SCOUTING_WHAT_DEFAULT),
+            budget_ms: get(Z_CONFIG_SCOUTING_TIMEOUT_KEY)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(u64::from(SCOUTING_TIMEOUT_DEFAULT_MS)),
+            locator: get(Z_CONFIG_MULTICAST_LOCATOR_KEY)
+                .unwrap_or_else(|| MULTICAST_LOCATOR_DEFAULT.into()),
+            zid: get(Z_CONFIG_SESSION_ZID_KEY)
+                .and_then(|s| parse_hex_zid(&s))
+                .unwrap_or_else(fresh_scout_zid),
+        }
+    }
+}
+
+/// The locators a `z_open` whose config names none opens on: pico's `_z_locators_by_scout`,
+/// which scouts with the config's `what`, group and budget, stops at the first Hello, and
+/// hands that node's locators to the open as its connect locators
+/// (`vendor/zenoh-pico/src/net/session.c` @
+/// `ret = _z_locators_by_scout(config, zid, &connect_locators);`). Nobody answering, or a
+/// node that answered with no locator, is `Z_ERR_SCOUT_NO_RESULTS`, as there; a group this
+/// crate cannot scout on is `Z_ERR_INVALID`, as `z_scout` answers it.
+pub(crate) fn locators_by_scout(cfg: &ConfigState) -> Result<Vec<String>, ZResult> {
+    let read = ScoutConfig::read(Some(cfg));
+    let Some((group, port)) = parse_multicast_locator(&read.locator) else {
+        return Err(crate::result::Z_ERR_INVALID);
+    };
+    wz_capi_core::scouting::scout_first(group.into(), port, read.what, read.zid, read.budget_ms)
+        .map(|hello| hello.locators)
+        .filter(|locators| !locators.is_empty())
+        .ok_or(crate::result::Z_ERR_SCOUT_NO_RESULTS)
+}
+
 /// Active multicast scouting (pico `z_scout`).
 ///
 /// BLOCKS for the resolved budget, invoking `callback` once per Hello decoded,
@@ -576,33 +627,13 @@ pub unsafe extern "C" fn z_scout(
     } else {
         Some(Box::from_raw(config_handle as *mut ConfigState))
     };
-    let cfg_get = |key: u8| -> Option<String> {
-        cfg.as_ref()
-            .and_then(|c| c.get(key))
-            .map(|s| s.trim().to_string())
-    };
-
+    let read = ScoutConfig::read(cfg.as_deref());
+    drop(cfg);
     let (what, budget_ms) = match options.as_ref() {
         Some(o) => (o.what as u8, u64::from(o.timeout_ms)),
-        None => (
-            cfg_get(Z_CONFIG_SCOUTING_WHAT_KEY)
-                .and_then(|s| s.parse::<u8>().ok())
-                .unwrap_or(SCOUTING_WHAT_DEFAULT),
-            cfg_get(Z_CONFIG_SCOUTING_TIMEOUT_KEY)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(u64::from(SCOUTING_TIMEOUT_DEFAULT_MS)),
-        ),
+        None => (read.what, read.budget_ms),
     };
-    let locator =
-        cfg_get(Z_CONFIG_MULTICAST_LOCATOR_KEY).unwrap_or_else(|| MULTICAST_LOCATOR_DEFAULT.into());
-    // The Scout announces the identity this node would open a session with, so
-    // a responder that logs the scouter names the same zid a later InitSyn
-    // would carry. An unparseable configured zid falls back to a fresh random
-    // one rather than scouting as all-zeros (which a peer may read as unset).
-    let zid = cfg_get(Z_CONFIG_SESSION_ZID_KEY)
-        .and_then(|s| parse_hex_zid(&s))
-        .unwrap_or_else(fresh_scout_zid);
-    drop(cfg);
+    let ScoutConfig { locator, zid, .. } = read;
 
     let Some((group, port)) = parse_multicast_locator(&locator) else {
         if let Some(drop_fn) = user_drop {

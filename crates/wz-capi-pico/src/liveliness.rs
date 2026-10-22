@@ -572,7 +572,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         // get over. Shared with `z_get` through the core cancellation plane
         // (`wz_capi_core::cancellation`, R2949), so the two planes cannot drift
         // in their cancellation semantics — including `cancel`'s wait for every
-        // face's callback, which each [`crate::get::FaceReply`] holds open.
+        // face's callback, which each [`crate::get::LegReply`] holds open.
         let fan = match &token {
             None => None,
             Some(token) => {
@@ -586,7 +586,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         let registration = fan.as_ref().map(|(_, r)| Arc::clone(r));
         let fan = fan.map(|(f, _)| f);
         for (session, revised) in state.shared.face_sessions_with_wake() {
-            let per_face = crate::get::FaceReply {
+            let per_face = crate::get::LegReply {
                 closure: closure.clone(),
                 gate: gate.clone(),
                 _registration: registration.clone(),

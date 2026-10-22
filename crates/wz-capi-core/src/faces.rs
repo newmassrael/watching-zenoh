@@ -68,6 +68,7 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use tokio::sync::Notify;
 
+use crate::cancellation::CancellableFan;
 #[cfg(feature = "group")]
 use crate::group::{retire_copies, FaceGroup, GroupAggregate, GroupError, GroupId};
 #[cfg(feature = "peer")]
@@ -208,6 +209,12 @@ struct FilterEntry {
     /// (`vendor/zenoh-pico/src/net/primitives.c` @ `_z_add_interest`), and
     /// learns only what peers volunteer.
     ask: Option<InterestForm>,
+    /// Whether the session's OWN entities count, as they do in zenoh-pico when its
+    /// local subscriber or queryable switch is on and the entity's locality admits
+    /// session-local traffic (`ctx->allow_local`, `vendor/zenoh-pico/src/net/filtering.c` @
+    /// `_z_write_filter_ctx_add_local_match`). They are read fresh from the
+    /// declarations every time ([`Inner::local_entity_matches`]), never cached.
+    count_local: bool,
     /// The last answer worked out for this filter and what it was worked out from: the
     /// set of faces and the declarations the faces' peers had made. While neither has
     /// moved the answer is the same, which is what lets a put skip the work of asking.
@@ -877,7 +884,15 @@ struct MatchEntry {
     /// `undeclare_matching_listener` can retire it deterministically.
     state: Arc<StdMutex<MatchAggregate>>,
     scope: MatchScope,
+    /// Whether the session's OWN entities count toward the verdict, as one more
+    /// member of the aggregate ([`LOCAL_PLANE_MEMBER`]) beside the faces — see
+    /// [`FilterEntry::count_local`].
+    count_local: bool,
 }
+
+/// The member a [`MatchAggregate`] files the session's own entities under, beside the
+/// ids of its faces. Face ids count up from zero and never reach it.
+const LOCAL_PLANE_MEMBER: u64 = u64::MAX;
 
 /// Which remote declaration a C matching listener watches.
 ///
@@ -896,6 +911,17 @@ enum MatchScope {
 }
 
 impl MatchScope {
+    /// The plane the scope's entities are on, as a write filter names it. A matching
+    /// listener asks for a match, never for a complete one.
+    fn plane(self) -> FilterPlane {
+        match self {
+            MatchScope::RemoteSubscribers => FilterPlane::Subscribers,
+            MatchScope::RemoteQueryables => FilterPlane::Queryables {
+                complete_required: false,
+            },
+        }
+    }
+
     /// Install this scope's per-face watch on `session` for `keyexpr`.
     ///
     /// One function rather than a match at each of the two call sites (declare
@@ -1398,6 +1424,30 @@ impl Inner {
             sum = sum.wrapping_add(counter.load(Acquire));
         }
         Some((self.face_set_generation, sum))
+    }
+
+    /// Whether this session itself holds an entity a write filter or a matching listener
+    /// on `plane` and `keyexpr` sees when it counts the session's own entities: a
+    /// subscriber, or a queryable, whose `allowed_origin` admits session-local traffic and
+    /// whose key meets `keyexpr` — complete and including it, for a querier whose target
+    /// requires completeness. zenoh-pico's local half of the write filter
+    /// (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_session_register`).
+    fn local_entity_matches(&self, plane: FilterPlane, keyexpr: &str) -> bool {
+        use wz_runtime_tokio::keyexpr_match::{keyexpr_includes_target, keyexpr_intersects_text};
+        match plane {
+            FilterPlane::Subscribers => self.subs.iter().any(|sub| {
+                sub.allowed_origin.allows_local() && keyexpr_intersects_text(keyexpr, &sub.keyexpr)
+            }),
+            FilterPlane::Queryables { complete_required } => self.qbls.iter().any(|qbl| {
+                qbl.allowed_origin.allows_local()
+                    && if complete_required {
+                        let target: Vec<&str> = keyexpr.split('/').collect();
+                        qbl.complete && keyexpr_includes_target(&qbl.keyexpr, &target)
+                    } else {
+                        keyexpr_intersects_text(keyexpr, &qbl.keyexpr)
+                    }
+            }),
+        }
     }
 
     /// R2580 — EVERY SESSION A DECLARATION REACHES: the live faces, and the
@@ -1938,8 +1988,9 @@ impl SharedSession {
         }
     }
 
-    /// The local plane's session — what the ABI shims issue the LOCAL leg of a
-    /// `z_get` on (the publish legs stay inside this file).
+    /// The local plane's session. A get's and a publish's local legs are issued on
+    /// it inside this file ([`Self::fan_query`], the publish fan-out); the ABIs
+    /// reach it for what else is session-scope (a held query, the clock).
     pub fn local_session(&self) -> &TokioSession {
         &self.local
     }
@@ -3463,6 +3514,9 @@ impl SharedSession {
                     .filters
                     .iter()
                     .find(|e| e.id == filter)
+                    // A filter that counts the session's own entities has no kept answer
+                    // for them; it is asked the long way, which reads them.
+                    .filter(|entry| !entry.count_local)
                     .and_then(|entry| {
                         let token = guard.filter_token(entry.plane)?;
                         let kept = entry.cache?;
@@ -3544,7 +3598,7 @@ impl SharedSession {
     }
 
     /// A snapshot of every connected face's session PAIRED with its re-arm
-    /// signal — what [`crate::get::fan_get`] iterates.
+    /// signal — what [`Self::fan_query`] iterates.
     ///
     /// Paired rather than looked up per face afterwards because the two must
     /// come from the same snapshot: a face that leaves the registry between the
@@ -3556,6 +3610,60 @@ impl SharedSession {
             .values()
             .map(|face| (face.session.clone(), face.revised.clone()))
             .collect()
+    }
+
+    /// The fan-out every get shares, the query half of the publish fan-out: the wire leg
+    /// to each face with [`Locality::Remote`], then the local leg ONCE on the
+    /// [local plane](Self::local) with [`Locality::SessionLocal`], each only where
+    /// `destination` admits it.
+    ///
+    /// A C session's queryable is declared on every face AND on the plane, so an `Any`
+    /// get handed to each face would run its one handler once per face, and at zero
+    /// faces there would be no local leg at all. Both ABIs issued their gets through
+    /// their own copy of this loop, and the pico copy had exactly that defect (open-debt
+    /// item 914): it is one function so the two cannot disagree again.
+    ///
+    /// `issue` makes the one call a leg is, on the session and with the locality it is
+    /// handed, and answers the leg's request id when it issued one. Each issued leg is
+    /// recorded against `fan`; a token cancelled mid-fan stops the loop at that leg (its
+    /// own undo has then already run) and the local leg is not issued. Each face's drive
+    /// loop is woken after its leg, issued or not, so it re-arms on the deadline just
+    /// registered: without it a silent session sweeps the get only at the next keepalive
+    /// wake. The plane's drain is woken after the local leg, for what a local queryable's
+    /// handler stages on it; the loopback replies and the final are finalised inside
+    /// `Session::query`.
+    pub fn fan_query(
+        &self,
+        destination: Locality,
+        fan: Option<&CancellableFan>,
+        mut issue: impl FnMut(&TokioSession, Locality) -> Option<u64>,
+    ) {
+        // `false` when the token cancelled while the fan was running.
+        let recorded = |session: &TokioSession, rid: u64| {
+            fan.map_or(true, |fan| {
+                let undo = session.clone();
+                fan.record(move || {
+                    undo.cancel_pending_query(rid);
+                })
+            })
+        };
+        if destination.allows_remote() {
+            for (session, revised) in self.face_sessions_with_wake() {
+                let issued = issue(&session, Locality::Remote);
+                if issued.is_some_and(|rid| !recorded(&session, rid)) {
+                    return;
+                }
+                revised.notify_one();
+            }
+        }
+        if destination.allows_local() {
+            if let Some(rid) = issue(&self.local, Locality::SessionLocal) {
+                // The local leg is cancellable like a face's; nothing follows it, so a
+                // cancel that raced it has nothing further to stop.
+                let _ = recorded(&self.local, rid);
+            }
+            self.local_wake.notify_one();
+        }
     }
 
     /// Face `id`'s drive-loop re-arm signal (see [`FaceEntry::revised`]).
@@ -3634,6 +3742,7 @@ impl SharedSession {
                 face.subs.insert(id, sub);
             }
         }
+        let local_key = allowed_origin.allows_local().then(|| keyexpr.clone());
         guard.subs.push(SubEntry {
             id,
             keyexpr,
@@ -3642,6 +3751,12 @@ impl SharedSession {
             retraction,
             sink,
         });
+        drop(guard);
+        // A subscriber the session's own traffic reaches is a match for every listener
+        // that counts the session's own subscribers.
+        if let Some(key) = local_key {
+            self.refresh_local_matches(FilterPlane::Subscribers, &key);
+        }
         id
     }
 
@@ -3675,16 +3790,41 @@ impl SharedSession {
     /// has no handle filed; its listener handle is dropped after the lock is
     /// released.
     pub fn declare_matching_listener(&self, keyexpr: String, sink: MatchingSink) -> MatchId {
-        self.declare_matching_listener_scoped(keyexpr, sink, MatchScope::RemoteSubscribers)
+        self.declare_matching_listener_scoped(keyexpr, sink, MatchScope::RemoteSubscribers, false)
+    }
+
+    /// [`Self::declare_matching_listener`] that also counts the session's OWN subscribers
+    /// when `count_local` is set: zenoh-pico's matching status with its local subscriber
+    /// switch on, for a publisher whose locality admits session-local traffic. Its
+    /// matching listener is a write filter's callback
+    /// (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_update_state`),
+    /// and that filter counts the local subscribers.
+    pub fn declare_matching_listener_counting_local(
+        &self,
+        keyexpr: String,
+        sink: MatchingSink,
+        count_local: bool,
+    ) -> MatchId {
+        self.declare_matching_listener_scoped(
+            keyexpr,
+            sink,
+            MatchScope::RemoteSubscribers,
+            count_local,
+        )
     }
 
     /// The shared body of the publisher and querier declare forms — see
     /// [`MatchScope`] for why the scope is recorded on the entry.
+    ///
+    /// A listener that counts the session's own entities is given their verdict once its
+    /// faces are installed, and again after every local declaration that could move it
+    /// ([`Self::refresh_local_matches`]).
     fn declare_matching_listener_scoped(
         &self,
         keyexpr: String,
         sink: MatchingSink,
         scope: MatchScope,
+        count_local: bool,
     ) -> MatchId {
         // R311y535 — the sink moves INTO the aggregate, which is now its ONE
         // owner. The `MatchEntry` keeps only the shared handle.
@@ -3704,6 +3844,7 @@ impl SharedSession {
                 keyexpr: keyexpr.clone(),
                 state: state.clone(),
                 scope,
+                count_local,
             });
             (id, faces)
         };
@@ -3744,7 +3885,55 @@ impl SharedSession {
             }
         }
         drop(orphans);
+        // Phase 4 — the session's own entities, for a listener that counts them. No lock
+        // is held here, as the matching lock order requires.
+        if count_local {
+            self.fold_local_match(&state, scope, &keyexpr);
+        }
         id
+    }
+
+    /// Fold the session's own verdict for one matching listener into its aggregate, and
+    /// deliver it to C when the session verdict flips.
+    ///
+    /// The verdict is worked out INSIDE the fold, under the aggregate's lock: the registry
+    /// lock is taken after the aggregate's, which is the one order the matching lock order
+    /// allows ([`deliver_matching_flip`]), and two folds racing a declaration each read the
+    /// declarations as they stand when they hold the aggregate, so the last fold delivered
+    /// is the current answer.
+    fn fold_local_match(&self, state: &StdMutex<MatchAggregate>, scope: MatchScope, keyexpr: &str) {
+        deliver_matching_flip(state, |agg| {
+            let matching = self.lock().local_entity_matches(scope.plane(), keyexpr);
+            agg.apply(LOCAL_PLANE_MEMBER, matching)
+        });
+    }
+
+    /// Give every matching listener that counts the session's own entities of `plane`, and
+    /// whose key meets `keyexpr`, the verdict after a local declaration or retraction on
+    /// `keyexpr` — pico's `_z_write_filter_notify_subscriber` /
+    /// `_z_write_filter_notify_queryable` (`vendor/zenoh-pico/src/net/filtering.c`), which
+    /// run inside the declare or undeclare, on its thread.
+    ///
+    /// Called with no lock held. The listeners are read under the registry lock and folded
+    /// after it is released, by the matching lock order.
+    fn refresh_local_matches(&self, plane: FilterPlane, keyexpr: &str) {
+        use wz_runtime_tokio::keyexpr_match::keyexpr_intersects_text;
+        let affected: Vec<(Arc<StdMutex<MatchAggregate>>, MatchScope, String)> = {
+            let guard = self.lock();
+            guard
+                .matches
+                .iter()
+                .filter(|entry| {
+                    entry.count_local
+                        && entry.scope.plane() == plane
+                        && keyexpr_intersects_text(&entry.keyexpr, keyexpr)
+                })
+                .map(|entry| (entry.state.clone(), entry.scope, entry.keyexpr.clone()))
+                .collect()
+        };
+        for (state, scope, key) in affected {
+            self.fold_local_match(&state, scope, &key);
+        }
     }
 
     /// The QUERIER-side twin of [`Self::declare_matching_listener`]: watch for
@@ -3767,7 +3956,24 @@ impl SharedSession {
         keyexpr: String,
         sink: MatchingSink,
     ) -> MatchId {
-        self.declare_matching_listener_scoped(keyexpr, sink, MatchScope::RemoteQueryables)
+        self.declare_matching_listener_scoped(keyexpr, sink, MatchScope::RemoteQueryables, false)
+    }
+
+    /// [`Self::declare_querier_matching_listener`] that also counts the session's OWN
+    /// queryables when `count_local` is set — the querier twin of
+    /// [`Self::declare_matching_listener_counting_local`].
+    pub fn declare_querier_matching_listener_counting_local(
+        &self,
+        keyexpr: String,
+        sink: MatchingSink,
+        count_local: bool,
+    ) -> MatchId {
+        self.declare_matching_listener_scoped(
+            keyexpr,
+            sink,
+            MatchScope::RemoteQueryables,
+            count_local,
+        )
     }
 
     /// The SESSION's matching verdict for a QUERIER's `keyexpr` (pico
@@ -3831,14 +4037,17 @@ impl SharedSession {
     /// counters that say whether those registries have changed since, which is
     /// why it cannot drift from what the peers said.
     ///
-    /// The local plane is not asked and not counted. zenoh-pico's default build
-    /// counts no session-local subscriber (`Z_FEATURE_LOCAL_SUBSCRIBER` is 0),
-    /// and the plane's link is inert.
+    /// The local plane is not asked. The session's own entities count when
+    /// `count_local` says so, which is zenoh-pico's local subscriber or queryable switch
+    /// with an entity whose locality admits session-local traffic; its default build
+    /// counts none (`Z_FEATURE_LOCAL_SUBSCRIBER` is 0). They are read off the
+    /// declarations when the filter is asked, never cached.
     pub fn declare_write_filter(
         &self,
         plane: FilterPlane,
         keyexpr: String,
         ask: Option<InterestForm>,
+        count_local: bool,
     ) -> FilterId {
         let mut guard = self.lock();
         guard.next_filter_id = guard.next_filter_id.wrapping_add(1);
@@ -3861,6 +4070,7 @@ impl SharedSession {
             plane,
             keyexpr,
             ask,
+            count_local,
             #[cfg(target_has_atomic = "64")]
             cache: None,
         });
@@ -3923,6 +4133,11 @@ impl SharedSession {
             let Some(entry) = guard.filters.iter().find(|e| e.id == id) else {
                 return false;
             };
+            // The session's own entity is a match whatever the peers say, and it is
+            // read here rather than kept: no peer's counter moves when it comes or goes.
+            if entry.count_local && guard.local_entity_matches(entry.plane, &entry.keyexpr) {
+                return false;
+            }
             #[cfg(target_has_atomic = "64")]
             if let Some(token) = guard.filter_token(entry.plane) {
                 if let Some(kept) = entry.cache {
@@ -4082,10 +4297,18 @@ impl SharedSession {
         // the final per-face subscriber or the SSOT entry — runs the C
         // `drop(context)`, which must not run under the registry lock (a drop
         // that re-enters the session would deadlock the non-reentrant mutex).
+        // A subscriber the session's own traffic reached is a match no more.
+        let local_key = dropped_entry
+            .as_ref()
+            .filter(|entry| entry.allowed_origin.allows_local())
+            .map(|entry| entry.keyexpr.clone());
         drop(dropped);
         drop(dropped_entry);
         drop(dropped_live);
         drop(dropped_live_entry);
+        if let Some(key) = local_key {
+            self.refresh_local_matches(FilterPlane::Subscribers, &key);
+        }
     }
 }
 
@@ -4597,6 +4820,7 @@ impl SharedSession {
                 face.qbls.insert(id, qbl);
             }
         }
+        let local_key = allowed_origin.allows_local().then(|| keyexpr.clone());
         guard.qbls.push(QblEntry {
             id,
             keyexpr,
@@ -4606,6 +4830,17 @@ impl SharedSession {
             retraction,
             sink,
         });
+        drop(guard);
+        // A queryable the session's own gets reach is a match for every listener that
+        // counts the session's own queryables.
+        if let Some(key) = local_key {
+            self.refresh_local_matches(
+                FilterPlane::Queryables {
+                    complete_required: false,
+                },
+                &key,
+            );
+        }
         id
     }
 
@@ -4630,10 +4865,23 @@ impl SharedSession {
                 }
             }
         }
+        // A queryable the session's own gets reached is a match no more.
+        let local_key = dropped_entry
+            .as_ref()
+            .filter(|entry| entry.allowed_origin.allows_local())
+            .map(|entry| entry.keyexpr.clone());
         // Drop OUTSIDE the lock — see `undeclare_subscriber`: the last
         // `Arc<CQueryClosure>` release runs the C `drop(context)`.
         drop(dropped);
         drop(dropped_entry);
+        if let Some(key) = local_key {
+            self.refresh_local_matches(
+                FilterPlane::Queryables {
+                    complete_required: false,
+                },
+                &key,
+            );
+        }
     }
 }
 
@@ -4804,14 +5052,19 @@ mod matching_aggregate_tests {
     #[test]
     fn a_write_filter_starts_active_and_a_retracted_one_does_not_suppress() {
         let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
-        let publisher =
-            shared.declare_write_filter(FilterPlane::Subscribers, "wz/wf/pub".to_owned(), None);
+        let publisher = shared.declare_write_filter(
+            FilterPlane::Subscribers,
+            "wz/wf/pub".to_owned(),
+            None,
+            false,
+        );
         let querier = shared.declare_write_filter(
             FilterPlane::Queryables {
                 complete_required: true,
             },
             "wz/wf/qry".to_owned(),
             None,
+            false,
         );
         assert_ne!(publisher, querier, "each filter is its own entry");
         assert!(shared.write_filter_active(publisher));
@@ -4827,6 +5080,56 @@ mod matching_aggregate_tests {
             "and retracting one leaves the other's state alone"
         );
         assert!(!shared.has_router_peer(), "no face, so no router peer");
+    }
+
+    /// zenoh-pico with its local subscriber switch on: a write filter and a matching
+    /// listener that count the session's own entities see a subscriber whose locality
+    /// admits session-local traffic, and stop seeing it when it is retracted; one whose
+    /// locality is remote-only, and a filter that does not count local entities, see
+    /// nothing. The matching listener hears both flips, inside the declare and the
+    /// undeclare, as pico's write filter calls its listeners there.
+    #[test]
+    fn the_sessions_own_subscriber_counts_where_the_filter_counts_local_entities() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let counting = shared.declare_write_filter(
+            FilterPlane::Subscribers,
+            "wz/local/**".to_owned(),
+            None,
+            true,
+        );
+        let remote_only = shared.declare_write_filter(
+            FilterPlane::Subscribers,
+            "wz/local/**".to_owned(),
+            None,
+            false,
+        );
+        let heard = Arc::new(StdMutex::new(Vec::new()));
+        let log = heard.clone();
+        let sink: MatchingSink = Arc::new(move |matching| log.lock().unwrap().push(matching));
+        shared.declare_matching_listener_counting_local("wz/local/a".to_owned(), sink, true);
+        let no_op: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
+
+        // A remote-only subscriber is no session-local match.
+        let remote_sub =
+            shared.declare_subscriber("wz/local/a".to_owned(), Locality::Remote, no_op.clone());
+        assert!(shared.write_filter_active(counting));
+        assert!(heard.lock().unwrap().is_empty());
+
+        let local_sub = shared.declare_subscriber("wz/local/a".to_owned(), Locality::Any, no_op);
+        assert!(
+            !shared.write_filter_active(counting),
+            "the session's own subscriber opens a filter that counts it"
+        );
+        assert!(
+            shared.write_filter_active(remote_only),
+            "and not one that does not"
+        );
+        assert_eq!(*heard.lock().unwrap(), vec![true]);
+
+        shared.undeclare_subscriber(local_sub);
+        assert!(shared.write_filter_active(counting));
+        assert_eq!(*heard.lock().unwrap(), vec![true, false]);
+        shared.undeclare_subscriber(remote_sub);
     }
 
     /// R311y557 — the CLOSING measurement for what R311y554 pinned as a named
@@ -4881,6 +5184,27 @@ mod matching_aggregate_tests {
             &[b"x".to_vec()],
             "the C subscriber callback received the payload exactly once"
         );
+    }
+
+    /// A get's legs at zero faces: one local leg, on the plane, exactly when its
+    /// destination admits session-local traffic, and never a remote one. The pico
+    /// ABI's own copy of this loop issued every leg on a face, so a session with no
+    /// peer never reached its own queryable (open-debt item 914).
+    #[test]
+    fn a_faceless_get_issues_one_local_leg_where_its_destination_admits_one() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        for (destination, expected) in [
+            (Locality::Any, vec![Locality::SessionLocal]),
+            (Locality::SessionLocal, vec![Locality::SessionLocal]),
+            (Locality::Remote, vec![]),
+        ] {
+            let mut legs = Vec::new();
+            shared.fan_query(destination, None, |_session, locality| {
+                legs.push(locality);
+                None
+            });
+            assert_eq!(legs, expected, "legs of a {destination:?} get with no face");
+        }
     }
 
     /// R311y557 — a REMOTE-only subscriber still refuses its own session's put,
@@ -5101,6 +5425,7 @@ mod matching_aggregate_tests {
             FilterPlane::Subscribers,
             "wz/plain/filtered".to_owned(),
             None,
+            false,
         );
 
         // No face has said it matches: suppressed, and the same on every later put.

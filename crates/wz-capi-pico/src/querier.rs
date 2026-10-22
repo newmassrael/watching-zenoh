@@ -82,10 +82,21 @@ pub struct z_querier_options_t {
     pub consolidation: z_query_consolidation_t,
     pub congestion_control: c_int,
     pub is_express: bool,
+    /// Only with `local-queryable` (`Z_FEATURE_LOCAL_QUERYABLE`), between
+    /// `is_express` and `priority` as pico declares it, which moves `priority`
+    /// from 24 to 28 and leaves the size at 48.
+    #[cfg(feature = "local-queryable")]
+    pub allowed_destination: crate::locality::z_locality_t,
     pub priority: c_int,
     pub timeout_ms: u64,
     pub accept_replies: z_reply_keyexpr_t,
 }
+
+crate::locality::locality_option_field!(
+    z_querier_options_t,
+    allowed_destination,
+    "local-queryable"
+);
 
 /// pico `z_querier_get_options_t` (`api/types.h:290-297`), 40 B measured.
 ///
@@ -173,6 +184,8 @@ pub unsafe extern "C" fn z_querier_options_default(options: *mut z_querier_optio
         },
         congestion_control: Z_CONGESTION_CONTROL_BLOCK,
         is_express: false,
+        #[cfg(feature = "local-queryable")]
+        allowed_destination: crate::locality::Z_LOCALITY_ANY,
         priority: Z_PRIORITY_DEFAULT,
         // 0 means "use the library default", never "infinite" — the same
         // convention `z_get_options_default` documents.
@@ -409,6 +422,7 @@ pub unsafe extern "C" fn z_declare_querier(
                     congestion_control: (*options).congestion_control,
                     priority: (*options).priority,
                     is_express: (*options).is_express,
+                    destination: (*options).allowed_destination(),
                 },
             )
         };
@@ -430,6 +444,7 @@ pub unsafe extern "C" fn z_declare_querier(
                 complete_required: target == crate::get::Z_QUERY_TARGET_ALL_COMPLETE,
             },
             &key,
+            qos.destination.allows_local(),
         );
         let mut boxed = Box::new(QuerierState {
             #[cfg(feature = "unstable-api")]
@@ -583,11 +598,13 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
 // --- matching (the R311y527 asymmetry, closed) ------------------------------
 
 /// Poll a querier's matching status (pico `z_querier_get_matching_status`):
-/// `true` when ANY connected peer has a matching QUERYABLE.
+/// whether its write filter has a match, as pico answers it
+/// (`vendor/zenoh-pico/src/api/api.c` @
+/// `matching_status->matching = !_z_write_filter_active(&querier->_filter);`) — a
+/// connected peer's QUERYABLE, complete when the querier's target is
+/// `ALL_COMPLETE`, and with `local-queryable` the session's own.
 ///
-/// The querier twin of `z_publisher_get_matching_status`, and the same
-/// cross-face OR — see `SharedSession::declare_matching_listener` for why a
-/// per-face pass-through would report the opposite of the truth.
+/// The querier twin of `z_publisher_get_matching_status`.
 #[no_mangle]
 pub unsafe extern "C" fn z_querier_get_matching_status(
     querier: *const z_loaned_querier_t,
@@ -601,9 +618,7 @@ pub unsafe extern "C" fn z_querier_get_matching_status(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        (*matching_status).matching = state
-            .shared_session()
-            .has_matching_queryable(state.keyexpr());
+        (*matching_status).matching = !state.filter.active();
         Z_OK
     })
 }
@@ -667,7 +682,13 @@ unsafe fn declare_querier_matching(
         None => return Err(Z_ERR_NULL),
     };
     let shared = state.shared_session();
-    let id = shared.declare_querier_matching_listener(state.keyexpr().to_owned(), sink);
+    // The querier's matching listener counts what its write filter counts: the
+    // session's own queryables too, for a querier whose destination admits them.
+    let id = shared.declare_querier_matching_listener_counting_local(
+        state.keyexpr().to_owned(),
+        sink,
+        state.qos.destination.allows_local(),
+    );
     state.record_matching_listener(id);
     Ok((shared, id))
 }
@@ -707,6 +728,8 @@ mod tests {
             consolidation: z_query_consolidation_t { mode: 0 },
             congestion_control: 0,
             is_express: false,
+            #[cfg(feature = "local-queryable")]
+            allowed_destination: crate::locality::Z_LOCALITY_ANY,
             priority: 0,
             timeout_ms: 0,
             accept_replies: 0,
@@ -717,7 +740,16 @@ mod tests {
         assert_eq!(&o.consolidation as *const _ as usize - base, 12);
         assert_eq!(&o.congestion_control as *const _ as usize - base, 16);
         assert_eq!(&o.is_express as *const _ as usize - base, 20);
-        assert_eq!(&o.priority as *const _ as usize - base, 24);
+        #[cfg(feature = "local-queryable")]
+        assert_eq!(&o.allowed_destination as *const _ as usize - base, 24);
+        assert_eq!(
+            &o.priority as *const _ as usize - base,
+            if cfg!(feature = "local-queryable") {
+                28
+            } else {
+                24
+            }
+        );
         assert_eq!(&o.timeout_ms as *const _ as usize - base, 32);
         assert_eq!(&o.accept_replies as *const _ as usize - base, 40);
     }
@@ -734,6 +766,8 @@ mod tests {
             consolidation: z_query_consolidation_t { mode: 99 },
             congestion_control: 99,
             is_express: true,
+            #[cfg(feature = "local-queryable")]
+            allowed_destination: 99,
             priority: 99,
             timeout_ms: 99,
             accept_replies: 99,
@@ -750,5 +784,7 @@ mod tests {
         assert_eq!(q.priority, g.priority);
         assert_eq!(q.timeout_ms, g.timeout_ms);
         assert_eq!(q.accept_replies, g.accept_replies);
+        #[cfg(feature = "local-queryable")]
+        assert_eq!(q.allowed_destination, g.allowed_destination);
     }
 }

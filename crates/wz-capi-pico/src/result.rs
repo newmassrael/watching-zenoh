@@ -82,6 +82,12 @@ pub const Z_ERR_SESSION_CLOSED: ZResult = -73;
 /// uses this one because its refusals are the ones a program branches on.
 pub const Z_EINVAL: ZResult = -75;
 
+/// A `z_open` whose config names no locator scouted and nobody answered. Matches
+/// pico `_Z_ERR_SCOUT_NO_RESULTS` (`utils/result.h`), which `_z_open` returns for
+/// a scout that found nothing and for a build that cannot scout at all
+/// (`vendor/zenoh-pico/src/net/session.c` @ `ret = _Z_ERR_SCOUT_NO_RESULTS;`).
+pub const Z_ERR_SCOUT_NO_RESULTS: ZResult = -87;
+
 /// An allocation failed. Matches pico `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
 /// (`utils/result.h`).
 pub const Z_ERR_SYSTEM_OUT_OF_MEMORY: ZResult = -78;

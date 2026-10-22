@@ -117,6 +117,32 @@ config WZ_CAP_CONNECTIVITY
 	  zenoh-pico's switch for it: Z_FEATURE_CONNECTIVITY.
 	  Exported by: pico.
 
+config WZ_CAP_ADMIN_SPACE
+	bool "admin-space"
+	default n
+	select WZ_CAP_QUERYABLE
+	select WZ_CAP_UNSTABLE_API
+	help
+	  pico's admin space: zp_start_admin_space, zp_stop_admin_space and the @/<zid>/pico/** documents.
+	  zenoh-pico's switch for it: Z_FEATURE_ADMIN_SPACE.
+	  Exported by: pico.
+
+config WZ_CAP_LOCAL_SUBSCRIBER
+	bool "local-subscriber"
+	default n
+	help
+	  pico's session-local subscriptions: a session's own put reaches its own subscribers.
+	  zenoh-pico's switch for it: Z_FEATURE_LOCAL_SUBSCRIBER.
+	  Exported by: pico.
+
+config WZ_CAP_LOCAL_QUERYABLE
+	bool "local-queryable"
+	default n
+	help
+	  pico's session-local queryables: a session's own get reaches its own queryables.
+	  zenoh-pico's switch for it: Z_FEATURE_LOCAL_QUERYABLE.
+	  Exported by: pico.
+
 config WZ_CAP_MULTI_THREAD
 	bool "multi-thread"
 	default y

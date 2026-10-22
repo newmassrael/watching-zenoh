@@ -27,7 +27,6 @@ use wz_runtime_tokio::advanced_cache::{CacheStore, Retained};
 use wz_runtime_tokio::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherPlane, DeclaredPublisher,
 };
-use wz_runtime_tokio::locality::Locality;
 use wz_runtime_tokio::node_clock::NodeHlc;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::sample::SampleKind;
@@ -76,18 +75,20 @@ impl PicoPlane {
     }
 }
 
-/// The options every plain publish of this ABI carries: delivered to peers only,
-/// reliable.
+/// The options every plain publish of this ABI carries: reliable, and the
+/// destination a pico put takes by default.
 ///
-/// `Locality::Remote`, because a pico session's own put is not delivered to its
-/// own subscribers by default (`Z_FEATURE_LOCAL_SUBSCRIBER` is 0), and this
-/// crate's plain put says so ([`crate::pubsub`]'s `put_options`). An advanced
-/// publisher that took the composite's own `Any` would deliver in-process where
-/// the plain publisher it wraps does not.
-fn remote_only(options: PublishOptions) -> PublishOptions {
+/// That destination is `Locality::Remote` without `local-subscriber`, because a
+/// pico session's own put is not delivered to its own subscribers by default
+/// (`Z_FEATURE_LOCAL_SUBSCRIBER` is 0), and `Any` with it, as this crate's plain
+/// put has it ([`crate::pubsub`]'s `put_options`). An advanced publisher that took
+/// the composite's own `Any` regardless would deliver in-process where the plain
+/// publisher it wraps does not. A publish through a publisher then takes that
+/// publisher's own destination ([`crate::pubsub::PublisherQos`]).
+fn pico_publish(options: PublishOptions) -> PublishOptions {
     options
         .with_reliability(Reliability::Reliable)
-        .with_locality(Locality::Remote)
+        .with_locality(crate::locality::default_locality!("local-subscriber"))
 }
 
 impl AdvancedPublisherPlane for PicoPlane {
@@ -175,7 +176,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         // count the runtime reports is the number of peers a put reached, which
         // a filter that held the sample back makes 0 — a put with no recipient,
         // and `Z_OK`.
-        match publisher.publish(payload, &remote_only(options)) {
+        match publisher.publish(payload, &pico_publish(options)) {
             code if code == Z_OK => Ok(payload.len()),
             _ => Err(PublishError::ExceedsCapacity),
         }
@@ -188,7 +189,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         payload: &[u8],
         _sporadic: bool,
     ) {
-        let mut options = remote_only(PublishOptions::default());
+        let mut options = pico_publish(PublishOptions::default());
         options.kind = SampleKind::Put;
         match beacon {
             // Through the beacon publisher, as pico's heartbeat task does, so

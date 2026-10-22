@@ -112,7 +112,16 @@ advanced = ["liveliness", "queryable", "unstable-api", "wz-capi-core/advanced"]
 # `Z_FEATURE_QUERYABLE` (`vendor/zenoh-pico/CMakeLists.txt` @
 # `if(Z_FEATURE_ADMIN_SPACE AND NOT Z_FEATURE_QUERYABLE)`), so it implies `queryable`, and
 # forces it off without the unstable API, so it implies `unstable-api`.
-admin-space = ["queryable", "unstable-api"]
+admin-space = ["queryable", "unstable-api", "wz-capi-core/admin-space"]
+# `local-subscriber` / `local-queryable` (`Z_FEATURE_LOCAL_SUBSCRIBER`, `Z_FEATURE_LOCAL_QUERYABLE`,
+# off as upstream's are): a session's own put reaches its own subscribers, and its own get its own
+# queryables, inside the call and on the calling thread, as pico delivers them
+# (`vendor/zenoh-pico/src/session/loopback.c` @ `_z_session_deliver_push_locally`). The option
+# structs gain the `allowed_origin` / `allowed_destination` fields those switches add, so a
+# program compiled with them links a build that has them; a publisher's and a querier's write
+# filter and matching status count the session's own entities.
+local-subscriber = ["wz-capi-core/local-subscriber"]
+local-queryable = ["wz-capi-core/local-queryable"]
 # `unstable-api` (`Z_FEATURE_UNSTABLE_API`, on in the reference build and off in upstream's
 # default): the entity ids (`z_session_id`, `z_publisher_id`, ...), the sample's reliability and
 # source info, `z_reliability_default`, `z_bytes_get_contiguous_view`, `z_reply_replier_id`, the
@@ -243,6 +252,11 @@ required-features = ["peer"]
 [[test]]
 name = "session_check"
 required-features = ["peer", "query"]
+
+# A session's own put and get reach its own subscriber and queryable, inside the call.
+[[test]]
+name = "local_delivery"
+required-features = ["peer", "query", "queryable", "local-subscriber", "local-queryable"]
 
 [[test]]
 name = "connectivity_events"

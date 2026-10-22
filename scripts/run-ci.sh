@@ -15653,17 +15653,18 @@ layer_e_ap_demo_round_trip() {
     # feature-arm builds in Layer C1bm), while the ONE artifact this lane's legs
     # link carries every scheme they exercise.
     (cd crates && cargo build -p wz-capi-pico --features transport-link-tls --quiet) || return 1
-    # Open-debt items 918 and 917 -- and wz's build of every other pico header arm,
-    # which the `_st` drop-in legs and `pico_header_arm_layout` link. pico's arms differ
-    # in the size of structs a C program allocates (`_z_fifo_mt_t` and `z_open_options_t`
-    # with `Z_FEATURE_MULTI_THREAD`, every option struct with an unstable field with
-    # `Z_FEATURE_UNSTABLE_API`), so a program compiled against an arm's headers links
+    # Open-debt items 918, 917 and 914 -- and wz's build of every other pico header arm,
+    # which the `_st` drop-in legs, `pico_header_arm_layout` and Layer Z's local-delivery
+    # leg link. pico's arms differ in the size of structs a C program allocates
+    # (`_z_fifo_mt_t` and `z_open_options_t` with `Z_FEATURE_MULTI_THREAD`, every option
+    # struct with an unstable field with `Z_FEATURE_UNSTABLE_API`, seven with a locality
+    # field with the local switches), so a program compiled against an arm's headers links
     # the build of that arm. Its features are read off the arm's own generated config.h,
     # so the build is what that header states, each into its own target directory
     # because every build is `libwz_capi_pico.so`. The pairs are the ones
     # `PicoHeaderArm` in wz-integration-tests names.
     local arm arm_features
-    for arm in st default; do
+    for arm in st default local; do
         arm_features="$(python3 scripts/lib/capability_config.py --features pico \
             "target/zenoh-pico-build-$arm/zenohpico/include/zenoh-pico/config.h")" || return 1
         # shellcheck disable=SC2086 # the cargo arguments are words on purpose
@@ -18414,6 +18415,15 @@ layer_z_zenohd_interop() {
     # silent peer. Skipping green on a wz artifact we can produce would let the
     # lane report success having linked nothing.
     (cd crates && cargo build -p wz-capi-pico --features transport-link-tls --quiet) || return 1
+    # Open-debt item 914 -- and wz's build of the LOCAL header arm, which upstream's own
+    # local-delivery tests link in the leg below; built from that arm's config.h, as
+    # Layer E builds the other arms.
+    local local_features
+    local_features="$(python3 scripts/lib/capability_config.py --features pico \
+        target/zenoh-pico-build-local/zenohpico/include/zenoh-pico/config.h)" || return 1
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build -p wz-capi-pico $local_features \
+        --target-dir target/wz-capi-pico-local --quiet) || return 1
     # §5.21 token cross-impl leg — the router-hat token lifecycle leg spawns the
     # pico z_sub_liveliness (the liveliness SUBSCRIBER that prints "New alive
     # token" on the future push + "Dropped token" on the undeclare; z_get_liveliness
@@ -19248,6 +19258,14 @@ layer_z_zenohd_interop() {
             pico_zscout_legs_hold_in_a_namespace_with_no_default_route_against_a_zenohd \
             -- --ignored --quiet --test-threads=1 || return 1
     fi
+    # Open-debt item 914 -- zenoh-pico's own tests of its session-local delivery
+    # (`tests/z_api_local_subscriber_test.c`, `tests/z_api_local_queryable_test.c`),
+    # upstream's text against the local header arm, linked to wz's build of that arm
+    # (built above) and run beside a zenohd they find by scouting, as the scouting legs
+    # above do. Their own `assert`s over the 27 locality combinations are the oracle.
+    _runci_guarded_test Z 2 env WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
+        --test pico_local_delivery_upstream_tests_on_wz -- --ignored --quiet --test-threads=1 \
+        || return 1
     # R311y533 -- the LIVELINESS SNAPSHOT leg, moved here from Layer E because
     # its old topology was one the REFERENCE cannot serve. Measured: the real
     # zenoh-pico z_get_liveliness against the real zenoh-pico z_liveliness, wired

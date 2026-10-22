@@ -273,7 +273,9 @@ pub struct ze_advanced_publisher_sample_miss_detection_options_t {
 
 /// pico `ze_advanced_publisher_options_t` (`api/advanced_publisher.h:124-130`),
 /// 88 B measured with `publisher_options@0 / cache@24 / sample_miss_detection@56
-/// / publisher_detection@72 / publisher_detection_metadata@80`.
+/// / publisher_detection@72 / publisher_detection_metadata@80`. With
+/// `local-subscriber` the embedded options are 32 B, so 96 B with every later
+/// field 8 B on.
 ///
 /// `publisher_options` is the PLAIN publisher's own options type, not a second
 /// spelling of its five fields: pico embeds a `z_publisher_options_t` and hands
@@ -1415,7 +1417,16 @@ const _: () = {
     assert!(size_of::<ze_owned_advanced_publisher_t>() == 224);
     assert!(size_of::<ze_owned_advanced_subscriber_t>() == 152);
     assert!(size_of::<ze_owned_sample_miss_listener_t>() == 24);
-    assert!(size_of::<ze_advanced_publisher_options_t>() == 88);
+    // The embedded `z_publisher_options_t` gains `allowed_destination` with
+    // `local-subscriber` (24 -> 32 B), which moves everything after it.
+    assert!(
+        size_of::<ze_advanced_publisher_options_t>()
+            == if cfg!(feature = "local-subscriber") {
+                96
+            } else {
+                88
+            }
+    );
     assert!(size_of::<ze_advanced_publisher_cache_options_t>() == 32);
     assert!(size_of::<ze_advanced_publisher_sample_miss_detection_options_t>() == 16);
     assert!(size_of::<ze_advanced_publisher_put_options_t>() == 32);
@@ -1459,7 +1470,10 @@ pub unsafe extern "C" fn ze_advanced_publisher_delete(
 }
 
 /// Whether any subscriber currently matches an advanced publisher (pico
-/// `ze_advanced_publisher_get_matching_status`).
+/// `ze_advanced_publisher_get_matching_status`): the wrapped publisher's own status,
+/// as pico answers it (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+/// `return z_publisher_get_matching_status(z_publisher_loan(&pub->_publisher), matching_status);`),
+/// which is its write filter's.
 ///
 /// # Safety
 /// `publisher` must be null or a live loaned advanced publisher;
@@ -1473,10 +1487,12 @@ pub unsafe extern "C" fn ze_advanced_publisher_get_matching_status(
         if matching_status.is_null() {
             return Z_ERR_NULL;
         }
-        let Some((shared, keyexpr)) = advanced_publisher_match_target(publisher) else {
+        let Some(state) =
+            crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(publisher)
+        else {
             return Z_ERR_NULL;
         };
-        (*matching_status).matching = shared.has_matching(&keyexpr);
+        (*matching_status).matching = state.publisher.publisher().filter_matches();
         Z_OK
     })
 }
@@ -1519,7 +1535,8 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_background_matching_liste
     )
 }
 
-/// The `(session, keyexpr)` a matching watch on an advanced publisher targets.
+/// The `(session, keyexpr, counts_local)` a matching watch on an advanced publisher
+/// targets.
 ///
 /// The keyexpr is the publisher's OWN, not its `@adv` cache key: matching asks
 /// "is anyone subscribed to what I publish", and what an advanced publisher
@@ -1529,9 +1546,15 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_background_matching_liste
 /// `pub_` must be null or a live loaned advanced publisher.
 unsafe fn advanced_publisher_match_target(
     pub_: *const ze_loaned_advanced_publisher_t,
-) -> Option<(Arc<SharedSession>, String)> {
-    crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
-        .map(|state| (state.shared.clone(), state.publisher.keyexpr().to_owned()))
+) -> Option<(Arc<SharedSession>, String, bool)> {
+    crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_).map(|state| {
+        (
+            state.shared.clone(),
+            state.publisher.keyexpr().to_owned(),
+            // As the wrapped publisher's own matching listener counts.
+            state.publisher.publisher().counts_local(),
+        )
+    })
 }
 
 /// Declare a miss listener that lives as long as its subscriber (pico

@@ -443,21 +443,21 @@ pub(crate) type CReplyClosure = FfiClosure<z_closure_reply_callback_t>;
 // Sharing one get's `CReplyClosure` across per-face callbacks needs `Sync` (so
 // `Arc<CReplyClosure>`, and each `on_reply`, is `Send`).
 //
-// `call` — invoked only from the drive thread. Every face of a session is driven
-// on ONE task, and `on_reply` runs at a `drain_deferred_fires` site. The one
-// drain site reachable from the C APPLICATION thread is `Session::query`'s own
-// tail, which is gated on `allows_local` (`session/mod.rs:2023`) — and
-// `get_options` below pins `Locality::Remote`, so that gate is closed and the
-// C-thread `z_get` drains nothing. The `Remote` pin is what makes this
-// MECHANICAL rather than a promise: `Any::allows_local()` is true
-// (`wz-session-core/src/locality.rs:70-72`), so a default-locality get would
-// drain on the C thread while a drive thread ran `call` for another face — two
-// `call(context)`s at once on one C context, the unsound-`Sync` bug R311y288
-// fixed on the publish plane. The sibling half of the same argument lives on
-// `faces::queryable_options` (the queryable is Remote too, so no in-process
-// queryable job can be staged for a C-thread drain either), and
-// `SharedSession::dispatch` is the only caller of the UNGATED
-// `sweep_expired_queries`.
+// `call` — WHO invokes it is pico's contract, which this ABI keeps in each arm.
+// Without `local-queryable`, only the drive thread: every face of a session is
+// driven on ONE task, `on_reply` runs at a `drain_deferred_fires` site, and the
+// one drain site reachable from the C APPLICATION thread is `Session::query`'s
+// own tail, gated on `allows_local` — closed, because `get_options` gives a
+// get `Locality::Remote` in that arm and the queryables are Remote too
+// (`faces::queryable_options`). With `local-queryable`, a get that reaches the
+// session's own queryable is answered inside the calls that make it, on the
+// threads that call: the reply arrives on the thread that called
+// `z_query_reply`, while a peer's reply may arrive on the drive thread at once.
+// pico does the same: a reply to a local query is delivered locally and
+// synchronously (`vendor/zenoh-pico/src/net/primitives.c` @ `_z_send_reply`,
+// `query->_is_local`), its reply callback running outside the session lock. A
+// program built with that switch is written for it. `SharedSession::dispatch`
+// is the only caller of the UNGATED `sweep_expired_queries`.
 //
 // `drop` — CANNOT be attributed to the drive thread, and this is where the
 // querier plane genuinely diverges from its siblings. It runs wherever the LAST
@@ -681,6 +681,10 @@ pub struct z_get_options_t {
     pub congestion_control: c_int,
     pub priority: c_int,
     pub is_express: bool,
+    /// Only with `local-queryable`, between `is_express` and `target` as pico
+    /// declares it; `target` moves from 32 to 36 and nothing after it moves.
+    #[cfg(feature = "local-queryable")]
+    pub allowed_destination: crate::locality::z_locality_t,
     pub target: z_query_target_t,
     pub timeout_ms: u64,
     /// `z_moved_bytes_t*` — an optional attachment on the query. Honoured.
@@ -710,6 +714,8 @@ pub struct z_get_options_t {
 crate::option_fields::unstable_option_fields!(z_get_options_t {
     source_info: *mut crate::pubsub::z_source_info_t = std::ptr::null_mut(),
 });
+
+crate::locality::locality_option_field!(z_get_options_t, allowed_destination, "local-queryable");
 
 impl z_get_options_t {
     /// The token the caller handed over, taken: pico drops it whatever the call
@@ -750,6 +756,15 @@ const _: () = {
     // when in fact the missing pair sits BEFORE `accept_replies` and displaced
     // it by 16 B. A size check cannot tell those two stories apart.
     assert!(std::mem::offset_of!(z_get_options_t, attachment) == 48);
+    // The local queryable's field takes the padding after `is_express`.
+    assert!(
+        std::mem::offset_of!(z_get_options_t, target)
+            == if cfg!(feature = "local-queryable") {
+                36
+            } else {
+                32
+            }
+    );
 };
 
 #[cfg(feature = "unstable-api")]
@@ -814,6 +829,10 @@ pub unsafe extern "C" fn z_get_options_default(options: *mut z_get_options_t) {
     (*options).congestion_control = crate::qos::Z_CONGESTION_CONTROL_BLOCK;
     (*options).priority = crate::qos::Z_PRIORITY_DEFAULT;
     (*options).is_express = false;
+    #[cfg(feature = "local-queryable")]
+    {
+        (*options).allowed_destination = crate::locality::Z_LOCALITY_ANY;
+    }
     (*options).target = Z_QUERY_TARGET_BEST_MATCHING;
     (*options).timeout_ms = 0;
     (*options).attachment = std::ptr::null_mut();
@@ -919,19 +938,14 @@ fn get_timeout_ms(timeout_ms: u64) -> u32 {
 
 /// The wz query options one C `z_get_options_t` maps to.
 ///
-/// `allowed_destination` is pinned [`Locality::Remote`], and that is load-bearing
-/// rather than a default:
-///
-/// **Fidelity.** pico's `allowed_destination` field exists only under
-/// `Z_FEATURE_LOCAL_QUERYABLE`, which defaults to **0**, and this crate's
-/// queryables are declared `Locality::Remote` for the same reason
-/// ([`wz_capi_core::faces::queryable_options`]). A default pico build has no local
-/// queryable for a get to reach, so Remote-only IS the faithful default.
-///
-/// **Soundness.** It closes the `allows_local` gate on `Session::query`'s
-/// loopback fan and its drain (`session/mod.rs:1976, 2023`), which is what keeps
-/// the C application thread out of `call`. See the `unsafe impl Sync for
-/// CReplyClosure` above — this function is half of that proof.
+/// `allowed_destination` is the caller's ([`PicoQueryQos::destination`]):
+/// `Locality::Remote` without `local-queryable`, where pico's field does not exist
+/// (`Z_FEATURE_LOCAL_QUERYABLE` defaults to 0) and a default pico build has no
+/// local queryable for a get to reach; the caller's own value with it, where a
+/// get reaches the session's own queryables inside the call, on the calling
+/// thread, as pico's `_z_session_deliver_query_locally` does. See the
+/// `unsafe impl Sync for CReplyClosure` above for what each arm means for the
+/// reply callback.
 #[allow(clippy::too_many_arguments)]
 fn get_options(
     target: z_query_target_t,
@@ -944,7 +958,7 @@ fn get_options(
     value_meta: PicoQueryValueMeta,
 ) -> QueryOptions {
     let mut opts = QueryOptions::get()
-        .with_allowed_destination(Locality::Remote)
+        .with_allowed_destination(qos.destination)
         .with_timeout_ms(get_timeout_ms(timeout_ms))
         // R311y551 — the request-side QoS trio. This function's own doc, and
         // `z_get`'s, used to record these as "carried for layout and dropped —
@@ -1177,6 +1191,7 @@ unsafe fn get_inner(
                 congestion_control: (*options).congestion_control,
                 priority: (*options).priority,
                 is_express: (*options).is_express,
+                destination: (*options).allowed_destination(),
             },
         )
     };
@@ -1262,6 +1277,10 @@ pub(crate) struct PicoQueryQos {
     pub(crate) priority: crate::qos::z_priority_t,
     /// Bypass batching for lower latency.
     pub(crate) is_express: bool,
+    /// Where the query may go: the options' `allowed_destination` with
+    /// `local-queryable`, remote only without it. Not a QoS field, but declared by
+    /// the same two structs and inherited by a querier's gets the same way.
+    pub(crate) destination: Locality,
 }
 
 impl PicoQueryQos {
@@ -1276,6 +1295,7 @@ impl PicoQueryQos {
             congestion_control: crate::qos::Z_CONGESTION_CONTROL_BLOCK,
             priority: crate::qos::Z_PRIORITY_DEFAULT,
             is_express: false,
+            destination: crate::locality::default_locality!("local-queryable"),
         }
     }
 }
@@ -1336,11 +1356,13 @@ pub(crate) fn issue_get(
     fan_get(shared, &keyexpr, &wire, &opts, closure, gate, token)
 }
 
-/// Fan one C get across every connected face, returning `Z_OK`.
+/// Fan one C get across every connected face and, where its destination admits
+/// session-local traffic, once to the session's own queryables, returning `Z_OK`.
+/// The legs are [`SharedSession::fan_query`]'s, shared with the zenoh-c ABI.
 ///
-/// The C thread holds its own `Arc` clone (`guard`) for the whole loop. That is
-/// load-bearing: without it, a face answering and dropping its pending entry
-/// before the NEXT face's `query` is issued would take the refcount to zero and
+/// The C thread holds its own `Arc` clone (`guard`) for the whole fan. That is
+/// load-bearing: without it, a leg answering and dropping its pending entry
+/// before the NEXT leg's `query` is issued would take the refcount to zero and
 /// run the C `drop(context)` — completing the get while it was still being
 /// issued.
 ///
@@ -1350,7 +1372,7 @@ pub(crate) fn issue_get(
 /// session (`z_put` from inside one is supported), so holding the lock across it
 /// would deadlock the non-reentrant mutex.
 ///
-/// Zero faces is `Z_OK` with no query issued: `guard` is then the last clone, so
+/// Zero legs is `Z_OK` with no query issued: `guard` is then the last clone, so
 /// the C `drop(context)` runs here on the C thread and the get completes
 /// immediately with no reply. That is pico's own behaviour for an empty peer set
 /// — `_z_query` runs `_z_drop_handler_execute(dropper, arg)` on the caller
@@ -1372,8 +1394,8 @@ fn fan_get(
     // afterwards would leave a window in which a token cancelled mid-fan left
     // live pending queries behind.
     //
-    // R2949 — the registration is shared by every per-face callback (see
-    // [`FaceReply`]), so it drops only when the LAST of them does, and the
+    // R2949 — the registration is shared by every leg's callback (see
+    // [`LegReply`]), so it drops only when the LAST of them does, and the
     // token's `cancel` waits for that, as pico's `_z_sync_group_wait` does.
     let fan = match &token {
         None => None,
@@ -1396,76 +1418,47 @@ fn fan_get(
     };
     let registration = fan.as_ref().map(|(_, r)| Arc::clone(r));
     let fan = fan.map(|(f, _)| f);
-    for (session, revised) in shared.face_sessions_with_wake() {
-        let per_face = FaceReply {
-            closure: closure.clone(),
-            gate: gate.clone(),
-            _registration: registration.clone(),
-        };
-        // Only `on_reply` carries the `Arc`. `on_final` needs no body at all:
-        // completion is signalled by the pending entry's sink being DROPPED
-        // (which drops this closure and releases the clone), and that happens on
-        // a real final, a timeout sweep, and a face death alike — whereas a
-        // counter incremented here would never be reached by the face-death
-        // path. See the module doc.
-        let on_reply = move |view: &dyn ReplyView| per_face.fire(view);
-        // R2959 — a declared key goes out as its alias; the reply gate and the
-        // loopback still match the literal (`query_aliased`'s
-        // `loopback_keyexpr`). The alias error collapses onto the plain one's
-        // best-effort handling below: either way this face issued nothing.
-        let issued = if wire.mapping_id == 0 {
-            session
-                .query(keyexpr, opts.clone(), on_reply, |_rid| {})
-                .ok()
-        } else {
-            session
-                .query_aliased(
-                    wire.mapping_id,
-                    wire.suffix.as_deref(),
-                    keyexpr,
-                    opts.clone(),
-                    on_reply,
-                    |_rid| {},
-                )
-                .ok()
-        };
-        // R311y575 — record this face's rid against the cancellation set before
-        // moving on. `record` answers `false` when the token cancelled while the
-        // fan was running; it has already unregistered THIS rid (the handler
-        // that ran could not have seen it), so the only thing left is to stop
-        // issuing on further faces.
-        let cancelled_mid_fan = match (&fan, &issued) {
-            (Some(fan), Some(handle)) => {
-                let undo_session = session.clone();
-                let rid = handle.rid();
-                !fan.record(move || {
-                    undo_session.cancel_pending_query(rid);
-                })
-            }
-            _ => false,
-        };
-        // A per-face issue error (a face mid-teardown) is swallowed, matching
-        // the fan-out publish's best-effort discipline. Its `Arc` clone was
-        // already dropped with the rolled-back sink, so it cannot hold the get
-        // open — and if EVERY face errors, `guard` below completes it. (The
-        // handle itself is a plain rid, so there is nothing of it to release.)
-        if cancelled_mid_fan {
-            break;
-        }
-        // Wake this face's drive loop so it re-arms on the deadline just
-        // registered. Without this the loop stays parked on whatever it armed
-        // BEFORE the get existed — in a silent session that is the keepalive
-        // wake, ~3333 ms out, so every get would be swept that late however
-        // short its timeout. `notify_one` (not `notify_waiters`) because the
-        // loop is not necessarily parked in that arm right now: the permit is
-        // stored and honoured at its next arm instead of being dropped.
-        //
-        // Issued even when `query` errored: the wake is idempotent and a
-        // spurious one only costs a recompute, whereas reasoning about which
-        // failure modes still need it would be a standing invariant to get
-        // wrong.
-        revised.notify_one();
-    }
+    shared.fan_query(
+        opts.allowed_destination,
+        fan.as_deref(),
+        |session, locality| {
+            let leg = LegReply {
+                closure: closure.clone(),
+                gate: gate.clone(),
+                _registration: registration.clone(),
+            };
+            // Only `on_reply` carries the `Arc`. `on_final` needs no body at all:
+            // completion is signalled by the pending entry's sink being DROPPED
+            // (which drops this closure and releases the clone), and that happens
+            // on a real final, a timeout sweep, and a face death alike — whereas a
+            // counter incremented here would never be reached by the face-death
+            // path. See the module doc.
+            let on_reply = move |view: &dyn ReplyView| leg.fire(view);
+            let opts = opts.clone().with_allowed_destination(locality);
+            // R2959 — a declared key goes out as its alias; the reply gate still
+            // matches the literal. The local plane has no wire to name it on, so
+            // its leg asks by the literal. An issue error (a face mid-teardown, an
+            // alias the face was never told) is swallowed, matching the fan-out
+            // publish's best-effort discipline: its `Arc` clone was already dropped
+            // with the rolled-back sink, so it cannot hold the get open, and if
+            // EVERY leg errors, `guard` below completes it.
+            let issued = if wire.mapping_id == 0 || locality == Locality::SessionLocal {
+                session.query(keyexpr, opts, on_reply, |_rid| {}).ok()
+            } else {
+                session
+                    .query_aliased(
+                        wire.mapping_id,
+                        wire.suffix.as_deref(),
+                        keyexpr,
+                        opts,
+                        on_reply,
+                        |_rid| {},
+                    )
+                    .ok()
+            };
+            issued.map(|handle| handle.rid())
+        },
+    );
     drop(guard);
     // After `guard`, explicitly: locals drop in REVERSE declaration order, so
     // left implicit the registration would go first and a concurrent `cancel`
@@ -1474,27 +1467,28 @@ fn fan_get(
     Z_OK
 }
 
-/// R2949 — what each face's reply callback owns.
+/// R2949 — what each leg's reply callback owns: a face's, the local plane's, or a
+/// liveliness get's.
 ///
 /// A struct rather than three captured locals because the DROP ORDER is the
 /// contract: fields drop in declaration order, so the C closure clone goes
 /// before the token registration, and a `cancel` waiting on the registration
-/// cannot return while this face's share of the C `drop(context)` is still
+/// cannot return while this leg's share of the C `drop(context)` is still
 /// pending. Captured locals of a closure promise no such order.
 ///
 /// ⚠ The callback must name the WHOLE struct — hence [`Self::fire`] taking
-/// `&self`. A closure that wrote `per_face.closure` and `per_face.gate`
+/// `&self`. A closure that wrote `leg.closure` and `leg.gate`
 /// captures only those two fields (Rust 2021 disjoint capture), so the
 /// registration was dropped at the end of the loop iteration, removing its
 /// handler before any cancel could run it. The pico cancellation differential
 /// test's legC measured exactly that.
-pub(crate) struct FaceReply {
+pub(crate) struct LegReply {
     pub(crate) closure: Arc<CReplyClosure>,
     pub(crate) gate: Arc<ReplyGate>,
     pub(crate) _registration: Option<Arc<wz_capi_core::cancellation::Registration>>,
 }
 
-impl FaceReply {
+impl LegReply {
     /// Deliver one reply. Taking `&self` is what makes a callback that calls it
     /// capture the whole struct, registration included.
     pub(crate) fn fire(&self, view: &dyn ReplyView) {
@@ -1948,6 +1942,7 @@ mod tests {
             congestion_control: crate::qos::Z_CONGESTION_CONTROL_DROP,
             priority: 1, // Z_PRIORITY_REAL_TIME, distinct from the default (5).
             is_express: true,
+            destination: Locality::Remote,
         };
         let opts = get_options(
             Z_QUERY_TARGET_BEST_MATCHING,

@@ -153,9 +153,9 @@ PICO_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
      "session-open seam; open-debt item 911"),
     ("Z_FEATURE_TCP_NODELAY", "always", "crates/wz-runtime-tokio/src/lib.rs",
      "set on every TCP-backed link, as zenoh does; turning it off would be a policy"),
-    ("Z_FEATURE_LOCAL_SUBSCRIBER", "never", None,
-     "every put is remote-only and the options struct keeps the off layout, which is "
-     "upstream's default; the on arm is open-debt item 914"),
+    ("Z_FEATURE_LOCAL_SUBSCRIBER", "maps", "wz-capi-pico/local-subscriber",
+     "a session's own put reaches its own subscribers inside the call; allowed_origin and "
+     "allowed_destination in the option structs; the write filter and matching count them"),
     ("Z_FEATURE_SESSION_CHECK", "always", "crates/wz-capi-pico/tests/session_check.rs",
      "a put, delete or get on an entity whose session was closed, and a reply on a query "
      "held past it, answer the session-closed error, as upstream's default does"),
@@ -177,9 +177,9 @@ PICO_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
     ("Z_FEATURE_MULTICAST_DECLARATIONS", "never", None,
      "meaningful only over a multicast transport, which the C surface does not establish; "
      "open-debt item 913"),
-    ("Z_FEATURE_LOCAL_QUERYABLE", "never", None,
-     "queries never reach a queryable of the same session, upstream's default; the on arm "
-     "is open-debt item 914"),
+    ("Z_FEATURE_LOCAL_QUERYABLE", "maps", "wz-capi-pico/local-queryable",
+     "a session's own get reaches its own queryables, and their replies it, inside the "
+     "calls; allowed_origin and allowed_destination in the option structs"),
     ("Z_FEATURE_ADMIN_SPACE", "maps", "wz-capi-pico/admin-space",
      "zp_start_admin_space / zp_stop_admin_space and the open flag, serving pico's "
      "@/<zid>/pico/** documents; the session-local connectivity half has no observer "

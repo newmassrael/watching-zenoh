@@ -299,6 +299,13 @@ multi-thread = []
 # capability is one of the core's.
 unstable-api = []
 connectivity = ["unstable-api"]
+# pico's admin space and its session-local delivery (`deploy/capabilities.toml`, off by default
+# as upstream's are). The model behind them is here either way: the local plane, and a write
+# filter or matching listener told whether to count the session's own entities. Features here
+# because every capability is one of the core's.
+admin-space = []
+local-subscriber = []
+local-queryable = []
 
 [dependencies]
 # OS entropy for the per-session zid, as zenoh-pico does at `z_open`

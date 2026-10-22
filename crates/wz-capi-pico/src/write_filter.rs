@@ -118,15 +118,20 @@ pub(crate) struct WriteFilter {
 }
 
 impl WriteFilter {
-    /// Create the filter for an entity whose own key is `key`.
+    /// Create the filter for an entity whose own key is `key`. `count_local` is pico's
+    /// `ctx->allow_local`: the session's own subscribers or queryables count too, which
+    /// they do for an entity whose destination admits session-local traffic in a build
+    /// with the local switch (`vendor/zenoh-pico/src/net/filtering.c` @
+    /// `_z_write_filter_session_register`).
     pub(crate) fn declare(
         session: &PicoSession,
         plane: FilterPlane,
         key: &DeclaredKeyexpr,
+        count_local: bool,
     ) -> Self {
         let shared = session.shared.clone();
         let ask = interest_form(&shared, session.mode, key);
-        let id = shared.declare_write_filter(plane, key.literal().to_owned(), ask);
+        let id = shared.declare_write_filter(plane, key.literal().to_owned(), ask, count_local);
         Self { shared, id }
     }
 

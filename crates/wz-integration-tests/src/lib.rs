@@ -957,6 +957,10 @@ pub mod common {
         /// default, whose missing unstable API takes three fields out of the
         /// option structs (`z_get_options_t` 64 B against 80; open-debt item 917).
         UpstreamDefault,
+        /// The reference arm with both session-local switches on (`-local`): seven
+        /// option structs gain `allowed_origin` / `allowed_destination`, and a
+        /// session delivers to its own entities (open-debt item 914).
+        Local,
     }
 
     impl PicoHeaderArm {
@@ -966,6 +970,7 @@ pub mod common {
                 Self::MultiThreaded => "",
                 Self::SingleThreaded => "-st",
                 Self::UpstreamDefault => "-default",
+                Self::Local => "-local",
             }
         }
 
@@ -975,6 +980,7 @@ pub mod common {
                 Self::MultiThreaded => "target",
                 Self::SingleThreaded => "target/wz-capi-pico-st",
                 Self::UpstreamDefault => "target/wz-capi-pico-default",
+                Self::Local => "target/wz-capi-pico-local",
             }
         }
 
@@ -983,7 +989,7 @@ pub mod common {
             match self {
                 Self::MultiThreaded => zenoh_pico_include_dirs(),
                 Self::SingleThreaded => zenoh_pico_include_dirs_single_threaded(),
-                Self::UpstreamDefault => {
+                Self::UpstreamDefault | Self::Local => {
                     let root = project_root();
                     let generated = root.join(format!(
                         "target/zenoh-pico-build{}/zenohpico/include",
@@ -995,11 +1001,17 @@ pub mod common {
                          scripts/build-zenoh-pico-cli.sh first",
                         generated.display()
                     );
-                    // No Mbed TLS: TLS is off in upstream's default, and the third
-                    // slot repeats the vendored headers rather than naming a
-                    // directory this arm does not use.
                     let vendored = root.join("vendor/zenoh-pico/include");
-                    [generated, vendored.clone(), vendored]
+                    // The local arm keeps the reference arm's TLS and so reaches Mbed
+                    // TLS headers; upstream's default has TLS off, and its third slot
+                    // repeats the vendored headers rather than naming a directory the
+                    // arm does not use.
+                    let third = if self == Self::Local {
+                        mbedtls_include_dir()
+                    } else {
+                        vendored.clone()
+                    };
+                    [generated, vendored, third]
                 }
             }
         }

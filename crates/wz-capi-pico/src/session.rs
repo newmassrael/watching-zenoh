@@ -232,7 +232,10 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
 
 /// Open a session, consuming the moved config (pico `z_open`). A `connect`
 /// config blocks until Established; a `listen` config returns as soon as the
-/// bind succeeds.
+/// bind succeeds. A config naming neither scouts for the first node that answers
+/// and connects to its locators, as pico's `_z_open` does (see
+/// [`crate::scout::locators_by_scout`]); nobody answering, or a build without
+/// `scout`, is `Z_ERR_SCOUT_NO_RESULTS`.
 ///
 /// `options->auto_start_read_task` decides whether the session's read task runs
 /// from the open, as pico starts its executor only if it is set (default true);
@@ -302,11 +305,25 @@ pub unsafe extern "C" fn z_open(
             Some("peer") => WhatAmI::Peer,
             _ => WhatAmI::Client,
         };
+        // The connect locators: the configured one, or with neither locator configured the
+        // first scouted node's (`vendor/zenoh-pico/src/net/session.c` @
+        // `ret = _z_locators_by_scout(config, zid, &connect_locators);`), whose build without
+        // scouting answers `_Z_ERR_SCOUT_NO_RESULTS`. A session that is re-dialled after it
+        // lost its link dials the locators found here again. pico re-runs the whole open,
+        // scouting included (`_z_client_reopen_task_fn` calls `_z_open`), so a router that
+        // comes back on another locator is found there and not here.
+        let connect: Vec<String> = match (connect, &listen) {
+            (Some(connect), _) => vec![connect],
+            (None, Some(_)) => Vec::new(),
+            #[cfg(feature = "scout")]
+            (None, None) => match crate::scout::locators_by_scout(&cfg) {
+                Ok(locators) => locators,
+                Err(code) => return code,
+            },
+            #[cfg(not(feature = "scout"))]
+            (None, None) => return crate::result::Z_ERR_SCOUT_NO_RESULTS,
+        };
         drop(cfg);
-
-        if connect.is_none() && listen.is_none() {
-            return crate::result::Z_ERR_INVALID;
-        }
         // A build without the `peer` feature is a client build: it opens to the endpoint it is
         // given, and a listener or `mode=peer` is a role it does not have. (zenoh-pico's own
         // `Z_FEATURE_UNICAST_PEER` gates less: a build without it still takes a lone listener,
@@ -346,7 +363,7 @@ pub unsafe extern "C" fn z_open(
         // the connect locator otherwise (`vendor/zenoh-pico/src/net/session.c` @
         // `// First, try to open the optional listen locator.`).
         #[cfg(feature = "admin-space")]
-        let transport_endpoint = listen.clone().or_else(|| connect.clone());
+        let transport_endpoint = listen.clone().or_else(|| connect.first().cloned());
         match open_blocking(
             connect.into_iter().collect(),
             // pico's config carries ONE listen locator, so the set is that one or none.
@@ -384,10 +401,20 @@ pub unsafe extern "C" fn z_open(
                 // pico has no client storage: its sessions read shared memory through the
                 // default reader, as every session did before the field existed.
                 shm_clients: wz_capi_core::faces::no_shm_clients(),
-                // pico runs a callback only from its background executor, so a delivery the
-                // session makes to itself is staged and run there, never inside the call.
+                // Without the local switches pico runs a callback only from its background
+                // executor, so a delivery the session makes to itself is staged and run there,
+                // never inside the call. With them, a session's own put, get and reply reach
+                // its own subscribers, queryables and reply callbacks INSIDE the call, on the
+                // calling thread (`vendor/zenoh-pico/src/session/loopback.c` @
+                // `_z_session_deliver_push_locally`, which hands the message to
+                // `_z_handle_network_message` before returning), as zenoh-c's does.
+                #[cfg(not(any(feature = "local-subscriber", feature = "local-queryable")))]
                 local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::DriveTask,
-                // pico scouts when a program calls `z_scout`, never inside `z_open`.
+                #[cfg(any(feature = "local-subscriber", feature = "local-queryable"))]
+                local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::Caller,
+                // The plan is zenoh's scouting node, which keeps looking and answers Scouts.
+                // pico's open looks once, before the open (`connect` above), and its session
+                // answers no Scout.
                 #[cfg(feature = "scout")]
                 scouting: None,
                 // zenoh-pico ends its push to every peer link it adds as a PEER, accepted or
@@ -1104,18 +1131,22 @@ fn entity_id_of(identity: Option<([u8; 16], u64)>) -> crate::entity::z_entity_gl
 
 // --- R311y559: the remaining option defaults + the two `zp_` task probes -----
 
-/// pico `z_subscriber_options_t` — a ONE-BYTE dummy in this build.
+/// pico `z_subscriber_options_t`.
 ///
 /// The struct is `{ z_locality_t allowed_origin; }` under
-/// `Z_FEATURE_LOCAL_SUBSCRIBER` and `{ uint8_t __dummy; }` without it, and the
-/// generated `config.h` these programs compile against has the feature OFF. So
-/// the field a caller can set does not exist, which is the same fact
-/// `crate::pubsub`'s `Locality::Remote` subscribe pin records from the other
-/// side. 1 B MEASURED.
+/// `Z_FEATURE_LOCAL_SUBSCRIBER` (4 B) and `{ uint8_t __dummy; }` without it (1 B
+/// MEASURED), and this crate follows the switch with `local-subscriber`. Without
+/// it the field a caller could set does not exist and the subscriber is remote
+/// only, as pico's is with no local path compiled in.
 #[repr(C)]
 pub struct z_subscriber_options_t {
+    #[cfg(feature = "local-subscriber")]
+    pub allowed_origin: crate::locality::z_locality_t,
+    #[cfg(not(feature = "local-subscriber"))]
     pub __dummy: u8,
 }
+
+crate::locality::locality_option_field!(z_subscriber_options_t, allowed_origin, "local-subscriber");
 
 /// pico `z_open_options_t`, 16 B measured:
 /// `{ bool auto_start_read_task; bool auto_start_lease_task; z_task_attr_t* }`.
@@ -1177,7 +1208,14 @@ pub struct zp_task_lease_options_t {
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<z_subscriber_options_t>() == 1);
+    assert!(
+        std::mem::size_of::<z_subscriber_options_t>()
+            == if cfg!(feature = "local-subscriber") {
+                4
+            } else {
+                1
+            }
+    );
     assert!(
         std::mem::size_of::<z_open_options_t>()
             == match (
@@ -1215,7 +1253,15 @@ const _: () = assert!(
 #[no_mangle]
 pub unsafe extern "C" fn z_subscriber_options_default(options: *mut z_subscriber_options_t) {
     if !options.is_null() {
-        (*options).__dummy = 0;
+        // `options->allowed_origin = z_locality_default();` with the switch on.
+        #[cfg(feature = "local-subscriber")]
+        {
+            (*options).allowed_origin = crate::locality::Z_LOCALITY_ANY;
+        }
+        #[cfg(not(feature = "local-subscriber"))]
+        {
+            (*options).__dummy = 0;
+        }
     }
 }
 

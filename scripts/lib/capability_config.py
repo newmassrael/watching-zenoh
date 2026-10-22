@@ -32,8 +32,11 @@ is the half that is not a graph and does not belong in a table.
      restricted to the capabilities the crate has; it forwards `wz-capi-core/<id>`.
   3. For the core: the same capabilities are features, their edges are a SUBSET of the declared
      `implies` (the core is the model; it does not repeat an ABI's rule), and the default set
-     is the base plus every capability.
-  4. The default features of each ABI crate are its base plus every capability it has.
+     is the base plus every capability that is on by default.
+  4. The default features of each ABI crate are its base plus every capability it has that is
+     on by default. A capability is on by default unless declared `default = "off"`, which is
+     for a switch the reference library itself leaves off (pico's local delivery, its admin
+     space): the drop-in's default exports what the reference build does.
   5. No capability feature exists in a manifest that the declaration does not name.
 
 Usage:
@@ -132,6 +135,8 @@ def validate_decl(data: dict, caps: dict) -> list[str]:
             out.append(f"{c['id']} is not in core, and every capability is")
         if not c["kconfig"].startswith("WZ_CAP_"):
             out.append(f"{c['id']}: Kconfig symbol `{c['kconfig']}` is not WZ_CAP_*")
+        if c.get("default", "on") not in ("on", "off"):
+            out.append(f"{c['id']}: default is `{c['default']}`, which is neither on nor off")
         if "pico_flag" in c and "pico_flags_all" in c:
             out.append(f"{c['id']} names both a pico_flag and pico_flags_all; it is one or the other")
         for flag in [c.get("pico_flag", "Z_FEATURE_")] + c.get("pico_flags_all", []):
@@ -150,6 +155,11 @@ def validate_decl(data: dict, caps: dict) -> list[str]:
                 seen.add(cur)
                 stack.extend(caps[cur]["implies"])
     return out
+
+
+def default_on(cap: dict) -> bool:
+    """Whether a build that names nothing has the capability: on unless declared `off`."""
+    return cap.get("default", "on") == "on"
 
 
 def closure(caps: dict, on: set[str]) -> set[str]:
@@ -182,7 +192,7 @@ def emit_kconfig(decl: dict) -> str:
         cap = caps[cid]
         lines.append(f"config {cap['kconfig']}")
         lines.append(f'\tbool "{cid}"')
-        lines.append("\tdefault y")
+        lines.append("\tdefault y" if default_on(cap) else "\tdefault n")
         for dep in cap["implies"]:
             lines.append(f"\tselect {caps[dep]['kconfig']}")
         lines.append("\thelp")
@@ -299,9 +309,7 @@ def check_manifest(decl: dict, abi: str, feats: dict) -> list[str]:
     for cid in sorted(others & set(feats)):
         out.append(f"{abi}: has a feature `{cid}` the declaration does not give this ABI")
     default = set(feats.get("default", []))
-    want = set(decl["base"][abi]) | mine
-    if abi == "core":
-        want = set(decl["base"]["core"]) | mine
+    want = set(decl["base"][abi]) | {cid for cid in mine if default_on(caps[cid])}
     if default != want:
         out.append(f"{abi}: default is {sorted(default)}, expected {sorted(want)}")
     return out
@@ -362,6 +370,9 @@ def cmd_selftest() -> int:
                              "CONFIG_WZ_CAP_GROUP=n\nCONFIG_OTHER=y\n") == {"query"})
     expect("a pico header reads 1 and not 0",
            read_config(decl, "#define Z_FEATURE_QUERY 1\n#define Z_FEATURE_QUERYABLE 0\n") == {"query"})
+    expect("an off-by-default capability is `default n` in the Kconfig and reachable by its switch",
+           "config WZ_CAP_ADMIN_SPACE\n\tbool \"admin-space\"\n\tdefault n" in emit_kconfig(decl)
+           and "admin-space" in read_config(decl, "#define Z_FEATURE_ADMIN_SPACE 1\n"))
     expect("a capability of several pico switches is on only when all of them are",
            "liveliness-get" in read_config(
                decl, "#define Z_FEATURE_LIVELINESS 1\n#define Z_FEATURE_QUERY 1\n")

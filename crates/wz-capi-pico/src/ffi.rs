@@ -86,8 +86,8 @@ unsafe impl Send for SendPtr {}
 /// **`Sync` is deliberately NOT implemented here.** Each plane must write its
 /// own `unsafe impl Sync for CClosure<ItsCallbackType>`, because the safety
 /// argument is per-plane and genuinely different: the subscriber plane's rests
-/// on the fan-out publish being `Locality::Remote`, the queryable plane's on the
-/// queryable being declared `Locality::Remote`. A blanket
+/// on where a publish may go and the queryable plane's on where a queryable
+/// admits a query from, in each arm of pico's local switches. A blanket
 /// `unsafe impl<C> Sync for CClosure<C>` would silently hand that guarantee to
 /// the next plane before anyone had made its argument — which is exactly the
 /// class of bug R311y288 fixed on the publish plane. Rust allows `unsafe impl`

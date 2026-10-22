@@ -97,6 +97,7 @@ pub mod keyexpr;
 mod link_properties;
 #[cfg(feature = "liveliness")]
 pub mod liveliness;
+pub mod locality;
 pub mod matching;
 mod option_fields;
 mod os;
@@ -169,12 +170,20 @@ const _: () = {
 // The answering end of a query. The closure families share `{ context, call, drop }`
 // (`~/zenoh-pico/include/zenoh-pico/api/types.h:730-750`), so 24 B like
 // closure_sample; `z_queryable_options_t` is `{ bool complete; }` in a
-// default pico build (`Z_FEATURE_LOCAL_QUERYABLE` = 0, CMakeLists.txt:353).
+// default pico build (`Z_FEATURE_LOCAL_QUERYABLE` = 0) and gains a 4-byte
+// `allowed_origin` with the switch.
 #[cfg(feature = "queryable")]
 const _: () = {
     use core::mem::size_of;
     assert!(size_of::<query::z_owned_closure_query_t>() == 24);
-    assert!(size_of::<query::z_queryable_options_t>() == 1);
+    assert!(
+        size_of::<query::z_queryable_options_t>()
+            == if cfg!(feature = "local-queryable") {
+                8
+            } else {
+                1
+            }
+    );
     assert!(size_of::<query::z_query_reply_err_options_t>() == 8);
     // The two whose layout is `Z_FEATURE_UNSTABLE_API`-conditional (a trailing
     // `z_source_info_t *source_info`, `api/types.h:334-336,359-361`) — so the

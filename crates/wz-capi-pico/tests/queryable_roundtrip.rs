@@ -27,10 +27,10 @@ use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_query, z_closure_query_move,
     z_config_default, z_config_loan_mut, z_config_move, z_declare_queryable, z_loaned_query_t,
     z_open, z_owned_closure_query_t, z_owned_config_t, z_owned_queryable_t, z_owned_session_t,
-    z_query_keyexpr, z_query_reply, z_queryable_move, z_queryable_options_t, z_session_drop,
-    z_session_loan, z_session_loan_mut, z_session_move, z_undeclare_queryable,
-    z_view_keyexpr_from_str, z_view_keyexpr_loan, z_view_keyexpr_t, zp_config_insert,
-    Z_CONFIG_LISTEN_KEY, Z_OK,
+    z_query_keyexpr, z_query_reply, z_queryable_move, z_queryable_options_default,
+    z_queryable_options_t, z_session_drop, z_session_loan, z_session_loan_mut, z_session_move,
+    z_undeclare_queryable, z_view_keyexpr_from_str, z_view_keyexpr_loan, z_view_keyexpr_t,
+    zp_config_insert, Z_CONFIG_LISTEN_KEY, Z_OK,
 };
 
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
@@ -48,6 +48,15 @@ use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 
 const KEYEXPR: &str = "demo/q";
 const ANSWER: &str = "answer-from-c-queryable";
+
+/// Queryable options as a C program fills them: defaulted, then `complete` set.
+/// The default writes the fields only some builds have (`allowed_origin`).
+unsafe fn queryable_options(complete: bool) -> z_queryable_options_t {
+    let mut opts: z_queryable_options_t = std::mem::zeroed();
+    z_queryable_options_default(&mut opts);
+    opts.complete = complete;
+    opts
+}
 
 /// Context the C query callback writes into / replies from.
 struct QCtx {
@@ -249,7 +258,7 @@ fn c_queryable_answers_a_native_wz_querier_over_loopback_tcp() {
         assert_eq!(z_view_keyexpr_from_str(&mut ke, ke_str.as_ptr()), Z_OK);
 
         let mut qbl: z_owned_queryable_t = std::mem::zeroed();
-        let opts = z_queryable_options_t { complete: true };
+        let opts = queryable_options(true);
         // Declared BEFORE any peer connects — the SSOT replays it onto the
         // face as it comes up (pico's declare-before-peer).
         assert_eq!(
@@ -358,7 +367,7 @@ fn c_query_closure_drop_runs_exactly_once() {
         assert_eq!(z_view_keyexpr_from_str(&mut ke, ke_str.as_ptr()), Z_OK);
 
         let mut qbl: z_owned_queryable_t = std::mem::zeroed();
-        let opts = z_queryable_options_t { complete: false };
+        let opts = queryable_options(false);
         assert_eq!(
             z_declare_queryable(
                 z_session_loan(&zs),

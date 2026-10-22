@@ -612,22 +612,22 @@ pub(crate) type CQueryClosure = FfiClosure<z_closure_query_callback_t>;
 //
 // Sharing one queryable's `CQueryClosure` across a per-face callback needs
 // `Sync` (so `Arc<CQueryClosure>`, and each callback, is `Send`). Sharing
-// `&CQueryClosure` is sound because `call` is only ever invoked from the
-// session's single drive task: every face of a session is driven on ONE task,
-// and the queryable handler fires from that task's inbound dispatch drain.
+// `&CQueryClosure` is sound because the closure is two C pointers Rust only
+// reads, and WHO calls `call` is pico's contract, kept in each arm:
 //
-// It is load-bearing that the C application thread never invokes `call`, and
-// what makes that MECHANICAL rather than a promise is that this crate declares
-// every queryable `Locality::Remote` (`faces::queryable_options`). A Remote
-// queryable is unreachable from `Session::query`'s in-process fan
-// (`session/mod.rs:1976`, gated on the queryable registry's locality), so no
-// `z_get` on the C thread — whatever locality IT chooses — can run this handler
-// there. Relying instead on the get side passing `Locality::Remote` would be a
-// promise the next round could silently break; `Any::allows_local()` is true
-// (`wz-session-core/src/locality.rs:70-72`), so a default-locality get would
-// otherwise drain a local queryable job on the C thread while a drive thread ran
-// `call` on another face — two `call(context)`s at once on one C context, the
-// unsound-`Sync` bug R311y288 already fixed once on the publish plane.
+// - Without `local-queryable` every queryable is `Locality::Remote`, which the
+//   queryable's own declaration makes MECHANICAL rather than a promise: a Remote
+//   queryable is unreachable from `Session::query`'s in-process fan (gated on the
+//   queryable registry's locality), so no `z_get` on the C thread, whatever
+//   locality IT chooses, can run this handler there. The handler fires from the
+//   drive task's inbound dispatch alone, as pico's default build fires it from
+//   its read task alone.
+// - With `local-queryable` a queryable whose `allowed_origin` admits it answers
+//   the session's own get inside `z_get`, on the calling thread, while the drive
+//   task may be answering a peer's query with it at once. pico does exactly that:
+//   `_z_session_deliver_query_locally` runs on the thread that called `z_get`,
+//   and the queryable callback runs outside the session lock. A program built
+//   with that switch is written for it.
 //
 // `drop` runs only when the last `Arc` is released, which cannot overlap a live
 // `call` (a running callback holds a reference).
@@ -841,17 +841,29 @@ pub unsafe extern "C" fn z_closure_query_drop(closure: *mut z_moved_closure_quer
 /// one. Mirroring pico's api.c feature gates rather than its header is the rule
 /// here: the header declares fields/ops unconditionally, the gates decide what a
 /// default build actually has.
+///
+/// With `local-queryable` the struct gains `allowed_origin` after `complete`
+/// (`#if Z_FEATURE_LOCAL_QUERYABLE == 1` upstream), 8 B with its alignment.
 #[repr(C)]
 pub struct z_queryable_options_t {
     pub complete: bool,
+    #[cfg(feature = "local-queryable")]
+    pub allowed_origin: crate::locality::z_locality_t,
 }
 
+crate::locality::locality_option_field!(z_queryable_options_t, allowed_origin, "local-queryable");
+
 /// Fill default queryable options (pico `z_queryable_options_default`):
-/// `complete = false`, the incomplete default.
+/// `complete = false`, the incomplete default, and with `local-queryable` an
+/// `allowed_origin` of `Z_LOCALITY_ANY`.
 #[no_mangle]
 pub unsafe extern "C" fn z_queryable_options_default(options: *mut z_queryable_options_t) {
     if !options.is_null() {
         (*options).complete = false;
+        #[cfg(feature = "local-queryable")]
+        {
+            (*options).allowed_origin = crate::locality::Z_LOCALITY_ANY;
+        }
     }
 }
 
@@ -1125,16 +1137,17 @@ unsafe fn declare_queryable_inner(
     if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
         return Err(Z_ERR_INVALID);
     }
-    let complete = if options.is_null() {
-        false
+    let (complete, allowed_origin) = if options.is_null() {
+        (false, crate::locality::default_locality!("local-queryable"))
     } else {
-        (*options).complete
+        ((*options).complete, (*options).allowed_origin())
     };
     let (id, key) = declare_queryable_on(
         &crate::write_filter::PicoSession::of(state),
         ke,
         declared_of(keyexpr),
         complete,
+        allowed_origin,
         {
             // R311y498 — see the pubsub/liveliness twins: the shim mints, the
             // registry calls the factory per face, the C drop(context) is unmoved.
@@ -1155,10 +1168,10 @@ unsafe fn declare_queryable_inner(
 /// Declare a queryable the way pico's `z_declare_queryable` does, for whatever
 /// answers it: the key's declaration, then the queryable announced on it.
 ///
-/// R311y554 — `Locality::Remote`: `Z_FEATURE_LOCAL_QUERYABLE` defaults to 0
-/// (`vendor/zenoh-pico/CMakeLists.txt:353`), so a default pico build has no
-/// local queryable at all and its `z_queryable_options_t` carries no
-/// `allowed_origin` field — which is why this crate's mirror carries none.
+/// R311y554 — `allowed_origin` is the caller's with `local-queryable` and
+/// `Locality::Remote` without it: `Z_FEATURE_LOCAL_QUERYABLE` defaults to 0
+/// upstream, so a default pico build has no local queryable at all and its
+/// `z_queryable_options_t` carries no `allowed_origin` field.
 /// R2959 — pico declares the queryable's NON-WILD PREFIX and announces the
 /// queryable ON that declaration, the wild tail as suffix
 /// (`vendor/zenoh-pico/src/net/primitives.c` @
@@ -1175,6 +1188,7 @@ pub(crate) fn declare_queryable_on(
     keyexpr: String,
     existing: Option<&DeclaredKeyexpr>,
     complete: bool,
+    allowed_origin: wz_runtime_tokio::locality::Locality,
     sink: wz_capi_core::faces::QueryableSink,
 ) -> Result<(QblId, DeclaredKeyexpr), ZResult> {
     let key = DeclaredKeyexpr::declare_non_wild_prefix(&session.shared, &keyexpr, existing)?;
@@ -1182,7 +1196,7 @@ pub(crate) fn declare_queryable_on(
         keyexpr,
         key.wire(&session.shared),
         complete,
-        wz_runtime_tokio::locality::Locality::Remote,
+        allowed_origin,
         // A peer or router-hat session retracts the queryable naming its key
         // (`_z_undeclare_queryable`) — the announced one, for a queryable.
         key.retraction_naming(session),
@@ -1212,8 +1226,16 @@ impl PlainQueryable {
         complete: bool,
         sink: wz_capi_core::faces::QueryableSink,
     ) -> Result<Self, ZResult> {
-        let (id, key) =
-            declare_queryable_on(session, keyexpr.to_owned(), existing, complete, sink)?;
+        // Declared as pico declares its own (`z_declare_queryable` with NULL options):
+        // the default origin.
+        let (id, key) = declare_queryable_on(
+            session,
+            keyexpr.to_owned(),
+            existing,
+            complete,
+            crate::locality::default_locality!("local-queryable"),
+            sink,
+        )?;
         Ok(Self {
             shared: session.shared.clone(),
             id,

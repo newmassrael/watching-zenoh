@@ -375,9 +375,13 @@ pub unsafe extern "C" fn z_matching_listener_drop(
 
 /// Poll the current matching status (pico `z_publisher_get_matching_status`).
 ///
-/// Reads the SESSION verdict: `true` when ANY connected peer has a matching
-/// subscriber, which is the same aggregation the listener delivers, so the poll
-/// and the callback cannot disagree.
+/// pico answers it from the publisher's write filter
+/// (`vendor/zenoh-pico/src/api/api.c` @
+/// `matching_status->matching = !_z_write_filter_active(&publisher->_filter);`), and so
+/// does this: `true` when what the filter counts has a match — a connected peer's
+/// subscriber, and with `local-subscriber` the session's own for a publisher whose
+/// destination admits it. The listener counts the same, so the poll and the callback
+/// cannot disagree.
 #[no_mangle]
 pub unsafe extern "C" fn z_publisher_get_matching_status(
     publisher: *const z_loaned_publisher_t,
@@ -391,7 +395,7 @@ pub unsafe extern "C" fn z_publisher_get_matching_status(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        (*matching_status).matching = state.shared_session().has_matching(state.keyexpr());
+        (*matching_status).matching = state.filter_matches();
         Z_OK
     })
 }
@@ -483,7 +487,14 @@ unsafe fn declare_matching(
     };
 
     let shared = state.shared_session();
-    let id = shared.declare_matching_listener(state.keyexpr().to_owned(), sink);
+    // pico's matching listener is its publisher's write filter's callback, so it counts
+    // what the filter counts: the session's own subscribers too, for a publisher whose
+    // destination admits them (`local-subscriber`).
+    let id = shared.declare_matching_listener_counting_local(
+        state.keyexpr().to_owned(),
+        sink,
+        state.counts_local(),
+    );
     // R311y528 — the publisher owns the retraction. Without this the entry
     // outlives `z_undeclare_publisher` / `z_publisher_drop` and the C closure
     // keeps firing for a publisher the program has released; see
@@ -508,7 +519,7 @@ unsafe fn declare_matching(
 /// moved closure, which is consumed on every path.
 #[cfg(feature = "advanced")]
 pub(crate) unsafe fn declare_advanced_matching(
-    target: Option<(Arc<SharedSession>, String)>,
+    target: Option<(Arc<SharedSession>, String, bool)>,
     listener: Option<*mut z_owned_matching_listener_t>,
     callback: *mut z_moved_closure_matching_status_t,
 ) -> ZResult {
@@ -518,11 +529,11 @@ pub(crate) unsafe fn declare_advanced_matching(
             Ok(sink) => sink,
             Err(code) => return code,
         };
-        let Some((shared, keyexpr)) = target else {
+        let Some((shared, keyexpr, counts_local)) = target else {
             // `sink` drops here, running the caller's `drop(context)`.
             return Z_ERR_NULL;
         };
-        let id = shared.declare_matching_listener(keyexpr, sink);
+        let id = shared.declare_matching_listener_counting_local(keyexpr, sink, counts_local);
         match listener {
             None => Z_OK,
             Some(slot) if slot.is_null() => {

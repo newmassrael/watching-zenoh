@@ -1077,89 +1077,41 @@ pub(crate) fn issue_get(
     };
 
     // R311y554 / R311y557 — the same two-legs-are-disjoint split as the fan-out
-    // publish. A C session's queryable is replayed onto every face AND onto the
-    // session-scope local plane, so handing an `Any` get to each face would run
-    // the ONE C query handler once per face and answer a single `z_get` N times.
-    // The faces therefore take `Remote` and only `Remote`; the LOCAL leg is
-    // issued exactly once, on the plane, which owns it whether or not a face
-    // exists. That is what the "first face carries it, and with no face there is
-    // no local leg" convention this replaced could not do.
-    use wz_runtime_tokio::locality::Locality;
-    let want_remote = opts.allowed_destination.allows_remote();
-    let want_local = opts.allowed_destination.allows_local();
-
-    // The C thread's own clone, held across the whole loop — see the module doc
+    // publish: each face takes `Remote` and only `Remote`, and the LOCAL leg is
+    // issued exactly once, on the session-scope plane, whether or not a face
+    // exists. The split is `SharedSession::fan_query`'s, shared with the pico ABI.
+    //
+    // The C thread's own clone, held across the whole fan — see the module doc
     // for why a face that finalises early must not be able to complete the get
     // while later faces are still being issued.
     let guard = closure.clone();
-    let leg = || LegReply {
-        closure: closure.clone(),
-        gate: gate.clone(),
-        _registration: registration.clone(),
-    };
-    // R2949 — record a leg's rid against the cancellation set; `false` means the
-    // token cancelled while the fan was running, and `record` has already undone
-    // THIS leg, so nothing further may be issued.
-    let cancelled_mid_fan = |session: &wz_runtime_tokio::session::TokioSession, rid: u64| {
-        fan.as_ref().is_some_and(|fan| {
-            let undo_session = session.clone();
-            !fan.record(move || {
-                undo_session.cancel_pending_query(rid);
-            })
-        })
-    };
-    let mut stopped = false;
-    if want_remote {
-        for (session, revised) in shared.face_sessions_with_wake() {
-            let per_face = leg();
+    shared.fan_query(
+        opts.allowed_destination,
+        fan.as_deref(),
+        |session, locality| {
+            let leg = LegReply {
+                closure: closure.clone(),
+                gate: gate.clone(),
+                _registration: registration.clone(),
+            };
             // Only `on_reply` carries the `Arc`. Completion is signalled by the
             // pending entry's sink being DROPPED, which covers a real final, a
             // timeout sweep and a face death alike — whereas a counter
             // incremented in `on_final` would never be reached by the face-death
-            // path.
-            let issued = query_leg(
-                &session,
+            // path. An issue error (a face mid-teardown) is swallowed, matching
+            // the fan-out publish's best-effort discipline; its clone was already
+            // dropped with the rolled-back sink.
+            query_leg(
+                session,
                 &keyexpr,
-                opts.clone().with_allowed_destination(Locality::Remote),
+                opts.clone().with_allowed_destination(locality),
                 &value,
-                move |view: &dyn ReplyView| per_face.fire(view),
-            );
-            stopped = matches!(&issued, Ok(handle) if cancelled_mid_fan(&session, handle.rid()));
-            // A per-face issue error (a face mid-teardown) is swallowed,
-            // matching the fan-out publish's best-effort discipline; its clone
-            // was already dropped with the rolled-back sink.
-            drop(issued);
-            if stopped {
-                break;
-            }
-            // Wake this face's drive loop so it re-arms on the deadline just
-            // registered; without it a silent session sweeps only at the next
-            // keepalive wake.
-            revised.notify_one();
-        }
-    }
-    if want_local && !stopped {
-        let local = leg();
-        let local_session = shared.local_session();
-        let issued = query_leg(
-            local_session,
-            &keyexpr,
-            opts.with_allowed_destination(Locality::SessionLocal),
-            &value,
-            move |view: &dyn ReplyView| local.fire(view),
-        );
-        if let Ok(handle) = &issued {
-            // The local leg is cancellable like a face's: same registry, same
-            // undo, on the plane's own session.
-            let _ = cancelled_mid_fan(local_session, handle.rid());
-        }
-        drop(issued);
-        // The plane's own drain, for the deferred half: the loopback replies and
-        // the Final are finalised INLINE by `Session::query`, but a local
-        // queryable handler that publishes stages onto the plane like any other
-        // producer.
-        shared.wake_local_plane();
-    }
+                move |view: &dyn ReplyView| leg.fire(view),
+            )
+            .ok()
+            .map(|handle| handle.rid())
+        },
+    );
     drop(guard);
     // After `guard`, explicitly: locals drop in REVERSE declaration order, so
     // left implicit the registration would go first and a concurrent `cancel`
