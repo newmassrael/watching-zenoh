@@ -46,9 +46,7 @@
 #[cfg(not(feature = "bounded-heapless"))]
 use alloc::vec::Vec;
 
-#[cfg(feature = "bounded-heapless")]
-use crate::bounded::BoundedVec;
-#[cfg(feature = "bounded-heapless")]
+use crate::bounded::{BoundedVec, Profile, Storage};
 use crate::caps;
 #[cfg(feature = "alloc")]
 use crate::query::QueryReply;
@@ -220,10 +218,6 @@ pub trait FinalStaging {
 #[cfg(not(feature = "bounded-heapless"))]
 pub type ReplyStage = Vec<QueryReply>;
 
-/// The `Final`s owed to one peer, as `(rid, the query's QoS)`.
-#[cfg(not(feature = "bounded-heapless"))]
-pub type FinalStage = Vec<(u64, QosLevel)>;
-
 #[cfg(not(feature = "bounded-heapless"))]
 impl ReplyStaging for Vec<QueryReply> {
     fn stage_parts(&mut self, parts: ReplyParts<'_>) -> Result<(), ReplyError> {
@@ -242,27 +236,6 @@ impl ReplyStaging for Vec<QueryReply> {
 
     #[cfg(feature = "alloc")]
     fn drain_staged(&mut self) -> impl Iterator<Item = QueryReply> + '_ {
-        self.drain(..)
-    }
-}
-
-#[cfg(not(feature = "bounded-heapless"))]
-impl FinalStaging for Vec<(u64, QosLevel)> {
-    fn has_room(&self) -> bool {
-        true
-    }
-
-    fn owe(&mut self, rid: u64, qos: QosLevel) {
-        self.push((rid, qos));
-    }
-
-    fn refuse_request(&mut self) {}
-
-    fn owed(&self) -> usize {
-        self.len()
-    }
-
-    fn drain_owed(&mut self) -> impl Iterator<Item = (u64, QosLevel)> {
         self.drain(..)
     }
 }
@@ -692,26 +665,34 @@ impl ReplyStaging for ReplyStage {
     }
 }
 
-/// The `Final`s owed to one peer: [`caps::MAX_PENDING_FINALS`] rows, no more. A full
-/// table refuses the REQUEST that would have needed one ([`Self::refusals`]
-/// counts them) and does not grow.
-#[cfg(feature = "bounded-heapless")]
-pub struct FinalStage {
-    rows: BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }>,
+/// The `Final`s owed to one peer, as `(rid, the query's QoS)`: up to
+/// [`caps::MAX_PENDING_FINALS`] rows on a policy that enforces the capacity
+/// ([`Static`](crate::bounded::Static)), where a full table refuses the REQUEST that
+/// would have needed one ([`Self::refusals`] counts them) and does not grow; and as
+/// many as are owed on one that does not ([`Heap`](crate::bounded::Heap)), which
+/// refuses nothing and counts nothing, as it always did.
+///
+/// One algorithm for both: the table is a [`BoundedVec`] of its storage policy,
+/// `has_room` asks it how many pushes are still guaranteed, and the heap policy
+/// answers `usize::MAX`. The policy defaults to this build's
+/// [`Profile`](crate::bounded::Profile), so `FinalStage` alone is the build's table.
+pub struct FinalStage<P: Storage = Profile> {
+    rows: BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }, P>,
     refused_requests: u32,
 }
 
-#[cfg(feature = "bounded-heapless")]
-impl FinalStage {
-    /// An empty table. `const`, so a session slot that holds one can be a
-    /// `static`.
+impl FinalStage<Profile> {
+    /// An empty table of this build's profile. `const`, so a session slot that holds
+    /// one can be a `static`.
     pub const fn new() -> Self {
         Self {
             rows: BoundedVec::new(),
             refused_requests: 0,
         }
     }
+}
 
+impl<P: Storage> FinalStage<P> {
     /// How many requests were refused because no `Final` could be owed for them.
     pub fn refusals(&self) -> u32 {
         self.refused_requests
@@ -723,26 +704,26 @@ impl FinalStage {
     }
 }
 
-#[cfg(feature = "bounded-heapless")]
-impl IntoIterator for FinalStage {
+impl<P: Storage> IntoIterator for FinalStage<P> {
     type Item = (u64, QosLevel);
     type IntoIter =
-        <BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }> as IntoIterator>::IntoIter;
+        <BoundedVec<(u64, QosLevel), { caps::MAX_PENDING_FINALS }, P> as IntoIterator>::IntoIter;
 
     fn into_iter(self) -> Self::IntoIter {
         self.rows.into_iter()
     }
 }
 
-#[cfg(feature = "bounded-heapless")]
-impl Default for FinalStage {
+impl<P: Storage> Default for FinalStage<P> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            rows: BoundedVec::default(),
+            refused_requests: 0,
+        }
     }
 }
 
-#[cfg(feature = "bounded-heapless")]
-impl core::ops::Deref for FinalStage {
+impl<P: Storage> core::ops::Deref for FinalStage<P> {
     type Target = [(u64, QosLevel)];
 
     fn deref(&self) -> &[(u64, QosLevel)] {
@@ -750,8 +731,7 @@ impl core::ops::Deref for FinalStage {
     }
 }
 
-#[cfg(feature = "bounded-heapless")]
-impl FinalStaging for FinalStage {
+impl<P: Storage> FinalStaging for FinalStage<P> {
     fn has_room(&self) -> bool {
         self.rows.free_slots() > 0
     }
@@ -775,5 +755,101 @@ impl FinalStaging for FinalStage {
 
     fn drain_owed(&mut self) -> impl Iterator<Item = (u64, QosLevel)> {
         core::mem::take(&mut self.rows).into_iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bounded::Static;
+
+    const N: usize = caps::MAX_PENDING_FINALS;
+
+    /// The finals table, written once and run on every policy: fill it to its
+    /// declared capacity, then ask for one more. A policy that enforces the
+    /// capacity says there is no room and takes the refusal as counted; one that
+    /// does not says there is room and takes the entry. The expectations are read
+    /// from the policy's own contract, never from a feature gate.
+    fn fill_to_n_then_refuse_at_n_plus_one<P: Storage>() {
+        let mut finals: FinalStage<P> = FinalStage::default();
+        for rid in 0..N as u64 {
+            assert!(finals.has_room(), "entry {rid} is within the capacity");
+            finals.owe(rid, QosLevel::DEFAULT);
+        }
+        assert_eq!(finals.owed(), N);
+        assert_eq!(finals.refusals(), 0, "nothing was refused up to N");
+
+        if P::ENFORCES_CAPACITY {
+            assert!(!finals.has_room(), "a full table has no room");
+            finals.refuse_request();
+            assert_eq!(finals.refusals(), 1, "the refused request is counted");
+            finals.owe(N as u64, QosLevel::DEFAULT);
+            assert_eq!(finals.owed(), N, "an entry past N is not taken");
+            assert_eq!(
+                finals.refusals(),
+                2,
+                "and is counted, not dropped in silence"
+            );
+        } else {
+            assert!(finals.has_room(), "an advisory capacity always has room");
+            finals.owe(N as u64, QosLevel::DEFAULT);
+            assert_eq!(finals.owed(), N + 1);
+            assert_eq!(finals.refusals(), 0, "the growable table refuses nothing");
+        }
+    }
+
+    /// What is owed is taken in the order it was owed, and taking it empties the
+    /// table without touching the count of what was refused.
+    fn drain_takes_in_order_and_keeps_the_count<P: Storage>() {
+        let mut finals: FinalStage<P> = FinalStage::default();
+        for rid in 10..13u64 {
+            finals.owe(rid, QosLevel::DEFAULT);
+        }
+        finals.refuse_request();
+        let mut taken = [0u64; 3];
+        for (slot, (rid, _)) in taken.iter_mut().zip(finals.drain_owed()) {
+            *slot = rid;
+        }
+        assert_eq!(taken, [10, 11, 12]);
+        assert_eq!(finals.owed(), 0);
+        assert!(finals.is_empty());
+        assert_eq!(finals.refusals(), 1, "draining does not clear the count");
+    }
+
+    /// `clear` drops what is owed and keeps the count, as `forget_peer` relies on.
+    fn clear_keeps_the_count<P: Storage>() {
+        let mut finals: FinalStage<P> = FinalStage::default();
+        finals.owe(1, QosLevel::DEFAULT);
+        finals.refuse_request();
+        finals.clear();
+        assert_eq!(finals.owed(), 0);
+        assert_eq!(finals.refusals(), 1);
+    }
+
+    macro_rules! on_every_policy {
+        ($($case:ident),* $(,)?) => {
+            mod on_static {
+                use super::*;
+                $(#[test] fn $case() { super::$case::<Static>(); })*
+            }
+            #[cfg(feature = "alloc")]
+            mod on_heap {
+                use crate::bounded::Heap;
+                $(#[test] fn $case() { super::$case::<Heap>(); })*
+            }
+        };
+    }
+
+    on_every_policy!(
+        fill_to_n_then_refuse_at_n_plus_one,
+        drain_takes_in_order_and_keeps_the_count,
+        clear_keeps_the_count,
+    );
+
+    /// The default `FinalStage` is the build's profile and can sit in a `static`.
+    #[test]
+    fn the_profile_table_is_const_constructible() {
+        static FINALS: FinalStage = FinalStage::new();
+        assert_eq!(FINALS.owed(), 0);
     }
 }
