@@ -43,7 +43,9 @@ use std::sync::Arc;
 
 use tokio::sync::Notify;
 
-use wz_runtime_tokio::multicast_glue::{McastGroupMembership, MulticastTxProducer};
+use wz_runtime_tokio::multicast_glue::{
+    McastGroupMembership, MulticastMember, MulticastTxProducer,
+};
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
 #[cfg(feature = "queryable")]
 use wz_runtime_tokio::session::Queryable;
@@ -55,9 +57,51 @@ use wz_runtime_tokio::session::{
 use wz_runtime_tokio::session_glue::IterationEvent;
 use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 
+use wz_runtime_tokio::session_glue::LinkKind;
+
 #[cfg(feature = "queryable")]
 use super::{queryable_options, QblEntry, QblId};
-use super::{Inner, SharedSession, SubEntry, SubId};
+use super::{
+    FaceEventKind, FaceSnapshot, GroupLink, Inner, LinkSnapshot, SharedSession, SubEntry, SubId,
+};
+
+/// One member of a group as the transport both upstreams report it as: its zid and role,
+/// neither QoS nor shared memory, and one link from this node's locator on the group to the
+/// member's address, over the group (`src`, `group` and `endpoint` label it; see
+/// [`GroupLink`]). `None` for a member whose JOIN named a role this node does not know,
+/// which a transport cannot report, as [`FaceSnapshot`] refuses a face with no role.
+///
+/// The link is a UDP datagram link, whose MTU each ABI reports by its own table.
+fn member_snapshot(
+    member: &MulticastMember,
+    src: &str,
+    group: &str,
+    endpoint: &str,
+) -> Option<FaceSnapshot> {
+    let whatami = member.whatami?.to_wire();
+    let peer = member.peer.as_slice();
+    let mut zid = [0u8; 16];
+    let n = peer.len().min(16);
+    zid[..n].copy_from_slice(&peer[..n]);
+    Some(FaceSnapshot {
+        zid,
+        whatami,
+        is_qos: false,
+        is_multicast: true,
+        is_shm: false,
+        links: vec![LinkSnapshot {
+            src: src.to_owned(),
+            dst: format!("udp/{}", member.locator),
+            kind: Some(LinkKind::Udp),
+            interfaces: None,
+            mtu: 0,
+            group: Some(GroupLink {
+                locator: group.to_owned(),
+                endpoint: endpoint.to_owned(),
+            }),
+        }],
+    })
+}
 
 /// One joined group: its session and the wz entities each C declaration has on
 /// it, keyed by the C id, as a unicast face keys its own.
@@ -72,6 +116,28 @@ pub(super) struct McastFaceEntry {
     pub(super) revised: Arc<Notify>,
     /// Who is on the group, as the face's loop keeps it.
     pub(super) membership: McastGroupMembership,
+    /// The group's transmit seam, which a JOIN asked for on the session's word goes
+    /// through.
+    pub(super) producer: MulticastTxProducer,
+    /// The endpoint the session joined the group by, as the session was given it.
+    pub(super) endpoint: String,
+    /// The members announced as connected so far, each as it was announced, so a
+    /// departure is announced as the arrival was even when the join that held it is gone.
+    pub(super) announced: Vec<(MulticastMember, FaceSnapshot)>,
+}
+
+/// What a group face is made of when it comes up ([`SharedSession::mcast_face_up`]).
+pub struct McastFaceParts<'a> {
+    /// The group's session.
+    pub session: &'a TokioMulticastSession,
+    /// The group's re-arm signal, the one its [`sweep_mcast_face`] waits on.
+    pub revised: &'a Arc<Notify>,
+    /// Who is on the group.
+    pub membership: &'a McastGroupMembership,
+    /// The group's transmit seam.
+    pub producer: &'a MulticastTxProducer,
+    /// The endpoint the session joined the group by.
+    pub endpoint: &'a str,
 }
 
 /// A group face as a sender takes it: the session and its re-arm signal, read
@@ -147,18 +213,18 @@ impl SharedSession {
     }
 
     /// A group face came up: replay the session's subscribers and queryables onto
-    /// `session` and register it as face `id`, with `revised` as its re-arm signal,
-    /// the one its [`sweep_mcast_face`] waits on, and `membership` as who is on it.
+    /// its session and register it as face `id`.
     ///
     /// A face already registered under `id` is replaced, and its entities are
     /// dropped outside the registry lock, as a replaced unicast face's are.
-    pub fn mcast_face_up(
-        &self,
-        id: u64,
-        session: &TokioMulticastSession,
-        revised: &Arc<Notify>,
-        membership: &McastGroupMembership,
-    ) {
+    pub fn mcast_face_up(&self, id: u64, parts: McastFaceParts<'_>) {
+        let McastFaceParts {
+            session,
+            revised,
+            membership,
+            producer,
+            endpoint,
+        } = parts;
         let mut guard = self.lock();
         let subs = guard
             .subs
@@ -180,11 +246,89 @@ impl SharedSession {
                 qbls,
                 revised: revised.clone(),
                 membership: membership.clone(),
+                producer: producer.clone(),
+                endpoint: endpoint.to_owned(),
+                announced: Vec::new(),
             },
         );
         guard.refresh_mcast_set();
         drop(guard);
         drop(replaced);
+    }
+
+    /// Every member of every group the session joined, each as the multicast transport
+    /// both upstreams report it as, with its one link: in pico's `z_info_transports` /
+    /// `z_info_links` (`vendor/zenoh-pico/src/api/api.c` @
+    /// `z_result_t z_info_transports(const z_loaned_session_t *zs, z_moved_closure_transport_t *callback) {`)
+    /// and zenoh's
+    /// peers of a multicast transport (`io/zenoh-transport/src/multicast/transport.rs` @
+    /// `link.dst = p.locator.clone();`).
+    ///
+    /// Not among [`Self::face_snapshots`], which a caller that reports unicast faces
+    /// alone reads: pico's admin space leaves a multicast transport out
+    /// (`vendor/zenoh-pico/src/api/admin_space.c` @
+    /// `if (transport == NULL || z_transport_is_multicast(transport)) {`).
+    pub fn group_member_snapshots(&self) -> Vec<FaceSnapshot> {
+        self.lock()
+            .mcast_faces
+            .values()
+            .flat_map(|face| face.announced.iter().map(|(_, snapshot)| snapshot.clone()))
+            .collect()
+    }
+
+    /// The members of group face `id` are now `members`: announce each that left as a
+    /// departed transport and each that came as an arrived one, as pico announces a member
+    /// connected at its JOIN and disconnected at its lease, its Close or a JOIN that
+    /// changes it (`vendor/zenoh-pico/src/transport/multicast/rx.c` @
+    /// `_z_connectivity_peer_connected(_z_transport_common_get_session(&ztm->_common), &connected_peer, true, mtu,`).
+    ///
+    /// A member is the same member while its zid, role and address are: a JOIN that moves
+    /// any of them is a departure and an arrival. Departures are announced first, so a
+    /// member that re-joined changed is never reported twice at once. The events run
+    /// outside the registry lock ([`Self::fire_face_event`]).
+    pub(crate) fn group_members_moved(&self, id: u64, members: &[MulticastMember]) {
+        let (departed, arrived) = {
+            let mut guard = self.lock();
+            let Some(face) = guard.mcast_faces.get_mut(&id) else {
+                return;
+            };
+            let labels = face.membership.link();
+            let (kept, departed): (Vec<_>, Vec<_>) = std::mem::take(&mut face.announced)
+                .into_iter()
+                .partition(|(member, _)| members.contains(member));
+            face.announced = kept;
+            let mut arrived = Vec::new();
+            for member in members {
+                if face.announced.iter().any(|(held, _)| held == member) {
+                    continue;
+                }
+                let Some((src, group)) = labels.as_ref() else {
+                    continue;
+                };
+                let Some(snapshot) = member_snapshot(member, src, group, &face.endpoint) else {
+                    continue;
+                };
+                face.announced.push((*member, snapshot.clone()));
+                arrived.push(snapshot);
+            }
+            (departed, arrived)
+        };
+        for (_, snapshot) in &departed {
+            self.fire_face_event(FaceEventKind::Down, snapshot);
+        }
+        for snapshot in &arrived {
+            self.fire_face_event(FaceEventKind::Up, snapshot);
+        }
+    }
+
+    /// Ask every group face to send its JOIN now (pico's `zp_send_join`); how many were
+    /// asked.
+    pub fn send_join_on_groups(&self) -> usize {
+        let guard = self.lock();
+        for face in guard.mcast_faces.values() {
+            face.producer.request_join();
+        }
+        guard.mcast_faces.len()
     }
 
     /// The zid of every member of every group the session joined, as each group's peer

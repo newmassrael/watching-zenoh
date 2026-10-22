@@ -3569,6 +3569,14 @@ async fn serve_group<D, B, Fut>(
 
     let producer = MulticastTxProducer::new();
     let membership = McastGroupMembership::new();
+    // Weak: the registry holds the membership, so a strong handle here would keep the
+    // registry alive through its own face.
+    let registry = Arc::downgrade(&shared);
+    membership.observe(Arc::new(move |members| {
+        if let Some(shared) = registry.upgrade() {
+            shared.group_members_moved(id, members);
+        }
+    }));
     let session = shared.new_mcast_face_session(producer.clone(), &membership);
     let revised = Arc::new(Notify::new());
     let serve = serve_group_face(
@@ -3591,7 +3599,16 @@ async fn serve_group<D, B, Fut>(
         &mut stop,
         |joined: Result<(), &std::io::Error>| {
             match joined {
-                Ok(()) => shared.mcast_face_up(id, &session, &revised, &membership),
+                Ok(()) => shared.mcast_face_up(
+                    id,
+                    crate::faces::McastFaceParts {
+                        session: &session,
+                        revised: &revised,
+                        membership: &membership,
+                        producer: &producer,
+                        endpoint,
+                    },
+                ),
                 Err(e) => log_open_failure(&format!("join {endpoint}"), e),
             }
             let _ = up.send(joined.is_ok());
@@ -5131,6 +5148,105 @@ mod multicast_face_tests {
                 stop_tx.send(true).expect("the faces watch the stop");
                 a_task.await.expect("A's face ended");
                 b_task.await.expect("B's face ended");
+            })
+            .await;
+    }
+
+    /// A member of A's group is a multicast transport of A's: listed with its one link,
+    /// announced as it arrives, and announced again as it leaves when B stops, whose Close
+    /// A hears. A's request for a JOIN reaches its one group.
+    ///
+    /// # Control
+    ///
+    /// With the drive's `observe` registration removed, no event is announced and the
+    /// listing stays empty: the first wait times out.
+    #[tokio::test(start_paused = true)]
+    async fn a_member_is_announced_and_listed_as_a_multicast_transport() {
+        use crate::faces::{FaceEventKind, FaceSnapshot};
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let bus = GroupBus::new(ENDPOINT);
+                let (a_stop, a_stop_rx) = watch::channel(false);
+                let (b_stop, b_stop_rx) = watch::channel(false);
+                let (up_tx, mut up_rx) = mpsc::unbounded_channel();
+                let a = session(0xa1);
+                let b = session(0xb2);
+                let events: Arc<Mutex<Vec<(FaceEventKind, FaceSnapshot)>>> =
+                    Arc::new(Mutex::new(Vec::new()));
+                let heard = events.clone();
+                a.watch_faces(Arc::new(move |kind, snapshot: &FaceSnapshot| {
+                    heard.lock().expect("events").push((kind, snapshot.clone()));
+                }));
+                let a_task = join(&bus, 1, &a, a_stop_rx, up_tx.clone());
+                let b_task = join(&bus, 2, &b, b_stop_rx, up_tx);
+                assert_eq!(up_rx.recv().await, Some(true), "the first face joined");
+                assert_eq!(up_rx.recv().await, Some(true), "the second face joined");
+                let mut waited = 0;
+                while a.group_member_snapshots().is_empty() {
+                    assert!(waited < 50, "A never listed B");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    waited += 1;
+                }
+
+                let listed = a.group_member_snapshots();
+                assert_eq!(listed.len(), 1, "{listed:?}");
+                let member = &listed[0];
+                assert_eq!(member.zid, [0xb2; 16]);
+                assert_eq!(member.whatami, WhatAmI::Peer.to_wire());
+                assert!(member.is_multicast);
+                assert!(a.face_snapshots().is_empty(), "a member is no unicast face");
+                let link = &member.links[..];
+                assert_eq!(link.len(), 1, "{link:?}");
+                assert_eq!(link[0].src, "udp/127.0.0.1:1");
+                assert_eq!(link[0].dst, "udp/127.0.0.1:2");
+                let group = link[0].group.as_ref().expect("a member's link has a group");
+                assert_eq!(
+                    (group.locator.as_str(), group.endpoint.as_str()),
+                    (ENDPOINT, ENDPOINT)
+                );
+                assert_eq!(
+                    events
+                        .lock()
+                        .expect("events")
+                        .iter()
+                        .map(|(kind, s)| (*kind, s.zid))
+                        .collect::<Vec<_>>(),
+                    [(FaceEventKind::Up, [0xb2; 16])],
+                    "B's arrival, once"
+                );
+                assert_eq!(a.send_join_on_groups(), 1, "A's one group was asked");
+
+                b_stop.send(true).expect("B's face watches its stop");
+                b_task.await.expect("B's face ended");
+                let mut waited = 0;
+                while !a.group_member_snapshots().is_empty() {
+                    assert!(waited < 50, "A still lists B after its Close");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    waited += 1;
+                }
+                let seen: Vec<_> = events
+                    .lock()
+                    .expect("events")
+                    .iter()
+                    .map(|(kind, s)| (*kind, s.zid, s.links[0].dst.clone()))
+                    .collect();
+                assert_eq!(
+                    seen,
+                    [
+                        (FaceEventKind::Up, [0xb2; 16], "udp/127.0.0.1:2".to_owned()),
+                        (
+                            FaceEventKind::Down,
+                            [0xb2; 16],
+                            "udp/127.0.0.1:2".to_owned()
+                        ),
+                    ],
+                    "B left as it arrived"
+                );
+
+                a_stop.send(true).expect("A's face watches its stop");
+                a_task.await.expect("A's face ended");
             })
             .await;
     }

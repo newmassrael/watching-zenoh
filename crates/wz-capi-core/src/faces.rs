@@ -119,7 +119,7 @@ use wz_runtime_tokio::Reliability;
 #[cfg(feature = "multicast-transport")]
 mod multicast;
 #[cfg(feature = "multicast-transport")]
-pub use multicast::{dispatch_mcast_event, sweep_mcast_face};
+pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 
 // R311y498 — NO `use crate::pubsub` / `use crate::query` here, deliberately.
 //
@@ -1375,6 +1375,22 @@ pub struct LinkSnapshot {
     /// The negotiated outbound frame budget (`z_link_mtu`), clamped into the
     /// `uint16_t` upstream returns.
     pub mtu: u16,
+    /// The group a member of a joined group is reached through, `None` on a unicast link
+    /// (open-debt item 913).
+    pub group: Option<GroupLink>,
+}
+
+/// The group under a group member's link, in the two spellings the two upstreams report it
+/// by: each ABI picks its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupLink {
+    /// The group's locator, which zenoh reports as the link's `group`
+    /// (`io/zenoh-link-commons/src/lib.rs` @ `group: Some(link.get_dst().to_owned()),`).
+    pub locator: String,
+    /// The endpoint the session joined it by, its socket keys included, which zenoh-pico
+    /// reports as the link's `src` (`vendor/zenoh-pico/src/transport/multicast/rx.c` @
+    /// `entry->common._link_src = _z_endpoint_to_string(&ztm->_common._link->_endpoint);`).
+    pub endpoint: String,
 }
 
 /// R2259 (open-debt item 593) — one ESTABLISHED face as zenoh-c's
@@ -1396,11 +1412,11 @@ pub struct FaceSnapshot {
     pub is_qos: bool,
     /// Whether this is a multicast transport (`z_transport_is_multicast`).
     ///
-    /// Always `false` for a face: wz's C surface establishes UNICAST transports
-    /// only, and the honest report for one is that it is not multicast. The
-    /// field exists because `zc_internal_create_transport` can build a
-    /// transport value that IS multicast — upstream's own test door — and that
-    /// value must round-trip through the same accessor.
+    /// `false` for a unicast face, `true` for a member of a group the session joined
+    /// ([`SharedSession::group_member_snapshots`]), which both upstreams report as a
+    /// multicast transport of its own. `zc_internal_create_transport` can also build a
+    /// multicast transport value, upstream's own test door, and that value round-trips
+    /// through the same accessor.
     pub is_multicast: bool,
     /// Whether SHM was negotiated on this transport (`z_transport_is_shm`).
     ///
@@ -1440,6 +1456,7 @@ impl FaceSnapshot {
                 kind: subject.as_ref().and_then(|s| s.kind),
                 interfaces: subject.as_ref().and_then(|s| s.interfaces.clone()),
                 mtu,
+                group: None,
             })
             .collect();
         // A build without `transport-qos` never negotiates the ext, so `false`

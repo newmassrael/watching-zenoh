@@ -834,15 +834,25 @@ pub unsafe extern "C" fn zp_send_join_options_default(options: *mut zp_send_join
 
 /// pico `zp_send_join`: send a Join now. Upstream sends one only on a multicast or
 /// raw-ethernet transport and answers `_Z_RES_OK` on a unicast one without sending
-/// (`vendor/zenoh-pico/src/transport/common/lease.c` `_z_send_join`); this ABI
-/// establishes unicast transports only, so a live session answers `Z_OK`.
+/// (`vendor/zenoh-pico/src/transport/common/lease.c` @ `z_result_t _z_send_join(`). A
+/// session that joined a group asks the group's loop for its JOIN, which then keeps its
+/// cadence from it; a session with none sends nothing. A live session answers `Z_OK`.
 #[cfg(not(feature = "multi-thread"))]
 #[no_mangle]
 pub unsafe extern "C" fn zp_send_join(
     zs: *const z_loaned_session_t,
     _options: *const zp_send_join_options_t,
 ) -> ZResult {
-    guarded(|| live_session_result(zs))
+    guarded(|| {
+        let live = live_session_result(zs);
+        #[cfg(feature = "multicast-transport")]
+        if live == Z_OK {
+            if let Some(state) = session_state(zs) {
+                state.shared.send_join_on_groups();
+            }
+        }
+        live
+    })
 }
 
 /// What the three single-threaded entry points answer for `zs`: `Z_OK` for an open

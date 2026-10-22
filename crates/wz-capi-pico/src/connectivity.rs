@@ -409,12 +409,67 @@ fn transport_of(snapshot: &FaceSnapshot) -> z_loaned_transport_t {
     }
 }
 
+/// Every transport pico reports: each unicast face, then each member of each group the
+/// session joined, which pico lists as a multicast transport of its own
+/// (`vendor/zenoh-pico/src/api/api.c` @
+/// `z_result_t z_info_transports(const z_loaned_session_t *zs, z_moved_closure_transport_t *callback) {`).
+fn connected(shared: &SharedSession) -> Vec<FaceSnapshot> {
+    #[cfg_attr(not(feature = "multicast-transport"), allow(unused_mut))]
+    let mut all = shared.face_snapshots();
+    #[cfg(feature = "multicast-transport")]
+    all.extend(shared.group_member_snapshots());
+    all
+}
+
+/// The text pico's `_z_endpoint_to_string` makes of a UDP group endpoint: the locator
+/// without its metadata, then the config keys pico's UDP link knows, in its own order and
+/// joined by `;`, with NO separator between the two
+/// (`vendor/zenoh-pico/src/link/endpoint.c` @ `memcpy(curr_dst, config, config_len);`), so
+/// `udp/224.0.0.224:7447#iface=lo` reads back as `udp/224.0.0.224:7447iface=lo`.
+///
+/// pico reads the config up to the first key it does not know and keeps the last value of
+/// a key given twice (`vendor/zenoh-pico/src/protocol/config.c` @
+/// `z_result_t _z_str_intmap_from_strn(`), and declares no locator metadata key, so the
+/// text keeps what pico kept.
+fn pico_group_endpoint_text(endpoint: &str) -> String {
+    // pico's UDP config keys, in the order its mapping lists them
+    // (`vendor/zenoh-pico/include/zenoh-pico/link/config/udp.h` @ `#define UDP_CONFIG_MAPPING_BUILD`).
+    const UDP_KEYS: [&str; 3] = ["iface", "tout", "join"];
+    let (locator, config) = endpoint.split_once('#').unwrap_or((endpoint, ""));
+    let locator = locator.split_once('?').map_or(locator, |(bare, _)| bare);
+    let mut values: [Option<&str>; 3] = [None; 3];
+    for pair in config.split(';').filter(|pair| !pair.is_empty()) {
+        let Some((key, value)) = pair.split_once('=') else {
+            break;
+        };
+        let Some(slot) = UDP_KEYS.iter().position(|known| *known == key) else {
+            break;
+        };
+        values[slot] = Some(value);
+    }
+    let config: Vec<String> = UDP_KEYS
+        .iter()
+        .zip(values)
+        .filter_map(|(key, value)| value.map(|value| format!("{key}={value}")))
+        .collect();
+    format!("{locator}{}", config.join(";"))
+}
+
 /// The link pico reports for one link of an established face.
+///
+/// A group member's link starts at the endpoint the session joined the group by, as pico
+/// labels it (`vendor/zenoh-pico/src/transport/multicast/rx.c` @
+/// `entry->common._link_src = _z_endpoint_to_string(&ztm->_common._link->_endpoint);`),
+/// written as pico writes an endpoint ([`pico_group_endpoint_text`]).
 fn link_of(zid: [u8; 16], link: &LinkSnapshot) -> z_loaned_link_t {
     let (mtu, is_streamed, is_reliable) = pico_link_properties(link.kind, link.mtu);
+    let src = link.group.as_ref().map_or_else(
+        || link.src.clone(),
+        |group| pico_group_endpoint_text(&group.endpoint),
+    );
     z_loaned_link_t {
         zid: z_id_t { id: zid },
-        src: ConnText::new(link.src.as_bytes()),
+        src: ConnText::new(src.as_bytes()),
         dst: ConnText::new(link.dst.as_bytes()),
         mtu,
         is_streamed,
@@ -633,7 +688,7 @@ impl Connectivity {
         // between is queued rather than missed.
         let id = self.transports.insert(Arc::clone(&delivery));
         if history {
-            for snapshot in shared.face_snapshots() {
+            for snapshot in connected(shared) {
                 delivery.call(z_loaned_transport_event_t {
                     kind: Z_SAMPLE_KIND_PUT,
                     transport: transport_of(&snapshot),
@@ -659,7 +714,7 @@ impl Connectivity {
         });
         let id = self.links.insert(Arc::clone(&listener));
         if history {
-            for snapshot in shared.face_snapshots() {
+            for snapshot in connected(shared) {
                 if !listener.wants(&transport_of(&snapshot)) {
                     continue;
                 }
@@ -1284,7 +1339,7 @@ pub unsafe extern "C" fn z_info_transports(
         let Some(state) = session_state(zs) else {
             return Z_ERR_NULL;
         };
-        for snapshot in state.shared.face_snapshots() {
+        for snapshot in connected(&state.shared) {
             let mut transport = transport_of(&snapshot);
             if let Some(call) = closure.call {
                 call(&mut transport, closure.context.0);
@@ -1356,7 +1411,7 @@ pub unsafe extern "C" fn z_info_links(
         let Some(state) = session_state(zs) else {
             return Z_ERR_NULL;
         };
-        for snapshot in state.shared.face_snapshots() {
+        for snapshot in connected(&state.shared) {
             let peer = transport_of(&snapshot);
             if let Some((zid, multicast)) = filter {
                 if zid != peer.zid.id || multicast != peer.is_multicast {
@@ -1846,12 +1901,82 @@ mod tests {
                 kind: Some(LinkKind::Tcp),
                 interfaces: None,
                 mtu: 2048,
+                group: None,
             }],
         }
     }
 
     fn shared() -> SharedSession {
         SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy")
+    }
+
+    /// A group endpoint is written as pico writes one. MEASURED first: the real
+    /// `z_info` printed `src=udp/224.0.0.225:7449iface=lo` for a group joined as
+    /// `udp/224.0.0.225:7449#iface=lo`.
+    #[test]
+    fn a_group_endpoint_reads_as_pico_writes_it() {
+        for (joined, pico) in [
+            (
+                "udp/224.0.0.224:7447#iface=lo",
+                "udp/224.0.0.224:7447iface=lo",
+            ),
+            ("udp/224.0.0.224:7447", "udp/224.0.0.224:7447"),
+            // pico's own key order, whatever the order given.
+            (
+                "udp/224.0.0.224:7447#join=224.0.0.9;iface=eth0",
+                "udp/224.0.0.224:7447iface=eth0;join=224.0.0.9",
+            ),
+            // The last of a key given twice.
+            (
+                "udp/224.0.0.224:7447#iface=a;iface=b",
+                "udp/224.0.0.224:7447iface=b",
+            ),
+            // Read up to the first key pico does not know.
+            (
+                "udp/224.0.0.224:7447#iface=lo;ttl=5;tout=1",
+                "udp/224.0.0.224:7447iface=lo",
+            ),
+            // No locator metadata.
+            (
+                "udp/224.0.0.224:7447?rel=0#iface=lo",
+                "udp/224.0.0.224:7447iface=lo",
+            ),
+        ] {
+            assert_eq!(pico_group_endpoint_text(joined), pico, "{joined}");
+        }
+    }
+
+    /// A group member's link reads as pico's does: from the endpoint the session joined
+    /// by, written as pico writes it, to the member's address, with the UDP multicast
+    /// link's fixed properties. A unicast link keeps its own `src`.
+    ///
+    /// # Control
+    ///
+    /// Reading `src` off the snapshot whatever its group reds the first assert with the
+    /// node's own locator.
+    #[test]
+    fn a_group_members_link_starts_at_the_joined_endpoint() {
+        let member = LinkSnapshot {
+            src: "udp/127.0.0.1:40000".to_owned(),
+            dst: "udp/127.0.0.1:40001".to_owned(),
+            kind: Some(LinkKind::Udp),
+            interfaces: None,
+            mtu: 0,
+            group: Some(wz_capi_core::faces::GroupLink {
+                locator: "udp/224.0.0.224:7447".to_owned(),
+                endpoint: "udp/224.0.0.224:7447#iface=lo".to_owned(),
+            }),
+        };
+        let held = HeldLink(link_of([7; 16], &member));
+        assert_eq!(held.0.src.as_bytes(), b"udp/224.0.0.224:7447iface=lo");
+        assert_eq!(held.0.dst.as_bytes(), b"udp/127.0.0.1:40001");
+        assert_eq!(
+            (held.0.mtu, held.0.is_streamed, held.0.is_reliable),
+            (1450, false, false)
+        );
+        let unicast = face(7, false, "tcp/127.0.0.1:7447");
+        let held = HeldLink(link_of(unicast.zid, &unicast.links[0]));
+        assert_eq!(held.0.src.as_bytes(), b"tcp/127.0.0.1:7447");
     }
 
     /// Arrival is the transport and then its link; departure is the link and
@@ -2075,6 +2200,7 @@ mod tests {
                         kind: Some(LinkKind::Tcp),
                         interfaces: None,
                         mtu: 1,
+                        group: None,
                     },
                 ),
             };
@@ -2139,6 +2265,7 @@ mod tests {
                     kind: Some(LinkKind::Tcp),
                     interfaces: Some(vec!["eth0".into()]),
                     mtu: 1,
+                    group: None,
                 },
             );
             let mut group = z_owned_string_t::null_value();

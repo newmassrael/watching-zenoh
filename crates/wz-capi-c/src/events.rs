@@ -2543,6 +2543,7 @@ mod tests {
             kind: Some(wz_runtime_tokio::session_glue::LinkKind::Udp),
             interfaces: Some(vec!["lo".to_owned()]),
             mtu: 65535,
+            group: None,
         };
         let owned = owned_link(LinkState::from_snapshot(&snapshot, [9u8; 16]));
         assert!(unsafe { z_internal_link_check(&owned) });
@@ -2606,6 +2607,7 @@ mod tests {
                 kind: Some(kind),
                 interfaces: None,
                 mtu: 1200,
+                group: None,
             };
             let owned = owned_link(LinkState::from_snapshot(&snapshot, [3u8; 16]));
             let loaned = unsafe { z_link_loan(&owned) };
@@ -2633,6 +2635,7 @@ mod tests {
             kind: None,
             interfaces: None,
             mtu: 1024,
+            group: None,
         };
         let state = LinkEventState {
             loaned: z_loaned_link_t::from_handle(Box::into_raw(Box::new(LinkState::from_snapshot(
