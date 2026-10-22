@@ -222,6 +222,10 @@ pub trait SeqBacking<T>: Sized + IntoIterator<Item = T> {
     /// Remove and return the last element, if any.
     fn pop(&mut self) -> Option<T>;
 
+    /// Remove and return the element at `index`, shifting the ones after it down so the
+    /// order holds. Panics when `index` is out of bounds.
+    fn remove(&mut self, index: usize) -> T;
+
     /// Keep only the elements for which `keep` returns `true`, in order.
     fn retain<F: FnMut(&T) -> bool>(&mut self, keep: F);
 
@@ -345,6 +349,10 @@ impl<T> SeqBacking<T> for Vec<T> {
         Vec::pop(self)
     }
 
+    fn remove(&mut self, index: usize) -> T {
+        Vec::remove(self, index)
+    }
+
     fn retain<F: FnMut(&T) -> bool>(&mut self, keep: F) {
         Vec::retain(self, keep);
     }
@@ -398,6 +406,10 @@ impl<T, const N: usize> SeqBacking<T> for heapless::Vec<T, N> {
 
     fn pop(&mut self) -> Option<T> {
         heapless::Vec::pop(self)
+    }
+
+    fn remove(&mut self, index: usize) -> T {
+        heapless::Vec::remove(self, index)
     }
 
     fn retain<F: FnMut(&T) -> bool>(&mut self, keep: F) {
@@ -585,27 +597,29 @@ impl<T, const N: usize, P: Storage> BoundedVec<T, N, P> {
     /// fire also means a panicking callback cannot leave a half-swept
     /// entry behind -- every fired entry is already out of `self`.
     ///
-    /// No-alloc: `self` is taken out via [`core::mem::take`] and rebuilt
-    /// from the retained partition; `self` and the returned vec share
-    /// capacity `N` (retained + extracted == taken <= N), so neither push
-    /// can exceed `N`.
+    /// In place: an extracted entry is removed from `self` and the rest stay where
+    /// they are, so the table keeps the storage it has. The earlier form took the
+    /// whole table out and rebuilt it, which gave the capacity back on every call
+    /// and made the next push allocate again (a heap table paid two allocations a
+    /// query for it; a fixed one moved its whole buffer twice). The returned vec is
+    /// empty, and holds no storage, when nothing is extracted. `self` and the
+    /// returned vec together hold what `self` held (retained + extracted <= N), so
+    /// neither push can exceed `N`.
     pub fn drain_partition<F>(&mut self, mut extract: F) -> Self
     where
         F: FnMut(&mut T) -> bool,
     {
         let mut extracted: Self = Self::default();
-        let mut keep: Self = Self::default();
-        for mut entry in core::mem::take(self) {
-            if extract(&mut entry) {
+        let mut at = 0;
+        while at < self.inner.as_slice().len() {
+            if extract(&mut self.inner.as_mut_slice()[at]) {
                 extracted
-                    .push(entry)
-                    .expect("drain_partition fits: keep + extracted == taken <= N");
+                    .push(self.inner.remove(at))
+                    .expect("drain_partition fits: retained + extracted <= N");
             } else {
-                keep.push(entry)
-                    .expect("drain_partition fits: keep + extracted == taken <= N");
+                at += 1;
             }
         }
-        *self = keep;
         extracted
     }
 }
@@ -942,6 +956,35 @@ mod tests {
         let extracted = all.drain_partition(|_| true);
         assert_eq!(extracted.len(), 2);
         assert!(all.is_empty());
+    }
+
+    #[test]
+    fn drain_partition_takes_adjacent_matches_without_skipping() {
+        let mut v: BoundedVec<u32, 6> = BoundedVec::new();
+        for x in [2, 4, 6, 1, 8, 3] {
+            v.push(x).unwrap();
+        }
+        let extracted = v.drain_partition(|x| *x % 2 == 0);
+        assert_eq!(extracted.as_ref(), &[2, 4, 6, 8]);
+        assert_eq!(v.as_ref(), &[1, 3]);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn drain_partition_leaves_a_heap_table_its_storage() {
+        let mut v: BoundedVec<u32, 4, Heap> = BoundedVec::default();
+        for i in 0..4 {
+            v.push(i).unwrap();
+        }
+        let room = v.inner.capacity();
+        assert!(room >= 4);
+        let extracted = v.drain_partition(|_| true);
+        assert_eq!(extracted.len(), 4);
+        assert!(v.is_empty());
+        assert_eq!(v.inner.capacity(), room);
+        let none = v.drain_partition(|_| true);
+        assert!(none.is_empty());
+        assert_eq!(none.inner.capacity(), 0);
     }
 
     #[test]
