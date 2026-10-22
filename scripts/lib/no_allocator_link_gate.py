@@ -483,6 +483,21 @@ IMAGES: dict[str, Image] = {
                 label="cyt4bf-sockets-client-fixed",
                 no_default_features=True,
             ),
+            # The widest the client is made: the link sleeps until the session's next deadline
+            # (`CONFIG_WZ_IDLE_WAIT_MS`) and one send window is one datagram
+            # (`CONFIG_WZ_TX_BATCHING`).
+            Build(
+                V7EMHF,
+                None,
+                ("fixed-client", "rx-in-place", "mac-cyt4bf", "zeth-driver", "batching"),
+                env=ZEPHYR_BUILD_VALUES
+                + (
+                    ("WZ_CLIENT_ENDPOINT", "udp/192.0.2.1:7447"),
+                    ("WZ_IDLE_WAIT_MS", "1000"),
+                ),
+                label="cyt4bf-sockets-client-fixed-idle-batching",
+                no_default_features=True,
+            ),
         ),
         ci=False,
     ),

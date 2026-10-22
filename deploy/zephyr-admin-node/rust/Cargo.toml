@@ -191,6 +191,12 @@ fixed-client = [
     "wz-session-mcu/client-slot",
     "wz-session-core/session-slot",
 ]
+# The messages of one send window leave as one datagram (`CONFIG_WZ_TX_BATCHING`): a reply and the
+# final that ends its query are one frame. Off, every message is a datagram of its own.
+batching = [
+    "wz-runtime-coop?/transport-batching",
+    "wz-session-core/transport-batching",
+]
 # The measurement of one typed session slot (`scripts/lib/session_slot_bytes.py`): with
 # it the fixed-memory image declares `WZ_SESSION_SLOT_BYTES`, a symbol whose SIZE is the
 # slot's size. Off by default, because the array is that size again in RAM.

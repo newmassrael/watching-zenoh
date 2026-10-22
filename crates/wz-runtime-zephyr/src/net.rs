@@ -452,6 +452,16 @@ impl DatagramSocket for ZephyrUdpSocket {
         ZephyrUdpSocket::times_out(self)
     }
 
+    const CAN_SET_RECEIVE_TIMEOUT: bool = true;
+
+    /// Re-arm `SO_RCVTIMEO` through the board hook that armed it when the socket was opened. A
+    /// socket whose first arming was refused takes none, because a read of it blocks for ever
+    /// when the timeout is not there to end it.
+    fn set_receive_timeout(&self, ms: c_int) -> bool {
+        // SAFETY: plain FFI with value arguments, on the descriptor this socket owns.
+        self.times_out && unsafe { wz_net_set_rcvtimeo_ms(self.fd, ms) } == 0
+    }
+
     fn recv_waiting(
         &self,
         buf: &mut [u8],

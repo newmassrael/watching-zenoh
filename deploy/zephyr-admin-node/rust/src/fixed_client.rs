@@ -83,6 +83,37 @@ const TX: usize = BATCH_SIZE as usize;
 /// seconds, and a board with no link or no server never gets one.
 const ADDRESS_WAIT_MS: u32 = 30_000;
 
+/// The most the node's link sleeps when its session has nothing due sooner
+/// (`CONFIG_WZ_IDLE_WAIT_MS`, handed to cargo as `WZ_IDLE_WAIT_MS`); 0 keeps the tick. The node
+/// holds ONE session and its loop waits on nothing else, which is what lets its link sleep.
+const IDLE_WAIT_MS: u32 = decimal(match option_env!("WZ_IDLE_WAIT_MS") {
+    Some(text) => text,
+    None => "0",
+});
+
+/// A decimal number read when the image compiles, so that a value the build was given that is not
+/// one stops the build instead of reading as zero.
+const fn decimal(text: &str) -> u32 {
+    let bytes = text.as_bytes();
+    assert!(!bytes.is_empty(), "WZ_IDLE_WAIT_MS is empty");
+    let mut value = 0u32;
+    let mut at = 0;
+    while at < bytes.len() {
+        let digit = bytes[at];
+        assert!(
+            digit.is_ascii_digit(),
+            "WZ_IDLE_WAIT_MS is not a decimal number"
+        );
+        value = value * 10 + (digit - b'0') as u32;
+        at += 1;
+    }
+    value
+}
+
+/// How often the loop says how many times it went round: the figure that tells a node that
+/// sleeps from one that polls.
+const LOOP_REPORT_MS: u64 = 5_000;
+
 type Clock = ZephyrClock<TICK_HZ>;
 /// The requests a session of this node holds: as many as the image's limits say, and the overlay of
 /// this node (`overlays/t2g_client_fixed.conf`) says none. It answers queries and asks none, so it
@@ -281,6 +312,11 @@ pub fn run() -> i32 {
     };
 
     let stack = Stack::new(address, &NODE.rx, &NODE.tx);
+    let stack = if IDLE_WAIT_MS > 0 {
+        stack.with_idle_wait_ms(IDLE_WAIT_MS)
+    } else {
+        stack
+    };
     let host: Host = SessionHost::new(
         CoopLocalSet::new(&runtime),
         &NODE.sessions,
@@ -314,10 +350,28 @@ pub fn run() -> i32 {
     let mut stack_watch = StackWatch::new();
     let mut next_stack_check_ms = 0u64;
     let mut refused = (runtime.task_refusals(), runtime.timer_refusals());
+    let mut rounds = 0u32;
+    let mut next_report_ms = 0u64;
+    let mut reported_ms = 0u64;
     loop {
         local.run_until_idle();
         let now_ms = clock.now_us() / 1000;
         node.tick(now_ms);
+        rounds = rounds.wrapping_add(1);
+        if now_ms >= next_report_ms {
+            // The first line only starts the interval; the ones after it say what the node did
+            // in it.
+            if reported_ms != 0 {
+                log_args(format_args!(
+                    "zephyr-wz-client: loop {} rounds in {} ms",
+                    rounds,
+                    now_ms - reported_ms
+                ));
+            }
+            rounds = 0;
+            reported_ms = now_ms;
+            next_report_ms = now_ms + LOOP_REPORT_MS;
+        }
         if now_ms >= next_stack_check_ms {
             next_stack_check_ms = now_ms + STACK_CHECK_MS;
             // A table the image sized too small refuses what it cannot hold and counts it; the

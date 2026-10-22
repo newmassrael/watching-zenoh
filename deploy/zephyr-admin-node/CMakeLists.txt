@@ -54,6 +54,14 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
     endif()
     set(no_default_features NO_DEFAULT_FEATURES)
     list(APPEND backend_env WZ_CLIENT_ENDPOINT=${CONFIG_WZ_CLIENT_ENDPOINT})
+    # How long the link may sleep when nothing is due (0: the tick), and whether one send window is
+    # one datagram. Both only on the fixed-memory profile, the one that has the slot stack's link.
+    if(CONFIG_WZ_FIXED_MEMORY)
+      list(APPEND backend_env WZ_IDLE_WAIT_MS=${CONFIG_WZ_IDLE_WAIT_MS})
+      if(CONFIG_WZ_TX_BATCHING)
+        list(APPEND backend_feature batching)
+      endif()
+    endif()
   endif()
 
   # The CYT4BF's ETH0 under Zephyr's own stack: the Ethernet driver over the wz MAC crate
