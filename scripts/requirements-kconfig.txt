@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The one Kconfig interpreter of the host build configuration (docs/build-configuration.md,
+# decision C11), pinned by version and by hash: install with
+#   python3 -m pip install --require-hashes -r scripts/requirements-kconfig.txt
+# 14.1.0 is the version Zephyr bundles (zephyr/scripts/kconfig/kconfiglib.py, VERSION = (14, 1, 0)).
+# Both hashes are PyPI's own (https://pypi.org/pypi/kconfiglib/14.1.0/json).
+kconfiglib==14.1.0 \
+    --hash=sha256:edcd35a20e7e138a9a9e96149027f805f785e818d2eae400b6fa8b0c8845114a \
+    --hash=sha256:bed2cc2216f538eca4255a83a4588d8823563cdd50114f86cf1a2674e602c93c

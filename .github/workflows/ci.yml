@@ -920,7 +920,12 @@ jobs:
         # LANE, and the second run costs ~5s.
         env:
           WZ_C0_REQUIRE: "1"
-        run: bash scripts/run-ci.sh --layer C0
+          WZ_KCONFIG_REQUIRE: "1"
+        run: |
+          # The build configuration's presets are resolved by the one pinned Kconfig
+          # interpreter (docs/build-configuration.md C11), so this armed run provisions it.
+          bash scripts/provision-kconfiglib.sh
+          bash scripts/run-ci.sh --layer C0
 
       - name: Layer C0i (armed) — the impact-ref gate discriminates both ways
         # R311y783. `scripts/append-round.sh` refuses a round whose `--impact`

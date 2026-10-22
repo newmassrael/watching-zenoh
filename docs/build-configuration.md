@@ -62,8 +62,13 @@ original reproduced by naming it. Three things follow from it:
   `deploy/wz-config.toml` names its switch and is held to the map.
 - **No Rust API compatibility atom.** `api-compat-c` and `api-compat-pico` exist;
   nothing makes wz a drop-in for the `zenoh` crate's public API.
-- **No Kconfig interpreter on the host.** `kconfiglib` exists only inside the
-  Zephyr tree.
+- **One pinned Kconfig interpreter on the host** (step 1, C11): `kconfiglib` 14.1.0, the
+  version Zephyr bundles, pinned by hash (`scripts/requirements-kconfig.txt`) and provisioned
+  into `target/kconfig-venv` by `scripts/provision-kconfiglib.sh`. `wz_config.py
+  --resolve-features` / `--resolve-env` merge presets onto the generated tree's defaults,
+  strictly (C9, with Zephyr's merge settings and its two value checks as errors), and Layer C0
+  resolves every registered profile. The equivalence gate against Zephyr's own copy is still
+  to come.
 
 ## 3. The model
 

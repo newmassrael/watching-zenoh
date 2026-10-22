@@ -13,13 +13,30 @@ decision C1): the capabilities of the C ABI builds (their Kconfig symbol, the AB
 them, what they imply, zenoh-pico's own switch for them) and the limits an image states for
 itself (their Kconfig symbol, default and help). This tool is everything that derives from it:
 
+    --emit kconfig-root           print deploy/Kconfig, the root of the host configuration
     --emit kconfig-capabilities   print deploy/Kconfig.capabilities
     --emit kconfig-limits         print deploy/Kconfig.limits
     --emit rust-limits            print crates/wz-session-core/src/caps_generated.rs
-    --write                       write all three
+    --write                       write all four
     --features ABI CONFIG         turn a Kconfig result (or a pico config.h) into the cargo arguments
+    --resolve-features ABI PRESET...
+                                  merge presets onto the defaults (kconfiglib) and print the cargo
+                                  arguments of ABI
+    --resolve-env PRESET...       the same merge; print WZ_LIMIT_<NAME>=<value> for each limit it
+                                  sets off its default
+    --check-presets               every registered profile (configs/profiles) resolves strictly
     --check                       hold every derived file, caps.rs and the three manifests to it
     --selftest                    drive the reader, the derivations and the check on what can be wrong
+
+## Presets (docs/build-configuration.md, decisions C9 and C14)
+
+A preset is a defconfig fragment that opens with `# wz-preset: 1`, `# catalog: <version>` and
+`# base: <original>` and then lists only what differs from the defaults. It is resolved by the
+one pinned interpreter (kconfiglib, scripts/requirements-kconfig.txt, provisioned by
+scripts/provision-kconfiglib.sh into target/kconfig-venv): merged onto the generated Kconfig's
+defaults in the order given, strictly. A symbol the tree does not have, a value its type or
+range refuses, an assignment its dependencies do not allow and a header of another catalogue
+are each an error, not a warning.
 
 ## Why a declaration and not three manifests and a Rust row
 
@@ -55,8 +72,10 @@ limit and binds the name the code uses to the generated value.
      could not be stated by an image.
 
 Usage:
-    wz_config.py --check | --selftest | --write
-    wz_config.py --emit kconfig-capabilities | kconfig-limits | rust-limits
+    wz_config.py --check | --selftest | --write | --check-presets
+    wz_config.py --emit kconfig-root | kconfig-capabilities | kconfig-limits | rust-limits
+    wz_config.py --resolve-features pico|c|core PRESET...
+    wz_config.py --resolve-env PRESET...
     wz_config.py --features pico|c|core CONFIG
         CONFIG is a Kconfig `.config` (CONFIG_WZ_CAP_X=y) or a pico header of
         `#define Z_FEATURE_X 0|1` lines; a capability the file does not mention is OFF.
@@ -67,6 +86,7 @@ from __future__ import annotations
 import functools
 import importlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -74,7 +94,15 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DECL = ROOT / "deploy" / "wz-config.toml"
+KCONFIG_ROOT = ROOT / "deploy" / "Kconfig"
 KCONFIG_CAPS = ROOT / "deploy" / "Kconfig.capabilities"
+PROFILES = ROOT / "configs" / "profiles"
+KCONFIG_VENV = ROOT / "target" / "kconfig-venv"
+# A job that provisions kconfiglib arms this; where it is set, an absent interpreter is a FAIL
+# in every command that needs one, never a SKIP.
+KCONFIG_REQUIRED = os.environ.get("WZ_KCONFIG_REQUIRE") == "1"
+# The ABI a preset's `# base:` original is built through.
+BASE_ABI = {"zenoh-pico": "pico", "zenoh-c": "c", "zenoh": "core"}
 KCONFIG_LIMITS = ROOT / "deploy" / "Kconfig.limits"
 RUST_LIMITS = ROOT / "crates" / "wz-session-core" / "src" / "caps_generated.rs"
 CAPS_RS = ROOT / "crates" / "wz-session-core" / "src" / "caps.rs"
@@ -419,7 +447,20 @@ def emit_rust_limits(decl: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def emit_kconfig_root(decl: dict) -> str:
+    """The root of the host build configuration: every generated menu, read by kconfiglib."""
+    out = generated_header("#", "kconfig-root") + [
+        "",
+        'mainmenu "wz build configuration"',
+        "",
+        'rsource "Kconfig.capabilities"',
+        'rsource "Kconfig.limits"',
+    ]
+    return "\n".join(out) + "\n"
+
+
 GENERATED = {
+    "kconfig-root": (KCONFIG_ROOT, emit_kconfig_root),
     "kconfig-capabilities": (KCONFIG_CAPS, emit_kconfig_capabilities),
     "kconfig-limits": (KCONFIG_LIMITS, emit_kconfig_limits),
     "rust-limits": (RUST_LIMITS, emit_rust_limits),
@@ -515,6 +556,154 @@ def check_manifest(decl: dict, abi: str, feats: dict) -> list[str]:
     if default != want:
         out.append(f"{abi}: default is {sorted(default)}, expected {sorted(want)}")
     return out
+
+
+# ---------------------------------------------------------------------------------------------
+# presets: resolved by the pinned Kconfig interpreter
+# ---------------------------------------------------------------------------------------------
+
+
+class PresetError(ValueError):
+    """A preset that cannot be resolved as written: refused, never resolved in part (C9)."""
+
+
+def kconfiglib_module():
+    """The pinned kconfiglib, from the interpreter or from this checkout's venv; None if neither.
+
+    scripts/provision-kconfiglib.sh installs it in target/kconfig-venv at the version and hashes
+    scripts/requirements-kconfig.txt pins. kconfiglib is pure Python, so the venv's
+    site-packages serves the interpreter that runs this tool.
+    """
+    try:
+        return importlib.import_module("kconfiglib")
+    except ImportError:
+        pass
+    for site in sorted(KCONFIG_VENV.glob("lib/python*/site-packages")):
+        sys.path.insert(0, str(site))
+        try:
+            return importlib.import_module("kconfiglib")
+        except ImportError:
+            sys.path.remove(str(site))
+    return None
+
+
+PRESET_HEADER_RE = re.compile(r"^#\s*(wz-preset|catalog|base):\s*(\S+)\s*$")
+
+
+def preset_header(text: str) -> dict:
+    """The `# wz-preset:`, `# catalog:` and `# base:` lines a preset opens with."""
+    header: dict = {}
+    for line in text.splitlines():
+        m = PRESET_HEADER_RE.match(line)
+        if m:
+            header[m.group(1)] = m.group(2)
+    return header
+
+
+def check_preset_header(decl: dict, name: str, text: str) -> list[str]:
+    out: list[str] = []
+    header = preset_header(text)
+    if header.get("wz-preset") != "1":
+        out.append(f"{name}: no `# wz-preset: 1` line")
+    if header.get("catalog") != str(decl["catalog_version"]):
+        out.append(f"{name}: written for catalogue {header.get('catalog')!r}, the declaration is "
+                   f"catalogue {decl['catalog_version']}")
+    if header.get("base") not in BASE_ABI:
+        out.append(f"{name}: base {header.get('base')!r} is none of {sorted(BASE_ABI)}")
+    return out
+
+
+def resolve(fragments: list[pathlib.Path]):
+    """The configuration the generated Kconfig gives when `fragments` are merged in order onto
+    its defaults, a later fragment overriding an earlier one.
+
+    Strict (C9): a symbol the tree does not have, a value outside a symbol's type or range and an
+    assignment its dependencies do not allow are each refused with kconfiglib's own words,
+    never dropped; so is a fragment whose header names another catalogue.
+    """
+    kconfiglib = kconfiglib_module()
+    if kconfiglib is None:
+        raise PresetError("kconfiglib is not installed: run scripts/provision-kconfiglib.sh")
+    decl = load_decl()
+    problems: list[str] = []
+    for frag in fragments:
+        problems += check_preset_header(decl, frag.name, frag.read_text(encoding="utf-8"))
+    if problems:
+        raise PresetError("; ".join(problems))
+    kconf = kconfiglib.Kconfig(str(KCONFIG_ROOT), warn_to_stderr=False)
+    # The interpreter's settings while fragments are merged are Zephyr's
+    # (zephyr/scripts/kconfig/kconfig.py): an assignment to a symbol the tree does not have is
+    # reported, and a later fragment overriding an earlier one is the merge, not a mistake.
+    kconf.warn_assign_undef = True
+    kconf.warn_assign_override = False
+    kconf.warn_assign_redun = False
+    for frag in fragments:
+        kconf.load_config(str(frag), replace=False)
+    problems = [w.strip() for w in kconf.warnings]
+    # And Zephyr's two checks after the merge, here errors: a symbol with no prompt cannot be
+    # assigned, and an assigned value must be the value the symbol got (a `select`, a
+    # dependency or a range can each keep it from taking).
+    for sym in kconf.unique_defined_syms:
+        if sym.user_value is None or sym.choice:
+            continue
+        if not any(node.prompt for node in sym.nodes):
+            problems.append(f"{sym.name} is assigned but has no prompt; it is not user-configurable")
+            continue
+        wanted = (kconfiglib.TRI_TO_STR[sym.user_value]
+                  if sym.type in (kconfiglib.BOOL, kconfiglib.TRISTATE) else sym.user_value)
+        if wanted != sym.str_value:
+            problems.append(f"{sym.name} was assigned the value '{wanted}' but got the value "
+                            f"'{sym.str_value}'")
+    if problems:
+        raise PresetError("; ".join(problems))
+    return kconf
+
+
+def resolved_caps(decl: dict, kconf) -> set[str]:
+    return {cid for cid, cap in decl["caps"].items() if kconf.syms[cap["kconfig"]].tri_value == 2}
+
+
+def resolved_limit_env(decl: dict, kconf) -> list[str]:
+    """`WZ_LIMIT_<NAME>=<value>` for every limit the configuration sets off its default."""
+    out: list[str] = []
+    for lim in decl["limits"]:
+        value = int(kconf.syms[lim["kconfig"]].str_value)
+        if value != lim["default"]:
+            out.append(f"{lim['kconfig']}={value}")
+    return out
+
+
+def cmd_check_presets() -> int:
+    """Every registered profile resolves, strictly, on the pinned interpreter.
+
+    Without kconfiglib the presets cannot be read, and that is a SKIP said out loud, unless the
+    job that provisions it arms the requirement (WZ_KCONFIG_REQUIRE=1), where it is a FAIL.
+    """
+    if kconfiglib_module() is None:
+        if KCONFIG_REQUIRED:
+            print("  wz-config presets FAIL: kconfiglib is absent, but WZ_KCONFIG_REQUIRE=1 says "
+                  "this job provisions it (scripts/provision-kconfiglib.sh)", file=sys.stderr)
+            return 1
+        print("  wz-config presets SKIP: kconfiglib is absent (scripts/provision-kconfiglib.sh)")
+        return 0
+    profiles = sorted(PROFILES.glob("*.conf"))
+    if not profiles:
+        print(f"  wz-config presets FAIL: no profile under {PROFILES.relative_to(ROOT)}",
+              file=sys.stderr)
+        return 1
+    decl = load_decl()
+    bad = 0
+    for profile in profiles:
+        try:
+            kconf = resolve([profile])
+        except PresetError as exc:
+            print(f"  wz-config presets FAIL: {profile.name}: {exc}", file=sys.stderr)
+            bad += 1
+            continue
+        abi = BASE_ABI[preset_header(profile.read_text(encoding="utf-8"))["base"]]
+        print(f"  wz-config presets: {profile.name} -> {abi}: "
+              f"{cargo_args(decl, abi, resolved_caps(decl, kconf))}")
+    return 1 if bad else 0
 
 
 # ---------------------------------------------------------------------------------------------
@@ -752,6 +941,58 @@ def cmd_selftest() -> int:
         {"id": "a", "kconfig": "WZ_CAP_A", "abis": ["core"], "implies": ["b"]},
         {"id": "b", "kconfig": "WZ_CAP_B", "abis": ["core"], "implies": ["a"]}]}
     expect("a dependency cycle is refused", any("cycle" in p for p in validate_caps(cyc)))
+
+    # Presets, on the pinned interpreter. Without it these arms cannot run, and that is said.
+    if kconfiglib_module() is None:
+        if KCONFIG_REQUIRED:
+            expect("kconfiglib is present where WZ_KCONFIG_REQUIRE=1 says this job provisions it",
+                   False)
+        else:
+            print("  wz-config selftest: the preset arms SKIP, kconfiglib is absent "
+                  "(scripts/provision-kconfiglib.sh); Layer C0's --check-presets is armed where "
+                  "it is not")
+    else:
+        import tempfile
+
+        head = f"# wz-preset: 1\n# catalog: {decl['catalog_version']}\n# base: zenoh-c\n"
+
+        def preset(dir_: pathlib.Path, name: str, body: str, header: str = head) -> pathlib.Path:
+            path = dir_ / name
+            path.write_text(header + body, encoding="utf-8")
+            return path
+
+        def refused(paths: list[pathlib.Path], words: str) -> bool:
+            try:
+                resolve(paths)
+            except PresetError as exc:
+                return words in str(exc)
+            return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = pathlib.Path(tmp)
+            comparison = PROFILES / "host-client-tcp-query.conf"
+            expect("the host comparison preset resolves to the build it was measured with",
+                   cargo_args(decl, "c", resolved_caps(decl, resolve([comparison])))
+                   == "--no-default-features --features query")
+            expect("a symbol the tree does not have is refused",
+                   refused([preset(d, "unknown.conf", "CONFIG_WZ_CAP_NO_SUCH=y\n")], "NO_SUCH"))
+            expect("an assignment a select overrides is refused",
+                   refused([preset(d, "select.conf", "CONFIG_WZ_CAP_PEER=n\n")], "WZ_CAP_PEER"))
+            expect("a limit that is not an integer is refused",
+                   refused([preset(d, "int.conf", "CONFIG_WZ_LIMIT_MAX_TASKS=many\n")], "MAX_TASKS"))
+            expect("a preset of another catalogue is refused",
+                   refused([preset(d, "old.conf", "", head.replace(
+                       f"catalog: {decl['catalog_version']}", "catalog: 0"))], "catalogue"))
+            first = preset(d, "first.conf", "CONFIG_WZ_LIMIT_MAX_TASKS=4\n")
+            later = preset(d, "later.conf", "CONFIG_WZ_LIMIT_MAX_TASKS=6\n")
+            expect("a limit set off its default reaches the environment",
+                   resolved_limit_env(decl, resolve([first])) == ["WZ_LIMIT_MAX_TASKS=4"])
+            expect("a later preset overrides an earlier one",
+                   resolved_limit_env(decl, resolve([first, later])) == ["WZ_LIMIT_MAX_TASKS=6"])
+            expect("a preset that changes nothing resolves to the defaults",
+                   resolved_caps(decl, resolve([preset(d, "empty.conf", "")]))
+                   == {cid for cid, cap in caps.items() if default_on(cap)}
+                   and resolved_limit_env(decl, resolve([preset(d, "empty2.conf", "")])) == [])
     print(f"  wz-config selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
@@ -770,6 +1011,27 @@ def main(argv: list[str]) -> int:
         decl = load_decl()
         on = read_config(decl, pathlib.Path(argv[3]).read_text(encoding="utf-8"))
         print(cargo_args(decl, argv[2], on))
+        return 0
+    if len(argv) == 2 and argv[1] == "--check-presets":
+        return cmd_check_presets()
+    if len(argv) >= 4 and argv[1] == "--resolve-features" and argv[2] in ABIS:
+        decl = load_decl()
+        try:
+            kconf = resolve([pathlib.Path(p) for p in argv[3:]])
+        except PresetError as exc:
+            print(f"  wz-config FAIL: {exc}", file=sys.stderr)
+            return 1
+        print(cargo_args(decl, argv[2], resolved_caps(decl, kconf)))
+        return 0
+    if len(argv) >= 3 and argv[1] == "--resolve-env":
+        decl = load_decl()
+        try:
+            kconf = resolve([pathlib.Path(p) for p in argv[2:]])
+        except PresetError as exc:
+            print(f"  wz-config FAIL: {exc}", file=sys.stderr)
+            return 1
+        for line in resolved_limit_env(decl, kconf):
+            print(line)
         return 0
     print(__doc__, file=sys.stderr)
     return 2

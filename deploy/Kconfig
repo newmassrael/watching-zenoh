@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit kconfig-root.
+# Do not edit: `wz_config.py --check` fails when this file is stale.
+
+mainmenu "wz build configuration"
+
+rsource "Kconfig.capabilities"
+rsource "Kconfig.limits"

@@ -3244,6 +3244,10 @@ layer_c0_test_discipline() {
     # the size gate above grades.
     python3 scripts/lib/wz_config.py --selftest || return 1
     python3 scripts/lib/wz_config.py --check || return 1
+    # Every registered profile (configs/profiles) resolves, strictly (C9), on the one pinned
+    # Kconfig interpreter (C11, scripts/provision-kconfiglib.sh). A job without kconfiglib
+    # SKIPs out loud; the validate job provisions it and arms WZ_KCONFIG_REQUIRE.
+    python3 scripts/lib/wz_config.py --check-presets || return 1
     # R2288 (open-debt item 610) — every refusal the framing loop can return is
     # named by a test that fires it, and the population is DERIVED from the
     # function body rather than listed.
