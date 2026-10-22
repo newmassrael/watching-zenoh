@@ -610,6 +610,13 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "adjudicates"
             )
             for f in (
+                # `bounded-heapless` joins. It was probed through public items under a bare
+                # `#[cfg(feature = "bounded-heapless")]` in `reply_stage` (R3291, above); the
+                # storage-policy step made the staging tables generic over the policy, so
+                # those items carry no cfg any more. What the feature still gates in a
+                # public module is two accessors of `ApplicationLayerObserver`
+                # (`reply_refusals`, `request_refusals`), which are METHODS.
+                "bounded-heapless",
                 # Round 3301 -- `adminspace-core` joins. S9e split the admin space in
                 # two: `adminspace-fixed` keeps the modules (and is probed), and this
                 # feature keeps the heap forms the allocator-free build does not have,
