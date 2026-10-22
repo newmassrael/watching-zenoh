@@ -3502,6 +3502,12 @@ layer_c0_test_discipline() {
     # failure branches would have a population of zero on most runs.
     python3 scripts/lib/upstream_feature_census.py --selftest || return 1
     python3 scripts/lib/upstream_feature_census.py || return 1
+    # R3406 -- the same census for the other two originals wz replaces: every zenoh-pico
+    # `Z_FEATURE_*` switch and every zenoh-c cargo feature, judged once against the drop-in
+    # crates (docs/build-configuration.md C7). The pico arm reads the vendor submodule, so it
+    # runs here; the zenoh-c arm needs the provisioned checkout and runs in Layer C1cc.
+    python3 scripts/lib/upstream_switch_map.py --selftest || return 1
+    python3 scripts/lib/upstream_switch_map.py || return 1
     # R2240 (unregistered open-debt item 592, completion condition 2) — every
     # zenohd ORACLE this tree builds must answer with the version this tree
     # PINS. The binaries are gitignored build output, so R2228 moving
@@ -21693,6 +21699,9 @@ layer_c1cc_api_compat_c() {
     # This is the other half — the constant against UPSTREAM — and it can only
     # run where upstream is, which is here.
     python3 scripts/lib/zenoh_c_archive_arm.py --derive --require || return 1
+    # R3406 -- the zenoh-c half of the upstream switch map, against the checkout this lane
+    # has just established: a cargo feature zenoh-c grew or dropped is seen here or nowhere.
+    python3 scripts/lib/upstream_switch_map.py --zenoh-c || return 1
     # Named --exact one per invocation, like the E lanes: a rename or a silently
     # dropped test then fails the lane instead of shrinking it.
     for leg in \

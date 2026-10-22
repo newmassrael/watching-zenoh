@@ -161,11 +161,6 @@ PINNED_NON_CAPABILITY: dict[str, str] = {
         "(`zenoh-keyexpr/internal` et al). It gates no capability an operator "
         "can deploy -- a node built with and without it speaks the same wire"
     ),
-    "unstable": (
-        "un-hides API surface upstream has not committed to. wz's drop-in claim "
-        "is the two C ABIs and the wire, none of which this moves; the Rust "
-        "usability layer it exposes is the axis item 199 itself ruled out"
-    ),
     "internal_config": (
         "un-hides config-struct internals to zenoh's own crates. Same shape as "
         "`internal`, one crate narrower"
@@ -251,6 +246,17 @@ ANSWERS: tuple[tuple[str, str | None, str], ...] = (
         "protocol capability: it decorates zenoh-task / zenoh-runtime futures "
         "with tracing spans. Named rather than excused, because the one gap in "
         "an otherwise closed surface is the whole value of counting it",
+    ),
+    (
+        "unstable",
+        None,
+        "UNANSWERED -- open-debt item 910. R3406: until this round an exclusion, "
+        "on the reading that wz's drop-in claim is the two C ABIs and the wire and "
+        "that the Rust API was not a replacement axis (item 199, Round 2162). The "
+        "owner put the zenoh crate's public Rust API in scope on 2026-10-22 "
+        "(docs/build-configuration.md C13), and this feature gates part of that "
+        "API, so it is a capability wz owes: the compatibility crate of item 910 "
+        "answers it under the same name",
     ),
     (
         "uring",

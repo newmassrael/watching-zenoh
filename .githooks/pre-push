@@ -902,6 +902,10 @@ round_fed_gates=(
     "store_reasons_resolve.py"
     "token_plane_parity_gate.py"
     "upstream_feature_census.py"
+    # R3406 -- the zenoh-pico and zenoh-c switch tables. Round-fed by the drop-in crates'
+    # manifests, deploy/capabilities.toml and the pico submodule's CMakeLists. A text read
+    # plus one `cargo metadata --no-deps`, no build.
+    "upstream_switch_map.py"
     "upstream_link_axis_gate.py --check"
     "upstream_link_config_keys_gate.py --check"
     # R2973 -- which hosts each link runs on, against upstream's own gates at the
