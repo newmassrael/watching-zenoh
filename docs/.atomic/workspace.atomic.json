@@ -277984,6 +277984,60 @@
         "Read the hosted CI run of the push that carries this round, once. If Layer A5, Layer C0 or Layer C1bn is red there, it is a new cause and is read from its own log; the C1bn budget margin in particular is a cache question first, since its lanes passed."
       ]
     },
+    "Round 3422": {
+      "decision_summary": "Land the fixed client node as a Linux process and measure it against zenoh-pico (6 commits). The UDP link every stack shares moved from the Zephyr crate into wz-runtime-coop (a DatagramSocket trait, UdpDriver, UdpStack); a new wz-runtime-posix crate supplies the host socket, and deploy/host-slot-node links with no allocator. The link can sleep up to the next timer (service_within), and a drain's replies and final can leave as one datagram (begin_burst, optional batching). Same host, loopback, 1 KiB reply, order shuffled: GET median 74.9-77.0 us (wz), 72.7-73.0 (wz batching), 74.8-76.3 (pico); CPU per query 7.8 / 5.8 / 7.2 us; idle context switches 2 / s against 10 / s; RSS 1.34 against 1.99 MB. Latency is indistinguishable from pico; no order is claimed in latency or size.",
+      "changes_bullets": [
+        "wz-runtime-coop: udp_link (DatagramSocket, UdpDriver, UdpStack, FixedUdpDriver, TxStore, HeapTx) is the one UDP link; its heap forms are absent under session-slot, as the crate's alloc is. SessionDatagramLink gains service_within and uses_wake_budget; SessionPump computes the wake budget from the handshake, lease and keepalive deadlines and the runtime's next timer.",
+        "wz-runtime-zephyr: net.rs keeps its names as aliases of the shared link at the Zephyr socket; wz-runtime-posix (Linux only) is the host socket, clock, entropy and slot stack; deploy/host-slot-node is the fixed client as a process (feature batching, default off).",
+        "wz-session-core: ResponseSink::begin_burst and end_burst; the session link opens a batching window around a drain when transport-batching is on, so a reply and its final leave as one frame.",
+        "scripts/lib/feature_public_surface_census.py: wz-runtime-posix OFF_AXIS row and the session-slot axis entry; docs/storage-policy-and-link-layer.md section 5.1 holds the measured table."
+      ],
+      "verification_bullets": [
+        "Host, pinned zenohd, zenoh-c getter over TCP, UDP to the responder, 1 KiB reply, fresh router per run, order shuffled: GET median wz 74.9-77.0, wz with batching 72.7-73.0, pico single thread 74.8-76.3, pico with its read task 74.8-76.4, zenoh 95.6 us. CPU per answered query, lowest of 15: wz 7.8, wz batching 5.8, pico 7.2-7.6, zenoh 35.4 us. Idle context switches a second: wz 2 (499 before the idle wait), pico 10.",
+        "A 40 s idle hold with a 10 s lease kept the session; the queries after it were all correct. The node links with no allocator symbol among its 24 libc imports.",
+        "Tests: wz-runtime-coop lib, 29 passed with the heap, 33 with heap and slot features together, 29 on the slot profile alone; the burst tests in wz-runtime-tokio each fail under a mutation of the code they hold. clippy of the three runtime crates with all features and targets, -D warnings, clean. cargo doc --all-features of the posix, zephyr, coop, session-mcu, session-lwip and acceptor crates: no new broken link.",
+        "Kit, fixed client: stack_frame_gate passes, chain 6,816 B against the committed 6,808 B (tolerance 128 B); image 173,496 B.",
+        "feature_public_surface_census and guarded_count_gate over the range pass; validate-workspace: T1 orphan 14, unchanged.",
+        "Not run here: the full local CI sweep, a heap-free GET issuer, TCP or a real network, other payload sizes, the Zephyr socket with idle wait or batching enabled, and any hardware run of the new link."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run for this push per job at the start of the next round; C1bz (tokio), C1cf and C1cs were red on the run before it and belong to the multicast group work, not to this round.",
+        "A heap-free GET issuer on the slot profile does not exist (the kit client is Requesters over NoReplies); it is the next candidate, then the idle wait and batching on the Zephyr socket, then one shared fixed-client application and a runtime axis in deploy/capabilities.toml.",
+        "The receive-side extension depth cap (8) rejects a message that zenoh and zenoh-pico accept; register it as a debt after a probe that sends nine extensions."
+      ],
+      "publishable_decision_summary": "Land the fixed client node as a Linux process and measure it against zenoh-pico (6 commits). The UDP link every stack shares moved from the Zephyr crate into wz-runtime-coop (a DatagramSocket trait, UdpDriver, UdpStack); a new wz-runtime-posix crate supplies the host socket, and deploy/host-slot-node links with no allocator. The link can sleep up to the next timer (service_within), and a drain's replies and final can leave as one datagram (begin_burst, optional batching). Same host, loopback, 1 KiB reply, order shuffled: GET median 74.9-77.0 us (wz), 72.7-73.0 (wz batching), 74.8-76.3 (pico); CPU per query 7.8 / 5.8 / 7.2 us; idle context switches 2 / s against 10 / s; RSS 1.34 against 1.99 MB. Latency is indistinguishable from pico; no order is claimed in latency or size.",
+      "publishable_changes_bullets": [
+        "wz-runtime-coop: udp_link (DatagramSocket, UdpDriver, UdpStack, FixedUdpDriver, TxStore, HeapTx) is the one UDP link; its heap forms are absent under session-slot, as the crate's alloc is. SessionDatagramLink gains service_within and uses_wake_budget; SessionPump computes the wake budget from the handshake, lease and keepalive deadlines and the runtime's next timer.",
+        "wz-runtime-zephyr: net.rs keeps its names as aliases of the shared link at the Zephyr socket; wz-runtime-posix (Linux only) is the host socket, clock, entropy and slot stack; deploy/host-slot-node is the fixed client as a process (feature batching, default off).",
+        "wz-session-core: ResponseSink::begin_burst and end_burst; the session link opens a batching window around a drain when transport-batching is on, so a reply and its final leave as one frame.",
+        "scripts/lib/feature_public_surface_census.py: wz-runtime-posix OFF_AXIS row and the session-slot axis entry; docs/storage-policy-and-link-layer.md section 5.1 holds the measured table."
+      ],
+      "publishable_verification_bullets": [
+        "Host, pinned zenohd, zenoh-c getter over TCP, UDP to the responder, 1 KiB reply, fresh router per run, order shuffled: GET median wz 74.9-77.0, wz with batching 72.7-73.0, pico single thread 74.8-76.3, pico with its read task 74.8-76.4, zenoh 95.6 us. CPU per answered query, lowest of 15: wz 7.8, wz batching 5.8, pico 7.2-7.6, zenoh 35.4 us. Idle context switches a second: wz 2 (499 before the idle wait), pico 10.",
+        "A 40 s idle hold with a 10 s lease kept the session; the queries after it were all correct. The node links with no allocator symbol among its 24 libc imports.",
+        "Tests: wz-runtime-coop lib, 29 passed with the heap, 33 with heap and slot features together, 29 on the slot profile alone; the burst tests in wz-runtime-tokio each fail under a mutation of the code they hold. clippy of the three runtime crates with all features and targets, -D warnings, clean. cargo doc --all-features of the posix, zephyr, coop, session-mcu, session-lwip and acceptor crates: no new broken link.",
+        "Kit, fixed client: stack_frame_gate passes, chain 6,816 B against the committed 6,808 B (tolerance 128 B); image 173,496 B.",
+        "feature_public_surface_census and guarded_count_gate over the range pass; validate-workspace: T1 orphan 14, unchanged.",
+        "Not run here: the full local CI sweep, a heap-free GET issuer, TCP or a real network, other payload sizes, the Zephyr socket with idle wait or batching enabled, and any hardware run of the new link."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run for this push per job at the start of the next round; C1bz (tokio), C1cf and C1cs were red on the run before it and belong to the multicast group work, not to this round.",
+        "A heap-free GET issuer on the slot profile does not exist (the kit client is Requesters over NoReplies); it is the next candidate, then the idle wait and batching on the Zephyr socket, then one shared fixed-client application and a runtime axis in deploy/capabilities.toml.",
+        "The receive-side extension depth cap (8) rejects a message that zenoh and zenoh-pico accept; register it as a debt after a probe that sends nine extensions."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
