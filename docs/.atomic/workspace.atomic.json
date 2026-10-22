@@ -277952,6 +277952,38 @@
         "A consumer holding the ABI 47 record size must move to 48 with the pin. The byte order says how a number the organization wrote in the Custom Data is read unless the organization's definition says otherwise; the door does not look at the data."
       ]
     },
+    "Round 3421": {
+      "decision_summary": "The hosted CI run of the custom-options door push ended with four failed jobs. Read job by job: (1) the isolated-crate lanes job failed because a doc comment added by that push linked [write], which rustdoc finds both as a function and as the write! macro; it is now [write()], and that is the only failure that push caused. (2) Layer A5 named api-compat-rust as neither a preset member nor excluded; the exclusion row is on main since a later push by another session. (3) Layer C0 refused a comment in the pico admin space source that said not built with no tracker; that sentence is gone from main. (4) Layer C1bn used 92 percent of its budget after the rust-cache of its reader job found no entry; its lanes passed, nothing was changed for it. The verdicts of (2), (3) and (4) are read from the next hosted run, not re-run here.",
+      "changes_bullets": [
+        "wz-capture pcapng.rs: the doc comment of write_with_options links write() and not write, so rustdoc does not take it for the write! macro. No other line changed."
+      ],
+      "verification_bullets": [
+        "On a build host: cargo doc -p wz-capture --no-deps with RUSTDOCFLAGS -Dwarnings exits 0 after the change; the failing run's log showed the same command failing on that one link.",
+        "The attribution of the other three jobs is from the failed run's job logs and from the tree: the A5 exclusion row and the absence of the C0 comment were read on main, and the rust-cache miss is the line No cache found in the C1bn log; a ci cache entry saved on main after that run exists. None of the three was re-run here.",
+        "Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3413, sections 266."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI run of the push that carries this round, once. If Layer A5, Layer C0 or Layer C1bn is red there, it is a new cause and is read from its own log; the C1bn budget margin in particular is a cache question first, since its lanes passed."
+      ],
+      "publishable_decision_summary": "The hosted CI run of the custom-options door push ended with four failed jobs. Read job by job: (1) the isolated-crate lanes job failed because a doc comment added by that push linked [write], which rustdoc finds both as a function and as the write! macro; it is now [write()], and that is the only failure that push caused. (2) Layer A5 named api-compat-rust as neither a preset member nor excluded; the exclusion row is on main since a later push by another session. (3) Layer C0 refused a comment in the pico admin space source that said not built with no tracker; that sentence is gone from main. (4) Layer C1bn used 92 percent of its budget after the rust-cache of its reader job found no entry; its lanes passed, nothing was changed for it. The verdicts of (2), (3) and (4) are read from the next hosted run, not re-run here.",
+      "publishable_changes_bullets": [
+        "wz-capture pcapng.rs: the doc comment of write_with_options links write() and not write, so rustdoc does not take it for the write! macro. No other line changed."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: cargo doc -p wz-capture --no-deps with RUSTDOCFLAGS -Dwarnings exits 0 after the change; the failing run's log showed the same command failing on that one link.",
+        "The attribution of the other three jobs is from the failed run's job logs and from the tree: the A5 exclusion row and the absence of the C0 comment were read on main, and the rust-cache miss is the line No cache found in the C1bn log; a ci cache entry saved on main after that run exists. None of the three was re-run here.",
+        "Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3413, sections 266."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI run of the push that carries this round, once. If Layer A5, Layer C0 or Layer C1bn is red there, it is a new cause and is read from its own log; the C1bn budget margin in particular is a cache question first, since its lanes passed."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
