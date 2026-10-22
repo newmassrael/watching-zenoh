@@ -1650,7 +1650,7 @@ pub struct GroupFaceSeams<F, G, H> {
 
 /// R2850 / open-debt item 913 — run ONE group face on the caller's executor until
 /// it is stopped or its link is lost for good: bind and open, drive, re-join on
-/// a lost link (see [`spawn_group_face`] for why a face is one loop, and
+/// a lost link (see `spawn_group_face` for why a face is one loop, and
 /// [`GroupRejoin`] for when it re-joins).
 ///
 /// The loop every group face runs, whoever spawns it. A router spawns it on a

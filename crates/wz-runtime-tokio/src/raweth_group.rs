@@ -3,7 +3,8 @@
 //
 //! Open-debt item 911 — a multicast group over raw Ethernet: the link zenoh-pico's raweth
 //! transport runs a multicast session over (`vendor/zenoh-pico/src/transport/raweth/`), as a
-//! [`MulticastLinkDriver`] the group face drives like a UDP group.
+//! [`MulticastLinkDriver`](crate::multicast_glue::MulticastLinkDriver) the group face drives
+//! like a UDP group.
 //!
 //! What pico does on it, and so what this link does:
 //!
@@ -24,9 +25,10 @@
 //! link-local address its modified EUI-64 makes (RFC 4291 appendix A), which is unique per MAC
 //! and names it in a member listing.
 //!
-//! The socket is behind [`RawEthCarrier`]: `AF_PACKET` needs `CAP_NET_RAW`, which an
-//! unprivileged run does not have, and the link above it is the same over any carrier of whole
-//! frames ([`AfPacketCarrier`] is the one a session opens).
+//! The socket is behind [`RawEthCarrier`](crate::raweth_group::RawEthCarrier): `AF_PACKET`
+//! needs `CAP_NET_RAW`, which an unprivileged run does not have, and the link above it is the
+//! same over any carrier of whole frames
+//! ([`AfPacketCarrier`](crate::raweth_group::AfPacketCarrier) is the one a session opens).
 
 use std::io;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
