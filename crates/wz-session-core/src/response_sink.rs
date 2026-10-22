@@ -216,8 +216,8 @@ pub trait DeclareReplySink {
     /// the queryable's `QueryableInfo.complete`, which an `AllComplete` querier's
     /// filter requires before it opens.
     ///
-    /// A default body that sends nothing, so a sink that cannot answer (the
-    /// multicast reply loop) is a sink that does not, as it always was.
+    /// A default body that sends nothing, so a sink that cannot answer is a sink
+    /// that does not.
     #[cfg(all(feature = "alloc", feature = "declare-queryable"))]
     fn send_declare_queryable_reply(
         &self,

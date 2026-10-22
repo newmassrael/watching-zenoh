@@ -145,6 +145,32 @@ impl<Q: MulticastReplyEnqueue> crate::response_sink::DeclareReplySink for Multic
             });
         }
     }
+    /// Open-debt item 913 — a member's interest in queryables is answered on the group with each
+    /// matching queryable, as zenoh-pico answers one on a multicast transport
+    /// (`vendor/zenoh-pico/src/session/interest.c` @
+    /// `ret = _z_interest_send_decl_queryable(zn, id, NULL, restr_key_opt);`): a member's
+    /// querier's write filter opens on it. Upstream's `z_test_peer_multicast.c` at
+    /// `Z_FEATURE_MULTICAST_DECLARATIONS=1` found it missing: the session that opened last never
+    /// queried, the others having declared their queryables before it was there to hear them.
+    #[cfg(feature = "declare-queryable")]
+    fn send_declare_queryable_reply(
+        &self,
+        queryable_id: u64,
+        keyexpr: &str,
+        complete: bool,
+        interest_id: u64,
+    ) {
+        if let Ok(declare) = crate::declare_build::build_declare_queryable_reply_with_id(
+            interest_id,
+            queryable_id,
+            keyexpr,
+            crate::queryable_info::QueryableInfo::local(complete),
+        ) {
+            self.queue.enqueue(MulticastTxItem::DeclareReply {
+                declare: Box::new(declare),
+            });
+        }
+    }
     #[cfg(all(feature = "declare-subscriber", feature = "declare-undeclare"))]
     fn send_undeclare_subscriber_reply(&self, subscriber_id: u64) {
         // Same id-only retraction the unicast sink emits, through this
