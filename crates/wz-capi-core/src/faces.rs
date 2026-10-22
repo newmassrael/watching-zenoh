@@ -401,6 +401,19 @@ impl FanTargets {
     fn has_groups(&self) -> bool {
         false
     }
+
+    /// Whether a group a write filter does not ask is among the targets: one zenoh-pico sends
+    /// a put to whatever the filter says ([`crate::drive::GroupDeclarations::asks_for_filters`]).
+    #[cfg(feature = "multicast-transport")]
+    fn has_unasked_groups(&self) -> bool {
+        self.groups.iter().any(|group| !group.asks)
+    }
+
+    /// A build without the multicast transport has no group.
+    #[cfg(not(feature = "multicast-transport"))]
+    fn has_unasked_groups(&self) -> bool {
+        false
+    }
 }
 
 /// One leg of a get, as [`SharedSession::fan_query`] hands it to the ABI that issues
@@ -1515,7 +1528,7 @@ struct Inner {
     /// changed since it was last worked out ([`SharedSession::write_filter_active`]).
     #[cfg(target_has_atomic = "64")]
     face_epochs: Arc<Vec<FaceEpochs>>,
-    /// How many times [`Self::face_set`] has been rebuilt.
+    /// How many times [`Self::face_set`], or the set of groups, has been rebuilt.
     face_set_generation: u64,
     /// R2259 (open-debt item 593) — the face-lifecycle observers the C
     /// link/transport event planes register, keyed by the id
@@ -1575,6 +1588,10 @@ struct Inner {
     /// `mcast_faces` under the lock that changes it, as `face_set` is.
     #[cfg(feature = "multicast-transport")]
     mcast_set: Arc<Vec<multicast::McastLeg>>,
+    /// The two counters of each group a write filter asks, as [`Self::face_epochs`] holds the
+    /// faces': what the group's members declared moves a filter's answer as a peer's does.
+    #[cfg(all(feature = "multicast-transport", target_has_atomic = "64"))]
+    mcast_epochs: Arc<Vec<FaceEpochs>>,
     subs: Vec<SubEntry>,
     /// R311y559 — the session-scope ENTITY id counter: the `eid` of every entity the session
     /// declares, the one the C ABIs' `z_*_id` accessors report.
@@ -1673,7 +1690,11 @@ impl Inner {
     fn filter_token(&self, plane: FilterPlane) -> Option<(u64, u64)> {
         use std::sync::atomic::Ordering::Acquire;
         let mut sum = 0u64;
-        for epochs in self.face_epochs.iter() {
+        #[cfg(feature = "multicast-transport")]
+        let groups = self.mcast_epochs.iter();
+        #[cfg(not(feature = "multicast-transport"))]
+        let groups = core::iter::empty();
+        for epochs in self.face_epochs.iter().chain(groups) {
             let (subscribers, queryables) = epochs.as_ref()?;
             let counter = match plane {
                 FilterPlane::Subscribers => subscribers,
@@ -3365,6 +3386,9 @@ impl SharedSession {
         // [`Self::publish_aliased_all`]'s local leg resolves against. Without
         // it an aliased put would deliver on the wire and to nobody in-process.
         let _ = self.local.actions().send_declare_keyexpr(id, &keyexpr);
+        // Open-debt item 913 — and every group told the session's keyexprs.
+        #[cfg(feature = "multicast-transport")]
+        Self::announce_keyexpr_on_groups(&guard, id, &keyexpr);
         guard.kexprs.push(KexprEntry {
             id,
             keyexpr,
@@ -3401,6 +3425,8 @@ impl SharedSession {
                     let _ = face.session.actions().resend_declare_keyexpr(id, &keyexpr);
                 }
                 let _ = self.local.actions().resend_declare_keyexpr(id, &keyexpr);
+                #[cfg(feature = "multicast-transport")]
+                Self::announce_keyexpr_on_groups(&guard, id, &keyexpr);
                 return Some(id);
             }
         }
@@ -3464,6 +3490,8 @@ impl SharedSession {
         // put on a retracted id answers `UnknownMapping` on BOTH legs rather
         // than continuing to deliver in-process.
         self.local.actions().send_undeclare_kexpr(mapping_id);
+        #[cfg(feature = "multicast-transport")]
+        Self::retract_keyexpr_on_groups(guard, mapping_id);
     }
 
     /// Record a C liveliness TOKEN in the SSOT and declare it on every live
@@ -3507,7 +3535,7 @@ impl SharedSession {
         // Open-debt item 913 — and every group the session joined is told of it, as its ABI
         // says.
         #[cfg(feature = "multicast-transport")]
-        Self::announce_token_on_groups(&guard, id, &keyexpr);
+        Self::announce_token_on_groups(&guard, id, &keyexpr, &wire);
         guard.tokens.push(TokenEntry {
             id,
             keyexpr,
@@ -3532,7 +3560,12 @@ impl SharedSession {
                 // Open-debt item 913 — retracted from every group told of it, by the key the
                 // entry holds.
                 #[cfg(feature = "multicast-transport")]
-                Self::retract_token_on_groups(&guard, id, &guard.tokens[pos].keyexpr);
+                Self::retract_token_on_groups(
+                    &guard,
+                    id,
+                    &guard.tokens[pos].keyexpr,
+                    &guard.tokens[pos].wire,
+                );
                 dropped_entry = Some(guard.tokens.remove(pos));
             }
             // R2580 — including the plane's, or a C `z_drop` on the token would
@@ -4424,16 +4457,30 @@ impl SharedSession {
     /// with an entity whose locality admits session-local traffic; its default build
     /// counts none (`Z_FEATURE_LOCAL_SUBSCRIBER` is 0). They are read off the
     /// declarations when the filter is asked, never cached.
+    ///
+    /// Open-debt item 913 — the filter's Interest takes the session's next entity id, asked
+    /// or not, as zenoh-pico's `_z_add_interest` takes it before it decides whether to send
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @ `intr._id = _z_get_entity_id(zn);`), and
+    /// every group a filter asks ([`crate::drive::GroupDeclarations::asks_for_filters`]) is
+    /// asked by that id for its members' declarations on `wire`, the key as the peers were
+    /// told it. A group that comes up later is not asked: zenoh-pico opens its one transport
+    /// before any entity, so it has no such moment.
     pub fn declare_write_filter(
         &self,
         plane: FilterPlane,
         keyexpr: String,
+        wire: &WireKey,
         ask: Option<InterestForm>,
         count_local: bool,
     ) -> FilterId {
         let mut guard = self.lock();
         guard.next_filter_id = guard.next_filter_id.wrapping_add(1);
         let id = guard.next_filter_id;
+        let interest_id = guard.take_entity_id();
+        #[cfg(feature = "multicast-transport")]
+        Self::ask_filter_on_groups(&mut guard, id, interest_id, plane, &keyexpr, wire);
+        #[cfg(not(feature = "multicast-transport"))]
+        let _ = (interest_id, wire);
         if let Some(form) = &ask {
             for face in guard.faces.values_mut() {
                 let hold = match plane {
@@ -4477,21 +4524,26 @@ impl SharedSession {
                     dropped.push(hold);
                 }
             }
+            #[cfg(feature = "multicast-transport")]
+            Self::end_filter_on_groups(&mut guard, id);
         }
         drop(dropped);
     }
 
     /// Whether write filter `id` keeps a put, a delete or a get from being sent: it says
-    /// nothing matches ([`Self::write_filter_active`]) and the session holds no group.
+    /// nothing matches ([`Self::write_filter_active`]) and the session holds no group the
+    /// filter does not ask.
     ///
     /// Open-debt item 913 — zenoh-pico sends on a multicast transport whatever its filter
-    /// says (`vendor/zenoh-pico/src/api/api.c` @
-    /// `session->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE ||`): without its
-    /// `Z_FEATURE_MULTICAST_DECLARATIONS` a multicast session sends its group no Interest,
-    /// so the filter has no answer to wait for there. The filter's own answer, which a
-    /// matching status reports, is unchanged.
+    /// says unless its `Z_FEATURE_MULTICAST_DECLARATIONS` is on
+    /// (`vendor/zenoh-pico/src/api/api.c` @
+    /// `session->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE ||`): without it a multicast
+    /// session sends its group no Interest, so the filter has no answer to wait for there,
+    /// and with it the group's answer is counted as a peer's
+    /// ([`crate::drive::GroupDeclarations::asks_for_filters`]). The filter's own answer,
+    /// which a matching status reports, is unchanged.
     pub fn write_filter_holds_back(&self, id: FilterId) -> bool {
-        !self.fan_targets().has_groups() && self.write_filter_active(id)
+        !self.fan_targets().has_unasked_groups() && self.write_filter_active(id)
     }
 
     /// Whether the filter says NOTHING matches — zenoh-pico's
@@ -4548,10 +4600,10 @@ impl SharedSession {
                 }
                 seen = Some(token);
             }
-            (entry.plane, entry.keyexpr.clone(), guard.face_set.clone())
+            (entry.plane, entry.keyexpr.clone(), guard.fan_targets())
         };
         // `Remote`: only what a peer declared counts. See `declare_write_filter`.
-        let matching = sessions.iter().any(|session| match plane {
+        let matching = sessions.faces.iter().any(|session| match plane {
             FilterPlane::Subscribers => {
                 session.remote_subscribers_match(&keyexpr, Locality::Remote)
             }
@@ -4559,6 +4611,21 @@ impl SharedSession {
                 session.remote_queryables_match(&keyexpr, Locality::Remote, complete_required)
             }
         });
+        // Open-debt item 913 — and what the members of each group the filter asks declared.
+        #[cfg(feature = "multicast-transport")]
+        let matching = matching
+            || sessions
+                .groups
+                .iter()
+                .filter(|group| group.asks)
+                .any(|group| match plane {
+                    FilterPlane::Subscribers => group
+                        .session
+                        .remote_subscribers_match(&keyexpr, Locality::Remote),
+                    FilterPlane::Queryables { complete_required } => group
+                        .session
+                        .remote_queryables_match(&keyexpr, Locality::Remote, complete_required),
+                });
         #[cfg(target_has_atomic = "64")]
         if let Some((generation, epoch_sum)) = seen {
             let mut guard = self.lock();
@@ -5474,6 +5541,7 @@ mod matching_aggregate_tests {
         let publisher = shared.declare_write_filter(
             FilterPlane::Subscribers,
             "wz/wf/pub".to_owned(),
+            &WireKey::literal(),
             None,
             false,
         );
@@ -5482,6 +5550,7 @@ mod matching_aggregate_tests {
                 complete_required: true,
             },
             "wz/wf/qry".to_owned(),
+            &WireKey::literal(),
             None,
             false,
         );
@@ -5513,12 +5582,14 @@ mod matching_aggregate_tests {
         let counting = shared.declare_write_filter(
             FilterPlane::Subscribers,
             "wz/local/**".to_owned(),
+            &WireKey::literal(),
             None,
             true,
         );
         let remote_only = shared.declare_write_filter(
             FilterPlane::Subscribers,
             "wz/local/**".to_owned(),
+            &WireKey::literal(),
             None,
             false,
         );
@@ -5843,6 +5914,7 @@ mod matching_aggregate_tests {
         let filter = shared.declare_write_filter(
             FilterPlane::Subscribers,
             "wz/plain/filtered".to_owned(),
+            &WireKey::literal(),
             None,
             false,
         );

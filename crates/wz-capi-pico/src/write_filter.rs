@@ -48,7 +48,7 @@
 use std::sync::Arc;
 
 use wz_capi_core::drive::SessionState;
-use wz_capi_core::faces::{FilterId, FilterPlane, SharedSession};
+use wz_capi_core::faces::{FilterId, FilterPlane, SharedSession, WireKey};
 #[cfg(feature = "advanced")]
 use wz_runtime_tokio::node_clock::NodeHlc;
 use wz_runtime_tokio::session::InterestForm;
@@ -130,8 +130,12 @@ impl WriteFilter {
         count_local: bool,
     ) -> Self {
         let shared = session.shared.clone();
-        let ask = interest_form(&shared, session.mode, key);
-        let id = shared.declare_write_filter(plane, key.literal().to_owned(), ask, count_local);
+        // The key goes on the wire as the entity's own declaration: its id and the rest of
+        // the key, or the literal when nothing covers it.
+        let wire = key.wire(&shared);
+        let ask = interest_form(&shared, session.mode, key, &wire);
+        let id =
+            shared.declare_write_filter(plane, key.literal().to_owned(), &wire, ask, count_local);
         Self { shared, id }
     }
 
@@ -175,18 +179,16 @@ fn interest_form(
     shared: &Arc<SharedSession>,
     mode: WhatAmI,
     key: &DeclaredKeyexpr,
+    wire: &WireKey,
 ) -> Option<InterestForm> {
     let client = mode == WhatAmI::Client;
     if !client && !shared.has_router_peer() {
         return None;
     }
-    // The key goes on the wire as the entity's own declaration: its id and the
-    // rest of the key, or the literal when nothing covers it.
-    let wire = key.wire(shared);
     let (mapping_id, suffix) = if wire.mapping_id == 0 {
         (0, Some(key.literal().to_owned()))
     } else {
-        (wire.mapping_id, wire.suffix)
+        (wire.mapping_id, wire.suffix.clone())
     };
     Some(InterestForm {
         mapping_id,

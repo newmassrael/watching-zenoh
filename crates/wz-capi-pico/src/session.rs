@@ -409,8 +409,13 @@ pub unsafe extern "C" fn z_open(
                     profile: PICO_GROUP,
                     is_shm: false,
                     // pico declares its entities over whatever transport it holds, a group too
-                    // (MEASURED off the group's wire: `decl_subscriber(1, ..)`).
+                    // (MEASURED off the group's wire: `decl_subscriber(1, ..)`), and with
+                    // `Z_FEATURE_MULTICAST_DECLARATIONS` its keyexprs and write filters as well
+                    // (MEASURED: `decl_kexpr(1, demo/mc/zp)`, `Interest(3, .., 1:)`).
+                    #[cfg(not(feature = "multicast-declarations"))]
                     declarations: wz_capi_core::drive::GroupDeclarations::Entities,
+                    #[cfg(feature = "multicast-declarations")]
+                    declarations: wz_capi_core::drive::GroupDeclarations::Mapped,
                 }],
             ),
             listen => (listen, connect, Vec::new()),

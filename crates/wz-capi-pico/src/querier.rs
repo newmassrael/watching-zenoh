@@ -434,6 +434,12 @@ pub unsafe extern "C" fn z_declare_querier(
             Ok(key) => key,
             Err(rc) => return rc,
         };
+        // Its entity id, taken before the filter's Interest takes the next, as pico's
+        // `_z_declare_querier` takes it (`vendor/zenoh-pico/src/net/primitives.c` @
+        // `querier->_id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`) before the filter is made.
+        let eid = state.shared.next_entity_id();
+        #[cfg(not(feature = "unstable-api"))]
+        let _ = eid;
         // R2962 — and its write filter, counting QUERYABLES; a target of
         // `ALL_COMPLETE` counts only the ones declared complete
         // (`vendor/zenoh-pico/src/api/api.c` @
@@ -448,7 +454,7 @@ pub unsafe extern "C" fn z_declare_querier(
         );
         let mut boxed = Box::new(QuerierState {
             #[cfg(feature = "unstable-api")]
-            eid: state.shared.next_entity_id(),
+            eid,
             shared: state.shared.clone(),
             filter,
             key,

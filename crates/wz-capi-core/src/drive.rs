@@ -3808,6 +3808,24 @@ pub enum GroupDeclarations {
     /// zenoh-pico declares a session's entities over whatever transport it holds at its
     /// default (`vendor/zenoh-pico/src/net/primitives.c` @ `z_result_t _z_send_declare(`).
     Entities,
+    /// What a unicast face is told, on the group: each keyexpr the session declares while the
+    /// group is up, and each subscriber, queryable and liveliness token with its entity id on
+    /// the key it was declared to the peers by, retracted naming its own key. And what the
+    /// session asks: the members' keyexprs once, when the group comes up, and the members'
+    /// subscribers or queryables for each write filter, whose answer then holds a put back on
+    /// the group as on a unicast face. zenoh-pico with `Z_FEATURE_MULTICAST_DECLARATIONS`
+    /// (`vendor/zenoh-pico/src/session/keyexpr.c` @ `#if Z_FEATURE_MULTICAST_DECLARATIONS == 0`,
+    /// `vendor/zenoh-pico/src/api/api.c` @ `session->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE ||`).
+    Mapped,
+}
+
+impl GroupDeclarations {
+    /// Whether a write filter asks the group, and so whether its answer holds a put back there:
+    /// only with [`Self::Mapped`]. On any other group zenoh-pico sends whatever the filter says,
+    /// and zenoh routes a group's data whatever its members declared.
+    pub fn asks_for_filters(self) -> bool {
+        self == Self::Mapped
+    }
 }
 
 /// What a session's JOIN beacon advertises on a group, beside its identity and its role:

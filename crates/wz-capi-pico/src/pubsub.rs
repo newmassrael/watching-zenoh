@@ -875,6 +875,14 @@ impl PlainPublisher {
         declared: PublisherQos,
     ) -> Result<Self, ZResult> {
         let key = DeclaredKeyexpr::declare(&session.shared, keyexpr, existing)?;
+        // The publisher's entity id comes off the session's one counter before its filter's
+        // Interest takes the next, whether or not this build reports the id: pico's
+        // `_z_declare_publisher` takes it (`vendor/zenoh-pico/src/net/primitives.c` @
+        // `publisher->_id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`) before `z_declare_publisher`
+        // creates the filter, and a group the Interest goes to reads the id.
+        let eid = session.shared.next_entity_id();
+        #[cfg(not(feature = "unstable-api"))]
+        let _ = eid;
         // R2962 — the filter is created AFTER the key, because its Interest names
         // the key's declaration (pico's order: `_z_declared_keyexpr_declare`, then
         // `_z_write_filter_create`, in `z_declare_publisher`).
@@ -890,7 +898,7 @@ impl PlainPublisher {
             .zip(key.whole_key_mapping(&session.shared));
         Ok(Self {
             #[cfg(feature = "unstable-api")]
-            eid: session.shared.next_entity_id(),
+            eid,
             shared: session.shared.clone(),
             filter,
             key,

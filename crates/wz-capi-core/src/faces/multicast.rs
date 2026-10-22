@@ -25,16 +25,16 @@
 //! (`vendor/zenoh-pico/src/session/keyexpr.c` @
 //! `#if Z_FEATURE_MULTICAST_DECLARATIONS == 0`).
 //!
-//! What the face tells the group of the session's declarations is the ABI's
-//! ([`GroupDeclarations`]): nothing for zenoh-pico at its default, and for zenoh
-//! each subscriber declared while the group is up, which zenoh announces on
-//! every group it holds. Not sent on either: the Declare of each queryable and
-//! liveliness token, and with zenoh-pico the Declare of each subscriber, which
-//! zenoh-pico sends over whatever transport its session holds
-//! (`_z_send_declare`, `vendor/zenoh-pico/src/net/primitives.c`). A member
-//! that reads them (a write filter, a matching listener, a liveliness
-//! subscriber) hears none from this face; a member's put and query reach it
-//! whether or not it heard any, which is what a group carries without them.
+//! What the face tells the group of the session's declarations, and what it asks
+//! the group, is the ABI's ([`GroupDeclarations`]): for zenoh each subscriber
+//! declared while the group is up, which zenoh announces on every group it holds;
+//! for zenoh-pico at its default each subscriber, queryable and liveliness token on
+//! its literal key, as zenoh-pico sends its declarations over whatever transport its
+//! session holds (`_z_send_declare`, `vendor/zenoh-pico/src/net/primitives.c`); and
+//! for zenoh-pico with its multicast declarations what a unicast face is told and
+//! asked, keyexprs and write filters included. A member's put and query reach the
+//! face whether or not it heard any declaration, which is what a group carries
+//! without them.
 //!
 //! ## Who drives it
 //!
@@ -67,10 +67,11 @@ use super::TokenId;
 #[cfg(feature = "queryable")]
 use super::{queryable_options, QblEntry, QblId};
 use super::{
-    FaceEventKind, FaceSnapshot, GroupLink, Inner, LinkSnapshot, SharedSession, SubEntry, SubId,
+    FaceEventKind, FaceSnapshot, FilterId, FilterPlane, GroupLink, Inner, LinkSnapshot,
+    SharedSession, SubEntry, SubId, WireKey,
 };
 use crate::drive::GroupDeclarations;
-use wz_runtime_tokio::session::GroupDeclaration;
+use wz_runtime_tokio::session::{GroupDeclaration, GroupKey, InterestKinds, RetractionKey};
 
 /// One member of a group as the transport both upstreams report it as: its zid and role,
 /// shared memory as the calling ABI says (`is_shm`), and one link from this node's locator on
@@ -140,6 +141,9 @@ pub(super) struct McastFaceEntry {
     /// The members announced as connected so far, each as it was announced, so a
     /// departure is announced as the arrival was even when the join that held it is gone.
     pub(super) announced: Vec<(MulticastMember, FaceSnapshot)>,
+    /// The Interest each write filter asked the group by, keyed by the filter, so the filter's
+    /// end ends it on the group ([`GroupDeclarations::asks_for_filters`]).
+    pub(super) filters: BTreeMap<FilterId, u64>,
 }
 
 /// What a group face is made of when it comes up ([`SharedSession::mcast_face_up`]).
@@ -168,11 +172,16 @@ pub struct McastFaceParts<'a> {
 pub(super) struct McastLeg {
     pub(super) session: TokioMulticastSession,
     pub(super) revised: Arc<Notify>,
+    /// Whether a write filter asks this group, so that what its members declare decides
+    /// whether a put leaves ([`GroupDeclarations::asks_for_filters`]).
+    pub(super) asks: bool,
 }
 
 impl Inner {
     /// Rebuild [`Inner::mcast_set`] from `mcast_faces`, with the lock held, as
-    /// [`Inner::refresh_face_set`] does for the unicast faces.
+    /// [`Inner::refresh_face_set`] does for the unicast faces. The groups a write filter asks
+    /// are part of what its answer depends on, so their counters join the faces' and the
+    /// rebuild moves the same generation.
     pub(super) fn refresh_mcast_set(&mut self) {
         self.mcast_set = Arc::new(
             self.mcast_faces
@@ -180,9 +189,58 @@ impl Inner {
                 .map(|face| McastLeg {
                     session: face.session.clone(),
                     revised: face.revised.clone(),
+                    asks: face.declarations.asks_for_filters(),
                 })
                 .collect(),
         );
+        #[cfg(target_has_atomic = "64")]
+        {
+            self.mcast_epochs = Arc::new(
+                self.mcast_faces
+                    .values()
+                    .filter(|face| face.declarations.asks_for_filters())
+                    .map(|face| face.session.remote_declaration_epochs())
+                    .collect(),
+            );
+        }
+        self.face_set_generation = self.face_set_generation.wrapping_add(1);
+    }
+}
+
+/// How a group is told the key of an entity declared on `keyexpr` and named to the peers as
+/// `wire`: by that declaration only when the group is told the session's keyexprs
+/// ([`GroupDeclarations::Mapped`]), and by the literal otherwise, as zenoh-pico names a key on
+/// a multicast transport at its default.
+fn group_key<'a>(
+    declarations: GroupDeclarations,
+    keyexpr: &'a str,
+    wire: &'a WireKey,
+) -> GroupKey<'a> {
+    if declarations == GroupDeclarations::Mapped && wire.mapping_id != 0 {
+        GroupKey {
+            mapping_id: wire.mapping_id,
+            suffix: wire.suffix.as_deref(),
+        }
+    } else {
+        GroupKey::literal(keyexpr)
+    }
+}
+
+/// The key a retraction names on a group: the entity's own key the declaring ABI retracts by
+/// (`retraction`), when the group is told the session's keyexprs and the ABI names one, and
+/// else the key it was announced on ([`group_key`]).
+fn retraction_key<'a>(
+    declarations: GroupDeclarations,
+    keyexpr: &'a str,
+    wire: &'a WireKey,
+    retraction: Option<&'a RetractionKey>,
+) -> GroupKey<'a> {
+    match retraction {
+        Some(own) if declarations == GroupDeclarations::Mapped && own.mapping_id != 0 => GroupKey {
+            mapping_id: own.mapping_id,
+            suffix: Some(own.suffix.as_str()),
+        },
+        _ => group_key(declarations, keyexpr, wire),
     }
 }
 
@@ -201,42 +259,79 @@ fn announced_id(
     }
     match (declarations, what) {
         (GroupDeclarations::Subscribers, GroupDeclaration::Subscriber) => Some(0),
-        (GroupDeclarations::Entities, _) => Some(id),
+        (GroupDeclarations::Entities | GroupDeclarations::Mapped, _) => Some(id),
         _ => None,
     }
 }
 
-/// Tell the group `session` reaches of the entity `what` (`id`, `keyexpr`) as `declarations`
-/// says. Best effort, as the group's put is: a key past the codec's bound is announced nowhere,
-/// and the entity still serves the group.
-fn announce_on(
-    session: &TokioMulticastSession,
-    declarations: GroupDeclarations,
+/// An entity as a group is told of it: its kind, its id, the key it is declared on and how
+/// that key is named to the peers, the key its retraction names, and the traffic it takes.
+struct Told<'a> {
     what: GroupDeclaration,
     id: u64,
-    keyexpr: &str,
+    keyexpr: &'a str,
+    wire: &'a WireKey,
+    retraction: Option<&'a RetractionKey>,
     allowed_origin: wz_runtime_tokio::locality::Locality,
-) {
-    if let Some(announced) = announced_id(declarations, what, id, allowed_origin) {
-        let _ = session.announce(what, announced, keyexpr);
+}
+
+/// Tell the group `session` reaches of `entity` as `declarations` says. Best effort, as the
+/// group's put is: a key past the codec's bound is announced nowhere, and the entity still
+/// serves the group.
+fn announce_on(session: &TokioMulticastSession, declarations: GroupDeclarations, entity: &Told) {
+    if let Some(announced) =
+        announced_id(declarations, entity.what, entity.id, entity.allowed_origin)
+    {
+        let key = group_key(declarations, entity.keyexpr, entity.wire);
+        let _ = session.announce(entity.what, announced, key);
     }
 }
 
 /// Retract from the group the entity [`announce_on`] told it of. zenoh retracts nothing on a
 /// group: its announcement is a subscriber the group keeps.
-fn retract_on(
-    session: &TokioMulticastSession,
-    declarations: GroupDeclarations,
-    what: GroupDeclaration,
-    id: u64,
-    keyexpr: &str,
-    allowed_origin: wz_runtime_tokio::locality::Locality,
-) {
-    if declarations != GroupDeclarations::Entities {
+fn retract_on(session: &TokioMulticastSession, declarations: GroupDeclarations, entity: &Told) {
+    if !matches!(
+        declarations,
+        GroupDeclarations::Entities | GroupDeclarations::Mapped
+    ) {
         return;
     }
-    if let Some(announced) = announced_id(declarations, what, id, allowed_origin) {
-        let _ = session.retract(what, announced, keyexpr);
+    if let Some(announced) =
+        announced_id(declarations, entity.what, entity.id, entity.allowed_origin)
+    {
+        let key = retraction_key(declarations, entity.keyexpr, entity.wire, entity.retraction);
+        let _ = session.retract(entity.what, announced, key);
+    }
+}
+
+impl SubEntry {
+    /// The subscription as a group is told of it.
+    fn told(&self) -> Told<'_> {
+        Told {
+            what: GroupDeclaration::Subscriber,
+            id: self.id,
+            keyexpr: &self.keyexpr,
+            wire: &self.wire,
+            retraction: self.retraction.as_ref(),
+            allowed_origin: self.allowed_origin,
+        }
+    }
+}
+
+#[cfg(feature = "queryable")]
+impl QblEntry {
+    /// The queryable as a group is told of it.
+    fn told(&self) -> Told<'_> {
+        Told {
+            what: GroupDeclaration::Queryable {
+                complete: self.complete,
+            },
+            id: self.id,
+            keyexpr: &self.keyexpr,
+            wire: &self.wire,
+            retraction: self.retraction.as_ref(),
+            allowed_origin: self.allowed_origin,
+        }
     }
 }
 
@@ -252,14 +347,7 @@ fn subscribe_on(
         SubscribeOptions::default().with_allowed_origin(entry.allowed_origin),
         (entry.sink)(),
     );
-    announce_on(
-        session,
-        declarations,
-        GroupDeclaration::Subscriber,
-        entry.id,
-        &entry.keyexpr,
-        entry.allowed_origin,
-    );
+    announce_on(session, declarations, &entry.told());
     subscriber
 }
 
@@ -272,16 +360,7 @@ fn answer_on(
     entry: &QblEntry,
     declarations: GroupDeclarations,
 ) -> Queryable {
-    announce_on(
-        session,
-        declarations,
-        GroupDeclaration::Queryable {
-            complete: entry.complete,
-        },
-        entry.id,
-        &entry.keyexpr,
-        entry.allowed_origin,
-    );
+    announce_on(session, declarations, &entry.told());
     session.declare_queryable(
         entry.keyexpr.clone(),
         queryable_options(entry.complete, entry.allowed_origin),
@@ -349,6 +428,21 @@ impl SharedSession {
             .iter()
             .map(|entry| (entry.id, answer_on(session, entry, GroupDeclarations::None)))
             .collect();
+        // A group told the session's keyexprs is asked for its members' at once, with the
+        // session's next entity id, as zenoh-pico asks when it opens its multicast transport
+        // (`vendor/zenoh-pico/src/session/interest.c` @
+        // `z_result_t _z_interest_pull_resource_from_peers(_z_session_t *zn) {`). Best effort:
+        // a member's own declarations reach the group later all the same.
+        if declarations == GroupDeclarations::Mapped {
+            let interest_id = guard.take_entity_id();
+            let _ = session.ask(
+                interest_id,
+                InterestKinds::KEYEXPRS,
+                /*current=*/ true,
+                /*future=*/ false,
+                None,
+            );
+        }
         let replaced = guard.mcast_faces.insert(
             id,
             McastFaceEntry {
@@ -363,6 +457,7 @@ impl SharedSession {
                 is_shm,
                 declarations,
                 announced: Vec::new(),
+                filters: BTreeMap::new(),
             },
         );
         guard.refresh_mcast_set();
@@ -501,19 +596,16 @@ impl SharedSession {
     /// outside the lock, retracting it from each group told of it. Called before the
     /// registry entry is removed, which is where its key is read.
     pub(super) fn unsubscribe_on_groups(guard: &mut Inner, id: SubId) -> Vec<Subscriber> {
-        let told = guard
-            .subs
-            .iter()
-            .find(|entry| entry.id == id)
-            .map(|entry| (entry.keyexpr.clone(), entry.allowed_origin));
-        guard
-            .mcast_faces
+        let Inner {
+            subs, mcast_faces, ..
+        } = guard;
+        let entry = subs.iter().find(|entry| entry.id == id);
+        mcast_faces
             .values_mut()
             .filter_map(|face| {
                 let sub = face.subs.remove(&id)?;
-                if let Some((keyexpr, origin)) = &told {
-                    let what = GroupDeclaration::Subscriber;
-                    retract_on(&face.session, face.declarations, what, id, keyexpr, *origin);
+                if let Some(entry) = entry {
+                    retract_on(&face.session, face.declarations, &entry.told());
                 }
                 Some(sub)
             })
@@ -525,54 +617,130 @@ impl SharedSession {
     /// entry is removed, which is where its key is read.
     #[cfg(feature = "queryable")]
     pub(super) fn unanswer_on_groups(guard: &mut Inner, id: QblId) -> Vec<Queryable> {
-        let told = guard
-            .qbls
-            .iter()
-            .find(|entry| entry.id == id)
-            .map(|entry| (entry.keyexpr.clone(), entry.complete, entry.allowed_origin));
-        guard
-            .mcast_faces
+        let Inner {
+            qbls, mcast_faces, ..
+        } = guard;
+        let entry = qbls.iter().find(|entry| entry.id == id);
+        mcast_faces
             .values_mut()
             .filter_map(|face| {
                 let qbl = face.qbls.remove(&id)?;
-                if let Some((keyexpr, complete, origin)) = &told {
-                    let what = GroupDeclaration::Queryable {
-                        complete: *complete,
-                    };
-                    retract_on(&face.session, face.declarations, what, id, keyexpr, *origin);
+                if let Some(entry) = entry {
+                    retract_on(&face.session, face.declarations, &entry.told());
                 }
                 Some(qbl)
             })
             .collect()
     }
 
-    /// Tell every group of liveliness token `id` on `keyexpr`, as each group's declarations
-    /// say. A group carries no copy of a token: the token is the declaration, which the group's
-    /// members read, and the session's own plane holds the local one.
-    pub(super) fn announce_token_on_groups(guard: &Inner, id: TokenId, keyexpr: &str) {
+    /// Tell every group of liveliness token `id` on `keyexpr`, named to the peers as `wire`, as
+    /// each group's declarations say. A group carries no copy of a token: the token is the
+    /// declaration, which the group's members read, and the session's own plane holds the
+    /// local one.
+    pub(super) fn announce_token_on_groups(
+        guard: &Inner,
+        id: TokenId,
+        keyexpr: &str,
+        wire: &WireKey,
+    ) {
+        let entity = Told {
+            what: GroupDeclaration::Token,
+            id,
+            keyexpr,
+            wire,
+            retraction: None,
+            allowed_origin: wz_runtime_tokio::locality::Locality::Any,
+        };
         for face in guard.mcast_faces.values() {
-            announce_on(
-                &face.session,
-                face.declarations,
-                GroupDeclaration::Token,
-                id,
-                keyexpr,
-                wz_runtime_tokio::locality::Locality::Any,
-            );
+            announce_on(&face.session, face.declarations, &entity);
         }
     }
 
-    /// Retract liveliness token `id` on `keyexpr` from every group told of it.
-    pub(super) fn retract_token_on_groups(guard: &Inner, id: TokenId, keyexpr: &str) {
+    /// Retract liveliness token `id` from every group told of it, naming the key it was
+    /// announced on.
+    pub(super) fn retract_token_on_groups(
+        guard: &Inner,
+        id: TokenId,
+        keyexpr: &str,
+        wire: &WireKey,
+    ) {
+        let entity = Told {
+            what: GroupDeclaration::Token,
+            id,
+            keyexpr,
+            wire,
+            retraction: None,
+            allowed_origin: wz_runtime_tokio::locality::Locality::Any,
+        };
         for face in guard.mcast_faces.values() {
-            retract_on(
-                &face.session,
-                face.declarations,
-                GroupDeclaration::Token,
-                id,
-                keyexpr,
-                wz_runtime_tokio::locality::Locality::Any,
-            );
+            retract_on(&face.session, face.declarations, &entity);
+        }
+    }
+
+    /// Declare keyexpr `id` (`keyexpr`) to every group told the session's keyexprs, as a
+    /// unicast face is told it ([`SharedSession::declare_keyexpr`]); a key declared again is
+    /// declared again, as zenoh-pico sends a declaration whether or not the key was new.
+    pub(super) fn announce_keyexpr_on_groups(guard: &Inner, id: u64, keyexpr: &str) {
+        let Some(id) = core::num::NonZeroU64::new(id) else {
+            return;
+        };
+        for face in guard.mcast_faces.values() {
+            if face.declarations == GroupDeclarations::Mapped {
+                let _ = face.session.announce_keyexpr(id, keyexpr);
+            }
+        }
+    }
+
+    /// Retract keyexpr `id` from every group told of it.
+    pub(super) fn retract_keyexpr_on_groups(guard: &Inner, id: u64) {
+        for face in guard.mcast_faces.values() {
+            if face.declarations == GroupDeclarations::Mapped {
+                let _ = face.session.retract_keyexpr(id);
+            }
+        }
+    }
+
+    /// Ask every group a write filter asks ([`GroupDeclarations::asks_for_filters`]) for its
+    /// members' declarations on `plane` and `keyexpr`, named as the group was told it
+    /// ([`group_key`] of `wire`), with interest id `interest_id`: the current
+    /// ones, and the kind alone, as a zenoh-pico peer with no router among its peers puts its
+    /// filter's Interest (`vendor/zenoh-pico/src/net/filtering.c` @
+    /// `uint8_t flags = interest_flag | _Z_INTEREST_FLAG_RESTRICTED | _Z_INTEREST_FLAG_CURRENT;`),
+    /// which is every peer on a multicast transport, its router check reading unicast peers
+    /// alone. Each group keeps the id, for [`Self::end_filter_on_groups`].
+    pub(super) fn ask_filter_on_groups(
+        guard: &mut Inner,
+        filter: FilterId,
+        interest_id: u64,
+        plane: FilterPlane,
+        keyexpr: &str,
+        wire: &WireKey,
+    ) {
+        let kinds = match plane {
+            FilterPlane::Subscribers => InterestKinds::SUBSCRIBERS,
+            FilterPlane::Queryables { .. } => InterestKinds::QUERYABLES,
+        };
+        for face in guard.mcast_faces.values_mut() {
+            if face.declarations.asks_for_filters() {
+                let _ = face.session.ask(
+                    interest_id,
+                    kinds,
+                    /*current=*/ true,
+                    /*future=*/ false,
+                    Some(group_key(face.declarations, keyexpr, wire)),
+                );
+                face.filters.insert(filter, interest_id);
+            }
+        }
+    }
+
+    /// End on every group the Interest write filter `filter` asked it by: its
+    /// `Interest(Final)`, as zenoh-pico ends an interest on its multicast transport.
+    pub(super) fn end_filter_on_groups(guard: &mut Inner, filter: FilterId) {
+        for face in guard.mcast_faces.values_mut() {
+            if let Some(interest_id) = face.filters.remove(&filter) {
+                let _ = face.session.ask_final(interest_id);
+            }
         }
     }
 }
