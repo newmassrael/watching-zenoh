@@ -161,6 +161,9 @@ struct Link {
 struct Shared {
     link: RwLock<Option<Arc<Link>>>,
     linked: tokio::sync::watch::Sender<bool>,
+    /// A JOIN asked for ahead of the beacon's cadence ([`MulticastTxProducer::request_join`]).
+    /// A `Notify` keeps one permit, so requests made before the loop looks fold into one JOIN.
+    join_now: tokio::sync::Notify,
 }
 
 /// The handle a multicast group's producers push through: an application's
@@ -193,6 +196,7 @@ impl MulticastTxProducer {
             shared: Arc::new(Shared {
                 link: RwLock::new(None),
                 linked,
+                join_now: tokio::sync::Notify::new(),
             }),
         }
     }
@@ -211,6 +215,21 @@ impl MulticastTxProducer {
     pub async fn linked(&self) {
         let mut linked = self.shared.linked.subscribe();
         let _ = linked.wait_for(|linked| *linked).await;
+    }
+
+    /// Ask the group's loop to send its JOIN now rather than at the beacon's next turn, as
+    /// pico's `zp_send_join` sends one on the caller's word
+    /// (`vendor/zenoh-pico/src/transport/common/lease.c` @ `z_result_t _z_send_join(`). The
+    /// loop then keeps its cadence from that JOIN. A request while no loop runs is kept for
+    /// the next one.
+    pub fn request_join(&self) {
+        self.shared.join_now.notify_one();
+    }
+
+    /// A JOIN was asked for ([`Self::request_join`]); what the group's loop waits on beside
+    /// its link.
+    pub(crate) async fn join_requested(&self) {
+        self.shared.join_now.notified().await;
     }
 
     /// Push `item` onto the attached pipeline, on the caller's thread: ask its
@@ -570,6 +589,12 @@ impl MulticastTxPlane {
     /// The conduits as written: what the JOIN advertises.
     pub(crate) fn on_wire(&self) -> &MulticastTxConduits {
         &self.on_wire
+    }
+
+    /// A JOIN was asked for through this plane's producer
+    /// ([`MulticastTxProducer::request_join`]).
+    pub(crate) async fn join_requested(&self) {
+        self.producer.join_requested().await;
     }
 
     /// Queue a datagram that carries no SN — a JOIN or a Close — on the

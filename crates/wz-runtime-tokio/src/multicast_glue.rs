@@ -1280,6 +1280,11 @@ where
                     |lost| on_event(IterationEvent::MulticastPeerLost(lost)),
                 );
             }
+            // A JOIN asked for by a producer's holder (`MulticastTxProducer::request_join`):
+            // the beacon is due now, and the top of the loop sends it and restarts the cadence.
+            () = tx.join_requested() => {
+                next_join_ms = clock.now_monotonic_ms();
+            }
         }
         // §5.21 router-multicast-faces (I3b) — relay the on-group ROUTER member
         // set to the forwarder when it changes (a JOIN admit in the RX arm or a
@@ -1856,9 +1861,28 @@ impl GroupFaceRecorder {
 /// its own, hence the mutex; one lock covers the member list and the two link
 /// locators, so a reader never pairs one join's members with another join's
 /// labels.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct McastGroupMembership {
     inner: std::sync::Arc<std::sync::Mutex<Option<McastGroupView>>>,
+    /// Who hears each change of the members ([`Self::observe`]).
+    observer: std::sync::Arc<std::sync::Mutex<Option<McastMembersObserver>>>,
+}
+
+/// What a host hears each time a group's members change: the members the live join holds
+/// now, the empty list when the join ends. Called on the thread that runs the group's loop,
+/// with no lock of the membership held, so it may read the membership back.
+pub type McastMembersObserver = std::sync::Arc<dyn Fn(&[MulticastMember]) + Send + Sync>;
+
+/// One member of a group, as a [`McastGroupMembership`] lists it; re-exported so a host
+/// reads the list without a dependency of its own on the session core.
+pub use wz_session_core::multicast_dispatch::MulticastMember;
+
+impl std::fmt::Debug for McastGroupMembership {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McastGroupMembership")
+            .field("view", &self.inner)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One join's view: the group's link, labelled as upstream labels it, and the
@@ -1918,12 +1942,43 @@ impl McastGroupMembership {
         &self,
         members: &[wz_session_core::multicast_dispatch::MulticastMember],
     ) {
-        self.with(|view| {
-            if let Some(view) = view.as_mut() {
+        let live = self.with(|view| match view.as_mut() {
+            Some(view) => {
                 view.members.clear();
                 view.members.extend_from_slice(members);
+                true
             }
+            None => false,
         });
+        if live {
+            self.announce(members);
+        }
+    }
+
+    /// Hear every change of the members from now on, in place of any observer heard before:
+    /// a membership has one host. Each change is reported with the members the join holds
+    /// after it, and the end of the join with none; a host that wants arrivals and departures
+    /// compares each list with the one before (zenoh announces a member as a transport of its
+    /// own, `zenoh/src/api/connectivity.rs` @
+    /// `.broadcast_transport_event(SampleKind::Put, &peer, true);`).
+    pub fn observe(&self, observer: McastMembersObserver) {
+        *self
+            .observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
+    }
+
+    /// Tell the observer, cloned out of its lock first, so the observer may read this
+    /// membership or replace itself.
+    fn announce(&self, members: &[wz_session_core::multicast_dispatch::MulticastMember]) {
+        let observer = self
+            .observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(observer) = observer {
+            observer(members);
+        }
     }
 
     /// The members of the live join, in peer-table order.
@@ -1988,7 +2043,16 @@ impl McastGroupMembershipJoin {
 
 impl Drop for McastGroupMembershipJoin {
     fn drop(&mut self) {
-        self.membership.with(|view| *view = None);
+        let had_members = self.membership.with(|view| {
+            let had = view.as_ref().is_some_and(|v| !v.members.is_empty());
+            *view = None;
+            had
+        });
+        // The members left with the transport that held them; a join that held none changed
+        // nothing an observer was told.
+        if had_members {
+            self.membership.announce(&[]);
+        }
     }
 }
 
@@ -3965,6 +4029,54 @@ mod tests {
             .map(|d| data_conduit_advertised(d))
             .collect();
         assert!(after.iter().all(|&next| next <= 1), "{after:?}");
+    }
+
+    /// Open-debt item 913 — a JOIN asked for through the producer (pico's
+    /// `zp_send_join`) is written at once, between two turns of a beacon that
+    /// would not send another for a minute.
+    ///
+    /// # Control
+    ///
+    /// With the loop's `join_requested` arm removed the request is never heard and
+    /// the second wait times out with one JOIN written.
+    #[cfg(feature = "codec-push")]
+    #[tokio::test]
+    async fn a_requested_join_is_written_ahead_of_the_beacon() {
+        let mut params = params(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        params.join_interval_ms = 60_000;
+        fn joins(group: &GatedGroup) -> usize {
+            group
+                .log
+                .written
+                .lock()
+                .expect("sent log")
+                .iter()
+                .filter(|d| d[0] & 0x1f == wire_const::T_MID_JOIN)
+                .count()
+        }
+        async fn until(group: &GatedGroup, want: usize) -> bool {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while joins(group) < want {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .is_ok()
+        }
+        let group = GatedGroup::start(false, params).await;
+        assert!(until(&group, 1).await, "the beacon's first JOIN");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            joins(&group),
+            1,
+            "the beacon waits a minute after its first JOIN"
+        );
+        group.producer.request_join();
+        assert!(
+            until(&group, 2).await,
+            "the requested JOIN was written within two seconds"
+        );
+        group.finish().await;
     }
 
     /// R2929 — the control: the same puts over a link that keeps writing are
