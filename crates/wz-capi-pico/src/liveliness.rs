@@ -417,7 +417,7 @@ pub struct z_liveliness_get_options_t {
     /// token drops this snapshot get's pending registration; an ALREADY-cancelled
     /// token fails the call with `Z_ERR_CANCELLED` and sends no Interest, which
     /// is upstream's own ordering (`src/net/liveliness.c:284-310, 341`).
-    pub cancellation_token: *mut crate::sync::z_moved_cancellation_token_t,
+    pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
 }
 
 /// The upstream layout this struct must match, measured against the reference
@@ -494,7 +494,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         let token = if options.is_null() {
             None
         } else {
-            crate::sync::take_moved_cancellation_token((*options).cancellation_token)
+            crate::cancellation::take_moved_cancellation_token((*options).cancellation_token)
         };
         if callback.is_null() {
             return Z_ERR_NULL;

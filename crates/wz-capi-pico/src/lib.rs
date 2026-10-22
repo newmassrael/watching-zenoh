@@ -77,6 +77,7 @@ mod advanced_forms;
 #[cfg(feature = "advanced")]
 mod advanced_plane;
 pub mod bytes;
+pub mod cancellation;
 pub mod codec;
 pub mod config;
 pub mod connectivity;
@@ -107,6 +108,8 @@ pub mod serde;
 pub mod session;
 mod session_ext;
 pub mod string_array;
+// pico's multi-threaded arm's host surface: mutex, condvar and task.
+#[cfg(feature = "multi-thread")]
 pub mod sync;
 pub mod whatami;
 mod write_filter;

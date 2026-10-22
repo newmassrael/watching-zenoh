@@ -309,38 +309,12 @@ fn extra_public_symbols() -> BTreeSet<String> {
 /// That half is checked mechanically against the vendored headers below; this
 /// list exists so a NEW one has to be looked at by a person rather than joining
 /// a growing number.
+//
+// The single-threaded entry points (`zp_read`, `zp_send_keep_alive`, `zp_send_join`,
+// `zp_spin_once` and their option defaults) were entries here while wz exported them on
+// every arm. wz now builds the two header arms as two libraries, and the multi-threaded
+// one this census reads exports none of them, as the oracle does not.
 const BUILD_GATED_EXTRAS: &[(&str, &str)] = &[
-    (
-        "zp_spin_once",
-        "upstream declares it under `#if Z_FEATURE_MULTI_THREAD == 0`; the CMake \
-         oracle build has threads ON, so the artifact omits the body. wz's \
-         single-threaded drop-in defines it unconditionally.",
-    ),
-    (
-        "zp_read",
-        "upstream declares and defines it only under `#if Z_FEATURE_MULTI_THREAD == 0`; \
-         the oracle build has threads ON. wz exports it on every arm, as zp_spin_once.",
-    ),
-    (
-        "zp_read_options_default",
-        "the options default of zp_read, under the same single-threaded condition.",
-    ),
-    (
-        "zp_send_keep_alive",
-        "single-threaded only upstream (`Z_FEATURE_MULTI_THREAD == 0`); exported on every arm.",
-    ),
-    (
-        "zp_send_keep_alive_options_default",
-        "the options default of zp_send_keep_alive, same condition.",
-    ),
-    (
-        "zp_send_join",
-        "single-threaded only upstream (`Z_FEATURE_MULTI_THREAD == 0`); exported on every arm.",
-    ),
-    (
-        "zp_send_join_options_default",
-        "the options default of zp_send_join, same condition.",
-    ),
     (
         "z_scout_options_default",
         "declared in upstream's `primitives.h`; the oracle build omits the body \
@@ -379,9 +353,9 @@ const BUILD_GATED_EXTRAS: &[(&str, &str)] = &[
 /// The zenoh-c reverse leg asserts an exact zero because every entry there is a
 /// mistake by construction. Here the set is legitimately non-empty: upstream's
 /// headers declare symbols whose bodies a given `Z_FEATURE_*` configuration
-/// omits, and wz's drop-in defines them on every arm. `zp_spin_once` is the
-/// clean case — upstream declares it only when `Z_FEATURE_MULTI_THREAD == 0`,
-/// and the oracle is built with threads on.
+/// omits, and wz's drop-in defines some of them in the build this census reads.
+/// `z_scout_options_default` is the clean case — upstream declares it in
+/// `primitives.h`, and the oracle's configuration leaves out the body.
 ///
 /// So the gate splits the set by a MACHINE-INDEPENDENT question: does the
 /// pinned, in-repo header tree use this name as a function? If not, wz invented

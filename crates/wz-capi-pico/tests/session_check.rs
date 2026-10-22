@@ -5,10 +5,11 @@
 //! entry points, on the drop-in.
 //!
 //! An entity that outlives its session's `z_close` (a publisher, a querier) is refused with
-//! `_Z_ERR_SESSION_CLOSED` rather than answering success into a session that sends nothing;
-//! the batch calls answer a null session the same way; and `zp_read`, `zp_send_keep_alive`
-//! and `zp_send_join`, which pico declares for its single-threaded headers, answer `Z_OK` on
-//! an open session and `_Z_ERR_SESSION_CLOSED` on a closed one.
+//! `_Z_ERR_SESSION_CLOSED` rather than answering success into a session that sends nothing,
+//! and the batch calls answer a null session the same way. In a build of the single-threaded
+//! arm (without `multi-thread`), `zp_read`, `zp_send_keep_alive` and `zp_send_join` answer
+//! `Z_OK` on an open session and `_Z_ERR_SESSION_CLOSED` on a closed one, and `zp_spin_once`
+//! answers `true` and `false`.
 //!
 //! Before this file the publisher half answered `Z_OK` after a close (measured by reading:
 //! `z_close` dropped every face and kept the session, and the put path asked nothing about
@@ -17,10 +18,11 @@
 use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(not(feature = "multi-thread"))]
 use wz_capi_pico::session::{
     zp_read, zp_read_options_default, zp_read_options_t, zp_send_join,
     zp_send_join_options_default, zp_send_join_options_t, zp_send_keep_alive,
-    zp_send_keep_alive_options_default, zp_send_keep_alive_options_t,
+    zp_send_keep_alive_options_default, zp_send_keep_alive_options_t, zp_spin_once,
 };
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_reply, z_closure_reply_move,
@@ -160,12 +162,6 @@ fn a_closed_session_refuses_its_publisher_and_querier() {
             "the refused get must drop its closure"
         );
 
-        // The single-threaded entry points answer the closed session the same way.
-        let mut read = zp_read_options_t { single_read: true };
-        zp_read_options_default(&mut read);
-        assert!(!read.single_read);
-        assert_eq!(zp_read(z_session_loan(&dialer), &read), SESSION_CLOSED);
-
         z_publisher_drop(z_publisher_move(&mut publisher));
         z_querier_drop(z_querier_move(&mut querier));
         z_session_drop(z_session_move(&mut dialer));
@@ -173,6 +169,16 @@ fn a_closed_session_refuses_its_publisher_and_querier() {
     }
 }
 
+#[test]
+fn the_batch_calls_answer_a_null_session_as_a_closed_one() {
+    unsafe {
+        assert_eq!(zp_batch_start(std::ptr::null()), SESSION_CLOSED);
+        assert_eq!(zp_batch_flush(std::ptr::null()), SESSION_CLOSED);
+        assert_eq!(zp_batch_stop(std::ptr::null()), SESSION_CLOSED);
+    }
+}
+
+#[cfg(not(feature = "multi-thread"))]
 #[test]
 fn the_single_threaded_entry_points_answer_an_open_session() {
     unsafe {
@@ -199,8 +205,9 @@ fn the_single_threaded_entry_points_answer_an_open_session() {
             Z_OK,
             "upstream answers OK on a unicast transport without sending"
         );
+        assert!(zp_spin_once(session), "an open session spins");
 
-        // A null session is a closed one to all three, and to the batch calls.
+        // A null session is a closed one to all four.
         assert_eq!(zp_read(std::ptr::null(), std::ptr::null()), SESSION_CLOSED);
         assert_eq!(
             zp_send_keep_alive(std::ptr::null(), std::ptr::null()),
@@ -210,10 +217,33 @@ fn the_single_threaded_entry_points_answer_an_open_session() {
             zp_send_join(std::ptr::null(), std::ptr::null()),
             SESSION_CLOSED
         );
-        assert_eq!(zp_batch_start(std::ptr::null()), SESSION_CLOSED);
-        assert_eq!(zp_batch_flush(std::ptr::null()), SESSION_CLOSED);
-        assert_eq!(zp_batch_stop(std::ptr::null()), SESSION_CLOSED);
+        assert!(!zp_spin_once(std::ptr::null()));
 
+        z_session_drop(z_session_move(&mut listener));
+    }
+}
+
+#[cfg(not(feature = "multi-thread"))]
+#[test]
+fn the_single_threaded_entry_points_answer_a_closed_session() {
+    unsafe {
+        let port = free_port();
+        let mut listener = open_role(port, Z_CONFIG_LISTEN_KEY);
+        assert_eq!(
+            z_close(z_session_loan_mut(&mut listener), std::ptr::null()),
+            Z_OK
+        );
+        let session = z_session_loan(&listener);
+        assert_eq!(zp_read(session, std::ptr::null()), SESSION_CLOSED);
+        assert_eq!(
+            zp_send_keep_alive(session, std::ptr::null()),
+            SESSION_CLOSED
+        );
+        assert_eq!(zp_send_join(session, std::ptr::null()), SESSION_CLOSED);
+        assert!(
+            !zp_spin_once(session),
+            "upstream answers false for a closed session (`!z_session_is_closed`)"
+        );
         z_session_drop(z_session_move(&mut listener));
     }
 }

@@ -119,11 +119,11 @@ PICO_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
      "transport-fragmentation is enabled unconditionally"),
     ("Z_FEATURE_ENCODING_VALUES", "always", "crates/wz-capi-pico/src/encoding.rs",
      "the predefined encoding table, held to the oracle"),
-    ("Z_FEATURE_MULTI_THREAD", "always", "crates/wz-capi-pico/src/session.rs",
-     "a host threading model rather than a wire feature: the session drives itself on its "
-     "own runtime, so one cdylib serves both header arms, the single-threaded entry points "
-     "(zp_read, zp_send_keep_alive, zp_send_join) included; only the mutex and condvar "
-     "sizes differ between the arms, which is open-debt item 917's layout question"),
+    ("Z_FEATURE_MULTI_THREAD", "maps", "wz-capi-pico/multi-thread",
+     "which header arm the library is the drop-in for: on, the task doors, host sync and "
+     "blocking channels; off, zp_read / zp_send_keep_alive / zp_send_join / zp_spin_once, "
+     "a one-byte z_open_options_t and 48-byte channel collections. A session drives itself "
+     "on its own runtime in both"),
     ("Z_FEATURE_LINK_TCP", "always", "crates/wz-capi-core/Cargo.toml",
      "the tcp/ link is part of every capi-core build"),
     ("Z_FEATURE_LINK_BLUETOOTH", "never", None,

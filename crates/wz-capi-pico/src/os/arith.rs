@@ -19,7 +19,9 @@ const TICKS_PER_MILLI: i64 = 10_000;
 
 /// The longest finite block `SleepConditionVariableSRW` is asked for. `INFINITE` is
 /// `u32::MAX`, so a deadline about 49.7 days away would otherwise read as "never time
-/// out": pico's `(DWORD)remaining` has that edge, and wz clamps just below it.
+/// out": pico's `(DWORD)remaining` has that edge, and wz clamps just below it. The
+/// condvar wait is the multi-threaded arm's, and so is this.
+#[cfg(any(feature = "multi-thread", test))]
 pub const MAX_FINITE_WAIT_MS: u32 = u32::MAX - 1;
 
 /// How many of `unit` make a second.
@@ -58,6 +60,7 @@ pub fn ticks_advance(duration: u32, frequency: i64, unit: Unit) -> i64 {
 /// The milliseconds a wait until the counter reading `deadline` should block for,
 /// given the reading `now` (`system.c:210-221`): the interval in milliseconds, zero
 /// when `deadline` is not in the future, and never `INFINITE`.
+#[cfg(any(feature = "multi-thread", test))]
 pub fn remaining_millis(deadline: i64, now: i64, frequency: i64) -> u32 {
     let remaining = deadline.wrapping_sub(now) as f64 / frequency as f64 * 1000.0;
     if remaining > 0.0 {

@@ -700,7 +700,7 @@ pub struct z_get_options_t {
     /// face; an ALREADY-cancelled token fails the call with `Z_ERR_CANCELLED`
     /// and sends no Query, both mirroring upstream (see
     /// [`crate::get::fan_get`]).
-    pub cancellation_token: *mut crate::sync::z_moved_cancellation_token_t,
+    pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
     pub accept_replies: z_reply_keyexpr_t,
 }
 
@@ -1085,7 +1085,7 @@ unsafe fn get_inner(
             // line. It is a MOVED handle upstream drops unconditionally
             // (`api.c:1783`), so taking it anywhere later would leak it on the
             // null-callback return below, exactly as the two byte buffers would.
-            crate::sync::take_moved_cancellation_token((*options).cancellation_token),
+            crate::cancellation::take_moved_cancellation_token((*options).cancellation_token),
         )
     };
 
@@ -1266,7 +1266,7 @@ pub(crate) fn issue_get(
     qos: PicoQueryQos,
     value_meta: PicoQueryValueMeta,
     closure: Arc<CReplyClosure>,
-    token: Option<Arc<crate::sync::CancellationToken>>,
+    token: Option<Arc<crate::cancellation::CancellationToken>>,
 ) -> ZResult {
     let params = transmit_parameters(params_in, accept_replies);
 
@@ -1320,7 +1320,7 @@ fn fan_get(
     opts: &QueryOptions,
     closure: Arc<CReplyClosure>,
     gate: Arc<ReplyGate>,
-    token: Option<Arc<crate::sync::CancellationToken>>,
+    token: Option<Arc<crate::cancellation::CancellationToken>>,
 ) -> ZResult {
     let guard = closure.clone();
     // R311y575 — the cancellation is registered BEFORE the first face is

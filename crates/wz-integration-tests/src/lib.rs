@@ -933,6 +933,76 @@ pub mod common {
         );
     }
 
+    /// The target directory the SINGLE-THREADED drop-in is built into, under
+    /// `crates/`. Its own directory, because the two arms are two builds of one
+    /// crate with one library name: in the shared target directory either build
+    /// would overwrite the other's `libwz_capi_pico.so`.
+    pub const WZ_CAPI_PICO_SINGLE_THREADED_TARGET_DIR: &str = "target/wz-capi-pico-st";
+
+    /// Locate the `wz-capi-pico` cdylib built for pico's SINGLE-THREADED header
+    /// arm (`Z_FEATURE_MULTI_THREAD 0`): the crate without its `multi-thread`
+    /// capability, built from the arm's own generated `config.h` by
+    /// `scripts/lib/capability_config.py --features pico`, so the feature set is
+    /// what that header states.
+    ///
+    /// A program compiled against one header arm must link the build of the same
+    /// arm. The two disagree on the size of structs the C program allocates in
+    /// its own frame (`z_open_options_t` 16 B against 1 B, `_z_fifo_mt_t` 184 B
+    /// against 48 B), so the multi-threaded cdylib zeroed 184 bytes into a
+    /// single-threaded program's 48-byte channel slot.
+    pub fn wz_capi_pico_cdylib_single_threaded() -> PathBuf {
+        let crates_dir = project_root().join("crates");
+        let target = crates_dir.join(WZ_CAPI_PICO_SINGLE_THREADED_TARGET_DIR);
+        let candidates = [
+            target.join("debug/libwz_capi_pico.so"),
+            target.join("release/libwz_capi_pico.so"),
+        ];
+        for c in &candidates {
+            if c.is_file() {
+                assert_capi_cdylib_is_not_stale(c, &crates_dir, "wz-capi-pico");
+                return c.clone();
+            }
+        }
+        panic!(
+            "the single-threaded libwz_capi_pico.so is not in {candidates:?}; from \
+             crates/, run `cargo build -p wz-capi-pico $(python3 \
+             ../scripts/lib/capability_config.py --features pico \
+             ../target/zenoh-pico-build-st/zenohpico/include/zenoh-pico/config.h) \
+             --target-dir {WZ_CAPI_PICO_SINGLE_THREADED_TARGET_DIR}`"
+        );
+    }
+
+    /// One of zenoh-pico's two header arms, and the wz build a program compiled
+    /// against it links. The pair is one value so a leg cannot take the headers of
+    /// one arm and the library of the other, which is the mismatch that smashed a
+    /// single-threaded program's stack.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum PicoHeaderArm {
+        /// `Z_FEATURE_MULTI_THREAD 1`, the primary CMake arm and wz's default build.
+        MultiThreaded,
+        /// `Z_FEATURE_MULTI_THREAD 0`, the `-st` CMake arm and wz without
+        /// `multi-thread`.
+        SingleThreaded,
+    }
+
+    impl PicoHeaderArm {
+        /// The include set a program of this arm compiles against.
+        pub fn include_dirs(self) -> [PathBuf; 3] {
+            match self {
+                Self::MultiThreaded => zenoh_pico_include_dirs(),
+                Self::SingleThreaded => zenoh_pico_include_dirs_single_threaded(),
+            }
+        }
+
+        /// The wz cdylib a program of this arm links.
+        pub fn wz_cdylib(self) -> PathBuf {
+            match self {
+                Self::MultiThreaded => wz_capi_pico_cdylib(),
+                Self::SingleThreaded => wz_capi_pico_cdylib_single_threaded(),
+            }
+        }
+    }
+
     /// R2579 — refuse a zenoh-c differential when the cdylib on disk is not the
     /// ABI arm this oracle's header is. Hoisted out of
     /// `zenoh_c_source_info_twice_and_diff.rs` on its SECOND consumer rather
@@ -1131,9 +1201,26 @@ pub mod common {
             &[
                 format!("-L{}", libdir.display()),
                 format!("-l{link}"),
-                format!("-Wl,-rpath,{}", libdir.display()),
+                baked_library_dir(libdir),
             ],
         )
+    }
+
+    /// The linker argument that makes a compiled C program load its library from
+    /// `libdir` and nowhere else.
+    ///
+    /// `-rpath` alone records `DT_RUNPATH` on a current toolchain, and the loader
+    /// searches `LD_LIBRARY_PATH` BEFORE `DT_RUNPATH`. `cargo test` puts
+    /// `crates/target/debug` on its children's `LD_LIBRARY_PATH`, so a program
+    /// linked against a library of the same name in another directory loaded the
+    /// one in `target/debug` instead: measured, when the single-threaded pico
+    /// drop-in (its own target directory, `libwz_capi_pico.so` like the default
+    /// build's) ran as the multi-threaded one. `--disable-new-dtags` records
+    /// `DT_RPATH`, which the loader searches before `LD_LIBRARY_PATH`, so the
+    /// library a program was linked against is the one it runs with whatever its
+    /// environment says.
+    pub fn baked_library_dir(libdir: &Path) -> String {
+        format!("-Wl,--disable-new-dtags,-rpath,{}", libdir.display())
     }
 
     /// What a C link names after a Rust static library on Linux: the system libraries the
@@ -1424,12 +1511,13 @@ pub mod common {
     /// code at all. This is the header set that gives them a body.
     ///
     /// Only the config header differs; the API headers are the same vendored
-    /// tree, and the LIBRARY is wz's cdylib either way. That the one cdylib
-    /// serves both arms is a measurement, not a convenience: across the two
-    /// configs the only public owned types whose size moves are
-    /// `z_owned_mutex_t` and `z_owned_condvar_t`, neither of which either
-    /// example names. `scripts/build-zenoh-pico-cli.sh` carries the numbers and
-    /// generates this tree.
+    /// tree. The LIBRARY is not the same: a program of this arm links
+    /// [`wz_capi_pico_cdylib_single_threaded`] (take both through
+    /// [`PicoHeaderArm::SingleThreaded`]). This file once recorded that one cdylib
+    /// served both arms, measured over the public owned types an example names;
+    /// the structs the C program allocates WITHOUT naming them (`_z_fifo_mt_t`
+    /// inside the channel macros, `z_open_options_t`) moved between the arms too.
+    /// `scripts/build-zenoh-pico-cli.sh` generates this tree.
     pub fn zenoh_pico_include_dirs_single_threaded() -> [PathBuf; 3] {
         let root = project_root();
         let vendored = root.join("vendor/zenoh-pico/include");
@@ -1469,10 +1557,11 @@ pub mod common {
     /// `-DZENOH_LINUX` is required, not optional: pico's
     /// `system/common/platform.h` `#error "Unknown platform"`s without one of
     /// its `ZENOH_<PLATFORM>` macros, and it is the platform selector CMake
-    /// passes for a Unix build. `-Wl,-rpath` is baked so the produced binary
-    /// finds the `.so` without the caller having to export
-    /// `LD_LIBRARY_PATH` — the runtime library search is part of what "drop-in"
-    /// means.
+    /// passes for a Unix build. The library directory is baked
+    /// ([`baked_library_dir`]) so the produced binary finds the `.so` without the
+    /// caller having to export `LD_LIBRARY_PATH`, and finds that one even when an
+    /// `LD_LIBRARY_PATH` names another — the runtime library search is part of
+    /// what "drop-in" means.
     ///
     /// A compile or link failure is returned as `Err(diagnostics)` rather than
     /// panicked, because for this atom a link failure is a MEASUREMENT (which
@@ -1486,27 +1575,25 @@ pub mod common {
         // oracle compiled in a connectivity plane wz did not implement and an
         // example that used it (`z_info.c`) then demanded symbols wz lacked. wz
         // implements that plane now, so claim and oracle are the same surface.
-        compile_pico_example_against_wz_capi_with_includes(
-            example,
-            out_dir,
-            &zenoh_pico_include_dirs(),
-        )
+        compile_pico_example_against_wz_capi_in(example, out_dir, PicoHeaderArm::MultiThreaded)
     }
 
-    /// [`compile_pico_example_against_wz_capi`] against a caller-chosen header
-    /// set — the SINGLE-THREADED arm
-    /// ([`zenoh_pico_include_dirs_single_threaded`]) being the reason it exists.
+    /// [`compile_pico_example_against_wz_capi`] in a chosen header arm — the
+    /// SINGLE-THREADED one being the reason it exists.
     ///
     /// The header set is the only knob a drop-in has for selecting which
     /// `#if Z_FEATURE_*` branch of an upstream example gets compiled, and two of
-    /// them have no body under the primary arm. Everything else — upstream's own
-    /// program text, wz's cdylib as the sole library, the baked rpath — is
-    /// identical, so a leg built this way is the same witness as any other.
-    pub fn compile_pico_example_against_wz_capi_with_includes(
+    /// them have no body under the primary arm. The arm also picks the wz build
+    /// the program links, because the arms differ in struct sizes. Everything
+    /// else — upstream's own program text, wz's cdylib as the sole library, the
+    /// baked rpath — is identical, so a leg built this way is the same witness as
+    /// any other.
+    pub fn compile_pico_example_against_wz_capi_in(
         example: &str,
         out_dir: &Path,
-        includes: &[PathBuf],
+        arm: PicoHeaderArm,
     ) -> Result<PathBuf, String> {
+        let includes = arm.include_dirs();
         let root = project_root();
         let src = root
             .join("vendor/zenoh-pico/examples/unix/c11")
@@ -1517,7 +1604,7 @@ pub mod common {
              `git submodule update --init vendor/zenoh-pico`",
             src.display()
         );
-        let cdylib = wz_capi_pico_cdylib();
+        let cdylib = arm.wz_cdylib();
         let libdir = cdylib
             .parent()
             .expect("cdylib path has a parent directory")
@@ -1527,14 +1614,14 @@ pub mod common {
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
         let mut cmd = Command::new(&cc);
         cmd.arg(&src).arg("-DZENOH_LINUX");
-        for inc in includes {
+        for inc in &includes {
             cmd.arg(format!("-I{}", inc.display()));
         }
         cmd.arg("-o")
             .arg(&exe)
             .arg(format!("-L{}", libdir.display()))
             .arg("-lwz_capi_pico")
-            .arg(format!("-Wl,-rpath,{}", libdir.display()));
+            .arg(baked_library_dir(&libdir));
 
         let out = cmd
             .output_bounded()
@@ -1619,7 +1706,7 @@ pub mod common {
             .arg(&exe)
             .arg(format!("-L{}", libdir.display()))
             .arg(format!("-l{link}"))
-            .arg(format!("-Wl,-rpath,{}", libdir.display()));
+            .arg(baked_library_dir(libdir));
         let out = cmd
             .output_bounded()
             .unwrap_or_else(|e| panic!("failed to spawn C compiler {cc:?}: {e}"));

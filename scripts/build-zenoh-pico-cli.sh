@@ -476,8 +476,8 @@ export PKG_CONFIG_PATH="$MBEDTLS_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CO
 # `z_moved_*` / `z_*_options_t` type the vendored headers declare — 86 of them —
 # size AND alignment are identical in every case. TLS adds a link backend behind
 # its own guard; it reshapes nothing the API surface exposes. So one header tree
-# and one cdylib still serve every leg, and the TLS pair simply stops being the
-# two programs with no body.
+# and one cdylib still serve every leg of the primary arm, and the TLS pair simply
+# stops being the two programs with no body.
 #
 # The cost of the flag is a real dependency, not a macro: see the Mbed TLS
 # provisioning above.
@@ -560,17 +560,19 @@ done
 # header tree above they compile to a one-`printf` stub, so a leg driving them
 # would exercise zero wz code.
 #
-# Only the HEADERS are produced here, and that is the whole point. A drop-in leg
-# compiles upstream's source against these includes and links wz's cdylib — pico
-# 's library is never involved — so the single-threaded arm needs no second
-# libzenohpico and no second cdylib. That last clause was MEASURED rather than
-# assumed: of every public owned type an upstream example stack-allocates, the
-# only two whose size moves between the two configs are `z_owned_mutex_t`
-# (40 -> 8) and `z_owned_condvar_t` (48 -> 8), and neither example names either
-# type. Session, publisher, subscriber, bytes, sample, closure and handler are
-# byte-identical across the arms, so ONE cdylib serves both. The counterparties
-# stay the multi-threaded binaries installed above — `Z_FEATURE_MULTI_THREAD` is
-# a host threading model, not a wire feature.
+# Only the HEADERS are produced here. A drop-in leg compiles upstream's source
+# against these includes and links wz's cdylib — pico's library is never
+# involved — so the single-threaded arm needs no second libzenohpico. It does need
+# a second wz build: the arms differ in the size of structs a program allocates
+# without naming them (`_z_fifo_mt_t` 184 -> 48 and `_z_ring_mt_t` 136 -> 48 inside
+# the channel macros, `z_open_options_t` 16 -> 1), besides `z_owned_mutex_t`
+# (40 -> 8) and `z_owned_condvar_t` (48 -> 8). This comment once said one cdylib
+# served both, measured over the owned types an example names; the multi-threaded
+# build then zeroed 184 bytes into a single-threaded program's 48-byte channel slot
+# (open-debt item 918). run-ci Layer E builds wz-capi-pico without `multi-thread`
+# from this arm's config.h for those legs. The counterparties stay the
+# multi-threaded binaries installed above — `Z_FEATURE_MULTI_THREAD` is a host
+# threading model, not a wire feature.
 #
 # Configure-only is deliberate: `cmake -B` writes the generated config.h during
 # the configure step, and building the arm would cost a second full pico compile

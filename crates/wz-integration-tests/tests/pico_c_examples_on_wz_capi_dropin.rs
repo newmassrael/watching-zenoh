@@ -97,12 +97,13 @@ use std::time::Duration;
 
 use wz_integration_tests::bounded::{BoundedChild as _, BoundedOutput as _, BoundedStatus as _};
 use wz_integration_tests::common::{
-    compile_pico_example_against_wz_capi, compile_pico_example_against_wz_capi_with_includes,
+    compile_pico_example_against_wz_capi, compile_pico_example_against_wz_capi_in,
     devices_holding_group, graceful_terminate, project_root, read_captured,
     run_query_until_answered, spawn_zenohd_multicast_scouting_on_any_interface,
     wait_for_capture_alive, wait_for_exit, wait_for_substring, wait_for_tcp_accept_alive,
     zenoh_pico_cli_binary, zenoh_pico_include_dirs, zenoh_pico_include_dirs_single_threaded,
-    zenoh_pico_library_dir, zenohd_binary, ChildGuard, NetnsPair, PortReservation, QueryAttempts,
+    zenoh_pico_library_dir, zenohd_binary, ChildGuard, NetnsPair, PicoHeaderArm, PortReservation,
+    QueryAttempts,
 };
 
 /// How many one-shot queries the declaration-propagation window may eat.
@@ -182,12 +183,11 @@ fn dropin_binary(example: &str, dir: &std::path::Path) -> std::path::PathBuf {
 ///
 /// `z_pub_st.c` / `z_sub_st.c` guard their whole `main` on
 /// `Z_FEATURE_MULTI_THREAD == 0`, so the primary header set compiles them to a
-/// one-`printf` stub. Only the `-I` differs; the library is the same wz cdylib,
-/// which is a MEASURED claim rather than a convenience — see
-/// `zenoh_pico_include_dirs_single_threaded`.
+/// one-`printf` stub. The `-I` and the library both change: the program links
+/// wz's single-threaded build, because the two arms differ in the size of structs
+/// the program allocates (see `PicoHeaderArm`).
 fn dropin_binary_single_threaded(example: &str, dir: &std::path::Path) -> std::path::PathBuf {
-    let includes = zenoh_pico_include_dirs_single_threaded();
-    match compile_pico_example_against_wz_capi_with_includes(example, dir, &includes) {
+    match compile_pico_example_against_wz_capi_in(example, dir, PicoHeaderArm::SingleThreaded) {
         Ok(exe) => exe,
         Err(diag) => panic!(
             "§5.27 api-compat-pico: upstream {example}.c does NOT link against wz's \
@@ -5016,8 +5016,8 @@ fn pico_zpong_source_on_wz_capi_echoes_for_the_real_pico_zping() {
 /// `Z_FEATURE_LINK_TLS` 0 and 1, every `z_owned_*` / `z_loaned_*` / `z_view_*` /
 /// `z_moved_*` / `z_*_options_t` type the vendored headers declare — 86 of them
 /// — has identical size and alignment. That is why TLS rides the PRIMARY header
-/// arm rather than a fourth configure, and why one cdylib still serves all 36
-/// legs.
+/// arm rather than a fourth configure, and why one cdylib serves every leg of
+/// that arm (LEGS 33/34 are the single-threaded arm's, and link its own build).
 ///
 /// So the gate now asserts the configuration each set of legs DEPENDS on, from
 /// the side that makes a silent regression loud:

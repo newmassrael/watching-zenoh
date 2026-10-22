@@ -260,17 +260,32 @@ pub type z_element_free_f = Option<unsafe extern "C" fn(*mut *mut c_void)>;
 /// `src` into `dst` and releases `src`'s own allocation.
 pub type z_element_move_f = Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>;
 
-/// Whether a full push evicts (ring) or blocks (fifo) — the ONLY behavioural
-/// difference between the two collections, so they share one implementation
-/// with this discriminant rather than duplicating the locking.
+/// What a full push does: the ring evicts, and the fifo blocks in pico's
+/// multi-threaded arm and drops the new element in its single-threaded one. The
+/// ONLY behavioural difference between the two collections on the push side, so
+/// they share one implementation with this discriminant rather than duplicating
+/// the locking.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FullPolicy {
-    /// pico `_z_fifo_mt_push`: wait on `_cv_not_full` until a consumer pulls.
+    /// pico `_z_fifo_mt_push` (`Z_FEATURE_MULTI_THREAD == 1`): wait on
+    /// `_cv_not_full` until a consumer pulls.
+    #[cfg(feature = "multi-thread")]
     Block,
+    /// pico `_z_fifo_mt_push` (`Z_FEATURE_MULTI_THREAD == 0`) →
+    /// `_z_fifo_push_drop`: a single-threaded program has nobody to wait for, so
+    /// the NEW element is freed and the collection keeps what it holds.
+    #[cfg(not(feature = "multi-thread"))]
+    DropNewest,
     /// pico `_z_ring_mt_push` → `_z_ring_push_force_drop`: evict the OLDEST
     /// element and free it, so the newest `capacity` are always retained.
     EvictOldest,
 }
+
+/// The fifo's push policy in this build's header arm.
+#[cfg(feature = "multi-thread")]
+const FIFO_FULL: FullPolicy = FullPolicy::Block;
+#[cfg(not(feature = "multi-thread"))]
+const FIFO_FULL: FullPolicy = FullPolicy::DropNewest;
 
 /// The elements plus the closed flag, under one mutex.
 struct ChannelState {
@@ -309,21 +324,40 @@ impl Channel {
     }
 }
 
-/// pico `_z_fifo_mt_t` (184 B measured). Slot 0 is this crate's [`Channel`]
-/// handle; the remainder is inert padding that keeps the C-side `sizeof` and
-/// the `memcpy` relocation exact.
+/// pico `_z_fifo_mt_t`: `{ _z_fifo_t _fifo; bool is_closed; }` and, in the
+/// multi-threaded arm, a mutex and two condvars after them
+/// (`vendor/zenoh-pico/include/zenoh-pico/collections/fifo_mt.h`). 184 B measured
+/// in the multi-threaded arm, 48 B in the single-threaded one (the 40-byte ring
+/// and the flag). Slot 0 is this crate's [`Channel`] handle; the remainder is
+/// inert padding that keeps the C-side `sizeof` and the `memcpy` relocation exact.
+///
+/// The size is the header arm's because pico's channel macros allocate the struct
+/// in the CALLER's frame and hand it to `_z_fifo_mt_init`, which zeroes it whole:
+/// a 184-byte zeroing into a single-threaded program's 48-byte slot overran its
+/// stack.
 #[repr(C)]
 pub struct _z_fifo_mt_t {
     handle: *mut c_void,
-    _pad: [u8; 176],
+    _pad: [u8; FIFO_MT_BYTES - std::mem::size_of::<*mut c_void>()],
 }
 
-/// pico `_z_ring_mt_t` (136 B measured). Same shape as [`_z_fifo_mt_t`].
+/// pico `_z_ring_mt_t`: `{ _z_ring_t _ring; bool is_closed; }` plus a mutex and a
+/// condvar in the multi-threaded arm (`collections/ring_mt.h`). 136 B measured in
+/// that arm, 48 B in the single-threaded one. Same shape as [`_z_fifo_mt_t`].
 #[repr(C)]
 pub struct _z_ring_mt_t {
     handle: *mut c_void,
-    _pad: [u8; 128],
+    _pad: [u8; RING_MT_BYTES - std::mem::size_of::<*mut c_void>()],
 }
+
+#[cfg(feature = "multi-thread")]
+const FIFO_MT_BYTES: usize = 184;
+#[cfg(feature = "multi-thread")]
+const RING_MT_BYTES: usize = 136;
+#[cfg(not(feature = "multi-thread"))]
+const FIFO_MT_BYTES: usize = 48;
+#[cfg(not(feature = "multi-thread"))]
+const RING_MT_BYTES: usize = 48;
 
 /// Install a fresh channel into a C-allocated collection slot.
 ///
@@ -377,40 +411,57 @@ unsafe fn push(
     let Some(channel) = channel(context) else {
         return Z_ERR_GENERIC;
     };
-    let Ok(mut state) = channel.state.lock() else {
+    let Ok(state) = channel.state.lock() else {
         return Z_ERR_GENERIC;
     };
+    // A blocking push waits until there is room or the channel closes.
+    #[cfg(feature = "multi-thread")]
+    let state = if policy == FullPolicy::Block {
+        let Ok(state) = channel
+            .not_full
+            .wait_while(state, |s| !s.closed && s.items.len() >= channel.capacity)
+        else {
+            return Z_ERR_GENERIC;
+        };
+        state
+    } else {
+        state
+    };
+    let mut state = state;
+    if state.closed {
+        // A closed channel accepts nothing more. The element is the caller's to
+        // release; report the closure rather than leaking it into a collection
+        // that will never be pulled.
+        drop(state);
+        return Z_RES_CHANNEL_CLOSED;
+    }
     // The element the ring evicted, released AFTER the lock is dropped: the
     // free function is C code that may re-enter this library (a
     // `z_owned_sample_t`'s drop runs this crate's own `z_sample_drop`), and
     // running it under the channel mutex is how a self-deadlock gets built.
     let mut evicted: Option<*mut c_void> = None;
-    loop {
-        if state.closed {
-            // A closed channel accepts nothing more. The element is the
-            // caller's to release; report the closure rather than leaking it
-            // into a collection that will never be pulled.
-            drop(state);
-            return Z_RES_CHANNEL_CLOSED;
-        }
-        if state.items.len() < channel.capacity {
-            state.items.push_back(elem as usize);
-            break;
-        }
+    if state.items.len() >= channel.capacity {
         match policy {
             FullPolicy::EvictOldest => {
                 evicted = state.items.pop_front().map(|bits| bits as *mut c_void);
-                state.items.push_back(elem as usize);
-                break;
             }
-            FullPolicy::Block => {
-                let Ok(next) = channel.not_full.wait(state) else {
-                    return Z_ERR_GENERIC;
-                };
-                state = next;
+            #[cfg(not(feature = "multi-thread"))]
+            FullPolicy::DropNewest => {
+                // Released like an evicted element, outside the lock; nothing was
+                // added, so nobody is woken.
+                drop(state);
+                if let Some(free) = free_f {
+                    let mut raw = elem as *mut c_void;
+                    free(&mut raw);
+                }
+                return Z_OK;
             }
+            // The wait above returned with room or closed, and closed returned.
+            #[cfg(feature = "multi-thread")]
+            FullPolicy::Block => unreachable!("a blocking push waits for room"),
         }
     }
+    state.items.push_back(elem as usize);
     drop(state);
     channel.not_empty.notify_one();
     if let (Some(mut raw), Some(free)) = (evicted, free_f) {
@@ -419,7 +470,11 @@ unsafe fn push(
     Z_OK
 }
 
-/// Pull one element, blocking until one arrives or the channel closes.
+/// Pull one element: in pico's multi-threaded arm, blocking until one arrives or
+/// the channel closes; in its single-threaded one, never blocking, and answering
+/// `Z_OK` with `dst` untouched when there is nothing to pull and the channel is
+/// open (`vendor/zenoh-pico/src/collections/fifo_mt.c` @ `_z_fifo_mt_pull`, the
+/// `#else` arm, and `ring_mt.c` @ `_z_ring_mt_pull`, which agree).
 ///
 /// # Safety
 /// `dst` must be writable storage for one element of the collection's element
@@ -428,21 +483,28 @@ unsafe fn pull(dst: *mut c_void, context: *mut c_void, move_f: z_element_move_f)
     let Some(channel) = channel(context) else {
         return Z_ERR_GENERIC;
     };
-    let Ok(mut state) = channel.state.lock() else {
+    let Ok(state) = channel.state.lock() else {
         return Z_ERR_GENERIC;
     };
-    let raw = loop {
-        if let Some(bits) = state.items.pop_front() {
-            break bits as *mut c_void;
-        }
-        if state.closed {
-            return Z_RES_CHANNEL_CLOSED;
-        }
-        let Ok(next) = channel.not_empty.wait(state) else {
-            return Z_ERR_GENERIC;
-        };
-        state = next;
+    // The multi-threaded arm waits for an element or the close.
+    #[cfg(feature = "multi-thread")]
+    let Ok(state) = channel
+        .not_empty
+        .wait_while(state, |s| s.items.is_empty() && !s.closed)
+    else {
+        return Z_ERR_GENERIC;
     };
+    let mut state = state;
+    let Some(bits) = state.items.pop_front() else {
+        // Empty: closed, or (single-threaded only) nothing yet, which upstream
+        // answers with `_Z_RES_OK` and the destination untouched.
+        return if state.closed {
+            Z_RES_CHANNEL_CLOSED
+        } else {
+            Z_OK
+        };
+    };
+    let raw = bits as *mut c_void;
     drop(state);
     channel.not_full.notify_one();
     // Outside the lock, for the same re-entrancy reason `push` releases the
@@ -580,18 +642,19 @@ pub unsafe extern "C" fn _z_fifo_mt_free(fifo: *mut _z_fifo_mt_t, free_f: z_elem
     });
 }
 
-/// pico `_z_fifo_mt_push`: blocks while the collection is full.
+/// pico `_z_fifo_mt_push`: blocks while the collection is full, or in the
+/// single-threaded arm frees the new element instead.
 #[no_mangle]
 pub unsafe extern "C" fn _z_fifo_mt_push(
     elem: *const c_void,
     context: *mut c_void,
     free_f: z_element_free_f,
 ) -> ZResult {
-    guarded(|| push(elem, context, free_f, FullPolicy::Block))
+    guarded(|| push(elem, context, free_f, FIFO_FULL))
 }
 
 /// pico `_z_fifo_mt_pull`: blocks until an element arrives or the channel
-/// closes.
+/// closes, or in the single-threaded arm returns at once.
 #[no_mangle]
 pub unsafe extern "C" fn _z_fifo_mt_pull(
     dst: *mut c_void,
@@ -693,14 +756,15 @@ pub unsafe extern "C" fn _z_ring_mt_try_pull(
     guarded(|| try_pull(dst, context, move_f))
 }
 
-// Compile-time byte-compat guard for the two C-allocated collections. MEASURED
-// against the pinned pico headers with a real C compiler; a drift here is a
-// stack smash in the caller, not a Rust error, so it is pinned at build time.
+// Compile-time byte-compat guard for the two C-allocated collections, per header
+// arm. A drift here is a stack smash in the caller, not a Rust error, so it is
+// pinned at build time; `tests/header_arm_layout.rs` measures the same sizes with
+// a real C compiler against the arm's own generated headers.
 const _: () = {
     use core::mem::{align_of, size_of};
-    assert!(size_of::<_z_fifo_mt_t>() == 184);
+    assert!(size_of::<_z_fifo_mt_t>() == FIFO_MT_BYTES);
     assert!(align_of::<_z_fifo_mt_t>() == 8);
-    assert!(size_of::<_z_ring_mt_t>() == 136);
+    assert!(size_of::<_z_ring_mt_t>() == RING_MT_BYTES);
     assert!(align_of::<_z_ring_mt_t>() == 8);
 };
 
@@ -764,7 +828,7 @@ mod tests {
     fn a_fifo_pulls_in_order_and_reports_closure_when_drained() {
         let mut fifo = _z_fifo_mt_t {
             handle: std::ptr::null_mut(),
-            _pad: [0; 176],
+            _pad: [0; FIFO_MT_BYTES - std::mem::size_of::<*mut c_void>()],
         };
         unsafe {
             assert_eq!(_z_fifo_mt_init(&mut fifo, 4), Z_OK);
@@ -810,7 +874,7 @@ mod tests {
     fn a_full_ring_keeps_the_newest_and_a_full_fifo_would_block() {
         let mut ring = _z_ring_mt_t {
             handle: std::ptr::null_mut(),
-            _pad: [0; 128],
+            _pad: [0; RING_MT_BYTES - std::mem::size_of::<*mut c_void>()],
         };
         unsafe {
             assert_eq!(_z_ring_mt_init(&mut ring, 2), Z_OK);
@@ -832,6 +896,77 @@ mod tests {
         }
     }
 
+    /// pico's single-threaded fifo: a full push frees the NEW element and keeps
+    /// what is held, and a pull on an empty open fifo returns at once with `Z_OK`
+    /// and the destination untouched (`_z_fifo_push_drop`, and the `#else` arm of
+    /// `_z_fifo_mt_pull`). The ring's pull answers the same.
+    #[cfg(not(feature = "multi-thread"))]
+    #[test]
+    fn a_single_threaded_fifo_drops_the_newest_and_never_blocks() {
+        static FREED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+        unsafe extern "C" fn record_free(slot: *mut *mut c_void) {
+            FREED.lock().unwrap().push(*slot as usize);
+            free_usize(slot);
+        }
+        let mut fifo = _z_fifo_mt_t {
+            handle: std::ptr::null_mut(),
+            _pad: [0; FIFO_MT_BYTES - std::mem::size_of::<*mut c_void>()],
+        };
+        unsafe {
+            assert_eq!(_z_fifo_mt_init(&mut fifo, 2), Z_OK);
+            let ctx = (&mut fifo as *mut _z_fifo_mt_t).cast::<c_void>();
+            let third = elem(3);
+            assert_eq!(_z_fifo_mt_push(elem(1), ctx, Some(record_free)), Z_OK);
+            assert_eq!(_z_fifo_mt_push(elem(2), ctx, Some(record_free)), Z_OK);
+            assert_eq!(
+                _z_fifo_mt_push(third, ctx, Some(record_free)),
+                Z_OK,
+                "a full single-threaded push does not block"
+            );
+            assert_eq!(
+                FREED.lock().unwrap().as_slice(),
+                &[third as usize],
+                "the element freed is the new one"
+            );
+            let mut out: usize = 0;
+            let dst = (&mut out as *mut usize).cast::<c_void>();
+            for expected in 1..=2usize {
+                assert_eq!(_z_fifo_mt_pull(dst, ctx, Some(move_usize)), Z_OK);
+                assert_eq!(out, expected, "the fifo kept what it held");
+            }
+            out = 99;
+            assert_eq!(
+                _z_fifo_mt_pull(dst, ctx, Some(move_usize)),
+                Z_OK,
+                "an empty open fifo answers at once"
+            );
+            assert_eq!(out, 99, "and moves nothing into the destination");
+            assert_eq!(_z_fifo_mt_close(&mut fifo), Z_OK);
+            assert_eq!(
+                _z_fifo_mt_pull(dst, ctx, Some(move_usize)),
+                Z_RES_CHANNEL_CLOSED
+            );
+            _z_fifo_mt_clear(&mut fifo, Some(free_usize));
+        }
+        let mut ring = _z_ring_mt_t {
+            handle: std::ptr::null_mut(),
+            _pad: [0; RING_MT_BYTES - std::mem::size_of::<*mut c_void>()],
+        };
+        unsafe {
+            assert_eq!(_z_ring_mt_init(&mut ring, 2), Z_OK);
+            let ctx = (&mut ring as *mut _z_ring_mt_t).cast::<c_void>();
+            let mut out: usize = 99;
+            let dst = (&mut out as *mut usize).cast::<c_void>();
+            assert_eq!(_z_ring_mt_pull(dst, ctx, Some(move_usize)), Z_OK);
+            assert_eq!(
+                out, 99,
+                "an empty open ring answers at once, moving nothing"
+            );
+            _z_ring_mt_clear(&mut ring, Some(free_usize));
+        }
+    }
+
+    #[cfg(feature = "multi-thread")]
     #[test]
     fn a_blocked_fifo_pull_wakes_on_a_push_from_another_thread() {
         // The property the whole channel bundle rests on: `z_*_channel_*_recv`
@@ -840,7 +975,7 @@ mod tests {
         // test above and still spin a real program at 100% CPU.
         let fifo = Box::into_raw(Box::new(_z_fifo_mt_t {
             handle: std::ptr::null_mut(),
-            _pad: [0; 176],
+            _pad: [0; FIFO_MT_BYTES - std::mem::size_of::<*mut c_void>()],
         }));
         unsafe {
             assert_eq!(_z_fifo_mt_init(fifo, 4), Z_OK);
@@ -880,7 +1015,7 @@ mod tests {
         // ordinary `z_drop(handler)` path) must free them.
         let mut fifo = _z_fifo_mt_t {
             handle: std::ptr::null_mut(),
-            _pad: [0; 176],
+            _pad: [0; FIFO_MT_BYTES - std::mem::size_of::<*mut c_void>()],
         };
         static FREED: AtomicUsize = AtomicUsize::new(0);
         unsafe extern "C" fn counting_free(slot: *mut *mut c_void) {

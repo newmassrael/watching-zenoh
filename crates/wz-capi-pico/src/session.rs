@@ -62,7 +62,10 @@ use crate::config::{
     Z_CONFIG_TLS_ROOT_CA_CERTIFICATE_KEY, Z_CONFIG_TLS_VERIFY_NAME_ON_CONNECT_KEY,
 };
 use crate::ffi::{guard_val, guarded};
-use crate::result::{ZResult, Z_EINVAL, Z_ERR_GENERIC, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
+// The read-task doors' refusal, which only the multi-threaded arm has.
+#[cfg(feature = "multi-thread")]
+use crate::result::Z_EINVAL;
+use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
 use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, DialPhase, OpenError, OpenStance, SessionState,
     DEFAULT_BATCH_SIZE,
@@ -240,6 +243,10 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
 /// (`vendor/zenoh-pico/src/api/api.c` @ `if (opts.auto_start_admin_space) {`).
 /// The rest of the options have no effect here: the lease flag is never read by
 /// pico either, and the thread attributes have nothing to apply to.
+///
+/// Without `multi-thread` the options carry no read-task flag, and the session reads
+/// from the open: pico's single-threaded program advances its session with `zp_read`
+/// and `zp_spin_once`, which a wz session does on its own runtime.
 #[no_mangle]
 pub unsafe extern "C" fn z_open(
     zs: *mut z_owned_session_t,
@@ -252,7 +259,14 @@ pub unsafe extern "C" fn z_open(
         }
         // pico reads the options only when they are given and otherwise takes
         // `z_open_options_default`, whose read task starts.
+        #[cfg(feature = "multi-thread")]
         let start_read_task = options.is_null() || (*options).auto_start_read_task;
+        #[cfg(not(feature = "multi-thread"))]
+        let start_read_task = {
+            // Read only for the admin-space flag, which a build may not have.
+            let _ = options;
+            true
+        };
         // And its admin space does not start unless asked to.
         #[cfg(feature = "admin-space")]
         let start_admin_space = !options.is_null() && (*options).auto_start_admin_space;
@@ -526,7 +540,9 @@ pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
 // `z_result_t zp_stop_read_task(z_loaned_session_t *zs) {`), and while it is
 // stopped the session reads nothing and sends no keep-alive; the lease pair is a
 // literal no-op (`zp_start_lease_task` returns `_Z_RES_OK` and touches nothing).
-// The same gate answers all of it: see `wz_capi_core::drive::ReadGate`.
+// The same gate answers all of it: see `wz_capi_core::drive::ReadGate`. pico declares
+// the family only in its multi-threaded arm (`Z_FEATURE_MULTI_THREAD == 1`), and so
+// does this crate, under `multi-thread`.
 //
 // These used to be Z_OK shims on the ground that wz's session drives itself, and
 // that held for every program that never stopped the task. A program that opens
@@ -538,6 +554,7 @@ pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
 /// pico's is. From inside one of the session's own callbacks it answers
 /// `_Z_ERR_INVALID` and changes nothing, as pico's does from its executor's
 /// thread.
+#[cfg(feature = "multi-thread")]
 #[no_mangle]
 pub unsafe extern "C" fn zp_start_read_task(
     zs: *mut z_loaned_session_t,
@@ -558,6 +575,7 @@ pub unsafe extern "C" fn zp_start_read_task(
 /// It returns once no callback is running, as pico's does after joining its
 /// executor's thread, and from inside one of the session's own callbacks it
 /// answers `_Z_ERR_INVALID` and stops nothing.
+#[cfg(feature = "multi-thread")]
 #[no_mangle]
 pub unsafe extern "C" fn zp_stop_read_task(zs: *mut z_loaned_session_t) -> ZResult {
     match session_state(zs) {
@@ -571,6 +589,7 @@ pub unsafe extern "C" fn zp_stop_read_task(zs: *mut z_loaned_session_t) -> ZResu
 
 /// pico `zp_start_lease_task` — a no-op in pico 1.10.1 too: the lease is checked
 /// by the executor `zp_start_read_task` starts.
+#[cfg(feature = "multi-thread")]
 #[no_mangle]
 pub unsafe extern "C" fn zp_start_lease_task(
     _zs: *mut z_loaned_session_t,
@@ -580,6 +599,7 @@ pub unsafe extern "C" fn zp_start_lease_task(
 }
 
 /// pico `zp_stop_lease_task` — a no-op in pico 1.10.1 too.
+#[cfg(feature = "multi-thread")]
 #[no_mangle]
 pub unsafe extern "C" fn zp_stop_lease_task(_zs: *mut z_loaned_session_t) -> ZResult {
     Z_OK
@@ -636,19 +656,25 @@ pub unsafe extern "C" fn zp_stop_lease_task(_zs: *mut z_loaned_session_t) -> ZRe
 ///
 /// A panic yields `false` — a spin that unwound made no progress, and claiming
 /// otherwise is the direction that misleads.
+#[cfg(not(feature = "multi-thread"))]
 #[no_mangle]
 pub unsafe extern "C" fn zp_spin_once(zs: *const z_loaned_session_t) -> bool {
-    guard_val(false, || session_state(zs).is_some())
+    // Upstream: `if (!z_session_is_closed(zs)) { return _z_runtime_spin_once(..); } return
+    // false;`, so a closed session answers `false` like a null one.
+    guard_val(false, || {
+        session_state(zs).is_some_and(|state| !state.is_closed())
+    })
 }
 
 // --- the single-threaded entry points (pico `Z_FEATURE_MULTI_THREAD == 0`) --
 //
 // A program compiled against pico's single-threaded headers advances its session
-// by hand with these three, which upstream declares (and defines) only when
-// `Z_FEATURE_MULTI_THREAD == 0` (`vendor/zenoh-pico/include/zenoh-pico/api/primitives.h`,
-// `vendor/zenoh-pico/src/api/api.c` `zp_read` .. `zp_send_join`). They are exported here on
-// every build for the reason `zp_spin_once` is: one cdylib serves both header arms, and
-// only `z_owned_mutex_t` / `z_owned_condvar_t` differ in size between them.
+// by hand with these three and `zp_spin_once`, which upstream declares (and defines)
+// only when `Z_FEATURE_MULTI_THREAD == 0` (`vendor/zenoh-pico/include/zenoh-pico/api/primitives.h`,
+// `vendor/zenoh-pico/src/api/api.c` `zp_read` .. `zp_spin_once`), and so does this crate,
+// without `multi-thread`. The two header arms are two builds: they differ in the size of
+// structs the C program allocates (`z_open_options_t`, the channel collections), so one
+// cdylib cannot serve both.
 //
 // The wz session drives itself, so each is the same one-directional divergence
 // `zp_spin_once` documents: the work a call would trigger (a read, a keep-alive, a
@@ -656,24 +682,28 @@ pub unsafe extern "C" fn zp_spin_once(zs: *const z_loaned_session_t) -> bool {
 // and the call answers what upstream answers for a live session.
 
 /// pico `zp_read_options_t` (`api/types.h`, `Z_FEATURE_MULTI_THREAD == 0`): one `bool`.
+#[cfg(not(feature = "multi-thread"))]
 #[repr(C)]
 pub struct zp_read_options_t {
     pub single_read: bool,
 }
 
 /// pico `zp_send_keep_alive_options_t`: one byte so the struct is not empty.
+#[cfg(not(feature = "multi-thread"))]
 #[repr(C)]
 pub struct zp_send_keep_alive_options_t {
     pub __dummy: u8,
 }
 
 /// pico `zp_send_join_options_t`: one byte so the struct is not empty.
+#[cfg(not(feature = "multi-thread"))]
 #[repr(C)]
 pub struct zp_send_join_options_t {
     pub __dummy: u8,
 }
 
 /// pico `zp_read_options_default`: `single_read = false`.
+#[cfg(not(feature = "multi-thread"))]
 #[no_mangle]
 pub unsafe extern "C" fn zp_read_options_default(options: *mut zp_read_options_t) {
     if !options.is_null() {
@@ -684,6 +714,7 @@ pub unsafe extern "C" fn zp_read_options_default(options: *mut zp_read_options_t
 /// pico `zp_read`: read and process what the session's link holds. The wz session
 /// reads continuously on its own runtime, so a live session answers `Z_OK`; a null
 /// one answers `_Z_ERR_SESSION_CLOSED`, the code pico's session check uses.
+#[cfg(not(feature = "multi-thread"))]
 #[no_mangle]
 pub unsafe extern "C" fn zp_read(
     zs: *const z_loaned_session_t,
@@ -693,6 +724,7 @@ pub unsafe extern "C" fn zp_read(
 }
 
 /// pico `zp_send_keep_alive_options_default`.
+#[cfg(not(feature = "multi-thread"))]
 #[no_mangle]
 pub unsafe extern "C" fn zp_send_keep_alive_options_default(
     options: *mut zp_send_keep_alive_options_t,
@@ -704,6 +736,7 @@ pub unsafe extern "C" fn zp_send_keep_alive_options_default(
 
 /// pico `zp_send_keep_alive`: send a KeepAlive now. The wz session keeps its lease
 /// with keep-alives on its own schedule, so a live session answers `Z_OK`.
+#[cfg(not(feature = "multi-thread"))]
 #[no_mangle]
 pub unsafe extern "C" fn zp_send_keep_alive(
     zs: *const z_loaned_session_t,
@@ -713,6 +746,7 @@ pub unsafe extern "C" fn zp_send_keep_alive(
 }
 
 /// pico `zp_send_join_options_default`.
+#[cfg(not(feature = "multi-thread"))]
 #[no_mangle]
 pub unsafe extern "C" fn zp_send_join_options_default(options: *mut zp_send_join_options_t) {
     if !options.is_null() {
@@ -724,6 +758,7 @@ pub unsafe extern "C" fn zp_send_join_options_default(options: *mut zp_send_join
 /// raw-ethernet transport and answers `_Z_RES_OK` on a unicast one without sending
 /// (`vendor/zenoh-pico/src/transport/common/lease.c` `_z_send_join`); this ABI
 /// establishes unicast transports only, so a live session answers `Z_OK`.
+#[cfg(not(feature = "multi-thread"))]
 #[no_mangle]
 pub unsafe extern "C" fn zp_send_join(
     zs: *const z_loaned_session_t,
@@ -734,6 +769,7 @@ pub unsafe extern "C" fn zp_send_join(
 
 /// What the three single-threaded entry points answer for `zs`: `Z_OK` for an open
 /// session, `_Z_ERR_SESSION_CLOSED` for a null or closed one.
+#[cfg(not(feature = "multi-thread"))]
 unsafe fn live_session_result(zs: *const z_loaned_session_t) -> ZResult {
     match session_state(zs) {
         Some(state) if !state.is_closed() => Z_OK,
@@ -1095,13 +1131,24 @@ pub struct z_subscriber_options_t {
 /// auto_start_admin_space` (`vendor/zenoh-pico/include/zenoh-pico/api/types.h` @
 /// `bool auto_start_admin_space;`), at offset 16 for 24 B, which is the layout a
 /// program compiled with `Z_FEATURE_ADMIN_SPACE=1` writes.
+///
+/// Without `multi-thread` the three task fields do not exist, as they do not in pico's
+/// single-threaded header (`#if Z_FEATURE_MULTI_THREAD == 1` around them): the struct is
+/// the admin-space flag alone, or with no admin space pico's one-byte `__dummy` that keeps
+/// it from being empty. One byte either way, where the multi-threaded struct is 16; a
+/// default written as 16 bytes into a single-threaded program's struct overran it.
 #[repr(C)]
 pub struct z_open_options_t {
+    #[cfg(feature = "multi-thread")]
     pub auto_start_read_task: bool,
+    #[cfg(feature = "multi-thread")]
     pub auto_start_lease_task: bool,
+    #[cfg(feature = "multi-thread")]
     pub executor_task_attributes: *mut crate::sync::z_task_attr_t,
     #[cfg(feature = "admin-space")]
     pub auto_start_admin_space: bool,
+    #[cfg(not(any(feature = "multi-thread", feature = "admin-space")))]
+    pub __dummy: u8,
 }
 
 /// pico `z_close_options_t` — a one-byte dummy, 1 B measured.
@@ -1111,12 +1158,14 @@ pub struct z_close_options_t {
 }
 
 /// pico `zp_task_read_options_t`, 8 B measured.
+#[cfg(feature = "multi-thread")]
 #[repr(C)]
 pub struct zp_task_read_options_t {
     pub task_attributes: *mut crate::sync::z_task_attr_t,
 }
 
 /// pico `zp_task_lease_options_t`, 8 B measured.
+#[cfg(feature = "multi-thread")]
 #[repr(C)]
 pub struct zp_task_lease_options_t {
     pub task_attributes: *mut crate::sync::z_task_attr_t,
@@ -1126,19 +1175,33 @@ const _: () = {
     assert!(std::mem::size_of::<z_subscriber_options_t>() == 1);
     assert!(
         std::mem::size_of::<z_open_options_t>()
-            == if cfg!(feature = "admin-space") {
-                24
-            } else {
-                16
+            == match (
+                cfg!(feature = "multi-thread"),
+                cfg!(feature = "admin-space")
+            ) {
+                (true, true) => 24,
+                (true, false) => 16,
+                (false, _) => 1,
             }
     );
     assert!(std::mem::size_of::<z_close_options_t>() == 1);
+};
+
+#[cfg(feature = "multi-thread")]
+const _: () = {
     assert!(std::mem::size_of::<zp_task_read_options_t>() == 8);
     assert!(std::mem::size_of::<zp_task_lease_options_t>() == 8);
 };
 
 #[cfg(feature = "admin-space")]
-const _: () = assert!(std::mem::offset_of!(z_open_options_t, auto_start_admin_space) == 16);
+const _: () = assert!(
+    std::mem::offset_of!(z_open_options_t, auto_start_admin_space)
+        == if cfg!(feature = "multi-thread") {
+            16
+        } else {
+            0
+        }
+);
 
 /// Fill default subscriber options (pico `z_subscriber_options_default`).
 ///
@@ -1163,12 +1226,19 @@ pub unsafe extern "C" fn z_subscriber_options_default(options: *mut z_subscriber
 pub unsafe extern "C" fn z_open_options_default(options: *mut z_open_options_t) {
     if !options.is_null() {
         *options = z_open_options_t {
+            #[cfg(feature = "multi-thread")]
             auto_start_read_task: true,
+            #[cfg(feature = "multi-thread")]
             auto_start_lease_task: false,
+            #[cfg(feature = "multi-thread")]
             executor_task_attributes: std::ptr::null_mut(),
             // `options->auto_start_admin_space = false;` in pico's default.
             #[cfg(feature = "admin-space")]
             auto_start_admin_space: false,
+            // pico's single-threaded default writes nothing to `__dummy`; zero is what a
+            // whole-struct write here can say about it.
+            #[cfg(not(any(feature = "multi-thread", feature = "admin-space")))]
+            __dummy: 0,
         };
     }
 }
@@ -1188,6 +1258,7 @@ pub unsafe extern "C" fn z_close_options_default(options: *mut z_close_options_t
 ///
 /// # Safety
 /// `options` must be null or valid and writable.
+#[cfg(feature = "multi-thread")]
 #[no_mangle]
 pub unsafe extern "C" fn zp_task_read_options_default(options: *mut zp_task_read_options_t) {
     if !options.is_null() {
@@ -1199,6 +1270,7 @@ pub unsafe extern "C" fn zp_task_read_options_default(options: *mut zp_task_read
 ///
 /// # Safety
 /// `options` must be null or valid and writable.
+#[cfg(feature = "multi-thread")]
 #[no_mangle]
 pub unsafe extern "C" fn zp_task_lease_options_default(options: *mut zp_task_lease_options_t) {
     if !options.is_null() {
@@ -1217,6 +1289,7 @@ pub unsafe extern "C" fn zp_task_lease_options_default(options: *mut zp_task_lea
 ///
 /// # Safety
 /// `zs` must be null or a live loaned session.
+#[cfg(feature = "multi-thread")]
 #[no_mangle]
 pub unsafe extern "C" fn zp_read_task_is_running(zs: *const z_loaned_session_t) -> bool {
     session_state(zs).is_some_and(SessionState::read_task_is_running)
@@ -1227,6 +1300,7 @@ pub unsafe extern "C" fn zp_read_task_is_running(zs: *const z_loaned_session_t) 
 ///
 /// # Safety
 /// `zs` must be null or a live loaned session.
+#[cfg(feature = "multi-thread")]
 #[no_mangle]
 pub unsafe extern "C" fn zp_lease_task_is_running(zs: *const z_loaned_session_t) -> bool {
     zp_read_task_is_running(zs)

@@ -98,6 +98,14 @@ config WZ_CAP_GOSSIP
 	  A session told of a node by one it holds a link to dials it.
 	  Exported by: pico, c.
 
+config WZ_CAP_MULTI_THREAD
+	bool "multi-thread"
+	default y
+	help
+	  pico's multi-threaded C ABI (task doors, host sync, blocking channels); off, the single-threaded one.
+	  zenoh-pico's switch for it: Z_FEATURE_MULTI_THREAD.
+	  Exported by: pico.
+
 config WZ_CAP_TRANSPORT_TLS
 	bool "transport_tls"
 	default y

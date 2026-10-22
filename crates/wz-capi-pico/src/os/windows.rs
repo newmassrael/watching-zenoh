@@ -18,34 +18,21 @@
 use std::ffi::{c_char, c_ulong, c_void};
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_TIMEOUT, FILETIME, HANDLE, SYSTEMTIME, WAIT_OBJECT_0,
-};
+use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows_sys::Win32::System::SystemInformation::GetSystemTimeAsFileTime;
-use windows_sys::Win32::System::Threading::{
-    AcquireSRWLockExclusive, CreateThread, InitializeConditionVariable, InitializeSRWLock,
-    ReleaseSRWLockExclusive, SleepConditionVariableSRW, TryAcquireSRWLockExclusive,
-    WaitForSingleObject, WakeConditionVariable, CONDITION_VARIABLE, INFINITE, SRWLOCK,
-};
 use windows_sys::Win32::System::Time::{
     FileTimeToSystemTime, GetTimeZoneInformation, SystemTimeToTzSpecificLocalTime,
     TIME_ZONE_ID_INVALID, TIME_ZONE_INFORMATION,
 };
 
 use super::{arith, Unit};
-use crate::result::{ZResult, Z_ERR_GENERIC, Z_OK};
-use crate::sync::Z_ETIMEDOUT;
 
 /// What `GetTimeZoneInformation` returns while daylight saving time is in effect
 /// (documented as 2, with 0 unknown, 1 standard and `TIME_ZONE_ID_INVALID` failure).
 /// windows-sys keeps this one constant in a namespace this file has no other use
 /// for, so it is named here instead of enabling that namespace for one number.
 const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
-
-/// pico `_Z_ERR_SYSTEM_TASK_FAILED` (`utils/result.h:87`): what pico's Windows
-/// `_z_task_init` reports when `CreateThread` returns no handle.
-const Z_ERR_SYSTEM_TASK_FAILED: ZResult = -79;
 
 /// pico `z_clock_t`: `LARGE_INTEGER`, a union of which `QuadPart` is the only member
 /// pico reads. Eight bytes, passed and returned in one integer register, exactly as
@@ -67,25 +54,7 @@ pub struct WallTime {
     pub dstflag: i16,
 }
 
-/// pico `_z_mutex_t`: `SRWLOCK`, one pointer. It needs no destroy and zero is its
-/// initial state.
-pub type RawMutex = SRWLOCK;
-/// pico `_z_condvar_t`: `CONDITION_VARIABLE`, one pointer.
-pub type RawCondvar = CONDITION_VARIABLE;
-/// pico `_z_task_t`: a thread `HANDLE`. pico declares it `HANDLE *` and stores the
-/// handle in the pointer-sized slot, so the owned value is pointer-sized either way.
-pub type RawTask = HANDLE;
-/// pico `z_task_attr_t`: `void *`, "not used in Windows".
-pub type TaskAttr = *mut c_void;
-
-/// The value of a task that was never started or has been joined or detached.
-pub const TASK_NULL: RawTask = std::ptr::null_mut();
-
 const _: () = {
-    assert!(std::mem::size_of::<RawMutex>() == std::mem::size_of::<*mut c_void>());
-    assert!(std::mem::size_of::<RawCondvar>() == std::mem::size_of::<*mut c_void>());
-    assert!(std::mem::size_of::<RawTask>() == std::mem::size_of::<*mut c_void>());
-    assert!(std::mem::size_of::<TaskAttr>() == std::mem::size_of::<*mut c_void>());
     assert!(std::mem::size_of::<Clock>() == 8);
     assert!(std::mem::size_of::<WallTime>() == 16);
 };
@@ -255,206 +224,255 @@ pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Mutex
-// ---------------------------------------------------------------------------
+/// The host primitives of pico's multi-threaded arm: mutex, condvar and task. pico
+/// compiles its own only under `Z_FEATURE_MULTI_THREAD == 1`
+/// (`vendor/zenoh-pico/src/system/windows/system.c` @ `#if Z_FEATURE_MULTI_THREAD == 1`),
+/// and so does this crate, under `multi-thread`.
+#[cfg(feature = "multi-thread")]
+mod threads {
+    use std::ffi::c_void;
 
-/// Initialise a mutex in place (`InitializeSRWLock`).
-///
-/// # Safety
-/// `m` must point at storage for a `RawMutex`.
-pub unsafe fn mutex_init(m: *mut RawMutex) -> ZResult {
-    InitializeSRWLock(m);
-    Z_OK
-}
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_TIMEOUT, HANDLE, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Threading::{
+        AcquireSRWLockExclusive, CreateThread, InitializeConditionVariable, InitializeSRWLock,
+        ReleaseSRWLockExclusive, SleepConditionVariableSRW, TryAcquireSRWLockExclusive,
+        WaitForSingleObject, WakeConditionVariable, CONDITION_VARIABLE, INFINITE, SRWLOCK,
+    };
 
-/// Destroy a mutex: an SRW lock has nothing to release, as in pico.
-///
-/// # Safety
-/// `m` must point at a `RawMutex`.
-pub unsafe fn mutex_destroy(_m: *mut RawMutex) -> ZResult {
-    Z_OK
-}
+    use super::{arith, clock_now, frequency, Clock};
+    use crate::result::{ZResult, Z_ERR_GENERIC, Z_OK};
+    use crate::sync::Z_ETIMEDOUT;
 
-/// Lock, blocking (exclusive).
-///
-/// # Safety
-/// `m` must point at an initialised `RawMutex`.
-pub unsafe fn mutex_lock(m: *mut RawMutex) -> ZResult {
-    AcquireSRWLockExclusive(m);
-    Z_OK
-}
+    /// pico `_Z_ERR_SYSTEM_TASK_FAILED` (`utils/result.h:87`): what pico's Windows
+    /// `_z_task_init` reports when `CreateThread` returns no handle.
+    const Z_ERR_SYSTEM_TASK_FAILED: ZResult = -79;
 
-/// Try to lock without blocking. A refusal is pico's generic error on Windows.
-///
-/// # Safety
-/// As `mutex_lock`.
-pub unsafe fn mutex_try_lock(m: *mut RawMutex) -> ZResult {
-    if TryAcquireSRWLockExclusive(m) {
+    /// pico `_z_mutex_t`: `SRWLOCK`, one pointer. It needs no destroy and zero is its
+    /// initial state.
+    pub type RawMutex = SRWLOCK;
+    /// pico `_z_condvar_t`: `CONDITION_VARIABLE`, one pointer.
+    pub type RawCondvar = CONDITION_VARIABLE;
+    /// pico `_z_task_t`: a thread `HANDLE`. pico declares it `HANDLE *` and stores the
+    /// handle in the pointer-sized slot, so the owned value is pointer-sized either way.
+    pub type RawTask = HANDLE;
+    /// pico `z_task_attr_t`: `void *`, "not used in Windows".
+    pub type TaskAttr = *mut c_void;
+
+    /// The value of a task that was never started or has been joined or detached.
+    pub const TASK_NULL: RawTask = std::ptr::null_mut();
+
+    const _: () = {
+        assert!(std::mem::size_of::<RawMutex>() == std::mem::size_of::<*mut c_void>());
+        assert!(std::mem::size_of::<RawCondvar>() == std::mem::size_of::<*mut c_void>());
+        assert!(std::mem::size_of::<RawTask>() == std::mem::size_of::<*mut c_void>());
+        assert!(std::mem::size_of::<TaskAttr>() == std::mem::size_of::<*mut c_void>());
+    };
+
+    // ---------------------------------------------------------------------------
+    // Mutex
+    // ---------------------------------------------------------------------------
+
+    /// Initialise a mutex in place (`InitializeSRWLock`).
+    ///
+    /// # Safety
+    /// `m` must point at storage for a `RawMutex`.
+    pub unsafe fn mutex_init(m: *mut RawMutex) -> ZResult {
+        InitializeSRWLock(m);
         Z_OK
-    } else {
-        Z_ERR_GENERIC
     }
-}
 
-/// Unlock.
-///
-/// # Safety
-/// As `mutex_lock`, and the caller holds the lock.
-pub unsafe fn mutex_unlock(m: *mut RawMutex) -> ZResult {
-    ReleaseSRWLockExclusive(m);
-    Z_OK
-}
-
-// ---------------------------------------------------------------------------
-// Condition variable
-// ---------------------------------------------------------------------------
-
-/// Initialise a condvar in place (`InitializeConditionVariable`). There is no clock
-/// to choose: the wait takes a relative timeout.
-///
-/// # Safety
-/// `cv` must point at storage for a `RawCondvar`.
-pub unsafe fn condvar_init(cv: *mut RawCondvar) -> ZResult {
-    InitializeConditionVariable(cv);
-    Z_OK
-}
-
-/// Destroy a condvar: nothing to release, as in pico.
-///
-/// # Safety
-/// `cv` must point at a `RawCondvar`.
-pub unsafe fn condvar_destroy(_cv: *mut RawCondvar) -> ZResult {
-    Z_OK
-}
-
-/// Wake one waiter.
-///
-/// # Safety
-/// `cv` must point at an initialised `RawCondvar`.
-pub unsafe fn condvar_signal(cv: *mut RawCondvar) -> ZResult {
-    WakeConditionVariable(cv);
-    Z_OK
-}
-
-/// Wait, releasing `m`. pico ignores the wait's result and so does this: the only
-/// failure `SleepConditionVariableSRW` has without a timeout is a bad argument.
-///
-/// # Safety
-/// `cv` and `m` must be initialised, and the caller holds `m` exclusively.
-pub unsafe fn condvar_wait(cv: *mut RawCondvar, m: *mut RawMutex) -> ZResult {
-    SleepConditionVariableSRW(cv, m, INFINITE, 0);
-    Z_OK
-}
-
-/// Wait until an ABSOLUTE performance-counter deadline.
-///
-/// `SleepConditionVariableSRW` takes a relative timeout, so the deadline becomes the
-/// milliseconds from now, as pico does (`system.c:210-232`); a timeout is
-/// `Z_ETIMEDOUT` and any other failure is pico's generic error. A host with no
-/// counter cannot make the conversion and is an error, as in pico.
-///
-/// # Safety
-/// As `condvar_wait`.
-pub unsafe fn condvar_wait_until(
-    cv: *mut RawCondvar,
-    m: *mut RawMutex,
-    abstime: &Clock,
-) -> ZResult {
-    let frequency = frequency();
-    if frequency == 0 {
-        return Z_ERR_GENERIC;
+    /// Destroy a mutex: an SRW lock has nothing to release, as in pico.
+    ///
+    /// # Safety
+    /// `m` must point at a `RawMutex`.
+    pub unsafe fn mutex_destroy(_m: *mut RawMutex) -> ZResult {
+        Z_OK
     }
-    let block = arith::remaining_millis(abstime.quad_part, clock_now().quad_part, frequency);
-    if SleepConditionVariableSRW(cv, m, block, 0) == 0 {
-        if GetLastError() == ERROR_TIMEOUT {
-            Z_ETIMEDOUT
+
+    /// Lock, blocking (exclusive).
+    ///
+    /// # Safety
+    /// `m` must point at an initialised `RawMutex`.
+    pub unsafe fn mutex_lock(m: *mut RawMutex) -> ZResult {
+        AcquireSRWLockExclusive(m);
+        Z_OK
+    }
+
+    /// Try to lock without blocking. A refusal is pico's generic error on Windows.
+    ///
+    /// # Safety
+    /// As `mutex_lock`.
+    pub unsafe fn mutex_try_lock(m: *mut RawMutex) -> ZResult {
+        if TryAcquireSRWLockExclusive(m) {
+            Z_OK
         } else {
             Z_ERR_GENERIC
         }
-    } else {
+    }
+
+    /// Unlock.
+    ///
+    /// # Safety
+    /// As `mutex_lock`, and the caller holds the lock.
+    pub unsafe fn mutex_unlock(m: *mut RawMutex) -> ZResult {
+        ReleaseSRWLockExclusive(m);
         Z_OK
     }
-}
 
-// ---------------------------------------------------------------------------
-// Task
-// ---------------------------------------------------------------------------
+    // ---------------------------------------------------------------------------
+    // Condition variable
+    // ---------------------------------------------------------------------------
 
-/// What a started thread needs, handed through the one pointer `CreateThread` passes.
-struct Start {
-    fun: extern "C" fn(*mut c_void) -> *mut c_void,
-    arg: *mut c_void,
-}
-
-/// The thread entry point, in the calling convention `CreateThread` uses. pico casts
-/// the C function to it; that is the same call on 64-bit Windows and a corrupted
-/// stack on 32-bit, where the two conventions differ, so wz enters through a function
-/// that is the right type and calls the C one itself. The C function's return value
-/// has nowhere to go (pico's thread exit code is the low half of that pointer and
-/// nothing reads it), so the exit code is 0.
-unsafe extern "system" fn thread_main(start: *mut c_void) -> u32 {
-    let Start { fun, arg } = *Box::from_raw(start.cast::<Start>());
-    fun(arg);
-    0
-}
-
-/// Start a thread running `fun(arg)` (`CreateThread`). `attr` is unused on Windows, as
-/// in pico. No handle is pico's `_Z_ERR_SYSTEM_TASK_FAILED`.
-///
-/// # Safety
-/// `task` must be valid and writable.
-pub unsafe fn task_spawn(
-    task: *mut RawTask,
-    _attr: *mut TaskAttr,
-    fun: extern "C" fn(*mut c_void) -> *mut c_void,
-    arg: *mut c_void,
-) -> ZResult {
-    let start = Box::into_raw(Box::new(Start { fun, arg }));
-    let handle = CreateThread(
-        std::ptr::null(),
-        0,
-        Some(thread_main),
-        start.cast::<c_void>(),
-        0,
-        std::ptr::null_mut(),
-    );
-    if handle.is_null() {
-        drop(Box::from_raw(start));
-        return Z_ERR_SYSTEM_TASK_FAILED;
-    }
-    *task = handle;
-    Z_OK
-}
-
-/// Wait for a started task to finish and release its handle. The handle is not null.
-/// pico leaves the handle for a later free; wz's join consumes the task, so it closes
-/// it here, on every path.
-///
-/// # Safety
-/// `handle` must be a task `task_spawn` started and nothing has joined or detached.
-pub unsafe fn task_join(handle: RawTask) -> ZResult {
-    let waited = WaitForSingleObject(handle, INFINITE);
-    CloseHandle(handle);
-    if waited == WAIT_OBJECT_0 {
-        Z_OK
-    } else {
-        Z_ERR_GENERIC
-    }
-}
-
-/// Release a started task WITHOUT waiting: closing the handle is what detaches a
-/// Windows thread, which keeps running. The handle is not null.
-///
-/// # Safety
-/// As `task_join`.
-pub unsafe fn task_detach(handle: RawTask) -> ZResult {
-    if CloseHandle(handle) == 0 {
-        Z_ERR_GENERIC
-    } else {
+    /// Initialise a condvar in place (`InitializeConditionVariable`). There is no clock
+    /// to choose: the wait takes a relative timeout.
+    ///
+    /// # Safety
+    /// `cv` must point at storage for a `RawCondvar`.
+    pub unsafe fn condvar_init(cv: *mut RawCondvar) -> ZResult {
+        InitializeConditionVariable(cv);
         Z_OK
     }
+
+    /// Destroy a condvar: nothing to release, as in pico.
+    ///
+    /// # Safety
+    /// `cv` must point at a `RawCondvar`.
+    pub unsafe fn condvar_destroy(_cv: *mut RawCondvar) -> ZResult {
+        Z_OK
+    }
+
+    /// Wake one waiter.
+    ///
+    /// # Safety
+    /// `cv` must point at an initialised `RawCondvar`.
+    pub unsafe fn condvar_signal(cv: *mut RawCondvar) -> ZResult {
+        WakeConditionVariable(cv);
+        Z_OK
+    }
+
+    /// Wait, releasing `m`. pico ignores the wait's result and so does this: the only
+    /// failure `SleepConditionVariableSRW` has without a timeout is a bad argument.
+    ///
+    /// # Safety
+    /// `cv` and `m` must be initialised, and the caller holds `m` exclusively.
+    pub unsafe fn condvar_wait(cv: *mut RawCondvar, m: *mut RawMutex) -> ZResult {
+        SleepConditionVariableSRW(cv, m, INFINITE, 0);
+        Z_OK
+    }
+
+    /// Wait until an ABSOLUTE performance-counter deadline.
+    ///
+    /// `SleepConditionVariableSRW` takes a relative timeout, so the deadline becomes the
+    /// milliseconds from now, as pico does (`system.c:210-232`); a timeout is
+    /// `Z_ETIMEDOUT` and any other failure is pico's generic error. A host with no
+    /// counter cannot make the conversion and is an error, as in pico.
+    ///
+    /// # Safety
+    /// As `condvar_wait`.
+    pub unsafe fn condvar_wait_until(
+        cv: *mut RawCondvar,
+        m: *mut RawMutex,
+        abstime: &Clock,
+    ) -> ZResult {
+        let frequency = frequency();
+        if frequency == 0 {
+            return Z_ERR_GENERIC;
+        }
+        let block = arith::remaining_millis(abstime.quad_part, clock_now().quad_part, frequency);
+        if SleepConditionVariableSRW(cv, m, block, 0) == 0 {
+            if GetLastError() == ERROR_TIMEOUT {
+                Z_ETIMEDOUT
+            } else {
+                Z_ERR_GENERIC
+            }
+        } else {
+            Z_OK
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task
+    // ---------------------------------------------------------------------------
+
+    /// What a started thread needs, handed through the one pointer `CreateThread` passes.
+    struct Start {
+        fun: extern "C" fn(*mut c_void) -> *mut c_void,
+        arg: *mut c_void,
+    }
+
+    /// The thread entry point, in the calling convention `CreateThread` uses. pico casts
+    /// the C function to it; that is the same call on 64-bit Windows and a corrupted
+    /// stack on 32-bit, where the two conventions differ, so wz enters through a function
+    /// that is the right type and calls the C one itself. The C function's return value
+    /// has nowhere to go (pico's thread exit code is the low half of that pointer and
+    /// nothing reads it), so the exit code is 0.
+    unsafe extern "system" fn thread_main(start: *mut c_void) -> u32 {
+        let Start { fun, arg } = *Box::from_raw(start.cast::<Start>());
+        fun(arg);
+        0
+    }
+
+    /// Start a thread running `fun(arg)` (`CreateThread`). `attr` is unused on Windows, as
+    /// in pico. No handle is pico's `_Z_ERR_SYSTEM_TASK_FAILED`.
+    ///
+    /// # Safety
+    /// `task` must be valid and writable.
+    pub unsafe fn task_spawn(
+        task: *mut RawTask,
+        _attr: *mut TaskAttr,
+        fun: extern "C" fn(*mut c_void) -> *mut c_void,
+        arg: *mut c_void,
+    ) -> ZResult {
+        let start = Box::into_raw(Box::new(Start { fun, arg }));
+        let handle = CreateThread(
+            std::ptr::null(),
+            0,
+            Some(thread_main),
+            start.cast::<c_void>(),
+            0,
+            std::ptr::null_mut(),
+        );
+        if handle.is_null() {
+            drop(Box::from_raw(start));
+            return Z_ERR_SYSTEM_TASK_FAILED;
+        }
+        *task = handle;
+        Z_OK
+    }
+
+    /// Wait for a started task to finish and release its handle. The handle is not null.
+    /// pico leaves the handle for a later free; wz's join consumes the task, so it closes
+    /// it here, on every path.
+    ///
+    /// # Safety
+    /// `handle` must be a task `task_spawn` started and nothing has joined or detached.
+    pub unsafe fn task_join(handle: RawTask) -> ZResult {
+        let waited = WaitForSingleObject(handle, INFINITE);
+        CloseHandle(handle);
+        if waited == WAIT_OBJECT_0 {
+            Z_OK
+        } else {
+            Z_ERR_GENERIC
+        }
+    }
+
+    /// Release a started task WITHOUT waiting: closing the handle is what detaches a
+    /// Windows thread, which keeps running. The handle is not null.
+    ///
+    /// # Safety
+    /// As `task_join`.
+    pub unsafe fn task_detach(handle: RawTask) -> ZResult {
+        if CloseHandle(handle) == 0 {
+            Z_ERR_GENERIC
+        } else {
+            Z_OK
+        }
+    }
 }
+#[cfg(feature = "multi-thread")]
+pub use threads::*;
 
 #[cfg(test)]
 mod tests {
@@ -471,6 +489,7 @@ mod tests {
     /// line in the same shape and compares the two. This test is what makes the
     /// Rust half of that comparison come from the build and not from a literal
     /// typed into a workflow, so a type that changes size changes the line.
+    #[cfg(feature = "multi-thread")]
     #[test]
     fn the_rust_types_report_their_sizes_in_the_shape_the_c_probe_does() {
         println!(
@@ -528,6 +547,7 @@ mod tests {
 
     /// A thread started through `CreateThread` runs the C function with its argument
     /// and a join waits for it, which is what the trampoline exists to guarantee.
+    #[cfg(feature = "multi-thread")]
     #[test]
     fn the_trampoline_runs_the_function_and_join_waits() {
         use std::sync::atomic::AtomicBool;

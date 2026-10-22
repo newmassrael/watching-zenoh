@@ -18,11 +18,9 @@
 //! (the condvar waits on an interval instead), a 32-bit `suseconds_t`, and Darwin's
 //! larger pthread layouts.
 
-use std::ffi::{c_char, c_int, c_ulong, c_void};
+use std::ffi::{c_char, c_ulong, c_void};
 
 use super::Unit;
-use crate::result::{ZResult, Z_OK};
-use crate::sync::{Z_ERR_SYSTEM_GENERIC, Z_ETIMEDOUT};
 
 /// pico `z_clock_t`: `struct timespec`, 16 B. Returned BY VALUE from `clock_now`,
 /// which the SysV AMD64 ABI passes back in two integer registers; `libc::timespec`
@@ -31,45 +29,6 @@ use crate::sync::{Z_ERR_SYSTEM_GENERIC, Z_ETIMEDOUT};
 pub type Clock = libc::timespec;
 /// pico `z_time_t`: `struct timeval`, the WALL clock, 16 B.
 pub type WallTime = libc::timeval;
-/// pico `_z_mutex_t`: `pthread_mutex_t`. 40 B on Linux, measured; 64 B on macOS.
-pub type RawMutex = libc::pthread_mutex_t;
-/// pico `_z_condvar_t`: `pthread_cond_t`, 48 B.
-pub type RawCondvar = libc::pthread_cond_t;
-/// pico `_z_task_t`: `pthread_t`, 8 B.
-pub type RawTask = libc::pthread_t;
-/// pico `z_task_attr_t`: `pthread_attr_t`, 56 B on Linux, measured; 64 B on macOS,
-/// where Darwin's pthread types are a signature word plus an opaque block
-/// (`__sig` and `__opaque[56]`).
-pub type TaskAttr = libc::pthread_attr_t;
-
-/// The value of a task that was never started or has been joined or detached.
-pub const TASK_NULL: RawTask = 0;
-
-/// What `sizeof(pthread_attr_t)` is on this host. The pin exists so that a target
-/// whose layout is not the one a size was measured on fails the build instead of
-/// writing past the caller's storage, which is exactly what it did on macOS the first
-/// time this crate was built there.
-#[cfg(target_os = "macos")]
-const TASK_ATTR_BYTES: usize = 64;
-#[cfg(not(target_os = "macos"))]
-const TASK_ATTR_BYTES: usize = 56;
-
-const _: () = {
-    assert!(std::mem::size_of::<RawTask>() == 8);
-    assert!(std::mem::size_of::<TaskAttr>() == TASK_ATTR_BYTES);
-};
-
-/// pico's `_Z_CHECK_SYS_ERR`: 0 is `Z_OK`, anything else is the system-error code.
-/// pico additionally logs the raw `errno`; the code handed to C is the same either
-/// way.
-#[inline]
-fn sys(rc: c_int) -> ZResult {
-    if rc == 0 {
-        Z_OK
-    } else {
-        Z_ERR_SYSTEM_GENERIC
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Monotonic clock
@@ -258,217 +217,274 @@ pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
     libc::arc4random_buf(buf, len);
 }
 
-// ---------------------------------------------------------------------------
-// Mutex
-// ---------------------------------------------------------------------------
+/// The host primitives of pico's multi-threaded arm: mutex, condvar and task. pico
+/// compiles its own only under `Z_FEATURE_MULTI_THREAD == 1`
+/// (`vendor/zenoh-pico/src/system/unix/system.c` @ `#if Z_FEATURE_MULTI_THREAD == 1`), and
+/// so does this crate, under `multi-thread`.
+#[cfg(feature = "multi-thread")]
+mod threads {
+    use std::ffi::{c_int, c_void};
 
-/// Initialise a mutex in place.
-///
-/// # Safety
-/// `m` must point at storage for a `RawMutex`.
-pub unsafe fn mutex_init(m: *mut RawMutex) -> ZResult {
-    sys(libc::pthread_mutex_init(m, std::ptr::null()))
-}
+    #[cfg(target_os = "macos")]
+    use super::clock_now;
+    use super::Clock;
+    use crate::result::{ZResult, Z_OK};
+    use crate::sync::{Z_ERR_SYSTEM_GENERIC, Z_ETIMEDOUT};
 
-/// Destroy a mutex.
-///
-/// # Safety
-/// `m` must point at an initialised, unlocked `RawMutex`.
-pub unsafe fn mutex_destroy(m: *mut RawMutex) -> ZResult {
-    sys(libc::pthread_mutex_destroy(m))
-}
+    /// pico `_z_mutex_t`: `pthread_mutex_t`. 40 B on Linux, measured; 64 B on macOS.
+    pub type RawMutex = libc::pthread_mutex_t;
+    /// pico `_z_condvar_t`: `pthread_cond_t`, 48 B.
+    pub type RawCondvar = libc::pthread_cond_t;
+    /// pico `_z_task_t`: `pthread_t`, 8 B.
+    pub type RawTask = libc::pthread_t;
+    /// pico `z_task_attr_t`: `pthread_attr_t`, 56 B on Linux, measured; 64 B on macOS,
+    /// where Darwin's pthread types are a signature word plus an opaque block
+    /// (`__sig` and `__opaque[56]`).
+    pub type TaskAttr = libc::pthread_attr_t;
 
-/// Lock, blocking.
-///
-/// # Safety
-/// `m` must point at an initialised `RawMutex`.
-pub unsafe fn mutex_lock(m: *mut RawMutex) -> ZResult {
-    sys(libc::pthread_mutex_lock(m))
-}
+    /// The value of a task that was never started or has been joined or detached.
+    pub const TASK_NULL: RawTask = 0;
 
-/// Try to lock without blocking.
-///
-/// # Safety
-/// As `mutex_lock`.
-pub unsafe fn mutex_try_lock(m: *mut RawMutex) -> ZResult {
-    sys(libc::pthread_mutex_trylock(m))
-}
+    /// What `sizeof(pthread_attr_t)` is on this host. The pin exists so that a target
+    /// whose layout is not the one a size was measured on fails the build instead of
+    /// writing past the caller's storage, which is exactly what it did on macOS the first
+    /// time this crate was built there.
+    #[cfg(target_os = "macos")]
+    const TASK_ATTR_BYTES: usize = 64;
+    #[cfg(not(target_os = "macos"))]
+    const TASK_ATTR_BYTES: usize = 56;
 
-/// Unlock.
-///
-/// # Safety
-/// As `mutex_lock`, and the caller holds the lock.
-pub unsafe fn mutex_unlock(m: *mut RawMutex) -> ZResult {
-    sys(libc::pthread_mutex_unlock(m))
-}
-
-// ---------------------------------------------------------------------------
-// Condition variable
-// ---------------------------------------------------------------------------
-
-/// Initialise a condvar on `CLOCK_MONOTONIC`.
-///
-/// The clock is set through a `pthread_condattr_t` exactly as pico does
-/// (`system.c:160-166`), and it is load-bearing rather than incidental. Skipping it
-/// leaves glibc's default `CLOCK_REALTIME`, and since `clock_now` is
-/// `CLOCK_MONOTONIC`, a deadline computed from it would be read against a different
-/// epoch: `condvar_wait_until` would return immediately or hang for the
-/// wall-clock/uptime skew. The two only agree because both name the same clock. The
-/// attr is destroyed on every path, including the failure one, because
-/// `pthread_condattr_init` may allocate.
-///
-/// # Safety
-/// `cv` must point at storage for a `RawCondvar`.
-pub unsafe fn condvar_init(cv: *mut RawCondvar) -> ZResult {
-    let mut attr: libc::pthread_condattr_t = std::mem::zeroed();
-    let rc = libc::pthread_condattr_init(&mut attr);
-    if rc != 0 {
-        return sys(rc);
-    }
-    let rc = condattr_use_monotonic(&mut attr);
-    let out = if rc != 0 {
-        sys(rc)
-    } else {
-        sys(libc::pthread_cond_init(cv, &attr))
+    const _: () = {
+        assert!(std::mem::size_of::<RawTask>() == 8);
+        assert!(std::mem::size_of::<TaskAttr>() == TASK_ATTR_BYTES);
     };
-    libc::pthread_condattr_destroy(&mut attr);
-    out
-}
 
-/// Put `CLOCK_MONOTONIC` on the condattr, which is what makes an absolute deadline
-/// taken from `clock_now` mean the same instant to the wait. macOS has no
-/// `pthread_condattr_setclock`, and pico skips the call there (`system.c:162-165`);
-/// `cond_wait_until` is where that gap is closed.
-#[cfg(not(target_os = "macos"))]
-unsafe fn condattr_use_monotonic(attr: *mut libc::pthread_condattr_t) -> c_int {
-    libc::pthread_condattr_setclock(attr, libc::CLOCK_MONOTONIC)
-}
-
-#[cfg(target_os = "macos")]
-unsafe fn condattr_use_monotonic(_attr: *mut libc::pthread_condattr_t) -> c_int {
-    0
-}
-
-/// Destroy a condvar.
-///
-/// # Safety
-/// `cv` must point at an initialised `RawCondvar` nobody waits on.
-pub unsafe fn condvar_destroy(cv: *mut RawCondvar) -> ZResult {
-    sys(libc::pthread_cond_destroy(cv))
-}
-
-/// Wake one waiter.
-///
-/// # Safety
-/// `cv` must point at an initialised `RawCondvar`.
-pub unsafe fn condvar_signal(cv: *mut RawCondvar) -> ZResult {
-    sys(libc::pthread_cond_signal(cv))
-}
-
-/// Wait, releasing `m`.
-///
-/// # Safety
-/// `cv` and `m` must be initialised, and the caller holds `m`.
-pub unsafe fn condvar_wait(cv: *mut RawCondvar, m: *mut RawMutex) -> ZResult {
-    sys(libc::pthread_cond_wait(cv, m))
-}
-
-/// Wait until an ABSOLUTE monotonic deadline.
-///
-/// A timeout is `Z_ETIMEDOUT` and NOT the generic system error, because that
-/// distinction is the whole point of the call: pico special-cases `ETIMEDOUT` ahead of
-/// `_Z_CHECK_SYS_ERR` (`system.c:199-203`), and a caller that cannot tell "deadline
-/// reached" from "the system refused" has no way to decide whether to retry.
-///
-/// # Safety
-/// As `condvar_wait`.
-pub unsafe fn condvar_wait_until(
-    cv: *mut RawCondvar,
-    m: *mut RawMutex,
-    abstime: &Clock,
-) -> ZResult {
-    let rc = cond_wait_until(cv, m, abstime);
-    if rc == libc::ETIMEDOUT {
-        return Z_ETIMEDOUT;
+    /// pico's `_Z_CHECK_SYS_ERR`: 0 is `Z_OK`, anything else is the system-error code.
+    /// pico additionally logs the raw `errno`; the code handed to C is the same either
+    /// way.
+    #[inline]
+    fn sys(rc: c_int) -> ZResult {
+        if rc == 0 {
+            Z_OK
+        } else {
+            Z_ERR_SYSTEM_GENERIC
+        }
     }
-    sys(rc)
-}
 
-#[cfg(not(target_os = "macos"))]
-unsafe fn cond_wait_until(cv: *mut RawCondvar, m: *mut RawMutex, abstime: &Clock) -> c_int {
-    libc::pthread_cond_timedwait(cv, m, abstime)
-}
+    // ---------------------------------------------------------------------------
+    // Mutex
+    // ---------------------------------------------------------------------------
 
-/// macOS: `pthread_cond_timedwait` reads its deadline against the REALTIME clock,
-/// while a `Clock` is a MONOTONIC instant, so pico (`system.c:178-203`) turns the
-/// deadline into an interval from `clock_now` and waits on that with the Darwin-only
-/// `pthread_cond_timedwait_relative_np`. This is the same.
-#[cfg(target_os = "macos")]
-unsafe fn cond_wait_until(cv: *mut RawCondvar, m: *mut RawMutex, abstime: &Clock) -> c_int {
-    let deadline = relative_deadline(clock_now(), *abstime);
-    libc::pthread_cond_timedwait_relative_np(cv, m, &deadline)
-}
-
-/// The interval from `now` to the absolute instant `abs`, or zero when `abs` is not
-/// in the future. Pure arithmetic and compiled on every Unix, so the one place the
-/// macOS wait differs from the others is tested where the tests run.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn relative_deadline(now: Clock, abs: Clock) -> Clock {
-    let mut sec = abs.tv_sec - now.tv_sec;
-    let mut nsec = abs.tv_nsec - now.tv_nsec;
-    if nsec < 0 {
-        sec -= 1;
-        nsec += 1_000_000_000;
+    /// Initialise a mutex in place.
+    ///
+    /// # Safety
+    /// `m` must point at storage for a `RawMutex`.
+    pub unsafe fn mutex_init(m: *mut RawMutex) -> ZResult {
+        sys(libc::pthread_mutex_init(m, std::ptr::null()))
     }
-    if sec < 0 {
-        return libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
+
+    /// Destroy a mutex.
+    ///
+    /// # Safety
+    /// `m` must point at an initialised, unlocked `RawMutex`.
+    pub unsafe fn mutex_destroy(m: *mut RawMutex) -> ZResult {
+        sys(libc::pthread_mutex_destroy(m))
+    }
+
+    /// Lock, blocking.
+    ///
+    /// # Safety
+    /// `m` must point at an initialised `RawMutex`.
+    pub unsafe fn mutex_lock(m: *mut RawMutex) -> ZResult {
+        sys(libc::pthread_mutex_lock(m))
+    }
+
+    /// Try to lock without blocking.
+    ///
+    /// # Safety
+    /// As `mutex_lock`.
+    pub unsafe fn mutex_try_lock(m: *mut RawMutex) -> ZResult {
+        sys(libc::pthread_mutex_trylock(m))
+    }
+
+    /// Unlock.
+    ///
+    /// # Safety
+    /// As `mutex_lock`, and the caller holds the lock.
+    pub unsafe fn mutex_unlock(m: *mut RawMutex) -> ZResult {
+        sys(libc::pthread_mutex_unlock(m))
+    }
+
+    // ---------------------------------------------------------------------------
+    // Condition variable
+    // ---------------------------------------------------------------------------
+
+    /// Initialise a condvar on `CLOCK_MONOTONIC`.
+    ///
+    /// The clock is set through a `pthread_condattr_t` exactly as pico does
+    /// (`system.c:160-166`), and it is load-bearing rather than incidental. Skipping it
+    /// leaves glibc's default `CLOCK_REALTIME`, and since `clock_now` is
+    /// `CLOCK_MONOTONIC`, a deadline computed from it would be read against a different
+    /// epoch: `condvar_wait_until` would return immediately or hang for the
+    /// wall-clock/uptime skew. The two only agree because both name the same clock. The
+    /// attr is destroyed on every path, including the failure one, because
+    /// `pthread_condattr_init` may allocate.
+    ///
+    /// # Safety
+    /// `cv` must point at storage for a `RawCondvar`.
+    pub unsafe fn condvar_init(cv: *mut RawCondvar) -> ZResult {
+        let mut attr: libc::pthread_condattr_t = std::mem::zeroed();
+        let rc = libc::pthread_condattr_init(&mut attr);
+        if rc != 0 {
+            return sys(rc);
+        }
+        let rc = condattr_use_monotonic(&mut attr);
+        let out = if rc != 0 {
+            sys(rc)
+        } else {
+            sys(libc::pthread_cond_init(cv, &attr))
         };
+        libc::pthread_condattr_destroy(&mut attr);
+        out
     }
-    libc::timespec {
-        tv_sec: sec,
-        tv_nsec: nsec,
+
+    /// Put `CLOCK_MONOTONIC` on the condattr, which is what makes an absolute deadline
+    /// taken from `clock_now` mean the same instant to the wait. macOS has no
+    /// `pthread_condattr_setclock`, and pico skips the call there (`system.c:162-165`);
+    /// `cond_wait_until` is where that gap is closed.
+    #[cfg(not(target_os = "macos"))]
+    unsafe fn condattr_use_monotonic(attr: *mut libc::pthread_condattr_t) -> c_int {
+        libc::pthread_condattr_setclock(attr, libc::CLOCK_MONOTONIC)
+    }
+
+    #[cfg(target_os = "macos")]
+    unsafe fn condattr_use_monotonic(_attr: *mut libc::pthread_condattr_t) -> c_int {
+        0
+    }
+
+    /// Destroy a condvar.
+    ///
+    /// # Safety
+    /// `cv` must point at an initialised `RawCondvar` nobody waits on.
+    pub unsafe fn condvar_destroy(cv: *mut RawCondvar) -> ZResult {
+        sys(libc::pthread_cond_destroy(cv))
+    }
+
+    /// Wake one waiter.
+    ///
+    /// # Safety
+    /// `cv` must point at an initialised `RawCondvar`.
+    pub unsafe fn condvar_signal(cv: *mut RawCondvar) -> ZResult {
+        sys(libc::pthread_cond_signal(cv))
+    }
+
+    /// Wait, releasing `m`.
+    ///
+    /// # Safety
+    /// `cv` and `m` must be initialised, and the caller holds `m`.
+    pub unsafe fn condvar_wait(cv: *mut RawCondvar, m: *mut RawMutex) -> ZResult {
+        sys(libc::pthread_cond_wait(cv, m))
+    }
+
+    /// Wait until an ABSOLUTE monotonic deadline.
+    ///
+    /// A timeout is `Z_ETIMEDOUT` and NOT the generic system error, because that
+    /// distinction is the whole point of the call: pico special-cases `ETIMEDOUT` ahead of
+    /// `_Z_CHECK_SYS_ERR` (`system.c:199-203`), and a caller that cannot tell "deadline
+    /// reached" from "the system refused" has no way to decide whether to retry.
+    ///
+    /// # Safety
+    /// As `condvar_wait`.
+    pub unsafe fn condvar_wait_until(
+        cv: *mut RawCondvar,
+        m: *mut RawMutex,
+        abstime: &Clock,
+    ) -> ZResult {
+        let rc = cond_wait_until(cv, m, abstime);
+        if rc == libc::ETIMEDOUT {
+            return Z_ETIMEDOUT;
+        }
+        sys(rc)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    unsafe fn cond_wait_until(cv: *mut RawCondvar, m: *mut RawMutex, abstime: &Clock) -> c_int {
+        libc::pthread_cond_timedwait(cv, m, abstime)
+    }
+
+    /// macOS: `pthread_cond_timedwait` reads its deadline against the REALTIME clock,
+    /// while a `Clock` is a MONOTONIC instant, so pico (`system.c:178-203`) turns the
+    /// deadline into an interval from `clock_now` and waits on that with the Darwin-only
+    /// `pthread_cond_timedwait_relative_np`. This is the same.
+    #[cfg(target_os = "macos")]
+    unsafe fn cond_wait_until(cv: *mut RawCondvar, m: *mut RawMutex, abstime: &Clock) -> c_int {
+        let deadline = relative_deadline(clock_now(), *abstime);
+        libc::pthread_cond_timedwait_relative_np(cv, m, &deadline)
+    }
+
+    /// The interval from `now` to the absolute instant `abs`, or zero when `abs` is not
+    /// in the future. Pure arithmetic and compiled on every Unix, so the one place the
+    /// macOS wait differs from the others is tested where the tests run.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(super) fn relative_deadline(now: Clock, abs: Clock) -> Clock {
+        let mut sec = abs.tv_sec - now.tv_sec;
+        let mut nsec = abs.tv_nsec - now.tv_nsec;
+        if nsec < 0 {
+            sec -= 1;
+            nsec += 1_000_000_000;
+        }
+        if sec < 0 {
+            return libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+        }
+        libc::timespec {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Task
+    // ---------------------------------------------------------------------------
+
+    /// Start a thread running `fun(arg)`.
+    ///
+    /// `pthread_create` directly, because upstream's is: the handle a caller gets back is
+    /// a real `pthread_t` it may hand to `task_join`, and a Rust `JoinHandle` cannot be
+    /// one. `attr` is passed through rather than ignored, because a program setting a
+    /// stack size on a constrained target is the reason the parameter exists.
+    ///
+    /// # Safety
+    /// `task` must be valid and writable; `attr` must be null or a valid `pthread_attr_t`.
+    pub unsafe fn task_spawn(
+        task: *mut RawTask,
+        attr: *mut TaskAttr,
+        fun: extern "C" fn(*mut c_void) -> *mut c_void,
+        arg: *mut c_void,
+    ) -> ZResult {
+        sys(libc::pthread_create(task, attr, fun, arg))
+    }
+
+    /// Wait for a started task to finish. The handle is not null.
+    ///
+    /// # Safety
+    /// `handle` must be a task `task_spawn` started and nothing has joined or detached.
+    pub unsafe fn task_join(handle: RawTask) -> ZResult {
+        sys(libc::pthread_join(handle, std::ptr::null_mut()))
+    }
+
+    /// Release a started task WITHOUT waiting. The handle is not null.
+    ///
+    /// # Safety
+    /// As `task_join`.
+    pub unsafe fn task_detach(handle: RawTask) -> ZResult {
+        sys(libc::pthread_detach(handle))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Task
-// ---------------------------------------------------------------------------
-
-/// Start a thread running `fun(arg)`.
-///
-/// `pthread_create` directly, because upstream's is: the handle a caller gets back is
-/// a real `pthread_t` it may hand to `task_join`, and a Rust `JoinHandle` cannot be
-/// one. `attr` is passed through rather than ignored, because a program setting a
-/// stack size on a constrained target is the reason the parameter exists.
-///
-/// # Safety
-/// `task` must be valid and writable; `attr` must be null or a valid `pthread_attr_t`.
-pub unsafe fn task_spawn(
-    task: *mut RawTask,
-    attr: *mut TaskAttr,
-    fun: extern "C" fn(*mut c_void) -> *mut c_void,
-    arg: *mut c_void,
-) -> ZResult {
-    sys(libc::pthread_create(task, attr, fun, arg))
-}
-
-/// Wait for a started task to finish. The handle is not null.
-///
-/// # Safety
-/// `handle` must be a task `task_spawn` started and nothing has joined or detached.
-pub unsafe fn task_join(handle: RawTask) -> ZResult {
-    sys(libc::pthread_join(handle, std::ptr::null_mut()))
-}
-
-/// Release a started task WITHOUT waiting. The handle is not null.
-///
-/// # Safety
-/// As `task_join`.
-pub unsafe fn task_detach(handle: RawTask) -> ZResult {
-    sys(libc::pthread_detach(handle))
-}
+#[cfg(feature = "multi-thread")]
+pub use threads::*;
 
 #[cfg(test)]
 mod tests {
@@ -541,6 +557,7 @@ mod tests {
     /// structs a C program stack-allocates through pico's header are 40 (64 on macOS)
     /// and 48 bytes, and those are the sizes the pthread objects wz initialises in
     /// place occupy.
+    #[cfg(feature = "multi-thread")]
     #[test]
     fn owned_sync_types_match_picos_measured_sizes() {
         // Linux: measured. macOS: `__sig` plus `__opaque[56]` for the mutex and
@@ -556,6 +573,7 @@ mod tests {
     // the layout pico programs see, and the Rust types must be exactly that large on
     // every host that builds them. A missing compiler fails the test; it is never a
     // skip.
+    #[cfg(feature = "multi-thread")]
     #[test]
     fn owned_sync_types_match_the_host_c_compilers_pthread_sizes() {
         use std::io::Write;
@@ -602,6 +620,7 @@ mod tests {
     }
 
     /// The one place the macOS condvar wait differs, tested where the tests run.
+    #[cfg(feature = "multi-thread")]
     #[test]
     fn a_relative_deadline_is_the_interval_to_the_instant_or_zero() {
         let same = |a: Clock, b: Clock| a.tv_sec == b.tv_sec && a.tv_nsec == b.tv_nsec;

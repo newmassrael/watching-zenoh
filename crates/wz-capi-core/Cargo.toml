@@ -65,6 +65,7 @@ default = [
     "advanced",
     "group",
     "gossip",
+    "multi-thread",
     "transport_tls",
     "transport_quic",
     "transport_quic_datagram",
@@ -287,6 +288,10 @@ group = ["wz-runtime-tokio/ext-pubsub-group-membership"]
 # it, which is how two peers that each reached a third come to meet when multicast scouting
 # reaches nobody.
 gossip = ["peer", "wz-runtime-tokio/routing-gossip"]
+# pico's header arm for its tasks (`deploy/capabilities.toml`). The model has no thread choice of
+# its own, since a session drives itself on its runtime either way, so nothing here reads it; it
+# is a feature because every capability is one of the core's.
+multi-thread = []
 
 [dependencies]
 # OS entropy for the per-session zid, as zenoh-pico does at `z_open`

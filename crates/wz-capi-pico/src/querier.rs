@@ -101,7 +101,7 @@ pub struct z_querier_get_options_t {
     pub payload: *mut z_moved_bytes_t,
     pub encoding: *mut c_void,
     pub attachment: *mut z_moved_bytes_t,
-    pub cancellation_token: *mut crate::sync::z_moved_cancellation_token_t,
+    pub cancellation_token: *mut crate::cancellation::z_moved_cancellation_token_t,
     /// `z_source_info_t*` — the `(zid, eid, sn)` stamped on the outbound Query
     /// body (ext 0x01). READ as of R311y562; it was carried opaque alongside
     /// `cancellation_token` and the two were named ignored TOGETHER, which
@@ -483,7 +483,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
                 // R311y575 — consumed on the same every-path line as the byte
                 // buffers, for the same reason: upstream's `z_querier_get` drops
                 // it unconditionally once the call is made.
-                crate::sync::take_moved_cancellation_token((*options).cancellation_token),
+                crate::cancellation::take_moved_cancellation_token((*options).cancellation_token),
             )
         };
         if callback.is_null() {

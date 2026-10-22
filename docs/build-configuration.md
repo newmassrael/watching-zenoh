@@ -24,8 +24,9 @@ original reproduced by naming it. Three things follow from it:
 
 ## 2. What exists
 
-- **Capabilities of the C ABI builds** (`deploy/capabilities.toml`): eighteen, all on
-  by default, generated into `deploy/Kconfig.capabilities` and cargo arguments by
+- **Capabilities of the C ABI builds** (`deploy/capabilities.toml`): nineteen, all on
+  by default (one of them, `multi-thread`, chooses pico's header arm: off is pico's
+  single-threaded C ABI, a separate library from the default one), generated into `deploy/Kconfig.capabilities` and cargo arguments by
   `scripts/lib/capability_config.py`, which also holds the three capi manifests to
   the declared graph. No Kconfig `rsource`s the generated file; the MCU images do
   not see it.
@@ -218,7 +219,7 @@ fragment. A preset file starts with `# wz-preset: 1`, `# catalog: <version>` and
 
 Each step lands with its own done-when; sizes are not estimated here.
 
-1. **One declaration and its generator** (C1, C2, C3, C6, C10, C11). Move the eighteen
+1. **One declaration and its generator** (C1, C2, C3, C6, C10, C11). Move the nineteen
    capabilities, the limits and the axis-like symbols of the MCU images into
    `deploy/wz-config.toml`; the generator absorbs `capability_config.py` and
    `limit_config.py`; the images use the generated Kconfig and CMake bridge; place
@@ -253,7 +254,9 @@ Each step lands with its own done-when; sizes are not estimated here.
    runs one cooperative task. First rewrite, as one table, which task touches each
    cell that is `Sync` today on the single-task rule; then a task seam in which the
    runtime supplies task bodies and attributes and the image creates the tasks. The
-   multi-task value is not selectable until the table is complete.
+   multi-task value is not selectable until the table is complete. This axis is wz's
+   own tasks on an MCU; which of pico's two C header arms the host drop-in serves is a
+   separate choice, already selectable as the `multi-thread` capability.
 9. **Policies that change the shape of the code**, each by section 5 and C3 (a
    strategy type parameter).
 10. **Platforms and packaging**: FreeRTOS+TCP, QNX, an installable SDK.

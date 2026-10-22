@@ -66,6 +66,7 @@ default = [
     "liveliness-get",
     "advanced",
     "gossip",
+    "multi-thread",
 ]
 # The capabilities pico's own CMake switches name (`Z_FEATURE_QUERY`, `Z_FEATURE_QUERYABLE`,
 # `Z_FEATURE_LIVELINESS`, `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`), each one feature
@@ -111,6 +112,15 @@ admin-space = ["queryable"]
 # `gossip`: a session that is told of a node by one it holds a link to dials it (see the
 # runtime's feature of the same name). Pico itself has no such plane.
 gossip = ["peer", "wz-capi-core/gossip"]
+# `multi-thread` (`Z_FEATURE_MULTI_THREAD`, on as upstream's is): which of pico's two header arms
+# this library is the drop-in for. On: the read and lease task doors (`zp_start_read_task`, ...),
+# the host mutex, condvar and task (`z_mutex_*`, `z_condvar_*`, `z_task_*`), the three-field
+# `z_open_options_t`, and channel collections that block. Off: the single-threaded entry points
+# (`zp_read`, `zp_send_keep_alive`, `zp_send_join`, `zp_spin_once`), a one-byte
+# `z_open_options_t`, and channel collections that never block, sized as that arm's header sizes
+# them. The two arms disagree on struct sizes the C program allocates, so a program must link the
+# build of the arm it compiled against; a session drives itself on its own runtime in both.
+multi-thread = ["wz-capi-core/multi-thread"]
 serial-drive-own-thread = ["wz-capi-core/serial-drive-own-thread"]
 # Receive busy-poll: on in a default build through wz-capi-core's own default, and named here so a
 # build that lists its features can say so; see wz-capi-core's feature of this name.
