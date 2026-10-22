@@ -86,6 +86,14 @@ codec-response = ["wz-session-core/codec-response"]
 codec-response-final = ["wz-session-core/codec-response-final"]
 liveliness-token = ["wz-session-core/liveliness-token"]
 query-queryable = ["wz-session-core/query-queryable"]
+# A node that ASKS: the request it writes, the replies and the final it is answered with, and the
+# selector parameters it can state. `SlotDispatch::get` on the slot profile.
+query-get = [
+    "wz-session-core/codec-request",
+    "wz-session-core/codec-response",
+    "wz-session-core/codec-response-final",
+    "wz-session-core/query-selector-parameters",
+]
 pubsub-put = ["wz-session-core/pubsub-put"]
 # The dialer and the connection manager: a node that holds an initiator session with each endpoint
 # of an `EndpointSource` and re-dials the ones that drop. Nothing in it is the admin space's, so a

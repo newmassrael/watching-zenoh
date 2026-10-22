@@ -525,6 +525,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "client-node",
                 "dial",
                 "liveliness-token",
+                # A node that ASKS: `SlotDispatch::get`, its request and its error, in
+                # `app_layer` behind `all(session-slot, query-get)`, and the sweep of
+                # expired queries in the dispatch. Selected by an image (`host-slot-node
+                # --features get`), never added to by a library caller.
+                "query-get",
                 "session-slot",
                 "test-support",
                 "transport-multicast",
@@ -988,6 +993,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "codec-response-final",
             "dial",
             "liveliness-token",
+            "query-get",
             "session-slot",
             "test-support",
             "transport-multicast",

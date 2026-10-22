@@ -235,10 +235,149 @@ where
     K: ObserverSinks + 'static,
 {
     fn on_event(&mut self, event: IterationEvent<'_>) {
-        let mut peers = self.handle.peers().borrow_mut();
-        self.observer
-            .borrow_mut()
-            .dispatch(&mut peers, &mut self.requesters, event, &*self.handle);
+        {
+            let mut peers = self.handle.peers().borrow_mut();
+            self.observer.borrow_mut().dispatch(
+                &mut peers,
+                &mut self.requesters,
+                event,
+                &*self.handle,
+            );
+        }
+        // A query whose deadline has passed ends with a timeout reply and its final, here, because
+        // this is the one place that runs on every iteration of the session and holds the pending
+        // table: nothing else on this profile sweeps it.
+        #[cfg(feature = "query-get")]
+        {
+            let now_ms = wz_runtime_core::TimeSource::now_monotonic_ms(&self.handle.clock);
+            self.requesters.replies.sweep_timed_out(now_ms);
+        }
+    }
+}
+
+/// What a `get` asks of a session on the slot profile, every field borrowed from the caller. The
+/// owner of a pending table and a sink has no other way to say it: the table is the session's own,
+/// beside its slot, and the sink is the application's closed type `R`.
+#[cfg(all(feature = "session-slot", feature = "query-get"))]
+#[derive(Debug, Clone, Copy)]
+pub struct GetRequest<'a> {
+    /// The queried keyexpr, written as a literal. Replies whose key does not intersect it are not
+    /// delivered, as both upstreams keep.
+    pub keyexpr: &'a str,
+    /// The selector parameters; empty states none.
+    pub parameters: &'a [u8],
+    /// The consolidation the peer is asked for, or none for its default. The sink sees every reply
+    /// that is delivered: nothing consolidates locally on this profile.
+    pub consolidation: Option<wz_session_core::query_mode::ConsolidationMode>,
+    /// The target of the query, or none for the default.
+    pub target: Option<wz_session_core::query_mode::QueryTarget>,
+    /// How long the query may stay pending, in milliseconds; zero is
+    /// [`DEFAULT_GET_TIMEOUT_MS`]. A pending entry that never expired would hold one of the
+    /// table's few rows for ever, so there is no unbounded query here. A nonzero value is also
+    /// sent to the peer as the request's timeout.
+    pub timeout_ms: u32,
+    /// The QoS of the request; the default is not written.
+    pub qos: wz_session_core::sample::QosLevel,
+}
+
+/// How long a query with no timeout of its own stays pending: zenoh's default.
+#[cfg(all(feature = "session-slot", feature = "query-get"))]
+pub const DEFAULT_GET_TIMEOUT_MS: u32 = 10_000;
+
+/// Why a `get` was not issued. Nothing was sent and nothing is pending in either case.
+#[cfg(all(feature = "session-slot", feature = "query-get"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GetError {
+    /// The pending table is full, or the keyexpr is longer than the table keeps.
+    Register(wz_session_core::registry_error::RegisterError),
+    /// The request could not be written or sent: the session has no transport at the moment, or
+    /// the keyexpr is empty.
+    Send(wz_session_core::send_wire_error::SendWireError),
+}
+
+#[cfg(all(feature = "session-slot", feature = "query-get"))]
+impl<C, R, G, K> SlotDispatch<C, R, G, K>
+where
+    C: ClockSource + 'static,
+    R: ReplySink,
+    G: ReplySink,
+    K: ObserverSinks + 'static,
+{
+    /// Ask a query on this session and deliver what answers it to `sink`.
+    ///
+    /// In the order both upstreams keep: the pending entry is registered first (so no solicited
+    /// reply can precede it), then the request is written into the slot the link lends, and an
+    /// entry whose request failed to go out is removed again, so a refused query leaves no row
+    /// behind that would later end with a final for a query nobody was told was asked. The
+    /// request id is fresh, and the sink's `on_final` runs once, when the peer's final arrives or
+    /// the deadline passes.
+    ///
+    /// Nothing here allocates: the request is encoded from `request`'s own text, and the pending
+    /// row is one of the table's.
+    ///
+    /// # Errors
+    ///
+    /// [`GetError::Register`] when the table has no free row, [`GetError::Send`] when the request
+    /// could not go out.
+    pub fn get(
+        &mut self,
+        request: &GetRequest<'_>,
+        sink: R,
+    ) -> Result<wz_session_core::reply::ReplyHandle, GetError> {
+        use wz_session_core::reply_acceptance::ReplyAcceptance;
+
+        let actions = &*self.handle;
+        let rid = actions.alloc_next_request_id();
+        let timeout_ms = match request.timeout_ms {
+            0 => DEFAULT_GET_TIMEOUT_MS,
+            asked => asked,
+        };
+        let now_ms = wz_runtime_core::TimeSource::now_monotonic_ms(&actions.clock);
+        let handle = self
+            .requesters
+            .replies
+            .register_sink(
+                rid,
+                // One final: the peer's. A query answered from this node's own queryables
+                // would be a second, and a session on this profile does not loop a get back.
+                1,
+                Some(now_ms + u64::from(timeout_ms)),
+                ReplyAcceptance::Matching(request.keyexpr),
+                sink,
+            )
+            .map_err(GetError::Register)?;
+        let sent = actions.send_get_parts(wz_session_core::lent_request::GetParts {
+            rid,
+            keyexpr: request.keyexpr,
+            parameters: request.parameters,
+            consolidation: request.consolidation,
+            target: request.target,
+            timeout_ms: u64::from(request.timeout_ms),
+            qos: request.qos,
+        });
+        if let Err(why) = sent {
+            self.requesters.replies.unregister(rid);
+            return Err(GetError::Send(why));
+        }
+        Ok(handle)
+    }
+
+    /// Whether the session has completed its handshake and not yet lost its transport: a `get`
+    /// before that is refused as [`GetError::Send`].
+    pub fn is_established(&self) -> bool {
+        self.handle.is_established()
+    }
+
+    /// How many queries are waiting for their final.
+    pub fn pending_gets(&self) -> usize {
+        self.requesters.replies.len()
+    }
+
+    /// The earliest deadline among the pending queries, in the session clock's milliseconds. A
+    /// link that sleeps while the session is idle must wake no later than this, or a query ends
+    /// late by as much as the sleep.
+    pub fn next_get_deadline_ms(&self) -> Option<u64> {
+        self.requesters.replies.next_deadline_ms()
     }
 }
 
