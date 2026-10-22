@@ -1709,10 +1709,7 @@ where
                 None
             }
         });
-        if let Some(on_open) = on_open.take() {
-            on_open(Ok(()));
-        }
-        let outcome = drive_multicast_session_with_membership(
+        let drive = drive_multicast_session_with_membership(
             &mut dispatcher,
             MulticastDriveConfig {
                 params,
@@ -1730,8 +1727,28 @@ where
             Some(&mut *shutdown),
             recorder.recorder(),
             membership_join.as_ref().map(|join| &join.membership),
-        )
-        .await;
+        );
+        // The face is reported open once the loop has attached the group's pipeline to
+        // `producer`, not when the link is bound: what the host sends the moment it hears the
+        // face is up (open-debt item 913 — zenoh-pico's open-time Interest, a put right after
+        // the session opens) would otherwise be dropped as unlinked. A loop that ends before it
+        // attaches reports the open as it ends, as the bound link did open.
+        let outcome = match on_open.take() {
+            None => drive.await,
+            Some(on_open) => {
+                let mut drive = core::pin::pin!(drive);
+                let ended = tokio::select! {
+                    biased;
+                    outcome = &mut drive => Some(outcome),
+                    () = producer.linked() => None,
+                };
+                on_open(Ok(()));
+                match ended {
+                    Some(outcome) => outcome,
+                    None => drive.await,
+                }
+            }
+        };
         // This join's transport ends with its loop, before any re-join opens the
         // next one — and its members with it.
         recorder.close();
