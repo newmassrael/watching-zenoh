@@ -42,7 +42,7 @@ use crate::ext_chain::decode_ext_chain;
     feature = "codec-close",
     feature = "codec-keep-alive"
 ))]
-use crate::ext_chain::decode_handshake_ext_chain;
+use crate::ext_chain::decode_handshake_ext_chain_into;
 pub use crate::ext_chain::ExtChainOwned;
 #[cfg(feature = "alloc")]
 use crate::link::RxBytes;
@@ -1218,20 +1218,21 @@ fn parse_init(
     // instead, by the 4-bit id against a list of ids, which let a known
     // id with the mandatory bit set (`0x58`, the region name as a
     // mandatory ZBuf) through and refused an unknown one at the decode.
-    let extensions = if has_ext {
-        decode_handshake_ext_chain(cursor)?
-    } else {
-        ExtChainOwned::new()
+    //
+    // The frame is built first and its chain is read where it lies: a chain read as a value
+    // and moved in is 520 bytes (and the `Result` it comes back in 528) beside the frame's 712.
+    let mut frame = InboundFrame::Init {
+        is_ack: (flags & wire_const::FLAG_T_INIT_A) != 0,
+        has_ext,
+        body,
+        extensions: ExtChainOwned::new(),
     };
-    Ok((
-        InboundFrame::Init {
-            is_ack: (flags & wire_const::FLAG_T_INIT_A) != 0,
-            has_ext,
-            body,
-            extensions,
-        },
-        bytes.len() - cursor.remaining(),
-    ))
+    if has_ext {
+        if let InboundFrame::Init { extensions, .. } = &mut frame {
+            decode_handshake_ext_chain_into(cursor, extensions)?;
+        }
+    }
+    Ok((frame, bytes.len() - cursor.remaining()))
 }
 
 /// The `Open` arm of [`parse_unit`], out of line (see [`parse_init`]).
@@ -1252,20 +1253,18 @@ fn parse_open(
     // unit — the same boundary rule as `multicast_join::decode_join`.
     body.lease =
         crate::lease::lease_from_wire((flags & wire_const::FLAG_T_OPEN_T) != 0, body.lease);
-    let extensions = if has_ext {
-        decode_handshake_ext_chain(cursor)?
-    } else {
-        ExtChainOwned::new()
+    let mut frame = InboundFrame::Open {
+        is_ack: (flags & wire_const::FLAG_T_OPEN_A) != 0,
+        has_ext,
+        body,
+        extensions: ExtChainOwned::new(),
     };
-    Ok((
-        InboundFrame::Open {
-            is_ack: (flags & wire_const::FLAG_T_OPEN_A) != 0,
-            has_ext,
-            body,
-            extensions,
-        },
-        bytes.len() - cursor.remaining(),
-    ))
+    if has_ext {
+        if let InboundFrame::Open { extensions, .. } = &mut frame {
+            decode_handshake_ext_chain_into(cursor, extensions)?;
+        }
+    }
+    Ok((frame, bytes.len() - cursor.remaining()))
 }
 
 /// The `Close` arm of [`parse_unit`], out of line (see [`parse_init`]).
@@ -1278,23 +1277,21 @@ fn parse_close(
     cursor: &mut SceCursor<'_>,
 ) -> Result<(InboundFrame, usize), InboundParseError> {
     let body = Close::decode(cursor)?;
-    let extensions = if has_ext {
-        decode_handshake_ext_chain(cursor)?
-    } else {
-        ExtChainOwned::new()
+    let mut frame = InboundFrame::Close {
+        reason: body.reason,
+        // R311y839 — the scope bit, read off the parent header exactly
+        // as the Open arm reads `FLAG_T_OPEN_A` and the Frame arm reads
+        // `FLAG_T_FRAME_R`.
+        session: (flags & wire_const::FLAG_T_CLOSE_S) != 0,
+        has_ext,
+        extensions: ExtChainOwned::new(),
     };
-    Ok((
-        InboundFrame::Close {
-            reason: body.reason,
-            // R311y839 — the scope bit, read off the parent header exactly
-            // as the Open arm reads `FLAG_T_OPEN_A` and the Frame arm reads
-            // `FLAG_T_FRAME_R`.
-            session: (flags & wire_const::FLAG_T_CLOSE_S) != 0,
-            has_ext,
-            extensions,
-        },
-        bytes.len() - cursor.remaining(),
-    ))
+    if has_ext {
+        if let InboundFrame::Close { extensions, .. } = &mut frame {
+            decode_handshake_ext_chain_into(cursor, extensions)?;
+        }
+    }
+    Ok((frame, bytes.len() - cursor.remaining()))
 }
 
 /// R69b — map a parsed inbound transport frame to the matching
@@ -1414,18 +1411,17 @@ fn decode_keep_alive(
 ) -> Result<(InboundFrame, usize), InboundParseError> {
     let mut cursor = SceCursor::new(&bytes[1..]);
     let _body = KeepAlive::decode(&mut cursor)?;
-    let extensions = if has_ext {
-        decode_handshake_ext_chain(&mut cursor)?
-    } else {
-        ExtChainOwned::new()
+    // The frame first, its chain read where it lies (see `parse_init`).
+    let mut frame = InboundFrame::KeepAlive {
+        has_ext,
+        extensions: ExtChainOwned::new(),
     };
-    Ok((
-        InboundFrame::KeepAlive {
-            has_ext,
-            extensions,
-        },
-        bytes.len() - cursor.remaining(),
-    ))
+    if has_ext {
+        if let InboundFrame::KeepAlive { extensions, .. } = &mut frame {
+            decode_handshake_ext_chain_into(&mut cursor, extensions)?;
+        }
+    }
+    Ok((frame, bytes.len() - cursor.remaining()))
 }
 
 /// The transport-OAM body (`T_MID_OAM`, 0x00), decoded off its own cursor.

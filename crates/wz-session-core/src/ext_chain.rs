@@ -113,7 +113,11 @@ pub type ExtChainOwned = Vec<ExtEntryOwned>;
 pub type ExtChainOwned = heapless::Vec<ExtEntryOwned, { crate::parse_error::MAX_EXT_CHAIN_DEPTH }>;
 
 /// [`decode_ext_chain`] into the form a received handshake message holds its
-/// chain in ([`ExtChainOwned`]).
+/// chain in ([`ExtChainOwned`]), read into a chain the caller already holds (empty, as
+/// [`ExtChainOwned::new`] makes it): the caller builds the message the chain belongs to first,
+/// so that the chain (520 bytes on `session-slot`) is read where it will stay and is not a value
+/// of its own on the way there. On an error the chain holds the entries read so far, which the
+/// caller discards with the message.
 ///
 /// An entry's own body is a separate matter: an owned entry carries its bytes
 /// in the SCE default storage, so an extension whose body is a byte string (the
@@ -126,19 +130,20 @@ pub type ExtChainOwned = heapless::Vec<ExtEntryOwned, { crate::parse_error::MAX_
     feature = "codec-close",
     feature = "codec-keep-alive"
 ))]
-pub(crate) fn decode_handshake_ext_chain(
+pub(crate) fn decode_handshake_ext_chain_into(
     cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,
-) -> Result<ExtChainOwned, crate::parse_error::InboundParseError> {
+    entries: &mut ExtChainOwned,
+) -> Result<(), crate::parse_error::InboundParseError> {
     #[cfg(not(feature = "session-slot"))]
     {
-        decode_ext_chain(cursor)
+        *entries = decode_ext_chain(cursor)?;
+        Ok(())
     }
     #[cfg(feature = "session-slot")]
     {
         use crate::parse_error::{InboundParseError, MAX_EXT_CHAIN_DEPTH};
         use wz_codecs::ext_entry::ExtEntry;
 
-        let mut entries = ExtChainOwned::new();
         for _ in 0..MAX_EXT_CHAIN_DEPTH {
             let entry = ExtEntry::decode(cursor).map_err(InboundParseError::Codec)?;
             let z = entry.z();
@@ -148,7 +153,7 @@ pub(crate) fn decode_handshake_ext_chain(
                 return Err(InboundParseError::ExtChainOverflow);
             }
             if !z {
-                return Ok(entries);
+                return Ok(());
             }
         }
         Err(InboundParseError::ExtChainOverflow)
@@ -300,7 +305,7 @@ pub(crate) fn encode_ext_chain_into(
 /// longer a list to be short of.
 ///
 /// The heap profile's form: it returns a growable `Vec`. The slot profile reads
-/// its chain through [`decode_handshake_ext_chain`], into an array.
+/// its chain through [`decode_handshake_ext_chain_into`], into an array.
 #[cfg(feature = "alloc")]
 pub(crate) fn decode_ext_chain(
     cursor: &mut sce_forge_runtime::codec::SceCursor<'_>,
