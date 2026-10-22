@@ -42,6 +42,10 @@ VENDOR_DIR="$ROOT/vendor/zenoh-pico"
 EXAMPLES_DIR="$VENDOR_DIR/examples"
 BUILD_DIR="$ROOT/target/zenoh-pico-build"
 INSTALL_DIR="$ROOT/target/zenoh-pico-cli"
+# The arm built with Z_FEATURE_MULTICAST_DECLARATIONS (below). Variables of their own, because
+# the provenance gate binds a root to its stamp by the variable the root is assigned to.
+BUILD_DIR_MCDECL="$ROOT/target/zenoh-pico-build-mcdecl"
+INSTALL_DIR_MCDECL="$ROOT/target/zenoh-pico-cli-mcdecl"
 
 # Curated CLI binary set: the four that the AP MVP demo round-trip
 # matrix needs (R121c+ integration tests). Adding more here costs
@@ -676,7 +680,7 @@ done
 # upstream's own CI runs `tests/z_test_peer_multicast` at both values of the switch
 # (`vendor/zenoh-pico/.github/workflows/ci.yml` @
 # `Z_FEATURE_MULTICAST_DECLARATIONS: ${{ matrix.feature_declarations }}`).
-cmake -B "${BUILD_DIR}-mcdecl" -S "$EXAMPLES_DIR" \
+cmake -B "${BUILD_DIR_MCDECL}" -S "$EXAMPLES_DIR" \
     -DCMAKE_C_STANDARD=11 \
     -DCMAKE_BUILD_TYPE=Release \
     -DZ_FEATURE_UNSTABLE_API=ON \
@@ -687,7 +691,7 @@ cmake -B "${BUILD_DIR}-mcdecl" -S "$EXAMPLES_DIR" \
     -DZ_FEATURE_CONNECTIVITY=1 \
     -DZ_FEATURE_MULTICAST_DECLARATIONS=1 >&2
 
-GENERATED_CONFIG_MCDECL="${BUILD_DIR}-mcdecl/zenohpico/include/zenoh-pico/config.h"
+GENERATED_CONFIG_MCDECL="${BUILD_DIR_MCDECL}/zenohpico/include/zenoh-pico/config.h"
 if [[ ! -f "$GENERATED_CONFIG_MCDECL" ]]; then
     echo "build-zenoh-pico-cli: mcdecl-arm config.h missing: $GENERATED_CONFIG_MCDECL" >&2
     exit 1
@@ -718,15 +722,15 @@ done
 
 # The multicast-declarations arm's programs, and its library beside them in its own build
 # directory, staged into a root of its own.
-cmake --build "${BUILD_DIR}-mcdecl" --target "${MCDECL_TARGETS[@]}" -j"$(nproc)" >&2
-mkdir -p "${INSTALL_DIR}-mcdecl"
+cmake --build "${BUILD_DIR_MCDECL}" --target "${MCDECL_TARGETS[@]}" -j"$(nproc)" >&2
+mkdir -p "${INSTALL_DIR_MCDECL}"
 for bin in "${MCDECL_TARGETS[@]}"; do
-    src="${BUILD_DIR}-mcdecl/$bin"
+    src="${BUILD_DIR_MCDECL}/$bin"
     if [[ ! -x "$src" ]]; then
         echo "build-zenoh-pico-cli: expected mcdecl binary missing: $src" >&2
         exit 1
     fi
-    install -m 0755 "$src" "${INSTALL_DIR}-mcdecl/$bin"
+    install -m 0755 "$src" "${INSTALL_DIR_MCDECL}/$bin"
 done
 
 # R2326 (unregistered open-debt item 10) — record WHICH vendor/zenoh-pico state
@@ -751,8 +755,8 @@ done
 # makes the stamp permanently unmatchable.
 vendored_oracle_stamp_root "$INSTALL_DIR" "$_wzpico_token"
 vendored_oracle_stamp_root "$BUILD_DIR" "$_wzpico_token"
-vendored_oracle_stamp_root "${INSTALL_DIR}-mcdecl" "$_wzpico_token"
-vendored_oracle_stamp_root "${BUILD_DIR}-mcdecl" "$_wzpico_token"
+vendored_oracle_stamp_root "${INSTALL_DIR_MCDECL}" "$_wzpico_token"
+vendored_oracle_stamp_root "${BUILD_DIR_MCDECL}" "$_wzpico_token"
 
 # R2327b — verify the contract this script has just asserted, HERE, rather than
 # leaving a hosted lane to discover it. R2326 shipped a stamp that could never
@@ -770,9 +774,9 @@ vendored_oracle_assert_fresh "$INSTALL_DIR" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 vendored_oracle_assert_fresh "$BUILD_DIR" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
-vendored_oracle_assert_fresh "${INSTALL_DIR}-mcdecl" build-zenoh-pico-cli \
+vendored_oracle_assert_fresh "${INSTALL_DIR_MCDECL}" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
-vendored_oracle_assert_fresh "${BUILD_DIR}-mcdecl" build-zenoh-pico-cli \
+vendored_oracle_assert_fresh "${BUILD_DIR_MCDECL}" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 
 echo "build-zenoh-pico-cli: installed ${#TARGETS[@]} binaries to $INSTALL_DIR" >&2
