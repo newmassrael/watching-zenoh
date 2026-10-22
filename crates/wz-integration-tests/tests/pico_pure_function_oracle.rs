@@ -665,7 +665,7 @@ fn serialized_bytes_agree_with_the_real_pico_library() {
 
         // Length-prefixed strings, including the empty one and a multi-byte
         // UTF-8 body (whose LENGTH is in bytes, not characters — an easy slip).
-        for probe in ["", "a", "alpha", "hello world", "日本語テキスト"] {
+        for probe in ["", "a", "alpha", "hello world", "한국어텍스트"] {
             assert_eq!(
                 serialize_str(&wz, probe),
                 serialize_str(&pico, probe),
