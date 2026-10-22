@@ -172,9 +172,11 @@ pub struct McastFaceParts<'a> {
 pub(super) struct McastLeg {
     pub(super) session: TokioMulticastSession,
     pub(super) revised: Arc<Notify>,
-    /// Whether a write filter asks this group, so that what its members declare decides
-    /// whether a put leaves ([`GroupDeclarations::asks_for_filters`]).
-    pub(super) asks: bool,
+    /// What the session tells this group and asks it: whether a write filter asks it, so that
+    /// what its members declare decides whether a put leaves
+    /// ([`GroupDeclarations::asks_for_filters`]), and whether a put names its key by a
+    /// declaration the group holds ([`GroupDeclarations::declares_keyexprs`]).
+    pub(super) declarations: GroupDeclarations,
 }
 
 impl Inner {
@@ -189,7 +191,7 @@ impl Inner {
                 .map(|face| McastLeg {
                     session: face.session.clone(),
                     revised: face.revised.clone(),
-                    asks: face.declarations.asks_for_filters(),
+                    declarations: face.declarations,
                 })
                 .collect(),
         );
@@ -216,7 +218,7 @@ fn group_key<'a>(
     keyexpr: &'a str,
     wire: &'a WireKey,
 ) -> GroupKey<'a> {
-    if declarations == GroupDeclarations::Mapped && wire.mapping_id != 0 {
+    if declarations.declares_keyexprs() && wire.mapping_id != 0 {
         GroupKey {
             mapping_id: wire.mapping_id,
             suffix: wire.suffix.as_deref(),
@@ -236,7 +238,7 @@ fn retraction_key<'a>(
     retraction: Option<&'a RetractionKey>,
 ) -> GroupKey<'a> {
     match retraction {
-        Some(own) if declarations == GroupDeclarations::Mapped && own.mapping_id != 0 => GroupKey {
+        Some(own) if declarations.declares_keyexprs() && own.mapping_id != 0 => GroupKey {
             mapping_id: own.mapping_id,
             suffix: Some(own.suffix.as_str()),
         },
@@ -433,7 +435,7 @@ impl SharedSession {
         // (`vendor/zenoh-pico/src/session/interest.c` @
         // `z_result_t _z_interest_pull_resource_from_peers(_z_session_t *zn) {`). Best effort:
         // a member's own declarations reach the group later all the same.
-        if declarations == GroupDeclarations::Mapped {
+        if declarations.declares_keyexprs() {
             let interest_id = guard.take_entity_id();
             let _ = session.ask(
                 interest_id,
@@ -685,7 +687,7 @@ impl SharedSession {
             return;
         };
         for face in guard.mcast_faces.values() {
-            if face.declarations == GroupDeclarations::Mapped {
+            if face.declarations.declares_keyexprs() {
                 let _ = face.session.announce_keyexpr(id, keyexpr);
             }
         }
@@ -694,7 +696,7 @@ impl SharedSession {
     /// Retract keyexpr `id` from every group told of it.
     pub(super) fn retract_keyexpr_on_groups(guard: &Inner, id: u64) {
         for face in guard.mcast_faces.values() {
-            if face.declarations == GroupDeclarations::Mapped {
+            if face.declarations.declares_keyexprs() {
                 let _ = face.session.retract_keyexpr(id);
             }
         }

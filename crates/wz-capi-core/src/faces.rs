@@ -334,11 +334,20 @@ enum PutKey<'a> {
     /// the key reaches is left unwritten.
     Literal(&'a str),
     /// A declared alias the caller holds no literal for: a face resolves it through its
-    /// own table, and a group, which is told no declaration, is sent the literal it
-    /// stands for.
+    /// own table, a group told the session's keyexprs is sent the alias, and any other
+    /// group the literal it stands for.
     // Read only by the group leg, which a build without the multicast transport has not.
     #[cfg_attr(not(feature = "multicast-transport"), allow(dead_code))]
     Alias {
+        mapping_id: u64,
+        suffix: Option<&'a str>,
+    },
+    /// A declared alias together with the literal it stands for, which the caller holds:
+    /// every leg can name the literal, and a group told the session's keyexprs is sent the
+    /// alias (open-debt item 913).
+    #[cfg_attr(not(feature = "multicast-transport"), allow(dead_code))]
+    Declared {
+        literal: &'a str,
         mapping_id: u64,
         suffix: Option<&'a str>,
     },
@@ -348,7 +357,7 @@ impl<'a> PutKey<'a> {
     /// The literal, when the caller holds it.
     fn literal(self) -> Option<&'a str> {
         match self {
-            PutKey::Literal(literal) => Some(literal),
+            PutKey::Literal(literal) | PutKey::Declared { literal, .. } => Some(literal),
             PutKey::Alias { .. } => None,
         }
     }
@@ -406,7 +415,9 @@ impl FanTargets {
     /// a put to whatever the filter says ([`crate::drive::GroupDeclarations::asks_for_filters`]).
     #[cfg(feature = "multicast-transport")]
     fn has_unasked_groups(&self) -> bool {
-        self.groups.iter().any(|group| !group.asks)
+        self.groups
+            .iter()
+            .any(|group| !group.declarations.asks_for_filters())
     }
 
     /// A build without the multicast transport has no group.
@@ -3193,12 +3204,15 @@ impl SharedSession {
     }
 
     /// The group legs of a publish (open-debt item 913): ONE send per group reaches every
-    /// member. A group is told no declaration, so the key goes by its literal, and an alias
-    /// is resolved to it through the local plane, which holds every declaration this
-    /// session made ([`Self::declare_keyexpr`]); an alias the plane does not know is one no
-    /// face was told of either, and is skipped here as it is there. Best-effort per group,
-    /// as per face: a group whose link is down is skipped, and only an error every leg
-    /// would meet is surfaced.
+    /// member. A group told the session's keyexprs
+    /// ([`crate::drive::GroupDeclarations::declares_keyexprs`]) is sent an alias as the alias,
+    /// as zenoh-pico names a put's key with its multicast declarations on; any other group
+    /// is told no declaration, so the key goes by its literal, and an alias is resolved to
+    /// it through the local plane, which holds every declaration this session made
+    /// ([`Self::declare_keyexpr`]); an alias the plane does not know is one no face was told
+    /// of either, and is skipped here as it is there. Best-effort per group, as per face: a
+    /// group whose link is down is skipped, and only an error every leg would meet is
+    /// surfaced.
     #[cfg(feature = "multicast-transport")]
     fn group_fan(
         &self,
@@ -3211,7 +3225,9 @@ impl SharedSession {
             return Ok(0);
         }
         let literal = match key {
-            PutKey::Literal(literal) => std::borrow::Cow::Borrowed(literal),
+            PutKey::Literal(literal) | PutKey::Declared { literal, .. } => {
+                std::borrow::Cow::Borrowed(literal)
+            }
             PutKey::Alias { mapping_id, suffix } => {
                 let Some(mut literal) = self.local.actions().resolve_outbound_mapping(mapping_id)
                 else {
@@ -3223,9 +3239,22 @@ impl SharedSession {
                 std::borrow::Cow::Owned(literal)
             }
         };
+        let declared = match key {
+            PutKey::Alias { mapping_id, suffix }
+            | PutKey::Declared {
+                mapping_id, suffix, ..
+            } => Some(wz_runtime_tokio::session::GroupKey { mapping_id, suffix }),
+            PutKey::Literal(_) => None,
+        };
         let mut delivered = 0usize;
         for group in targets.groups.iter() {
-            match Leg::of_publish(group.session.publish(&literal, payload, remote.clone())) {
+            let sent = match declared {
+                Some(name) if group.declarations.declares_keyexprs() => group
+                    .session
+                    .publish_named_on_group(&literal, name, payload, remote.clone()),
+                _ => group.session.publish(&literal, payload, remote.clone()),
+            };
+            match Leg::of_publish(sent) {
                 Leg::Delivered(n) => delivered += n,
                 Leg::Skipped => {}
                 Leg::Refused => return Err(FanoutError::ExceedsCapacity),
@@ -3323,7 +3352,11 @@ impl SharedSession {
         // both), so an unknown mapping is the caller publishing on an alias it never
         // declared, and is skipped on every leg (see [`Leg::of_alias`]).
         let key = match key {
-            Some(literal) => PutKey::Literal(literal),
+            Some(literal) => PutKey::Declared {
+                literal,
+                mapping_id,
+                suffix,
+            },
             None => PutKey::Alias { mapping_id, suffix },
         };
         self.fan_out(opts, key, payload, |session, leg| {
@@ -3347,7 +3380,12 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        self.fan_out(opts, PutKey::Literal(keyexpr), payload, |session, leg| {
+        let key = PutKey::Declared {
+            literal: keyexpr,
+            mapping_id,
+            suffix: None,
+        };
+        self.fan_out(opts, key, payload, |session, leg| {
             Leg::of_alias(
                 session
                     .publish_aliased(mapping_id, None, keyexpr, payload, leg)
@@ -3879,10 +3917,12 @@ impl SharedSession {
     /// every test that runs with real faces still tests the counters.
     ///
     /// A session that holds a group (open-debt item 913) answers [`FilteredPut::NotPlain`]
-    /// before the filter is asked: the lane writes unicast faces only, and zenoh-pico writes
-    /// to a multicast transport whatever its write filter says (`vendor/zenoh-pico/src/api/api.c`
-    /// @ `session->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE ||`), so the general publish that
-    /// follows reaches the group unfiltered.
+    /// unless the filter holds the put back ([`Self::write_filter_holds_back`]): the lane
+    /// writes unicast faces only, so the general publish that follows reaches the group.
+    /// zenoh-pico writes to a multicast transport whatever its write filter says unless its
+    /// multicast declarations are on (`vendor/zenoh-pico/src/api/api.c` @
+    /// `session->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE ||`), when the group's answer holds
+    /// the put back as a peer's does.
     pub fn put_plain_filtered(
         &self,
         filter: FilterId,
@@ -3896,22 +3936,25 @@ impl SharedSession {
             let kept = {
                 let guard = self.lock();
                 let targets = guard.fan_targets();
+                // A session with a group takes the long way below, which asks the filter
+                // outside this lock.
                 if targets.has_groups() {
-                    return FilteredPut::NotPlain;
+                    None
+                } else {
+                    guard
+                        .filters
+                        .iter()
+                        .find(|e| e.id == filter)
+                        // A filter that counts the session's own entities has no kept answer
+                        // for them; it is asked the long way, which reads them.
+                        .filter(|entry| !entry.count_local)
+                        .and_then(|entry| {
+                            let token = guard.filter_token(entry.plane)?;
+                            let kept = entry.cache?;
+                            ((kept.generation, kept.epoch_sum) == token)
+                                .then_some((kept.inactive, targets))
+                        })
                 }
-                guard
-                    .filters
-                    .iter()
-                    .find(|e| e.id == filter)
-                    // A filter that counts the session's own entities has no kept answer
-                    // for them; it is asked the long way, which reads them.
-                    .filter(|entry| !entry.count_local)
-                    .and_then(|entry| {
-                        let token = guard.filter_token(entry.plane)?;
-                        let kept = entry.cache?;
-                        ((kept.generation, kept.epoch_sum) == token)
-                            .then_some((kept.inactive, targets))
-                    })
             };
             if let Some((inactive, targets)) = kept {
                 if inactive {
@@ -3922,6 +3965,9 @@ impl SharedSession {
         }
         let targets = self.fan_targets();
         if targets.has_groups() {
+            if !targets.has_unasked_groups() && self.write_filter_active(filter) {
+                return FilteredPut::Suppressed;
+            }
             return FilteredPut::NotPlain;
         }
         if self.write_filter_active(filter) {
@@ -4617,7 +4663,7 @@ impl SharedSession {
             || sessions
                 .groups
                 .iter()
-                .filter(|group| group.asks)
+                .filter(|group| group.declarations.asks_for_filters())
                 .any(|group| match plane {
                     FilterPlane::Subscribers => group
                         .session

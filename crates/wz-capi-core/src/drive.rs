@@ -3826,6 +3826,13 @@ impl GroupDeclarations {
     pub fn asks_for_filters(self) -> bool {
         self == Self::Mapped
     }
+
+    /// Whether the group is told the session's keyexprs, and so names a key by its declaration
+    /// there as a unicast face does: only with [`Self::Mapped`]. zenoh-pico declares no keyexpr
+    /// on a multicast transport at its default.
+    pub fn declares_keyexprs(self) -> bool {
+        self == Self::Mapped
+    }
 }
 
 /// What a session's JOIN beacon advertises on a group, beside its identity and its role:

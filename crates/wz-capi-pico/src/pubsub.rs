@@ -928,7 +928,7 @@ impl PlainPublisher {
             FilteredPut::Suppressed | FilteredPut::Sent(Ok(_)) => Z_OK,
             FilteredPut::Sent(Err(_)) => Z_ERR_GENERIC,
             // Nothing was sent, and the put is wanted: the filter said so, or the session holds
-            // a multicast group, which pico writes to whatever the filter says.
+            // a multicast group the filter does not hold the put back from.
             FilteredPut::NotPlain => self.publish_filtered(payload, &put_options()),
         }
     }
