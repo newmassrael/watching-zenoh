@@ -416,6 +416,16 @@ jobs:
           fi
           (cd crates && cargo build -p wz-ap-demo --features "$features") && demo=PASS
           verdict "wz-ap-demo builds:" "$demo"
+          # Windows only: the demo's named stop event, the way a process with no console
+          # is asked to stop cleanly. The test creates the event by the name the demo
+          # gives its own process, signals it, and expects the demo's wait to resolve
+          # and the event to be reset. It is an observation and is not part of this
+          # step's verdict: a line of its own, read when a Windows host is asked.
+          if [ "$RUNNER_OS" = Windows ]; then
+            stop_event=FAIL
+            (cd crates && cargo test -p wz-ap-demo --bin wz-ap-demo stop_event) && stop_event=PASS
+            verdict "wz-ap-demo stops on a named event:" "$stop_event"
+          fi
           (cd crates && cargo test -p wz-host-interop-tests --no-run) && harness=PASS
           verdict "host interop tests compile:" "$harness"
           cargo "+$ZENOHD_CHANNEL" install zenohd --version "$ZENOHD_VERSION" --locked --root "$root" && router=PASS

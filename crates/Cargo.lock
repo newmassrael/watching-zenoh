@@ -2743,6 +2743,7 @@ dependencies = [
  "env_logger",
  "log",
  "tokio",
+ "windows-sys 0.61.2",
  "wz",
  "wz-ap-demo-app",
  "wz-runtime-tokio-test-support",

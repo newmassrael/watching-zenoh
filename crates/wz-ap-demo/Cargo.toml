@@ -121,6 +121,19 @@ env_logger = "0.11"
 # its body branches on the matching `codec-*` feature, and consumers
 # never need their own mirror.
 
+# A Windows build waits on a named event for a stop request (`stop_event.rs`),
+# the way a process with no console can be asked to stop cleanly. `windows-sys`
+# is already in this workspace's graph (`wz-capi-pico` and the async runtime
+# name the same version), so this adds no third-party crate; each feature below
+# is one namespace the file calls into, and nothing else is enabled.
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+]
+
 # R311y405 — the sibling fixture crate (the sanctioned test-fixture home),
 # DEV-only: the `--router quic/` cert-threading discriminator
 # (`run_router_admits_a_quic_listen_with_cert_at_bind`) needs a self-signed

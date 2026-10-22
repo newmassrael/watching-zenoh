@@ -59,11 +59,41 @@ pub(crate) async fn shutdown_signal() {
     }
 }
 
-/// R278 — non-Unix fallback. Windows + WASM only support Ctrl-C
+/// Windows — the first of Ctrl-C or a stop request on the named event
+/// (see [`crate::stop_event`]).
+///
+/// SIGTERM has no analogue a process without a console can be sent, so the
+/// event is the Windows path for a parent that starts the demo that way; both
+/// routes run the same graceful shutdown. A Ctrl-C handler that cannot be
+/// installed no longer ends the wait: the process would otherwise stop at once
+/// for a reason that is not a request to stop, so the event is then the only
+/// path left and the warning says so.
+#[cfg(windows)]
+pub(crate) async fn shutdown_signal() {
+    let ctrl_c = async {
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => log::info!("wz-ap-demo: Ctrl-C received; graceful shutdown"),
+            Err(e) => {
+                log::warn!(
+                    "wz-ap-demo: ctrl_c handler error: {e}; \
+                     only the stop event can end this wait"
+                );
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    tokio::select! {
+        () = ctrl_c => {}
+        () = crate::stop_event::requested() => {
+            log::info!("wz-ap-demo: stop event received; graceful shutdown");
+        }
+    }
+}
+
+/// R278 — the remaining non-Unix fallback (WASM). Only Ctrl-C is supported
 /// here; the Unix-only SIGTERM path is omitted because there is no
-/// portable analogue (Windows uses `CTRL_BREAK_EVENT` /
-/// `WM_CLOSE` / etc. which are not yet wired into the demo).
-#[cfg(not(unix))]
+/// portable analogue.
+#[cfg(all(not(unix), not(windows)))]
 pub(crate) async fn shutdown_signal() {
     if let Err(e) = tokio::signal::ctrl_c().await {
         log::warn!("wz-ap-demo: ctrl_c handler error: {e}");

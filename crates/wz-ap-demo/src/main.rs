@@ -97,6 +97,7 @@ mod sessions_driver;
 mod sessions_run;
 mod sessions_scouting;
 mod shutdown;
+mod stop_event;
 mod tasks;
 mod teardown;
 mod usage;
