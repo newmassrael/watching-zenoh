@@ -53,9 +53,10 @@ use std::time::Duration;
 
 use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
-    compile_pico_example_against_wz_capi, compile_pico_source, graceful_terminate,
-    group_declarations, project_root, read_captured, wait_for_substring, zenoh_pico_cli_binary,
-    zenoh_pico_include_dirs, zenoh_pico_library_dir, ChildGuard, PicoHeaderArm,
+    compile_pico_example_against_wz_capi, compile_pico_example_against_wz_capi_in,
+    compile_pico_source, graceful_terminate, group_declarations, project_root, read_captured,
+    wait_for_substring, zenoh_pico_cli_binary, zenoh_pico_include_dirs, zenoh_pico_library_dir,
+    zenoh_pico_mcdecl_cli_binary, ChildGuard, PicoHeaderArm,
 };
 
 /// The program sleeps 5 s, puts for 5 s, gets for 5 s and sleeps 5 s more in each of its
@@ -296,6 +297,62 @@ fn upstream_examples_on_wz_declare_on_a_group_as_the_real_library_does() {
     assert!(
         differ.is_empty(),
         "upstream's examples on wz declare on the group otherwise than on the real library:\n{}",
+        differ.join("\n")
+    );
+}
+
+/// With pico's `Z_FEATURE_MULTICAST_DECLARATIONS=1`, upstream's examples put the same
+/// declarations and interests on the group on wz's drop-in built with `multicast-declarations`
+/// as on the real library built with the switch: the open-time interest that pulls the
+/// members' keyexprs (`vendor/zenoh-pico/src/session/interest.c` @
+/// `z_result_t _z_interest_pull_resource_from_peers(_z_session_t *zn) {`), a write filter's
+/// interest, and each entity's declaration.
+///
+/// # Control
+///
+/// The reference must put something on the group for each program, as in the default leg.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
+fn upstream_examples_with_multicast_declarations_declare_on_a_group_as_the_real_library_does() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled examples");
+    let mut differ = Vec::new();
+    for (example, key, args) in [
+        ("z_sub", "demo/mc/**", ["-k", "demo/mc/**"]),
+        ("z_pub", "demo/mc/zp", ["-k", "demo/mc/zp"]),
+        ("z_queryable", "demo/mc/q", ["-k", "demo/mc/q"]),
+        ("z_liveliness", "demo/mc/token", ["-k", "demo/mc/token"]),
+    ] {
+        let real = group_declarations(&recorded_on_group(
+            &format!("real zenoh-pico {example} (multicast declarations)"),
+            &zenoh_pico_mcdecl_cli_binary(example),
+            &args,
+        ));
+        let wz_exe = compile_pico_example_against_wz_capi_in(
+            example,
+            dir.path(),
+            PicoHeaderArm::McastDeclarations,
+        )
+        .unwrap_or_else(|diag| {
+            panic!("{example}.c does not build against wz's mcdecl arm\n{diag}")
+        });
+        let wz = group_declarations(&recorded_on_group(
+            &format!("{example}.c on wz-capi-pico (multicast declarations)"),
+            &wz_exe,
+            &args,
+        ));
+        assert!(
+            real.iter().any(|d| d.contains(key)),
+            "the real {example} declared nothing on {key}: {real:#?}"
+        );
+        if wz != real {
+            differ.push(format!("{example}: real {real:?}, wz {wz:?}"));
+        }
+    }
+    assert!(
+        differ.is_empty(),
+        "upstream's examples on wz declare on the group otherwise than on the real library \
+         at Z_FEATURE_MULTICAST_DECLARATIONS=1:\n{}",
         differ.join("\n")
     );
 }

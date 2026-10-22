@@ -73,6 +73,18 @@ pico_flags_all = ["Z_FEATURE_MULTICAST_TRANSPORT", "Z_FEATURE_LINK_UDP_MULTICAST
 implies = ["link-udp", "peer"]
 help = "A UDP multicast group a peer joins: one transport to every member of the group."
 
+# Open-debt item 913 — zenoh-pico's multicast declarations switch (vendor default 0). On a
+# group it sends interests (the open-time pull of the members' keyexprs, a write filter's),
+# declares keyexprs, and lets a publisher's or querier's write filter hold a write back.
+[[capability]]
+id = "multicast-declarations"
+kconfig = "WZ_CAP_MULTICAST_DECLARATIONS"
+abis = ["core", "pico"]
+pico_flag = "Z_FEATURE_MULTICAST_DECLARATIONS"
+default = "off"
+implies = ["multicast-transport"]
+help = "pico's multicast declarations: interests, keyexpr declarations and the write filter on a group."
+
 [[capability]]
 id = "query"
 kconfig = "WZ_CAP_QUERY"

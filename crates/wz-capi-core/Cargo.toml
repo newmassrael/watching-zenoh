@@ -146,6 +146,10 @@ transport-link-serial = ["wz-runtime-tokio/transport-link-serial"]
 # feature) and the runtime's group session and drive (`transport-multicast`). A group is joined
 # by a peer, so it takes the peer's roles.
 multicast-transport = ["peer", "link-udp", "wz-runtime-tokio/transport-multicast"]
+# Open-debt item 913 — zenoh-pico's multicast declarations switch: on a group, the interests
+# (the open-time pull of the members' keyexprs, a write filter's), the keyexpr declarations,
+# and a write filter that holds a write back. Off by default, as pico's switch is.
+multicast-declarations = ["multicast-transport", "wz-runtime-tokio/multicast-declarations"]
 # The link kinds the zenoh-c ABI forwards beside the ones above. No arm of this
 # crate is cfg'd on them: a session dials through `dial_endpoint` and binds through
 # `bind_endpoint_with_config`, and both decide by scheme in the runtime, so a scheme

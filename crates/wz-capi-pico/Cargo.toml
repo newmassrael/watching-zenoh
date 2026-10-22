@@ -91,6 +91,9 @@ peer = ["scout", "wz-capi-core/peer"]
 # interface does (`vendor/zenoh-pico/src/link/multicast/udp.c` @
 # `z_result_t _z_endpoint_udp_multicast_valid(`). A build without it refuses that config.
 multicast-transport = ["link-udp", "peer", "wz-capi-core/multicast-transport"]
+# Open-debt item 913 — pico's `Z_FEATURE_MULTICAST_DECLARATIONS` (vendor default 0), off here
+# as there.
+multicast-declarations = ["multicast-transport", "wz-capi-core/multicast-declarations"]
 # `link-udp` (`Z_FEATURE_LINK_UDP_UNICAST`): a `udp/` endpoint to dial. `scout` implies it, the
 # scouting group being a UDP one.
 link-udp = ["wz-capi-core/link-udp"]
