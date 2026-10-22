@@ -859,6 +859,22 @@ pub struct PassiveFrame {
     /// message arrived under, and [`Self::unit_offset`] is where inside it this
     /// message stands.
     pub unit_len: usize,
+    /// Where the bytes this message's framing unit was read from END, in the
+    /// space [`Self::stream_offset`] is in, exclusive; `None` on a datagram
+    /// link, whose anchor names a packet and has no end.
+    ///
+    /// # Why it is not `stream_offset + prefix_width + unit_len`
+    ///
+    /// That sum is the end of a plain unit only. An lz4 batch's
+    /// [`Self::unit_len`] is the length of the bytes this reader made, not of
+    /// the bytes on the wire, and a unit a layer below this observer framed
+    /// (a WebSocket message, the plaintext of TLS records) occupies more of the
+    /// stream than its body: frame headers, masks, record headers and tags.
+    /// This observer writes the end of what it was handed, and a layer that
+    /// framed the unit and then moves [`Self::stream_offset`] into its own
+    /// space moves this with it. What reads it is the question "which packets
+    /// carried this message", which needs both ends.
+    pub wire_end: Option<usize>,
     /// The decoded transport message, or the decode error.
     pub frame: Result<InboundFrame, InboundParseError>,
     /// The flow context AS OF this frame (after folding it in). Copied rather
@@ -2133,11 +2149,16 @@ impl PassiveSession {
     ) -> Vec<PassiveFrame> {
         let seat = usize::from(direction == Direction::B);
         let unaccounted = self.unaccounted_batch_bytes[seat];
+        // The end of the bytes this unit was handed as, which is what the wire
+        // carried whether or not the body turns out to be an lz4 batch.
+        let wire_end = (source.anchor.space == OffsetSpace::StreamBytes)
+            .then(|| source.anchor.offset + source.prefix_width + bytes.len());
         let mut frames = self.walk_framing_unit(direction, bytes, source, handshake, resync);
         let whole = self.unaccounted_batch_bytes[seat] == unaccounted
             && frames.iter().all(|f| f.frame.is_ok());
         for frame in &mut frames {
             frame.unit_read_whole = whole;
+            frame.wire_end = wire_end;
         }
         frames
     }
@@ -2213,6 +2234,8 @@ impl PassiveSession {
                         batch_index: 0,
                         unit_offset: 0,
                         unit_len: bytes.len(),
+                        // Stamped by `decode_framing_unit`.
+                        wire_end: None,
                         batch_offset: None,
                         undefined_mandatory_ext: None,
                         prefix_width,
@@ -2355,6 +2378,8 @@ impl PassiveSession {
                 batch_index,
                 unit_offset: pos,
                 unit_len: unit.len(),
+                // Stamped by `decode_framing_unit`.
+                wire_end: None,
                 batch_offset,
                 undefined_mandatory_ext,
                 prefix_width,

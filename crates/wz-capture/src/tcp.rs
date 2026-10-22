@@ -398,6 +398,34 @@ impl StreamAssembler {
             .map(|(packet, _)| packet)
     }
 
+    /// Every capture packet that carried a byte of `start..end`, in stream
+    /// order (a retransmission that filled a gap can make that differ from
+    /// packet order), with adjacent runs of one packet named once. A caller
+    /// that needs a set sorts and dedups.
+    ///
+    /// `None` when the range is not answerable as a whole: its first byte was
+    /// trimmed (see [`Self::origin_of_offset`] on why the nearest surviving run
+    /// is not an answer), or no run holds any byte of it. A range whose middle
+    /// fell in a gap answers with the packets that did carry its bytes.
+    pub fn packets_in(&self, start: usize, end: usize) -> Option<Vec<usize>> {
+        if start < self.discarded || end <= start {
+            return None;
+        }
+        let first = self
+            .runs
+            .partition_point(|r| r.stream_offset + r.len <= start);
+        let mut packets: Vec<usize> = Vec::new();
+        for run in self.runs.iter().skip(first) {
+            if run.stream_offset >= end {
+                break;
+            }
+            if packets.last() != Some(&run.packet_index) {
+                packets.push(run.packet_index);
+            }
+        }
+        (!packets.is_empty()).then_some(packets)
+    }
+
     /// Which capture packet carried the byte at `stream_offset`, and
     /// where inside that packet's transport payload it sat.
     ///

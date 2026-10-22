@@ -1196,6 +1196,28 @@ impl LiveDissection {
         wz_capture::selection_json::selection_json_where_coordinated(&self.dissection, filter, &ids)
     }
 
+    /// THE PACKETS THAT CARRIED THE ROWS A SELECTOR PICKS, over the rows
+    /// [`Self::selection`] writes, with the context a reader needs to read them
+    /// again when `context` is set. See
+    /// [`wz_capture::selected_packets`] for which packets and why.
+    ///
+    /// `&mut self` for [`Self::selection`]'s reason: the ids a selector's `flow`
+    /// term compares are settled first, by the reconciliation a drain makes.
+    pub fn selected_packets(
+        &mut self,
+        filter: &wz_capture::filter::Filter,
+        context: bool,
+    ) -> wz_capture::selected_packets::SelectedPackets {
+        self.drain(&mut []);
+        let ids = HandleIds::of(self);
+        wz_capture::selected_packets::selected_packets_coordinated(
+            &self.dissection,
+            filter,
+            &ids,
+            context,
+        )
+    }
+
     /// THE SELECTOR'S VERDICT OVER THE ROWS AFTER A CURSOR, and the earlier rows
     /// whose word has changed since this handle last said one.
     ///

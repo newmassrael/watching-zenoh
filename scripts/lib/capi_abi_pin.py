@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 44
+EXPECTED_VERSION = 45
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -400,6 +400,12 @@ EXPECTED_SYMBOLS = {
     # memory rule does not move: the list is a `char*` released by
     # `wz_dissect_string_free`, nothing is retained, and no callback runs.
     "wz_dissect_selector_fields",
+    # (ABI 45) -- the capture packets that carried the rows a selector picks,
+    # with the context a reader needs as a flag. One symbol: the numbers go into
+    # a `uint64_t` buffer the CALLER sized (nothing written when it is short,
+    # the count always in `*needed`) and ten counts into an 80-byte struct the
+    # caller owns. Nothing is allocated for the caller and nothing is retained.
+    "wz_dissect_live_selected_packets",
     # (ABI 43) -- a live handle whose two ceilings on decoded messages the caller
     # sets: how many one flow keeps, and how many the handle keeps in all. One
     # symbol: two integers in and the handle through a pointer the CALLER owns,

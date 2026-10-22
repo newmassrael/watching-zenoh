@@ -141,13 +141,40 @@ use crate::fields_json::{
 /// carries no coordinate keys at all, on the field document's own rule that a
 /// key is never invented. `verdict` is `None` when no selector was asked. `seq`
 /// is `None` for a row the caller numbers no rows of.
-struct Row {
-    seq: Option<u64>,
-    direction: &'static str,
-    list_id: Option<u64>,
-    anchor: u64,
-    batch_index: u64,
-    verdict: Option<RowVerdict>,
+///
+/// `source` is where the row's bytes came from, which the documents here do not
+/// write and [`crate::selected_packets`] reads to name the packets that carried
+/// them.
+pub(crate) struct Row<'a> {
+    pub(crate) seq: Option<u64>,
+    pub(crate) direction: &'static str,
+    pub(crate) list_id: Option<u64>,
+    pub(crate) anchor: u64,
+    pub(crate) batch_index: u64,
+    pub(crate) verdict: Option<RowVerdict>,
+    pub(crate) source: RowSource<'a>,
+}
+
+/// Where one row's bytes came from.
+#[derive(Clone, Copy)]
+pub(crate) enum RowSource<'a> {
+    /// A message of the TCP flow at `index` in `Dissection::flows`, at
+    /// `position` in its list: its bytes are a range of the flow's stream.
+    Stream {
+        index: usize,
+        flow: &'a crate::FlowDissection,
+        position: usize,
+    },
+    /// A message of the datagram flow at `index` in
+    /// `Dissection::datagram_flows`, at `position` in its cleartext list: one
+    /// packet carried it whole.
+    Datagram {
+        index: usize,
+        flow: &'a crate::DatagramDissection,
+        position: usize,
+    },
+    /// A scouting message, carried whole by the packet `packet`.
+    Scouting { packet: usize },
 }
 
 /// The coordinate keys of a row, without its braces and without its verdict.
@@ -181,12 +208,13 @@ fn push_row(row: &Row, first: &mut bool, out: &mut String) {
 ///
 /// ONE enumeration behind both documents this file writes, so that "the same rows
 /// in the same order, with the same numbers" is a property of the code and not of
-/// two walks agreeing.
-fn for_each_row(
-    d: &crate::Dissection,
+/// two walks agreeing. [`crate::selected_packets`] walks it too, for the same
+/// reason: the packets it names are those of these rows and of no others.
+pub(crate) fn for_each_row<'d>(
+    d: &'d crate::Dissection,
     verdicts: Option<&RowJudgement>,
     coordinates: &dyn RowCoordinates,
-    each: &mut dyn FnMut(Row),
+    each: &mut dyn FnMut(Row<'d>),
 ) {
     let lists = RenderedLists::of(d);
 
@@ -214,6 +242,11 @@ fn for_each_row(
                 anchor: frame.stream_offset as u64,
                 batch_index: frame.batch_index as u64,
                 verdict,
+                source: RowSource::Stream {
+                    index: i,
+                    flow,
+                    position,
+                },
             });
         }
     }
@@ -236,6 +269,11 @@ fn for_each_row(
                 anchor: frame.stream_offset as u64,
                 batch_index: frame.batch_index as u64,
                 verdict,
+                source: RowSource::Datagram {
+                    index: i,
+                    flow,
+                    position,
+                },
             });
         }
         // The scouting list, after the transport rows exactly as the field
@@ -256,6 +294,9 @@ fn for_each_row(
                 anchor: datagram.packet_index as u64,
                 batch_index: 0,
                 verdict,
+                source: RowSource::Scouting {
+                    packet: datagram.packet_index,
+                },
             });
         }
     }

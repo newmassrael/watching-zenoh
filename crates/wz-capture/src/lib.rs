@@ -210,6 +210,11 @@ mod window_tests;
 // only users are the exchange and payload planes, so it is built with them.
 #[cfg(feature = "network-codecs")]
 pub(crate) mod overlay_map;
+/// The capture packets that carried the rows a selector picks, with the
+/// context a reader needs to read them again. Gated with `selection_json`,
+/// whose rows it walks.
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
+pub mod selected_packets;
 /// A selector's VERDICT over the rows of [`fields_json`], and nothing
 /// beside it: five values per row and the ceilings, where the field document
 /// renders every row's whole tree.
@@ -1835,14 +1840,37 @@ fn instant_of_plaintext(
 /// `packet_for`, and every byte of a record arrives in the packet that completes
 /// it or earlier, so the record's start resolves to a packet that genuinely
 /// carried this frame's bytes.
-fn remap_decrypted_offsets(frames: &mut [PassiveFrame], spans: &[(usize, usize)]) {
+///
+/// [`PassiveFrame::wire_end`] moves by the same rule from the other side: the
+/// unit's last plaintext byte belongs to a record, and the unit ends on the wire
+/// where that record ends (`record_ends`, one per span, header and tag
+/// included). So the two ends bound every record that carried a byte of the
+/// unit, and nothing in them is a plaintext measure.
+fn remap_decrypted_offsets(
+    frames: &mut [PassiveFrame],
+    spans: &[(usize, usize)],
+    record_ends: &[usize],
+) {
+    // The index of the record holding plaintext byte `at`: the last span that
+    // starts at or before it.
+    let record_of = |at: usize| {
+        spans
+            .partition_point(|(plain_at, _)| *plain_at <= at)
+            .checked_sub(1)
+    };
     for frame in frames {
-        let span = spans
-            .iter()
-            .rev()
-            .find(|(plain_at, _)| *plain_at <= frame.stream_offset);
-        if let Some((_, stream_offset)) = span {
+        let start = record_of(frame.stream_offset);
+        let end = frame
+            .wire_end
+            .and_then(|end| record_of(end.checked_sub(1)?))
+            .and_then(|record| record_ends.get(record).copied());
+        if let Some((_, stream_offset)) = start.and_then(|record| spans.get(record)) {
             frame.stream_offset = *stream_offset;
+            frame.wire_end = end;
+        } else {
+            // No record holds it, so its offset stays where it was; an end in
+            // plaintext space beside it would be a number in neither space.
+            frame.wire_end = None;
         }
     }
 }
@@ -2596,6 +2624,31 @@ impl FlowDissection {
         self.assembler(direction).packet_for_offset(stream_offset)
     }
 
+    /// Every capture packet that carried a byte of the framing unit `frame` was
+    /// read from: what a file needs to hold for a reader to read this message
+    /// again from the wire.
+    ///
+    /// From the unit's anchor to [`PassiveFrame::wire_end`], both in this
+    /// flow's TCP stream: a plain unit from its length prefix to the end of its
+    /// body as sent (an lz4 batch included), a WebSocket message from its first
+    /// frame's header past its last frame, a TLS unit from the record holding
+    /// its first plaintext byte to the end of the record holding its last. Every
+    /// message of one unit therefore names the same packets.
+    ///
+    /// A frame with no end (a datagram anchor, or a decrypted unit no record
+    /// held) answers with the packet of its anchor alone, which is what
+    /// [`Self::packet_for`] has always named. `None` when that is not
+    /// answerable either (see [`crate::tcp::StreamAssembler::packets_in`]).
+    pub fn packets_carrying(&self, frame: &PassiveFrame) -> Option<Vec<usize>> {
+        let assembler = self.assembler(frame.direction);
+        match frame.wire_end {
+            Some(end) => assembler.packets_in(frame.stream_offset, end),
+            None => assembler
+                .packet_for_offset(frame.stream_offset)
+                .map(|packet| alloc::vec![packet]),
+        }
+    }
+
     /// The packet that carried the byte at `stream_offset`, and where
     /// inside that packet's TCP payload it sat.
     ///
@@ -3089,9 +3142,9 @@ impl FlowDissection {
             Direction::B => b,
         };
         deframer.push(bytes);
-        let mut ready: Vec<(usize, Vec<u8>)> = Vec::new();
+        let mut ready: Vec<ws::WsMessage> = Vec::new();
         let mut resyncs: Vec<ws::WsResync> = Vec::new();
-        while let Some(msg) = deframer.next_message() {
+        while let Some(msg) = deframer.next_spanned_message() {
             // R311y612 — drained HERE and not after the loop, so a recovery is
             // attributed to the message decoded right after it. A flow that
             // resynchronises twice in one push would otherwise report the
@@ -3114,7 +3167,12 @@ impl FlowDissection {
         for resync in resyncs {
             self.ws_resyncs.push((direction, resync));
         }
-        for (offset, payload) in ready {
+        for ws::WsMessage {
+            offset,
+            end,
+            payload,
+        } in ready
+        {
             // R311y709 — the payload, which is what a decoder sees. The frame
             // headers this deframer consumed are recovered and never fed, and
             // that difference is a fact about ws rather than a defect.
@@ -3132,13 +3190,18 @@ impl FlowDissection {
                 .assembler(direction)
                 .instant_of_offset(offset)
                 .or(self.session.observed_at_nanos());
-            let batch = self.session.next_datagram_at(
+            let mut batch = self.session.next_datagram_at(
                 direction,
                 &payload,
                 offset,
                 wz_session_core::passive::LinkHandshake::Present,
                 instant,
             );
+            // The observer saw a payload and cannot know the frame headers,
+            // masks and fragments it came out of; the deframer can.
+            for frame in &mut batch {
+                frame.wire_end = Some(end);
+            }
             self.ingest.observe_frames(&batch);
             self.frames.append(batch);
         }
@@ -6035,6 +6098,10 @@ impl Dissection {
             // offset within it back to the record that produced it.
             let mut plaintext: [Vec<u8>; 2] = [Vec::new(), Vec::new()];
             let mut spans: [Vec<(usize, usize)>; 2] = [Vec::new(), Vec::new()];
+            // Beside `spans`, one per entry: where that record ENDS in the TCP
+            // stream, header and tag included, which is where a message whose
+            // last byte it carried ends on the wire.
+            let mut record_ends: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
             for index in 0..2usize {
                 let direction = idx_direction(index);
                 // R311y668 — a direction the opener holds no key for is reported
@@ -6063,6 +6130,7 @@ impl Dissection {
                             // (1) above.
                             if opened.content_type == tls::CT_APPLICATION_DATA {
                                 spans[index].push((plaintext[index].len(), record.stream_offset));
+                                record_ends[index].push(record.stream_offset + record.bytes.len());
                                 plaintext[index].extend_from_slice(&opened.plaintext);
                             }
                         }
@@ -6135,7 +6203,11 @@ impl Dissection {
                     frames: &flow.frames[before..],
                     record_origins: &spans[index],
                 });
-                remap_decrypted_offsets(&mut flow.frames[before..], &spans[index]);
+                remap_decrypted_offsets(
+                    &mut flow.frames[before..],
+                    &spans[index],
+                    &record_ends[index],
+                );
                 summary.frames += flow.frames.len() - before;
             }
         }
@@ -15174,6 +15246,56 @@ mod ws_flow_tests {
         );
     }
 
+    /// A WebSocket message is carried by every packet from its first frame's
+    /// header to the end of its last frame: one frame split across two segments,
+    /// and one message FRAGMENTED into two frames in two segments, each name
+    /// both packets. The payload alone is shorter than either span by the frame
+    /// headers, so an end computed from it would stop inside the first packet.
+    #[test]
+    fn a_websocket_message_names_every_packet_its_frames_came_in() {
+        let first = zenoh_ws_frame(1);
+        let (head, tail) = first.split_at(2);
+        let mut payload = alloc::vec![
+            wz_session_core::wire_const::T_MID_FRAME | wz_codecs::wire_const::FLAG_T_FRAME_R,
+            2,
+        ];
+        payload.extend_from_slice(&[0x1F, 0x00, 0x00, 0x00]);
+        let (front, back) = payload.split_at(3);
+        let fragment_one = crate::ws::tests::frame(false, 0x2, front, None);
+        let fragment_two = crate::ws::tests::frame(true, 0x0, back, None);
+        let upgrade = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n";
+        let mut seq = 1000u32;
+        let mut d = Dissection::new();
+        let parts: [&[u8]; 5] = [upgrade, head, tail, &fragment_one, &fragment_two];
+        for (packet, bytes) in parts.iter().enumerate() {
+            d.push_packet(
+                LINKTYPE_ETHERNET,
+                packet,
+                &tcp_packet(1111, 7447, seq, bytes),
+            );
+            seq += bytes.len() as u32;
+        }
+
+        let flow = &d.flows()[0];
+        assert!(flow.framing().is_websocket());
+        let carried: Vec<Option<Vec<usize>>> = flow
+            .frames
+            .iter()
+            .map(|f| flow.packets_carrying(f))
+            .collect();
+        assert_eq!(
+            carried,
+            [Some(alloc::vec![1, 2]), Some(alloc::vec![3, 4])],
+            "a split frame and a fragmented message each name both packets"
+        );
+        let upgrade_len = upgrade.len();
+        assert_eq!(
+            flow.frames[0].wire_end,
+            Some(upgrade_len + first.len()),
+            "the first message ends where its frame does"
+        );
+    }
+
     /// One zenoh batch in one unmasked ws BINARY frame — the flow-level twin of
     /// `ws::tests::zenoh_frame`, kept here because this module's `frame` helper
     /// is the one these fixtures are built with.
@@ -17241,6 +17363,26 @@ mod tls_flow_tests {
             resolved,
             alloc::vec![Some(1), Some(2), Some(3)],
             "a decrypted frame must attribute to the packet that carried it"
+        );
+
+        // AND ITS END moves with it: from the end of its plaintext to the end of
+        // the record that held its last byte, header and tag included (each
+        // record is 10 bytes here), so the packets that carried it are the
+        // record's and not a plaintext measure's.
+        let ends: Vec<Option<usize>> = d.flows()[0].frames.iter().map(|f| f.wire_end).collect();
+        assert_eq!(ends, alloc::vec![Some(67), Some(77), Some(87)]);
+        let carried: Vec<Option<Vec<usize>>> = d.flows()[0]
+            .frames
+            .iter()
+            .map(|f| d.flows()[0].packets_carrying(f))
+            .collect();
+        assert_eq!(
+            carried,
+            alloc::vec![
+                Some(alloc::vec![1]),
+                Some(alloc::vec![2]),
+                Some(alloc::vec![3])
+            ]
         );
     }
 

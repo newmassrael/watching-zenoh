@@ -1571,7 +1571,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 44
+#define WZ_DISSECT_ABI_REVISION 45
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -5996,6 +5996,100 @@ int wz_dissect_live_selection(wz_dissect_live *h, const char *selector,
  * @carries selection_since was passenger */
 int wz_dissect_live_selection_since(wz_dissect_live *h, const char *selector,
                                     uint64_t after_seq, char **out);
+
+/* (ABI 45) -- the flags of wz_dissect_live_selected_packets, below: the picked
+ * rows' packets alone, or with the context a reader needs to read them again.
+ * Any other value is WZ_DISSECT_ERR_INVALID_ARG, never a quiet fall back to
+ * either.
+ *
+ * @unknown SELECTED caller-supplied */
+#define WZ_DISSECT_SELECTED_ROWS_ONLY 0
+#define WZ_DISSECT_SELECTED_WITH_CONTEXT 1
+
+/* (ABI 45) -- the summary beside the packet numbers: ten counts, 80 bytes,
+ * 8-aligned, each at eight times its place. wz_dissect_live_selected_packets
+ * says what each one counts. */
+typedef struct wz_dissect_selected_packets {
+    uint64_t rows_yes;         /* the picked rows */
+    uint64_t rows_no;          /* rows the selector refused */
+    uint64_t rows_undecided;   /* judged, and the capture could not decide */
+    uint64_t rows_unjudged;    /* no record a selector speaks of */
+    uint64_t rows_trimmed;     /* messages the ceilings took before the walk */
+    uint64_t flows_evicted;    /* flows the flow ceiling evicted before it */
+    uint64_t rows_unplaced;    /* picked rows whose packets are gone */
+    uint64_t packets;          /* numbers in the list, context included */
+    uint64_t context_packets;  /* of those, the ones only context named */
+    uint64_t context_unplaced; /* context rows or ranges not placed */
+} wz_dissect_selected_packets;
+
+/* (ABI 45) -- THE CAPTURE PACKETS THAT CARRIED THE ROWS A SELECTOR PICKS, as
+ * numbers into a buffer you sized, with a summary of what the list covers.
+ *
+ * WHAT IT IS FOR. wz_dissect_live_selection says which rows a selector picks.
+ * A datagram row's anchor is a packet, but a stream row's is a byte offset, and
+ * the one packet any document names for it is the packet of its first byte. A
+ * message spanning segments, a WebSocket message in several frames and a unit
+ * inside TLS records are carried by packets nothing else names. This door
+ * writes them: every packet that carried a byte of a picked row's framing unit,
+ * ascending, each once. The numbers are the handle's packet coordinates (for
+ * wz_dissect_pcap_replay, the file's packet indices), the ones
+ * wz_dissect_pcap_frame_bytes takes. The walk is the selection document's over
+ * its rows, so its cost follows the rows and the packets named, not the packet
+ * numbers.
+ *
+ * FLAGS. WZ_DISSECT_SELECTED_ROWS_ONLY names the picked rows' packets alone.
+ * WZ_DISSECT_SELECTED_WITH_CONTEXT also names what a reader of a file made of
+ * the list alone needs to read the picked rows again, for every flow with a
+ * picked row: the packets of its Init and Open rows (the compression and
+ * low-latency agreement and the sequence ring come from them), of every row
+ * carrying a Declare (a numeric key expression resolves through one), of every
+ * row of a fragment chain a picked row belongs to, and of the stream ahead of
+ * each direction's first message (a WebSocket opening, a TLS handshake); on a
+ * TLS flow, every packet of a direction up to the end of its last picked unit,
+ * because a record is opened at a sequence number counted from the first. A
+ * picked ResponseFinal's Request is picked with it, being one exchange. Any
+ * other flags value is WZ_DISSECT_ERR_INVALID_ARG.
+ *
+ *     wz_dissect_selected_packets s;
+ *     size_t n = 0;
+ *     wz_dissect_live_selected_packets(h, "key == demo/a",
+ *                                      WZ_DISSECT_SELECTED_WITH_CONTEXT,
+ *                                      NULL, 0, &n, &s);       // size
+ *     uint64_t *packets = malloc(n * sizeof *packets);
+ *     wz_dissect_live_selected_packets(h, "key == demo/a",
+ *                                      WZ_DISSECT_SELECTED_WITH_CONTEXT,
+ *                                      packets, n, &n, &s);    // read
+ *
+ * THE BUFFER. *needed always receives the number of packets; when cap is at
+ * least that, out holds them, and when it is less NOTHING is written to out.
+ * out may be NULL with cap 0, to ask for the count alone. *summary is written
+ * on every WZ_DISSECT_OK. Between two calls the handle may have read more, so
+ * a second call can need more than the first said: compare *needed with cap.
+ *
+ * NOTHING LEAVES THE LIST QUIETLY. The summary's four row counts partition the
+ * rows of the selection document by the word they got. rows_trimmed counts the
+ * messages the handle's ceilings discarded before the walk and flows_evicted
+ * the flows it evicted: rows this walk never saw. rows_unplaced counts picked
+ * rows whose stream bytes were given back to a retention ceiling, whose packets
+ * cannot be named. context_packets is how many packets context added, and
+ * context_unplaced how many context rows or stream ranges it could not place.
+ * A caller that judges new rows before its ceilings take any reads zero in
+ * rows_trimmed, rows_unplaced and context_unplaced.
+ *
+ * An empty selector asks nothing: every row is unjudged and no packet is named.
+ * A selector that does not parse is WZ_DISSECT_ERR_SELECTOR, and
+ * wz_dissect_selector_diagnose says where. WZ_DISSECT_ERR_INVALID_ARG for a null
+ * handle, selector, needed or summary, for out NULL with cap non-zero, and for
+ * an unknown flags value. On every failure *needed is 0 and *summary is all
+ * zeros (when they are not NULL).
+ *
+ * @bound cap buffer-capacity -- the size of YOUR array. This library imposes
+ * no ceiling of its own on the list: a short `cap` writes nothing and *needed
+ * says how many to make room for. */
+int wz_dissect_live_selected_packets(wz_dissect_live *h, const char *selector,
+                                     int flags, uint64_t *out, size_t cap,
+                                     size_t *needed,
+                                     wz_dissect_selected_packets *summary);
 
 /* (ABI 40) -- HOW MANY SELECTORS THE HANDLE KEEPS A MEMORY FOR AT ONCE, for
  * wz_dissect_live_census and wz_dissect_live_selection_since.

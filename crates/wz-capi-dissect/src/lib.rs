@@ -196,6 +196,17 @@ pub const WZ_DISSECT_FRAMING_TCP_STREAM: c_int = 1;
 /// whose session negotiated LowLatency.
 pub const WZ_DISSECT_FRAMING_LOWLATENCY_STREAM: c_int = 2;
 
+/// (ABI 45) — [`wz_dissect_live_selected_packets`] names only the packets the
+/// picked rows came in. Zero on purpose, for [`WZ_DISSECT_LIMITS_NONE`]'s reason.
+pub const WZ_DISSECT_SELECTED_ROWS_ONLY: c_int = 0;
+/// (ABI 45) — [`wz_dissect_live_selected_packets`] also names the packets a
+/// reader needs to read the picked rows again from a file holding only the
+/// list: the handshake, the declarations, the earlier fragments of a chain, and
+/// the stream ahead of each direction's first message (on a TLS flow, every
+/// record up to the last picked one). `wz_capture::selected_packets` says why
+/// each is needed.
+pub const WZ_DISSECT_SELECTED_WITH_CONTEXT: c_int = 1;
+
 /// R2102 (open-debt item 524) — the `ts_ns` a caller passes to
 /// [`wz_dissect_live_push`] when it has no clock reading, and the value a
 /// record carries back when nothing timed it.
@@ -411,6 +422,9 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // closed words. The selector verdict moved to revision 5 on the same step
     // (a word that is no field is a path; `in`, `matches`, `len()`; two token
     // classes), which moves no symbol.
+    // 45, for `wz_dissect_live_selected_packets`: the packet numbers that carried
+    // the rows a selector picks, into a buffer the caller sized, with a summary
+    // struct beside them and a flag that adds the context a reader needs.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -428,7 +442,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 44;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 45;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -4429,6 +4443,183 @@ pub unsafe extern "C" fn wz_dissect_live_selection_since(
     write_string(doc, out)
 }
 
+/// (ABI 45) — what [`wz_dissect_live_selected_packets`] walked and could not
+/// reach, beside the packet numbers it wrote.
+///
+/// Ten unsigned 64-bit counts and nothing else, so the layout is the same on
+/// every ABI this library is built for: 80 bytes, 8-aligned, each field at eight
+/// times its place. `wz_capture::selected_packets::SelectedPacketsSummary`
+/// says what each count means; the four `rows_*` word counts partition the rows
+/// of the selection document.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WzDissectSelectedPackets {
+    /// Rows the selector said `yes` of.
+    pub rows_yes: u64,
+    /// Rows it said `no` of.
+    pub rows_no: u64,
+    /// Rows it judged and the capture could not decide.
+    pub rows_undecided: u64,
+    /// Rows it could not speak of, and every row under an empty selector.
+    pub rows_unjudged: u64,
+    /// Messages the message ceilings discarded before the walk.
+    pub rows_trimmed: u64,
+    /// Flows the flow ceiling evicted before the walk.
+    pub flows_evicted: u64,
+    /// Picked rows whose packets cannot be named any more.
+    pub rows_unplaced: u64,
+    /// Packet numbers in the list, context included: what `needed` says.
+    pub packets: u64,
+    /// Of those, the ones only context named.
+    pub context_packets: u64,
+    /// Rows and stream ranges context needed and could not place.
+    pub context_unplaced: u64,
+}
+
+impl From<wz_capture::selected_packets::SelectedPacketsSummary> for WzDissectSelectedPackets {
+    fn from(s: wz_capture::selected_packets::SelectedPacketsSummary) -> Self {
+        Self {
+            rows_yes: s.rows_yes,
+            rows_no: s.rows_no,
+            rows_undecided: s.rows_undecided,
+            rows_unjudged: s.rows_unjudged,
+            rows_trimmed: s.rows_trimmed,
+            flows_evicted: s.flows_evicted,
+            rows_unplaced: s.rows_unplaced,
+            packets: s.packets,
+            context_packets: s.context_packets,
+            context_unplaced: s.context_unplaced,
+        }
+    }
+}
+
+/// (ABI 45) — THE CAPTURE PACKETS THAT CARRIED THE ROWS A SELECTOR PICKS, as
+/// numbers into a buffer the caller sized, with a summary of what the list
+/// covers.
+///
+/// # What a consumer writing the picked messages to a file was paying for
+///
+/// [`wz_dissect_live_selection`] says which rows a selector picks and joins
+/// each to its record. A datagram row's anchor is a packet; a stream row's is a
+/// byte offset, and the one packet any document names for it is the packet of
+/// its first byte. A message spanning segments, a WebSocket message in several
+/// frames and a unit inside TLS records are carried by packets nothing
+/// published names, so the consumer had to keep its own copy of the stream
+/// layout, and [`wz_dissect_pcap_frame_bytes`] reads the container up to each
+/// packet it is asked for.
+///
+/// This door writes the packet numbers themselves: every packet that carried a
+/// byte of a picked row's framing unit, sorted, each once. The numbers are the
+/// handle's packet coordinates ([`wz_dissect_pcap_replay`]'s are the file's
+/// packet indices), which is what [`wz_dissect_pcap_frame_bytes`] and the
+/// records' packet anchors use. The walk is the selection document's, over its
+/// rows; its cost follows the rows and the packets named, not the packet
+/// numbers.
+///
+/// # `flags`
+///
+/// [`WZ_DISSECT_SELECTED_ROWS_ONLY`] or [`WZ_DISSECT_SELECTED_WITH_CONTEXT`];
+/// any other value is [`WZ_DISSECT_ERR_INVALID_ARG`]. With context the list
+/// also holds what a reader of a file made of the list alone needs to read the
+/// picked rows: without the Init and Open a compressed session's batches and
+/// the sequence ring are unknown, without the Declare a numeric key expression
+/// does not resolve, without the earlier fragments a chain is not joined, and a
+/// TLS record cannot be opened without the records before it.
+///
+/// # The buffer
+///
+/// [`wz_dissect_pcap_frame_bytes`]'s rule: `*needed` always receives the number
+/// of packets; when `cap` is at least that, `out` holds them; when it is less
+/// NOTHING is written to `out` and the caller sizes and calls again. `out` may
+/// be null with `cap` zero, to ask for the count alone. `*summary` is written on
+/// every [`WZ_DISSECT_OK`], whether or not `out` was.
+///
+/// # Nothing leaves the list quietly
+///
+/// The summary counts the rows by the word they got, the messages the handle's
+/// ceilings took before the walk (`rows_trimmed`) and the flows it evicted
+/// (`flows_evicted`), which this walk never sees; the picked rows whose stream
+/// bytes were given back, whose packets cannot be named (`rows_unplaced`); and
+/// how many packets context added and how many context rows or ranges it could
+/// not place. A caller that judges new rows before its ceilings take any reads
+/// zero in the three.
+///
+/// An empty selector asks nothing: every row is `unjudged` and no packet is
+/// named. A selector that does not parse is [`WZ_DISSECT_ERR_SELECTOR`].
+///
+/// # `handle` is not `const`
+///
+/// For [`wz_dissect_live_selection`]'s reason.
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed. `selector` must be a
+/// NUL-terminated C string, `needed` a writable `size_t` and `summary` a
+/// writable [`WzDissectSelectedPackets`]; none of the four may be null. `out`
+/// must point to at least `cap` writable `uint64_t`, or be null with `cap`
+/// zero. On a failure `*needed` is zero and `*summary` is all zeros, each when
+/// it is not null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_selected_packets(
+    handle: *mut live::LiveDissection,
+    selector: *const c_char,
+    flags: c_int,
+    out: *mut u64,
+    cap: usize,
+    needed: *mut usize,
+    summary: *mut WzDissectSelectedPackets,
+) -> c_int {
+    // Zeros first, into whichever of the two exists, so no refusal below leaves
+    // the caller holding a count from an earlier call.
+    if !needed.is_null() {
+        // SAFETY: non-null, and writable by the caller contract.
+        unsafe { *needed = 0 };
+    }
+    if !summary.is_null() {
+        // SAFETY: non-null, and writable by the caller contract.
+        unsafe { *summary = WzDissectSelectedPackets::default() };
+    }
+    if needed.is_null()
+        || summary.is_null()
+        || handle.is_null()
+        || selector.is_null()
+        || (out.is_null() && cap != 0)
+    {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let context = match flags {
+        WZ_DISSECT_SELECTED_ROWS_ONLY => false,
+        WZ_DISSECT_SELECTED_WITH_CONTEXT => true,
+        _ => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    // SAFETY: caller contract above.
+    let expr = match unsafe { std::ffi::CStr::from_ptr(selector) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return WZ_DISSECT_ERR_INVALID_ARG,
+    };
+    let filter = match wz_capture::filter::Filter::parse(expr) {
+        Ok(f) => f,
+        Err(_) => return WZ_DISSECT_ERR_SELECTOR,
+    };
+    // SAFETY: caller contract above.
+    let picked = unsafe { (*handle).selected_packets(&filter, context) };
+    // SAFETY: null-checked above.
+    unsafe {
+        *needed = picked.packets.len();
+        *summary = picked.summary.into();
+    }
+    // An empty list writes nothing, and must not reach the copy: `out` may be
+    // null then, and a copy is owed valid pointers even for zero values.
+    if !picked.packets.is_empty() && cap >= picked.packets.len() {
+        // SAFETY: `out` is writable for `cap` values by the caller contract, and
+        // non-null because `cap` is non-zero here.
+        unsafe {
+            core::ptr::copy_nonoverlapping(picked.packets.as_ptr(), out, picked.packets.len());
+        }
+    }
+    WZ_DISSECT_OK
+}
+
 /// (ABI 40) — HOW MANY SELECTORS THE HANDLE KEEPS A MEMORY FOR AT ONCE, for
 /// [`wz_dissect_live_census`] and [`wz_dissect_live_selection_since`].
 ///
@@ -8399,7 +8590,9 @@ mod tests {
         // `wz_dissect_live_close`; no string, no struct.
         // 44, for `wz_dissect_selector_fields`: one symbol, a `char*` released
         // by `wz_dissect_string_free`; no input, no struct, no state.
-        assert_eq!(wz_dissect_abi_version(), 44);
+        // 45, for `wz_dissect_live_selected_packets`: one symbol, a buffer of
+        // `uint64_t` the caller sized and an 80-byte struct of counts it owns.
+        assert_eq!(wz_dissect_abi_version(), 45);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -14111,6 +14304,168 @@ mod tests {
                 Some((requests, digits(rest)))
             })
             .expect("the exchange plane's totals")
+    }
+
+    /// `wz_dissect_live_selected_packets` the way C calls it: once to size, once
+    /// to read, with the refusal code when it refuses.
+    fn selected_packets(
+        handle: *mut live::LiveDissection,
+        selector: &str,
+        flags: c_int,
+    ) -> Result<(Vec<u64>, WzDissectSelectedPackets), c_int> {
+        let selector = std::ffi::CString::new(selector).expect("no NUL");
+        let mut needed = usize::MAX;
+        let mut summary = WzDissectSelectedPackets {
+            rows_yes: 7,
+            ..Default::default()
+        };
+        let rc = unsafe {
+            wz_dissect_live_selected_packets(
+                handle,
+                selector.as_ptr(),
+                flags,
+                core::ptr::null_mut(),
+                0,
+                &mut needed,
+                &mut summary,
+            )
+        };
+        if rc != WZ_DISSECT_OK {
+            assert_eq!(needed, 0, "a refusal leaves no count");
+            assert_eq!(summary, WzDissectSelectedPackets::default());
+            return Err(rc);
+        }
+        assert_eq!(
+            summary.packets, needed as u64,
+            "the summary counts what needed says"
+        );
+        let mut out = vec![u64::MAX; needed];
+        let rc = unsafe {
+            wz_dissect_live_selected_packets(
+                handle,
+                selector.as_ptr(),
+                flags,
+                out.as_mut_ptr(),
+                out.len(),
+                &mut needed,
+                &mut summary,
+            )
+        };
+        assert_eq!(rc, WZ_DISSECT_OK);
+        assert_eq!(
+            needed,
+            out.len(),
+            "the handle read nothing between the calls"
+        );
+        Ok((out, summary))
+    }
+
+    /// The door names the packets of the picked rows, and context adds the other
+    /// direction's handshake; the four words partition the rows; a short buffer
+    /// is not written; and each argument refusal says so with zeros.
+    ///
+    /// The capture holds each direction's stream in ONE packet: packet 0 is the
+    /// low side's Init, records and requests, packet 1 the high side's Init,
+    /// replies and closes. The put is the low side's.
+    #[test]
+    fn the_selected_packets_door_names_the_packets_and_refuses_with_zeros() {
+        let capture = selector_capture();
+        let handle = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+
+        let (put, summary) =
+            selected_packets(handle, "kind == put", WZ_DISSECT_SELECTED_ROWS_ONLY).expect("ok");
+        assert_eq!(put, vec![0]);
+        assert_eq!(summary.rows_yes, 1);
+        assert_eq!(summary.context_packets, 0);
+        assert_eq!(summary.rows_trimmed + summary.rows_unplaced, 0);
+
+        let (with_context, summary) =
+            selected_packets(handle, "kind == put", WZ_DISSECT_SELECTED_WITH_CONTEXT).expect("ok");
+        assert_eq!(with_context, vec![0, 1], "the high side's Init is context");
+        assert_eq!(summary.context_packets, 1);
+
+        // A request and its final are one exchange, so both sides are picked.
+        let (queries, summary) =
+            selected_packets(handle, "kind == query", WZ_DISSECT_SELECTED_ROWS_ONLY).expect("ok");
+        assert_eq!(queries, vec![0, 1]);
+        let (_, all) = selected_packets(handle, "", WZ_DISSECT_SELECTED_ROWS_ONLY).expect("ok");
+        assert_eq!(all.rows_yes, 0, "an empty selector picks nothing");
+        assert_eq!(
+            summary.rows_yes + summary.rows_no + summary.rows_undecided + summary.rows_unjudged,
+            all.rows_unjudged,
+            "the four words partition the same rows an empty selector counts"
+        );
+
+        // A buffer one short is not written, and still says how many.
+        let selector = std::ffi::CString::new("kind == query").expect("no NUL");
+        let mut short = [u64::MAX; 1];
+        let mut needed = 0usize;
+        let mut summary = WzDissectSelectedPackets::default();
+        let rc = unsafe {
+            wz_dissect_live_selected_packets(
+                handle,
+                selector.as_ptr(),
+                WZ_DISSECT_SELECTED_ROWS_ONLY,
+                short.as_mut_ptr(),
+                short.len(),
+                &mut needed,
+                &mut summary,
+            )
+        };
+        assert_eq!((rc, needed, short[0]), (WZ_DISSECT_OK, 2, u64::MAX));
+
+        assert_eq!(
+            selected_packets(handle, "kind ==", WZ_DISSECT_SELECTED_ROWS_ONLY),
+            Err(WZ_DISSECT_ERR_SELECTOR)
+        );
+        assert_eq!(
+            selected_packets(handle, "kind == put", 2),
+            Err(WZ_DISSECT_ERR_INVALID_ARG),
+            "an unknown flags value is refused, not read as either"
+        );
+        assert_eq!(
+            selected_packets(core::ptr::null_mut(), "kind == put", 0),
+            Err(WZ_DISSECT_ERR_INVALID_ARG)
+        );
+        let rc = unsafe {
+            wz_dissect_live_selected_packets(
+                handle,
+                selector.as_ptr(),
+                WZ_DISSECT_SELECTED_ROWS_ONLY,
+                core::ptr::null_mut(),
+                4,
+                &mut needed,
+                &mut summary,
+            )
+        };
+        assert_eq!(
+            rc, WZ_DISSECT_ERR_INVALID_ARG,
+            "a null buffer with a capacity"
+        );
+        assert_eq!(needed, 0);
+        unsafe { wz_dissect_live_close(handle) };
+    }
+
+    /// The summary's layout is the header's: ten `uint64_t`, each at eight times
+    /// its place.
+    #[test]
+    fn the_selected_packets_summary_is_ten_counts_in_order() {
+        assert_eq!(core::mem::size_of::<WzDissectSelectedPackets>(), 80);
+        assert_eq!(core::mem::align_of::<WzDissectSelectedPackets>(), 8);
+        assert_eq!(core::mem::offset_of!(WzDissectSelectedPackets, rows_yes), 0);
+        assert_eq!(
+            core::mem::offset_of!(WzDissectSelectedPackets, rows_unjudged),
+            24
+        );
+        assert_eq!(
+            core::mem::offset_of!(WzDissectSelectedPackets, rows_trimmed),
+            32
+        );
+        assert_eq!(core::mem::offset_of!(WzDissectSelectedPackets, packets), 56);
+        assert_eq!(
+            core::mem::offset_of!(WzDissectSelectedPackets, context_unplaced),
+            72
+        );
     }
 
     /// A transport message, bare, length-prefixed for a stream link.

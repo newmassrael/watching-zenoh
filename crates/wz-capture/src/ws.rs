@@ -724,6 +724,18 @@ impl WsDeframer {
     /// `None` is still the exit — that is "no boundary confirmed yet", the one
     /// honest reason to hand nothing back.
     pub fn next_message(&mut self) -> Option<(usize, Vec<u8>)> {
+        self.next_spanned_message()
+            .map(|message| (message.offset, message.payload))
+    }
+
+    /// [`Self::next_message`], with the stream offset the message's LAST frame
+    /// ended at.
+    ///
+    /// The payload is shorter than the stream it came from by every frame
+    /// header and mask, and a fragmented message spans several frames, so where
+    /// a message ends cannot be computed from its payload. It is known here, at
+    /// the moment the last frame is taken, and nowhere after.
+    pub fn next_spanned_message(&mut self) -> Option<WsMessage> {
         loop {
             // R311y612 — a desynchronised direction is no longer terminal: the
             // detecting call recorded it, and every later one scans.
@@ -749,7 +761,7 @@ impl WsDeframer {
     /// is a different answer from `Some(None)` ("nothing more in the buffer")
     /// and is exactly the distinction [`Self::next_message`] lost before
     /// R311y613.
-    fn deframe_until_desync(&mut self) -> Option<Option<(usize, Vec<u8>)>> {
+    fn deframe_until_desync(&mut self) -> Option<Option<WsMessage>> {
         loop {
             let frame_start = self.base;
             let frame = match self.take_frame() {
@@ -806,9 +818,16 @@ impl WsDeframer {
     }
 
     /// Hand back the assembled message and reset the accumulator.
-    fn take_partial(&mut self) -> Option<(usize, Vec<u8>)> {
+    ///
+    /// Called right after the message's last frame was taken, so `base` is the
+    /// offset that frame ended at.
+    fn take_partial(&mut self) -> Option<WsMessage> {
         let offset = self.partial_offset.take()?;
-        Some((offset, core::mem::take(&mut self.partial)))
+        Some(WsMessage {
+            offset,
+            end: self.base,
+            payload: core::mem::take(&mut self.partial),
+        })
     }
 
     /// Consume the HTTP upgrade handshake. `false` means "not yet all here".
@@ -909,6 +928,19 @@ impl WsDeframer {
             payload,
         })
     }
+}
+
+/// One zenoh-carrying WebSocket message, deframed: where it began and ended in
+/// its direction's stream, and its unmasked payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WsMessage {
+    /// Stream offset of its first frame's header.
+    pub offset: usize,
+    /// Stream offset just past its last frame, exclusive. Control frames
+    /// interleaved inside a fragmented message lie between the two.
+    pub end: usize,
+    /// The message's payload, every frame's unmasked and joined.
+    pub payload: Vec<u8>,
 }
 
 /// One parsed RFC6455 frame.

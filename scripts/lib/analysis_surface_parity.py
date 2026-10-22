@@ -545,6 +545,19 @@ ONLY_CAPI = {
         "no handle to keep it in.",
         (),
     ),
+    # (ABI 45) -- filed in the round that added the symbol.
+    "the capture packets that carried the rows a selector picks": (
+        "wz_dissect_live_selected_packets",
+        "DELIBERATE. The door exists because a consumer that LINKS this library "
+        "writes the picked messages into a file of its own format, and must not "
+        "re-derive which packets a stream message, a WebSocket message or a TLS "
+        "unit was carried by: that is a second reader of a stream layout the "
+        "handle already holds. The command line reads a capture once and prints "
+        "rows; it writes no file of picked packets, so it has no list to hand "
+        "out. A flag that wrote a cut capture would be a new capability of its "
+        "own, decided apart from this door.",
+        (),
+    ),
     "how many bytes of a followed container were consumed": (
         "wz_dissect_live_followed",
         "DELIBERATE. The door exists because a consumer that LINKS this library "

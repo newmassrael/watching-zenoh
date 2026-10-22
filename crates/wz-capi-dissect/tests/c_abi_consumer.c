@@ -650,6 +650,70 @@ static int check_selection_since_door(void) {
     return 0;
 }
 
+/* (ABI 45) -- THE SELECTED PACKETS DOOR, driven from C: the summary is the
+ * header's 80-byte struct, the count crosses as a size_t the caller owns, and a
+ * NULL buffer with capacity 0 asks for the count alone. Three keepalives judged
+ * under a record term are three `no` rows and no packet. Which packets a picked
+ * row names needs records to pick, and that is held where records can be built
+ * (the Rust tests). */
+static int check_selected_packets_door(void) {
+    wz_dissect_live *h = NULL;
+    unsigned char frame[64];
+    size_t frame_len = udp_keepalive_frame(frame);
+    wz_dissect_selected_packets s;
+    size_t needed = 99;
+    uint64_t packets[4] = {7, 7, 7, 7};
+    int rc;
+
+    CHECK(sizeof(wz_dissect_selected_packets) == 80, "summary size %zu",
+          sizeof(wz_dissect_selected_packets));
+    CHECK(offsetof(wz_dissect_selected_packets, rows_trimmed) == 32,
+          "rows_trimmed offset");
+    CHECK(offsetof(wz_dissect_selected_packets, context_unplaced) == 72,
+          "context_unplaced offset");
+
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK, "selected live_open rc=%d", rc);
+    rc = wz_dissect_live_push(h, 1, 1000000u, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "selected push rc=%d", rc);
+    rc = wz_dissect_live_push(h, 1, 2000000u, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "selected second push rc=%d", rc);
+    rc = wz_dissect_live_push(h, 1, 3000000u, frame, frame_len);
+    CHECK(rc == WZ_DISSECT_OK, "selected third push rc=%d", rc);
+
+    rc = wz_dissect_live_selected_packets(h, "bytes >= 0",
+                                          WZ_DISSECT_SELECTED_WITH_CONTEXT, NULL, 0,
+                                          &needed, &s);
+    CHECK(rc == WZ_DISSECT_OK, "selected count rc=%d", rc);
+    CHECK(needed == 0 && s.packets == 0, "no row picked, no packet: %zu", needed);
+    CHECK(s.rows_no == 3 && s.rows_yes == 0, "three keepalives judged no: %llu",
+          (unsigned long long)s.rows_no);
+    rc = wz_dissect_live_selected_packets(h, "bytes >= 0",
+                                          WZ_DISSECT_SELECTED_ROWS_ONLY, packets, 4,
+                                          &needed, &s);
+    CHECK(rc == WZ_DISSECT_OK && packets[0] == 7, "nothing written rc=%d", rc);
+
+    /* Refusals leave zeros, never a stale count. */
+    needed = 99;
+    rc = wz_dissect_live_selected_packets(h, "bytes >= 0", 5, NULL, 0, &needed, &s);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && needed == 0 && s.rows_no == 0,
+          "an unknown flags value rc=%d", rc);
+    rc = wz_dissect_live_selected_packets(h, "kind ==",
+                                          WZ_DISSECT_SELECTED_ROWS_ONLY, NULL, 0,
+                                          &needed, &s);
+    CHECK(rc == WZ_DISSECT_ERR_SELECTOR, "a bad selector rc=%d", rc);
+    rc = wz_dissect_live_selected_packets(h, "bytes >= 0",
+                                          WZ_DISSECT_SELECTED_ROWS_ONLY, NULL, 4,
+                                          &needed, &s);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "a NULL buffer with capacity rc=%d", rc);
+    rc = wz_dissect_live_selected_packets(NULL, "bytes >= 0",
+                                          WZ_DISSECT_SELECTED_ROWS_ONLY, NULL, 0,
+                                          &needed, &s);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle rc=%d", rc);
+    wz_dissect_live_close(h);
+    return 0;
+}
+
 /* (ABI 43) -- THE BOUNDED OPEN, driven from C: the two ceilings on decoded
  * messages are the caller's. Twelve keepalives on ONE flow under a per-flow
  * ceiling of 4 and a total of 5 leave four held (the per-flow ceiling is the
@@ -3961,6 +4025,11 @@ int main(void) {
 
     /* (ABI 43) -- and the open that takes the two message ceilings. */
     if (check_open_bounded_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 45) -- and the packets that carried the rows a selector picks. */
+    if (check_selected_packets_door() != 0) {
         return 1;
     }
 
