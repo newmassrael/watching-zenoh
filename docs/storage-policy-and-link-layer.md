@@ -406,6 +406,60 @@ the noise does not explain, and far below zenoh.
 What this does not show: other payload sizes, a real network, TCP for the wz node
 (it has no stream link on the host), or a node with more than one query in flight.
 
+The deadline of a pending query is the application layer's, and a link that sleeps
+while the session is idle would sleep past it. `SessionCore` holds one value for it
+(`set_app_wake_deadline_ms`, the earliest moment the layer needs the loop awake),
+`SlotDispatch` states the earliest pending query to it whenever the pending table
+changes, and the pump folds it into the budget it hands the link. The pump's test
+runs an acceptor over a link that records the wait it is told, and fails under a
+mutation that ignores the layer's deadline.
+
+## 5.3 The kit client sleeps when idle, and batches (2026-10-23)
+
+5.1 measured on the host what the idle wait and the batching window are worth;
+this is the same code on the T2G kit (CYT4BF, Cortex-M7, Zephyr's sockets, the
+fixed-memory client of `fixed_client.rs`). `ZephyrUdpSocket` re-arms
+`SO_RCVTIMEO` through the board hook that armed it when the socket was opened
+(`set_receive_timeout`), and the image opts in by Kconfig: `CONFIG_WZ_IDLE_WAIT_MS`
+(0, the default, keeps the tick) and `CONFIG_WZ_TX_BATCHING`
+(`overlays/t2g_client_batching.conf`, which also gives the main thread 10 KB). The
+loop says how many times it went round every five seconds, which is the figure
+that tells a node that sleeps from one that polls.
+
+Four images from one tree, flashed to the kit and asked 2,000 times for each of the
+node's two documents, three repetitions, the order shuffled every repetition (48,000
+GETs in all, none wrong); the router is a zenohd on the host, the kit its UDP client.
+
+| | base | idle wait 1,000 ms | batching | both |
+|---|---|---|---|---|
+| flash (text) | 158,924 B | 158,952 B | 167,128 B | 167,156 B |
+| worst stack chain, direct calls | 6,840 B | 6,848 B | 7,140 B | 7,148 B |
+| main stack | 9,216 B | 9,216 B | 10,240 B | 10,240 B |
+| loop rounds a second, session idle | 909 | about 4 | not taken | about 4 |
+| GET median, host's view (6 medians) | 0.399 ms | 0.387 ms | 0.351 ms | 0.351 ms |
+
+- **The idle wait takes the loop from 909 rounds a second to about 4**, with the
+  session held for 60 s at a 10 s lease and no loss. The node's one thread now
+  sleeps in the kernel until a datagram arrives or the keep-alive falls due. The
+  figure is the node's own count of its loop, not a power measurement: what the
+  board saves in current is not measured here. It costs 28 bytes of flash.
+- **Batching costs 8.2 KB of flash and 300 bytes of stack** (the batch writer and
+  its flush path are code the image did not carry), which is why its overlay raises
+  the main stack: the chain would leave 22 percent free at 9 KB, short of the
+  quarter HW.7 asks. The stack gate holds it as its own row,
+  `zephyr-client-fixed-batching`, at 7,140 B.
+- **The latency is the host's view** (a request through the router's REST port to
+  the kit and back), so it includes the host's part, and the runs of one image
+  differ among themselves by more than the images differ (0.31 to 0.48 ms for the
+  base). The batching images were lower in the medians, by about 0.04 ms, and the
+  ranges overlap: a small effect in the direction the host showed, not a margin.
+- **The base image file is 1,244 B larger** than the one of 5.1 (174,740 B against
+  173,496 B), from this change and from every commit that came to the tree since; the
+  idle wait adds 24 B to the file.
+
+What this does not show: the board's current draw, a second session (the idle wait
+is for an image that waits on one socket and no other), and the images over lwIP.
+
 ## 6. Open
 
 - The Zephyr kernel keeps a heap of its own (network buffers, POSIX objects).

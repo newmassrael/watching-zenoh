@@ -157,6 +157,19 @@ IMAGES = (
         entry="wz_app_main",
         peak=6808,
     ),
+    # The same client with the session coalescing a send window into one datagram
+    # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
+    # frames under the observer's drain, which the overlay says: 7,140 bytes in the image of
+    # 2026-10-23, against 6,840 for the client without them. Its stack is the overlay's own.
+    Image(
+        key="zephyr-client-fixed-batching",
+        elf=None,
+        source="deploy/zephyr-admin-node/overlays/t2g_client_batching.conf",
+        pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
+        unit=1,
+        entry="wz_app_main",
+        peak=7140,
+    ),
 )
 
 _HEAD = re.compile(r"^([0-9a-f]{8}) <(.*)>:$")
