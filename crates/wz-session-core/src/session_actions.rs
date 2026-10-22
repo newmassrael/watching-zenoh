@@ -2476,6 +2476,62 @@ enum DispatchStage {
     Scheduled,
 }
 
+/// How a message's encoder reaches [`SessionLinkActions::dispatch_network_message_at`].
+///
+/// On the slot profile the closure itself, so each kind of message keeps its own copy of the
+/// dispatch and the stack gate (`scripts/lib/stack_frame_gate.py`) can follow the direct calls
+/// from it down the image: a call through a pointer ends the chain it reads, and the frame of
+/// the dispatch is on the deepest one.
+#[cfg(all(
+    feature = "session-slot",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+#[inline(always)]
+fn as_encoder<P>(encode_body: &P) -> &P
+where
+    P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+{
+    encode_body
+}
+
+/// The same hand-over everywhere else: a trait object, so the dispatch (some 7 KB) is one copy
+/// and not one per kind of message sent, at the cost of one call through a pointer per message.
+#[cfg(all(
+    not(feature = "session-slot"),
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+#[inline(always)]
+fn as_encoder<'a, P>(
+    encode_body: &'a P,
+) -> &'a dyn Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
+where
+    P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+{
+    encode_body
+}
+
 /// R2952 — the runtime's hand-off: run a [`BlockFirstJob`] off the sending
 /// thread (tokio: `spawn_blocking`, upstream's own seam). `Send + Sync` because
 /// the session it lives in is shared across the runtime's threads.
@@ -4245,7 +4301,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             qos,
             body.len(),
             stats_class,
-            |sink| sce_forge_runtime::codec::SceSink::write_bytes(sink, &body),
+            as_encoder(&|sink: &mut crate::tx_buf::TxSink<'_>| {
+                sce_forge_runtime::codec::SceSink::write_bytes(sink, &body)
+            }),
         );
         self.with_conduit_link(Reliability::from_reliable_bool(reliable), route, |link| {
             link.link_driver().block_first_release(qos.priority())
@@ -8631,7 +8689,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             qos,
             worst_case_payload,
             stats_class,
-            encode_body,
+            as_encoder(&encode_body),
         )
     }
 
@@ -8685,6 +8743,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ))]
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
+    // The encoder is handed over by reference through [`as_encoder`]: a trait object on a host
+    // build, where this body is some 7 KB and a closure of its own for each kind of message sent
+    // made eight copies of it, differing in nothing but the call that writes the message; the
+    // closure itself on the slot profile, where the stack gate follows the direct calls of the
+    // image and a call through a pointer would hide everything beneath this frame from it.
     fn dispatch_network_message_at<P>(
         &self,
         stage: DispatchStage,
@@ -8693,10 +8756,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         qos: crate::sample::QosLevel,
         worst_case_payload: usize,
         _stats_class: crate::stats::NetworkStatsClass,
-        encode_body: P,
+        encode_body: &P,
     ) -> Result<(), SendWireError>
     where
-        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
+            + ?Sized,
     {
         let congestion = qos.congestion();
         // R2371 (`transport-stats`) — the NETWORK-message counters. Charged in
