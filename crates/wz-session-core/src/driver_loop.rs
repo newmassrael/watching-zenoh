@@ -465,7 +465,7 @@ pub enum IterationEvent<'a> {
     /// Carries the same ungated [`MulticastPeerId`] the departure does. `Copy`.
     MulticastSource(MulticastPeerId),
     /// The application layer's own deadline has come due: the moment it stated through
-    /// [`SessionCore::set_app_wake_deadline_ms`](crate::session_actions::SessionCore::set_app_wake_deadline_ms)
+    /// [`SessionLinkActions::set_app_wake_deadline_ms`](crate::session_actions::SessionLinkActions::set_app_wake_deadline_ms)
     /// is now or past.
     ///
     /// A session's steady state is event-free: the loop raises an event for a datagram, for the
