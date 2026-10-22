@@ -56,7 +56,8 @@ use wz_integration_tests::common::{
     compile_pico_example_against_wz_capi, compile_pico_example_against_wz_capi_in,
     compile_pico_source, graceful_terminate, group_declarations, group_puts, project_root,
     read_captured, wait_for_substring, zenoh_pico_cli_binary, zenoh_pico_include_dirs,
-    zenoh_pico_library_dir, zenoh_pico_mcdecl_cli_binary, ChildGuard, PicoHeaderArm,
+    zenoh_pico_library_dir, zenoh_pico_mcdecl_cli_binary, zenoh_pico_mcdecl_library_dir,
+    ChildGuard, PicoHeaderArm,
 };
 
 /// The program sleeps 5 s, puts for 5 s, gets for 5 s and sleeps 5 s more in each of its
@@ -210,6 +211,59 @@ fn upstream_peer_multicast_test_passes_against_wz_capi_pico() {
         )
     });
     run_and_read("z_test_peer_multicast on wz-capi-pico", &exe);
+}
+
+/// The calibration with pico's `Z_FEATURE_MULTICAST_DECLARATIONS=1`: upstream's test against
+/// upstream's library built with the switch, whose sessions then declare keyexprs, ask for the
+/// members' declarations and obey their write filters on the group.
+// wz-proves: none -- the calibration: upstream's program on upstream's switched-on library says whether this host carries the group with the switch, and runs no wz code
+#[test]
+#[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
+fn upstream_peer_multicast_test_with_multicast_declarations_passes_against_real_pico() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled test");
+    let exe = compile_pico_source(
+        &upstream_test(),
+        dir.path(),
+        &PicoHeaderArm::McastDeclarations.include_dirs(),
+        &zenoh_pico_mcdecl_library_dir(),
+        "zenohpico",
+    )
+    .unwrap_or_else(|diag| {
+        panic!("upstream's test does not build against upstream's switched-on library\n{diag}")
+    });
+    run_and_read(
+        "z_test_peer_multicast on libzenohpico (multicast declarations)",
+        &exe,
+    );
+}
+
+/// The claim with the switch: the same program against wz's drop-in built with
+/// `multicast-declarations`.
+// wz-proves: none -- upstream's own self-asserting test against wz; all four group members are wz, so no foreign party speaks
+#[test]
+#[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
+fn upstream_peer_multicast_test_with_multicast_declarations_passes_against_wz_capi_pico() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled test");
+    let arm = PicoHeaderArm::McastDeclarations;
+    let cdylib = arm.wz_cdylib();
+    let libdir = cdylib.parent().expect("the cdylib has a directory");
+    let exe = compile_pico_source(
+        &with_task_functions(dir.path()),
+        dir.path(),
+        &arm.include_dirs(),
+        libdir,
+        "wz_capi_pico",
+    )
+    .unwrap_or_else(|diag| {
+        panic!(
+            "upstream's z_test_peer_multicast.c does not build against wz's switched-on drop-in\n\
+             {diag}"
+        )
+    });
+    run_and_read(
+        "z_test_peer_multicast on wz-capi-pico (multicast declarations)",
+        &exe,
+    );
 }
 
 /// The group the cross legs share: a port of its own, so a leg never hears upstream's test
