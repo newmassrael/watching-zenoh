@@ -11,8 +11,8 @@
 use std::ffi::c_void;
 
 use wz_capi_core::drive::{
-    open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, FaceDrive, ListenPhase, OpenError,
-    OpenStance, SessionState, DEFAULT_BATCH_SIZE,
+    names_a_group, open_blocking, CapiTlsConfig, ConfiguredZid, DialPhase, FaceDrive, GroupJoin,
+    GroupProfile, ListenPhase, OpenError, OpenStance, SessionState, DEFAULT_BATCH_SIZE,
 };
 use wz_capi_core::faces::{no_shm_clients, OpenShmClients};
 use wz_capi_core::gossip::GossipPolicy;
@@ -243,6 +243,31 @@ fn listen_endpoints(
         .map(str::to_owned)
         .into_iter()
         .collect()
+}
+
+/// The largest batch zenoh puts on a multicast link, whatever its config states
+/// (`commons/zenoh-protocol/src/transport/mod.rs` @ `pub const MULTICAST: BatchSize = 8_192;`).
+const ZENOH_MULTICAST_BATCH: u16 = 8_192;
+
+/// Open-debt item 913 — what a zenoh-c session's JOIN advertises on a group, as zenoh's
+/// multicast transport fills it (`io/zenoh-transport/src/multicast/transport.rs` @
+/// `join_interval: self.manager.config.multicast.join_interval,`, beside the batch capped at
+/// `batch_size::MULTICAST`): the link lease of `transport/link/tx/lease`, the beacon
+/// interval of `transport/multicast/join_interval`, the default resolution of both sequence
+/// numbers and request ids (32 bits), the session's batch size held to the multicast cap (the
+/// UDP link's own MTU is above it on every target zenoh names), and per-priority conduits when
+/// `transport/multicast/qos/enabled` asks for them.
+fn zenoh_group_profile(node: &ZenohNodeConfig, batch_size: u16) -> GroupProfile {
+    // The 2-bit code of a 32-bit resolution, zenoh's default for both fields.
+    const BITS_32: u8 = 0x02;
+    GroupProfile {
+        lease_ms: node.lease_ms,
+        join_interval_ms: node.multicast_join_interval_ms,
+        seq_num_res: BITS_32,
+        req_id_res: BITS_32,
+        batch_size: batch_size.min(ZENOH_MULTICAST_BATCH),
+        is_qos: node.multicast_qos,
+    }
 }
 
 /// Construct and open a session, consuming the moved config (zenoh-c `z_open`).
@@ -574,6 +599,54 @@ pub(crate) unsafe fn open_session(
             return Z_EINVAL;
         };
 
+        // Open-debt item 913 — the multicast groups among the endpoints, as zenoh's runtime
+        // sorts them. A listened group is a multicast transport, in every role
+        // (`io/zenoh-transport/src/manager.rs` @ `self.add_listener_multicast(endpoint).await`).
+        // A group to dial is refused by a peer or a router, which fails the open
+        // (`zenoh/src/net/runtime/orchestrator.rs` @
+        // `bail!("Forbidden multicast endpoint in connect list!")`), and a client tries it as a
+        // unicast link it never establishes, so it opens only when another endpoint does: a
+        // client with nothing else to dial fails the open, and one with something else dials that.
+        let (listen, group_endpoints): (Vec<String>, Vec<String>) = listen
+            .into_iter()
+            .partition(|endpoint| !names_a_group(endpoint));
+        let connect = if connect.iter().any(|endpoint| names_a_group(endpoint)) {
+            if whatami != WhatAmI::Client {
+                return Z_ENETWORK;
+            }
+            let dialable: Vec<String> = connect
+                .into_iter()
+                .filter(|endpoint| !names_a_group(endpoint))
+                .collect();
+            if dialable.is_empty() {
+                return Z_ENETWORK;
+            }
+            dialable
+        } else {
+            connect
+        };
+        // A build without `multicast-transport` is handed the groups all the same, and its open
+        // refuses them (`OpenStance::groups`), rather than binding a group as a unicast port.
+        let groups = node.as_ref().map_or_else(Vec::new, |node| {
+            let profile = zenoh_group_profile(node, batch_size);
+            // zenoh reports its multicast transports as shared-memory ones when the session
+            // holds a shared-memory context, which `transport/shared_memory/enabled` gives it on
+            // the shared-memory build and nothing gives it on the other (MEASURED: the real
+            // library's `z_info` printed `is_shm: true` for a zenohd member).
+            #[cfg(feature = "zenoh-c-shared-memory")]
+            let is_shm = node.shared_memory;
+            #[cfg(not(feature = "zenoh-c-shared-memory"))]
+            let is_shm = false;
+            group_endpoints
+                .into_iter()
+                .map(|endpoint| GroupJoin {
+                    endpoint,
+                    profile,
+                    is_shm,
+                })
+                .collect()
+        });
+
         // zenoh's own bounded queue and waits: this ABI stands for zenoh-c.
         let stance = OpenStance {
             tx_queue: TxQueueConf::default(),
@@ -610,8 +683,7 @@ pub(crate) unsafe fn open_session(
             face_drive: FaceDrive::PerFace,
             auth,
             policy,
-            // This ABI joins no multicast group yet (open-debt item 913).
-            groups: Vec::new(),
+            groups,
         };
         // R3065 -- a session opened over a client storage advertises the protocols of THAT
         // reader: the stance takes both from the one set, so the list a peer's sender reads is

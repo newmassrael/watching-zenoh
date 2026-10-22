@@ -214,6 +214,7 @@ default = [
     "transport_compression",
     "auth_usrpwd",
     "interceptors",
+    "multicast-transport",
 ]
 # The roles beyond the client: a listener, a router or a peer, and the gossip that introduces
 # the nodes of a mesh. A build without them opens a client session to the endpoints it dials.
@@ -240,6 +241,9 @@ advanced = ["liveliness", "queryable", "timestamping", "wz-capi-core/advanced"]
 group = ["wz-capi-core/group"]
 # A session told of a node by one it holds a link to dials it.
 gossip = ["peer", "wz-capi-core/gossip"]
+# Open-debt item 913 — a UDP multicast group in `listen/endpoints`, joined as one transport to
+# every member of the group, as zenoh's runtime joins one (its listener of a multicast locator).
+multicast-transport = ["link-udp", "peer", "wz-capi-core/multicast-transport"]
 # The `tls/` link, dial and accept. A session reads the certificate material of
 # `transport/link/tls` (`root_ca_certificate`, `listen_certificate`, `listen_private_key`, each a
 # path) when it opens, and a path it cannot read fails the open; a `tls/` dial verifies the name

@@ -57,17 +57,16 @@
 //!
 //! ## What is honestly UNKNOWN, and says so
 //!
-//! Two accessors report absence rather than a plausible number, and upstream's
-//! own signatures are what make that expressible:
+//! One accessor reports absence rather than a plausible number, and upstream's
+//! own signature is what makes that expressible: `z_link_priorities` returns
+//! `bool`. wz binds a priority band to a link only under `transport-multilink` +
+//! `transport-qos`, and reads it back through no public accessor at all; with no
+//! band installed there is no range to report, and `false` is the measured answer.
 //!
-//! - `z_link_priorities` returns `bool`. wz binds a priority band to a link only
-//!   under `transport-multilink` + `transport-qos`, and reads it back through no
-//!   public accessor at all; with no band installed there is no range to report,
-//!   and `false` is the measured answer.
-//! - `z_link_group` writes an empty string. zenoh's link group is a multicast
-//!   join-group name, and wz's C surface establishes unicast transports only.
+//! `z_link_group` writes the group of a group member's link and an empty string for
+//! a unicast link, which has no group (open-debt item 913).
 //!
-//! `z_link_auth_identifier` is the third of that shape but not the same case: it
+//! `z_link_auth_identifier` is empty for another reason: it
 //! is empty because wz's auth extension records no per-link identity string, not
 //! because the link lacks one.
 
@@ -286,6 +285,8 @@ fn whatami_c_from_wire(wire: u8) -> u8 {
 struct LinkState {
     src: String,
     dst: String,
+    /// The group locator of a group member's link, `None` on a unicast one.
+    group: Option<String>,
     interfaces: Vec<String>,
     mtu: u16,
     is_streamed: bool,
@@ -293,9 +294,36 @@ struct LinkState {
     zid: [u8; 16],
 }
 
+/// The MTU zenoh's UDP multicast link reports, by target
+/// (`io/zenoh-links/zenoh-link-udp/src/lib.rs` @ `const UDP_MAX_MTU: BatchSize = u16::MAX - 8 - 40;`
+/// and the `UDP_MTU_LIMIT` beside it).
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const ZENOH_UDP_MTU: u16 = u16::MAX - 8 - 40;
+#[cfg(target_os = "macos")]
+const ZENOH_UDP_MTU: u16 = 9_216;
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+const ZENOH_UDP_MTU: u16 = 8_192;
+
 impl LinkState {
     fn from_snapshot(link: &LinkSnapshot, zid: [u8; 16]) -> Self {
+        if let Some(group) = &link.group {
+            // Open-debt item 913 — a group member's link, as zenoh builds one from its
+            // multicast link: this node's locator to the member's, over the group, with the
+            // link's MTU, no interfaces, no priorities and no reliability
+            // (`io/zenoh-link-commons/src/lib.rs` @ `pub fn new_multicast(link: &LinkMulticast) -> Self {`).
+            return Self {
+                src: link.src.clone(),
+                dst: link.dst.clone(),
+                group: Some(group.locator.clone()),
+                interfaces: Vec::new(),
+                mtu: ZENOH_UDP_MTU,
+                is_streamed: false,
+                reliability: None,
+                zid,
+            };
+        }
         Self {
+            group: None,
             src: link.src.clone(),
             dst: link.dst.clone(),
             // The three-state answer flattens HERE and nowhere else: upstream's
@@ -535,13 +563,19 @@ pub struct z_info_links_options_t {
     pub transport: *mut z_moved_transport_t,
 }
 
+/// The transport a links filter keeps: its zid and whether it is multicast. Both, because a
+/// node can hold a unicast and a multicast transport to one peer, and zenoh keeps the links of
+/// the one the filter names (`zenoh/src/net/runtime/mod.rs` @
+/// `Some(t) if t.is_multicast => self.get_links_transport_multicast(&t.zid),`).
+type TransportFilter = Option<([u8; 16], bool)>;
+
 /// Read a moved-transport filter, taking ownership as upstream's doc says it
-/// does, and answer the zid to keep.
+/// does, and answer the transport to keep.
 ///
 /// # Safety
 /// `moved` must be null or a valid moved transport.
 #[inline]
-unsafe fn take_transport_filter(moved: *mut z_moved_transport_t) -> Option<[u8; 16]> {
+unsafe fn take_transport_filter(moved: *mut z_moved_transport_t) -> TransportFilter {
     if moved.is_null() {
         return None;
     }
@@ -550,7 +584,9 @@ unsafe fn take_transport_filter(moved: *mut z_moved_transport_t) -> Option<[u8; 
     // free, which is exactly why `z_transport_drop` is also a no-op.
     let taken =
         unsafe { std::mem::replace(&mut (*moved)._this, z_owned_transport_t::null_value()) };
-    taken.is_live().then_some(taken.zid)
+    taken
+        .is_live()
+        .then_some((taken.zid, taken.is_multicast != 0))
 }
 
 // ---------------------------------------------------------------------------
@@ -594,6 +630,7 @@ pub unsafe extern "C" fn z_link_clone(this_: *mut z_owned_link_t, link: *const z
             let copy = LinkState {
                 src: state.src.clone(),
                 dst: state.dst.clone(),
+                group: state.group.clone(),
                 interfaces: state.interfaces.clone(),
                 mtu: state.mtu,
                 is_streamed: state.is_streamed,
@@ -685,11 +722,9 @@ pub unsafe extern "C" fn z_link_dst(link: *const z_loaned_link_t, str_out: *mut 
     });
 }
 
-/// Write this link's multicast GROUP (zenoh-c `z_link_group`).
-///
-/// Always empty, and that is a measurement rather than a stub: a group is the
-/// multicast join address, and wz's C surface establishes unicast transports
-/// only — see this module's header.
+/// Write this link's multicast GROUP (zenoh-c `z_link_group`): the group locator of a group
+/// member's link (open-debt item 913), and the empty string for a unicast link, which has
+/// none.
 ///
 /// # Safety
 /// `link` must be null or live; `str_out` must be null or writable.
@@ -699,9 +734,12 @@ pub unsafe extern "C" fn z_link_group(
     str_out: *mut z_owned_string_t,
 ) {
     guard_val((), || {
-        let _ = link;
+        // SAFETY: the caller's contract, delegated.
+        let text = unsafe { link_state(link) }
+            .and_then(|s| s.group.as_deref())
+            .unwrap_or("");
         // SAFETY: the caller's contract.
-        unsafe { write_string(str_out, "") };
+        unsafe { write_string(str_out, text) };
     });
 }
 
@@ -1859,14 +1897,27 @@ fn kind_of(kind: FaceEventKind) -> z_sample_kind_t {
     }
 }
 
-/// Whether a snapshot passes a zid filter.
+/// Whether a snapshot passes a transport filter.
 #[inline]
-fn passes(filter: Option<[u8; 16]>, snapshot: &FaceSnapshot) -> bool {
+fn passes(filter: TransportFilter, snapshot: &FaceSnapshot) -> bool {
     // `Option::is_none_or` would read better and is stable since 1.82; this
     // workspace's MSRV is 1.81, and clippy's `incompatible_msrv` is right to
     // refuse it.
     #[allow(clippy::unnecessary_map_or)]
-    filter.map_or(true, |zid| zid == snapshot.zid)
+    filter.map_or(true, |(zid, multicast)| {
+        zid == snapshot.zid && multicast == snapshot.is_multicast
+    })
+}
+
+/// Every transport zenoh reports: each unicast face, then each member of each group the
+/// session joined, a multicast transport of its own
+/// (`zenoh/src/net/runtime/mod.rs` @ `.map(|ref peer| Transport::new(peer, true));`).
+fn connected(shared: &wz_capi_core::faces::SharedSession) -> Vec<FaceSnapshot> {
+    #[cfg_attr(not(feature = "multicast-transport"), allow(unused_mut))]
+    let mut all = shared.face_snapshots();
+    #[cfg(feature = "multicast-transport")]
+    all.extend(shared.group_member_snapshots());
+    all
 }
 
 /// Default link-events listener options (zenoh-c
@@ -1964,15 +2015,20 @@ unsafe fn declare_link_listener(
     });
     let shared = state.shared.clone();
     if history {
-        for snapshot in shared.face_snapshots() {
+        for snapshot in connected(&shared) {
             if passes(filter, &snapshot) {
                 deliver_link_event(&closure, FaceEventKind::Up, &snapshot);
             }
         }
     }
     let sink = closure.clone();
+    // A group member's arrival and departure are TRANSPORT events alone: zenoh's multicast
+    // handler announces the member's transport and hands it a peer handler whose link hooks
+    // its multicast transport never calls
+    // (`zenoh/src/api/connectivity.rs` @ `impl TransportMulticastEventHandler for ConnectivityMulticastHandler {`).
+    // Its link is reported by the listing and by the history above, which read the links.
     let watcher = shared.watch_faces(Arc::new(move |kind, snapshot: &FaceSnapshot| {
-        if passes(filter, snapshot) {
+        if !snapshot.is_multicast && passes(filter, snapshot) {
             deliver_link_event(&sink, kind, snapshot);
         }
     }));
@@ -2066,15 +2122,34 @@ unsafe fn declare_transport_listener(
     });
     let shared = state.shared.clone();
     if history {
-        for snapshot in shared.face_snapshots() {
+        for snapshot in connected(&shared) {
             deliver_transport_event(&closure, FaceEventKind::Up, &snapshot);
         }
     }
     let sink = closure.clone();
     let watcher = shared.watch_faces(Arc::new(move |kind, snapshot: &FaceSnapshot| {
-        deliver_transport_event(&sink, kind, snapshot);
+        if snapshot.is_multicast {
+            deliver_transport_event(&sink, kind, &as_announced(snapshot));
+        } else {
+            deliver_transport_event(&sink, kind, snapshot);
+        }
     }));
     Ok(Box::into_raw(Box::new(ListenerState { shared, watcher })) as Handle)
+}
+
+/// A group member as zenoh ANNOUNCES it, which is not as zenoh lists it: the announced
+/// transport is built from the member's JOIN, whose shared-memory extension says whether it is a
+/// shared-memory one (`io/zenoh-transport/src/multicast/transport.rs` @
+/// `let is_shm = zcondfeat!("shared-memory", join.ext_shm.is_some(), false);`), and zenoh's
+/// own JOIN never carries the extension (`io/zenoh-transport/src/multicast/link.rs` @
+/// `ext_shm: None,`), while the listing and the history read the session's shared-memory
+/// context. MEASURED on the real library: a zenohd member listed with `is_shm: true` was
+/// announced with `is_shm: false`.
+fn as_announced(member: &FaceSnapshot) -> FaceSnapshot {
+    FaceSnapshot {
+        is_shm: false,
+        ..member.clone()
+    }
 }
 
 /// Declare a transport-events listener (zenoh-c
@@ -2373,7 +2448,7 @@ pub unsafe extern "C" fn z_info_links(
         let rc = match unsafe { session_state(session) } {
             Some(state) => {
                 if let Some(call) = held.call {
-                    for snapshot in state.shared.face_snapshots() {
+                    for snapshot in connected(&state.shared) {
                         if !passes(filter, &snapshot) {
                             continue;
                         }
@@ -2417,7 +2492,7 @@ pub unsafe extern "C" fn z_info_transports(
         let rc = match unsafe { session_state(session) } {
             Some(state) => {
                 if let Some(call) = held.call {
-                    for snapshot in state.shared.face_snapshots() {
+                    for snapshot in connected(&state.shared) {
                         let mut owned = z_owned_transport_t::from_snapshot(&snapshot);
                         // SAFETY: a live owned transport this frame built.
                         unsafe {
@@ -2451,10 +2526,10 @@ mod tests {
     /// A transport built through upstream's own constructor reads back through
     /// every accessor, INCLUDING the two booleans a session never sets.
     ///
-    /// `is_multicast` is the one worth a test on its own: `FaceSnapshot` always
-    /// reports `false` for it, so this constructor is the ONLY producer of a
-    /// multicast transport value on this ABI, and an accessor that ignored the
-    /// field would pass every face-derived check.
+    /// `is_multicast` is the one worth a test on its own: a unicast face reports
+    /// `false` for it, so an accessor that ignored the field would pass every
+    /// face-derived check; this constructor and a group member are the producers of
+    /// a multicast transport value on this ABI.
     #[test]
     fn a_constructed_transport_reads_back_through_every_accessor() {
         let mut owned = z_owned_transport_t::null_value();
@@ -2574,6 +2649,54 @@ mod tests {
 
         let mut moved = z_moved_link_t { _this: clone };
         unsafe { z_link_drop(&mut moved) };
+    }
+
+    /// Open-debt item 913 — a group member's link reads as zenoh's multicast link does:
+    /// its group, the UDP link's MTU whatever the snapshot carried, unstreamed, and no
+    /// reliability at all, where a unicast UDP link reports best-effort. A links filter
+    /// keeps the transport it names, multicast or not, of the zid it names.
+    ///
+    /// # Control
+    ///
+    /// Building the group link through the unicast arm reds the group and reliability
+    /// asserts; dropping the multicast half of the filter reds the last assert.
+    #[test]
+    fn a_group_members_link_reads_as_zenohs_multicast_link() {
+        use wz_capi_core::faces::{GroupLink, LinkSnapshot};
+        let snapshot = LinkSnapshot {
+            src: "udp/127.0.0.1:40000".to_owned(),
+            dst: "udp/127.0.0.1:40001".to_owned(),
+            kind: Some(wz_runtime_tokio::session_glue::LinkKind::Udp),
+            interfaces: None,
+            mtu: 0,
+            group: Some(GroupLink {
+                locator: "udp/224.0.0.224:7447".to_owned(),
+                endpoint: "udp/224.0.0.224:7447#iface=lo".to_owned(),
+            }),
+        };
+        let state = LinkState::from_snapshot(&snapshot, [5u8; 16]);
+        assert_eq!(state.group.as_deref(), Some("udp/224.0.0.224:7447"));
+        assert_eq!(state.src, "udp/127.0.0.1:40000");
+        assert_eq!(state.dst, "udp/127.0.0.1:40001");
+        assert_eq!(state.mtu, ZENOH_UDP_MTU);
+        assert!(!state.is_streamed);
+        assert_eq!(state.reliability, None);
+        assert!(state.interfaces.is_empty());
+
+        let member = FaceSnapshot {
+            zid: [5u8; 16],
+            whatami: 1,
+            is_qos: false,
+            is_multicast: true,
+            is_shm: false,
+            links: vec![snapshot],
+        };
+        assert!(passes(None, &member));
+        assert!(passes(Some(([5u8; 16], true)), &member));
+        assert!(
+            !passes(Some(([5u8; 16], false)), &member),
+            "a unicast filter kept a member"
+        );
     }
 
     /// R2794 (open-debt item 814) — zenoh-c's `z_link_is_streamed` and

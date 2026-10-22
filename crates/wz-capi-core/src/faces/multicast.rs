@@ -66,10 +66,14 @@ use super::{
 };
 
 /// One member of a group as the transport both upstreams report it as: its zid and role,
-/// neither QoS nor shared memory, and one link from this node's locator on the group to the
-/// member's address, over the group (`src`, `group` and `endpoint` label it; see
-/// [`GroupLink`]). `None` for a member whose JOIN named a role this node does not know,
+/// shared memory as the calling ABI says (`is_shm`), and one link from this node's locator on
+/// the group to the member's address, over the group (`src`, `group` and `endpoint` label it;
+/// see [`GroupLink`]). `None` for a member whose JOIN named a role this node does not know,
 /// which a transport cannot report, as [`FaceSnapshot`] refuses a face with no role.
+///
+/// Not QoS: zenoh reports a member's QoS as its JOIN advertised it, and the member table this
+/// reads does not keep that, so a member whose JOIN carries the QoS extension is reported
+/// without it. A group with QoS is off by default on both upstreams.
 ///
 /// The link is a UDP datagram link, whose MTU each ABI reports by its own table.
 fn member_snapshot(
@@ -77,6 +81,7 @@ fn member_snapshot(
     src: &str,
     group: &str,
     endpoint: &str,
+    is_shm: bool,
 ) -> Option<FaceSnapshot> {
     let whatami = member.whatami?.to_wire();
     let peer = member.peer.as_slice();
@@ -88,7 +93,7 @@ fn member_snapshot(
         whatami,
         is_qos: false,
         is_multicast: true,
-        is_shm: false,
+        is_shm,
         links: vec![LinkSnapshot {
             src: src.to_owned(),
             dst: format!("udp/{}", member.locator),
@@ -121,6 +126,8 @@ pub(super) struct McastFaceEntry {
     pub(super) producer: MulticastTxProducer,
     /// The endpoint the session joined the group by, as the session was given it.
     pub(super) endpoint: String,
+    /// Whether the group's transports are reported as shared-memory ones.
+    pub(super) is_shm: bool,
     /// The members announced as connected so far, each as it was announced, so a
     /// departure is announced as the arrival was even when the join that held it is gone.
     pub(super) announced: Vec<(MulticastMember, FaceSnapshot)>,
@@ -138,6 +145,9 @@ pub struct McastFaceParts<'a> {
     pub producer: &'a MulticastTxProducer,
     /// The endpoint the session joined the group by.
     pub endpoint: &'a str,
+    /// Whether the calling ABI reports the group's transports as shared-memory ones
+    /// (`GroupJoin::is_shm`).
+    pub is_shm: bool,
 }
 
 /// A group face as a sender takes it: the session and its re-arm signal, read
@@ -224,6 +234,7 @@ impl SharedSession {
             membership,
             producer,
             endpoint,
+            is_shm,
         } = parts;
         let mut guard = self.lock();
         let subs = guard
@@ -248,6 +259,7 @@ impl SharedSession {
                 membership: membership.clone(),
                 producer: producer.clone(),
                 endpoint: endpoint.to_owned(),
+                is_shm,
                 announced: Vec::new(),
             },
         );
@@ -305,7 +317,9 @@ impl SharedSession {
                 let Some((src, group)) = labels.as_ref() else {
                     continue;
                 };
-                let Some(snapshot) = member_snapshot(member, src, group, &face.endpoint) else {
+                let Some(snapshot) =
+                    member_snapshot(member, src, group, &face.endpoint, face.is_shm)
+                else {
                     continue;
                 };
                 face.announced.push((*member, snapshot.clone()));

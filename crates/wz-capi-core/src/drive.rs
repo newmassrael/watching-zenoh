@@ -3392,6 +3392,8 @@ struct GroupSetup {
 #[cfg(feature = "multicast-transport")]
 struct ResolvedGroup {
     endpoint: String,
+    /// [`GroupJoin::is_shm`].
+    is_shm: bool,
     group: std::net::IpAddr,
     port: u16,
     opts: wz_runtime_tokio::McastGroupOptions,
@@ -3431,6 +3433,7 @@ impl ResolvedGroup {
         } = join.profile;
         Some(Self {
             endpoint: join.endpoint.clone(),
+            is_shm: join.is_shm,
             group: parsed.addr.ip(),
             port: parsed.addr.port(),
             opts: wz_runtime_tokio::McastGroupOptions {
@@ -3498,6 +3501,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                     tokio::task::spawn_local(async move {
                         let ResolvedGroup {
                             endpoint,
+                            is_shm,
                             group,
                             port,
                             opts,
@@ -3506,7 +3510,10 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
                         serve_group(
                             shared,
                             index as u64,
-                            &endpoint,
+                            GroupLabel {
+                                endpoint: &endpoint,
+                                is_shm,
+                            },
                             &params,
                             || {
                                 wz_runtime_tokio::UdpDriver::bind_multicast_link(
@@ -3543,6 +3550,15 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
         .await;
 }
 
+/// What a group face reports about itself beside what it carries: the endpoint the session
+/// joined it by, and whether its transports are shared-memory ones ([`GroupJoin::is_shm`]).
+#[cfg(feature = "multicast-transport")]
+#[derive(Clone, Copy)]
+struct GroupLabel<'a> {
+    endpoint: &'a str,
+    is_shm: bool,
+}
+
 /// One group face for its whole life: bind and join, register as face `id` of the
 /// registry once joined, dispatch what the group carries into it and expire the gets
 /// that wait on it, until `stop` changes or the link is lost for good.
@@ -3553,7 +3569,7 @@ async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) 
 async fn serve_group<D, B, Fut>(
     shared: Arc<SharedSession>,
     id: u64,
-    endpoint: &str,
+    label: GroupLabel<'_>,
     params: &wz_runtime_tokio::multicast_glue::MulticastParams,
     bind: B,
     mut stop: tokio::sync::watch::Receiver<bool>,
@@ -3606,10 +3622,11 @@ async fn serve_group<D, B, Fut>(
                         revised: &revised,
                         membership: &membership,
                         producer: &producer,
-                        endpoint,
+                        endpoint: label.endpoint,
+                        is_shm: label.is_shm,
                     },
                 ),
-                Err(e) => log_open_failure(&format!("join {endpoint}"), e),
+                Err(e) => log_open_failure(&format!("join {}", label.endpoint), e),
             }
             let _ = up.send(joined.is_ok());
         },
@@ -3733,6 +3750,21 @@ pub struct OpenStance {
     pub groups: Vec<GroupJoin>,
 }
 
+/// Open-debt item 913 — whether `endpoint` names a multicast group in zenoh's sense: a `udp/`
+/// locator whose address is a multicast one (`io/zenoh-links/zenoh-link-udp/src/lib.rs` @
+/// `.any(|x| x.ip().is_multicast());`). zenoh's runtime opens a multicast transport for such
+/// an endpoint in `listen/endpoints` and refuses one in `connect/endpoints`.
+///
+/// An address this parser does not read as an IP is no group, where zenoh resolves a name
+/// first; a name that resolves to a group address is therefore listened on as a unicast
+/// endpoint, and its bind fails.
+pub fn names_a_group(endpoint: &str) -> bool {
+    use wz_runtime_tokio::locator::{parse_locator, Proto};
+
+    parse_locator(endpoint)
+        .is_ok_and(|parsed| parsed.proto == Proto::Udp && parsed.addr.ip().is_multicast())
+}
+
 /// Open-debt item 913 — a multicast group a session joins: the endpoint that names it, and
 /// what the session advertises on it.
 #[derive(Clone, Debug)]
@@ -3742,6 +3774,11 @@ pub struct GroupJoin {
     pub endpoint: String,
     /// What the session's beacon advertises on the group.
     pub profile: GroupProfile,
+    /// Whether the calling ABI's upstream reports the session's transports on this group as
+    /// shared-memory ones: zenoh's does when the session holds a shared-memory context
+    /// (`io/zenoh-transport/src/multicast/transport.rs` @ `self.shm_context.is_some()`), and
+    /// zenoh-pico has no shared memory.
+    pub is_shm: bool,
 }
 
 /// What a session's JOIN beacon advertises on a group, beside its identity and its role:
@@ -4960,7 +4997,7 @@ mod multicast_face_tests {
     use wz_runtime_tokio::sink::SampleView;
     use wz_runtime_tokio_test_support::multicast_bus::GroupBus;
 
-    use super::{serve_group, WhatAmI};
+    use super::{serve_group, GroupLabel, WhatAmI};
     use crate::faces::{QueryableSink, SharedSession, SubscriberSink};
 
     const ENDPOINT: &str = "udp/224.0.0.224:7447";
@@ -5004,7 +5041,10 @@ mod multicast_face_tests {
             serve_group(
                 shared,
                 0,
-                ENDPOINT,
+                GroupLabel {
+                    endpoint: ENDPOINT,
+                    is_shm: false,
+                },
                 &params(&zid),
                 move || {
                     std::future::ready(link.take().ok_or_else(|| io::Error::other("bound once")))

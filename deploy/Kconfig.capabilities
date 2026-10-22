@@ -47,7 +47,7 @@ config WZ_CAP_MULTICAST_TRANSPORT
 	help
 	  A UDP multicast group a peer joins: one transport to every member of the group.
 	  zenoh-pico has it when all of these are on: Z_FEATURE_MULTICAST_TRANSPORT, Z_FEATURE_LINK_UDP_MULTICAST.
-	  Exported by: pico.
+	  Exported by: pico, c.
 
 config WZ_CAP_QUERY
 	bool "query"
