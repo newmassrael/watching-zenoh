@@ -101,6 +101,21 @@ where
             .any(|(_, session)| session.actions().is_established())
     }
 
+    /// Ask every session's drive loop to run its next iteration now, however long its link was
+    /// going to sleep. For an application that has just left something for a session's layer
+    /// (a query in a [`GetMailbox`](crate::get_mailbox::GetMailbox)): the layer takes it on its
+    /// next event, and without this that event waits for the link's idle wait to run out. The
+    /// layer states its own deadline again on that event, so this costs one iteration.
+    ///
+    /// Only with `query-get`, the feature whose layer does state it again: without that, the
+    /// deadline this sets would stay and the loop would never sleep.
+    #[cfg(feature = "query-get")]
+    pub fn wake(&self) {
+        for (_, session) in self.manager.sessions() {
+            session.actions().set_app_wake_deadline_ms(Some(0));
+        }
+    }
+
     /// Whether the node holds a session, established or still opening. A node that holds none has
     /// no socket either, so its loop sleeps rather than spin above the network stack's threads.
     pub fn holds_session(&self) -> bool {

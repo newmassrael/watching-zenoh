@@ -27,6 +27,8 @@
 // that names it is the heap profile's; what a build with no allocator keeps is the
 // event seam ([`SessionEvents`]) and the reply sink that discards ([`NoReplies`]),
 // which an image's own dispatcher is written against.
+#[cfg(all(feature = "session-slot", feature = "query-get"))]
+use crate::get_mailbox::{Disposition, GetMailbox};
 #[cfg(feature = "alloc")]
 use core::cell::RefCell;
 
@@ -259,7 +261,7 @@ where
 /// What a `get` asks of a session on the slot profile, every field borrowed from the caller. The
 /// owner of a pending table and a sink has no other way to say it: the table is the session's own,
 /// beside its slot, and the sink is the application's closed type `R`.
-#[cfg(all(feature = "session-slot", feature = "query-get"))]
+#[cfg(feature = "query-get")]
 #[derive(Debug, Clone, Copy)]
 pub struct GetRequest<'a> {
     /// The queried keyexpr, written as a literal. Replies whose key does not intersect it are not
@@ -282,11 +284,11 @@ pub struct GetRequest<'a> {
 }
 
 /// How long a query with no timeout of its own stays pending: zenoh's default.
-#[cfg(all(feature = "session-slot", feature = "query-get"))]
+#[cfg(feature = "query-get")]
 pub const DEFAULT_GET_TIMEOUT_MS: u32 = 10_000;
 
 /// Why a `get` was not issued. Nothing was sent and nothing is pending in either case.
-#[cfg(all(feature = "session-slot", feature = "query-get"))]
+#[cfg(feature = "query-get")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GetError {
     /// The pending table is full, or the keyexpr is longer than the table keeps.
@@ -373,6 +375,30 @@ where
     fn publish_wake_deadline(&self) {
         self.handle
             .set_app_wake_deadline_ms(self.requesters.replies.next_deadline_ms());
+    }
+
+    /// Ask what the application left in `mailbox`, on this session, as this layer's own event.
+    ///
+    /// A query this session cannot take now (no free pending row, no transport) stays for the next
+    /// event, and one that can never be asked (a key the wire cannot carry) is freed and counted
+    /// by the mailbox. The sink is offered as a copy so that a refused offer leaves the row whole.
+    pub fn drain_mailbox<const N: usize>(&mut self, mailbox: &GetMailbox<R, N>)
+    where
+        R: Clone,
+    {
+        use wz_session_core::registry_error::RegisterError;
+        use wz_session_core::send_wire_error::SendWireError;
+
+        if mailbox.waiting() == 0 {
+            return;
+        }
+        mailbox.drain(|request, sink| match self.get(request, sink) {
+            Ok(_) => Disposition::Asked,
+            // No free pending row now, or the session is between transports: both pass.
+            Err(GetError::Register(RegisterError::TableFull))
+            | Err(GetError::Send(SendWireError::TransportUnavailable)) => Disposition::Retry,
+            Err(_) => Disposition::Reject,
+        });
     }
 
     /// Whether the session has completed its handshake and not yet lost its transport: a `get`

@@ -60,6 +60,9 @@ extern crate std;
 
 // R2827 — the application layer attached to the session drive.
 pub mod app_layer;
+// Where an application that is not the session's event leaves a query to be asked.
+#[cfg(feature = "query-get")]
+pub mod get_mailbox;
 // R311lt — the multicast group session's drive loop, pump and slot table, over
 // whichever stack carries the group (`GroupTransport`). It was
 // `wz-session-lwip`'s and named lwIP's types for what it needs of a stack.
