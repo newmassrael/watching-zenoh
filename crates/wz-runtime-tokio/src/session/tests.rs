@@ -11989,6 +11989,80 @@ fn tapped_qos_group_session() -> (
     (Session::new_multicast(observer, clock, producer), tap)
 }
 
+/// Open-debt item 913 — a member's interest in this session's keyexprs is answered after the
+/// JOIN it asks for: each keyexpr the session declared to the group that meets the interest's
+/// key, stamped with the interest's id, and then a final, the interest asking for no other kind.
+/// zenoh-pico's answer (`vendor/zenoh-pico/src/session/interest.c` @
+/// `ret = _z_interest_send_decl_resource(zn, id, NULL, restr_key_opt);`).
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "codec-push",
+    feature = "declare-interest",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+#[test]
+fn a_member_interest_in_keyexprs_is_answered_with_the_ones_declared_to_the_group() {
+    use core::num::NonZeroU64;
+    use wz_codecs::declare::DeclareOwnedVariant;
+    use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
+    use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+
+    let (session, mut tap) = tapped_qos_group_session();
+    for (id, keyexpr) in [(1, "demo/mc/q"), (2, "other/key")] {
+        session
+            .announce_keyexpr(NonZeroU64::new(id).expect("non-zero"), keyexpr)
+            .expect("the declaration is pushed");
+    }
+    while tap.try_next().is_some() {}
+
+    let interest = wz_session_core::interest_build::build_interest_exact(
+        7,
+        InterestKinds::KEYEXPRS,
+        /*current=*/ true,
+        /*future=*/ false,
+        Some((0, Some("demo/**"))),
+    )
+    .expect("the interest builds");
+    let outcome = DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable: true,
+        sn: 0,
+        messages: vec![NetworkMessage::Interest(interest)],
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    session.dispatch_multicast_iteration_event(IterationEvent::Poll(&outcome));
+    session.transport.tx.run_after_join();
+
+    let mut answered = Vec::new();
+    while let Some(datagram) = tap.try_next() {
+        let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&datagram) else {
+            continue;
+        };
+        for message in parse_frame_payload(&payload).expect("the frame parses") {
+            if let NetworkMessage::Declare(declare) = message {
+                let what = match &declare.body {
+                    DeclareOwnedVariant::CodecZenohDeclKexpr(kexpr) => {
+                        format!("kexpr {}", kexpr.id)
+                    }
+                    DeclareOwnedVariant::CodecZenohDeclFinal(_) => "final".to_owned(),
+                    _ => "other".to_owned(),
+                };
+                answered.push((declare.interest_id, what));
+            }
+        }
+    }
+    assert_eq!(
+        answered,
+        vec![
+            (Some(7), "kexpr 1".to_owned()),
+            (Some(7), "final".to_owned())
+        ],
+        "the keyexpr meeting `demo/**`, then the final, both answering interest 7"
+    );
+}
+
 /// R2937 — the band of the next frame a publish pushed onto the group.
 #[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
 fn next_pushed_band(

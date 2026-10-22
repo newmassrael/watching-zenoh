@@ -504,6 +504,14 @@ pub struct MulticastPayload {
     #[cfg(feature = "query-get")]
     pub(crate) membership:
         std::sync::Arc<std::sync::OnceLock<crate::multicast_glue::McastGroupMembership>>,
+    /// Open-debt item 913 — the keyexprs the session declared to the group and the members'
+    /// interests in them it owes an answer, shared by the session's clones and the hook that
+    /// answers after a JOIN.
+    #[cfg(all(
+        feature = "codec-push",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
+    pub(crate) keyexprs: std::sync::Arc<super::GroupKeyexprs>,
 }
 
 /// What a group's link reads as before the session is told it: every axis indeterminate.

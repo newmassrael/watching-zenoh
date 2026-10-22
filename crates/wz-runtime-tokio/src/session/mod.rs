@@ -610,6 +610,141 @@ fn asks_for_declarations(event: &wz_session_core::driver_loop::IterationEvent<'_
     }
 }
 
+/// Open-debt item 913 — the keyexprs a group session declared to its group, and the members'
+/// interests in them it still owes an answer. zenoh-pico answers a CURRENT interest that asks
+/// for keyexprs with a declaration of each key it holds that meets the interest's, ahead of its
+/// other declarations and the final (`vendor/zenoh-pico/src/session/interest.c` @
+/// `ret = _z_interest_send_decl_resource(zn, id, NULL, restr_key_opt);`); the session sends it
+/// from the hook that runs after the JOIN the interest asked for, ahead of the observer's.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "codec-push",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+#[derive(Default)]
+pub(crate) struct GroupKeyexprs {
+    state: std::sync::Mutex<GroupKeyexprState>,
+}
+
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "codec-push",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+#[derive(Default)]
+struct GroupKeyexprState {
+    declared: std::collections::BTreeMap<u64, String>,
+    owed: Vec<OwedKeyexprs>,
+}
+
+/// One interest's claim on a group session's keyexprs.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "codec-push",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+struct OwedKeyexprs {
+    interest_id: u64,
+    /// The key the interest names, `None` for every key. A key the member names by a declaration
+    /// of its own reads as every key: the session does not hold its members' declarations, so it
+    /// answers with more than zenoh-pico would rather than with less.
+    restriction: Option<String>,
+    /// Whether this answer ends the interest: it asks for no other kind, so nothing else stages
+    /// its final.
+    ends: bool,
+}
+
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "codec-push",
+    any(feature = "liveliness-token", feature = "declare-subscriber")
+))]
+impl GroupKeyexprs {
+    fn state(&self) -> std::sync::MutexGuard<'_, GroupKeyexprState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The session declared `keyexpr` to the group as `mapping_id`.
+    fn declared(&self, mapping_id: u64, keyexpr: &str) {
+        self.state().declared.insert(mapping_id, keyexpr.to_owned());
+    }
+
+    /// The session retracted declaration `mapping_id`.
+    fn retracted(&self, mapping_id: u64) {
+        self.state().declared.remove(&mapping_id);
+    }
+
+    /// Note each interest in `event` that asks for keyexprs now.
+    fn asked(&self, event: &wz_session_core::driver_loop::IterationEvent<'_>) {
+        use wz_codecs::wireexpr::WireexprOwnedVariant;
+        use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+        use wz_session_core::network_message::NetworkMessage;
+        let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event else {
+            return;
+        };
+        let mut state = self.state();
+        for message in messages.iter() {
+            let NetworkMessage::Interest(interest) = message else {
+                continue;
+            };
+            let Some(body) = interest.body.as_ref() else {
+                continue;
+            };
+            if !interest.c() || !body.ke() {
+                continue;
+            }
+            let restriction = body.keyexpr.as_ref().and_then(|wire| match &wire.body {
+                WireexprOwnedVariant::WireexprLocal(local) if local.id == 0 => {
+                    local.suffix.as_ref().map(|suffix| suffix.to_string())
+                }
+                _ => None,
+            });
+            state.owed.push(OwedKeyexprs {
+                interest_id: interest.interest_id,
+                restriction,
+                ends: !(body.su() || body.qu() || body.to()),
+            });
+        }
+    }
+
+    /// Send every owed answer through `producer`: each declared keyexpr that meets the
+    /// interest's key, then the final when nothing else ends the interest.
+    fn answer(&self, producer: &crate::multicast_pipeline::MulticastTxProducer) {
+        use wz_session_core::multicast_tx::MulticastTxItem;
+        let (owed, declared) = {
+            let mut state = self.state();
+            (core::mem::take(&mut state.owed), state.declared.clone())
+        };
+        for ask in owed {
+            for (mapping_id, keyexpr) in &declared {
+                if ask.restriction.as_deref().is_some_and(|restriction| {
+                    !wz_session_core::keyexpr_match::keyexpr_intersects_text(restriction, keyexpr)
+                }) {
+                    continue;
+                }
+                if let Ok(declare) = wz_session_core::declare_build::build_declare_kexpr_reply(
+                    ask.interest_id,
+                    *mapping_id,
+                    keyexpr,
+                ) {
+                    let _ = producer.push(MulticastTxItem::DeclareReply {
+                        declare: Box::new(declare),
+                    });
+                }
+            }
+            if ask.ends {
+                let _ = producer.push(MulticastTxItem::DeclareReply {
+                    declare: Box::new(wz_session_core::declare_build::build_declare_final_reply(
+                        ask.interest_id,
+                    )),
+                });
+            }
+        }
+    }
+}
+
 /// Open-debt item 913 — the kind of entity a group session announces or retracts
 /// ([`Session::announce`], [`Session::retract`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2679,18 +2814,26 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         // `// Push a join in case it's a new node`): the dispatch that stages the answer asks the
         // loop for a JOIN (`Self::dispatch_multicast_iteration_event`), and the loop runs this
         // right after queueing it, so a sender that had not admitted this member yet does admit
-        // it before the answer arrives. Weak, as the producer holds the hook.
+        // it before the answer arrives. Weak, as the producer holds the hook. The keyexprs the
+        // session declared go first, as zenoh-pico sends them before its other declarations.
+        #[cfg(all(
+            feature = "codec-push",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        ))]
+        let keyexprs = Arc::new(GroupKeyexprs::default());
         #[cfg(all(
             feature = "codec-push",
             any(feature = "liveliness-token", feature = "declare-subscriber")
         ))]
         {
             let observer = observer.clone();
+            let keyexprs = keyexprs.clone();
             let producer = tx.downgrade();
             tx.set_after_join(Arc::new(move || {
                 let Some(producer) = producer.upgrade() else {
                     return;
                 };
+                keyexprs.answer(&producer);
                 let sink = wz_session_core::multicast_reply_sink::MulticastReplySink::new(
                     crate::multicast_glue::TokioReplyBacking::new(producer),
                 );
@@ -2709,6 +2852,11 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
                 request_ids: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 #[cfg(feature = "query-get")]
                 membership: Arc::new(std::sync::OnceLock::new()),
+                #[cfg(all(
+                    feature = "codec-push",
+                    any(feature = "liveliness-token", feature = "declare-subscriber")
+                ))]
+                keyexprs,
             },
             observer,
             local_live,
@@ -2880,6 +3028,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         let declare =
             wz_session_core::declare_build::build_declare_kexpr(mapping_id.get(), keyexpr)
                 .map_err(wz_session_core::send_wire_error::SendWireError::Codec)?;
+        // Held for the members that ask for the session's keyexprs ([`GroupKeyexprs`]).
+        #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+        self.transport.keyexprs.declared(mapping_id.get(), keyexpr);
         self.send_declare_to_group(declare)
     }
 
@@ -2890,6 +3041,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         &self,
         mapping_id: u64,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
+        self.transport.keyexprs.retracted(mapping_id);
         self.send_declare_to_group(wz_session_core::declare_build::build_undeclare_kexpr(
             mapping_id,
         ))
@@ -3040,6 +3193,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             any(feature = "liveliness-token", feature = "declare-subscriber")
         ))]
         if asks_for_declarations(&event) {
+            self.transport.keyexprs.asked(&event);
             self.transport.tx.request_join();
         }
         R::with_mutex_mut(&self.observer, |obs| {

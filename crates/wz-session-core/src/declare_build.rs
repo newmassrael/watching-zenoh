@@ -991,6 +991,22 @@ pub fn build_declare_subscriber_reply_with_id(
     Ok(declare)
 }
 
+/// Open-debt item 913 — the interest-response `Declare(DeclKexpr)` reply: keyexpr `keyexpr`
+/// declared as `mapping_id`, stamped with the soliciting `interest_id`, as zenoh-pico answers an
+/// interest that asks for keyexprs with each one it holds
+/// (`vendor/zenoh-pico/src/session/interest.c` @
+/// `_z_n_msg_make_declare(&n_msg, declaration, _z_optional_id_make_some(interest_id));`).
+/// Panics on `mapping_id == 0`, as [`build_declare_kexpr`] does.
+pub fn build_declare_kexpr_reply(
+    interest_id: u64,
+    mapping_id: u64,
+    keyexpr: &str,
+) -> Result<DeclareOwned, CodecError> {
+    let mut declare = build_declare_kexpr(mapping_id, keyexpr)?;
+    stamp_interest_reply(&mut declare, interest_id);
+    Ok(declare)
+}
+
 /// R311y174 — the interest-response `Declare(DeclToken)` reply: a `DeclareToken`
 /// stamped with the soliciting `interest_id` — the CURRENT dump a router sends back
 /// per matching held liveliness token (zenoh `declare_token_interest`). The token
