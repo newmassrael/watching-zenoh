@@ -95,11 +95,13 @@ use wz_runtime_tokio::observer::ApplicationLayerObserver;
 #[cfg(feature = "group")]
 use wz_runtime_tokio::qos::Priority;
 use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
+use wz_runtime_tokio::reply::ReplyHandle;
+use wz_runtime_tokio::reply_sink::ReplyView;
 use wz_runtime_tokio::runtime_impl::{TokioRuntime, TokioTime};
 use wz_runtime_tokio::session::{
     InterestForm, LocalDeliveryDrain, MatchingInterestHold, MatchingListener, MatchingStatus,
-    PublishAliasError, PublishError, PublishOptions, QueryOptions, Queryable, QueryableOptions,
-    RetractionKey, SubscribeOptions, Subscriber, TokioQueryHolder, TokioSession,
+    PublishAliasError, PublishError, PublishOptions, QueryAliasError, QueryOptions, Queryable,
+    QueryableOptions, RetractionKey, SubscribeOptions, Subscriber, TokioQueryHolder, TokioSession,
 };
 use wz_runtime_tokio::session::{
     LivelinessOptions, LivelinessSubscriber, LivelinessSubscriberOptions, LivelinessToken,
@@ -113,6 +115,11 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::sync::PlainMutex as WzMutex;
 use wz_runtime_tokio::Reliability;
+
+#[cfg(feature = "multicast-transport")]
+mod multicast;
+#[cfg(feature = "multicast-transport")]
+pub use multicast::{dispatch_mcast_event, sweep_mcast_face};
 
 // R311y498 — NO `use crate::pubsub` / `use crate::query` here, deliberately.
 //
@@ -316,6 +323,202 @@ impl Leg {
                 Leg::Skipped
             }
             Err(_) => Leg::Refused,
+        }
+    }
+}
+
+/// What a publish names its key by, as the fan-out sees it.
+#[derive(Clone, Copy)]
+enum PutKey<'a> {
+    /// The literal. Every leg can name it, and a face whose peer said it wants nothing
+    /// the key reaches is left unwritten.
+    Literal(&'a str),
+    /// A declared alias the caller holds no literal for: a face resolves it through its
+    /// own table, and a group, which is told no declaration, is sent the literal it
+    /// stands for.
+    // Read only by the group leg, which a build without the multicast transport has not.
+    #[cfg_attr(not(feature = "multicast-transport"), allow(dead_code))]
+    Alias {
+        mapping_id: u64,
+        suffix: Option<&'a str>,
+    },
+}
+
+impl<'a> PutKey<'a> {
+    /// The literal, when the caller holds it.
+    fn literal(self) -> Option<&'a str> {
+        match self {
+            PutKey::Literal(literal) => Some(literal),
+            PutKey::Alias { .. } => None,
+        }
+    }
+}
+
+/// What a group leg sends of a publish's payload: its bytes, whatever form the faces are
+/// sent it in. A group negotiates no shared memory, so a chunk reaches it as the bytes
+/// read back out of the chunk, as it reaches a face that did not negotiate it.
+trait LegBytes {
+    fn leg_bytes(&self) -> &[u8];
+}
+
+impl LegBytes for &[u8] {
+    fn leg_bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+#[cfg(feature = "transport-shm")]
+impl LegBytes for Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload> {
+    fn leg_bytes(&self) -> &[u8] {
+        self.bytes()
+    }
+}
+
+/// The faces and the groups one fan-out sends to; see [`SharedSession`]'s `fan_targets`.
+struct FanTargets {
+    faces: Arc<Vec<TokioSession>>,
+    #[cfg(feature = "multicast-transport")]
+    groups: Arc<Vec<multicast::McastLeg>>,
+}
+
+/// The faces and the groups one get's wire legs go to, each face with its re-arm signal;
+/// see [`SharedSession`]'s `query_targets`.
+struct QueryTargets {
+    faces: Vec<(TokioSession, Arc<Notify>)>,
+    #[cfg(feature = "multicast-transport")]
+    groups: Arc<Vec<multicast::McastLeg>>,
+}
+
+impl FanTargets {
+    /// Whether a group is among the targets.
+    #[cfg(feature = "multicast-transport")]
+    fn has_groups(&self) -> bool {
+        !self.groups.is_empty()
+    }
+
+    /// A build without the multicast transport has no group.
+    #[cfg(not(feature = "multicast-transport"))]
+    fn has_groups(&self) -> bool {
+        false
+    }
+}
+
+/// One leg of a get, as [`SharedSession::fan_query`] hands it to the ABI that issues
+/// it: which session the leg is issued on, and so how it may name its key and with
+/// which locality it goes.
+///
+/// The ABI issues every leg through it and never names a transport: a leg that went
+/// out on a group (open-debt item 913) is issued by the same call as one that went to a
+/// face, and an ABI cannot forget the group's leg or name its key by an alias a group
+/// was never told.
+#[derive(Clone, Copy)]
+pub enum QueryLeg<'a> {
+    /// A unicast face: the wire leg to its one peer, which may name the key by an alias
+    /// the face was told.
+    Face(&'a TokioSession),
+    /// The local plane: the session's own queryables.
+    Local(&'a TokioSession),
+    /// A group the session joined: the wire leg to every member with one send, which
+    /// names the key by its literal, a group being told no declaration.
+    #[cfg(feature = "multicast-transport")]
+    Group(&'a wz_runtime_tokio::session::TokioMulticastSession),
+}
+
+impl QueryLeg<'_> {
+    /// The locality the leg is issued with: [`Locality::SessionLocal`] on the plane,
+    /// [`Locality::Remote`] on a wire leg. It is the leg's and not the caller's: each
+    /// leg is one half of the caller's destination, and the halves are disjoint.
+    pub fn locality(&self) -> Locality {
+        match self {
+            QueryLeg::Local(_) => Locality::SessionLocal,
+            QueryLeg::Face(_) => Locality::Remote,
+            #[cfg(feature = "multicast-transport")]
+            QueryLeg::Group(_) => Locality::Remote,
+        }
+    }
+
+    /// Issue the get on this leg, asking by the literal `keyexpr`, with `opts` at the
+    /// leg's own [`locality`](Self::locality).
+    pub fn query(
+        &self,
+        keyexpr: &str,
+        opts: QueryOptions,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+    ) -> Result<ReplyHandle, QueryAliasError> {
+        let opts = opts.with_allowed_destination(self.locality());
+        match self {
+            QueryLeg::Face(session) | QueryLeg::Local(session) => {
+                session.query(keyexpr, opts, on_reply, |_rid| {})
+            }
+            #[cfg(feature = "multicast-transport")]
+            QueryLeg::Group(session) => session.query(keyexpr, opts, on_reply, |_rid| {}),
+        }
+    }
+
+    /// [`Self::query`] asking as `wire` names the key where the leg can: a face by the
+    /// declared alias, the plane and a group by the literal (the plane has no wire to
+    /// name it on, and a group is told no declaration). The reply is still matched
+    /// against `keyexpr`.
+    pub fn query_on_wire(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        opts: QueryOptions,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+    ) -> Result<ReplyHandle, QueryAliasError> {
+        match self {
+            QueryLeg::Face(session) if !wire.is_literal() => session.query_aliased(
+                wire.mapping_id,
+                wire.suffix.as_deref(),
+                keyexpr,
+                opts.with_allowed_destination(self.locality()),
+                on_reply,
+                |_rid| {},
+            ),
+            _ => self.query(keyexpr, opts, on_reply),
+        }
+    }
+
+    /// [`Self::query`] whose VALUE is a chunk of shared memory: a face that negotiated
+    /// shared memory is sent its descriptor, and every other leg the bytes read back out
+    /// of it, a group included (see `Session::query_shm`).
+    #[cfg(all(feature = "transport-shm", feature = "query"))]
+    pub fn query_shm(
+        &self,
+        keyexpr: &str,
+        opts: QueryOptions,
+        value: &wz_runtime_tokio::shm_provider::ShmBackedPayload,
+        on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+    ) -> Result<ReplyHandle, QueryAliasError> {
+        let opts = opts.with_allowed_destination(self.locality());
+        match self {
+            QueryLeg::Face(session) | QueryLeg::Local(session) => {
+                session.query_shm(keyexpr, opts, value, on_reply, |_rid| {})
+            }
+            #[cfg(feature = "multicast-transport")]
+            QueryLeg::Group(session) => {
+                session.query_shm(keyexpr, opts, value, on_reply, |_rid| {})
+            }
+        }
+    }
+
+    /// What undoes the leg issued as `rid` when its get is cancelled: its pending
+    /// query, taken off the session it was issued on.
+    fn canceller(&self, rid: u64) -> Box<dyn FnOnce() + Send> {
+        match self {
+            QueryLeg::Face(session) | QueryLeg::Local(session) => {
+                let session = (*session).clone();
+                Box::new(move || {
+                    session.cancel_pending_query(rid);
+                })
+            }
+            #[cfg(feature = "multicast-transport")]
+            QueryLeg::Group(session) => {
+                let session = (*session).clone();
+                Box::new(move || {
+                    session.cancel_pending_query(rid);
+                })
+            }
         }
     }
 }
@@ -1344,6 +1547,17 @@ struct Inner {
     /// through [`Inner::declaration_targets`], which is the one place that
     /// unwraps it.
     local_face: Option<FaceEntry>,
+    /// Open-debt item 913 — the groups the session joined, each ONE face to every
+    /// member of its group, keyed by the id the drive role gave it. Not members of
+    /// `faces`: a group carries the session's subscribers and queryables and is
+    /// reached by a publish and a get, and nothing else a unicast face holds (see
+    /// the `multicast` module).
+    #[cfg(feature = "multicast-transport")]
+    mcast_faces: BTreeMap<u64, multicast::McastFaceEntry>,
+    /// The group faces as one shared list for the senders, rebuilt with
+    /// `mcast_faces` under the lock that changes it, as `face_set` is.
+    #[cfg(feature = "multicast-transport")]
+    mcast_set: Arc<Vec<multicast::McastLeg>>,
     subs: Vec<SubEntry>,
     next_sub_id: SubId,
     /// R311y559 — the session-scope ENTITY id counter the C ABIs' `z_*_id`
@@ -1409,6 +1623,15 @@ impl Inner {
             );
         }
         self.face_set_generation = self.face_set_generation.wrapping_add(1);
+    }
+
+    /// The faces and the groups a fan-out sends to, as of this step of the registry.
+    fn fan_targets(&self) -> FanTargets {
+        FanTargets {
+            faces: self.face_set.clone(),
+            #[cfg(feature = "multicast-transport")]
+            groups: self.mcast_set.clone(),
+        }
     }
 
     /// What a write filter's answer on `plane` depends on, as a number to compare: how many
@@ -2559,6 +2782,18 @@ impl SharedSession {
             guard.refresh_face_set();
             faces
         };
+        // Open-debt item 913 — and the groups: a get pending on one ends with its
+        // session, as a unicast face's does.
+        #[cfg(feature = "multicast-transport")]
+        {
+            let groups = {
+                let mut guard = self.lock();
+                let groups = std::mem::take(&mut guard.mcast_faces);
+                guard.refresh_mcast_set();
+                groups
+            };
+            drop(groups);
+        }
         // R2932 — a closed session sees no peer, so a C group's union loses
         // every member it heard over the wire, as `face_down` would take them.
         for mut entry in faces.into_values() {
@@ -2744,7 +2979,7 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        self.fan_out(opts, Some(keyexpr), |session, leg| {
+        self.fan_out(opts, PutKey::Literal(keyexpr), payload, |session, leg| {
             Leg::of_publish(session.publish(keyexpr, payload, leg))
         })
     }
@@ -2767,7 +3002,7 @@ impl SharedSession {
     ) -> Result<usize, FanoutError> {
         self.fan_out_with(
             opts,
-            Some(keyexpr),
+            PutKey::Literal(keyexpr),
             payload,
             |session, leg, payload| Leg::of_publish(session.publish_shm(keyexpr, payload, leg)),
             |session, leg, payload| {
@@ -2789,7 +3024,7 @@ impl SharedSession {
     ) -> Result<usize, FanoutError> {
         self.fan_out_with(
             opts,
-            None,
+            PutKey::Alias { mapping_id, suffix },
             payload,
             |session, leg, payload| {
                 Leg::of_alias(session.publish_shm_aliased_auto(mapping_id, suffix, payload, leg))
@@ -2821,7 +3056,8 @@ impl SharedSession {
     fn fan_out<F>(
         &self,
         opts: &PublishOptions,
-        key: Option<&str>,
+        key: PutKey<'_>,
+        payload: &[u8],
         send: F,
     ) -> Result<usize, FanoutError>
     where
@@ -2830,9 +3066,9 @@ impl SharedSession {
         self.fan_out_with(
             opts,
             key,
-            (),
-            |session, leg, ()| send(session, leg),
-            |session, leg, ()| send(session, leg),
+            payload,
+            |session, leg, _| send(session, leg),
+            |session, leg, _| send(session, leg),
         )
     }
 
@@ -2844,24 +3080,26 @@ impl SharedSession {
     fn fan_out_with<P, R, L>(
         &self,
         opts: &PublishOptions,
-        key: Option<&str>,
+        key: PutKey<'_>,
         payload: P,
         remote_leg: R,
         local_leg: L,
     ) -> Result<usize, FanoutError>
     where
+        P: LegBytes,
         R: Fn(&TokioSession, PublishOptions, &P) -> Leg,
         L: FnOnce(&TokioSession, PublishOptions, P) -> Leg,
     {
-        let sessions = self.face_set();
+        let targets = self.fan_targets();
         let mut delivered = 0usize;
         if opts.allowed_destination.allows_remote() {
             let remote = opts.clone().with_locality(Locality::Remote);
-            for session in sessions.iter() {
+            let literal = key.literal();
+            for session in targets.faces.iter() {
                 // A peer that has said it wants nothing this key reaches is not written to (see
                 // `Session::peer_wants_no_put_on`); a put with no literal key in hand, an alias
                 // alone, is written to every face as before.
-                if key.is_some_and(|key| session.peer_wants_no_put_on(key)) {
+                if literal.is_some_and(|key| session.peer_wants_no_put_on(key)) {
                     continue;
                 }
                 match remote_leg(session, remote.clone(), &payload) {
@@ -2870,6 +3108,7 @@ impl SharedSession {
                     Leg::Refused => return Err(FanoutError::ExceedsCapacity),
                 }
             }
+            delivered += self.group_fan(&targets, &remote, key, payload.leg_bytes())?;
         }
         if opts.allowed_destination.allows_local() {
             let local = opts.clone().with_locality(Locality::SessionLocal);
@@ -2891,6 +3130,66 @@ impl SharedSession {
             }
         }
         Ok(delivered)
+    }
+
+    /// The faces and the groups a fan-out sends to, read in ONE step of the registry, so a
+    /// face and a group that come or go together are both in it or both out.
+    fn fan_targets(&self) -> FanTargets {
+        self.lock().fan_targets()
+    }
+
+    /// The group legs of a publish (open-debt item 913): ONE send per group reaches every
+    /// member. A group is told no declaration, so the key goes by its literal, and an alias
+    /// is resolved to it through the local plane, which holds every declaration this
+    /// session made ([`Self::declare_keyexpr`]); an alias the plane does not know is one no
+    /// face was told of either, and is skipped here as it is there. Best-effort per group,
+    /// as per face: a group whose link is down is skipped, and only an error every leg
+    /// would meet is surfaced.
+    #[cfg(feature = "multicast-transport")]
+    fn group_fan(
+        &self,
+        targets: &FanTargets,
+        remote: &PublishOptions,
+        key: PutKey<'_>,
+        payload: &[u8],
+    ) -> Result<usize, FanoutError> {
+        if targets.groups.is_empty() {
+            return Ok(0);
+        }
+        let literal = match key {
+            PutKey::Literal(literal) => std::borrow::Cow::Borrowed(literal),
+            PutKey::Alias { mapping_id, suffix } => {
+                let Some(mut literal) = self.local.actions().resolve_outbound_mapping(mapping_id)
+                else {
+                    return Ok(0);
+                };
+                if let Some(suffix) = suffix {
+                    literal.push_str(suffix);
+                }
+                std::borrow::Cow::Owned(literal)
+            }
+        };
+        let mut delivered = 0usize;
+        for group in targets.groups.iter() {
+            match Leg::of_publish(group.session.publish(&literal, payload, remote.clone())) {
+                Leg::Delivered(n) => delivered += n,
+                Leg::Skipped => {}
+                Leg::Refused => return Err(FanoutError::ExceedsCapacity),
+            }
+        }
+        Ok(delivered)
+    }
+
+    /// A build without the multicast transport has no group to reach.
+    #[cfg(not(feature = "multicast-transport"))]
+    fn group_fan(
+        &self,
+        _targets: &FanTargets,
+        _remote: &PublishOptions,
+        _key: PutKey<'_>,
+        _payload: &[u8],
+    ) -> Result<usize, FanoutError> {
+        Ok(0)
     }
 
     /// Fan a publish on `keyexpr` over every face, naming it on the wire as
@@ -2969,7 +3268,11 @@ impl SharedSession {
         // (`declare_keyexpr` announces to both, and `undeclare_keyexpr` retracts from
         // both), so an unknown mapping is the caller publishing on an alias it never
         // declared, and is skipped on every leg (see [`Leg::of_alias`]).
-        self.fan_out(opts, key, |session, leg| {
+        let key = match key {
+            Some(literal) => PutKey::Literal(literal),
+            None => PutKey::Alias { mapping_id, suffix },
+        };
+        self.fan_out(opts, key, payload, |session, leg| {
             Leg::of_alias(session.publish_aliased_auto(mapping_id, suffix, payload, leg))
         })
     }
@@ -2990,7 +3293,7 @@ impl SharedSession {
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        self.fan_out(opts, Some(keyexpr), |session, leg| {
+        self.fan_out(opts, PutKey::Literal(keyexpr), payload, |session, leg| {
             Leg::of_alias(
                 session
                     .publish_aliased(mapping_id, None, keyexpr, payload, leg)
@@ -3486,8 +3789,8 @@ impl SharedSession {
         if params.destination.allows_local() && self.local.has_local_delivery_for(keyexpr) {
             return None;
         }
-        let sessions = self.face_set();
-        self.put_plain_to(&sessions, keyexpr, mapping_id, payload, params)
+        let targets = self.fan_targets();
+        self.put_plain_to(&targets, keyexpr, mapping_id, payload, params)
     }
 
     /// [`Self::put_plain_declared`] for a publisher that has a write filter
@@ -3502,6 +3805,12 @@ impl SharedSession {
     /// A DEBUG build always asks the filter the long way round
     /// ([`Self::write_filter_active`] checks its kept answer against the registries'), so
     /// every test that runs with real faces still tests the counters.
+    ///
+    /// A session that holds a group (open-debt item 913) answers [`FilteredPut::NotPlain`]
+    /// before the filter is asked: the lane writes unicast faces only, and zenoh-pico writes
+    /// to a multicast transport whatever its write filter says (`vendor/zenoh-pico/src/api/api.c`
+    /// @ `session->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE ||`), so the general publish that
+    /// follows reaches the group unfiltered.
     pub fn put_plain_filtered(
         &self,
         filter: FilterId,
@@ -3514,6 +3823,10 @@ impl SharedSession {
         {
             let kept = {
                 let guard = self.lock();
+                let targets = guard.fan_targets();
+                if targets.has_groups() {
+                    return FilteredPut::NotPlain;
+                }
                 guard
                     .filters
                     .iter()
@@ -3525,28 +3838,30 @@ impl SharedSession {
                         let token = guard.filter_token(entry.plane)?;
                         let kept = entry.cache?;
                         ((kept.generation, kept.epoch_sum) == token)
-                            .then(|| (kept.inactive, guard.face_set.clone()))
+                            .then_some((kept.inactive, targets))
                     })
             };
-            if let Some((inactive, sessions)) = kept {
+            if let Some((inactive, targets)) = kept {
                 if inactive {
                     return FilteredPut::Suppressed;
                 }
-                return self
-                    .put_plain_after_filter(&sessions, keyexpr, mapping_id, payload, params);
+                return self.put_plain_after_filter(&targets, keyexpr, mapping_id, payload, params);
             }
+        }
+        let targets = self.fan_targets();
+        if targets.has_groups() {
+            return FilteredPut::NotPlain;
         }
         if self.write_filter_active(filter) {
             return FilteredPut::Suppressed;
         }
-        let sessions = self.face_set();
-        self.put_plain_after_filter(&sessions, keyexpr, mapping_id, payload, params)
+        self.put_plain_after_filter(&targets, keyexpr, mapping_id, payload, params)
     }
 
     /// The part of [`Self::put_plain_declared`] that follows the filter, on faces already read.
     fn put_plain_after_filter(
         &self,
-        sessions: &[TokioSession],
+        targets: &FanTargets,
         keyexpr: &str,
         mapping_id: u64,
         payload: &[u8],
@@ -3555,22 +3870,27 @@ impl SharedSession {
         if params.destination.allows_local() && self.local.has_local_delivery_for(keyexpr) {
             return FilteredPut::NotPlain;
         }
-        match self.put_plain_to(sessions, keyexpr, mapping_id, payload, params) {
+        match self.put_plain_to(targets, keyexpr, mapping_id, payload, params) {
             Some(sent) => FilteredPut::Sent(sent),
             None => FilteredPut::NotPlain,
         }
     }
 
     /// The wire legs of [`Self::put_plain_declared`], on faces already read: `None` when one
-    /// of them stamps what it sends.
+    /// of them stamps what it sends, or when the session holds a group (open-debt item 913),
+    /// which only the general publish reaches.
     fn put_plain_to(
         &self,
-        sessions: &[TokioSession],
+        targets: &FanTargets,
         keyexpr: &str,
         mapping_id: u64,
         payload: &[u8],
         params: &wz_runtime_tokio::session::PlainPutParams,
     ) -> Option<Result<usize, FanoutError>> {
+        if targets.has_groups() {
+            return None;
+        }
+        let sessions = &targets.faces;
         // A node that states a traffic policy sends through the general publish: this lane writes
         // the frame without building the message a verdict reads, so the policy's egress half
         // (an ACL deny, a size cap, a rate) would never be asked. Every caller of the lane goes
@@ -3609,17 +3929,12 @@ impl SharedSession {
     /// two reads would otherwise have its query issued and its wake never
     /// notified.
     pub fn face_sessions_with_wake(&self) -> Vec<(TokioSession, Arc<Notify>)> {
-        self.lock()
-            .faces
-            .values()
-            .map(|face| (face.session.clone(), face.revised.clone()))
-            .collect()
+        Self::faces_with_wake(&self.lock())
     }
 
     /// The fan-out every get shares, the query half of the publish fan-out: the wire leg
-    /// to each face with [`Locality::Remote`], then the local leg ONCE on the
-    /// [local plane](Self::local) with [`Locality::SessionLocal`], each only where
-    /// `destination` admits it.
+    /// to each face, then to each group the session joined, then the local leg ONCE on
+    /// the [local plane](Self::local), each only where `destination` admits it.
     ///
     /// A C session's queryable is declared on every face AND on the plane, so an `Any`
     /// get handed to each face would run its one handler once per face, and at zero
@@ -3627,47 +3942,71 @@ impl SharedSession {
     /// their own copy of this loop, and the pico copy had exactly that defect (open-debt
     /// item 914): it is one function so the two cannot disagree again.
     ///
-    /// `issue` makes the one call a leg is, on the session and with the locality it is
-    /// handed, and answers the leg's request id when it issued one. Each issued leg is
-    /// recorded against `fan`; a token cancelled mid-fan stops the loop at that leg (its
-    /// own undo has then already run) and the local leg is not issued. Each face's drive
-    /// loop is woken after its leg, issued or not, so it re-arms on the deadline just
-    /// registered: without it a silent session sweeps the get only at the next keepalive
-    /// wake. The plane's drain is woken after the local leg, for what a local queryable's
+    /// `issue` makes the one call a leg is, through the [`QueryLeg`] it is handed, and
+    /// answers the leg's request id when it issued one. Each issued leg is recorded
+    /// against `fan`; a token cancelled mid-fan stops the loop at that leg (its own undo
+    /// has then already run) and no later leg is issued. Each face's drive loop, and each
+    /// group's sweep, is woken after its leg, issued or not, so it re-arms on the deadline
+    /// just registered: without it a silent session sweeps the get only at its next wake.
+    /// The plane's drain is woken after the local leg, for what a local queryable's
     /// handler stages on it; the loopback replies and the final are finalised inside
     /// `Session::query`.
     pub fn fan_query(
         &self,
         destination: Locality,
         fan: Option<&CancellableFan>,
-        mut issue: impl FnMut(&TokioSession, Locality) -> Option<u64>,
+        mut issue: impl FnMut(QueryLeg<'_>) -> Option<u64>,
     ) {
         // `false` when the token cancelled while the fan was running.
-        let recorded = |session: &TokioSession, rid: u64| {
-            fan.map_or(true, |fan| {
-                let undo = session.clone();
-                fan.record(move || {
-                    undo.cancel_pending_query(rid);
-                })
-            })
+        let mut issue_recorded = |leg: QueryLeg<'_>| -> bool {
+            match (issue(leg), fan) {
+                (Some(rid), Some(fan)) => fan.record(leg.canceller(rid)),
+                _ => true,
+            }
         };
         if destination.allows_remote() {
-            for (session, revised) in self.face_sessions_with_wake() {
-                let issued = issue(&session, Locality::Remote);
-                if issued.is_some_and(|rid| !recorded(&session, rid)) {
+            let targets = self.query_targets();
+            for (session, revised) in targets.faces {
+                if !issue_recorded(QueryLeg::Face(&session)) {
                     return;
                 }
                 revised.notify_one();
             }
+            #[cfg(feature = "multicast-transport")]
+            for group in targets.groups.iter() {
+                if !issue_recorded(QueryLeg::Group(&group.session)) {
+                    return;
+                }
+                group.revised.notify_one();
+            }
         }
         if destination.allows_local() {
-            if let Some(rid) = issue(&self.local, Locality::SessionLocal) {
-                // The local leg is cancellable like a face's; nothing follows it, so a
-                // cancel that raced it has nothing further to stop.
-                let _ = recorded(&self.local, rid);
-            }
+            // The local leg is cancellable like a face's; nothing follows it, so a cancel
+            // that raced it has nothing further to stop.
+            let _ = issue_recorded(QueryLeg::Local(&self.local));
             self.local_wake.notify_one();
         }
+    }
+
+    /// The faces and the groups a get's wire legs go to, read in ONE step of the registry:
+    /// a face or a group that leaves between two reads would otherwise have its leg issued
+    /// and its wake never notified.
+    fn query_targets(&self) -> QueryTargets {
+        let guard = self.lock();
+        QueryTargets {
+            faces: Self::faces_with_wake(&guard),
+            #[cfg(feature = "multicast-transport")]
+            groups: guard.mcast_set.clone(),
+        }
+    }
+
+    /// Every face's session with its re-arm signal, from the registry as `guard` holds it.
+    fn faces_with_wake(guard: &Inner) -> Vec<(TokioSession, Arc<Notify>)> {
+        guard
+            .faces
+            .values()
+            .map(|face| (face.session.clone(), face.revised.clone()))
+            .collect()
     }
 
     /// Face `id`'s drive-loop re-arm signal (see [`FaceEntry::revised`]).
@@ -3747,14 +4086,18 @@ impl SharedSession {
             }
         }
         let local_key = allowed_origin.allows_local().then(|| keyexpr.clone());
-        guard.subs.push(SubEntry {
+        let entry = SubEntry {
             id,
             keyexpr,
             allowed_origin,
             wire,
             retraction,
             sink,
-        });
+        };
+        // Open-debt item 913 — and on every group the session joined, by the literal.
+        #[cfg(feature = "multicast-transport")]
+        Self::subscribe_on_groups(&mut guard, &entry);
+        guard.subs.push(entry);
         drop(guard);
         // A subscriber the session's own traffic reaches is a match for every listener
         // that counts the session's own subscribers.
@@ -4261,8 +4604,16 @@ impl SharedSession {
         let mut dropped_entry = None;
         let mut dropped_live = Vec::new();
         let mut dropped_live_entry = None;
+        #[cfg(feature = "multicast-transport")]
+        let dropped_groups;
         {
             let mut guard = self.lock();
+            // Open-debt item 913 — the group faces' copies, into the same out-of-lock
+            // drop as the unicast faces'.
+            #[cfg(feature = "multicast-transport")]
+            {
+                dropped_groups = Self::unsubscribe_on_groups(&mut guard, id);
+            }
             // Remove the SSOT entry into a binding rather than `retain`-dropping
             // it in place: with no live face (a listener that never had a peer,
             // or one whose per-face declares all failed) the entry holds the
@@ -4307,6 +4658,8 @@ impl SharedSession {
             .filter(|entry| entry.allowed_origin.allows_local())
             .map(|entry| entry.keyexpr.clone());
         drop(dropped);
+        #[cfg(feature = "multicast-transport")]
+        drop(dropped_groups);
         drop(dropped_entry);
         drop(dropped_live);
         drop(dropped_live_entry);
@@ -4825,7 +5178,7 @@ impl SharedSession {
             }
         }
         let local_key = allowed_origin.allows_local().then(|| keyexpr.clone());
-        guard.qbls.push(QblEntry {
+        let entry = QblEntry {
             id,
             keyexpr,
             complete,
@@ -4833,7 +5186,12 @@ impl SharedSession {
             wire,
             retraction,
             sink,
-        });
+        };
+        // Open-debt item 913 — and on every group the session joined: a member's query
+        // reaches it, and its replies leave on the group.
+        #[cfg(all(feature = "multicast-transport", feature = "queryable"))]
+        Self::answer_on_groups(&mut guard, &entry);
+        guard.qbls.push(entry);
         drop(guard);
         // A queryable the session's own gets reach is a match for every listener that
         // counts the session's own queryables.
@@ -4855,8 +5213,15 @@ impl SharedSession {
     pub fn undeclare_queryable(&self, id: QblId) {
         let mut dropped = Vec::new();
         let mut dropped_entry = None;
+        #[cfg(all(feature = "multicast-transport", feature = "queryable"))]
+        let dropped_groups;
         {
             let mut guard = self.lock();
+            // Open-debt item 913 — the group faces' copies, dropped with the rest.
+            #[cfg(all(feature = "multicast-transport", feature = "queryable"))]
+            {
+                dropped_groups = Self::unanswer_on_groups(&mut guard, id);
+            }
             if let Some(pos) = guard.qbls.iter().position(|entry| entry.id == id) {
                 dropped_entry = Some(guard.qbls.remove(pos));
             }
@@ -4877,6 +5242,8 @@ impl SharedSession {
         // Drop OUTSIDE the lock — see `undeclare_subscriber`: the last
         // `Arc<CQueryClosure>` release runs the C `drop(context)`.
         drop(dropped);
+        #[cfg(all(feature = "multicast-transport", feature = "queryable"))]
+        drop(dropped_groups);
         drop(dropped_entry);
         if let Some(key) = local_key {
             self.refresh_local_matches(
@@ -5203,8 +5570,8 @@ mod matching_aggregate_tests {
             (Locality::Remote, vec![]),
         ] {
             let mut legs = Vec::new();
-            shared.fan_query(destination, None, |_session, locality| {
-                legs.push(locality);
+            shared.fan_query(destination, None, |leg| {
+                legs.push(leg.locality());
                 None
             });
             assert_eq!(legs, expected, "legs of a {destination:?} get with no face");

@@ -138,6 +138,13 @@ transport-link-tls = ["wz-runtime-tokio/transport-link-tls"]
 # `Z_FEATURE_LINK_WS` and `Z_FEATURE_LINK_SERIAL` are.
 transport-link-ws = ["wz-runtime-tokio/transport-link-ws"]
 transport-link-serial = ["wz-runtime-tokio/transport-link-serial"]
+# Open-debt item 913 — a multicast group the session joins, as ONE face beside its unicast ones:
+# a publish and a get reach every member with one send, and a member's put and query reach the
+# session's subscribers and queryables. pico's `Z_FEATURE_MULTICAST_TRANSPORT` and the multicast
+# endpoints zenoh-c listens on, over the UDP group link (`transport-link-udp`, the `link-udp`
+# feature) and the runtime's group session and drive (`transport-multicast`). A group is joined
+# by a peer, so it takes the peer's roles.
+multicast-transport = ["peer", "link-udp", "wz-runtime-tokio/transport-multicast"]
 # The link kinds the zenoh-c ABI forwards beside the ones above. No arm of this
 # crate is cfg'd on them: a session dials through `dial_endpoint` and binds through
 # `bind_endpoint_with_config`, and both decide by scheme in the runtime, so a scheme
@@ -435,11 +442,20 @@ tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macro
 # listener holds there. A dial can then be accepted by the other thread's listener, whose
 # teardown takes the face down before the test reads it: the reading of the 1 of 1200 empty
 # registries hosted Platform run 38013268899 counted. Already in the graph of both C ABI crates'
-# tests; it adds no new crate and no wz-runtime-tokio feature to `cargo test -p wz-capi-core`.
-wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
+# tests; it adds no new crate to `cargo test -p wz-capi-core`.
+#
+# `multicast` is the in-memory group the multicast face's tests run over (open-debt item 913).
+# It forwards the runtime's `transport-multicast`, the one runtime feature this dev-dependency
+# adds, and the feature this crate's own `multicast-transport` forwards too.
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = [
+    "multicast",
+] }
 # `node_auth`'s tests write the dictionary files a config names. Already in `crates/Cargo.lock`
 # through the C ABI crate's tests.
 tempfile = "3"
+# Paused time (`test-util`) for the multicast face's tests, whose beacons and lease then run
+# on their own schedule at no cost; the demo's group tests take it the same way.
+tokio = { version = "1", features = ["test-util"] }
 
 [lints]
 workspace = true

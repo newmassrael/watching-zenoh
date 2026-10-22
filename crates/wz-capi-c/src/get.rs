@@ -1085,33 +1085,29 @@ pub(crate) fn issue_get(
     // for why a face that finalises early must not be able to complete the get
     // while later faces are still being issued.
     let guard = closure.clone();
-    shared.fan_query(
-        opts.allowed_destination,
-        fan.as_deref(),
-        |session, locality| {
-            let leg = LegReply {
-                closure: closure.clone(),
-                gate: gate.clone(),
-                _registration: registration.clone(),
-            };
-            // Only `on_reply` carries the `Arc`. Completion is signalled by the
-            // pending entry's sink being DROPPED, which covers a real final, a
-            // timeout sweep and a face death alike — whereas a counter
-            // incremented in `on_final` would never be reached by the face-death
-            // path. An issue error (a face mid-teardown) is swallowed, matching
-            // the fan-out publish's best-effort discipline; its clone was already
-            // dropped with the rolled-back sink.
-            query_leg(
-                session,
-                &keyexpr,
-                opts.clone().with_allowed_destination(locality),
-                &value,
-                move |view: &dyn ReplyView| leg.fire(view),
-            )
-            .ok()
-            .map(|handle| handle.rid())
-        },
-    );
+    shared.fan_query(opts.allowed_destination, fan.as_deref(), |query| {
+        let leg = LegReply {
+            closure: closure.clone(),
+            gate: gate.clone(),
+            _registration: registration.clone(),
+        };
+        // Only `on_reply` carries the `Arc`. Completion is signalled by the
+        // pending entry's sink being DROPPED, which covers a real final, a
+        // timeout sweep and a face death alike — whereas a counter
+        // incremented in `on_final` would never be reached by the face-death
+        // path. An issue error (a face mid-teardown) is swallowed, matching
+        // the fan-out publish's best-effort discipline; its clone was already
+        // dropped with the rolled-back sink.
+        query_leg(
+            query,
+            &keyexpr,
+            opts.clone(),
+            &value,
+            move |view: &dyn ReplyView| leg.fire(view),
+        )
+        .ok()
+        .map(|handle| handle.rid())
+    });
     drop(guard);
     // After `guard`, explicitly: locals drop in REVERSE declaration order, so
     // left implicit the registration would go first and a concurrent `cancel`
@@ -1120,25 +1116,25 @@ pub(crate) fn issue_get(
     Z_OK
 }
 
-/// Issue one leg of a get on `session`: the ordinary query, or the query whose VALUE is a
-/// chunk of shared memory (R3059), which the session sends as a descriptor where it
-/// negotiated shared memory and as the chunk's bytes everywhere else, the local leg
-/// included. The one place a get decides which of the two it is, so the faces and the
-/// local plane cannot decide it differently.
+/// Issue one leg of a get: the ordinary query, or the query whose VALUE is a chunk of
+/// shared memory (R3059), which the leg sends as a descriptor where its face negotiated
+/// shared memory and as the chunk's bytes everywhere else, the local leg included. The
+/// one place a get decides which of the two it is, so the legs cannot decide it
+/// differently.
 fn query_leg(
-    session: &wz_runtime_tokio::session::TokioSession,
+    leg: wz_capi_core::faces::QueryLeg<'_>,
     keyexpr: &str,
     opts: QueryOptions,
     value: &crate::bytes::ValueChunk,
     on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
 ) -> Result<wz_runtime_tokio::reply::ReplyHandle, wz_runtime_tokio::session::QueryAliasError> {
     match value {
-        None => session.query(keyexpr, opts, on_reply, |_rid| {}),
+        None => leg.query(keyexpr, opts, on_reply),
         #[cfg(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")
         ))]
-        Some(chunk) => session.query_shm(keyexpr, opts, chunk, on_reply, |_rid| {}),
+        Some(chunk) => leg.query_shm(keyexpr, opts, chunk, on_reply),
         #[cfg(not(all(
             feature = "zenoh-c-shared-memory",
             not(feature = "zenoh-c-no-unstable-api")

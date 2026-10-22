@@ -610,6 +610,8 @@ pub(crate) unsafe fn open_session(
             face_drive: FaceDrive::PerFace,
             auth,
             policy,
+            // This ABI joins no multicast group yet (open-debt item 913).
+            groups: Vec::new(),
         };
         // R3065 -- a session opened over a client storage advertises the protocols of THAT
         // reader: the stance takes both from the one set, so the list a peer's sender reads is

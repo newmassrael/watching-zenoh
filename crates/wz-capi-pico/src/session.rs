@@ -436,6 +436,8 @@ pub unsafe extern "C" fn z_open(
                 // And no `access_control`, `low_pass_filter` or `downsampling` keys either: its
                 // node states no traffic policy, as it never has.
                 policy: wz_capi_core::node_policy::NodePolicy::default(),
+                // This ABI joins no multicast group yet (open-debt item 913).
+                groups: Vec::new(),
             },
         ) {
             Ok(state) => {

@@ -1418,47 +1418,30 @@ fn fan_get(
     };
     let registration = fan.as_ref().map(|(_, r)| Arc::clone(r));
     let fan = fan.map(|(f, _)| f);
-    shared.fan_query(
-        opts.allowed_destination,
-        fan.as_deref(),
-        |session, locality| {
-            let leg = LegReply {
-                closure: closure.clone(),
-                gate: gate.clone(),
-                _registration: registration.clone(),
-            };
-            // Only `on_reply` carries the `Arc`. `on_final` needs no body at all:
-            // completion is signalled by the pending entry's sink being DROPPED
-            // (which drops this closure and releases the clone), and that happens
-            // on a real final, a timeout sweep, and a face death alike — whereas a
-            // counter incremented here would never be reached by the face-death
-            // path. See the module doc.
-            let on_reply = move |view: &dyn ReplyView| leg.fire(view);
-            let opts = opts.clone().with_allowed_destination(locality);
-            // R2959 — a declared key goes out as its alias; the reply gate still
-            // matches the literal. The local plane has no wire to name it on, so
-            // its leg asks by the literal. An issue error (a face mid-teardown, an
-            // alias the face was never told) is swallowed, matching the fan-out
-            // publish's best-effort discipline: its `Arc` clone was already dropped
-            // with the rolled-back sink, so it cannot hold the get open, and if
-            // EVERY leg errors, `guard` below completes it.
-            let issued = if wire.mapping_id == 0 || locality == Locality::SessionLocal {
-                session.query(keyexpr, opts, on_reply, |_rid| {}).ok()
-            } else {
-                session
-                    .query_aliased(
-                        wire.mapping_id,
-                        wire.suffix.as_deref(),
-                        keyexpr,
-                        opts,
-                        on_reply,
-                        |_rid| {},
-                    )
-                    .ok()
-            };
-            issued.map(|handle| handle.rid())
-        },
-    );
+    shared.fan_query(opts.allowed_destination, fan.as_deref(), |query_leg| {
+        let leg = LegReply {
+            closure: closure.clone(),
+            gate: gate.clone(),
+            _registration: registration.clone(),
+        };
+        // Only `on_reply` carries the `Arc`. `on_final` needs no body at all:
+        // completion is signalled by the pending entry's sink being DROPPED
+        // (which drops this closure and releases the clone), and that happens
+        // on a real final, a timeout sweep, and a face death alike — whereas a
+        // counter incremented here would never be reached by the face-death
+        // path. See the module doc.
+        let on_reply = move |view: &dyn ReplyView| leg.fire(view);
+        // R2959 — a declared key goes out as its alias where the leg can name one,
+        // and the reply gate still matches the literal (`QueryLeg::query_on_wire`). An
+        // issue error (a face mid-teardown, an alias the face was never told) is
+        // swallowed, matching the fan-out publish's best-effort discipline: its `Arc`
+        // clone was already dropped with the rolled-back sink, so it cannot hold the
+        // get open, and if EVERY leg errors, `guard` below completes it.
+        query_leg
+            .query_on_wire(keyexpr, wire, opts.clone(), on_reply)
+            .ok()
+            .map(|handle| handle.rid())
+    });
     drop(guard);
     // After `guard`, explicitly: locals drop in REVERSE declaration order, so
     // left implicit the registration would go first and a concurrent `cancel`

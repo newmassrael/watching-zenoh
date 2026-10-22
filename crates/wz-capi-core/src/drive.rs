@@ -3371,6 +3371,245 @@ async fn drive_idle(whatami: WhatAmI, ctx: DriveContext) {
     }
 }
 
+/// Open-debt item 913 — what the drive needs to join a session's groups, gathered on the
+/// calling thread before the drive starts.
+#[cfg(feature = "multicast-transport")]
+struct GroupSetup {
+    joins: Vec<GroupJoin>,
+    shared: Arc<SharedSession>,
+    /// The session's wire zid, which every group's beacon carries and its receive gate
+    /// drops when its own traffic loops back.
+    zid: Vec<u8>,
+    whatami: WhatAmI,
+    tx_queue: TxQueueConf,
+    /// Where a group that cannot be joined reports the open as failed, before the role
+    /// reports anything.
+    opened: mpsc::Sender<bool>,
+}
+
+/// One group, resolved from its [`GroupJoin`]: where it is and what this session
+/// advertises on it.
+#[cfg(feature = "multicast-transport")]
+struct ResolvedGroup {
+    endpoint: String,
+    group: std::net::IpAddr,
+    port: u16,
+    opts: wz_runtime_tokio::McastGroupOptions,
+    params: wz_runtime_tokio::multicast_glue::MulticastParams,
+}
+
+#[cfg(feature = "multicast-transport")]
+impl ResolvedGroup {
+    /// Read `join`'s endpoint as a router reads its group locator: a `udp/` locator, either
+    /// family, with the socket keys of its metadata. `None` is an endpoint that names no
+    /// group, which fails the open.
+    fn resolve(
+        join: &GroupJoin,
+        zid: &[u8],
+        whatami: WhatAmI,
+        tx_queue: TxQueueConf,
+    ) -> Option<Self> {
+        use wz_runtime_tokio::locator::{parse_locator, Proto};
+
+        let parsed = parse_locator(&join.endpoint)
+            .map_err(|e| log_open_failure(&format!("group {}", join.endpoint), &e))
+            .ok()?;
+        if parsed.proto != Proto::Udp || !parsed.addr.ip().is_multicast() {
+            log_open_failure(
+                &format!("group {}", join.endpoint),
+                &"not a udp multicast group",
+            );
+            return None;
+        }
+        let GroupProfile {
+            lease_ms,
+            join_interval_ms,
+            seq_num_res,
+            req_id_res,
+            batch_size,
+            is_qos,
+        } = join.profile;
+        Some(Self {
+            endpoint: join.endpoint.clone(),
+            group: parsed.addr.ip(),
+            port: parsed.addr.port(),
+            opts: wz_runtime_tokio::McastGroupOptions {
+                iface: parsed.socket.as_ref().and_then(|s| s.iface.clone()),
+                ttl: parsed.mcast_ttl,
+                joins: parsed.mcast_join,
+                bind: parsed.socket.as_ref().and_then(|s| s.bind.clone()),
+                dscp: parsed.socket.as_ref().and_then(|s| s.dscp),
+            },
+            params: wz_runtime_tokio::multicast_glue::MulticastParams {
+                whatami,
+                zid: zid.to_vec(),
+                lease_ms,
+                join_interval_ms,
+                seq_num_res,
+                req_id_res,
+                batch_size,
+                is_qos,
+                tx_queue,
+            },
+        })
+    }
+}
+
+/// Open-debt item 913 — join the session's groups, then run `role` beside them, on the
+/// thread that runs the session's callbacks.
+///
+/// Every group is bound before the role runs, so a group that cannot be joined fails the
+/// open before the role reports anything, as a listener that cannot be bound does
+/// ([`bind_listeners`]); the role then reports the open. When the role returns (the session
+/// is closing, or its own open failed) every group is stopped, which announces the
+/// departure on the group, and its face leaves the registry.
+#[cfg(feature = "multicast-transport")]
+async fn serve_beside_groups(setup: GroupSetup, role: impl Future<Output = ()>) {
+    let GroupSetup {
+        joins,
+        shared,
+        zid,
+        whatami,
+        tx_queue,
+        opened,
+    } = setup;
+    if joins.is_empty() {
+        role.await;
+        return;
+    }
+    let Some(groups) = joins
+        .iter()
+        .map(|join| ResolvedGroup::resolve(join, &zid, whatami, tx_queue))
+        .collect::<Option<Vec<_>>>()
+    else {
+        let _ = opened.send(false);
+        return;
+    };
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async move {
+            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+            let (up_tx, mut up_rx) = tokio::sync::mpsc::unbounded_channel::<bool>();
+            let faces: Vec<_> = groups
+                .into_iter()
+                .enumerate()
+                .map(|(index, group)| {
+                    let (shared, stop, up) = (shared.clone(), stop_rx.clone(), up_tx.clone());
+                    tokio::task::spawn_local(async move {
+                        let ResolvedGroup {
+                            endpoint,
+                            group,
+                            port,
+                            opts,
+                            params,
+                        } = group;
+                        serve_group(
+                            shared,
+                            index as u64,
+                            &endpoint,
+                            &params,
+                            || {
+                                wz_runtime_tokio::UdpDriver::bind_multicast_link(
+                                    group,
+                                    port,
+                                    opts.as_socket_config(),
+                                )
+                            },
+                            stop,
+                            up,
+                        )
+                        .await
+                    })
+                })
+                .collect();
+            drop(up_tx);
+            let mut joined = 0;
+            while joined < faces.len() {
+                match up_rx.recv().await {
+                    Some(true) => joined += 1,
+                    _ => break,
+                }
+            }
+            if joined == faces.len() {
+                role.await;
+            } else {
+                let _ = opened.send(false);
+            }
+            let _ = stop_tx.send(true);
+            for face in faces {
+                let _ = face.await;
+            }
+        })
+        .await;
+}
+
+/// One group face for its whole life: bind and join, register as face `id` of the
+/// registry once joined, dispatch what the group carries into it and expire the gets
+/// that wait on it, until `stop` changes or the link is lost for good.
+///
+/// `bind` makes each join's link: the UDP group link in a session, an in-memory one in a
+/// test. `up` hears the first join once, whether it came up or not.
+#[cfg(feature = "multicast-transport")]
+async fn serve_group<D, B, Fut>(
+    shared: Arc<SharedSession>,
+    id: u64,
+    endpoint: &str,
+    params: &wz_runtime_tokio::multicast_glue::MulticastParams,
+    bind: B,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+    up: tokio::sync::mpsc::UnboundedSender<bool>,
+) where
+    D: wz_runtime_tokio::multicast_glue::MulticastLinkDriver,
+    B: FnMut() -> Fut,
+    Fut: Future<Output = std::io::Result<D>>,
+{
+    use wz_runtime_tokio::multicast_glue::{
+        serve_group_face, GroupFaceSeams, GroupFaceSpec, McastGroupMembership, MulticastTxProducer,
+    };
+
+    let producer = MulticastTxProducer::new();
+    let membership = McastGroupMembership::new();
+    let session = shared.new_mcast_face_session(producer.clone(), &membership);
+    let revised = Arc::new(Notify::new());
+    let serve = serve_group_face(
+        GroupFaceSpec {
+            label: "capi multicast group",
+            params,
+            tick_ms: GROUP_TICK_MS,
+            node_stats: None,
+            membership: Some(&membership),
+        },
+        bind,
+        GroupFaceSeams {
+            on_event: |event: IterationEvent<'_>| {
+                crate::faces::dispatch_mcast_event(&session, event)
+            },
+            on_members: |_: &[Vec<u8>]| {},
+            on_group_subs: |_: &[String]| {},
+        },
+        &producer,
+        &mut stop,
+        |joined: Result<(), &std::io::Error>| {
+            match joined {
+                Ok(()) => shared.mcast_face_up(id, &session, &revised),
+                Err(e) => log_open_failure(&format!("join {endpoint}"), e),
+            }
+            let _ = up.send(joined.is_ok());
+        },
+    );
+    tokio::select! {
+        _ = serve => {}
+        _ = crate::faces::sweep_mcast_face(&session, &revised) => {}
+    }
+    shared.mcast_face_down(id);
+}
+
+/// The tick of a group face's loop: how often a quiet loop looks at its beacon, its lease
+/// sweep and its stop. Shorter than any beacon interval an ABI advertises, so the beacon
+/// leaves on its own schedule.
+#[cfg(feature = "multicast-transport")]
+const GROUP_TICK_MS: u64 = 50;
+
 /// What the calling ABI, and the config it read, decide about the session being
 /// opened — as distinct from where it connects.
 ///
@@ -3469,6 +3708,41 @@ pub struct OpenStance {
     /// compiles `access_control`, `low_pass_filter` and `downsampling` into it, and an inert
     /// policy is a node that states none. zenoh-pico's ABI reads no such keys and says inert.
     pub policy: crate::node_policy::NodePolicy,
+    /// Open-debt item 913 — the multicast groups the session joins, each one face to every
+    /// member beside the unicast ones, bound before the open answers. The calling ABI decides
+    /// which of its endpoints names a group and what the group's beacon advertises; empty for
+    /// a session that joins none. A build without the `multicast-transport` feature refuses
+    /// an open that names one.
+    pub groups: Vec<GroupJoin>,
+}
+
+/// Open-debt item 913 — a multicast group a session joins: the endpoint that names it, and
+/// what the session advertises on it.
+#[derive(Clone, Debug)]
+pub struct GroupJoin {
+    /// `udp/<group>:<port>`, with the socket keys of its metadata (`iface`, `ttl`, `join`,
+    /// `bind`, `dscp`) read as a router's group locator reads them.
+    pub endpoint: String,
+    /// What the session's beacon advertises on the group.
+    pub profile: GroupProfile,
+}
+
+/// What a session's JOIN beacon advertises on a group, beside its identity and its role:
+/// the calling ABI's, because zenoh-pico and zenoh disagree on every one of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GroupProfile {
+    /// How long the members hold this session alive after each beacon, in milliseconds.
+    pub lease_ms: u64,
+    /// How often the session beacons, in milliseconds.
+    pub join_interval_ms: u64,
+    /// The 2-bit wire code of the sequence number resolution.
+    pub seq_num_res: u8,
+    /// The 2-bit wire code of the request id resolution.
+    pub req_id_res: u8,
+    /// The largest batch the session sends on the group.
+    pub batch_size: u16,
+    /// Whether the session offers the group per-priority conduits.
+    pub is_qos: bool,
 }
 
 #[cfg(feature = "session-extshm")]
@@ -3594,8 +3868,16 @@ pub fn open_blocking(
         face_drive,
         auth,
         policy,
+        groups,
         ..
     } = stance;
+    // A build without the transport has no group to join, and a session that was asked to
+    // join one is not opened as one that joins none.
+    #[cfg(not(feature = "multicast-transport"))]
+    if !groups.is_empty() {
+        log_open_failure("groups", &"this build has no multicast transport");
+        return Err(OpenError::DriveFailed);
+    }
     // R3070 -- a session that scouts for nodes to connect to dials them with the dial role,
     // whether or not it was also told an endpoint, so the plan decides the route alongside the
     // endpoints: a router's empty one scouts for nobody and routes as before.
@@ -3718,6 +4000,17 @@ pub fn open_blocking(
                     return;
                 }
             };
+            // Open-debt item 913 — the groups, joined on this thread before the role reports
+            // the open and served beside it ([`serve_beside_groups`]).
+            #[cfg(feature = "multicast-transport")]
+            let group_setup = GroupSetup {
+                joins: groups,
+                shared: drive_shared.clone(),
+                zid: wire_zid.clone(),
+                whatami: dial_whatami,
+                tx_queue: link_tx.queue,
+                opened: tx.clone(),
+            };
             let ctx = DriveContext {
                 zid: wire_zid,
                 shared: drive_shared,
@@ -3746,17 +4039,23 @@ pub fn open_blocking(
             // task is a session nobody is driving, which is what pico's is.
             #[cfg(feature = "peer")]
             rt.block_on(Pausable::new(drive_gate, async move {
-                if !connect.is_empty() || scouts || gossips_with_a_listener {
-                    drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
-                } else if !listen.is_empty() {
-                    drive_listen(listen, tls, dial_whatami, ctx).await;
-                } else {
-                    // R3067 -- no endpoint: a session alone, as zenoh starts one.
-                    // Whether a config MAY open without one is the calling ABI's
-                    // decision (a client may not, and a peer that scouts reaches
-                    // others through it), so it is asked there, not here.
-                    drive_idle(dial_whatami, ctx).await;
-                }
+                let role = async move {
+                    if !connect.is_empty() || scouts || gossips_with_a_listener {
+                        drive_dial(connect, listen, dial_whatami, tls, dial_phase, ctx).await;
+                    } else if !listen.is_empty() {
+                        drive_listen(listen, tls, dial_whatami, ctx).await;
+                    } else {
+                        // R3067 -- no endpoint: a session alone, as zenoh starts one.
+                        // Whether a config MAY open without one is the calling ABI's
+                        // decision (a client may not, and a peer that scouts reaches
+                        // others through it), so it is asked there, not here.
+                        drive_idle(dial_whatami, ctx).await;
+                    }
+                };
+                #[cfg(feature = "multicast-transport")]
+                serve_beside_groups(group_setup, role).await;
+                #[cfg(not(feature = "multicast-transport"))]
+                role.await;
             }));
             // The client's build has the one role, and `open_blocking` has refused any config
             // that has nothing to dial or find.
@@ -4497,6 +4796,7 @@ mod tests {
             face_drive: FaceDrive::Serial,
             auth: None,
             policy: crate::node_policy::NodePolicy::default(),
+            groups: Vec::new(),
         }
     }
 
@@ -4618,5 +4918,215 @@ mod tests {
             foreign, 0,
             "{foreign} of {opens} dials were accepted by another round's listener on the same port; first sightings: {sightings:#?}"
         );
+    }
+}
+
+/// Open-debt item 913 — two C sessions on one group, each through its multicast face: the
+/// drive's own face loop (`serve_group`) over the in-memory group, and the registry's replay
+/// and fan-outs above it. Time is paused, so the beacons run on the profile's schedule and
+/// cost nothing.
+#[cfg(all(test, feature = "multicast-transport"))]
+mod multicast_face_tests {
+    use std::io;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use tokio::sync::{mpsc, watch, Notify};
+    use wz_runtime_tokio::locality::Locality;
+    use wz_runtime_tokio::multicast_glue::MulticastParams;
+    use wz_runtime_tokio::query_sink::{QueryView, ReplyOut};
+    use wz_runtime_tokio::reply_sink::ReplyView;
+    use wz_runtime_tokio::runtime_impl::TokioTime;
+    use wz_runtime_tokio::session::{PublishOptions, QueryOptions, TokioQueryHolder};
+    use wz_runtime_tokio::sink::SampleView;
+    use wz_runtime_tokio_test_support::multicast_bus::GroupBus;
+
+    use super::{serve_group, WhatAmI};
+    use crate::faces::{QueryableSink, SharedSession, SubscriberSink};
+
+    const ENDPOINT: &str = "udp/224.0.0.224:7447";
+
+    /// A peer's beacon, every 100 ms.
+    fn params(zid: &[u8]) -> MulticastParams {
+        MulticastParams {
+            whatami: WhatAmI::Peer,
+            zid: zid.to_vec(),
+            lease_ms: 10_000,
+            join_interval_ms: 100,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+            tx_queue: Default::default(),
+        }
+    }
+
+    /// A session with the zid `byte` repeated.
+    fn session(byte: u8) -> Arc<SharedSession> {
+        Arc::new(SharedSession::new(TokioTime::new(), vec![byte; 16]).expect("test host entropy"))
+    }
+
+    /// Serve `shared`'s group face on this task's `LocalSet` until `stop` changes, joined
+    /// over `bus` at `port`.
+    fn join(
+        bus: &GroupBus,
+        port: u16,
+        shared: &Arc<SharedSession>,
+        stop: watch::Receiver<bool>,
+        up: mpsc::UnboundedSender<bool>,
+    ) -> tokio::task::JoinHandle<()> {
+        let zid = shared.zid().to_vec();
+        let mut link = Some(bus.attach(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            Arc::new(Notify::new()),
+        ));
+        let shared = shared.clone();
+        tokio::task::spawn_local(async move {
+            serve_group(
+                shared,
+                0,
+                ENDPOINT,
+                &params(&zid),
+                move || {
+                    std::future::ready(link.take().ok_or_else(|| io::Error::other("bound once")))
+                },
+                stop,
+                up,
+            )
+            .await
+        })
+    }
+
+    /// A subscriber that counts what it hears on `demo/mc/put`.
+    fn counting_subscriber(heard: &Arc<AtomicUsize>) -> SubscriberSink {
+        let heard = heard.clone();
+        Arc::new(move || {
+            let heard = heard.clone();
+            Box::new(move |sample: &dyn SampleView| {
+                assert_eq!(sample.keyexpr(), "demo/mc/put");
+                heard.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+    }
+
+    /// A queryable that answers `pong`.
+    fn answering_queryable() -> QueryableSink {
+        Arc::new(|_holder: &TokioQueryHolder| {
+            Box::new(|_query: &dyn QueryView, out: &mut dyn ReplyOut| out.reply(b"pong"))
+        })
+    }
+
+    /// One get's reply callback: what it heard, and a share of the hold whose last drop
+    /// is the get's end.
+    struct Leg {
+        replies: Arc<Mutex<Vec<Vec<u8>>>>,
+        _end: Arc<EndsOnDrop>,
+    }
+
+    impl Leg {
+        fn fire(&self, view: &dyn ReplyView) {
+            self.replies
+                .lock()
+                .expect("replies")
+                .push(view.payload().to_vec());
+        }
+    }
+
+    struct EndsOnDrop(Arc<Notify>);
+
+    impl Drop for EndsOnDrop {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
+    }
+
+    /// A's put reaches B's subscriber, declared before B joined (the face's replay), and
+    /// A's get is answered by B's queryable, declared after (the live declaration), and
+    /// ends on B's final rather than its own timeout: the get counted the one member it
+    /// held. Once B undeclares its subscriber, A's put reaches nothing on B.
+    #[tokio::test(start_paused = true)]
+    async fn two_sessions_put_and_get_through_their_group_faces() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let bus = GroupBus::new(ENDPOINT);
+                let (stop_tx, stop_rx) = watch::channel(false);
+                let (up_tx, mut up_rx) = mpsc::unbounded_channel();
+                let a = session(0xa1);
+                let b = session(0xb2);
+                let heard = Arc::new(AtomicUsize::new(0));
+                let sub = b.declare_subscriber(
+                    "demo/mc/**".into(),
+                    Locality::Any,
+                    counting_subscriber(&heard),
+                );
+                let a_task = join(&bus, 1, &a, stop_rx.clone(), up_tx.clone());
+                let b_task = join(&bus, 2, &b, stop_rx, up_tx);
+                assert_eq!(up_rx.recv().await, Some(true), "the first face joined");
+                assert_eq!(up_rx.recv().await, Some(true), "the second face joined");
+                let _qbl = b.declare_queryable(
+                    "demo/mc/q".into(),
+                    true,
+                    Locality::Any,
+                    answering_queryable(),
+                );
+                // Each admits the other from its beacon; a put before B admits A is dropped
+                // by B, as a frame from a member that never joined is.
+                for _ in 0..50 {
+                    a.publish_all("demo/mc/put", b"one", &PublishOptions::default())
+                        .expect("a put the codec can carry");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    if heard.load(Ordering::SeqCst) > 0 {
+                        break;
+                    }
+                }
+                assert!(heard.load(Ordering::SeqCst) > 0, "A's put never reached B");
+                // Two beacons more, so A holds B as a member whatever the order of the two.
+                tokio::time::sleep(Duration::from_millis(250)).await;
+
+                let replies = Arc::new(Mutex::new(Vec::new()));
+                let ended = Arc::new(Notify::new());
+                let hold = Arc::new(EndsOnDrop(ended.clone()));
+                let mut legs = Vec::new();
+                a.fan_query(Locality::Remote, None, |query| {
+                    legs.push(query.locality());
+                    let leg = Leg {
+                        replies: replies.clone(),
+                        _end: hold.clone(),
+                    };
+                    query
+                        .query(
+                            "demo/mc/q",
+                            QueryOptions::default().with_timeout_ms(10_000),
+                            move |view: &dyn ReplyView| leg.fire(view),
+                        )
+                        .ok()
+                        .map(|handle| handle.rid())
+                });
+                drop(hold);
+                assert_eq!(legs, [Locality::Remote], "one leg: the group, and no face");
+                tokio::time::timeout(Duration::from_secs(5), ended.notified())
+                    .await
+                    .expect("the get ended on B's final, well before its 10 s timeout");
+                assert_eq!(*replies.lock().expect("replies"), [b"pong".to_vec()]);
+
+                b.undeclare_subscriber(sub);
+                let before = heard.load(Ordering::SeqCst);
+                a.publish_all("demo/mc/put", b"two", &PublishOptions::default())
+                    .expect("a put the codec can carry");
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                assert_eq!(
+                    heard.load(Ordering::SeqCst),
+                    before,
+                    "an undeclared subscriber heard"
+                );
+
+                stop_tx.send(true).expect("the faces watch the stop");
+                a_task.await.expect("A's face ended");
+                b_task.await.expect("B's face ended");
+            })
+            .await;
     }
 }
