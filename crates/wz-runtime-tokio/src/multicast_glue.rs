@@ -1936,6 +1936,8 @@ pub type McastMembersObserver = std::sync::Arc<dyn Fn(&[MulticastMember]) + Send
 /// One member of a group, as a [`McastGroupMembership`] lists it; re-exported so a host
 /// reads the list without a dependency of its own on the session core.
 pub use wz_session_core::multicast_dispatch::MulticastMember;
+/// The zid a [`MulticastMember`] carries, re-exported for the same reason.
+pub use wz_session_core::multicast_peer_lost::MulticastPeerId;
 
 impl std::fmt::Debug for McastGroupMembership {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

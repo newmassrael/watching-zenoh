@@ -421,33 +421,44 @@ fn connected(shared: &SharedSession) -> Vec<FaceSnapshot> {
     all
 }
 
-/// The text pico's `_z_endpoint_to_string` makes of a UDP group endpoint: the locator
-/// without its metadata, then the config keys pico's UDP link knows, in its own order and
-/// joined by `;`, with NO separator between the two
-/// (`vendor/zenoh-pico/src/link/endpoint.c` @ `memcpy(curr_dst, config, config_len);`), so
-/// `udp/224.0.0.224:7447#iface=lo` reads back as `udp/224.0.0.224:7447iface=lo`.
+/// The config keys pico's link for a group endpoint's scheme knows, in the order its mapping
+/// lists them: the UDP group's (`vendor/zenoh-pico/include/zenoh-pico/link/config/udp.h` @
+/// `#define UDP_CONFIG_MAPPING_BUILD`) and the raweth link's
+/// (`vendor/zenoh-pico/src/transport/raweth/link.c` @ `#define RAWETH_CONFIG_MAPPING_BUILD`).
+fn pico_group_config_keys(scheme: &str) -> &'static [&'static str] {
+    match scheme {
+        "reth" => &["iface", "ethtype", "mapping", "whitelist"],
+        _ => &["iface", "tout", "join"],
+    }
+}
+
+/// The text pico's `_z_endpoint_to_string` makes of a group endpoint: the locator without
+/// its metadata, then the config keys pico's link for the scheme knows
+/// ([`pico_group_config_keys`]), in its own order and joined by `;`, with NO separator
+/// between the two (`vendor/zenoh-pico/src/link/endpoint.c` @
+/// `memcpy(curr_dst, config, config_len);`), so `udp/224.0.0.224:7447#iface=lo` reads back as
+/// `udp/224.0.0.224:7447iface=lo`.
 ///
 /// pico reads the config up to the first key it does not know and keeps the last value of
 /// a key given twice (`vendor/zenoh-pico/src/protocol/config.c` @
 /// `z_result_t _z_str_intmap_from_strn(`), and declares no locator metadata key, so the
 /// text keeps what pico kept.
 fn pico_group_endpoint_text(endpoint: &str) -> String {
-    // pico's UDP config keys, in the order its mapping lists them
-    // (`vendor/zenoh-pico/include/zenoh-pico/link/config/udp.h` @ `#define UDP_CONFIG_MAPPING_BUILD`).
-    const UDP_KEYS: [&str; 3] = ["iface", "tout", "join"];
     let (locator, config) = endpoint.split_once('#').unwrap_or((endpoint, ""));
     let locator = locator.split_once('?').map_or(locator, |(bare, _)| bare);
-    let mut values: [Option<&str>; 3] = [None; 3];
+    let scheme = locator.split_once('/').map_or("", |(scheme, _)| scheme);
+    let keys = pico_group_config_keys(scheme);
+    let mut values: Vec<Option<&str>> = vec![None; keys.len()];
     for pair in config.split(';').filter(|pair| !pair.is_empty()) {
         let Some((key, value)) = pair.split_once('=') else {
             break;
         };
-        let Some(slot) = UDP_KEYS.iter().position(|known| *known == key) else {
+        let Some(slot) = keys.iter().position(|known| *known == key) else {
             break;
         };
         values[slot] = Some(value);
     }
-    let config: Vec<String> = UDP_KEYS
+    let config: Vec<String> = keys
         .iter()
         .zip(values)
         .filter_map(|(key, value)| value.map(|value| format!("{key}={value}")))
@@ -460,17 +471,36 @@ fn pico_group_endpoint_text(endpoint: &str) -> String {
 /// A group member's link starts at the endpoint the session joined the group by, as pico
 /// labels it (`vendor/zenoh-pico/src/transport/multicast/rx.c` @
 /// `entry->common._link_src = _z_endpoint_to_string(&ztm->_common._link->_endpoint);`),
-/// written as pico writes an endpoint ([`pico_group_endpoint_text`]).
+/// written as pico writes an endpoint ([`pico_group_endpoint_text`]). Its other fields are
+/// those of the group's own link, which pico reads off the transport
+/// (`vendor/zenoh-pico/include/zenoh-pico/api/primitives.h` @ `*mtu = transport->_link->_mtu;`):
+/// a raweth group's link is a 1514-byte frame (`vendor/zenoh-pico/src/transport/raweth/link.c`
+/// @ `static uint16_t _z_get_link_mtu_raweth(void) { return _ZP_MAX_ETH_FRAME_SIZE; }`),
+/// unreliable and unstreamed, and its member has no `dst`: pico labels a member by the address
+/// its receive gave, which it renders only as an IPv4 or IPv6 address with a port
+/// (`vendor/zenoh-pico/src/transport/multicast/rx.c` @
+/// `} else if (remote_addr->len == 16 + sizeof(uint16_t)) {`), and a raweth receive gives four
+/// bytes of the source MAC (`vendor/zenoh-pico/src/link/transport/udp/raweth_unix.c` @
+/// `addr->len = sizeof(ETH_ALEN);`). MEASURED against the real library: `dst=` and `mtu=1514`.
 fn link_of(zid: [u8; 16], link: &LinkSnapshot) -> z_loaned_link_t {
-    let (mtu, is_streamed, is_reliable) = pico_link_properties(link.kind, link.mtu);
+    let raweth = link
+        .group
+        .as_ref()
+        .is_some_and(|group| group.endpoint.starts_with("reth/"));
+    let (mtu, is_streamed, is_reliable) = if raweth {
+        (1514, false, false)
+    } else {
+        pico_link_properties(link.kind, link.mtu)
+    };
     let src = link.group.as_ref().map_or_else(
         || link.src.clone(),
         |group| pico_group_endpoint_text(&group.endpoint),
     );
+    let dst = if raweth { "" } else { link.dst.as_str() };
     z_loaned_link_t {
         zid: z_id_t { id: zid },
         src: ConnText::new(src.as_bytes()),
-        dst: ConnText::new(link.dst.as_bytes()),
+        dst: ConnText::new(dst.as_bytes()),
         mtu,
         is_streamed,
         is_reliable,
@@ -1941,6 +1971,16 @@ mod tests {
                 "udp/224.0.0.224:7447?rel=0#iface=lo",
                 "udp/224.0.0.224:7447iface=lo",
             ),
+            // A raweth endpoint keeps the raweth link's keys. MEASURED on the real library:
+            // `src=reth/30:03:8c:c8:00:a2iface=lo;whitelist=30:03:8c:c8:00:a1,`.
+            (
+                "reth/30:03:8c:c8:00:a2#iface=lo;whitelist=30:03:8c:c8:00:a1,",
+                "reth/30:03:8c:c8:00:a2iface=lo;whitelist=30:03:8c:c8:00:a1,",
+            ),
+            (
+                "reth/30:03:8c:c8:00:a2#whitelist=30:03:8c:c8:00:a1,;mapping=a#aa:bb:cc:dd:ee:01#,;ethtype=72e0;iface=lo",
+                "reth/30:03:8c:c8:00:a2iface=lo;ethtype=72e0;mapping=a#aa:bb:cc:dd:ee:01#,;whitelist=30:03:8c:c8:00:a1,",
+            ),
         ] {
             assert_eq!(pico_group_endpoint_text(joined), pico, "{joined}");
         }
@@ -1977,6 +2017,38 @@ mod tests {
         let unicast = face(7, false, "tcp/127.0.0.1:7447");
         let held = HeldLink(link_of(unicast.zid, &unicast.links[0]));
         assert_eq!(held.0.src.as_bytes(), b"tcp/127.0.0.1:7447");
+    }
+
+    /// A raweth group member's link reads as the real library's: from the joined endpoint
+    /// with the raweth link's keys, to no `dst`, with the raweth link's 1514-byte frame.
+    /// MEASURED on the real library (`pico_raweth_on_wz_capi.rs`).
+    ///
+    /// # Control
+    ///
+    /// The UDP group's member above keeps its `dst` and the UDP link's 1450.
+    #[test]
+    fn a_raweth_group_members_link_reads_as_pico_labels_it() {
+        let member = LinkSnapshot {
+            src: "reth/30:03:8c:c8:00:a2".to_owned(),
+            dst: "reth/30:03:8c:c8:00:a1".to_owned(),
+            kind: None,
+            interfaces: None,
+            mtu: 0,
+            group: Some(wz_capi_core::faces::GroupLink {
+                locator: "reth/aa:bb:cc:dd:ee:ff".to_owned(),
+                endpoint: "reth/30:03:8c:c8:00:a2#iface=lo;whitelist=30:03:8c:c8:00:a1,".to_owned(),
+            }),
+        };
+        let held = HeldLink(link_of([7; 16], &member));
+        assert_eq!(
+            held.0.src.as_bytes(),
+            b"reth/30:03:8c:c8:00:a2iface=lo;whitelist=30:03:8c:c8:00:a1,"
+        );
+        assert_eq!(held.0.dst.as_bytes(), b"");
+        assert_eq!(
+            (held.0.mtu, held.0.is_streamed, held.0.is_reliable),
+            (1514, false, false)
+        );
     }
 
     /// Arrival is the transport and then its link; departure is the link and

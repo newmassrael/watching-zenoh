@@ -33,13 +33,15 @@
 use std::io;
 use std::net::{Ipv6Addr, SocketAddr, SocketAddrV6};
 use std::sync::Arc;
+#[cfg(feature = "reassembly")]
+use std::sync::Mutex;
 
 use tokio::io::unix::AsyncFd;
 use wz_packet_socket::raweth_socket::AfPacketSocket;
 use wz_session_core::link::{LinkEvent, LostCause, RxFrame, TxFrame};
 use wz_session_core::raweth_link::{
-    deframe, frame, RawEthHeader, RethLocator, ETH_HEADER_LEN, ETH_VLAN_HEADER_LEN, MAC_LEN,
-    MAX_ETH_FRAME_SIZE,
+    deframe, frame, leading_message_key, RawEthHeader, RethLocator, ETH_HEADER_LEN,
+    ETH_VLAN_HEADER_LEN, MAC_LEN, MAX_ETH_FRAME_SIZE,
 };
 use wz_session_core::reliability::Reliability;
 
@@ -117,6 +119,20 @@ pub fn member_address(mac: [u8; MAC_LEN]) -> SocketAddr {
     SocketAddr::V6(SocketAddrV6::new(ip, 0, 0, 0))
 }
 
+/// The `reth/` locator of the member [`member_address`] keyed `addr` by: its MAC, read back out
+/// of the modified EUI-64. `None` for an address no raweth member is keyed by.
+pub fn member_locator(addr: &SocketAddr) -> Option<String> {
+    let SocketAddr::V6(v6) = addr else {
+        return None;
+    };
+    let o = v6.ip().octets();
+    if o[..8] != [0xfe, 0x80, 0, 0, 0, 0, 0, 0] || o[11] != 0xff || o[12] != 0xfe {
+        return None;
+    }
+    let mac = [o[8] ^ 0x02, o[9], o[10], o[13], o[14], o[15]];
+    Some(format!("reth/{}", mac_text(&mac)))
+}
+
 /// `aa:bb:cc:dd:ee:ff`.
 fn mac_text(mac: &[u8; MAC_LEN]) -> String {
     mac.iter()
@@ -129,6 +145,8 @@ fn mac_text(mac: &[u8; MAC_LEN]) -> String {
 pub struct RawEthGroupDriver<C> {
     carrier: Option<Arc<C>>,
     endpoint: Arc<RethLocator>,
+    #[cfg(feature = "reassembly")]
+    routes: Arc<Mutex<FragmentRoutes>>,
 }
 
 impl<C: RawEthCarrier> RawEthGroupDriver<C> {
@@ -137,8 +155,24 @@ impl<C: RawEthCarrier> RawEthGroupDriver<C> {
         Self {
             carrier: Some(Arc::new(carrier)),
             endpoint: Arc::new(endpoint),
+            #[cfg(feature = "reassembly")]
+            routes: Arc::new(Mutex::new(FragmentRoutes::default())),
         }
     }
+}
+
+/// The mapping entry the fragments of the message on each channel go by, from its first
+/// fragment until its last: pico picks a message's destination once, by its key, and sends
+/// every fragment of it there (`vendor/zenoh-pico/src/transport/raweth/tx.c` @
+/// `// The message does not fit in the current batch, let's fragment it`). One message is
+/// fragmented at a time on a channel, so a channel holds one route. A build without
+/// `reassembly` has no fragment to route: the group's sender cuts none, and the wire form of
+/// one is not decoded.
+#[cfg(feature = "reassembly")]
+#[derive(Default)]
+struct FragmentRoutes {
+    reliable: Option<usize>,
+    best_effort: Option<usize>,
 }
 
 impl RawEthGroupDriver<AfPacketCarrier> {
@@ -210,6 +244,8 @@ impl<C: RawEthCarrier> MulticastLinkDriver for RawEthGroupDriver<C> {
         Ok(RawEthGroupSender {
             carrier,
             endpoint: self.endpoint.clone(),
+            #[cfg(feature = "reassembly")]
+            routes: self.routes.clone(),
         })
     }
 
@@ -242,17 +278,66 @@ impl<C: RawEthCarrier> MulticastLinkDriver for RawEthGroupDriver<C> {
 pub struct RawEthGroupSender<C> {
     carrier: Arc<C>,
     endpoint: Arc<RethLocator>,
+    #[cfg(feature = "reassembly")]
+    routes: Arc<Mutex<FragmentRoutes>>,
+}
+
+impl<C: RawEthCarrier> RawEthGroupSender<C> {
+    /// The index of the mapping entry `datagram` goes by: a frame's by the key of the message it
+    /// carries, a fragment's by the key of the message it is part of, read off the chain's
+    /// first fragment, and anything else (a JOIN, a declaration) by the first entry, as pico
+    /// sends a message that names no key (`vendor/zenoh-pico/src/transport/raweth/tx.c` @
+    /// `// Store default value into socket`).
+    fn route(&self, datagram: &[u8]) -> usize {
+        use wz_session_core::inbound::{parse_inbound, InboundFrame};
+        // A mapping of one entry sends everything one way, and the key need not be read.
+        if self.endpoint.mapping.len() < 2 {
+            return 0;
+        }
+        match parse_inbound(datagram) {
+            Ok(InboundFrame::Frame { payload, .. }) => self
+                .endpoint
+                .mapping_index_for(leading_message_key(&payload).as_deref()),
+            #[cfg(feature = "reassembly")]
+            Ok(InboundFrame::Fragment {
+                reliable,
+                more,
+                payload,
+                markers,
+                ..
+            }) => {
+                let mut routes = self
+                    .routes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let slot = if reliable {
+                    &mut routes.reliable
+                } else {
+                    &mut routes.best_effort
+                };
+                // A chain's first fragment, by its marker where the chain carries one and by
+                // the channel holding no route where it does not, picks the route.
+                if markers.first || slot.is_none() {
+                    *slot = Some(
+                        self.endpoint
+                            .mapping_index_for(leading_message_key(&payload).as_deref()),
+                    );
+                }
+                let index = slot.unwrap_or(0);
+                // The last fragment, or the one that abandons the chain, ends it.
+                if !more || markers.dropped {
+                    *slot = None;
+                }
+                index
+            }
+            _ => 0,
+        }
+    }
 }
 
 impl<C: RawEthCarrier> MulticastDatagramSender for RawEthGroupSender<C> {
     fn send(&self, datagram: &[u8]) -> impl core::future::Future<Output = io::Result<()>> + Send {
-        // A mapping of one entry sends everything one way, and the key need not be read.
-        let key = if self.endpoint.mapping.len() > 1 {
-            message_key(datagram)
-        } else {
-            None
-        };
-        let entry = self.endpoint.mapping_for(key.as_deref());
+        let entry = &self.endpoint.mapping[self.route(datagram)];
         let mut header =
             RawEthHeader::new(entry.dmac, self.endpoint.smac, self.endpoint.ethtype, 0);
         if let Some(tag) = entry.vlan {
@@ -262,34 +347,6 @@ impl<C: RawEthCarrier> MulticastDatagramSender for RawEthGroupSender<C> {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()));
         let carrier = self.carrier.clone();
         async move { carrier.send_frame(&framed?).await }
-    }
-}
-
-/// The literal key of the network message a datagram's frame carries first, as pico reads the
-/// key of the one message it frames: a put, a query or a reply. `None` for any other datagram
-/// (a JOIN, a fragment, a declaration) and for a key named by a declaration.
-fn message_key(datagram: &[u8]) -> Option<String> {
-    use wz_codecs::wireexpr::WireexprOwnedVariant;
-    use wz_session_core::inbound::{parse_inbound, InboundFrame};
-    use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
-    let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(datagram) else {
-        return None;
-    };
-    let messages = parse_frame_payload(&payload).ok()?;
-    let wire = match messages.first()? {
-        #[cfg(feature = "codec-push")]
-        NetworkMessage::Push(push) => &push.keyexpr,
-        #[cfg(feature = "codec-request")]
-        NetworkMessage::Request(request) => &request.keyexpr,
-        #[cfg(feature = "codec-response")]
-        NetworkMessage::Response(response) => &response.keyexpr,
-        _ => return None,
-    };
-    match &wire.body {
-        WireexprOwnedVariant::WireexprLocal(local) if local.id == 0 => {
-            local.suffix.as_ref().map(|suffix| suffix.to_string())
-        }
-        _ => None,
     }
 }
 
@@ -402,6 +459,77 @@ mod tests {
             Some(member_address([0x02, 0, 0, 0, 0, 0x03])),
             "the first frame's source is not on the whitelist"
         );
+    }
+
+    /// Every fragment of a put that does not fit one frame goes where the put's key maps, as
+    /// pico sends a fragmented message, and the chain's route ends with it: a put after it on a
+    /// key no entry meets goes by the first entry.
+    ///
+    /// # Control
+    ///
+    /// The chain's later fragments carry no key of their own: reading each fragment alone (a
+    /// route of `None` per fragment) sends them to the first entry and reds the assert.
+    #[cfg(feature = "transport-fragmentation")]
+    #[tokio::test]
+    async fn the_fragments_of_a_message_go_where_its_key_maps() {
+        let endpoint =
+            "reth/02:00:00:00:00:01#mapping=demo/a#02:00:00:00:00:aa#,demo/b/**#02:00:00:00:00:bb#";
+        let (raw_left, raw_right) = UnixDatagram::pair().expect("a datagram pair");
+        let sender = RawEthGroupDriver::new(
+            PairCarrier(raw_left),
+            parse_reth_locator(endpoint).expect("endpoint"),
+        )
+        .datagram_sender()
+        .expect("a sender");
+        let big = wz_session_core::frame_encode::encode_frame_with_push(
+            0,
+            wz_session_core::push_build::build_push_literal("demo/b/x", &[7u8; 600])
+                .expect("the put builds"),
+            true,
+        );
+        let mut conduits = wz_session_core::sn::MulticastTxConduits::new(u64::from(u32::MAX));
+        let fragments = wz_session_core::frame_encode::multicast_frame_or_fragments(
+            big,
+            0,
+            true,
+            200,
+            &mut conduits,
+            None,
+        );
+        assert!(fragments.len() > 2, "the put is cut into a chain");
+        for fragment in &fragments {
+            sender.send(fragment).await.expect("sent");
+        }
+        let mut buf = vec![0u8; MAX_ETH_FRAME_SIZE];
+        for i in 0..fragments.len() {
+            let n = raw_right.recv(&mut buf).await.expect("a frame");
+            let (header, _) = deframe(&buf[..n]).expect("a raweth frame");
+            assert_eq!(header.dmac, [0x02, 0, 0, 0, 0, 0xbb], "fragment {i}");
+        }
+        // After the chain, a put on a key no entry meets goes by the first entry.
+        let keyless = wz_session_core::frame_encode::encode_frame_with_push(
+            1,
+            wz_session_core::push_build::build_push_literal("other/key", b"x")
+                .expect("the put builds"),
+            true,
+        );
+        sender.send(&keyless).await.expect("sent");
+        let n = raw_right.recv(&mut buf).await.expect("a frame");
+        let (header, _) = deframe(&buf[..n]).expect("a raweth frame");
+        assert_eq!(header.dmac, [0x02, 0, 0, 0, 0, 0xaa]);
+    }
+
+    /// A member's address reads back as its MAC's `reth/` locator, and an address no raweth
+    /// member is keyed by reads as none.
+    #[test]
+    fn a_member_address_reads_back_as_its_mac() {
+        let mac = [0x30, 0x03, 0x8c, 0xc8, 0x00, 0xa1];
+        assert_eq!(
+            member_locator(&member_address(mac)).as_deref(),
+            Some("reth/30:03:8c:c8:00:a1")
+        );
+        assert_eq!(member_locator(&"127.0.0.1:7447".parse().unwrap()), None);
+        assert_eq!(member_locator(&"[fe80::1]:0".parse().unwrap()), None);
     }
 
     /// The link frames to what a raweth frame holds, the widest header its mapping makes taken

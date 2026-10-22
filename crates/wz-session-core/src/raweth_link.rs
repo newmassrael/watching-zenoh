@@ -400,14 +400,56 @@ impl RethLocator {
     /// (`vendor/zenoh-pico/src/transport/raweth/tx.c` @
     /// `static z_result_t _zp_raweth_set_socket(const _z_keyexpr_t *keyexpr, _z_raweth_socket_t *sock) {`).
     pub fn mapping_for(&self, keyexpr: Option<&str>) -> &RawEthMapping {
+        &self.mapping[self.mapping_index_for(keyexpr)]
+    }
+
+    /// The index in [`Self::mapping`] of the entry [`Self::mapping_for`] gives.
+    pub fn mapping_index_for(&self, keyexpr: Option<&str>) -> usize {
         keyexpr
             .and_then(|key| {
-                self.mapping.iter().find(|entry| {
+                self.mapping.iter().position(|entry| {
                     crate::keyexpr_match::keyexpr_intersects_text(key, &entry.keyexpr)
                 })
             })
-            .unwrap_or(&self.mapping[0])
+            .unwrap_or(0)
     }
+}
+
+/// The literal key of the network message `payload` begins with, as pico picks a raweth
+/// destination by: the key of a put, a query or a reply, and none for any other message
+/// (`vendor/zenoh-pico/src/transport/raweth/tx.c` @ `case _Z_N_PUSH:`).
+///
+/// Only the message's header, its request id and its key are read, so a payload cut short
+/// after the key names it as the whole message does: the first fragment of a message that
+/// does not fit one frame begins as the message does, and pico sends every fragment of a
+/// message to the destination its key picked (`_zp_raweth_set_socket` runs once per message,
+/// before the fragmenting loop, `vendor/zenoh-pico/src/transport/raweth/tx.c` @
+/// `// The message does not fit in the current batch, let's fragment it`). `None` as well for
+/// a key named by a declared id, which names no key text on the wire.
+pub fn leading_message_key(payload: &[u8]) -> Option<String> {
+    use sce_forge_runtime::codec::SceCursor;
+    // The network message ids and the flag that says a key carries its suffix
+    // (`vendor/zenoh-pico/include/zenoh-pico/protocol/definitions/network.h` @ `#define _Z_MID_N_PUSH 0x1d`).
+    const MID_PUSH: u8 = 0x1d;
+    const MID_REQUEST: u8 = 0x1c;
+    const MID_RESPONSE: u8 = 0x1b;
+    const FLAG_N: u8 = 0x20;
+    let (&header, rest) = payload.split_first()?;
+    let mut cursor = SceCursor::new(rest);
+    match header & 0x1f {
+        MID_PUSH => {}
+        MID_REQUEST | MID_RESPONSE => {
+            cursor.read_vle_u64().ok()?;
+        }
+        _ => return None,
+    }
+    let scope = cursor.read_vle_u64().ok()?;
+    if scope != 0 || header & FLAG_N == 0 {
+        return None;
+    }
+    let len = usize::try_from(cursor.read_vle_u64().ok()?).ok()?;
+    let suffix = cursor.peek_slice(len).ok()?;
+    core::str::from_utf8(suffix).ok().map(String::from)
 }
 
 /// Parse a `reth/<smac>[#key=value;...]` endpoint as zenoh-pico does.
@@ -722,5 +764,36 @@ mod tests {
         let f = frame(&lying, b"abc").unwrap();
         assert_eq!(&f[14..16], &[0x00, 0x03]);
         assert_eq!(deframe(&f).unwrap().1, b"abc");
+    }
+
+    /// The key a message names is read from its first bytes alone, as the first fragment of
+    /// a message that does not fit one frame carries them: a put's key follows its header, a
+    /// query's and a reply's follow the request id. A key named by a declared id, and a message
+    /// that names no key, read as none.
+    ///
+    /// # Control
+    ///
+    /// The whole put, past its key, reads the same as the put cut right after its key.
+    #[test]
+    fn the_key_a_message_begins_with_is_read_from_its_head() {
+        // Push, N set: scope 0, an 8-byte suffix, then whatever the body holds.
+        let put = [
+            0x3d, 0x00, 0x08, b'd', b'e', b'm', b'o', b'/', b'b', b'/', b'x', 0x01, 0x02, 0x03,
+        ];
+        assert_eq!(leading_message_key(&put).as_deref(), Some("demo/b/x"));
+        assert_eq!(leading_message_key(&put[..11]).as_deref(), Some("demo/b/x"));
+        // Cut inside the key: there is no key to read.
+        assert_eq!(leading_message_key(&put[..6]), None);
+        // Request and Response: the request id, then the key.
+        let query = [0x3c, 0x05, 0x00, 0x03, b'a', b'/', b'b'];
+        assert_eq!(leading_message_key(&query).as_deref(), Some("a/b"));
+        let reply = [0x3b, 0x81, 0x01, 0x00, 0x01, b'z'];
+        assert_eq!(leading_message_key(&reply).as_deref(), Some("z"));
+        // A put by a declared id, with and without a suffix of its own.
+        assert_eq!(leading_message_key(&[0x1d, 0x03, 0x09]), None);
+        assert_eq!(leading_message_key(&[0x3d, 0x03, 0x01, b'x']), None);
+        // A declaration names no key a destination is picked by.
+        assert_eq!(leading_message_key(&[0x1e, 0x00]), None);
+        assert_eq!(leading_message_key(&[]), None);
     }
 }
