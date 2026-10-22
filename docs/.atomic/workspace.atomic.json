@@ -278316,6 +278316,54 @@
         "A pre-push list of the prose-name gate next to the census would have caught this before the push: a name spelled as code in a comment needs a file that carries it, and a Kconfig symbol is carried by a .conf, not by its definition."
       ]
     },
+    "Round 3429": {
+      "decision_summary": "A consumer that starts wz-ap-demo on Windows without a console had no way to stop it gracefully: the demo listened for Ctrl-C only, a process with no console receives no console control event, and TerminateProcess skips the teardown (the liveliness token is not undeclared on the wire). The demo now also waits on a named event, Local\\<prefix><pid>, a manual-reset event the parent creates first and the demo opens by name when it begins to listen, so a request made early is not lost. A thread of the demo waits on it, resets it and then runs the same graceful path as Ctrl-C; once read, a request stays read. The prefix is wz's own (wz-stop-) unless WZ_STOP_EVENT_PREFIX names another, so a parent that already names its stop events one way keeps that name without wz carrying a consumer's name in its source. A Ctrl-C handler that cannot be installed no longer ends the wait at once on Windows. No ABI moved.",
+      "changes_bullets": [
+        "wz-ap-demo stop_event.rs (new): the contract in its header; prefix_of, event_name and the Windows listener (CreateEventW, a thread on WaitForSingleObject, ResetEvent, then a tokio watch value every waiter reads); requested() is the future shutdown selects on.",
+        "shutdown.rs: the Windows arm selects Ctrl-C and the stop event; the WASM fallback keeps Ctrl-C alone. main.rs: the module. Cargo.toml and Cargo.lock: windows-sys 0.61, already in the workspace graph, on Windows only, with three features.",
+        "platform.yml, router interop step: on Windows one more verdict line runs the stop event test on that host; it is an observation and does not change the step's verdict.",
+        "Tests: the name and the prefix rule (any host); on Windows, a parent creates the event by the demo's name, signals it, the wait resolves, the event is left reset, and a later wait resolves at once."
+      ],
+      "verification_bullets": [
+        "On a build host: the two host tests of the name and the prefix passed; clippy -D warnings with all targets is clean for the host target.",
+        "On this machine, which has the Windows (gnu) standard library: cargo check and clippy -D warnings of the demo's production code for x86_64-pc-windows-gnu are clean, so the Windows listener compiles and lints.",
+        "NOT run: the Windows test module, which needs the demo's dev-dependencies and so a C compiler for the Windows target that neither machine has, and the stop itself on Windows. The first evidence is the verdict line the hosted Windows interop step now prints; a consumer's own measurement of a stop without TerminateProcess is the other.",
+        "No mutation was run on the Windows listener, which cannot run here; the host-testable name and prefix rule is small.",
+        "actionlint of platform.yml: clean.",
+        "Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3421, sections 266."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted Platform run of the push that carries this round, the Windows interop job in particular: the line wz-ap-demo stops on a named event is the first time the Windows listener has run anywhere. A red there is a defect in this round, not an environment.",
+        "The consumer asked for an event name of its own with the same pid rule; this round names Local\\wz-stop-<pid> and reads WZ_STOP_EVENT_PREFIX, so the consumer sets the variable to its prefix when it starts the demo, or builds the wz name for this child. Whether it takes either is its answer to give.",
+        "A request that arrives before the demo has begun to listen is kept (the event is manual-reset and the parent holds it), but the demo begins to listen when it first waits for a shutdown, so a startup that blocks before that point reads the request late."
+      ],
+      "publishable_decision_summary": "A consumer that starts wz-ap-demo on Windows without a console had no way to stop it gracefully: the demo listened for Ctrl-C only, a process with no console receives no console control event, and TerminateProcess skips the teardown (the liveliness token is not undeclared on the wire). The demo now also waits on a named event, Local\\<prefix><pid>, a manual-reset event the parent creates first and the demo opens by name when it begins to listen, so a request made early is not lost. A thread of the demo waits on it, resets it and then runs the same graceful path as Ctrl-C; once read, a request stays read. The prefix is wz's own (wz-stop-) unless WZ_STOP_EVENT_PREFIX names another, so a parent that already names its stop events one way keeps that name without wz carrying a consumer's name in its source. A Ctrl-C handler that cannot be installed no longer ends the wait at once on Windows. No ABI moved.",
+      "publishable_changes_bullets": [
+        "wz-ap-demo stop_event.rs (new): the contract in its header; prefix_of, event_name and the Windows listener (CreateEventW, a thread on WaitForSingleObject, ResetEvent, then a tokio watch value every waiter reads); requested() is the future shutdown selects on.",
+        "shutdown.rs: the Windows arm selects Ctrl-C and the stop event; the WASM fallback keeps Ctrl-C alone. main.rs: the module. Cargo.toml and Cargo.lock: windows-sys 0.61, already in the workspace graph, on Windows only, with three features.",
+        "platform.yml, router interop step: on Windows one more verdict line runs the stop event test on that host; it is an observation and does not change the step's verdict.",
+        "Tests: the name and the prefix rule (any host); on Windows, a parent creates the event by the demo's name, signals it, the wait resolves, the event is left reset, and a later wait resolves at once."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the two host tests of the name and the prefix passed; clippy -D warnings with all targets is clean for the host target.",
+        "On this machine, which has the Windows (gnu) standard library: cargo check and clippy -D warnings of the demo's production code for x86_64-pc-windows-gnu are clean, so the Windows listener compiles and lints.",
+        "NOT run: the Windows test module, which needs the demo's dev-dependencies and so a C compiler for the Windows target that neither machine has, and the stop itself on Windows. The first evidence is the verdict line the hosted Windows interop step now prints; a consumer's own measurement of a stop without TerminateProcess is the other.",
+        "No mutation was run on the Windows listener, which cannot run here; the host-testable name and prefix rule is small.",
+        "actionlint of platform.yml: clean.",
+        "Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3421, sections 266."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted Platform run of the push that carries this round, the Windows interop job in particular: the line wz-ap-demo stops on a named event is the first time the Windows listener has run anywhere. A red there is a defect in this round, not an environment.",
+        "The consumer asked for an event name of its own with the same pid rule; this round names Local\\wz-stop-<pid> and reads WZ_STOP_EVENT_PREFIX, so the consumer sets the variable to its prefix when it starts the demo, or builds the wz name for this child. Whether it takes either is its answer to give.",
+        "A request that arrives before the demo has begun to listen is kept (the event is manual-reset and the parent holds it), but the demo begins to listen when it first waits for a shutdown, so a startup that blocks before that point reads the request late."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
