@@ -1454,7 +1454,7 @@ class BindgenFree(NamedTuple):
 BINDGEN_FREE: dict[str, BindgenFree] = {
     "validate-codegen": BindgenFree(
         layers=frozenset({
-            "A", "A2", "A3", "A4", "A5",
+            "0", "A", "A2", "A3", "A4", "A5",
             "C0", "C0s", "C0i", "C0b", "C0g", "C0d", "C0e", "C0f", "U",
         }),
         exempt={
@@ -1466,9 +1466,10 @@ BINDGEN_FREE: dict[str, BindgenFree] = {
             ),
         },
         measured=(
-            "2026-10-09, thirteen layers under the recording cargo with the "
+            "2026-10-22, fifteen layers under the recording cargo with the "
             "job's own REQUIRE variables: every layer passed and the only cargo "
-            "calls were `metadata` (A3, A5, C0) and `tree` (A4)."
+            "calls were `fmt` (0), `metadata` (A3, A5, C0) and `tree` (A4, C0, "
+            "C0s)."
         ),
     ),
 }

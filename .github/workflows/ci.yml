@@ -291,43 +291,6 @@ jobs:
           bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
             cmake libclang-dev clang perl pkg-config
 
-      - name: Install shellcheck (pinned + checksum-verified)
-        # Same contract as the actionlint step below, and for the same reason:
-        # an unpinned linter turns an upstream release — or here, a runner
-        # IMAGE bump — into a spontaneous red on an unrelated push.
-        #
-        # WHY IT MATTERS MORE NOW than when R311y417 disclosed it as "latent,
-        # not live". That assessment measured 0.8.0 / 0.9.0 / 0.10.0 agreeing
-        # on this tree, but Layer 0 then linted only the `run:` blocks inside
-        # .github/workflows/ via actionlint. R311y419 put scripts/*.sh,
-        # scripts/lib/*.sh and .githooks/* in scope, and on THAT surface the
-        # versions do not agree at all: 0.11.0 finds 5 SC2086 that 0.8.0 misses
-        # (unquoted `return $fail`, all fixed in the same commit) plus SC2329,
-        # a check 0.8.0 does not have. The exposure went live the moment the
-        # lint surface grew, which is why the pin lands with it.
-        #
-        # 0.11.0 rather than the 0.8.0-2 the ubuntu-22.04 image ships: pinning
-        # forward gets the newer checks, and pinning to the floating value
-        # would have frozen a 2021 release to avoid triaging its successors'
-        # findings. Bumping this pin is a deliberate commit — expect new
-        # findings, and expect them in BOTH the Layer 0.2 script lane and
-        # actionlint's SC* integration, which shares this binary.
-        env:
-          SHELLCHECK_VERSION: "0.11.0"
-          SHELLCHECK_SHA256: "b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6"
-        run: |
-          set -euo pipefail
-          tgz="shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz"
-          trap 'rm -rf "$tgz" "shellcheck-v${SHELLCHECK_VERSION}"' EXIT
-          curl -sSLf --retry 3 --retry-all-errors --retry-delay 2 \
-            --connect-timeout 10 --max-time 120 -o "$tgz" \
-            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/${tgz}"
-          echo "${SHELLCHECK_SHA256}  ${tgz}" | sha256sum -c -
-          tar xzf "$tgz" "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
-          sudo install -m 0755 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" \
-            /usr/local/bin/shellcheck
-          shellcheck --version
-
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
         # `rustup show` materialises the toolchain the repo pins — channel +
         # components + targets, all declared in rust-toolchain.toml — and every
@@ -407,104 +370,11 @@ jobs:
       - name: Reuse the RocksDB native engine across feature sets
         uses: ./.github/actions/rocksdb-engine
 
-      - name: Install actionlint (pinned + checksum-verified)
-        # R311y416 — Layer 0's actionlint half had never once executed:
-        # nothing installed the binary, and the ONE hosted run the lane ever
-        # had before this (30233462393) logged `actionlint SKIP`. R311y414
-        # and R311y415 both DISCLOSED that rather than closing it; this is
-        # the close. (R311y417 narrowed "SKIPping on every runner", which
-        # implied a history of runners; there was exactly one.)
-        #
-        # A pinned release tarball, not `go install ...@latest`: an unpinned
-        # linter turns an upstream release into a spontaneous red on an
-        # unrelated push, which is the same reproducibility trade
-        # rust-toolchain.toml and scripts/install-mnemosyne-cli.sh's
-        # MNEMOSYNE_REV already make in this repo. The sha256 is the one
-        # published in the release's own checksums.txt.
-        # Bumping the pin is a deliberate commit — expect new findings.
-        env:
-          ACTIONLINT_VERSION: "1.7.12"
-          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
-        run: |
-          set -euo pipefail
-          tgz="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          # R311y417 — `trap` so a checksum mismatch or a truncated fetch does
-          # not leave a partial tarball in $GITHUB_WORKSPACE for later steps.
-          trap 'rm -f "$tgz" actionlint' EXIT
-          # R311y417 — retries. A single transient network blip on an
-          # unrelated push would otherwise red the build, which the repo's
-          # no-flaky-ever rule does not accept for a provisioning step.
-          # Still LOUD on a real failure: -f keeps HTTP errors non-zero and
-          # the sha256 check below is unconditional.
-          curl -sSLf --retry 3 --retry-all-errors --retry-delay 2 \
-            --connect-timeout 10 --max-time 120 -o "$tgz" \
-            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tgz}"
-          echo "${ACTIONLINT_SHA256}  ${tgz}" | sha256sum -c -
-          tar xzf "$tgz" actionlint
-          sudo install -m 0755 actionlint /usr/local/bin/actionlint
-          actionlint --version
-
-      - name: Layer 0 — preflight lints (cargo fmt --check + actionlint)
-        # R311y415 — Layer 0 existed in run-ci.sh but appeared in NO hosted
-        # `--layer` set, and .githooks/pre-push stopped running it at
-        # R311y386 (the fast-gate reversal, whose own header lists fmt among
-        # what it deliberately no longer covers).
-        #
-        # A first cut of this comment concluded "so fmt was gated nowhere".
-        # Review falsified that: `.githooks/pre-commit` Check 2 already runs
-        # `(cd crates && cargo fmt --all -- --check)` whenever a
-        # `crates/**.rs` is staged. The gap this step closes is narrower and
-        # still real — pre-commit filters on `^crates/.+\.rs$` and runs only
-        # in `crates`, so the SIX auto-discovered `deploy/*` workspaces were
-        # gated by nothing, and the whole hook path is skipped by
-        # `--no-verify` or an uninstalled core.hooksPath.
-        #
-        # First of the Layer lanes (6 setup steps precede it — R311y417:
-        # y416 added the actionlint install and left the count at 5), so a
-        # fmt-dirty push is rejected before the expensive lanes, not after.
-        # `cargo fmt --check` compiles nothing and rustfmt is already
-        # materialised by rust-toolchain.toml's `components`, so the step
-        # needs no extra install — but it is not free. MEASURED HOSTED:
-        # 23s on run 30233462393 (fmt only — actionlint was still SKIPping
-        # there), and 29s on run 30235292100 once R311y416 armed the
-        # actionlint half; the install step adds 0.8s and actionlint itself
-        # 0.9s. Job totals 599s then 625s, both inside the 584-928s band
-        # the feature-gates comment records from before this step existed.
-        # R311y415 projected ~45-75s and was WRONG BY 2-3x, high.
-        # DO NOT DERIVE A MULTIPLIER FROM THIS. y415 wrote "the real ratio
-        # is ~0.8x" off a single sample (23s hosted / 26-30s local); the
-        # very next run gives 29s against 18-21s local, i.e. 1.4-1.6x the
-        # other way, and both sides swing ~40% run to run. What the
-        # measurements settle is the ORDER — tens of seconds — not a ratio.
-        # The narrower lesson that survives: y414's 3.29x is a parallel
-        # cargo-test number and this lane is 99% CPU single-threaded, so
-        # borrowing it was wrong; borrowing from same-CPU-profile lanes was
-        # also wrong. Measure the lane.
-        #
-        # It DOES need the recursive checkout above: `cargo fmt --all`
-        # resolves the whole workspace manifest, so a tree without
-        # vendor/sce fails in `cargo metadata` before rustfmt ever runs.
-        # R311y416 — Layer 0's actionlint half is REAL here now. The step
-        # above installs a pinned, checksum-verified binary, and
-        # WZ_LINT_REQUIRE=1 makes an absent actionlint OR an absent
-        # shellcheck FATAL instead of a SKIP, so a broken download reds the
-        # lane rather than quietly restoring the state y414/y415 disclosed.
-        # The 3 pre-existing findings (SC1090 x2, SC2086, all in the
-        # zephyr-mcu job) were fixed in the same commit that turned this on,
-        # so it lands green rather than red-then-fix.
-        # R311y419 — WZ_LINT_REQUIRE now arms a THIRD lane, 0.2: shellcheck
-        # over the repo's own scripts/*.sh + .githooks/*, a surface disjoint
-        # from the workflow `run:` blocks actionlint covers and previously
-        # linted by nothing. Its pre-existing findings were likewise fixed in
-        # the same commit, so this too lands green — but the count is worth
-        # recording because it is not the one a first look gives: 11 were
-        # visible, and 2 of those were malformed-directive parse errors
-        # (SC1073/SC1072) that had suppressed analysis of ALL of run-ci.sh;
-        # clearing them exposed 4 more, for 13 ordinary findings resolved.
-        # Local cost +1s over 18 files; the fmt half still dominates the lane.
-        env:
-          WZ_LINT_REQUIRE: "1"
-        run: bash scripts/run-ci.sh --layer 0
+      # R3416 — Layer 0 (fmt, actionlint, shellcheck) and its two pinned
+      # installs MOVED to `validate-codegen`, the static-lint job: 177s of the
+      # 1750s cold run that took this job to 97%, and a lane that compiles
+      # nothing has no use for the cargo cache this job exists to build. See
+      # this job's `Budget margin` step for the measurement.
 
       # R2525 — Layer C0 MOVED OUT of this job, to `defaults-off` below. It was
       # 336s of the 1811s that took `job-budget-margin.sh` from warning at 90%
@@ -740,6 +610,12 @@ jobs:
         # cold here. The next peel is Layer C1 itself, the one step that keeps
         # growing, and it is not a lane move: C1 is what builds the dependency
         # set this job saves for every reader, so it moves only with the save.
+        #
+        # R3416 — 85% cold left the next lock change one slow runner from the
+        # alarm, so Layer 0 and its two installs (177s + 2s on that cold run)
+        # move to `validate-codegen`, which compiles nothing: about 1360s cold
+        # (75%) and 1155s warm (64%) here, the margin y865 aimed for. Layer C1
+        # is then most of what is left, and it moves only with the save.
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 30 '${{ job.status }}'
 
@@ -860,6 +736,124 @@ jobs:
         with:
           path: ~/.cache/wz-apt
           key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      # R3416 — Layer 0 and its two pinned linters moved here from the `ci` job,
+      # unchanged: this is the job of the lints that compile nothing, and Layer 0
+      # took 177s of the cold run that took the `ci` job to 97% of its clock (see
+      # that job's `Budget margin` step). Its checkout is recursive, as fmt needs.
+      - name: Install shellcheck (pinned + checksum-verified)
+        # Same contract as the actionlint step below, and for the same reason:
+        # an unpinned linter turns an upstream release — or here, a runner
+        # IMAGE bump — into a spontaneous red on an unrelated push.
+        #
+        # WHY IT MATTERS MORE NOW than when R311y417 disclosed it as "latent,
+        # not live". That assessment measured 0.8.0 / 0.9.0 / 0.10.0 agreeing
+        # on this tree, but Layer 0 then linted only the `run:` blocks inside
+        # .github/workflows/ via actionlint. R311y419 put scripts/*.sh,
+        # scripts/lib/*.sh and .githooks/* in scope, and on THAT surface the
+        # versions do not agree at all: 0.11.0 finds 5 SC2086 that 0.8.0 misses
+        # (unquoted `return $fail`, all fixed in the same commit) plus SC2329,
+        # a check 0.8.0 does not have. The exposure went live the moment the
+        # lint surface grew, which is why the pin lands with it.
+        #
+        # 0.11.0 rather than the 0.8.0-2 the ubuntu-22.04 image ships: pinning
+        # forward gets the newer checks, and pinning to the floating value
+        # would have frozen a 2021 release to avoid triaging its successors'
+        # findings. Bumping this pin is a deliberate commit — expect new
+        # findings, and expect them in BOTH the Layer 0.2 script lane and
+        # actionlint's SC* integration, which shares this binary.
+        env:
+          SHELLCHECK_VERSION: "0.11.0"
+          SHELLCHECK_SHA256: "b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6"
+        run: |
+          set -euo pipefail
+          tgz="shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz"
+          trap 'rm -rf "$tgz" "shellcheck-v${SHELLCHECK_VERSION}"' EXIT
+          curl -sSLf --retry 3 --retry-all-errors --retry-delay 2 \
+            --connect-timeout 10 --max-time 120 -o "$tgz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/${tgz}"
+          echo "${SHELLCHECK_SHA256}  ${tgz}" | sha256sum -c -
+          tar xzf "$tgz" "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          sudo install -m 0755 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" \
+            /usr/local/bin/shellcheck
+          shellcheck --version
+
+      - name: Install actionlint (pinned + checksum-verified)
+        # R311y416 — Layer 0's actionlint half had never once executed:
+        # nothing installed the binary, and the ONE hosted run the lane ever
+        # had before this (30233462393) logged `actionlint SKIP`. R311y414
+        # and R311y415 both DISCLOSED that rather than closing it; this is
+        # the close. (R311y417 narrowed "SKIPping on every runner", which
+        # implied a history of runners; there was exactly one.)
+        #
+        # A pinned release tarball, not `go install ...@latest`: an unpinned
+        # linter turns an upstream release into a spontaneous red on an
+        # unrelated push, which is the same reproducibility trade
+        # rust-toolchain.toml and scripts/install-mnemosyne-cli.sh's
+        # MNEMOSYNE_REV already make in this repo. The sha256 is the one
+        # published in the release's own checksums.txt.
+        # Bumping the pin is a deliberate commit — expect new findings.
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+        run: |
+          set -euo pipefail
+          tgz="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          # R311y417 — `trap` so a checksum mismatch or a truncated fetch does
+          # not leave a partial tarball in $GITHUB_WORKSPACE for later steps.
+          trap 'rm -f "$tgz" actionlint' EXIT
+          # R311y417 — retries. A single transient network blip on an
+          # unrelated push would otherwise red the build, which the repo's
+          # no-flaky-ever rule does not accept for a provisioning step.
+          # Still LOUD on a real failure: -f keeps HTTP errors non-zero and
+          # the sha256 check below is unconditional.
+          curl -sSLf --retry 3 --retry-all-errors --retry-delay 2 \
+            --connect-timeout 10 --max-time 120 -o "$tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tgz}"
+          echo "${ACTIONLINT_SHA256}  ${tgz}" | sha256sum -c -
+          tar xzf "$tgz" actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Layer 0 — preflight lints (cargo fmt --check + actionlint)
+        # R311y415 — Layer 0 existed in run-ci.sh but appeared in NO hosted
+        # `--layer` set, and .githooks/pre-push stopped running it at
+        # R311y386 (the fast-gate reversal, whose own header lists fmt among
+        # what it deliberately no longer covers).
+        #
+        # A first cut of this comment concluded "so fmt was gated nowhere".
+        # Review falsified that: `.githooks/pre-commit` Check 2 already runs
+        # `(cd crates && cargo fmt --all -- --check)` whenever a
+        # `crates/**.rs` is staged. The gap this step closes is narrower and
+        # still real — pre-commit filters on `^crates/.+\.rs$` and runs only
+        # in `crates`, so the SIX auto-discovered `deploy/*` workspaces were
+        # gated by nothing, and the whole hook path is skipped by
+        # `--no-verify` or an uninstalled core.hooksPath.
+        #
+        # It ran first in the `ci` job so a fmt-dirty push was rejected before
+        # the expensive lanes; in a job of its own beside them it reports at
+        # least as early. `cargo fmt --check` compiles nothing and rustfmt is
+        # materialised by rust-toolchain.toml's `components`. MEASURED HOSTED:
+        # 23s on run 30233462393 (fmt only — actionlint was still SKIPping
+        # there), 29s on run 30235292100 once R311y416 armed the actionlint
+        # half, and 177s on run 39758930599, the fmt sweep having grown to
+        # every auto-discovered workspace. What the measurements settle is the
+        # ORDER, not a ratio; measure the lane.
+        #
+        # It DOES need the recursive checkout above: `cargo fmt --all`
+        # resolves the whole workspace manifest, so a tree without
+        # vendor/sce fails in `cargo metadata` before rustfmt ever runs.
+        # R311y416 — Layer 0's actionlint half is REAL here now. The step
+        # above installs a pinned, checksum-verified binary, and
+        # WZ_LINT_REQUIRE=1 makes an absent actionlint OR an absent
+        # shellcheck FATAL instead of a SKIP, so a broken download reds the
+        # lane rather than quietly restoring the state y414/y415 disclosed.
+        # R311y419 — WZ_LINT_REQUIRE also arms lane 0.2: shellcheck over the
+        # repo's own scripts/*.sh + .githooks/*, a surface disjoint from the
+        # workflow `run:` blocks actionlint covers.
+        env:
+          WZ_LINT_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer 0
 
       - name: Install mnemosyne-cli (pinned)
         # R311y417 — the `|| { ::warning; MNEMOSYNE_SKIP=1 }` fallback that used
@@ -3365,6 +3359,13 @@ jobs:
 
       - name: Layer G — per-triple no_std cross-compile
         run: bash scripts/run-ci.sh --layer G
+
+      - name: Layer C2m — the mcu-qemu deploy crate under clippy
+        # R3416 — Layer C2's deploy arm, split out: it SKIPped on every run in
+        # the jobs that ran C2, none of which installs `arm-none-eabi-gcc`, so
+        # the firmware Layer Q boots was linted by nothing. This job provisions
+        # the cross toolchain, and the lane refuses a missing tool here.
+        run: bash scripts/run-ci.sh --layer C2m
 
       - name: Layer Q — QEMU mps2/microbit e2e + footprint gate
         # R311y274 — WZ_Q_REQUIRE=1: this runner PROVISIONS the ARM cross-toolchain

@@ -158,6 +158,8 @@
 #              transport-batching and so run only in the default lane,
 #              not in the consumer-plane subsets.)
 #   Layer C2 — cargo clippy --workspace --all-targets -- -D warnings
+#   Layer C2m — the mcu-qemu deploy crate under clippy on thumbv7m (the
+#              cross toolchain's job; refuses a missing target or compiler)
 #   Layer C3 — per-package isolated `cargo clippy ... --all-targets`
 #              sub-lanes (R311cv; per-package isolated feature
 #              resolution catches preset-feature lint regressions that
@@ -14550,27 +14552,37 @@ layer_c2_cargo_clippy() {
     (cd crates && cargo clippy --workspace --all-targets "${excludes[@]}" \
         --exclude wz-runtime-tokio-multicast-tests --quiet -- -D warnings) || return 1
     legs=$((legs + 1))
+    # The mcu-qemu deploy arm that sat here is Layer C2m (R3416): it SKIPped
+    # wherever C2 ran, since no job running C2 installs `arm-none-eabi-gcc`, so
+    # the deploy crate was linted by nothing while this lane passed.
+    _runci_lane_did C2 "$legs" "clippy run(s)"
+}
 
+# ─── Layer C2m — the mcu-qemu deploy crate under clippy ──────────────
+#
+# R3416 — split out of Layer C2, whose deploy arm SKIPped on every hosted run:
+# the jobs that ran C2 installed no `arm-none-eabi-gcc`, so `deploy/mcu-qemu-demo`
+# (the thumbv7m firmware Layer Q boots) was linted by nothing, and a SKIP read
+# as green. It runs in the job that provisions the cross toolchain and boots
+# that firmware, and it REFUSES a missing target or compiler rather than
+# declining: where this lane is wired, an absent tool is a broken provision.
+layer_c2m_mcu_deploy_clippy() {
     local installed
     installed="$(rustup target list --installed 2>/dev/null)"
     if ! grep -q "^thumbv7m-none-eabi$" <<< "$installed"; then
-        echo "  C2 deploy SKIP (thumbv7m-none-eabi target absent)"
-        _runci_lane_did C2 "$legs" "clippy run(s); the deploy arm declined"
-        return 0
+        echo "  C2m FAIL: the thumbv7m-none-eabi target is not installed" >&2
+        return 1
     fi
     if ! command -v arm-none-eabi-gcc >/dev/null 2>&1; then
-        echo "  C2 deploy SKIP (arm-none-eabi-gcc not on PATH)"
-        _runci_lane_did C2 "$legs" "clippy run(s); the deploy arm declined"
-        return 0
+        echo "  C2m FAIL: arm-none-eabi-gcc is not on PATH (lwip-sys cross cc)" >&2
+        return 1
     fi
-
     local lwip_port
     lwip_port="$(realpath crates/lwip-sys/port/cross-test)"
     WZ_LWIP_PORT="$lwip_port" cargo clippy --release \
         --manifest-path deploy/mcu-qemu-demo/Cargo.toml \
         --target thumbv7m-none-eabi --quiet -- -D warnings || return 1
-    legs=$((legs + 1))
-    _runci_lane_did C2 "$legs" "clippy run(s), the mcu-qemu deploy arm included"
+    _runci_lane_did C2m 1 "clippy run, deploy/mcu-qemu-demo on thumbv7m-none-eabi"
 }
 
 # ─── Layer C3 — per-package isolated --all-targets ──────────────────
@@ -23509,6 +23521,7 @@ run_layer C1bi layer_c1bi_cargo_test_pubsub_qos || overall=1
 run_layer C1bj layer_c1bj_cargo_test_loopback_metadata_gates || overall=1
 run_layer C1bk layer_c1bk_cargo_test_query_pub_field_gates || overall=1
 run_layer C2 layer_c2_cargo_clippy || overall=1
+run_layer C2m layer_c2m_mcu_deploy_clippy || overall=1
 run_layer C3 layer_c3_per_pkg_isolated_lint || overall=1
 run_layer C4 layer_c4_preset_matrix || overall=1
 run_layer C4b layer_c4b_facade_subset_matrix || overall=1
