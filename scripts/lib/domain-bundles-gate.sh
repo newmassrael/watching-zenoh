@@ -21,10 +21,13 @@
 #   domain-platform  platform-freertos and platform-zephyr: one RTOS kernel and
 #                    one #[global_allocator] per deploy
 #   domain-runtime   runtime-tokio and runtime-coop: one runtime per deploy
+#                    (no longer: the facade stopped refusing the pair, because
+#                    a workspace build holds both side by side, so this bundle
+#                    compiles and is not an exclusion any more)
 #
 # A domain bundle is a CENSUS of a namespace, and a namespace may hold
 # alternatives (the same reason `storage-backend-*` are listed together). Those
-# three are not defects; they are named exclusions, and the SET is pinned, not
+# are not defects; they are named exclusions, and the SET is pinned, not
 # counted, as every gate here is.
 #
 # ## What this refuses
@@ -43,7 +46,7 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../../crates" || exit 2
 
 # bundle -> the reason the facade refuses it. Pinned SET.
-excluded="domain-api domain-platform domain-runtime"
+excluded="domain-api domain-platform"
 
 meta="$(cargo metadata --no-deps --format-version 1 2>/dev/null)" || {
     echo "domain-bundles: FAIL -- cargo metadata did not run" >&2
