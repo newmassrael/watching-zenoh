@@ -4228,23 +4228,29 @@ mod tests {
             };
             messages[1..]
                 .iter()
-                .map(|message| {
-                    let wire = match message {
-                        NetworkMessage::Declare(declare) => match &declare.body {
-                            wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclQueryable(q) => {
-                                &q.keyexpr
-                            }
-                            _ => unreachable!(),
-                        },
-                        NetworkMessage::Request(request) => &request.keyexpr,
-                        NetworkMessage::Interest(interest) => interest
+                // Each arm resolves its own key: a request's key is held in the receive
+                // profile's storage, which is not the heap storage a declaration's is under
+                // every feature set.
+                .map(|message| match message {
+                    NetworkMessage::Declare(declare) => match &declare.body {
+                        wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclQueryable(q) => {
+                            resolve_wireexpr(&q.keyexpr.body, &empty)
+                        }
+                        _ => unreachable!(),
+                    },
+                    NetworkMessage::Request(request) => {
+                        resolve_wireexpr(&request.keyexpr.body, &empty)
+                    }
+                    NetworkMessage::Interest(interest) => resolve_wireexpr(
+                        &interest
                             .body
                             .as_ref()
                             .and_then(|body| body.keyexpr.as_ref())
-                            .expect("a restricted interest"),
-                        _ => unreachable!(),
-                    };
-                    resolve_wireexpr(&wire.body, &empty)
+                            .expect("a restricted interest")
+                            .body,
+                        &empty,
+                    ),
+                    _ => unreachable!(),
                 })
                 .collect()
         };
