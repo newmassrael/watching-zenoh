@@ -1068,78 +1068,11 @@ fn parse_unit(
     let mut cursor = SceCursor::new(&bytes[1..]);
     match mid {
         #[cfg(feature = "codec-init-body")]
-        wire_const::T_MID_INIT => {
-            let body = InitBody::decode(&mut cursor, (flags >> 6) & 1, (flags >> 5) & 1)?
-                .try_into_owned_in::<HandshakeStorage>()?;
-            // The M (mandatory) bit is judged at the participant seam like every
-            // other transport message's ([`InboundFrame::ext_admission`]), by the
-            // extension's identity: the decode reads the chain, so a capture
-            // sees an extension nobody here implements. R2437 refused it HERE
-            // instead, by the 4-bit id against a list of ids, which let a known
-            // id with the mandatory bit set (`0x58`, the region name as a
-            // mandatory ZBuf) through and refused an unknown one at the decode.
-            let extensions = if has_ext {
-                decode_handshake_ext_chain(&mut cursor)?
-            } else {
-                ExtChainOwned::new()
-            };
-            Ok((
-                InboundFrame::Init {
-                    is_ack: (flags & wire_const::FLAG_T_INIT_A) != 0,
-                    has_ext,
-                    body,
-                    extensions,
-                },
-                bytes.len() - cursor.remaining(),
-            ))
-        }
+        wire_const::T_MID_INIT => parse_init(bytes, flags, has_ext, &mut cursor),
         #[cfg(feature = "codec-open-body")]
-        wire_const::T_MID_OPEN => {
-            let mut body = OpenBody::decode(&mut cursor, (flags >> 5) & 1)?
-                .try_into_owned_in::<HandshakeStorage>()?;
-            // R311ku — the `_Z_FLAG_T_OPEN_T` seconds form is projected
-            // back to milliseconds AT the wire boundary
-            // ([`crate::lease::lease_from_wire`], pico decode parity
-            // codec/transport.c:314), so no consumer ever sees the wire
-            // unit — the same boundary rule as `multicast_join::decode_join`.
-            body.lease =
-                crate::lease::lease_from_wire((flags & wire_const::FLAG_T_OPEN_T) != 0, body.lease);
-            let extensions = if has_ext {
-                decode_handshake_ext_chain(&mut cursor)?
-            } else {
-                ExtChainOwned::new()
-            };
-            Ok((
-                InboundFrame::Open {
-                    is_ack: (flags & wire_const::FLAG_T_OPEN_A) != 0,
-                    has_ext,
-                    body,
-                    extensions,
-                },
-                bytes.len() - cursor.remaining(),
-            ))
-        }
+        wire_const::T_MID_OPEN => parse_open(bytes, flags, has_ext, &mut cursor),
         #[cfg(feature = "codec-close")]
-        wire_const::T_MID_CLOSE => {
-            let body = Close::decode(&mut cursor)?;
-            let extensions = if has_ext {
-                decode_handshake_ext_chain(&mut cursor)?
-            } else {
-                ExtChainOwned::new()
-            };
-            Ok((
-                InboundFrame::Close {
-                    reason: body.reason,
-                    // R311y839 — the scope bit, read off the parent header exactly
-                    // as the Open arm reads `FLAG_T_OPEN_A` and the Frame arm reads
-                    // `FLAG_T_FRAME_R`.
-                    session: (flags & wire_const::FLAG_T_CLOSE_S) != 0,
-                    has_ext,
-                    extensions,
-                },
-                bytes.len() - cursor.remaining(),
-            ))
-        }
+        wire_const::T_MID_CLOSE => parse_close(bytes, flags, has_ext, &mut cursor),
         #[cfg(all(feature = "alloc", feature = "codec-frame"))]
         wire_const::T_MID_FRAME => {
             let head =
@@ -1263,6 +1196,105 @@ fn parse_unit(
         // Zero: see the `# What `0` means` section on this function.
         other => Ok((InboundFrame::Unknown { mid: other }, 0)),
     }
+}
+
+/// The `Init` arm of [`parse_unit`], a function of its own for the reason `parse_unit` is one:
+/// its temporaries (the borrowed body, the owned body, the extension chain) are gone when it
+/// returns, and what `parse_unit` keeps under it is the one arm that ran.
+#[cfg(feature = "codec-init-body")]
+#[inline(never)]
+fn parse_init(
+    bytes: &[u8],
+    flags: u8,
+    has_ext: bool,
+    cursor: &mut SceCursor<'_>,
+) -> Result<(InboundFrame, usize), InboundParseError> {
+    let body = InitBody::decode(cursor, (flags >> 6) & 1, (flags >> 5) & 1)?
+        .try_into_owned_in::<HandshakeStorage>()?;
+    // The M (mandatory) bit is judged at the participant seam like every
+    // other transport message's ([`InboundFrame::ext_admission`]), by the
+    // extension's identity: the decode reads the chain, so a capture
+    // sees an extension nobody here implements. R2437 refused it HERE
+    // instead, by the 4-bit id against a list of ids, which let a known
+    // id with the mandatory bit set (`0x58`, the region name as a
+    // mandatory ZBuf) through and refused an unknown one at the decode.
+    let extensions = if has_ext {
+        decode_handshake_ext_chain(cursor)?
+    } else {
+        ExtChainOwned::new()
+    };
+    Ok((
+        InboundFrame::Init {
+            is_ack: (flags & wire_const::FLAG_T_INIT_A) != 0,
+            has_ext,
+            body,
+            extensions,
+        },
+        bytes.len() - cursor.remaining(),
+    ))
+}
+
+/// The `Open` arm of [`parse_unit`], out of line (see [`parse_init`]).
+#[cfg(feature = "codec-open-body")]
+#[inline(never)]
+fn parse_open(
+    bytes: &[u8],
+    flags: u8,
+    has_ext: bool,
+    cursor: &mut SceCursor<'_>,
+) -> Result<(InboundFrame, usize), InboundParseError> {
+    let mut body =
+        OpenBody::decode(cursor, (flags >> 5) & 1)?.try_into_owned_in::<HandshakeStorage>()?;
+    // R311ku — the `_Z_FLAG_T_OPEN_T` seconds form is projected
+    // back to milliseconds AT the wire boundary
+    // ([`crate::lease::lease_from_wire`], pico decode parity
+    // codec/transport.c:314), so no consumer ever sees the wire
+    // unit — the same boundary rule as `multicast_join::decode_join`.
+    body.lease =
+        crate::lease::lease_from_wire((flags & wire_const::FLAG_T_OPEN_T) != 0, body.lease);
+    let extensions = if has_ext {
+        decode_handshake_ext_chain(cursor)?
+    } else {
+        ExtChainOwned::new()
+    };
+    Ok((
+        InboundFrame::Open {
+            is_ack: (flags & wire_const::FLAG_T_OPEN_A) != 0,
+            has_ext,
+            body,
+            extensions,
+        },
+        bytes.len() - cursor.remaining(),
+    ))
+}
+
+/// The `Close` arm of [`parse_unit`], out of line (see [`parse_init`]).
+#[cfg(feature = "codec-close")]
+#[inline(never)]
+fn parse_close(
+    bytes: &[u8],
+    flags: u8,
+    has_ext: bool,
+    cursor: &mut SceCursor<'_>,
+) -> Result<(InboundFrame, usize), InboundParseError> {
+    let body = Close::decode(cursor)?;
+    let extensions = if has_ext {
+        decode_handshake_ext_chain(cursor)?
+    } else {
+        ExtChainOwned::new()
+    };
+    Ok((
+        InboundFrame::Close {
+            reason: body.reason,
+            // R311y839 — the scope bit, read off the parent header exactly
+            // as the Open arm reads `FLAG_T_OPEN_A` and the Frame arm reads
+            // `FLAG_T_FRAME_R`.
+            session: (flags & wire_const::FLAG_T_CLOSE_S) != 0,
+            has_ext,
+            extensions,
+        },
+        bytes.len() - cursor.remaining(),
+    ))
 }
 
 /// R69b — map a parsed inbound transport frame to the matching
