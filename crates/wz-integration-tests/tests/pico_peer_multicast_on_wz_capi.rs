@@ -227,6 +227,14 @@ const CROSS_ADDR: ([u8; 4], u16) = ([224, 0, 0, 225], 7449);
 /// test's own that joins it on loopback. `SO_REUSEADDR` is load-bearing: the program binds the
 /// same port, and without the option the second socket on a multicast port receives nothing.
 fn recorded_on_group(label: &str, exe: &Path, args: &[&str]) -> Vec<Vec<u8>> {
+    recorded_while_running(&[(label, exe, args)])
+}
+
+/// One program the recorder runs on the group: its label, its build, its arguments.
+type OnGroup<'a> = (&'a str, &'a Path, &'a [&'a str]);
+
+/// Every datagram sent to the cross group while `programs` ran together, started in order.
+fn recorded_while_running(programs: &[OnGroup<'_>]) -> Vec<Vec<u8>> {
     let raw = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
@@ -243,7 +251,10 @@ fn recorded_on_group(label: &str, exe: &Path, args: &[&str]) -> Vec<Vec<u8>> {
     socket
         .set_read_timeout(Some(Duration::from_millis(200)))
         .expect("a read timeout, so a silent group cannot hang this test");
-    let (mut child, _out) = spawn_on_group(label, exe, args);
+    let mut children: Vec<_> = programs
+        .iter()
+        .map(|(label, exe, args)| spawn_on_group(label, exe, args))
+        .collect();
     let mut datagrams = Vec::new();
     let mut buf = [0u8; 65_535];
     let until = std::time::Instant::now() + Duration::from_secs(6);
@@ -252,7 +263,9 @@ fn recorded_on_group(label: &str, exe: &Path, args: &[&str]) -> Vec<Vec<u8>> {
             datagrams.push(buf[..n].to_vec());
         }
     }
-    graceful_terminate(child.child_mut(), Duration::from_secs(5));
+    for (child, _out) in children.iter_mut().rev() {
+        graceful_terminate(child.child_mut(), Duration::from_secs(5));
+    }
     datagrams
 }
 
@@ -385,6 +398,13 @@ fn subscriber_hears_publisher(sub: (&str, &Path), publisher: (&str, &Path)) {
     let key = "demo/mc/cross";
     let payload = "FROM-THE-OTHER-LIBRARY";
     let (mut sub_child, mut heard) = spawn_on_group(sub.0, sub.1, &["-k", "demo/mc/**", "-n", "1"]);
+    // The publisher starts once the subscriber is declared: a publisher with a write filter
+    // asks the group for subscribers once, when it declares, and a subscriber still opening
+    // would never hear the question.
+    if let Err(printed) = wait_for_substring(&mut heard, "Press CTRL-C", HEARD_WITHIN) {
+        graceful_terminate(sub_child.child_mut(), Duration::from_secs(5));
+        panic!("{} never declared its subscriber\n{printed}", sub.0);
+    }
     let (mut pub_child, mut said) =
         spawn_on_group(publisher.0, publisher.1, &["-k", key, "-v", payload]);
     let outcome = wait_for_substring(&mut heard, payload, HEARD_WITHIN);
@@ -404,6 +424,34 @@ fn subscriber_hears_publisher(sub: (&str, &Path), publisher: (&str, &Path)) {
         printed.contains(&format!(">> [Subscriber] Received ('{key}': '")),
         "{} heard the payload on another key\n{printed}",
         sub.0
+    );
+}
+
+/// A subscriber answers a member's interest: the real `z_pub` built with
+/// `Z_FEATURE_MULTICAST_DECLARATIONS=1` asks the group for subscribers on its key, and its write
+/// filter lets a put out only once one is declared to it. A pico subscriber at the DEFAULT
+/// switch answers, because pico answers an interest on a multicast transport whatever the
+/// switch (`vendor/zenoh-pico/src/session/interest.c` @
+/// `// Push a join in case it's a new node`), and so must upstream's `z_sub.c` on wz.
+///
+/// # Control
+///
+/// The real default `z_sub` first: it hears the filtered publisher, so the publisher's filter
+/// does open on an answer this host can carry.
+// wz-proves: api-compat-pico pico->wz partial
+#[test]
+#[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
+fn a_subscriber_on_wz_answers_the_interest_of_a_filtered_real_pico_zpub() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled example");
+    let filtered = zenoh_pico_mcdecl_cli_binary("z_pub");
+    let wz_sub = on_wz("z_sub", dir.path());
+    subscriber_hears_publisher(
+        ("real zenoh-pico z_sub", &zenoh_pico_cli_binary("z_sub")),
+        ("real zenoh-pico z_pub (multicast declarations)", &filtered),
+    );
+    subscriber_hears_publisher(
+        ("z_sub.c on wz-capi-pico", &wz_sub),
+        ("real zenoh-pico z_pub (multicast declarations)", &filtered),
     );
 }
 
