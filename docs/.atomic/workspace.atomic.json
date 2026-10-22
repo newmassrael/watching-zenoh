@@ -277354,6 +277354,62 @@
         "The capi-core matching listener still installs per face and does not see a session-local declaration (R2579); item 914 meets it."
       ]
     },
+    "Round 3409": {
+      "decision_summary": "Item 914 is paid. pico's Z_FEATURE_LOCAL_SUBSCRIBER and Z_FEATURE_LOCAL_QUERYABLE are two capabilities, off by default as upstream leaves them, and each is a header arm of its own: on, seven option structs carry the locality field and wz's build of that arm writes it. A session's own put or get reaches its own subscribers and queryables inside the call, on the calling thread, as pico's does, and a write filter or matching listener counts the session's own entities where the locality admits them, as upstream's write filter does. Upstream's own tests of the two switches, unmodified, are the oracle. Items 910, 912 and 913 stay open.",
+      "changes_bullets": [
+        "capabilities.toml: local-subscriber and local-queryable (default off) and admin-space as a capability (pico ADMIN_SPACE, default off); capability_config learns default = \"off\", emits Kconfig default n and checks manifest defaults; 24 capabilities.",
+        "capi-core: SharedSession::fan_query is the one get fan-out both ABIs issue through, faces Remote and the local plane once SessionLocal; pico's copy handed each face the caller's locality and had no plane leg, so with the local switch a session with no peer never reached its own queryable (measured: local_delivery's get leg failed) and one with N faces would have run it N times.",
+        "capi-core: a write filter and a matching listener may count local entities; a declare or undeclare of a subscriber or queryable that admits local traffic refreshes them, the verdict folded under the aggregate lock.",
+        "wz-capi-pico: z_locality_t and the locality fields of the subscriber, queryable, publisher, put, delete, querier and get options, each read through one accessor per struct; the local drain runs on the caller when a local switch is on; matching polls read the write filter, as upstream's do.",
+        "Found with 914: a pico z_open whose config names no locator was refused with Z_ERR_INVALID, where pico's _z_open scouts (what, group and budget from the config, first Hello) and opens on that node's locators, or answers _Z_ERR_SCOUT_NO_RESULTS; upstream's local tests open that way. capi-core's scout window gains the first-answer arm (scout_first); z_scout and the open read the scouting keys through one reader.",
+        "build-zenoh-pico-cli.sh configures a local arm; PicoHeaderArm::Local pairs it with wz's build; Layers E and Z build it; the layout probe checks the locality defaults and the advanced publisher options, which embed the publisher's."
+      ],
+      "verification_bullets": [
+        "pico_local_delivery_upstream_tests_on_wz (new): upstream's z_api_local_subscriber_test.c and z_api_local_queryable_test.c, unmodified, built against the local arm and linked to wz's build of it, walk their 27 locality combinations each beside a zenohd: 2 of 2 pass (137 s). Before the open-time scout they failed at their first z_open.",
+        "local_delivery (new, 4 tests) in the local arm and in the single-threaded, unstable-off local arm: own put and own get reach own entities inside the call on the calling thread, both locality filters, publisher matching counts the own subscriber per destination. Its get leg failed before fan_query.",
+        "a_faceless_get_issues_one_local_leg_where_its_destination_admits_one, an_open_with_no_locator_scouts_and_fails_when_nobody_answers, the_sessions_own_subscriber_counts_where_the_filter_counts_local_entities: pass.",
+        "pico_header_arm_layout with the local arm and the advanced publisher options: four arms clean, three mismatched pairs fail.",
+        "clippy in seven feature arms; capi-core, wz-capi-pico, wz-capi-c tests; matching legs; nondefault-tests gate: pass on a build host.",
+        "capability_config --check and --selftest (30 arms), upstream_switch_map, prose gate, citation anchor, pin binding: rc=0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Item 913: C ABI multicast transport; the raw-ethernet link of item 911 waits on it.",
+        "Item 910: the Rust API compatibility crate (signatures and foreign globs in the surface first).",
+        "Item 912: bt and a board's USB CDC serial need hardware to witness.",
+        "A pico session opened by scouting re-dials the scouted locators when it loses its link; pico re-runs the whole open, scouting again, so a router that returns on another locator is found there and not here.",
+        "The ws and serial links are still off-default features, not capabilities, so a pico config.h that turns them on does not reach them through capability_config."
+      ],
+      "publishable_decision_summary": "Item 914 is paid. pico's Z_FEATURE_LOCAL_SUBSCRIBER and Z_FEATURE_LOCAL_QUERYABLE are two capabilities, off by default as upstream leaves them, and each is a header arm of its own: on, seven option structs carry the locality field and wz's build of that arm writes it. A session's own put or get reaches its own subscribers and queryables inside the call, on the calling thread, as pico's does, and a write filter or matching listener counts the session's own entities where the locality admits them, as upstream's write filter does. Upstream's own tests of the two switches, unmodified, are the oracle. Items 910, 912 and 913 stay open.",
+      "publishable_changes_bullets": [
+        "capabilities.toml: local-subscriber and local-queryable (default off) and admin-space as a capability (pico ADMIN_SPACE, default off); capability_config learns default = \"off\", emits Kconfig default n and checks manifest defaults; 24 capabilities.",
+        "capi-core: SharedSession::fan_query is the one get fan-out both ABIs issue through, faces Remote and the local plane once SessionLocal; pico's copy handed each face the caller's locality and had no plane leg, so with the local switch a session with no peer never reached its own queryable (measured: local_delivery's get leg failed) and one with N faces would have run it N times.",
+        "capi-core: a write filter and a matching listener may count local entities; a declare or undeclare of a subscriber or queryable that admits local traffic refreshes them, the verdict folded under the aggregate lock.",
+        "wz-capi-pico: z_locality_t and the locality fields of the subscriber, queryable, publisher, put, delete, querier and get options, each read through one accessor per struct; the local drain runs on the caller when a local switch is on; matching polls read the write filter, as upstream's do.",
+        "Found with 914: a pico z_open whose config names no locator was refused with Z_ERR_INVALID, where pico's _z_open scouts (what, group and budget from the config, first Hello) and opens on that node's locators, or answers _Z_ERR_SCOUT_NO_RESULTS; upstream's local tests open that way. capi-core's scout window gains the first-answer arm (scout_first); z_scout and the open read the scouting keys through one reader.",
+        "build-zenoh-pico-cli.sh configures a local arm; PicoHeaderArm::Local pairs it with wz's build; Layers E and Z build it; the layout probe checks the locality defaults and the advanced publisher options, which embed the publisher's."
+      ],
+      "publishable_verification_bullets": [
+        "pico_local_delivery_upstream_tests_on_wz (new): upstream's z_api_local_subscriber_test.c and z_api_local_queryable_test.c, unmodified, built against the local arm and linked to wz's build of it, walk their 27 locality combinations each beside a zenohd: 2 of 2 pass (137 s). Before the open-time scout they failed at their first z_open.",
+        "local_delivery (new, 4 tests) in the local arm and in the single-threaded, unstable-off local arm: own put and own get reach own entities inside the call on the calling thread, both locality filters, publisher matching counts the own subscriber per destination. Its get leg failed before fan_query.",
+        "a_faceless_get_issues_one_local_leg_where_its_destination_admits_one, an_open_with_no_locator_scouts_and_fails_when_nobody_answers, the_sessions_own_subscriber_counts_where_the_filter_counts_local_entities: pass.",
+        "pico_header_arm_layout with the local arm and the advanced publisher options: four arms clean, three mismatched pairs fail.",
+        "clippy in seven feature arms; capi-core, wz-capi-pico, wz-capi-c tests; matching legs; nondefault-tests gate: pass on a build host.",
+        "capability_config --check and --selftest (30 arms), upstream_switch_map, prose gate, citation anchor, pin binding: rc=0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 913: C ABI multicast transport; the raw-ethernet link of item 911 waits on it.",
+        "Item 910: the Rust API compatibility crate (signatures and foreign globs in the surface first).",
+        "Item 912: bt and a board's USB CDC serial need hardware to witness.",
+        "A pico session opened by scouting re-dials the scouted locators when it loses its link; pico re-runs the whole open, scouting again, so a router that returns on another locator is found there and not here.",
+        "The ws and serial links are still off-default features, not capabilities, so a pico config.h that turns them on does not reach them through capability_config."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
