@@ -851,6 +851,13 @@ impl ApplicationLayerObserver {
     /// self-contained here (data replies drain before the finals), so the
     /// invariant lives with the concern rather than spread across a fat
     /// drain.
+    /// The staged query replies through `sink`, WITHOUT their finals: for a host that stages
+    /// each owed final behind the deferred handler jobs that may still answer the same query
+    /// ([`Self::take_pending_final_rids`]), as a session does, so no final overtakes a reply.
+    pub fn flush_query_reply_bodies<S: ResponseSink>(&mut self, sink: &S) {
+        self.drain_query_replies(sink);
+    }
+
     pub fn flush_query_replies<S: ResponseSink>(&mut self, sink: &S) {
         self.drain_query_replies(sink);
         self.drain_query_finals(sink);

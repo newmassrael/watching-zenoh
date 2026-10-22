@@ -530,6 +530,14 @@ pub use queryable::*;
 pub use subscriber::*;
 #[cfg(feature = "transport-multicast")]
 pub use transport::Multicast;
+#[cfg(feature = "query-queryable")]
+pub use transport::RemoteReplyRoute;
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "query-queryable",
+    not(all(feature = "codec-push", feature = "codec-response-final"))
+))]
+pub use transport::SilentGroupRoute;
 pub use transport::TransportState;
 #[cfg(feature = "transport-unicast")]
 pub use transport::Unicast;
@@ -2622,10 +2630,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             local_live,
             fires: wz_session_core::deferred_fire::DeferredFireQueue::new(),
             clock,
-            // R311y531 — always empty on a multicast session: the hold API is
-            // `Session<R, T, Unicast>`-only (a multicast session has no
-            // queryable dispatch and so owes no ResponseFinal), so nothing can
-            // ever put an entry here.
+            // The holds on the Finals this session's queryables owe: a group's queryable answers
+            // queries that came over the group, and its handler jobs and held queries keep their
+            // Finals here exactly as a unicast session's do (open-debt item 913; until then the
+            // hold API was unicast-only and this map stayed empty).
             #[cfg(feature = "query-queryable")]
             final_holds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
@@ -2745,12 +2753,39 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// drive_multicast_session(
     ///     .., |event| session.dispatch_multicast_iteration_event(event), ..)
     /// ```
+    ///
+    /// The group's queryables answer on the group, as the unicast dispatch answers on the link:
+    /// the replies staged during the dispatch leave through the session's producer, and each
+    /// query's `ResponseFinal` is STAGED behind the deferred handler jobs the same dispatch
+    /// queued, so it leaves after their replies, and after a handler that kept the query lets
+    /// it go ([`Self::hold_query`]). Open-debt item 913: the group's queryable replies used to be
+    /// the host's to flush, and a deferred handler had no route at all.
     pub fn dispatch_multicast_iteration_event(
         &self,
         event: wz_session_core::driver_loop::IterationEvent<'_>,
     ) {
         R::with_mutex_mut(&self.observer, |obs| {
             obs.dispatch_event(event);
+            #[cfg(all(
+                feature = "query-queryable",
+                feature = "codec-push",
+                feature = "codec-response-final"
+            ))]
+            {
+                let route = <Multicast as TransportState<R, T>>::reply_route(&self.transport);
+                obs.flush_query_reply_bodies(&route);
+                for (rid, qos) in obs.take_pending_final_rids() {
+                    let route = route.clone();
+                    let holds = self.final_holds.clone();
+                    self.fires.stage(Box::new(move || {
+                        if defer_final_to_holder(&holds, FinalKey { rid, local: false }, Some(qos))
+                        {
+                            return;
+                        }
+                        route.send_final(rid, qos);
+                    }));
+                }
+            }
         });
         self.drain_deferred_fires();
     }
@@ -2776,6 +2811,46 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         let (id, cell) = self.register_subscriber_local(&keyexpr_string, &options, callback);
         Subscriber {
             observer: self.observer.clone(),
+            id,
+            keyexpr: keyexpr_string,
+            options,
+            cell,
+            armed: true,
+            retraction: None,
+        }
+    }
+
+    /// Declare a [`Queryable`] on a MULTICAST session: registered in this session's queryable
+    /// registry and answered by the same deferred handler a unicast session's queryable is (run
+    /// outside the observer lock), its replies and its `ResponseFinal` leaving on the group
+    /// ([`Self::dispatch_multicast_iteration_event`]). It emits NO wire declaration, as
+    /// [`Self::declare_subscriber`] emits none: a group member answers every query the group
+    /// carries whether or not anyone was told of the queryable, which is how zenoh-pico's
+    /// multicast transport behaves without `Z_FEATURE_MULTICAST_DECLARATIONS`. Infallible for
+    /// the same reason the subscriber is: the keyexpr never reaches the outbound wire.
+    #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+    pub fn declare_queryable(
+        &self,
+        keyexpr: impl Into<String>,
+        options: QueryableOptions,
+        callback: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
+    ) -> Queryable<R, T> {
+        let keyexpr_string = keyexpr.into();
+        let (cell, sink) = self.deferred_query_sink(callback);
+        let id = R::with_mutex_mut(&self.observer, |observer| {
+            observer
+                .queryables
+                .register_sink(
+                    &keyexpr_string,
+                    options.allowed_origin,
+                    options.complete,
+                    crate::query_sink::BoxedQuerySink::new(sink),
+                )
+                .expect("register on the alloc backing never exceeds declared capacity")
+        });
+        Queryable {
+            observer: self.observer.clone(),
+            _marker: core::marker::PhantomData,
             id,
             keyexpr: keyexpr_string,
             options,
@@ -5422,8 +5497,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // SessionLinkActions for the wire-reply leg, and no
             // `declare_queryable` — a compile error, not a runtime reject).
             // Thread the resolved bundle into the sink builder.
-            let actions = self.actions().clone();
-            let (cell, sink) = self.deferred_query_sink(actions, callback);
+            let (cell, sink) = self.deferred_query_sink(callback);
             // R311df — observer access via R::with_mutex_mut closure form.
             let id = R::with_mutex_mut(&self.observer, |observer| {
                 // Full-fidelity registration through the `register_sink` SSOT:
@@ -5500,7 +5574,8 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 }
             };
             Ok(Queryable {
-                session: self.clone(),
+                observer: self.observer.clone(),
+                _marker: core::marker::PhantomData,
                 id,
                 keyexpr: keyexpr_string,
                 options,

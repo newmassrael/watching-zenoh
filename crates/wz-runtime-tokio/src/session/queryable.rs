@@ -254,7 +254,7 @@ impl OwnedQueryEvent {
     }
 }
 
-impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, Tp> {
     /// R311li — build the deferred cell + the staging sink one
     /// `declare_queryable{_aliased}` call installs in the registry: the
     /// sink copies the matched query out (owned) and stages one queue
@@ -269,28 +269,25 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// the same pass). The handler signature is unchanged — deferral
     /// is invisible at the type level.
     ///
-    /// B5b-2b / R311nf — the wire-reply leg of the sink emits through the
-    /// UNICAST action bundle (`actions.send_response`), which a multicast
-    /// session has no analogue of. The resolved unicast `actions` is threaded
-    /// in by the caller rather than projected from a fallible `actions()` (an
-    /// `impl FnMut`-in-`Result` would trip `clippy::type_complexity`). The
-    /// unicast guarantee is now STRUCTURAL, not a runtime reject: this helper
-    /// lives on the `impl Session<R, T, Unicast>` block, so it can only ever be
-    /// reached on a unicast transport (a `Session<R, T, Multicast>` does not
-    /// have it — a compile error, not an `UnsupportedVariant` projection). The
-    /// `actions` argument is therefore the infallible `self.actions().clone()`.
+    /// The wire-reply leg answers on the transport's route
+    /// ([`TransportState::reply_route`]): the unicast link's actions, or the group's
+    /// producer. It used to take the unicast actions and live on the unicast block alone, so a
+    /// multicast session had no deferred queryable; the route is the only part that differs, and
+    /// both transports now build this one sink (open-debt item 913).
     #[cfg(feature = "query-queryable")]
     pub(super) fn deferred_query_sink(
         &self,
-        actions: std::sync::Arc<SessionLinkActions<R, T>>,
         handler: impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
     ) -> (
         QueryHandlerCell<R>,
         impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static,
     )
     where
-        SessionLinkActions<R, T>: Send + Sync + 'static,
+        Tp: 'static,
+        <Tp as TransportState<R, T>>::Payload: Send + Sync,
+        <Tp as TransportState<R, T>>::ReplyRoute: Send + 'static,
     {
+        let route = Tp::reply_route(&self.transport);
         let erased: BoxedQueryHandler = Box::new(handler);
         let cell: QueryHandlerCell<R> =
             wz_session_core::deferred_fire::DeferredListenerCell::new(erased);
@@ -307,7 +304,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let owned = OwnedQueryEvent::from_view(view);
             let cell = cell_for_sink.clone();
             let observer = observer.clone();
-            let actions = actions.clone();
+            let route = route.clone();
             // A local GET's Final must follow this job's replies whichever
             // thread runs the job: taken here, inside the query's own loopback
             // window, and released when the job ends. See `HandlerJobHold`.
@@ -370,7 +367,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                     // after the drain. Overflow-rejected replies
                     // are skipped, mirroring flush_pending.
                     for reply in ReplyStaging::drain_staged(&mut replies) {
-                        send_staged_reply(&actions, reply);
+                        route.send_reply(reply);
                     }
                 }
             });
@@ -392,19 +389,20 @@ pub(super) type QueryableRetraction = Box<dyn FnMut() + Send + 'static>;
 
 #[non_exhaustive]
 pub struct Queryable<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    // R311ek — `session` is read only by the `query-queryable`-gated
+    // R311ek — `observer` is read only by the `query-queryable`-gated
     // observer-unregister in `undeclare` / `Drop`; the handle is only
     // ever constructed inside the same gate (`declare_queryable` returns
     // `Err(FeatureDisabled)` otherwise), so a `query-queryable`-off build
     // would carry this field unread. Gating it on the feature keeps the
     // struct dead-code-clean under `deny(warnings)` without an `#[allow]`.
+    // It is the observer and not the session, as a `Subscriber`'s is, so a
+    // multicast session's queryable is the same handle (open-debt item 913).
     #[cfg(feature = "query-queryable")]
-    pub(super) session: Session<R, T, Unicast>,
-    // R311ek — `query-queryable`-OFF `PhantomData` arm keeps the `R` / `T`
-    // type parameters live (their only field-level carrier is the gated
-    // `session` above). PhantomData fields are exempt from the dead-code
-    // lint, so this composes under `deny(warnings)`.
-    #[cfg(not(feature = "query-queryable"))]
+    pub(super) observer: Arc<<R as Runtime>::Mutex<ApplicationLayerObserver>>,
+    // R311ek — `PhantomData` keeps the `T` type parameter live (no field
+    // carries it), and with `query-queryable` off `R` too. PhantomData fields
+    // are exempt from the dead-code lint, so this composes under
+    // `deny(warnings)`.
     pub(super) _marker: core::marker::PhantomData<(R, T)>,
     pub(super) id: QueryableId,
     pub(super) keyexpr: String,
@@ -504,7 +502,7 @@ impl<R: SessionRuntime, T: TimeSource> Queryable<R, T> {
         }
         #[cfg(feature = "query-queryable")]
         {
-            R::with_mutex_mut(&self.session.observer, |observer| {
+            R::with_mutex_mut(&self.observer, |observer| {
                 let removed = observer.queryables.unregister(self.id);
                 // R311y797 — the undeclare twin of the declare-side
                 // re-evaluation (pico `_z_write_filter_notify_queryable`

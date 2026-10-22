@@ -245,6 +245,91 @@ pub trait TransportState<R: SessionRuntime, T: TimeSource>: sealed::Sealed {
     /// queries carry the bytes.
     #[cfg(feature = "transport-shm")]
     fn shm_admits(payload: &Self::Payload, protocol: u32) -> bool;
+
+    /// Where this session's queryables answer a query that came over the transport: see
+    /// [`RemoteReplyRoute`].
+    #[cfg(feature = "query-queryable")]
+    type ReplyRoute: RemoteReplyRoute;
+
+    /// The route this session's queryables answer remote queries on.
+    #[cfg(feature = "query-queryable")]
+    fn reply_route(payload: &Self::Payload) -> Self::ReplyRoute;
+}
+
+/// Where a queryable's replies to a query that came over the transport leave, and the query's
+/// `ResponseFinal` after them: the unicast link, or the group. The one per-transport part of
+/// the deferred queryable handler, of a held query, and of the Final the dispatch stages behind
+/// the handler jobs, so both transports keep Reply-before-Final the same way.
+///
+/// Not bound to `Send` itself: a unicast route is `Send` exactly when the runtime's link actions
+/// are, so the bound is asked where a route moves into a job (the deferred handler), as it was
+/// asked of the actions before.
+#[cfg(feature = "query-queryable")]
+pub trait RemoteReplyRoute: Clone {
+    /// Send one reply the handler produced.
+    fn send_reply(&self, reply: wz_session_core::query::QueryReply);
+    /// Send the query's terminator, once every reply has left.
+    fn send_final(&self, rid: u64, qos: wz_session_core::sample::QosLevel);
+}
+
+#[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
+impl<R: SessionRuntime, T: TimeSource> RemoteReplyRoute for Arc<SessionLinkActions<R, T>> {
+    fn send_reply(&self, reply: wz_session_core::query::QueryReply) {
+        super::queryable::send_staged_reply(self, reply);
+    }
+
+    fn send_final(&self, rid: u64, qos: wz_session_core::sample::QosLevel) {
+        self.send_response_final(rid, qos);
+    }
+}
+
+/// A group answers on the group: each reply as a `Response` frame, then the `ResponseFinal`,
+/// both through the producer its session publishes on (zenoh-pico replies on the multicast
+/// transport through the same `_z_send_n_msg`). A reply that would carry a shared-memory
+/// descriptor carries the bytes, since a group negotiates none.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "query-queryable",
+    feature = "codec-push",
+    feature = "codec-response-final"
+))]
+impl RemoteReplyRoute
+    for wz_session_core::multicast_reply_sink::MulticastReplySink<
+        crate::multicast_glue::TokioReplyBacking,
+    >
+{
+    fn send_reply(&self, reply: wz_session_core::query::QueryReply) {
+        use wz_session_core::response_sink::ResponseSink as _;
+        if let Ok(response) = reply.into_response() {
+            self.send_response(response);
+        }
+    }
+
+    fn send_final(&self, rid: u64, qos: wz_session_core::sample::QosLevel) {
+        use wz_session_core::response_sink::ResponseSink as _;
+        self.send_response_final(rid, qos);
+    }
+}
+
+/// The route of a group whose session cannot send: a build without the push codec has no
+/// producer, and one without the final codec cannot terminate a query, so its queryables answer
+/// nobody remote. A group's query owes nothing it could send.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "query-queryable",
+    not(all(feature = "codec-push", feature = "codec-response-final"))
+))]
+#[derive(Clone, Copy)]
+pub struct SilentGroupRoute;
+
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "query-queryable",
+    not(all(feature = "codec-push", feature = "codec-response-final"))
+))]
+impl RemoteReplyRoute for SilentGroupRoute {
+    fn send_reply(&self, _reply: wz_session_core::query::QueryReply) {}
+    fn send_final(&self, _rid: u64, _qos: wz_session_core::sample::QosLevel) {}
 }
 
 /// Typestate marker for a UNICAST session: the payload is the per-peer
@@ -287,6 +372,14 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Unicast {
     #[cfg(feature = "transport-shm")]
     fn shm_admits(payload: &Self::Payload, protocol: u32) -> bool {
         payload.shm_admits(protocol)
+    }
+
+    #[cfg(feature = "query-queryable")]
+    type ReplyRoute = Arc<SessionLinkActions<R, T>>;
+
+    #[cfg(feature = "query-queryable")]
+    fn reply_route(payload: &Self::Payload) -> Self::ReplyRoute {
+        payload.clone()
     }
 
     fn send_network_message_qos(
@@ -453,6 +546,40 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
     #[cfg(feature = "transport-shm")]
     fn shm_admits(_payload: &Self::Payload, _protocol: u32) -> bool {
         false
+    }
+
+    #[cfg(all(
+        feature = "query-queryable",
+        feature = "codec-push",
+        feature = "codec-response-final"
+    ))]
+    type ReplyRoute = wz_session_core::multicast_reply_sink::MulticastReplySink<
+        crate::multicast_glue::TokioReplyBacking,
+    >;
+
+    #[cfg(all(
+        feature = "query-queryable",
+        feature = "codec-push",
+        feature = "codec-response-final"
+    ))]
+    fn reply_route(payload: &Self::Payload) -> Self::ReplyRoute {
+        wz_session_core::multicast_reply_sink::MulticastReplySink::new(
+            crate::multicast_glue::TokioReplyBacking::new(payload.tx.clone()),
+        )
+    }
+
+    #[cfg(all(
+        feature = "query-queryable",
+        not(all(feature = "codec-push", feature = "codec-response-final"))
+    ))]
+    type ReplyRoute = SilentGroupRoute;
+
+    #[cfg(all(
+        feature = "query-queryable",
+        not(all(feature = "codec-push", feature = "codec-response-final"))
+    ))]
+    fn reply_route(_payload: &Self::Payload) -> Self::ReplyRoute {
+        SilentGroupRoute
     }
 
     fn send_network_message_qos(

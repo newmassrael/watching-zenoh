@@ -31,15 +31,28 @@ use wz_session_core::sample::QosLevel;
 /// on, and its `ResponseFinal` is owed until it is dropped. Built by
 /// [`Session::hold_query`]; each one is its own hold, so a query held twice
 /// stays open until both are dropped.
-pub struct HeldQuery<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    session: Session<R, T, Unicast>,
+///
+/// The route is the transport's ([`TransportState::reply_route`]): the link for a unicast
+/// session, the group for a multicast one, so a query that came over a group is kept and
+/// answered the same way (open-debt item 913).
+pub struct HeldQuery<
+    R: SessionRuntime = TokioRuntime,
+    T: TimeSource = TokioTime,
+    Tp: TransportState<R, T> = Unicast,
+> {
+    session: Session<R, T, Tp>,
     key: FinalKey,
     keyexpr: String,
     accept: ReplyKeyExpr,
     qos: QosLevel,
 }
 
-impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
+// `hold_query` keeps a clone of the session, and a session is `Clone` when its transport's
+// payload is (both transports' are), so that one method carries the bound.
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, Tp>
+where
+    <Tp as TransportState<R, T>>::Payload: Clone,
+{
     /// Keep the query `view` describes past its handler; see [`HeldQuery`].
     ///
     /// MUST be called from inside the queryable handler, which is what makes
@@ -48,7 +61,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// and a local GET's), so a hold taken there is always visible to the job
     /// it must suppress. Taken afterwards, it is a lost race — the Final has
     /// already gone and the requester has closed.
-    pub fn hold_query(&self, view: &dyn QueryView) -> HeldQuery<R, T> {
+    pub fn hold_query(&self, view: &dyn QueryView) -> HeldQuery<R, T, Tp> {
         let key = FinalKey {
             rid: view.rid(),
             local: view.is_local(),
@@ -70,7 +83,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             qos: view.qos(),
         }
     }
+}
 
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, Tp> {
     /// Route replies a held query produced: onto the wire for a query that
     /// came in on it, into this session's own pending GET for a query it asked
     /// of itself. A local reply lands as the in-dispatch local leg's does, and
@@ -85,8 +100,9 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             });
             self.drain_or_wake_local();
         } else {
+            let route = Tp::reply_route(&self.transport);
             for reply in replies {
-                super::queryable::send_staged_reply(self.actions(), reply);
+                route.send_reply(reply);
             }
         }
     }
@@ -97,7 +113,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// Taken by the queryable's staging sink, which runs inside the loopback
     /// window of the query that matched it, so the hold exists before the
     /// query's own terminator can be consulted.
-    pub(super) fn hold_for_handler_job(&self, rid: u64) -> HandlerJobHold<R, T> {
+    pub(super) fn hold_for_handler_job(&self, rid: u64) -> HandlerJobHold<R, T, Tp> {
         let key = FinalKey { rid, local: true };
         if let Ok(mut map) = self.final_holds.lock() {
             map.entry(key).or_default().holds += 1;
@@ -146,7 +162,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             }));
             self.drain_or_wake_local();
         } else {
-            self.actions().send_response_final(key.rid, qos);
+            Tp::reply_route(&self.transport).send_final(key.rid, qos);
         }
     }
 
@@ -167,7 +183,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     }
 }
 
-impl<R: SessionRuntime, T: TimeSource> HeldQuery<R, T> {
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> HeldQuery<R, T, Tp> {
     /// The request id the query carries.
     pub fn rid(&self) -> u64 {
         self.key.rid
@@ -207,7 +223,7 @@ impl<R: SessionRuntime, T: TimeSource> HeldQuery<R, T> {
     }
 }
 
-impl<R: SessionRuntime, T: TimeSource> Drop for HeldQuery<R, T> {
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Drop for HeldQuery<R, T, Tp> {
     fn drop(&mut self) {
         self.session.release_query_final(self.key);
     }
@@ -234,12 +250,16 @@ impl<R: SessionRuntime, T: TimeSource> Drop for HeldQuery<R, T> {
 /// The guard is moved INTO the job's closure, so it is released wherever that
 /// closure ends: after the handler's replies are delivered, or unrun when the
 /// listener was undeclared first, or while unwinding from a panicking handler.
-pub(super) struct HandlerJobHold<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> {
-    session: WeakSession<R, T, Unicast>,
+pub(super) struct HandlerJobHold<
+    R: SessionRuntime = TokioRuntime,
+    T: TimeSource = TokioTime,
+    Tp: TransportState<R, T> = Unicast,
+> {
+    session: WeakSession<R, T, Tp>,
     key: FinalKey,
 }
 
-impl<R: SessionRuntime, T: TimeSource> Drop for HandlerJobHold<R, T> {
+impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Drop for HandlerJobHold<R, T, Tp> {
     fn drop(&mut self) {
         // A session already gone has no GET left to terminate.
         if let Some(session) = self.session.upgrade() {

@@ -12205,6 +12205,119 @@ fn a_group_query_that_reaches_no_member_ends_at_once_and_sends_nothing() {
     assert!(tap.try_next().is_none(), "nothing went to the group");
 }
 
+/// What a group session put on the group, in order: `R` for a Response, `F(rid)` for a
+/// ResponseFinal, `?` for anything else, one entry per network message.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-unicast",
+    feature = "codec-push",
+    feature = "query-queryable",
+    feature = "codec-response-final"
+))]
+fn group_egress(tap: &mut crate::multicast_pipeline::MulticastTxTap) -> Vec<String> {
+    use wz_session_core::inbound::{parse_inbound, InboundFrame};
+    use wz_session_core::network_message::{parse_frame_payload, NetworkMessage};
+    let mut seen = Vec::new();
+    while let Some(datagram) = tap.try_next() {
+        let Ok(InboundFrame::Frame { payload, .. }) = parse_inbound(&datagram) else {
+            continue;
+        };
+        for message in parse_frame_payload(&payload).expect("the frame decodes") {
+            seen.push(match message {
+                NetworkMessage::Response(_) => "R".to_owned(),
+                NetworkMessage::ResponseFinal(f) => format!("F({})", f.request_id),
+                _ => "?".to_owned(),
+            });
+        }
+    }
+    seen
+}
+
+/// A query a member sent over the group, as the drive loop hands it to the session.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-unicast",
+    feature = "codec-push",
+    feature = "query-queryable",
+    feature = "codec-response-final"
+))]
+fn query_from_a_member(session: &TokioMulticastSession, rid: u64, keyexpr: &str) {
+    use wz_session_core::network_message::NetworkMessage;
+    let request = wz_session_core::request_build::build_request_query(rid, 0, Some(keyexpr))
+        .expect("the query builds");
+    let outcome = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable: true,
+        sn: 0,
+        messages: vec![NetworkMessage::Request(Box::new(request))],
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    session.dispatch_multicast_iteration_event(wz_session_core::driver_loop::IterationEvent::Poll(
+        &outcome,
+    ));
+}
+
+/// A queryable on a group answers a query that came over the group on the group: its reply,
+/// then the query's `ResponseFinal`, in that order, as zenoh-pico's multicast queryable
+/// replies through `_z_send_n_msg`. Open-debt item 913: a multicast session had no queryable
+/// of its own, and its replies were the host's to flush.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-unicast",
+    feature = "codec-push",
+    feature = "query-queryable",
+    feature = "codec-response-final"
+))]
+#[test]
+fn a_group_queryable_answers_on_the_group_and_its_final_follows_the_reply() {
+    let (session, mut tap) = tapped_qos_group_session();
+    let _queryable = session.declare_queryable(
+        "demo/group/qbl",
+        QueryableOptions::default(),
+        |_query, out| out.reply(b"answer"),
+    );
+    query_from_a_member(&session, 7, "demo/group/qbl");
+    assert_eq!(group_egress(&mut tap), ["R", "F(7)"]);
+}
+
+/// A handler that keeps a query that came over the group keeps its `ResponseFinal` too: the
+/// final leaves when the held query is dropped, after a reply made through it, as a held
+/// unicast query's does.
+#[cfg(all(
+    feature = "transport-multicast",
+    feature = "transport-unicast",
+    feature = "codec-push",
+    feature = "query-queryable",
+    feature = "codec-response-final"
+))]
+#[test]
+fn a_held_group_query_keeps_its_final_until_it_is_dropped() {
+    let (session, mut tap) = tapped_qos_group_session();
+    let held = Arc::new(Mutex::new(None));
+    let keep = held.clone();
+    let holder = session.clone();
+    let _queryable = session.declare_queryable(
+        "demo/group/held",
+        QueryableOptions::default(),
+        move |query, _out| {
+            *keep.lock().unwrap() = Some(holder.hold_query(query));
+        },
+    );
+    query_from_a_member(&session, 9, "demo/group/held");
+    assert!(
+        group_egress(&mut tap).is_empty(),
+        "nothing leaves while the query is held"
+    );
+    held.lock()
+        .unwrap()
+        .as_ref()
+        .expect("the handler kept the query")
+        .reply(|out| out.reply(b"late"));
+    held.lock().unwrap().take();
+    assert_eq!(group_egress(&mut tap), ["R", "F(9)"]);
+}
+
 /// R311y-item3 — the COMPOSED unification proof: the base `publish` (NOT
 /// `publish_qos`) with `PublishOptions::with_priority` set drives the multicast
 /// per-priority conduit band from the SINGLE `opts.qos` source. Pre-item3 the
