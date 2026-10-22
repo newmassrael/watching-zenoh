@@ -277166,6 +277166,78 @@
         "Read the hosted runs of the last push first: the CI run of 2fc786837 was still in flight when this round was written and nine of its jobs had failed on code this round repairs (C1o, C1m, C1ca, C1cf, C1cn, C0 and C1ak among them), so a red that survives this push is new. Open: the section 6.9 footprint caveats do not yet carry the thumbv7em-hf move; the 268 B gap in main between thumbv7em-hf and thumbv7m has no named commit (no commit between e08a10799 and 5faf6df4e was built on its own); the heap client text is 1.36 times zenoh-pico's and the fixed client's RAM and stack exceed it, so no ordering over pico is claimed; step 7 of the storage-policy note (the role as one declaration, and the stack and turnaround gates) is not started, and another session proposes it inside a build-configuration design on its own branch that removes bounded-heapless and session-slot and gives each table its own const capacity, which the owner has to confirm before this tree follows it. The matching watches stay on the profile on purpose."
       ]
     },
+    "Round 3406": {
+      "decision_summary": "One build-configuration design, and the first measurement it needs. docs/build-configuration.md states it: one declaration from which Kconfig, upstream defconfigs, the Zephyr bridge and the Rust constants are generated; cargo features only add code; capacity is a property of the table; drop-in and extension are separate namespaces; the C ABI is generated from one definition; family zenoh includes the Rust public API. The owner set the criterion: the long-term correct structure, cost not counted. upstream_switch_map.py judges every zenoh-pico switch (38) and zenoh-c cargo feature (17) against the drop-in crates, both directions, pins from the shared deriver. This round REVERSES the reading of item 199 and Round 2162 (b) that the Rust API is not a replacement axis: api-compat-rust is registered reserved and the census counts `unstable` as owed (item 910). Round 2162 is unchanged; this entry is the correction.",
+      "changes_bullets": [
+        "docs/build-configuration.md (new): decisions C1 to C14 and steps 1 to 14; a policy beyond upstream enters one at a time with its own case, and the upstream map is the source of the capabilities owed.",
+        "scripts/lib/upstream_switch_map.py (new): PICO_ROWS (38: 9 maps, 15 always, 12 never, 2 n/a) and ZENOH_C_ROWS (17: 3 maps, 3 always, 11 never); shape, declaration (pico_flag, many switches to one capability) and upstream arms; selftest of 19 cases and both readers.",
+        "scripts/run-ci.sh: Layer C0 runs the map's selftest and default run; Layer C1cc runs its zenoh-c arm after the archive arm.",
+        ".githooks/pre-push: upstream_switch_map.py joins the round-fed static gates.",
+        "scripts/lib/upstream_feature_census.py: `unstable` moves from PINNED_NON_CAPABILITY to an UNANSWERED row citing open-debt item 910.",
+        "Inventory: api-compat-rust added, reserved, under the api-compat section.",
+        "scripts/rustdoc-json.pin (new): the rustdoc JSON compiler pinned by date (nightly-2026-06-07) with the format version it emits (57); owner decision: a dated nightly, not RUSTC_BOOTSTRAP on the pinned stable.",
+        "scripts/lib/rust_api_surface.py (new) and deploy/upstream-api/zenoh-1.10.1-{default,unstable,unstable-shared-memory}.surface (709, 965, 1025 lines): the pinned zenoh crate's public modules, items, inherent methods, trait implementations and foreign re-exports, derived from rustdoc JSON. Layer C0 checks the committed files; Layer Z installs the pinned nightly without a rustup self-update and re-emits and compares. Signatures and the content of foreign globs are the next increment, and the docstring says so.",
+        "Open-debt register: items 910 to 920 filed (Rust API drop-in; pico links not forwarded; links absent; multicast in the C ABI; local delivery; pico admin-space doors; session check, unmeasured; the pico unstable-off and single-thread arms; zenoh-c features not forwarded; zenoh-c static library); swept_through moved to 920."
+      ],
+      "verification_bullets": [
+        "upstream_switch_map.py --selftest: 10 shape, 4 declaration and 5 upstream cases and both readers pass, rc=0.",
+        "upstream_switch_map.py (default, pico arm against the vendor submodule at 1.10.1): rc=0.",
+        "upstream_switch_map.py --zenoh-c against the provisioned zenoh-c checkout at 1.10.1: rc=0.",
+        "upstream_feature_census.py --selftest 6/6 + 3/3, the shape arm and --upstream against the pinned zenoh: each rc=0; 22 capabilities, 4 exclusions.",
+        "debt_plane_census.py: rc=0 after the marker moved to 920 (rc=1 before, naming 910 to 920).",
+        "validate-workspace before and after the inventory entry: T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3397, sections 266, unchanged.",
+        "rust_api_surface.py --selftest: the normaliser over 10 shapes, two refusals and the comparison, rc=0. --write under bx on this host (the pinned source lives outside the tree, so bx cannot send it): 88 s, memory peak 1.9 GB, three arms written. --upstream immediately after: 0 differences in each arm, so the emission is reproducible. The default run: rc=0.",
+        "nda-scan over the pushed range: clean.",
+        "Each landing commit passed the pre-commit and commit-msg hooks."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Steps 1, 4, 7 and 13 of docs/build-configuration.md are proposed to the session that landed D1 step 6; its user has to confirm before it starts.",
+        "Step 1 must take the many-to-one and AND relations from the upstream map: capability_config.read_config maps one pico flag to one capability, so a pico config.h with only the advanced subscription switch on, or with liveliness and query on, derives the wrong capability set.",
+        "The pico upstream defconfig is the vendor defaults; the reference build's configuration becomes a registered profile (items 917 and 918 carry the layouts the drop-in cannot produce yet).",
+        "Step 12, next increments: signatures in the surface lines; the JSON of the re-exported upstream crates so foreign globs expand; then the compatibility crate over wz-capi-core's SharedSession and the same normaliser over it, diffed against deploy/upstream-api/.",
+        "Installing the dated nightly on this host made rustup update itself (1.29.1 to 1.29.2); the Layer Z step passes --no-self-update so a run does not change the machine it grades on.",
+        "Item 916 (session check) is to be measured first: z_close, then z_publisher_put, then read the return code.",
+        "Comments in wz citing pico CMakeLists line numbers drifted by one line at 1.10.1; the map reads switches by name, not by line."
+      ],
+      "publishable_decision_summary": "One build-configuration design, and the first measurement it needs. docs/build-configuration.md states it: one declaration from which Kconfig, upstream defconfigs, the Zephyr bridge and the Rust constants are generated; cargo features only add code; capacity is a property of the table; drop-in and extension are separate namespaces; the C ABI is generated from one definition; family zenoh includes the Rust public API. The owner set the criterion: the long-term correct structure, cost not counted. upstream_switch_map.py judges every zenoh-pico switch (38) and zenoh-c cargo feature (17) against the drop-in crates, both directions, pins from the shared deriver. This round REVERSES the reading of item 199 and Round 2162 (b) that the Rust API is not a replacement axis: api-compat-rust is registered reserved and the census counts `unstable` as owed (item 910). Round 2162 is unchanged; this entry is the correction.",
+      "publishable_changes_bullets": [
+        "docs/build-configuration.md (new): decisions C1 to C14 and steps 1 to 14; a policy beyond upstream enters one at a time with its own case, and the upstream map is the source of the capabilities owed.",
+        "scripts/lib/upstream_switch_map.py (new): PICO_ROWS (38: 9 maps, 15 always, 12 never, 2 n/a) and ZENOH_C_ROWS (17: 3 maps, 3 always, 11 never); shape, declaration (pico_flag, many switches to one capability) and upstream arms; selftest of 19 cases and both readers.",
+        "scripts/run-ci.sh: Layer C0 runs the map's selftest and default run; Layer C1cc runs its zenoh-c arm after the archive arm.",
+        ".githooks/pre-push: upstream_switch_map.py joins the round-fed static gates.",
+        "scripts/lib/upstream_feature_census.py: `unstable` moves from PINNED_NON_CAPABILITY to an UNANSWERED row citing open-debt item 910.",
+        "Inventory: api-compat-rust added, reserved, under the api-compat section.",
+        "scripts/rustdoc-json.pin (new): the rustdoc JSON compiler pinned by date (nightly-2026-06-07) with the format version it emits (57); owner decision: a dated nightly, not RUSTC_BOOTSTRAP on the pinned stable.",
+        "scripts/lib/rust_api_surface.py (new) and deploy/upstream-api/zenoh-1.10.1-{default,unstable,unstable-shared-memory}.surface (709, 965, 1025 lines): the pinned zenoh crate's public modules, items, inherent methods, trait implementations and foreign re-exports, derived from rustdoc JSON. Layer C0 checks the committed files; Layer Z installs the pinned nightly without a rustup self-update and re-emits and compares. Signatures and the content of foreign globs are the next increment, and the docstring says so.",
+        "Open-debt register: items 910 to 920 filed (Rust API drop-in; pico links not forwarded; links absent; multicast in the C ABI; local delivery; pico admin-space doors; session check, unmeasured; the pico unstable-off and single-thread arms; zenoh-c features not forwarded; zenoh-c static library); swept_through moved to 920."
+      ],
+      "publishable_verification_bullets": [
+        "upstream_switch_map.py --selftest: 10 shape, 4 declaration and 5 upstream cases and both readers pass, rc=0.",
+        "upstream_switch_map.py (default, pico arm against the vendor submodule at 1.10.1): rc=0.",
+        "upstream_switch_map.py --zenoh-c against the provisioned zenoh-c checkout at 1.10.1: rc=0.",
+        "upstream_feature_census.py --selftest 6/6 + 3/3, the shape arm and --upstream against the pinned zenoh: each rc=0; 22 capabilities, 4 exclusions.",
+        "debt_plane_census.py: rc=0 after the marker moved to 920 (rc=1 before, naming 910 to 920).",
+        "validate-workspace before and after the inventory entry: T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3397, sections 266, unchanged.",
+        "rust_api_surface.py --selftest: the normaliser over 10 shapes, two refusals and the comparison, rc=0. --write under bx on this host (the pinned source lives outside the tree, so bx cannot send it): 88 s, memory peak 1.9 GB, three arms written. --upstream immediately after: 0 differences in each arm, so the emission is reproducible. The default run: rc=0.",
+        "nda-scan over the pushed range: clean.",
+        "Each landing commit passed the pre-commit and commit-msg hooks."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Steps 1, 4, 7 and 13 of docs/build-configuration.md are proposed to the session that landed D1 step 6; its user has to confirm before it starts.",
+        "Step 1 must take the many-to-one and AND relations from the upstream map: capability_config.read_config maps one pico flag to one capability, so a pico config.h with only the advanced subscription switch on, or with liveliness and query on, derives the wrong capability set.",
+        "The pico upstream defconfig is the vendor defaults; the reference build's configuration becomes a registered profile (items 917 and 918 carry the layouts the drop-in cannot produce yet).",
+        "Step 12, next increments: signatures in the surface lines; the JSON of the re-exported upstream crates so foreign globs expand; then the compatibility crate over wz-capi-core's SharedSession and the same normaliser over it, diffed against deploy/upstream-api/.",
+        "Installing the dated nightly on this host made rustup update itself (1.29.1 to 1.29.2); the Layer Z step passes --no-self-update so a run does not change the machine it grades on.",
+        "Item 916 (session check) is to be measured first: z_close, then z_publisher_put, then read the return code.",
+        "Comments in wz citing pico CMakeLists line numbers drifted by one line at 1.10.1; the map reads switches by name, not by line."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
