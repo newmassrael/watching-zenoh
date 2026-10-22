@@ -156,6 +156,7 @@ pub fn outbound_channel_with_capacity(
             closed: false,
             senders: 1,
             spare: Vec::new(),
+            spare_keep_max: SPARE_CAPACITY_MAX,
             carry: None,
             #[cfg(feature = "runtime-zero-copy")]
             pool: None,
@@ -639,9 +640,14 @@ struct LaneState {
     senders: usize,
     /// ARCHITECTURE section 9.1 — frame buffers the writer is done with, kept to
     /// be lent again so a link in steady state allocates none. Bounded in count
-    /// and in size ([`SPARE_MAX`], [`SPARE_CAPACITY_MAX`]) so a burst of large
+    /// and in size ([`SPARE_MAX`], `spare_keep_max`) so a burst of large
     /// frames cannot make a link hoard memory.
     spare: Vec<Vec<u8>>,
+    /// The largest buffer kept spare: [`SPARE_CAPACITY_MAX`] until a sender asks for a buffer
+    /// of the size the session builds its frames in (a batch), then that size up to
+    /// [`SPARE_CAPACITY_CEIL`]. A buffer the link itself asked for is the one it will ask for
+    /// again, and freeing it on the way back made every frame a fresh allocation of a batch.
+    spare_keep_max: usize,
     /// The rest of a frame that a sender flushing its own message could not write all of
     /// (the link took part and would take no more), with its priority: the next thread
     /// that holds the role writes it before it takes anything else, so the bytes of the
@@ -732,11 +738,15 @@ enum Out {
 /// How many spare frame buffers a lane set keeps.
 const SPARE_MAX: usize = 4;
 
-/// The largest buffer worth keeping spare. A frame buffer past it is rare (a
-/// frame is bounded by the link's batch size, which an ordinary session sets
-/// well under it) and is freed instead, so the pool's worst case is
-/// `SPARE_MAX * SPARE_CAPACITY_MAX` bytes per link.
+/// The largest buffer worth keeping spare before the link has said what size it works in. A
+/// frame buffer past it is freed instead, so the pool's worst case is
+/// `SPARE_MAX * SPARE_CAPACITY_MAX` bytes per link, until [`OutboundTx::take_buffer`] is
+/// asked for more (below).
 const SPARE_CAPACITY_MAX: usize = 16 * 1024;
+
+/// The most a link's own buffer size can raise the bound to: the largest frame the byte door
+/// accepts (`u16::MAX`) and its length prefix. A request past it is not a size a frame has.
+const SPARE_CAPACITY_CEIL: usize = u16::MAX as usize + 8;
 
 impl LaneState {
     /// A spare buffer with room for `min` bytes, if one is kept: the smallest
@@ -756,7 +766,7 @@ impl LaneState {
     /// is not worth keeping.
     fn give_spare(&mut self, mut buf: Vec<u8>) {
         if buf.capacity() == 0
-            || buf.capacity() > SPARE_CAPACITY_MAX
+            || buf.capacity() > self.spare_keep_max
             || self.spare.len() >= SPARE_MAX
         {
             return;
@@ -1125,12 +1135,13 @@ impl OutboundTx {
     /// frame in: one the writer has finished with when the lane set keeps one that
     /// fits, a fresh allocation otherwise.
     pub fn take_buffer(&self, min_capacity: usize) -> Vec<u8> {
-        let spare = self
-            .shared
-            .state
-            .lock()
-            .expect("outbound lanes poisoned")
-            .take_spare(min_capacity);
+        let spare = {
+            let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+            // The size asked for is the size the session builds its frames in, and the
+            // buffer comes back to the pool at that size: keep what is asked for.
+            st.spare_keep_max = st.spare_keep_max.max(min_capacity.min(SPARE_CAPACITY_CEIL));
+            st.take_spare(min_capacity)
+        };
         spare.unwrap_or_else(|| Vec::with_capacity(min_capacity))
     }
 
@@ -3302,6 +3313,36 @@ mod tests {
             1,
             "CONTROL: one at the bound is kept"
         );
+    }
+
+    /// A link that asks for a batch-sized buffer gets that buffer back: the session builds
+    /// every frame in one of a batch's size, so freeing it on the way back (it is past the
+    /// default bound) made each frame a fresh allocation of a batch.
+    #[test]
+    fn a_buffer_of_the_size_the_link_asked_for_is_kept_and_lent_again() {
+        let batch = 49_154;
+        let (tx, rx) = outbound_channel();
+        // CONTROL: before the link has asked for that size, a buffer of it is freed.
+        rx.recycle(buffer_of(batch));
+        assert_eq!(tx.spare_count(), 0, "CONTROL: past the default bound");
+        let first = tx.take_buffer(batch);
+        let at = first.as_ptr();
+        rx.recycle(first);
+        assert_eq!(tx.spare_count(), 1, "the buffer the link asked for is kept");
+        let again = tx.take_buffer(batch);
+        assert_eq!(again.as_ptr(), at, "and it is the one lent again");
+        assert!(again.is_empty());
+    }
+
+    /// What a link asks for raises the bound only to the largest frame there is.
+    #[test]
+    fn a_request_past_the_largest_frame_does_not_raise_the_bound_past_it() {
+        let (tx, rx) = outbound_channel();
+        let huge = tx.take_buffer(SPARE_CAPACITY_CEIL * 4);
+        rx.recycle(huge);
+        assert_eq!(tx.spare_count(), 0, "a buffer past the ceiling is freed");
+        rx.recycle(buffer_of(SPARE_CAPACITY_CEIL));
+        assert_eq!(tx.spare_count(), 1, "CONTROL: one at the ceiling is kept");
     }
 
     /// The smallest buffer that fits is the one lent, so a small frame does not

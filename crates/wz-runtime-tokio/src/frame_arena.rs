@@ -278,7 +278,11 @@ impl FrameArena for RecyclingArena {
                 len: want,
                 home: Arc::downgrade(&self.free),
             },
-            None => RecycledBuf::one_shot(self.buf_len).sliced_to(want),
+            // A dry pool: the frame gets storage of ITS width. The buffer is one-shot (it has no
+            // home to go back to), so a box of the stride would be 64 KiB zeroed for a frame of
+            // a kilobyte, and a read that overlapped the previous frame's last holder did it
+            // for one GET in three.
+            None => RecycledBuf::one_shot(want),
         }
     }
 }
@@ -314,11 +318,6 @@ impl RecycledBuf {
             len,
             home: Weak::new(),
         }
-    }
-
-    fn sliced_to(mut self, len: usize) -> Self {
-        self.len = len;
-        self
     }
 
     /// The slot index this buffer occupies in its arena, if any.
@@ -534,6 +533,30 @@ mod tests {
             arena.free.lock().expect("uncontended").len(),
             1,
             "only the buffer that came from the free list goes back to it"
+        );
+    }
+
+    /// A frame read while the pool is dry gets storage of its own width, not of the stride:
+    /// the buffer is one-shot, so the rest of a stride-wide box would be zeroed for nothing.
+    #[test]
+    fn an_overflow_buffer_is_the_width_of_its_frame_and_not_of_the_stride() {
+        let mut arena = RecyclingArena::new(1, MAX_FRAME);
+        let held = arena.take(16);
+        let overflow = arena.take(1100);
+        assert_eq!(overflow.as_ref().len(), 1100);
+        assert_eq!(
+            overflow
+                .bytes
+                .as_ref()
+                .expect("bytes outlive every read")
+                .len(),
+            1100,
+            "the box behind a one-shot frame is as wide as the frame"
+        );
+        assert_eq!(
+            held.bytes.as_ref().expect("bytes outlive every read").len(),
+            MAX_FRAME,
+            "CONTROL: the pooled buffer keeps its stride"
         );
     }
 
