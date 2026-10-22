@@ -278500,6 +278500,46 @@
         "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
       ]
     },
+    "Round 3433": {
+      "decision_summary": "The CI run of the push that carried item 913 started late and is red in four jobs, each read from its own log; all four are gates the group work moved and this round repays them. The probe of a pico open failure ran its child with a bare output, which the bounded census refuses because a child that never ends would hold the test forever; it now runs within the shared bound. The interest-reply module gained a test, a group member's interest on the alias it declared, and the two pinned counts of Layer C1c move with it to 6 and 10. The test that labels a raw Ethernet group's member by its MAC compiles only with raweth-transport, which no leg turned on; a leg now runs that module of the capi core with it. The jobs of that run still going are read from the next one.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/pico_open_failure_on_wz_capi.rs: the probe runs with output_bounded().",
+        "scripts/run-ci.sh Layer C1c: the interest-reply module is pinned at 6 under declare-subscriber and 10 with declare-undeclare, and the comment names the test that moved them.",
+        "scripts/lib/nondefault-tests-gate.sh: a hook leg runs wz-capi-core with raweth-transport over faces::multicast::.",
+        "docs/hosted-red-acks.md: the row for the four reds of run 39860923670."
+      ],
+      "verification_bullets": [
+        "On a build host: the interest-reply module runs 6 and 10 tests under the two feature sets; the bounded census passes; the probe test compiles; the capi core's group member tests pass with raweth-transport; clippy of wz-integration-tests with all targets is clean.",
+        "The count-guard oracle over the push range measures both moved pins and finds them right.",
+        "Each red was read from its job's log to its end and attributed by the gate's own sentence."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "carry_forward_bullets": [
+        "Read the CI run of this push job by job, and the jobs of run 39860923670 that were still running when it was written.",
+        "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
+      ],
+      "publishable_decision_summary": "The CI run of the push that carried item 913 started late and is red in four jobs, each read from its own log; all four are gates the group work moved and this round repays them. The probe of a pico open failure ran its child with a bare output, which the bounded census refuses because a child that never ends would hold the test forever; it now runs within the shared bound. The interest-reply module gained a test, a group member's interest on the alias it declared, and the two pinned counts of Layer C1c move with it to 6 and 10. The test that labels a raw Ethernet group's member by its MAC compiles only with raweth-transport, which no leg turned on; a leg now runs that module of the capi core with it. The jobs of that run still going are read from the next one.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/pico_open_failure_on_wz_capi.rs: the probe runs with output_bounded().",
+        "scripts/run-ci.sh Layer C1c: the interest-reply module is pinned at 6 under declare-subscriber and 10 with declare-undeclare, and the comment names the test that moved them.",
+        "scripts/lib/nondefault-tests-gate.sh: a hook leg runs wz-capi-core with raweth-transport over faces::multicast::.",
+        "docs/hosted-red-acks.md: the row for the four reds of run 39860923670."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the interest-reply module runs 6 and 10 tests under the two feature sets; the bounded census passes; the probe test compiles; the capi core's group member tests pass with raweth-transport; clippy of wz-integration-tests with all targets is clean.",
+        "The count-guard oracle over the push range measures both moved pins and finds them right.",
+        "Each red was read from its job's log to its end and attributed by the gate's own sentence."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the CI run of this push job by job, and the jobs of run 39860923670 that were still running when it was written.",
+        "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
