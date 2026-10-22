@@ -234,7 +234,7 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
 /// config blocks until Established; a `listen` config returns as soon as the
 /// bind succeeds. A config naming neither scouts for the first node that answers
 /// and connects to its locators, as pico's `_z_open` does (see
-/// [`crate::scout::locators_by_scout`]); nobody answering, or a build without
+/// `crate::scout::locators_by_scout`); nobody answering, or a build without
 /// `scout`, is `Z_ERR_SCOUT_NO_RESULTS`.
 ///
 /// `options->auto_start_read_task` decides whether the session's read task runs

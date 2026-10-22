@@ -10,7 +10,7 @@
 //! Without the switch pico passes `z_locality_default()` (ANY) and has no local path to
 //! take, so its traffic is remote only; this crate says `Remote` for that arm. With the
 //! switch, each struct's field is read through one method named as the field
-//! ([`locality_option_field`]), so a caller is the same in both arms.
+//! (`locality_option_field`), so a caller is the same in both arms.
 
 use std::ffi::c_int;
 
