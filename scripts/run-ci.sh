@@ -7728,7 +7728,9 @@ layer_c1am_cargo_test_adminspace() {
     # R2843 — 46 -> 47, the C1ak twin's arithmetic (see that guard).
     # R2859 — 47 -> 49: R2858's region test (the hosted red printed 48) and
     # R2859's multicast-row test. PRINTED by running the command.
-    _runci_guarded_test "C1AM adminspace 49" 49 \
+    # 49 -> 50: one more case selected by the filter since; the hosted run of
+    # e7e31951d and a run of this tree both printed 50.
+    _runci_guarded_test "C1AM adminspace 50" 50 \
         cargo test -p wz-session-core --features adminspace-metrics --lib adminspace --quiet || return 1
     # R2633 — 3 -> 5. `zenoh_hex_to_zid` grew the two refusals a conforming node
     # makes, needed because the router link-weight rows name neighbours by the
@@ -10755,7 +10757,7 @@ layer_c1o_keyexpr_gating_behavior() {
         cargo test -p wz-session-core --no-default-features \
         --features alloc,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 18 \
+    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 20 \
         cargo test -p wz-session-core --no-default-features \
         --features keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
