@@ -283,6 +283,22 @@ impl NetworkMessage {
 /// The verdict on one chain, or
 /// [`ExtAdmission::Admissible`](crate::ext_admit::ExtAdmission::Admissible) for a
 /// message that has none.
+// The union of its callers: the owned message (`alloc`), the Declare and Push
+// verdicts, and the views read where a slot profile's frame lies.
+#[cfg(any(
+    feature = "alloc",
+    feature = "codec-declare",
+    feature = "codec-push",
+    all(
+        feature = "codec-frame",
+        feature = "session-slot",
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    )
+))]
 fn judge_chain<E: crate::ext_view::ExtEntryView>(
     carrier: crate::ext_admit::ExtCarrier,
     extensions: Option<&[E]>,

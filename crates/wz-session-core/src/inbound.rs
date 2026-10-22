@@ -49,6 +49,9 @@ use crate::link::RxBytes;
 // `CodecError` is named only by the `Frame` arm, which is `codec-frame`'s.
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 use sce_forge_runtime::codec::CodecError;
+// Named by the owned `Oam`/`Frame` decode (`alloc`) and by the frame-head readers
+// (`codec-frame`); a slot profile with neither has no cursor to name.
+#[cfg(any(feature = "alloc", feature = "codec-frame"))]
 use sce_forge_runtime::codec::SceCursor;
 // Named by the heap variants and by `judge`, which the handshake arms call.
 #[cfg(any(
@@ -59,6 +62,16 @@ use sce_forge_runtime::codec::SceCursor;
     feature = "codec-keep-alive"
 ))]
 use wz_codecs::ext_entry::ExtEntryOwned;
+// The MID and flag constants: named by the heap `Oam` arm (`alloc`), by each
+// handshake arm of `ext_admission`, by `is_init_syn` and by the frame-head readers.
+#[cfg(any(
+    feature = "alloc",
+    feature = "codec-init-body",
+    feature = "codec-open-body",
+    feature = "codec-close",
+    feature = "codec-keep-alive",
+    feature = "codec-frame"
+))]
 use wz_codecs::wire_const;
 
 #[cfg(feature = "codec-close")]
