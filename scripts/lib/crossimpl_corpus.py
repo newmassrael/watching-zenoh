@@ -87,6 +87,9 @@ FOREIGN_ROOTS = {
     # Open-debt item 913 — the same CLIs built with `Z_FEATURE_MULTICAST_DECLARATIONS=1`, the
     # reference for wz's `multicast-declarations` build: a feature-variant pico oracle.
     "zenoh_pico_mcdecl_cli_binary": "pico",
+    # Open-debt items 911 and 913 — the CLIs built with `Z_FEATURE_RAWETH_TRANSPORT=1`, the
+    # reference for wz's `raweth-transport` build.
+    "zenoh_pico_reth_cli_binary": "pico",
     "zenohd_binary": "zenohd",
     "zenohd_unixpipe_binary": "zenohd",
     "zenohd_vsock_binary": "zenohd",

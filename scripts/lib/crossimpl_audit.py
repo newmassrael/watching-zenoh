@@ -1121,7 +1121,10 @@ HOST_GATED_CI_TARGETS: dict[str, str] = {
 # `zenoh_c_peer_multicast_on_wz_capi.rs` libzenohc adjudicates the group pub/sub both ways and the
 # subscriber announcement, and zenohd the member wz reports; `pico_open_failure_on_wz_capi.rs`
 # holds wz's `z_open` codes to the real pico's. Measured by Layer A4, not counted by hand.
-FOREIGN_ADJUDICATOR_LINKS = 1071
+# Items 911 and 913 -- 1071 -> 1074, RISING by three: `pico_raweth_on_wz_capi.rs` runs
+# upstream's raweth scenario across the real pico library (its raweth arm) and wz's drop-in
+# both ways, and has the real `z_info.c` adjudicate the member wz reports. Measured by Layer A4.
+FOREIGN_ADJUDICATOR_LINKS = 1074
 
 # ── Execution disclosure ────────────────────────────────────────────────────────
 #

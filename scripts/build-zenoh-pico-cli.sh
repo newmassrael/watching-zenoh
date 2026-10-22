@@ -46,6 +46,9 @@ INSTALL_DIR="$ROOT/target/zenoh-pico-cli"
 # the provenance gate binds a root to its stamp by the variable the root is assigned to.
 BUILD_DIR_MCDECL="$ROOT/target/zenoh-pico-build-mcdecl"
 INSTALL_DIR_MCDECL="$ROOT/target/zenoh-pico-cli-mcdecl"
+# The arm built with Z_FEATURE_RAWETH_TRANSPORT (below), named for the same reason.
+BUILD_DIR_RETH="$ROOT/target/zenoh-pico-build-reth"
+INSTALL_DIR_RETH="$ROOT/target/zenoh-pico-cli-reth"
 
 # Curated CLI binary set: the four that the AP MVP demo round-trip
 # matrix needs (R121c+ integration tests). Adding more here costs
@@ -164,6 +167,8 @@ restore_pico_example_patches() {
         git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_sub_attachment.c 2>/dev/null || true
         git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_queryable.c 2>/dev/null || true
         git -C "$VENDOR_DIR" checkout -- examples/unix/c11/z_get.c 2>/dev/null || true
+        git -C "$VENDOR_DIR" checkout -- src/transport/raweth/read.c 2>/dev/null || true
+        git -C "$VENDOR_DIR" checkout -- src/api/api.c 2>/dev/null || true
     fi
 }
 trap restore_pico_example_patches EXIT
@@ -705,6 +710,40 @@ fi
 # filter, one that subscribes, one that answers, one that holds a token, one that gets.
 MCDECL_TARGETS=(z_pub z_sub z_queryable z_liveliness z_get z_info)
 
+# --- the RAW ETHERNET arm ----------------------------------------------------
+#
+# Open-debt items 911 and 913 — the reference arm with `Z_FEATURE_RAWETH_TRANSPORT=1`
+# (`-reth`; vendor default 0): a `reth/` endpoint opens a multicast transport over an
+# `AF_PACKET` socket. Linux only, as pico's raweth link is. Upstream's own scenario for it
+# runs a z_pub and a z_sub on `lo` as root (`vendor/zenoh-pico/tests/raweth.py` @
+# `z_sub_command = f"sudo stdbuf -oL -eL ./{DIR_EXAMPLES}/z_sub -n 10 -m \"peer\" -l \`); the
+# programs are built here and the legs that run them raise the privilege themselves. At the pin
+# the library cannot run that scenario at all; its build carries two patches to the library,
+# applied for this arm's build alone (`patch_raweth_library`, below).
+cmake -B "${BUILD_DIR_RETH}" -S "$EXAMPLES_DIR" \
+    -DCMAKE_C_STANDARD=11 \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DZ_FEATURE_UNSTABLE_API=ON \
+    -DZ_FEATURE_ADVANCED_PUBLICATION=1 \
+    -DZ_FEATURE_ADVANCED_SUBSCRIPTION=1 \
+    -DZ_FEATURE_LINK_SERIAL=1 \
+    -DZ_FEATURE_LINK_TLS=1 \
+    -DZ_FEATURE_CONNECTIVITY=1 \
+    -DZ_FEATURE_RAWETH_TRANSPORT=1 >&2
+
+GENERATED_CONFIG_RETH="${BUILD_DIR_RETH}/zenohpico/include/zenoh-pico/config.h"
+if [[ ! -f "$GENERATED_CONFIG_RETH" ]]; then
+    echo "build-zenoh-pico-cli: reth-arm config.h missing: $GENERATED_CONFIG_RETH" >&2
+    exit 1
+fi
+if ! grep -qx "#define Z_FEATURE_RAWETH_TRANSPORT 1" "$GENERATED_CONFIG_RETH"; then
+    echo "build-zenoh-pico-cli: the reth arm did NOT take Z_FEATURE_RAWETH_TRANSPORT" >&2
+    exit 1
+fi
+
+# The programs upstream's raweth scenario runs, and the one that lists a member's link.
+RETH_TARGETS=(z_pub z_sub z_info)
+
 # Build only the curated CLI targets (avoids the full examples target
 # set; faster + smaller install surface).
 cmake --build "$BUILD_DIR" --target "${TARGETS[@]}" -j"$(nproc)" >&2
@@ -733,6 +772,77 @@ for bin in "${MCDECL_TARGETS[@]}"; do
     install -m 0755 "$src" "${INSTALL_DIR_MCDECL}/$bin"
 done
 
+# The raw Ethernet arm's two library patches, the only patches here to the library rather than
+# to an example. Both make pico's raweth transport do what pico already does for its UDP group,
+# and each was MEASURED necessary with upstream's own scenario (`tests/raweth.py`) on the
+# unpatched arm:
+#
+# 1. The receive. Both raweth read paths hand it a source-address slice with no buffer behind
+#    it, the read task a NULL one (`vendor/zenoh-pico/src/transport/raweth/read.c` @
+#    `_z_slice_t addr = _z_slice_alias_buf(NULL, 0);`) and the single read an uninitialised
+#    one, and the receive copies the sender's MAC into it
+#    (`vendor/zenoh-pico/src/link/transport/udp/raweth_unix.c` @
+#    `(void)memcpy((uint8_t *)addr->start, (header_addr + ETH_ALEN), sizeof(ETH_ALEN));`): the
+#    scenario's z_sub died of SIGSEGV in `_z_receive_raweth` at the publisher's first frame.
+#    The transport already keeps the buffer, for both multicast transports alike
+#    (`vendor/zenoh-pico/src/transport/multicast/transport.c` @
+#    `ztm->_zbuf_addr = _z_slice_alias_buf(ztm->_zbuf_addr_buf, sizeof(ztm->_zbuf_addr_buf));`),
+#    and the UDP group's read hands it over (`vendor/zenoh-pico/src/transport/multicast/read.c` @
+#    `ret = _z_multicast_handle_transport_message(ztm, &t_msg, &ztm->_zbuf_addr);`).
+# 2. The write filter. Without multicast declarations no member asks a filter's interest, so a
+#    publisher, a delete and a querier on a multicast transport step past their filter, but the
+#    test names the UDP transport's type alone (`vendor/zenoh-pico/src/api/api.c` @
+#    `should_proceed = should_proceed || (session->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE);`):
+#    with the receive fixed, the scenario's z_pub still never put, its filter waiting on an
+#    interest no raweth member sends. The patch names the raweth transport's type beside it.
+#
+# `api.c` is every arm's, so both files are patched for this build and restored right after
+# it (and by the `EXIT` trap on a failure), and no other arm is compiled from them.
+patch_raweth_library() {
+    local read_src="$VENDOR_DIR/src/transport/raweth/read.c"
+    local api_src="$VENDOR_DIR/src/api/api.c"
+    if ! grep -qx "    _z_slice_t addr = _z_slice_alias_buf(NULL, 0);" "$read_src" \
+        || ! grep -qx "    _z_slice_t addr;" "$read_src" \
+        || [[ "$(grep -c "_tp._type == _Z_TRANSPORT_MULTICAST_TYPE ||" "$api_src")" != 2 ]] \
+        || ! grep -q "should_proceed || (session->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE);" "$api_src"; then
+        echo "build-zenoh-pico-cli: pico's raweth read.c or api.c changed shape; if the pin fixed" >&2
+        echo "  the receive or the filter, drop that patch, else re-verify it" >&2
+        echo "  (current: $(git -C "$VENDOR_DIR" rev-parse --short HEAD))." >&2
+        exit 2
+    fi
+    sed -i \
+        -e 's|^    _z_slice_t addr = _z_slice_alias_buf(NULL, 0);$|    _z_slice_t addr = ztm->_zbuf_addr;|' \
+        -e 's|^    _z_slice_t addr;$|    _z_slice_t addr = ztm->_zbuf_addr;|' \
+        "$read_src"
+    sed -i \
+        -e 's@_tp._type == _Z_TRANSPORT_MULTICAST_TYPE ||$@_tp._type == _Z_TRANSPORT_MULTICAST_TYPE || session->_tp._type == _Z_TRANSPORT_RAWETH_TYPE ||@' \
+        -e 's@should_proceed || (session->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE);@should_proceed || (session->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE) || (session->_tp._type == _Z_TRANSPORT_RAWETH_TYPE);@' \
+        "$api_src"
+    if [[ "$(grep -cx "    _z_slice_t addr = ztm->_zbuf_addr;" "$read_src")" != 2 ]] \
+        || [[ "$(grep -c "_Z_TRANSPORT_RAWETH_TYPE ||\|== _Z_TRANSPORT_RAWETH_TYPE);" "$api_src")" != 3 ]]; then
+        echo "build-zenoh-pico-cli: the raweth library patches failed to land" >&2
+        exit 2
+    fi
+    echo "build-zenoh-pico-cli: applied the raweth receive-address and write-filter patches" >&2
+}
+restore_raweth_library() {
+    git -C "$VENDOR_DIR" checkout -- src/transport/raweth/read.c src/api/api.c
+}
+
+# The raw Ethernet arm's programs, staged the same way into a root of their own.
+patch_raweth_library
+cmake --build "${BUILD_DIR_RETH}" --target "${RETH_TARGETS[@]}" -j"$(nproc)" >&2
+restore_raweth_library
+mkdir -p "${INSTALL_DIR_RETH}"
+for bin in "${RETH_TARGETS[@]}"; do
+    src="${BUILD_DIR_RETH}/$bin"
+    if [[ ! -x "$src" ]]; then
+        echo "build-zenoh-pico-cli: expected reth binary missing: $src" >&2
+        exit 1
+    fi
+    install -m 0755 "$src" "${INSTALL_DIR_RETH}/$bin"
+done
+
 # R2326 (unregistered open-debt item 10) — record WHICH vendor/zenoh-pico state
 # produced these artefacts.
 #
@@ -757,6 +867,8 @@ vendored_oracle_stamp_root "$INSTALL_DIR" "$_wzpico_token"
 vendored_oracle_stamp_root "$BUILD_DIR" "$_wzpico_token"
 vendored_oracle_stamp_root "${INSTALL_DIR_MCDECL}" "$_wzpico_token"
 vendored_oracle_stamp_root "${BUILD_DIR_MCDECL}" "$_wzpico_token"
+vendored_oracle_stamp_root "${INSTALL_DIR_RETH}" "$_wzpico_token"
+vendored_oracle_stamp_root "${BUILD_DIR_RETH}" "$_wzpico_token"
 
 # R2327b — verify the contract this script has just asserted, HERE, rather than
 # leaving a hosted lane to discover it. R2326 shipped a stamp that could never
@@ -777,6 +889,10 @@ vendored_oracle_assert_fresh "$BUILD_DIR" build-zenoh-pico-cli \
 vendored_oracle_assert_fresh "${INSTALL_DIR_MCDECL}" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 vendored_oracle_assert_fresh "${BUILD_DIR_MCDECL}" build-zenoh-pico-cli \
+    vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
+vendored_oracle_assert_fresh "${INSTALL_DIR_RETH}" build-zenoh-pico-cli \
+    vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
+vendored_oracle_assert_fresh "${BUILD_DIR_RETH}" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 
 echo "build-zenoh-pico-cli: installed ${#TARGETS[@]} binaries to $INSTALL_DIR" >&2

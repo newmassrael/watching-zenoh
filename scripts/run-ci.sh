@@ -17735,6 +17735,30 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     _runci_guarded_test "M pico open failure codes on wz" 1 \
         cargo test -p wz-integration-tests \
         --test pico_open_failure_on_wz_capi -- --ignored || return 1
+    # Open-debt items 911 and 913 — zenoh-pico's raw Ethernet transport: upstream's own scenario
+    # (`tests/raweth.py`) across the real library and wz's drop-in both ways, and `z_info.c`
+    # reporting the real publisher as a member line for line. Each program runs under
+    # `sudo -n`, as upstream's scenario runs it, because an `AF_PACKET` socket needs
+    # CAP_NET_RAW; a host without non-interactive sudo SKIPs, FATAL under WZ_M_REQUIRE. The
+    # drop-in is built from the raweth arm's config.h, the reference arm being built (with its
+    # two library patches) by `scripts/build-zenoh-pico-cli.sh`. Count-guarded at 3.
+    if sudo -n true 2>/dev/null; then
+        local reth_features
+        reth_features=$(python3 scripts/lib/capability_config.py --features pico \
+            target/zenoh-pico-build-reth/zenohpico/include/zenoh-pico/config.h) || return 1
+        local -a reth_args
+        read -ra reth_args <<< "$reth_features"
+        (cd crates && cargo build -p wz-capi-pico --quiet "${reth_args[@]}" \
+            --target-dir target/wz-capi-pico-reth) || return 1
+        _runci_guarded_test "M pico raweth scenario on wz" 3 \
+            cargo test -p wz-integration-tests \
+            --test pico_raweth_on_wz_capi -- --ignored --test-threads=1 || return 1
+    elif (( m_required )); then
+        echo "  Layer M FAIL: no non-interactive sudo for the raweth legs, but WZ_M_REQUIRE=1" >&2
+        return 1
+    else
+        echo "Layer M SKIP pico raweth scenario on wz (no non-interactive sudo for CAP_NET_RAW)"
+    fi
     # Open-debt item 913 — the zenoh-c ABI's group: a stock zenohd joins
     # `udp/224.0.0.226:7451#iface=lo`, and upstream's `z_info.c` (events) and its printers
     # (listing) report it, once on libzenohc and once on wz's drop-in, which must agree block

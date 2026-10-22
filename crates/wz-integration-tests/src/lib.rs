@@ -966,6 +966,10 @@ pub mod common {
         /// arm whose pico is BUILT as well as configured, for the reference programs
         /// ([`zenoh_pico_mcdecl_cli_binary`]) and library ([`zenoh_pico_mcdecl_library_dir`]).
         McastDeclarations,
+        /// The reference arm with `Z_FEATURE_RAWETH_TRANSPORT=1` (`-reth`): no struct changes,
+        /// and wz's build with `raweth-transport` (open-debt items 911 and 913). Built as well
+        /// as configured, for the reference programs ([`zenoh_pico_reth_cli_binary`]).
+        RawEth,
     }
 
     impl PicoHeaderArm {
@@ -977,6 +981,7 @@ pub mod common {
                 Self::UpstreamDefault => "-default",
                 Self::Local => "-local",
                 Self::McastDeclarations => "-mcdecl",
+                Self::RawEth => "-reth",
             }
         }
 
@@ -988,6 +993,7 @@ pub mod common {
                 Self::UpstreamDefault => "target/wz-capi-pico-default",
                 Self::Local => "target/wz-capi-pico-local",
                 Self::McastDeclarations => "target/wz-capi-pico-mcdecl",
+                Self::RawEth => "target/wz-capi-pico-reth",
             }
         }
 
@@ -996,7 +1002,7 @@ pub mod common {
             match self {
                 Self::MultiThreaded => zenoh_pico_include_dirs(),
                 Self::SingleThreaded => zenoh_pico_include_dirs_single_threaded(),
-                Self::UpstreamDefault | Self::Local | Self::McastDeclarations => {
+                Self::UpstreamDefault | Self::Local | Self::McastDeclarations | Self::RawEth => {
                     let root = project_root();
                     let generated = root.join(format!(
                         "target/zenoh-pico-build{}/zenohpico/include",
@@ -1013,11 +1019,12 @@ pub mod common {
                     // TLS headers; upstream's default has TLS off, and its third slot
                     // repeats the vendored headers rather than naming a directory the
                     // arm does not use.
-                    let third = if matches!(self, Self::Local | Self::McastDeclarations) {
-                        mbedtls_include_dir()
-                    } else {
-                        vendored.clone()
-                    };
+                    let third =
+                        if matches!(self, Self::Local | Self::McastDeclarations | Self::RawEth) {
+                            mbedtls_include_dir()
+                        } else {
+                            vendored.clone()
+                        };
                     [generated, vendored, third]
                 }
             }
@@ -1794,6 +1801,22 @@ pub mod common {
     /// [`zenoh_pico_cli_binary`] is.
     pub fn zenoh_pico_mcdecl_cli_binary(name: &str) -> PathBuf {
         let root = project_root().join("target/zenoh-pico-cli-mcdecl");
+        let path = root.join(name);
+        assert!(
+            path.is_file(),
+            "{name} binary missing at {}; run scripts/build-zenoh-pico-cli.sh first",
+            path.display()
+        );
+        assert_zenoh_pico_oracle_fresh(&root);
+        path
+    }
+
+    /// Open-debt items 911 and 913 — a zenoh-pico CLI of the RAW ETHERNET arm
+    /// (`Z_FEATURE_RAWETH_TRANSPORT=1`, `target/zenoh-pico-cli-reth`), the reference a leg of
+    /// wz's build with `raweth-transport` is held to. Checked fresh as
+    /// [`zenoh_pico_cli_binary`] is.
+    pub fn zenoh_pico_reth_cli_binary(name: &str) -> PathBuf {
+        let root = project_root().join("target/zenoh-pico-cli-reth");
         let path = root.join(name);
         assert!(
             path.is_file(),

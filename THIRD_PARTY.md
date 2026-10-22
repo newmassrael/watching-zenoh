@@ -189,6 +189,24 @@ changelog that authorized the bump.
   one EXIT trap), which reverts all four files via `git checkout` on
   exit. Same harness-only scope as the R216 patch: runtime FFI use via
   `crates/zenoh-pico-sys` is unaffected.
+- **Build-time divergence (open-debt items 911 and 913)**: two patches to
+  the LIBRARY rather than to an example, for the raw Ethernet reference
+  arm (`target/zenoh-pico-build-reth`) alone. At the pin pico's raweth
+  transport cannot run upstream's own scenario, `tests/raweth.py`, and
+  each patch was measured necessary with it:
+  `src/transport/raweth/read.c` — both raweth read paths hand the
+  receive a source-address slice with no buffer behind it, and the
+  receive copies the sender's MAC into it, so the scenario's z_sub died
+  of SIGSEGV in `_z_receive_raweth` at the first frame; the patch hands
+  both reads the buffer the multicast transport already keeps
+  (`ztm->_zbuf_addr`), as the UDP group's read does.
+  `src/api/api.c` — without multicast declarations a publisher, a delete
+  and a querier on a multicast transport step past their write filter,
+  but the test names the UDP transport's type alone, so with the receive
+  fixed the scenario's z_pub still never put; the patch names the raweth
+  transport's type beside it. `api.c` is every arm's, so the build script
+  patches both files for the raweth arm's build and restores them right
+  after it (and on exit); no other arm is compiled from them.
 
 ## vendor/lwip — lightweight TCP/IP stack
 
