@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The compiler that emits rustdoc JSON, as data. Read by
+# scripts/lib/rust_api_surface.py and by nothing else.
+#
+# rustdoc's JSON output is available on nightly only, and its format changes
+# between nightlies (the `format_version` field). Two public surfaces are
+# comparable only when one compiler emitted both, so this toolchain is pinned by
+# DATE rather than named `nightly`, and the format version it emits is pinned
+# beside it: a reader refuses JSON of any other version instead of guessing at
+# a layout it was not written for. This is separate from rust-toolchain.toml,
+# which pins the compiler every wz build uses; this one is used for nothing but
+# the JSON (owner decision 2026-10-22: a dated nightly, not RUSTC_BOOTSTRAP on
+# the pinned stable).
+#
+# Moving it is a round of its own: install the new date, re-emit every
+# committed surface under deploy/upstream-api/, and read the diff, which should
+# be empty unless the normaliser changed.
+RUSTDOC_JSON_TOOLCHAIN=nightly-2026-06-07
+RUSTDOC_JSON_FORMAT_VERSION=57

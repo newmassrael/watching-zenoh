@@ -906,6 +906,9 @@ round_fed_gates=(
     # manifests, deploy/capabilities.toml and the pico submodule's CMakeLists. A text read
     # plus one `cargo metadata --no-deps`, no build.
     "upstream_switch_map.py"
+    # R3406 -- the committed public-API surfaces of the pinned zenoh crate. Round-fed by
+    # deploy/upstream-api/ and scripts/rustdoc-json.pin. A text read, no build.
+    "rust_api_surface.py"
     "upstream_link_axis_gate.py --check"
     "upstream_link_config_keys_gate.py --check"
     # R2973 -- which hosts each link runs on, against upstream's own gates at the

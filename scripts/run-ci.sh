@@ -3508,6 +3508,11 @@ layer_c0_test_discipline() {
     # runs here; the zenoh-c arm needs the provisioned checkout and runs in Layer C1cc.
     python3 scripts/lib/upstream_switch_map.py --selftest || return 1
     python3 scripts/lib/upstream_switch_map.py || return 1
+    # R3406 (open-debt item 910) -- the committed public-API surfaces of the pinned zenoh
+    # crate: every arm present, each stamped with the pinned toolchain and format version.
+    # The re-emission from upstream runs in Layer Z, where the source is.
+    python3 scripts/lib/rust_api_surface.py --selftest || return 1
+    python3 scripts/lib/rust_api_surface.py || return 1
     # R2240 (unregistered open-debt item 592, completion condition 2) — every
     # zenohd ORACLE this tree builds must answer with the version this tree
     # PINS. The binaries are gitignored build output, so R2228 moving
@@ -18321,6 +18326,19 @@ layer_z_zenohd_interop() {
              "feature and which direction"
         return 1
     fi
+    # R3406 (open-debt item 910) — the pinned zenoh crate's public Rust API, re-emitted from
+    # the same source with the dated nightly scripts/rustdoc-json.pin names and compared with
+    # the committed surfaces in deploy/upstream-api/. The toolchain is installed here, by the
+    # pin, and without letting rustup update itself: a run must not change the machine it
+    # grades on.
+    local rdj_toolchain
+    rdj_toolchain="$(sed -n 's/^RUSTDOC_JSON_TOOLCHAIN=//p' scripts/rustdoc-json.pin)"
+    if [[ -z "$rdj_toolchain" ]]; then
+        echo "  Z FAIL: scripts/rustdoc-json.pin names no RUSTDOC_JSON_TOOLCHAIN"
+        return 1
+    fi
+    rustup toolchain install "$rdj_toolchain" --profile minimal --no-self-update || return 1
+    python3 scripts/lib/rust_api_surface.py --upstream || return 1
     # R311y839 — the CLOSE SCOPE witness, run HERE: above every pico-CLI check
     # below, because it needs zenohd and nothing else, and a SKIP on an absent
     # z_sub would take a zenohd-only measurement down with it.
