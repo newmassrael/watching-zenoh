@@ -17,6 +17,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     compile_pico_source, zenoh_pico_include_dirs, zenoh_pico_library_dir, PicoHeaderArm,
 };
@@ -49,7 +50,7 @@ int main(int argc, char **argv) {
 fn open_code(exe: &Path, mode: &str, key: &str, endpoint: &str) -> String {
     let out = Command::new(exe)
         .args([mode, key, endpoint])
-        .output()
+        .output_bounded()
         .unwrap_or_else(|e| panic!("cannot run {}: {e}", exe.display()));
     String::from_utf8_lossy(&out.stdout)
         .lines()

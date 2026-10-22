@@ -5122,12 +5122,16 @@ layer_c1b_cargo_test_alloc() {
 # only the wider leg would let the narrower one rot into a compile the lane
 # never runs; pinning only the narrower one is what this lane already had, and
 # it would have counted 5 while four new tests never ran anywhere.
+#
+# Open-debt item 913 added `a_member_interest_on_its_own_alias_is_answered`, a
+# group member's interest on the alias it declared, to the module under both gates:
+# 6 and 10.
 layer_c1c_cargo_test_codec_declare() {
     (cd crates && cargo test -p wz-session-core --features codec-declare --quiet) || return 1
-    _runci_guarded_test C1c 5 \
+    _runci_guarded_test C1c 6 \
         cargo test -p wz-session-core --features declare-subscriber \
         --lib sub_interest_reply_tests --quiet || return 1
-    _runci_guarded_test C1c 9 \
+    _runci_guarded_test C1c 10 \
         cargo test -p wz-session-core --features declare-subscriber,declare-undeclare \
         --lib sub_interest_reply_tests --quiet || return 1
     _runci_guarded_test C1c 1 \

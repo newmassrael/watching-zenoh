@@ -289,6 +289,10 @@ transport-link-unixpipe,transport-link-ws|"
     # were compiled by no lane until this row -- the census reported them as
     # claimed by nothing. The filter is empty: every test of the build runs.
     "wz-capi-core|hook|access-extauth-usrpwd,interceptors|"
+    # Open-debt item 913 -- a group joined over raw Ethernet labels its member by the
+    # `reth/` locator of its MAC. `raweth-transport` is off by default, so that test was
+    # compiled by no leg. The filter is the module path, so a test added there is covered.
+    "wz-capi-core|hook|raweth-transport|faces::multicast::"
     # R2524 — `dissect` -> `dissect,fixtures`, and the route here is the point.
     # R2520 added the `fixtures` feature (the shared item-713 captures, which a
     # `#[cfg(test)]` fixture cannot carry across a crate boundary) and did NOT
