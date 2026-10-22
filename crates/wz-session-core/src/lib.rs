@@ -1919,6 +1919,17 @@ pub mod session_slot_pool_mcu {
 #[cfg(feature = "session-multicast")]
 pub mod multicast_dispatch;
 
+/// Open-debt item 913 — each multicast member's declarations kept apart for the session's
+/// observer, which sees no member: the dispatcher scopes their ids by member and retracts what a
+/// departing member held. Crate-private; reached through
+/// `multicast_dispatch::MulticastDispatcher::scope_member_declarations`.
+#[cfg(all(
+    feature = "session-multicast",
+    feature = "alloc",
+    feature = "codec-declare"
+))]
+mod multicast_member_scope;
+
 /// R311kt — the multicast JOIN datagram surface (encode the periodic TX
 /// beacon, decode the RX classify view, validate the §3.2 rejection
 /// rules), hoisted from `wz-runtime-tokio::multicast_glue` so both

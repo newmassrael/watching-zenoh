@@ -489,6 +489,11 @@ impl MulticastPeerActions for PeerBinding {
 /// holds a live peer (FSM != Free) and `None` when the slot is free.
 struct PeerSlot {
     engine: Engine<MulticastPeerPolicy<PeerBinding>>,
+    /// Open-debt item 913 — the declarations this member handed the session's observer, while
+    /// the dispatcher keeps members apart ([`MulticastDispatcher::scope_member_declarations`]).
+    /// `None` for a free slot and on a dispatcher that does not.
+    #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+    member: Option<crate::multicast_member_scope::MemberDeclarations>,
     /// The peer's transport SOURCE ADDRESS — the slot's primary key. `Some`
     /// while allocated, `None` when Free. Multicast Frame / KeepAlive /
     /// Close carry no zid on the wire, so the peer is FOUND by its datagram
@@ -622,6 +627,8 @@ impl PeerSlot {
         engine.initialize();
         Self {
             engine,
+            #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+            member: None,
             src: None,
             zid: None,
             last_seen_ms: 0,
@@ -830,6 +837,14 @@ pub struct MulticastDispatcher<const MAX_PEERS: usize> {
     /// [`Self::set_ingress_gate`].
     #[cfg(feature = "multicast-ingress-gate")]
     ingress_gate: Option<MulticastIngressGate>,
+    /// Open-debt item 913 — the tags members are admitted under, while the dispatcher keeps
+    /// their declarations apart ([`Self::scope_member_declarations`]); `None` while it does not.
+    #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+    member_tags: Option<crate::multicast_member_scope::MemberTags>,
+    /// The undeclarations of what departed members held, until the host takes them
+    /// ([`Self::take_member_retractions`]).
+    #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+    member_retractions: alloc::vec::Vec<crate::network_message::NetworkMessage>,
 }
 
 /// The predicate a host installs on a [`MulticastDispatcher`] to admit or drop each inbound
@@ -861,6 +876,77 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             namespace: None,
             #[cfg(feature = "multicast-ingress-gate")]
             ingress_gate: None,
+            #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+            member_tags: None,
+            #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+            member_retractions: alloc::vec::Vec::new(),
+        }
+    }
+
+    /// Open-debt item 913 — keep each member's declarations apart for the session's observer
+    /// (call on the owned dispatcher before the drive loop spins, as [`Self::set_namespace`]
+    /// is): every subscriber, queryable and token id a member declares or retracts reaches the
+    /// observer scoped by the member ([`Self::apply_member_scope`]), and when the member leaves
+    /// or the link goes, an undeclaration of each it still holds is made
+    /// ([`Self::take_member_retractions`]). A host whose observer is one session's, as a C
+    /// session's group face is, wants it: two zenoh-pico members number their entities alike,
+    /// and zenoh-pico keys what a member declared by the member as well as the id
+    /// (`vendor/zenoh-pico/src/net/filtering.c` @
+    /// `_z_filter_target_t target = {.decl_id = msg->id, .peer = (uintptr_t)peer};`). A host
+    /// that hands the ids on, as a router does to its other faces, must not: the scoped ids are
+    /// wider than the 32 bits both upstreams number an entity in.
+    #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+    pub fn scope_member_declarations(&mut self) {
+        if self.member_tags.is_none() {
+            self.member_tags = Some(crate::multicast_member_scope::MemberTags::new());
+        }
+    }
+
+    /// Scope the declarations of the batch the member at `src` sent
+    /// ([`Self::scope_member_declarations`]). A no-op on a dispatcher that does not keep members
+    /// apart, or for an address no member holds.
+    #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+    pub fn apply_member_scope(
+        &mut self,
+        src: SocketAddr,
+        outcome: &mut crate::driver_loop::DriverLoopOutcome,
+    ) {
+        let crate::driver_loop::DriverLoopOutcome::FramePayload { messages, .. } = outcome else {
+            return;
+        };
+        if let Some(member) = self
+            .peers
+            .iter_mut()
+            .find(|p| p.matches_src(src))
+            .and_then(|slot| slot.member.as_mut())
+        {
+            member.scope(messages);
+        }
+    }
+
+    /// The undeclarations of what the members that left since the last call held, as one batch
+    /// for the session's observer, or `None` when there are none.
+    #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+    pub fn take_member_retractions(&mut self) -> Option<crate::driver_loop::DriverLoopOutcome> {
+        if self.member_retractions.is_empty() {
+            return None;
+        }
+        Some(crate::driver_loop::DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: core::mem::take(&mut self.member_retractions),
+            has_ext: false,
+            extensions: alloc::vec::Vec::new(),
+            priority: crate::qos::Priority::DEFAULT,
+        })
+    }
+
+    /// Hold the undeclarations of what the member in slot `idx` declared, for
+    /// [`Self::take_member_retractions`]; the slot is about to be freed.
+    #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+    fn retire_member(&mut self, idx: usize) {
+        if let Some(member) = self.peers[idx].member.take() {
+            self.member_retractions.extend(member.retractions());
         }
     }
 
@@ -1275,6 +1361,12 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         let release = duties.has(SessionBinding::RELEASE_LINK);
         if release {
             self.running = false;
+            // Open-debt item 913 — the members go with the link, and what they declared with
+            // them, as zenoh-pico drops a peer's targets when its connection drops.
+            #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+            for idx in 0..MAX_PEERS {
+                self.retire_member(idx);
+            }
             self.peers = core::array::from_fn(|_| PeerSlot::new());
         }
         MulticastLinkDuties {
@@ -1371,6 +1463,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             None => return JoinOutcome::Refused(JoinRefuse::PeerTableFull),
         };
         self.peers[idx].admit(src, zid, baseline, qos_next_sns, now_ms);
+        #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+        if let Some(tags) = &mut self.member_tags {
+            self.peers[idx].member = Some(tags.admit());
+        }
         JoinOutcome::Admitted
     }
 
@@ -1645,6 +1741,8 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
     ) -> bool {
         match self.find_by_src(src) {
             Some(idx) => {
+                #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+                self.retire_member(idx);
                 self.peers[idx].evict(reason, on_lost);
                 true
             }
@@ -1702,6 +1800,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                 continue;
             }
             on_evict(idx);
+            #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+            if let Some(member) = slot.member.take() {
+                self.member_retractions.extend(member.retractions());
+            }
             slot.evict(MulticastPeerLostReason::LeaseExpired, &mut on_lost);
             expired += 1;
         }
@@ -1982,6 +2084,14 @@ pub(crate) fn ingest_multicast_fragment_counted<
         let o = {
             let mut o = o;
             dispatcher.apply_ingress_gate(&mut o);
+            o
+        };
+        // Open-debt item 913 — the reassembled batch's declarations scoped by member, as the
+        // whole-Frame seam's are.
+        #[cfg(feature = "codec-declare")]
+        let o = {
+            let mut o = o;
+            dispatcher.apply_member_scope(src, &mut o);
             o
         };
         // Item 751 — name the member the reassembled data is from, as the

@@ -403,6 +403,11 @@ where
                             MulticastPeerLostReason::CapabilitiesChanged,
                             |lost| on_event(IterationEvent::MulticastPeerLost(lost)),
                         );
+                        // Open-debt item 913 — and what it declared goes with it.
+                        #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+                        if let Some(retracted) = dispatcher.take_member_retractions() {
+                            on_event(IterationEvent::Poll(&retracted));
+                        }
                     }
                 }
             }
@@ -525,6 +530,11 @@ where
                             // or the feature off, is no work at all.
                             #[cfg(feature = "multicast-ingress-gate")]
                             dispatcher.apply_ingress_gate(&mut outcome);
+                            // Open-debt item 913 — this member's declarations scoped apart
+                            // from every other member's, on a dispatcher that keeps them
+                            // apart; after the namespace strip, which correlates the raw ids.
+                            #[cfg(feature = "codec-declare")]
+                            dispatcher.apply_member_scope(src, &mut outcome);
                             // Item 751 — name the member the data is from, so the
                             // observer's `Poll` is not anonymous.
                             if let Some(zid) = dispatcher.peer_zid_by_src(src) {
@@ -845,6 +855,11 @@ fn walk_multicast_inbound_reassembling<
                 dispatcher.close_by_src_with(src, |lost| {
                     on_event(IterationEvent::MulticastPeerLost(lost));
                 });
+                // Open-debt item 913 — and what it declared goes with it.
+                #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+                if let Some(retracted) = dispatcher.take_member_retractions() {
+                    on_event(IterationEvent::Poll(&retracted));
+                }
             }
         }
         // Every arm above is terminal for this unit: a Frame or a Fragment ate
@@ -888,6 +903,11 @@ pub fn sweep_multicast_reassembling<
         |idx| abort_peer_chains(reasm, idx),
         |lost| on_event(IterationEvent::MulticastPeerLost(lost)),
     );
+    // Open-debt item 913 — and what each expired member declared goes with it.
+    #[cfg(all(feature = "alloc", feature = "codec-declare"))]
+    if let Some(retracted) = dispatcher.take_member_retractions() {
+        on_event(IterationEvent::Poll(&retracted));
+    }
 }
 
 #[cfg(all(
