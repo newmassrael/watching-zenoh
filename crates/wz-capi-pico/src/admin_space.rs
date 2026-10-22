@@ -288,7 +288,8 @@ fn replies(identity: &Identity, faces: &[FaceSnapshot], query: &str) -> Vec<(Str
 }
 
 /// Push `(key, document)` when `key` intersects `query` and the document can be
-/// written; the document is not built for a key the query does not reach.
+/// written. `document` runs only for a key the query reaches, so a narrow query
+/// pays for the documents it asked for and no others.
 fn answer(
     out: &mut Vec<(String, String)>,
     query: &str,

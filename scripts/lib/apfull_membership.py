@@ -128,6 +128,11 @@ EXCLUSIONS = {
     # exclusion for it would now be false. It was not re-categorised or
     # re-worded: an `unbuilt` exclusion expires by being built, and this is what
     # that expiry looks like.
+    # R3416 — `api-compat-rust` (open-debt item 910): the zenoh crate's public Rust
+    # API as a drop-in over wz, declared as a reserved feature in R3410 with an
+    # UNBUILT reason and nothing behind it. Out of the preset until the
+    # compatibility crate exists; it comes in the way the two above did.
+    "api-compat-rust": ("unbuilt", "the Rust API compatibility crate is not built yet"),
 }
 
 

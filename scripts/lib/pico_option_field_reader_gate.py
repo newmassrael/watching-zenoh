@@ -113,6 +113,11 @@ UNREAD_WITH_REASON = {
     "zp_task_lease_options_t.task_attributes": (
         f"thread attributes of pico's lease task, itself a no-op in pico {REASONS_READ_AT}"
     ),
+    "zp_read_options_t.single_read": (
+        "bounds how much ONE zp_read call processes (one message or the whole batch); the wz "
+        "session reads continuously on its own runtime, so zp_read processes nothing and only "
+        "answers for a live session, and there is no per-call read to bound"
+    ),
     "z_query_reply_options_t.congestion_control": (
         "documented ignored by pico itself: a reply's congestion control is the query's"
     ),
@@ -234,6 +239,12 @@ def parse_structs(code):
         pieces.append(body[start:])
         fields = []
         for piece in pieces:
+            # R3416 -- a field's outer attributes are not its name. The header arms gate
+            # fields with `#[cfg(feature = "...")]`, and a piece that began with one matched
+            # nothing, so `z_open_options_t` lost its task fields and its admin-space flag.
+            piece = piece.lstrip()
+            while piece.startswith("#["):
+                piece = piece[balanced(piece, 1, "[", "]"):].lstrip()
             fm = re.match(r"\s*(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:\s*(.+)", piece, re.S)
             if fm:
                 fields.append((fm.group(1), fm.group(2)))
@@ -262,6 +273,36 @@ def parse_functions(code):
         body_end = balanced(code, j, "{", "}")
         fns.append((m.group(1), params, code[j + 1:body_end - 1]))
     return fns
+
+
+IMPL_RE = re.compile(r"\bimpl\s+(\w+_options_t)\s*\{")
+SELF_PARAM_RE = re.compile(r"\s*&?\s*(?:mut\s+)?self\b")
+
+
+def parse_methods(code, structs):
+    """`{struct: {method: {field}}}`: for each inherent method of an options struct
+    that takes `self`, the struct's fields it reads off `self`.
+
+    R3416 -- a field that exists in one header arm only is read through a method
+    spelled twice under complementary `cfg`s (`take_cancellation_token` reads
+    `self.cancellation_token` where the field exists and answers `None` where it
+    does not), so the caller names no field and compiles in both arms. A method
+    spelled twice reads the union of what its spellings read."""
+    methods = {}
+    for m in IMPL_RE.finditer(code):
+        struct = m.group(1)
+        if struct not in structs:
+            continue
+        body_end = balanced(code, m.end() - 1, "{", "}")
+        names = [f for f, _ in structs[struct]]
+        for fname, params, body in parse_functions(code[m.end():body_end - 1]):
+            if not SELF_PARAM_RE.match(params):
+                continue
+            got = methods.setdefault(struct, {}).setdefault(fname, set())
+            for fld in names:
+                if re.search(r"\bself\s*\.\s*" + re.escape(fld) + r"\b(?!\s*=[^=])", body):
+                    got.add(fld)
+    return methods
 
 
 def split_params(params):
@@ -298,6 +339,7 @@ def analyse(sources):
     code = "\n".join(strip_code(t) for t in sources.values())
     structs = parse_structs(code)
     fns = parse_functions(code)
+    methods = parse_methods(code, structs)
 
     def reads_through(struct, prefix, seen):
         """(struct.field, regex) for each field of `struct` reached from a receiver
@@ -318,6 +360,14 @@ def analyse(sources):
                 if ident in structs:
                     out.append((fld, ident))
         return out
+
+    def through(struct, prefix, seen):
+        """(receiver regex, struct) for `struct` at `prefix` and for every options
+        struct it embeds, each through the embedding field's name."""
+        yield prefix, struct
+        for fld, ident in embedded(struct):
+            if ident not in seen:
+                yield from through(ident, prefix + r"\s*\.\s*" + re.escape(fld), seen | {ident})
 
     def receivers(body, pname, struct):
         """Every expression in `body` that denotes a value of an options struct
@@ -386,6 +436,10 @@ def analyse(sources):
                     for key, field_rx in reads_through(typ, rx, {typ}):
                         if re.search(field_rx, body):
                             read.add(key)
+                    for path_rx, path_typ in through(typ, rx, {typ}):
+                        for method, fields in methods.get(path_typ, {}).items():
+                            if re.search(path_rx + r"\s*\.\s*" + re.escape(method) + r"\s*\(", body):
+                                read.update(f"{path_typ}.{f}" for f in fields)
     unread = set()
     for name, fields in structs.items():
         for fld, _ in fields:
@@ -490,6 +544,47 @@ def selftest():
     in_string = base.replace("(*o).x }", '(*o).x + "a.y".len() as i32 }')
     _, _, unread = analyse({"a.rs": in_string})
     assert unread == {"a_options_t.y"}, f"a field in a string is not a read: {unread}"
+
+    gated = """
+        pub struct a_options_t {
+            #[cfg(feature = "one")]
+            pub x: i32,
+            #[cfg(feature = "two")] #[allow(dead_code)]
+            pub y: i32,
+        }
+        pub unsafe extern "C" fn take_a(o: *const a_options_t) -> i32 { (*o).x }
+    """
+    structs, _, unread = analyse({"a.rs": gated})
+    assert [f for f, _ in structs["a_options_t"]] == ["x", "y"], (
+        f"a field behind attributes is still a field: {structs['a_options_t']}"
+    )
+    assert unread == {"a_options_t.y"}, f"an attributed field is read or unread like any other: {unread}"
+
+    # A method of the struct that reads a field off `self`, called on the parameter,
+    # reads that field; the same method left uncalled, or a same-named method of
+    # ANOTHER struct called on the parameter's embedded field, does not.
+    method = """
+        pub struct a_options_t { pub x: i32, pub y: i32 }
+        impl a_options_t {
+            #[cfg(feature = "one")]
+            unsafe fn take(&self) -> i32 { self.x }
+            #[cfg(not(feature = "one"))]
+            unsafe fn take(&self) -> i32 { 0 }
+            fn unused(&self) -> i32 { self.y }
+        }
+        pub unsafe extern "C" fn take_a(o: *const a_options_t) -> i32 { (*o).take() }
+    """
+    _, _, unread = analyse({"a.rs": method})
+    assert unread == {"a_options_t.y"}, f"a called method reads what it reads off self, an uncalled one nothing: {unread}"
+    method_collision = """
+        pub struct a_options_t { pub x: i32 }
+        impl a_options_t { fn take(&self) -> i32 { self.x } }
+        pub struct b_options_t { pub inner: a_options_t, pub x: i32 }
+        impl b_options_t { fn take(&self) -> i32 { self.x } }
+        pub unsafe extern "C" fn take_b(o: *const b_options_t) -> i32 { (*o).inner.take() }
+    """
+    _, _, unread = analyse({"a.rs": method_collision})
+    assert unread == {"b_options_t.x"}, f"a method is resolved on its receiver's type: {unread}"
 
     read_y = base.replace("(*o).x }", "(*o).x + (*o).y }")
     _, _, unread = analyse({"a.rs": read_y})

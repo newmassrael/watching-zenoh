@@ -304,6 +304,17 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "arms. Held to `ABI_CONTRACT` below rather than to this sentence",
         frozenset({"zenoh-c-no-unstable-api", "zenoh-c-shared-memory"}),
     ),
+    # R3416 -- `admin-space` (pico's `Z_FEATURE_ADMIN_SPACE`, off by default as upstream's is)
+    # gates `pub mod admin_space`, whose two public items are pico's `zp_start_admin_space` and
+    # `zp_stop_admin_space`, both `#[no_mangle] extern "C"`. It is the first non-default feature
+    # of this crate to gate a public item; the others gate private modules or default-on ones.
+    "wz-capi-pico": (
+        "a C ABI crate: its public contract is the SYMBOL SET a C program "
+        "links against, not a Rust path a consumer names, and that set is "
+        "measured against upstream's own library. Held to `ABI_CONTRACT` "
+        "below rather than to this sentence",
+        frozenset({"admin-space"}),
+    ),
     "wz-codecs-test-support": (
         "a test-support crate: `publish = false`, and NO workspace library "
         "consumes it -- every edge into it is a `dev-dependency`, so the only "
@@ -621,6 +632,13 @@ ABI_CONTRACT: dict[str, str] = {
         "arms a lane provisions an oracle for -- how many that is is derived "
         "per push by `scripts/lib/zenoh_c_census_arm_reach.py`, not asserted "
         "here (R2282 found this sentence claiming all four while one was run)"
+    ),
+    "wz-capi-pico": (
+        "the zenoh-pico drop-in cdylib; its symbol set is graded against "
+        "upstream's own libzenohpico.so by "
+        "`crates/wz-integration-tests/tests/pico_abi_symbol_census.rs`, which "
+        "names each symbol wz defines only behind a switch the oracle build "
+        "keeps off (the admin-space pair among them) rather than counting it"
     ),
 }
 
@@ -1039,6 +1057,8 @@ def axis_reachable_crate(pkg: str) -> str | None:
 # The set is no longer empty for exactly one row, and retiring it is a predicate for
 # "every workspace consumer of this package is a package this file already holds to
 # `ABI_CONTRACT`", which `wz-capi-pico` does not yet have a row for.
+# R3416 -- `wz-capi-pico` has that row now, so both workspace consumers of `wz-capi-core` are
+# held to `ABI_CONTRACT`; what is left is writing the predicate, not waiting for a row.
 PROSE_ONLY: frozenset[str] = frozenset({"wz-capi-core"})
 
 
