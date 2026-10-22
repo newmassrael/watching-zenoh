@@ -35,15 +35,17 @@
 #[cfg(feature = "alloc")]
 use alloc::boxed::Box;
 
-use wz_codecs::query::Query;
-use wz_codecs::query_ext_entry::{QueryExtEntry, QueryExtEntryVariant};
-use wz_codecs::request::{Request, RequestVariant};
+use wz_codecs::query::QueryView;
+use wz_codecs::query_ext_entry::{QueryExtEntryView, QueryExtEntryViewVariant};
+use wz_codecs::request::{RequestView, RequestViewVariant};
 
 use super::{DispatchOutcome, QueryEnvelope, QueryProjection, QueryableRegistry};
-use crate::ext_view::ExtEntryView;
+use crate::ext_view::{walked, ExtEntryView};
 use crate::query_sink::QuerySink;
 use crate::reply_stage::{FinalStage, FinalStaging, ReplyStage};
-use crate::wireexpr_resolve::{resolve_wireexpr_view, KeyexprBuf, KeyexprPastBound, MappingSpaces};
+use crate::wireexpr_resolve::{
+    resolve_wireexpr_viewed, KeyexprBuf, KeyexprPastBound, MappingSpaces,
+};
 
 /// Why a Request read in place is dispatched through its owned projection
 /// instead.
@@ -57,12 +59,12 @@ enum Fallback {
 /// Whether a Query's chain carries its value as a list of slices: the shape the
 /// owned path un-swaps before routing (`QueryableRegistry::unswap_query_value`
 /// reads the first value entry that has slices).
-fn has_sliced_value(exts: &[QueryExtEntry<'_>]) -> bool {
-    exts.iter().any(|ext| {
+fn has_sliced_value<'a>(exts: impl Iterator<Item = QueryExtEntryView<'a>>) -> bool {
+    exts.into_iter().any(|ext| {
         ext.eid() == crate::ext_header::body_eid::QUERY_VALUE
             && matches!(
                 &ext.body,
-                QueryExtEntryVariant::CodecZenohQueryValueZbuf(z) if z.slices.is_some()
+                QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(z) if z.slices.is_some()
             )
     })
 }
@@ -71,34 +73,39 @@ fn has_sliced_value(exts: &[QueryExtEntry<'_>]) -> bool {
 /// gate the owned projection reads it under. The shareable forms are `None`:
 /// the bytes are the link's, lent for the call, and a queryable that keeps them
 /// copies them.
-fn lent_projection<'q>(query: &'q Query<'q>) -> QueryProjection<'q> {
-    let exts: &[QueryExtEntry<'q>] = query.extensions.as_deref().unwrap_or(&[]);
+///
+/// The Query's chain is walked where it lies, once for each field that reads it: the attachment,
+/// the source info and the value each scan it for their own extension, as they scanned the held
+/// chain, and the bytes they hand out stay in the frame.
+fn lent_projection<'q>(query: &QueryView<'q>) -> QueryProjection<'q> {
     #[cfg(not(any(
         feature = "query-attachment",
         feature = "query-source-info",
         feature = "query-value"
     )))]
-    let _ = exts;
+    let _ = query.extensions;
     QueryProjection {
         #[cfg(feature = "query-selector-parameters")]
         parameters: query.parameters,
         #[cfg(not(feature = "query-selector-parameters"))]
         parameters: None,
         #[cfg(feature = "query-attachment")]
-        attachment: crate::attachment::decode_attachment_ext(
-            exts,
+        attachment: crate::attachment::decode_attachment_ext_in(
+            walked(query.extensions.as_ref()),
             crate::attachment::ATTACHMENT_EXT_ID_QUERY,
         ),
         #[cfg(not(feature = "query-attachment"))]
         attachment: None,
         #[cfg(feature = "query-source-info")]
-        source_info: crate::sample::extract_source_info(exts),
+        source_info: crate::sample::extract_source_info_in(walked(query.extensions.as_ref())),
         #[cfg(not(feature = "query-source-info"))]
         source_info: None,
         // A build with no heap does not project a query's value (its encoding is an
         // owned hint), nor a value or attachment held as shareable bytes.
         #[cfg(all(feature = "alloc", feature = "query-value"))]
-        plain_value: crate::query_value_ext::decode_query_value_ext(exts),
+        plain_value: crate::query_value_ext::decode_query_value_ext_in(walked(
+            query.extensions.as_ref(),
+        )),
         #[cfg(all(feature = "alloc", not(feature = "query-value")))]
         plain_value: None,
         #[cfg(feature = "alloc")]
@@ -116,14 +123,14 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
     /// one. See the module docs for what it hands to the owned projection.
     pub(super) fn dispatch_request_in_place(
         &mut self,
-        request: &Request<'_>,
+        request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
         pending_replies: &mut ReplyStage,
         pending_final_rids: &mut FinalStage,
     ) {
         // As the owned path: a Query that would owe a Final the table cannot
         // hold is refused before any queryable runs, and counted.
-        if matches!(request.body, RequestVariant::CodecZenohQuery(_))
+        if matches!(request.body, RequestViewVariant::CodecZenohQuery(_))
             && !pending_final_rids.has_room()
         {
             pending_final_rids.refuse_request();
@@ -136,7 +143,7 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
                     // the owned path reads it by.
                     pending_final_rids.owe(
                         request.rid,
-                        crate::declare_ext_qos::read_qos_in(request.extensions.as_deref()),
+                        crate::declare_ext_qos::read_qos_of(walked(request.extensions.as_ref())),
                     );
                 }
             }
@@ -152,7 +159,7 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
             Err(Fallback::SlicedValue | Fallback::KeyexprPastBound) => {
                 pending_final_rids.owe(
                     request.rid,
-                    crate::declare_ext_qos::read_qos_in(request.extensions.as_deref()),
+                    crate::declare_ext_qos::read_qos_of(walked(request.extensions.as_ref())),
                 );
             }
         }
@@ -162,30 +169,30 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
     /// Request where it lies.
     fn dispatch_lent(
         &mut self,
-        request: &Request<'_>,
+        request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
         replies: &mut ReplyStage,
     ) -> Result<DispatchOutcome, Fallback> {
         // Only the Query body arm reaches the table.
-        let RequestVariant::CodecZenohQuery(query) = &request.body else {
+        let RequestViewVariant::CodecZenohQuery(query) = &request.body else {
             return Ok(DispatchOutcome::NOT_DISPATCHED);
         };
-        if has_sliced_value(query.extensions.as_deref().unwrap_or(&[])) {
+        if has_sliced_value(walked(query.extensions.as_ref())) {
             return Err(Fallback::SlicedValue);
         }
         let mut composed = KeyexprBuf::new();
-        let keyexpr = match resolve_wireexpr_view(&request.keyexpr.body, spaces, &mut composed) {
+        let keyexpr = match resolve_wireexpr_viewed(&request.keyexpr.body, spaces, &mut composed) {
             Ok(Some(keyexpr)) => keyexpr,
             // The empty keyexpr, or an id the space does not hold: the query
             // never reaches the table and owes nothing, as on the owned path.
             Ok(None) => return Ok(DispatchOutcome::NOT_DISPATCHED),
             Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
         };
-        let outer = request.extensions.as_deref();
+        let outer = request.extensions.as_ref();
         let envelope = QueryEnvelope {
             rid: request.rid,
-            target: crate::request_routing_context::read_target_in(outer),
-            qos: crate::declare_ext_qos::read_qos_in(outer),
+            target: crate::request_routing_context::read_target_of(walked(outer)),
+            qos: crate::declare_ext_qos::read_qos_of(walked(outer)),
         };
         let matched =
             self.fire_projection(envelope, keyexpr, lent_projection(query), replies, true);
@@ -202,18 +209,21 @@ impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
     #[cfg(feature = "alloc")]
     fn dispatch_owned_projection(
         &mut self,
-        request: &Request<'_>,
+        request: &RequestView<'_>,
         spaces: MappingSpaces<'_>,
         pending_replies: &mut ReplyStage,
         pending_final_rids: &mut FinalStage,
     ) {
         // The wire profile is unbounded (`Heap`, or the AP's shared frame
-        // ranges), so this projection cannot refuse a decoded Request. It
-        // consumes its view; the clone is of the view, not of the bytes.
-        if let Ok(owned) = request
-            .clone()
-            .try_into_owned_in::<crate::wire::WireStorage>()
-        {
+        // ranges), so this projection cannot refuse a decoded Request. The
+        // view is first filled into the codec's own record (the heap profile has the stack
+        // for its 1.8 KB, and this is the path of a Request the lent form cannot hold), and
+        // that record consumes itself into the owned one.
+        let mut record = wz_codecs::request::Request::default();
+        if request.into_builder(&mut record).is_err() {
+            return;
+        }
+        if let Ok(owned) = record.try_into_owned_in::<crate::wire::WireStorage>() {
             self.dispatch_messages(
                 &[crate::network_message::NetworkMessage::Request(Box::new(
                     owned,
@@ -316,7 +326,7 @@ mod tests {
         let (mut owned_replies, mut owned_finals) = (ReplyStage::new(), FinalStage::new());
         owned.dispatch_messages(&messages, &peer, &mut owned_replies, &mut owned_finals);
         let (mut lent, lent_log) = recording();
-        let decoded = Request::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
+        let decoded = RequestView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
         let (mut lent_replies, mut lent_finals) = (ReplyStage::new(), FinalStage::new());
         lent.dispatch_iteration_event(
             IterationEvent::InPlace(InPlaceRecord::request_of_frame(
@@ -418,7 +428,7 @@ mod tests {
             .try_as_borrowed()
             .expect("a borrowed view")
             .encode_to_vec();
-        let decoded = Request::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
+        let decoded = RequestView::decode(&mut SceCursor::new(&wire)).expect("the record decodes");
         let (mut reg, log) = recording();
         let (mut replies, mut finals) = (ReplyStage::new(), FinalStage::new());
         for rid in 0..crate::caps::MAX_PENDING_FINALS as u64 {

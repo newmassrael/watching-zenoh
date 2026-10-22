@@ -658,7 +658,7 @@ enum LentRecord<'a> {
     #[cfg(feature = "codec-push")]
     Push(&'a wz_codecs::push::Push<'a>),
     #[cfg(feature = "codec-request")]
-    Request(&'a wz_codecs::request::Request<'a>),
+    Request(&'a wz_codecs::request::RequestView<'a>),
     #[cfg(feature = "codec-response")]
     Response(&'a wz_codecs::response::Response<'a>),
     #[cfg(all(feature = "session-slot", feature = "codec-declare"))]
@@ -754,7 +754,7 @@ impl<'a> InPlaceRecord<'a> {
         allow(dead_code)
     )]
     pub(crate) fn request_of_frame(
-        request: &'a wz_codecs::request::Request<'a>,
+        request: &'a wz_codecs::request::RequestView<'a>,
         reliable: bool,
         sn: u64,
         priority: crate::qos::Priority,
@@ -897,10 +897,11 @@ impl<'a> InPlaceRecord<'a> {
         }
     }
 
-    /// The Request, as it is decoded, its keyexpr, extensions and body ranges
-    /// of the frame. `None` when the record is of another kind.
+    /// The Request, as its view: its keyexpr and body ranges of the frame, and its extension chains as
+    /// the bytes they occupy, walked where they lie (a chain is not held, so a Request is a few words
+    /// however many extensions it may carry). `None` when the record is of another kind.
     #[cfg(feature = "codec-request")]
-    pub fn request(&self) -> Option<&'a wz_codecs::request::Request<'a>> {
+    pub fn request(&self) -> Option<&'a wz_codecs::request::RequestView<'a>> {
         match self.record {
             LentRecord::Request(request) => Some(request),
             #[allow(unreachable_patterns)]

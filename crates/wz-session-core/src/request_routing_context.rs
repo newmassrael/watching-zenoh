@@ -76,10 +76,19 @@ pub fn read_request_target(request: &RequestOwned) -> Option<QueryTarget> {
 
 /// [`read_request_target`] over any chain a reader can ask, the owned one or a
 /// Request's read where its frame lies: the one rule both read the target by.
+#[cfg(feature = "alloc")]
 pub(crate) fn read_target_in<E: crate::ext_view::ExtEntryView>(
     exts: Option<&[E]>,
 ) -> Option<QueryTarget> {
-    crate::ext_nodeid::read_z64_in(exts, TARGET_EXT_HEADER).and_then(QueryTarget::from_wire_byte)
+    exts.and_then(read_target_of)
+}
+
+/// [`read_target_in`] over the entries a chain yields, by reference or by value (a chain walked
+/// where its frame lies).
+pub(crate) fn read_target_of<E: crate::ext_view::ExtEntryView>(
+    exts: impl IntoIterator<Item = E>,
+) -> Option<QueryTarget> {
+    crate::ext_nodeid::read_z64_of(exts, TARGET_EXT_HEADER).and_then(QueryTarget::from_wire_byte)
 }
 
 /// The Request `ext_timeout` extension id — zenoh-pico's

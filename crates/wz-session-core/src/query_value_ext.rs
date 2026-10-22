@@ -102,10 +102,19 @@ pub fn encode_query_value_ext<S: CodecStorage>(
 /// slices' descriptor as though it were a value would deliver a few bytes of a
 /// buffer's address as the application's data.
 pub fn decode_query_value_ext<E: ExtEntryView>(extensions: &[E]) -> Option<(EncodingHint, &[u8])> {
+    decode_query_value_ext_in(extensions)
+}
+
+/// [`decode_query_value_ext`] over the entries a chain yields, by reference or by value (a chain
+/// walked where its frame lies): the payload stays where it lies, for as long as `'c`.
+pub fn decode_query_value_ext_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
+    extensions: impl IntoIterator<Item = T>,
+) -> Option<(EncodingHint, &'c [u8])> {
     // The value is told by its identity (`body_eid::QUERY_VALUE`), as upstream tells
     // it, and not by the id field its look-alikes share.
-    let bytes = crate::ext_view::find_by_eid(extensions, crate::ext_header::body_eid::QUERY_VALUE)?
-        .plain_zbuf()?;
+    let bytes =
+        crate::ext_view::find_by_eid_in(extensions, crate::ext_header::body_eid::QUERY_VALUE)?
+            .plain_zbuf_in()?;
     // The remainder after the encoding is the payload (pico takes
     // `_z_zbuf_len(zbf)` after `_z_encoding_decode`); the split is
     // `crate::encoding::split_value_body`'s, shared with the stats

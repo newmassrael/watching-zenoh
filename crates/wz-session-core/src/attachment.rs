@@ -120,7 +120,16 @@ pub fn encode_attachment_ext<S: CodecStorage>(
 /// of entry and the other messages' chains hold the generic one
 /// ([`crate::ext_view`]).
 pub fn decode_attachment_ext<E: ExtEntryView>(extensions: &[E], ext_id: u8) -> Option<&[u8]> {
-    crate::ext_view::find_by_eid(extensions, attachment_eid(ext_id))?.plain_zbuf()
+    decode_attachment_ext_in(extensions, ext_id)
+}
+
+/// [`decode_attachment_ext`] over the entries a chain yields, by reference or by value (a chain
+/// walked where its frame lies): the bytes stay where they lie, for as long as `'c`.
+pub fn decode_attachment_ext_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
+    extensions: impl IntoIterator<Item = T>,
+    ext_id: u8,
+) -> Option<&'c [u8]> {
+    crate::ext_view::find_by_eid_in(extensions, attachment_eid(ext_id))?.plain_zbuf_in()
 }
 
 /// The identity of the attachment extension of the carrier whose id is `ext_id`:

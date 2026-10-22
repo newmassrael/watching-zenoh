@@ -123,11 +123,19 @@ pub fn read_z64_in<E: crate::ext_view::ExtEntryView>(
     exts: Option<&[E]>,
     header: u8,
 ) -> Option<u64> {
+    read_z64_of(exts?, header)
+}
+
+/// [`read_z64_in`] over the entries a chain YIELDS, by reference (a held chain) or by value (one
+/// walked where its frame lies): the scan itself, which the held form is a call of.
+pub fn read_z64_of<E: crate::ext_view::ExtEntryView>(
+    exts: impl IntoIterator<Item = E>,
+    header: u8,
+) -> Option<u64> {
     let want = ext_eid(header);
-    exts?
-        .iter()
+    exts.into_iter()
         .filter(|ext| ext.eid() == want)
-        .find_map(crate::ext_view::ExtEntryView::zint)
+        .find_map(|ext| ext.zint())
 }
 
 /// Insert / replace / remove a `Z64`-bodied extension in a chain, by the

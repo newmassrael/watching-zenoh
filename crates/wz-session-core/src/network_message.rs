@@ -303,8 +303,34 @@ fn judge_chain<E: crate::ext_view::ExtEntryView>(
     carrier: crate::ext_admit::ExtCarrier,
     extensions: Option<&[E]>,
 ) -> crate::ext_admit::ExtAdmission {
-    extensions.map_or(crate::ext_admit::ExtAdmission::Admissible, |chain| {
-        crate::ext_admit::judge_ext_chain(carrier, chain.iter().map(|e| e.header()))
+    judge_headers(
+        carrier,
+        extensions.map(|chain| chain.iter().map(|e| e.header())),
+    )
+}
+
+/// [`judge_chain`] over the header bytes a chain yields, held or walked where its frame lies: the
+/// verdict reads the headers and nothing else of an entry.
+#[cfg(any(
+    feature = "alloc",
+    feature = "codec-declare",
+    feature = "codec-push",
+    all(
+        feature = "codec-frame",
+        feature = "session-slot",
+        any(
+            test,
+            feature = "session-unicast",
+            all(feature = "session-multicast", not(feature = "alloc"))
+        )
+    )
+))]
+fn judge_headers(
+    carrier: crate::ext_admit::ExtCarrier,
+    headers: Option<impl Iterator<Item = u8>>,
+) -> crate::ext_admit::ExtAdmission {
+    headers.map_or(crate::ext_admit::ExtAdmission::Admissible, |headers| {
+        crate::ext_admit::judge_ext_chain(carrier, headers)
     })
 }
 
@@ -573,18 +599,19 @@ fn push_view_admission(push: &wz_codecs::push::Push<'_>) -> crate::ext_admit::Ex
 }
 
 /// The chain a Request's body carries, for [`judge_request_chains`]: a Put's or a
-/// Del's (generic entries, `E`) or a Query's (the Query's own entries, `Q`).
-#[cfg(feature = "codec-request")]
+/// Del's (generic entries, `E`) or a Query's (the Query's own entries, `Q`). The owned message's;
+/// the Request read where its frame lies walks its chains (`request_view_admission`).
+#[cfg(all(feature = "alloc", feature = "codec-request"))]
 enum RequestBodyChain<'c, E, Q> {
     Put(Option<&'c [E]>),
     Del(Option<&'c [E]>),
     Query(Option<&'c [Q]>),
 }
 
-/// The verdict on a Request: its own chain, then its body's. One rule for the
-/// owned message ([`NetworkMessage::ext_admission`]) and the Request read where
-/// its frame lies (`request_view_admission`).
-#[cfg(feature = "codec-request")]
+/// The verdict on a Request: its own chain, then its body's. The same order
+/// `request_view_admission` judges the Request read where its frame lies in, over chains it
+/// walks and does not hold.
+#[cfg(all(feature = "alloc", feature = "codec-request"))]
 fn judge_request_chains<E: crate::ext_view::ExtEntryView, Q: crate::ext_view::ExtEntryView>(
     outer: Option<&[E]>,
     body: RequestBodyChain<'_, E, Q>,
@@ -639,17 +666,43 @@ fn judge_response_chains<E: crate::ext_view::ExtEntryView>(
     )
 ))]
 fn request_view_admission(
-    request: &wz_codecs::request::Request<'_>,
+    request: &wz_codecs::request::RequestView<'_>,
 ) -> crate::ext_admit::ExtAdmission {
-    use wz_codecs::request::RequestVariant as B;
-    let body = match &request.body {
-        B::CodecZenohMsgPut(put) => RequestBodyChain::Put(put.extensions.as_deref()),
-        B::CodecZenohMsgDel(del) => RequestBodyChain::Del(del.extensions.as_deref()),
-        B::CodecZenohQuery(query) | B::Default { body: query, .. } => {
-            RequestBodyChain::Query(query.extensions.as_deref())
-        }
-    };
-    judge_request_chains(request.extensions.as_deref(), body)
+    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N, ZenohBody as Z};
+    use crate::ext_view::walked;
+    use wz_codecs::request::RequestViewVariant as B;
+    // The rule of [`judge_request_chains`] -- the envelope's chain, then the body's -- over chains
+    // that are walked where the frame lies and not held, so no entry is decoded into a slot.
+    then_judge(
+        judge_headers(
+            C::Network(N::Request),
+            request
+                .extensions
+                .as_ref()
+                .map(|chain| walked(Some(chain)).map(|e| e.header)),
+        ),
+        || match &request.body {
+            B::CodecZenohMsgPut(put) => judge_headers(
+                C::Zenoh(Z::Put),
+                put.extensions
+                    .as_ref()
+                    .map(|chain| walked(Some(chain)).map(|e| e.header)),
+            ),
+            B::CodecZenohMsgDel(del) => judge_headers(
+                C::Zenoh(Z::Del),
+                del.extensions
+                    .as_ref()
+                    .map(|chain| walked(Some(chain)).map(|e| e.header)),
+            ),
+            B::CodecZenohQuery(query) | B::Default { body: query, .. } => judge_headers(
+                C::Zenoh(Z::Query),
+                query
+                    .extensions
+                    .as_ref()
+                    .map(|chain| walked(Some(chain)).map(|e| e.header)),
+            ),
+        },
+    )
 }
 
 /// [`NetworkMessage::ext_admission`] for a Response read where its frame lies.
@@ -1015,9 +1068,10 @@ pub(crate) enum WalkedRecord<'r> {
     /// A Push decoded where the payload lies, valid for the call.
     #[cfg(feature = "codec-push")]
     Push(&'r wz_codecs::push::Push<'r>),
-    /// A Request decoded where the payload lies, valid for the call.
+    /// A Request read where the payload lies, valid for the call: its view, which holds its extension
+    /// chains as the bytes they occupy and not as entries (the eager record is 1.8 KB).
     #[cfg(feature = "codec-request")]
-    Request(&'r wz_codecs::request::Request<'r>),
+    Request(&'r wz_codecs::request::RequestView<'r>),
     /// A Response decoded where the payload lies, valid for the call.
     #[cfg(feature = "codec-response")]
     Response(&'r wz_codecs::response::Response<'r>),
@@ -1252,11 +1306,24 @@ fn lend_request(
     cursor: &mut SceCursor<'_>,
     each: &mut impl FnMut(WalkedRecord<'_>) -> Result<(), crate::parse_error::InboundParseError>,
 ) -> Result<(), crate::parse_error::InboundParseError> {
-    // The decoded record is over a kilobyte (its extension vectors are inline), so it is decoded
-    // into the binding that lends it: `decode` returns it, and every hop a returned record takes
-    // (the `Ok(..)`, the caller's binding) is a copy of the whole record per query.
-    let mut request = wz_codecs::request::Request::default();
-    wz_codecs::request::Request::decode_into(cursor, &mut request)
+    // The record is read as its view: a few words and the bytes its chains occupy, where the eager
+    // record is over a kilobyte (its extension vectors are inline, sized for their declared
+    // maximum). `decode` refuses what `Request::decode` refuses, with the same error, so the
+    // walk of a chain afterwards cannot fail. It is decoded into the binding that lends it.
+    //
+    // A view is INVARIANT in the lifetime of the bytes it was read from (its lists hold functions
+    // that take a cursor over them), so it cannot be lent for the call while it is read from a
+    // cursor of the caller's lifetime. It is read from a cursor of its own over what remains, which
+    // lasts as long as the call, and the caller's cursor then moves past what it consumed.
+    let rest = cursor
+        .peek_slice(cursor.remaining())
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    let mut own = SceCursor::new(rest);
+    let mut request = wz_codecs::request::RequestView::default();
+    wz_codecs::request::RequestView::decode_into(&mut own, &mut request)
+        .map_err(crate::parse_error::InboundParseError::Codec)?;
+    cursor
+        .advance(rest.len() - own.remaining())
         .map_err(crate::parse_error::InboundParseError::Codec)?;
     admit_lent(request_view_admission(&request))?;
     each(WalkedRecord::Request(&request))

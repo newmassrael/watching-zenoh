@@ -911,8 +911,17 @@ pub fn extract_qos_in<E: crate::ext_view::ExtEntryView>(extensions: &[E]) -> Opt
 pub fn extract_source_info<E: crate::ext_view::ExtEntryView>(
     extensions: &[E],
 ) -> Option<SourceInfo> {
-    let ext = crate::ext_view::find_by_eid(extensions, crate::ext_header::body_eid::SOURCE_INFO)?;
-    decode_source_info_payload(ext.plain_zbuf()?)
+    extract_source_info_in(extensions)
+}
+
+/// [`extract_source_info`] over the entries a chain yields, by reference or by value (a chain
+/// walked where its frame lies).
+pub fn extract_source_info_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
+    extensions: impl IntoIterator<Item = T>,
+) -> Option<SourceInfo> {
+    let ext =
+        crate::ext_view::find_by_eid_in(extensions, crate::ext_header::body_eid::SOURCE_INFO)?;
+    decode_source_info_payload(ext.plain_zbuf_in()?)
 }
 
 /// Decode the ZBuf payload of a source-info extension into a typed

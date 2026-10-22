@@ -68,6 +68,68 @@ pub fn find_by_eid<E: ExtEntryView>(extensions: &[E], eid: u8) -> Option<&E> {
     extensions.iter().find(|ext| ext.eid() == eid)
 }
 
+/// A reference to an entry answers as the entry does, so that a reader written over the entries a
+/// chain YIELDS (`impl IntoIterator<Item: ExtEntryView>`) is the same reader for a slice
+/// (`slice.iter()` yields references) and for a chain read where its frame lies (a
+/// [`ListView`](sce_forge_runtime::view::ListView) yields entries by value).
+impl<T: ExtEntryView + ?Sized> ExtEntryView for &T {
+    fn header(&self) -> u8 {
+        (**self).header()
+    }
+
+    fn ext_id(&self) -> u8 {
+        (**self).ext_id()
+    }
+
+    fn enc(&self) -> u8 {
+        (**self).enc()
+    }
+
+    fn plain_zbuf(&self) -> Option<&[u8]> {
+        (**self).plain_zbuf()
+    }
+
+    fn zint(&self) -> Option<u64> {
+        (**self).zint()
+    }
+}
+
+/// An entry whose plain ZBuf bytes outlive the value that answers for them: [`ExtEntryView::plain_zbuf`]
+/// borrows from the entry it is asked of, which is no use to a reader that is handed entries one at a
+/// time and must give back bytes that stay where they lie (the attachment and the value of a Query
+/// read in place). `'c` is how long the bytes live: the slice a reference came from, or the frame a
+/// view was read from.
+pub trait ExtEntryBytes<'c>: ExtEntryView {
+    /// [`ExtEntryView::plain_zbuf`], for as long as `'c`.
+    fn plain_zbuf_in(&self) -> Option<&'c [u8]>;
+}
+
+impl<'c, T: ExtEntryView + ?Sized> ExtEntryBytes<'c> for &'c T {
+    fn plain_zbuf_in(&self) -> Option<&'c [u8]> {
+        // `self` is a `&&'c T`; the inner reference is `Copy` and outlives this call.
+        let entry: &'c T = self;
+        entry.plain_zbuf()
+    }
+}
+
+/// The entries of an optional chain a record carries where its frame lies, in order, each decoded as
+/// the walk reaches it: nothing for a record with no chain. What the readers written over the
+/// entries a chain yields are handed, in place of the slice a held chain would give them.
+pub fn walked<'a, E: 'a, const K: usize>(
+    chain: Option<&sce_forge_runtime::codec::ListView<'a, E, K>>,
+) -> impl Iterator<Item = E> + 'a {
+    chain.map(|list| list.iter()).into_iter().flatten()
+}
+
+/// [`find_by_eid`] over the entries a chain yields, by value or by reference: the first whose
+/// identity is `eid`.
+pub fn find_by_eid_in<'c, T: ExtEntryBytes<'c>>(
+    extensions: impl IntoIterator<Item = T>,
+    eid: u8,
+) -> Option<T> {
+    extensions.into_iter().find(|ext| ext.eid() == eid)
+}
+
 impl<S: CodecStorage> ExtEntryView for ExtEntryOwned<S> {
     fn header(&self) -> u8 {
         self.header
@@ -128,9 +190,54 @@ impl ExtEntryView for ExtEntry<'_> {
     }
 }
 
+/// The entry of a chain that is not held but WALKED (`wz_codecs::ext_entry::ExtEntryView`, the
+/// codec's view of an entry: this trait's name and that type's coincide, the type is spelled in
+/// full here for that reason). It answers every question as the entry it was read as does.
+impl ExtEntryView for wz_codecs::ext_entry::ExtEntryView<'_> {
+    fn header(&self) -> u8 {
+        self.header
+    }
+
+    fn ext_id(&self) -> u8 {
+        wz_codecs::ext_entry::ExtEntryView::ext_id(self)
+    }
+
+    fn enc(&self) -> u8 {
+        wz_codecs::ext_entry::ExtEntryView::enc(self)
+    }
+
+    fn plain_zbuf(&self) -> Option<&[u8]> {
+        use wz_codecs::ext_entry::ExtEntryViewVariant;
+        match &self.body {
+            ExtEntryViewVariant::CodecZenohExtZbuf(z) => Some(z.value),
+            _ => None,
+        }
+    }
+
+    fn zint(&self) -> Option<u64> {
+        use wz_codecs::ext_entry::ExtEntryViewVariant;
+        match &self.body {
+            ExtEntryViewVariant::CodecZenohExtZint(z) => Some(z.value),
+            _ => None,
+        }
+    }
+}
+
+impl<'a> ExtEntryBytes<'a> for wz_codecs::ext_entry::ExtEntryView<'a> {
+    fn plain_zbuf_in(&self) -> Option<&'a [u8]> {
+        use wz_codecs::ext_entry::ExtEntryViewVariant;
+        match &self.body {
+            ExtEntryViewVariant::CodecZenohExtZbuf(z) => Some(z.value),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(feature = "codec-request")]
 mod query {
-    use super::{CodecStorage, ExtEntryOwned, ExtEntryOwnedVariant, ExtEntryView, SceByteBuf};
+    use super::{
+        CodecStorage, ExtEntryBytes, ExtEntryOwned, ExtEntryOwnedVariant, ExtEntryView, SceByteBuf,
+    };
     use wz_codecs::query_ext_entry::{QueryExtEntryOwned, QueryExtEntryOwnedVariant};
     use wz_codecs::query_value_zbuf::QueryValueZbufOwned;
 
@@ -196,6 +303,49 @@ mod query {
             use wz_codecs::query_ext_entry::QueryExtEntryVariant;
             match &self.body {
                 QueryExtEntryVariant::CodecZenohExtZint(z) => Some(z.value),
+                _ => None,
+            }
+        }
+    }
+
+    /// A Query's entry as the walk of a chain yields it (`QueryExtEntryView`): the Query's chain read
+    /// where its frame lies and not held. The same answers as the entry it was read as.
+    impl ExtEntryView for wz_codecs::query_ext_entry::QueryExtEntryView<'_> {
+        fn header(&self) -> u8 {
+            self.header
+        }
+
+        fn ext_id(&self) -> u8 {
+            wz_codecs::query_ext_entry::QueryExtEntryView::ext_id(self)
+        }
+
+        fn enc(&self) -> u8 {
+            wz_codecs::query_ext_entry::QueryExtEntryView::enc(self)
+        }
+
+        fn plain_zbuf(&self) -> Option<&[u8]> {
+            use wz_codecs::query_ext_entry::QueryExtEntryViewVariant;
+            match &self.body {
+                // As on the owned entry: only the plain shape has `value`.
+                QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(z) => z.value,
+                _ => None,
+            }
+        }
+
+        fn zint(&self) -> Option<u64> {
+            use wz_codecs::query_ext_entry::QueryExtEntryViewVariant;
+            match &self.body {
+                QueryExtEntryViewVariant::CodecZenohExtZint(z) => Some(z.value),
+                _ => None,
+            }
+        }
+    }
+
+    impl<'a> ExtEntryBytes<'a> for wz_codecs::query_ext_entry::QueryExtEntryView<'a> {
+        fn plain_zbuf_in(&self) -> Option<&'a [u8]> {
+            use wz_codecs::query_ext_entry::QueryExtEntryViewVariant;
+            match &self.body {
+                QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(z) => z.value,
                 _ => None,
             }
         }

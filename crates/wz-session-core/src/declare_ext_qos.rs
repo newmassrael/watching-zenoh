@@ -194,12 +194,21 @@ fn read_qos_chain<S: CodecStorage>(exts: Option<&Vec<ExtEntryOwned<S>>>) -> QosL
 /// [`read_qos_chain`] over any chain a reader can ask, the owned one or one
 /// read where its message lies (a Request the in-place receive path lends):
 /// the one rule both read the `ext_qos` by.
+#[cfg(feature = "alloc")]
+pub(crate) fn read_qos_in<E: crate::ext_view::ExtEntryView>(exts: Option<&[E]>) -> QosLevel {
+    exts.map_or(QosLevel::DEFAULT, read_qos_of)
+}
+
+/// [`read_qos_in`] over the entries a chain yields, by reference or by value (a chain walked where
+/// its frame lies).
 #[cfg(any(
     feature = "alloc",
     all(feature = "codec-request", feature = "storage-profile")
 ))]
-pub(crate) fn read_qos_in<E: crate::ext_view::ExtEntryView>(exts: Option<&[E]>) -> QosLevel {
-    ext_nodeid::read_z64_in(exts, QOS_EXT_HEADER)
+pub(crate) fn read_qos_of<E: crate::ext_view::ExtEntryView>(
+    exts: impl IntoIterator<Item = E>,
+) -> QosLevel {
+    ext_nodeid::read_z64_of(exts, QOS_EXT_HEADER)
         .map(|v| QosLevel::from_raw(v as u8))
         .unwrap_or(QosLevel::DEFAULT)
 }

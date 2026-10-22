@@ -622,6 +622,24 @@ pub fn resolve_wireexpr_view<'k>(
     resolve_parts(arm, id, suffix, spaces, out)
 }
 
+/// [`resolve_wireexpr_view`] over a wireexpr read as its view
+/// (`WireexprView`): the same two arms, which the view holds as the codec's own arm types (a
+/// wireexpr has no list, so each arm is its own view). The arm is copied into the codec's variant
+/// (an id and a reference to the suffix, a few words) and the rule is the one rule.
+#[cfg(feature = "codec-request")]
+pub fn resolve_wireexpr_viewed<'k>(
+    body: &wz_codecs::wireexpr::WireexprViewVariant<'k>,
+    spaces: MappingSpaces<'k>,
+    out: &'k mut KeyexprBuf,
+) -> Result<Option<&'k str>, KeyexprPastBound> {
+    use wz_codecs::wireexpr::WireexprViewVariant as V;
+    let body = match body {
+        V::WireexprLocal(arm) => WireexprVariant::WireexprLocal(arm.clone()),
+        V::WireexprNonlocal(arm) => WireexprVariant::WireexprNonlocal(arm.clone()),
+    };
+    resolve_wireexpr_view(&body, spaces, out)
+}
+
 /// [`resolve_wireexpr_view`] over an OWNED wireexpr: what a declaration, an
 /// interest or a message decoded into its owned form carries. The rule is the
 /// same arm for arm and the answer is the same shape, a `&str` lent from the
