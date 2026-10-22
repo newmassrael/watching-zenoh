@@ -1156,6 +1156,11 @@ pub struct ZenohNodeConfig {
     /// `transport/multicast/qos/enabled`. wz's `--multicast-qos`. A real
     /// zenohd resolves this to `false`, so the default below is zenoh's.
     pub multicast_qos: bool,
+    /// Open-debt item 913 — `transport/multicast/join_interval`, in ms: how often a
+    /// multicast transport sends its JOIN. Read by the zenoh-c session for the groups it
+    /// joins ([`C_ABI_SESSION_HONOURED_KEYS`]); upstream's default is 2500
+    /// (`DEFAULT_CONFIG.json5` @ `join_interval: 2500,`).
+    pub multicast_join_interval_ms: u64,
     /// `transport/shared_memory/enabled`. wz's `--shm`.
     ///
     /// A real zenohd resolves this to **`true`** — measured — while the demo's
@@ -1467,6 +1472,7 @@ impl Default for ZenohNodeConfig {
             scouting_delay_ms: None,
             open_connect_scouted: None,
             multicast_qos: false,
+            multicast_join_interval_ms: 2_500,
             shared_memory: true,
             // Upstream's defaults (`DEFAULT_CONFIG.json5` @ `pool_size: 16777216,`).
             shm_transport_optimization: true,
@@ -2546,7 +2552,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     "transport/link/tx/threads",
     "transport/link/unixpipe/file_access_mask",
     "transport/multicast/compression/enabled",
-    "transport/multicast/join_interval",
+    // Open-debt item 913 — `transport/multicast/join_interval` LEFT this list for
+    // [`C_ABI_SESSION_HONOURED_KEYS`]: the zenoh-c session's groups beacon at it.
     "transport/multicast/max_sessions",
     "transport/shared_memory/mode",
     // R2230 (open-debt item 579) — the four `transport_optimization` knobs
@@ -2755,7 +2762,8 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // this is the first time it has been caught by an instrument rather than
     // by re-reading a group sentence.
     "transport/multicast/compression/enabled",
-    "transport/multicast/join_interval",
+    // Open-debt item 913 — `transport/multicast/join_interval` LEFT here, and its group
+    // below: the zenoh-c session reads it ([`C_ABI_SESSION_HONOURED_KEYS`]).
     "transport/multicast/max_sessions",
     "transport/shared_memory/mode",
     // R2230 (open-debt item 579) — the four `transport_optimization` knobs
@@ -2966,7 +2974,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         "TransportUnicastConf",
         &[
             "transport/multicast/compression/enabled",
-            "transport/multicast/join_interval",
+            // Open-debt item 913 — `transport/multicast/join_interval` LEFT this group:
+            // a group's beacon interval is a profile wz's multicast transport holds.
             "transport/multicast/max_sessions",
             "transport/shared_memory/mode",
             "transport/unicast/accept_pending",
@@ -3343,11 +3352,8 @@ pub const UNHONOURED_CITATION_LEDGER: &[(&str, &str, &str)] = &[
         "spawn_zenohd_sn_resolution",
     ),
     ("transport/link/tx/threads", "asserted-ignored", "ignored"),
-    (
-        "transport/multicast/join_interval",
-        "foreign-node-config",
-        "zenohd",
-    ),
+    // Open-debt item 913 — `transport/multicast/join_interval`'s row is GONE: the zenoh-c
+    // session honours the key now, and this ledger carries evidence for unhonoured keys.
     (
         "transport/unicast/accept_timeout",
         "not-this-key",
@@ -3597,11 +3603,16 @@ pub const DEEPENABLE_UPSTREAM_KEYS: &[&str] = &[
 /// the same reason the two keys above are here. `multihop` is not: it asks for a graph that
 /// floods more than one hop, which the plane this session holds does not build, and it stays
 /// among the keys wz does not honour.
+///
+/// Open-debt item 913 -- and `transport/multicast/join_interval`, how often each group the
+/// zenoh-c session joins sends its JOIN. The demo's groups take their interval from its command
+/// line, so it is the C ABI session's alone.
 pub const C_ABI_SESSION_HONOURED_KEYS: &[&str] = &[
     "scouting/gossip/autoconnect",
     "scouting/gossip/autoconnect_strategy",
     "scouting/gossip/enabled",
     "scouting/gossip/target",
+    "transport/multicast/join_interval",
     "transport/shared_memory/transport_optimization/enabled",
     "transport/shared_memory/transport_optimization/pool_size",
 ];
@@ -6844,6 +6855,10 @@ impl ZenohNodeConfig {
         if let Some(v) = want_bool(&doc, "transport/multicast/qos/enabled")? {
             out.multicast_qos = v;
             named.push("transport/multicast/qos/enabled");
+        }
+        if let Some(v) = want_u64(&doc, "transport/multicast/join_interval")? {
+            out.multicast_join_interval_ms = v;
+            named.push("transport/multicast/join_interval");
         }
         if let Some(v) = want_bool(&doc, "transport/shared_memory/enabled")? {
             out.shared_memory = v;
