@@ -638,6 +638,14 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
                     let _ = payload.tx.push(MulticastTxItem::Declare { declare });
                     Ok(())
                 }
+                // Open-debt item 913 — an interest the session asks the group (zenoh-pico asks
+                // one at open and one per write filter when its multicast declarations are on).
+                NetworkMessage::Interest(interest) => {
+                    let _ = payload.tx.push(MulticastTxItem::Interest {
+                        interest: Box::new(interest),
+                    });
+                    Ok(())
+                }
                 _ => {
                     let _ = priority;
                     Err(SendWireError::UnsupportedVariant)

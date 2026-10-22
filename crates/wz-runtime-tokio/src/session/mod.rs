@@ -625,6 +625,34 @@ pub enum GroupDeclaration {
     Token,
 }
 
+/// The declaration kinds an Interest asks for — what [`Session::ask`] takes.
+#[cfg(feature = "declare-interest")]
+pub use wz_session_core::interest_build::InterestKinds;
+
+/// Open-debt item 913 — how a group session names a key on the group: a keyexpr it declared to
+/// the group (`mapping_id`, never 0) followed by `suffix`, or the literal (`mapping_id` 0 and
+/// the whole key as `suffix`). zenoh-pico names a key by a declaration on its group only when
+/// its multicast declarations are on, and by the literal otherwise
+/// (`vendor/zenoh-pico/src/session/keyexpr.c` @ `#if Z_FEATURE_MULTICAST_DECLARATIONS == 0`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct GroupKey<'a> {
+    /// The declaration the key starts with, `0` for none.
+    pub mapping_id: u64,
+    /// What follows the declaration; the whole key when `mapping_id` is 0, `None` when the
+    /// declaration covers the whole key.
+    pub suffix: Option<&'a str>,
+}
+
+impl<'a> GroupKey<'a> {
+    /// The literal `keyexpr`, no declaration.
+    pub const fn literal(keyexpr: &'a str) -> Self {
+        Self {
+            mapping_id: 0,
+            suffix: Some(keyexpr),
+        }
+    }
+}
+
 /// R3069 -- how a chunk publish holds the payload it hands to its LOCAL leg: borrowed from a
 /// caller that goes on holding it, or handed over by one that gave it up. See
 /// [`Session::deliver_shm_local_owned`] for why the second exists.
@@ -2749,81 +2777,179 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     }
 
     /// Open-debt item 913 — announce the entity `what` to the group: a `Declare` of its kind with
-    /// id `id` and the literal `keyexpr`, answering no interest. What a session announces, and
+    /// id `id` on `key`, answering no interest. What a session announces, and
     /// with which id, is its ABI's: zenoh announces each subscriber with id 0
     /// (`zenoh/src/net/routing/hat/peer/pubsub.rs` @
     /// `// HACK(regions): if we have a multicast group, we use it to propagate subscribers to upstream gateways.`;
     /// MEASURED off the group's wire: `decl_subscriber(0, demo/mc/**)`), and zenoh-pico each
     /// subscriber, queryable and token with its own entity id, over whatever transport it holds
     /// (MEASURED: `decl_subscriber(1, demo/mc/**)`, `decl_queryable(1, demo/mc/q)`,
-    /// `decl_token(1, demo/mc/token)`). It routes nothing here: the group's data reaches every
-    /// member whatever it declared. `Err` for a key past the codec's bound, or a kind this build
-    /// cannot declare.
-    #[cfg(feature = "codec-push")]
+    /// `decl_token(1, demo/mc/token)`), each on the literal at pico's default and on the key it
+    /// declared to the group when its multicast declarations are on (MEASURED:
+    /// `decl_queryable(2, 1:)`). It routes nothing here: the group's data reaches every member
+    /// whatever it declared. `Err` for a key past the codec's bound, or a kind this build cannot
+    /// declare.
+    #[cfg(all(feature = "codec-push", feature = "codec-declare"))]
     pub fn announce(
         &self,
         what: GroupDeclaration,
         id: u64,
-        keyexpr: &str,
+        key: GroupKey<'_>,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
         use wz_session_core::send_wire_error::SendWireError;
+        let GroupKey { mapping_id, suffix } = key;
         let declare = match what {
             #[cfg(feature = "declare-subscriber")]
             GroupDeclaration::Subscriber => {
-                wz_session_core::declare_build::build_declare_subscriber(id, 0, Some(keyexpr))
+                wz_session_core::declare_build::build_declare_subscriber(id, mapping_id, suffix)
             }
             #[cfg(feature = "declare-queryable")]
             GroupDeclaration::Queryable { complete } => {
-                wz_session_core::declare_build::build_declare_queryable_with_id_info(
-                    id,
-                    keyexpr,
-                    wz_session_core::queryable_info::QueryableInfo::local(complete),
+                wz_session_core::declare_build::build_declare_queryable(id, mapping_id, suffix).map(
+                    |mut declare| {
+                        wz_session_core::declare_build::set_declare_queryable_info(
+                            &mut declare,
+                            wz_session_core::queryable_info::QueryableInfo::local(complete),
+                        );
+                        declare
+                    },
                 )
             }
             #[cfg(feature = "liveliness-token")]
             GroupDeclaration::Token => {
-                wz_session_core::declare_build::build_declare_token(id, 0, Some(keyexpr))
+                wz_session_core::declare_build::build_declare_token(id, mapping_id, suffix)
             }
             #[allow(unreachable_patterns)]
             _ => return Err(SendWireError::FeatureDisabled),
         }
         .map_err(SendWireError::Codec)?;
+        self.send_declare_to_group(declare)
+    }
+
+    /// Open-debt item 913 — retract the entity `what` the session announced: an `Undeclare` of
+    /// its kind with id `id`, naming `key`, as a zenoh-pico peer retracts one
+    /// (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `declaration = _z_make_undecl_subscriber(sub->_entity_id, &expr);`).
+    #[cfg(all(feature = "codec-push", feature = "codec-declare"))]
+    pub fn retract(
+        &self,
+        what: GroupDeclaration,
+        id: u64,
+        key: GroupKey<'_>,
+    ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        use wz_session_core::send_wire_error::SendWireError;
+        let (mapping_id, suffix) = (key.mapping_id, key.suffix.unwrap_or(""));
+        let declare = match what {
+            #[cfg(feature = "declare-subscriber")]
+            GroupDeclaration::Subscriber => {
+                wz_session_core::declare_build::build_undeclare_subscriber_on_wire(
+                    id, mapping_id, suffix,
+                )
+            }
+            #[cfg(feature = "declare-queryable")]
+            GroupDeclaration::Queryable { .. } => {
+                wz_session_core::declare_build::build_undeclare_queryable_on_wire(
+                    id, mapping_id, suffix,
+                )
+            }
+            #[cfg(feature = "liveliness-token")]
+            GroupDeclaration::Token => {
+                wz_session_core::declare_build::build_undeclare_token_on_wire(
+                    id, mapping_id, suffix,
+                )
+            }
+            #[allow(unreachable_patterns)]
+            _ => return Err(SendWireError::FeatureDisabled),
+        }
+        .map_err(SendWireError::Codec)?;
+        self.send_declare_to_group(declare)
+    }
+
+    /// Open-debt item 913 — declare `keyexpr` to the group as `mapping_id`, as zenoh-pico
+    /// declares a key over its multicast transport when its multicast declarations are on
+    /// (`vendor/zenoh-pico/src/session/keyexpr.c` @ `#if Z_FEATURE_MULTICAST_DECLARATIONS == 0`;
+    /// MEASURED off the group's wire: `decl_kexpr(1, demo/mc/q)`). The members map the id to the
+    /// key for this session, so what it later names by the id they read as the key. Id 0 is the
+    /// wire's literal and names no declaration, hence `NonZeroU64`.
+    #[cfg(all(feature = "codec-push", feature = "codec-declare"))]
+    pub fn announce_keyexpr(
+        &self,
+        mapping_id: core::num::NonZeroU64,
+        keyexpr: &str,
+    ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        let declare =
+            wz_session_core::declare_build::build_declare_kexpr(mapping_id.get(), keyexpr)
+                .map_err(wz_session_core::send_wire_error::SendWireError::Codec)?;
+        self.send_declare_to_group(declare)
+    }
+
+    /// Open-debt item 913 — retract the keyexpr [`Self::announce_keyexpr`] declared as
+    /// `mapping_id`.
+    #[cfg(all(feature = "codec-push", feature = "codec-declare"))]
+    pub fn retract_keyexpr(
+        &self,
+        mapping_id: u64,
+    ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        self.send_declare_to_group(wz_session_core::declare_build::build_undeclare_kexpr(
+            mapping_id,
+        ))
+    }
+
+    /// Open-debt item 913 — ask the group's members for their declarations of `kinds`, on `key`
+    /// or, with `None`, on every key: an `Interest` with id `interest_id`, `current` and `future`
+    /// as given, whose kinds are exactly `kinds`
+    /// ([`build_interest_exact`](wz_session_core::interest_build::build_interest_exact)). Each
+    /// member answers on the group with its matching declarations and a `DeclFinal`, which this
+    /// session's observer reads as it reads a unicast peer's.
+    #[cfg(all(feature = "codec-push", feature = "declare-interest"))]
+    pub fn ask(
+        &self,
+        interest_id: u64,
+        kinds: InterestKinds,
+        current: bool,
+        future: bool,
+        key: Option<GroupKey<'_>>,
+    ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
+        use wz_session_core::send_wire_error::SendWireError;
+        let interest = wz_session_core::interest_build::build_interest_exact(
+            interest_id,
+            kinds,
+            current,
+            future,
+            key.map(|k| (k.mapping_id, k.suffix)),
+        )
+        .map_err(SendWireError::Codec)?;
         self.send_network_message(
-            wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
+            wz_session_core::network_message::NetworkMessage::Interest(interest),
             true,
             false,
         )
     }
 
-    /// Open-debt item 913 — retract the entity `what` the session announced: an `Undeclare` of
-    /// its kind with id `id` and the literal `keyexpr`, as a zenoh-pico peer retracts one
+    /// Open-debt item 913 — end interest `interest_id` [`Self::ask`] sent: its `Interest(Final)`,
+    /// as zenoh-pico sends one on its multicast transport when it removes an interest there
     /// (`vendor/zenoh-pico/src/net/primitives.c` @
-    /// `declaration = _z_make_undecl_subscriber(sub->_entity_id, &expr);`).
-    #[cfg(feature = "codec-push")]
-    pub fn retract(
+    /// `z_result_t _z_remove_interest(_z_session_t *zn, uint32_t interest_id) {`).
+    #[cfg(all(feature = "codec-push", feature = "declare-interest"))]
+    pub fn ask_final(
         &self,
-        what: GroupDeclaration,
-        id: u64,
-        keyexpr: &str,
+        interest_id: u64,
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
-        use wz_session_core::send_wire_error::SendWireError;
-        let declare = match what {
-            #[cfg(feature = "declare-subscriber")]
-            GroupDeclaration::Subscriber => {
-                wz_session_core::declare_build::build_undeclare_subscriber_on_wire(id, 0, keyexpr)
-            }
-            #[cfg(feature = "declare-queryable")]
-            GroupDeclaration::Queryable { .. } => {
-                wz_session_core::declare_build::build_undeclare_queryable_on_wire(id, 0, keyexpr)
-            }
-            #[cfg(feature = "liveliness-token")]
-            GroupDeclaration::Token => {
-                wz_session_core::declare_build::build_undeclare_token_on_wire(id, 0, keyexpr)
-            }
-            #[allow(unreachable_patterns)]
-            _ => return Err(SendWireError::FeatureDisabled),
-        }
-        .map_err(SendWireError::Codec)?;
+        self.send_network_message(
+            wz_session_core::network_message::NetworkMessage::Interest(
+                wz_session_core::interest_build::build_interest_final(interest_id),
+            ),
+            true,
+            false,
+        )
+    }
+
+    /// One `Declare` onto the group.
+    #[cfg(all(feature = "codec-push", feature = "codec-declare"))]
+    fn send_declare_to_group(
+        &self,
+        declare: wz_codecs::declare::DeclareOwned,
+    ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
         self.send_network_message(
             wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
             true,
@@ -4924,6 +5050,93 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     fn adopt_shm_value(opts: &mut QueryOptions, value: &crate::shm_provider::ShmBackedPayload) {
         opts.payload = Some(value.bytes().to_vec());
     }
+
+    /// R2962 — whether a REMOTE peer has declared a subscriber matching
+    /// `keyexpr`, read off the registry the peer fills. The poll behind a
+    /// publisher's matching status without the publisher: no handle is made and
+    /// no Interest is taken, so calling it asks the peer nothing.
+    ///
+    /// `locality` gates the remote half exactly as `Publisher::get_matching_status`
+    /// does; the session-local half is deliberately NOT read, because a caller
+    /// that wants only what a peer says (zenoh-pico's default build counts no
+    /// local subscriber) must be able to ask for that alone.
+    ///
+    /// Open-debt item 913 — on every transport: a group session's registry is filled by what
+    /// its members declare on the group.
+    pub fn remote_subscribers_match(&self, keyexpr: &str, locality: Locality) -> bool {
+        #[cfg(feature = "declare-subscriber")]
+        {
+            R::with_mutex_mut(&self.observer, |obs| {
+                obs.remote_subscribers.has_matching_for(
+                    &wz_session_core::declare::subscriber::PublisherCriterion::new(
+                        keyexpr, locality,
+                    ),
+                )
+            })
+        }
+        #[cfg(not(feature = "declare-subscriber"))]
+        {
+            let _ = (keyexpr, locality);
+            false
+        }
+    }
+
+    /// R2962 — the QUERYABLE-plane twin of [`Self::remote_subscribers_match`],
+    /// `complete_required` being a querier whose target is `ALL_COMPLETE`.
+    pub fn remote_queryables_match(
+        &self,
+        keyexpr: &str,
+        locality: Locality,
+        complete_required: bool,
+    ) -> bool {
+        #[cfg(feature = "declare-queryable")]
+        {
+            R::with_mutex_mut(&self.observer, |obs| {
+                obs.remote_queryables.has_matching_for(
+                    &wz_session_core::declare::queryable::QuerierCriterion::new(
+                        keyexpr,
+                        locality,
+                        complete_required,
+                    ),
+                )
+            })
+        }
+        #[cfg(not(feature = "declare-queryable"))]
+        {
+            let _ = (keyexpr, locality, complete_required);
+            false
+        }
+    }
+
+    /// The two counters that move after every change to what a peer has declared to this
+    /// session, subscribers first and queryables second, to be read without the session's
+    /// lock ([`wz_session_core::declare::DeclEpoch`]). A reader that read both, computed an
+    /// answer from [`Self::remote_subscribers_match`] / [`Self::remote_queryables_match`],
+    /// and later finds both unchanged, holds an answer that is still true.
+    ///
+    /// `None` on a build without the two declaration planes: its reader asks the tables
+    /// every time. The method exists only on a target with 64-bit atomics.
+    #[cfg(target_has_atomic = "64")]
+    pub fn remote_declaration_epochs(
+        &self,
+    ) -> Option<(
+        Arc<std::sync::atomic::AtomicU64>,
+        Arc<std::sync::atomic::AtomicU64>,
+    )> {
+        #[cfg(all(feature = "declare-subscriber", feature = "declare-queryable"))]
+        {
+            Some(R::with_mutex_mut(&self.observer, |obs| {
+                (
+                    obs.remote_subscribers.peer().epoch(),
+                    obs.remote_queryables.peer().epoch(),
+                )
+            }))
+        }
+        #[cfg(not(all(feature = "declare-subscriber", feature = "declare-queryable")))]
+        {
+            None
+        }
+    }
 }
 
 #[cfg(feature = "transport-unicast")]
@@ -5319,90 +5532,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             session: self.clone(),
             plane: MatchingPlane::Queryables,
             keyexpr: keyexpr.to_string(),
-        }
-    }
-
-    /// R2962 — whether a REMOTE peer has declared a subscriber matching
-    /// `keyexpr`, read off the registry the peer fills. The poll behind a
-    /// publisher's matching status without the publisher: no handle is made and
-    /// no Interest is taken, so calling it asks the peer nothing.
-    ///
-    /// `locality` gates the remote half exactly as `Publisher::get_matching_status`
-    /// does; the session-local half is deliberately NOT read, because a caller
-    /// that wants only what a peer says (zenoh-pico's default build counts no
-    /// local subscriber) must be able to ask for that alone.
-    pub fn remote_subscribers_match(&self, keyexpr: &str, locality: Locality) -> bool {
-        #[cfg(feature = "declare-subscriber")]
-        {
-            R::with_mutex_mut(&self.observer, |obs| {
-                obs.remote_subscribers.has_matching_for(
-                    &wz_session_core::declare::subscriber::PublisherCriterion::new(
-                        keyexpr, locality,
-                    ),
-                )
-            })
-        }
-        #[cfg(not(feature = "declare-subscriber"))]
-        {
-            let _ = (keyexpr, locality);
-            false
-        }
-    }
-
-    /// R2962 — the QUERYABLE-plane twin of [`Self::remote_subscribers_match`],
-    /// `complete_required` being a querier whose target is `ALL_COMPLETE`.
-    pub fn remote_queryables_match(
-        &self,
-        keyexpr: &str,
-        locality: Locality,
-        complete_required: bool,
-    ) -> bool {
-        #[cfg(feature = "declare-queryable")]
-        {
-            R::with_mutex_mut(&self.observer, |obs| {
-                obs.remote_queryables.has_matching_for(
-                    &wz_session_core::declare::queryable::QuerierCriterion::new(
-                        keyexpr,
-                        locality,
-                        complete_required,
-                    ),
-                )
-            })
-        }
-        #[cfg(not(feature = "declare-queryable"))]
-        {
-            let _ = (keyexpr, locality, complete_required);
-            false
-        }
-    }
-
-    /// The two counters that move after every change to what a peer has declared to this
-    /// session, subscribers first and queryables second, to be read without the session's
-    /// lock ([`wz_session_core::declare::DeclEpoch`]). A reader that read both, computed an
-    /// answer from [`Self::remote_subscribers_match`] / [`Self::remote_queryables_match`],
-    /// and later finds both unchanged, holds an answer that is still true.
-    ///
-    /// `None` on a build without the two declaration planes: its reader asks the tables
-    /// every time. The method exists only on a target with 64-bit atomics.
-    #[cfg(target_has_atomic = "64")]
-    pub fn remote_declaration_epochs(
-        &self,
-    ) -> Option<(
-        Arc<std::sync::atomic::AtomicU64>,
-        Arc<std::sync::atomic::AtomicU64>,
-    )> {
-        #[cfg(all(feature = "declare-subscriber", feature = "declare-queryable"))]
-        {
-            Some(R::with_mutex_mut(&self.observer, |obs| {
-                (
-                    obs.remote_subscribers.peer().epoch(),
-                    obs.remote_queryables.peer().epoch(),
-                )
-            }))
-        }
-        #[cfg(not(all(feature = "declare-subscriber", feature = "declare-queryable")))]
-        {
-            None
         }
     }
 
