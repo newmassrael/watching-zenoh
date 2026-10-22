@@ -1089,6 +1089,73 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
                             declare,
                         );
                     }
+                    // Open-debt item 913 — an entity this member declares on a key it named
+                    // by its own declaration reaches the session as the literal, as its Push
+                    // does below: the session's observer holds one alias table for the whole
+                    // group, where every member's ids would meet (two zenoh-pico members
+                    // number their keyexprs from the same counter). Upstream's own
+                    // `z_test_peer_multicast.c` at `Z_FEATURE_MULTICAST_DECLARATIONS=1` found
+                    // it: each member's queryable and publisher keys are its own `2:`.
+                    let table = &slot.keyexpr_table;
+                    let named = match &mut declare.body {
+                        wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(d) => {
+                            Some((&mut d.keyexpr, &mut d.header))
+                        }
+                        wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclQueryable(d) => {
+                            Some((&mut d.keyexpr, &mut d.header))
+                        }
+                        wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclToken(d) => {
+                            Some((&mut d.keyexpr, &mut d.header))
+                        }
+                        _ => None,
+                    };
+                    if let Some((keyexpr, header)) = named {
+                        if let Some(literal) =
+                            crate::wireexpr_resolve::resolve_wireexpr(&keyexpr.body, table)
+                        {
+                            let _ = crate::wireexpr_build::set_literal_keyexpr_fields(
+                                keyexpr, header, &literal,
+                            );
+                        }
+                    }
+                }
+                // A member's query and its reply name the key as its Push does.
+                #[cfg(feature = "codec-request")]
+                NetworkMessage::Request(request) => {
+                    if let Some(literal) = crate::wireexpr_resolve::resolve_wireexpr(
+                        &request.keyexpr.body,
+                        &slot.keyexpr_table,
+                    ) {
+                        let _ =
+                            crate::request_build::set_request_keyexpr_literal(request, &literal);
+                    }
+                }
+                #[cfg(feature = "codec-response")]
+                NetworkMessage::Response(response) => {
+                    if let Some(literal) = crate::wireexpr_resolve::resolve_wireexpr(
+                        &response.keyexpr.body,
+                        &slot.keyexpr_table,
+                    ) {
+                        let _ =
+                            crate::response_build::set_response_keyexpr_literal(response, &literal);
+                    }
+                }
+                // And an interest the member restricts to a key it declared.
+                NetworkMessage::Interest(interest) => {
+                    if let Some(body) = interest.body.as_mut() {
+                        if let Some(keyexpr) = body.keyexpr.as_mut() {
+                            if let Some(literal) = crate::wireexpr_resolve::resolve_wireexpr(
+                                &keyexpr.body,
+                                &slot.keyexpr_table,
+                            ) {
+                                let _ = crate::wireexpr_build::set_literal_keyexpr_fields(
+                                    keyexpr,
+                                    &mut body.header,
+                                    &literal,
+                                );
+                            }
+                        }
+                    }
                 }
                 NetworkMessage::Push(push) => {
                     if let Some(literal) = crate::wireexpr_resolve::resolve_wireexpr(
@@ -4108,6 +4175,83 @@ mod tests {
             None,
             "an undeclared alias must stay id-only (dropped by the sentinel resolution, as in I1)",
         );
+    }
+
+    /// Open-debt item 913 — two members that declare one keyexpr id for two keys each name their
+    /// own key: a queryable a member declares, a query it sends and an interest it restricts on
+    /// its id reach the session as its literal, not as whatever the other member declared under
+    /// that id last.
+    #[cfg(all(feature = "multicast-declarations", feature = "codec-request"))]
+    #[test]
+    fn each_member_names_its_own_key_by_a_shared_id() {
+        use crate::declare_build::{build_declare_kexpr, build_declare_queryable};
+        use crate::driver_loop::DriverLoopOutcome;
+        use crate::interest_build::{build_interest_exact, InterestKinds};
+        use crate::network_message::NetworkMessage;
+        use crate::request_build::build_request_query;
+        use crate::wireexpr_resolve::resolve_wireexpr;
+        use alloc::boxed::Box;
+        use alloc::string::{String, ToString};
+        use alloc::vec;
+        use alloc::vec::Vec;
+
+        let mut d = running_dispatcher::<4>(5_000);
+        assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(d.ingest_join(ZID_B, SRC_B, sn0(), 0), JoinOutcome::Admitted);
+        let empty: hashbrown::HashMap<u64, String> = hashbrown::HashMap::new();
+        let mut named = |src, key: &str| -> Vec<Option<String>> {
+            let mut outcome = DriverLoopOutcome::FramePayload {
+                priority: crate::qos::Priority::DEFAULT,
+                reliable: true,
+                sn: 0,
+                messages: vec![
+                    NetworkMessage::Declare(Box::new(build_declare_kexpr(2, key).unwrap())),
+                    NetworkMessage::Declare(Box::new(build_declare_queryable(3, 2, None).unwrap())),
+                    NetworkMessage::Request(Box::new(build_request_query(1, 2, None).unwrap())),
+                    NetworkMessage::Interest(
+                        build_interest_exact(
+                            4,
+                            InterestKinds::QUERYABLES,
+                            true,
+                            false,
+                            Some((2, None)),
+                        )
+                        .unwrap(),
+                    ),
+                ],
+                has_ext: false,
+                extensions: vec![],
+            };
+            d.apply_declared_aliases(src, &mut outcome);
+            let DriverLoopOutcome::FramePayload { messages, .. } = &outcome else {
+                unreachable!()
+            };
+            messages[1..]
+                .iter()
+                .map(|message| {
+                    let wire = match message {
+                        NetworkMessage::Declare(declare) => match &declare.body {
+                            wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclQueryable(q) => {
+                                &q.keyexpr
+                            }
+                            _ => unreachable!(),
+                        },
+                        NetworkMessage::Request(request) => &request.keyexpr,
+                        NetworkMessage::Interest(interest) => interest
+                            .body
+                            .as_ref()
+                            .and_then(|body| body.keyexpr.as_ref())
+                            .expect("a restricted interest"),
+                        _ => unreachable!(),
+                    };
+                    resolve_wireexpr(&wire.body, &empty)
+                })
+                .collect()
+        };
+        // Each reaches the session as a literal, readable with no alias table at all.
+        let own = |key: &str| vec![Some(key.to_string()); 3];
+        assert_eq!(named(SRC_A, "test/A"), own("test/A"));
+        assert_eq!(named(SRC_B, "test/B"), own("test/B"));
     }
 
     /// §5.21 router-multicast-faces (I3a) — evicting a peer (Close / lease)
