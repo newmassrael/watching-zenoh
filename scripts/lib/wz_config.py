@@ -254,6 +254,10 @@ def validate_limits(limits: list[dict]) -> list[str]:
             out.append(f"limit `{lid}`: it has no help")
         elif "\n\n" in lim["help"].strip():
             out.append(f"limit `{lid}`: its help is more than one paragraph")
+        elif re.search(r"\[`|crate::", lim["help"]):
+            # A deployer reads the help in menuconfig; a Rust path or a rustdoc link is the
+            # developer's text, which caps.rs keeps.
+            out.append(f"limit `{lid}`: its help names Rust items; it is written for a deployer")
     return out
 
 
@@ -706,6 +710,9 @@ def cmd_selftest() -> int:
     bad_limit = SAMPLE.replace('kconfig = "WZ_LIMIT_MAX_A"', 'kconfig = "WZ_LIMIT_MAX_B"')
     expect("a limit whose symbol is not its name is refused",
            any("not WZ_LIMIT_MAX_A" in p for p in validate_decl(read_decl_toml(bad_limit))))
+    rusty = SAMPLE.replace("A table.\n'''", "A [`crate::x::Table`].\n'''")
+    expect("a limit help naming a Rust item is refused",
+           any("Rust items" in p for p in validate_decl(read_decl_toml(rusty))))
     two_para = SAMPLE.replace("A table.\n'''", "A table.\n\nMore.\n'''")
     expect("a limit help of two paragraphs is refused",
            any("paragraph" in p for p in validate_decl(read_decl_toml(two_para))))
