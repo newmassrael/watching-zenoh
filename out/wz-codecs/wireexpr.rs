@@ -19,6 +19,9 @@ use sce_forge_runtime::codec::VecSink;
 use super::wireexpr_local::WireexprLocal;
 use super::wireexpr_nonlocal::WireexprNonlocal;
 
+use super::wireexpr_local::WireexprLocalView;
+use super::wireexpr_nonlocal::WireexprNonlocalView;
+
 // RFC §synth-5-B variant primitive: discriminated-union body for the
 // codec's tag-field suffix. Each arm wraps an imported codec's decoded
 // value; the optional Default arm preserves the runtime tag value
@@ -163,6 +166,157 @@ impl<'a> Wireexpr<'a> {
     /// same gate (see `backends/rust/forge-runtime/src/codec.rs`). MCU /
     /// `no_std` builds without `alloc` only see the sink-based
     /// primary `encode`.
+    #[cfg(feature = "alloc")]
+    pub fn encode_to_vec(&self, n: u8) -> Vec<u8> {
+        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_sink = VecSink::new(&mut _sce_v);
+        self.encode(&mut _sce_sink, n)
+            .expect("VecSink is infallible");
+        _sce_v
+    }
+}
+
+// ── View (ADR 0049) ──────────────────────────────────────────────────
+// `WireexprView` is what a decode of `Wireexpr` learned, not a
+// copy of what the wire repeated: a scalar, a string or a bytes field is held
+// as `Wireexpr` holds it, an embedded body or a variant arm as its
+// own view, and a bounded list as the frame it was read from, how many entries
+// it holds and what a walk needs to read them again (`ListView`). Its size
+// depends on the number of fields and not on any `sce:max-count`, so moving
+// one copies a few words however long its lists may be. `decode` refuses the
+// frames `Wireexpr::decode` refuses, with the same error: the entries
+// are decoded once to check them, and a walk afterwards cannot fail.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum WireexprViewVariant<'a> {
+    WireexprNonlocal(WireexprNonlocalView<'a>),
+    WireexprLocal(WireexprLocalView<'a>),
+}
+
+impl<'a> Default for WireexprViewVariant<'a> {
+    fn default() -> Self {
+        Self::WireexprLocal(WireexprLocalView::default())
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct WireexprView<'a> {
+    pub body: WireexprViewVariant<'a>,
+}
+
+#[allow(dead_code)]
+impl<'a> WireexprView<'a> {
+    /// A view with every field at its own type's [`Default`]: the destination
+    /// [`Self::decode_into`] fills.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Decode the next frame from `cursor`: the bytes, the bounds and the
+    /// errors of [`Wireexpr::decode`], held as a view. On success the
+    /// cursor advances past the consumed bytes.
+    pub fn decode(cursor: &mut SceCursor<'a>, n: u8, tag: u8) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out, n, tag)?;
+        Ok(_out)
+    }
+
+    /// [`Self::decode`] into a destination the caller owns, so a view that
+    /// embeds or dispatches to this one is filled where it will live. On
+    /// `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self, n: u8, tag: u8) -> Result<(), CodecError> {
+        // Declared-but-unconsumed flag inputs: defensive suppress per declared
+        // `<sce:flag-input>` so codecs that haven't (yet) consumed an
+        // input via `present-if` compile cleanly. The validator enforces
+        // declaration; consumption is a per-codec design choice.
+        let _ = n;
+        // Parent-tag dispatch: `tag` is the dispatch value the
+        // caller (parent codec) extracted from its own flag carrier
+        // and passed in. The type is fixed at u8 — matches the parent's
+        // `<sce:flag>` width upper bound.
+        // Dispatch on the tag field; each arm decodes its body codec
+        // from the cursor. The default arm (when declared) carries the
+        // runtime tag value so encode can round-trip it back onto the
+        // wire.
+        // Each arm is installed in `_out.body` holding its body's default and
+        // that body is decoded where it sits, so no arm body is returned up
+        // through the variant wrapper.
+        match tag {
+            0u8 => {
+                _out.body = WireexprViewVariant::WireexprNonlocal(WireexprNonlocalView::default());
+                if let WireexprViewVariant::WireexprNonlocal(_b) = &mut _out.body {
+                    WireexprNonlocalView::decode_into(cursor, _b, n)?;
+                }
+            }
+            1u8 => {
+                _out.body = WireexprViewVariant::WireexprLocal(WireexprLocalView::default());
+                if let WireexprViewVariant::WireexprLocal(_b) = &mut _out.body {
+                    WireexprLocalView::decode_into(cursor, _b, n)?;
+                }
+            }
+            // Build-time `codec/variant-arm-unreachable` proves the
+            // arm set covers the tag domain without a default.
+            _ => unreachable!("variant exhaustiveness gated by codec/variant-arm-unreachable at parse time"),
+        }
+        Ok(())
+    }
+
+    /// Fill `_out`, the builder form [`Wireexpr`] a sender fills and
+    /// encodes, with what this view says: every field, each embedded body, the
+    /// variant arm, and each list entry as the walk yields it, built in the
+    /// destination where it will live. Fails only where the destination cannot
+    /// hold it, which a destination of the same declared bounds does.
+    pub fn into_builder(&self, _out: &mut Wireexpr<'a>) -> Result<(), CodecError> {
+        match &self.body {
+            WireexprViewVariant::WireexprNonlocal(_b) => {
+                _out.body = WireexprVariant::WireexprNonlocal(WireexprNonlocal::default());
+                if let WireexprVariant::WireexprNonlocal(_o) = &mut _out.body {
+                    _b.into_builder(_o)?;
+                }
+            }
+            WireexprViewVariant::WireexprLocal(_b) => {
+                _out.body = WireexprVariant::WireexprLocal(WireexprLocal::default());
+                if let WireexprVariant::WireexprLocal(_o) = &mut _out.body {
+                    _b.into_builder(_o)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Worst-case encoded byte count for this codec, as
+    /// [`Wireexpr::MAX_ENCODED_BYTES`].
+    pub const MAX_ENCODED_BYTES: usize = 146;
+
+    /// Encode what this view says into the caller-owned sink: the bytes
+    /// [`Wireexpr::encode`] writes for the value [`Self::into_builder`]
+    /// fills, written straight from the view, walking each list, without the
+    /// builder. It writes the canonical wire, not the frame the view was decoded
+    /// from, so a frame `decode` accepted in a form that is not canonical is
+    /// not passed on as it came.
+    pub fn encode<S: SceSink>(&self, w: &mut S, n: u8) -> Result<(), CodecError> {
+        // Declared-but-unconsumed flag inputs: see `decode` — same suppress per
+        // declared `<sce:flag-input>`.
+        let _ = n;
+        // Encode fixed prefix (tag field is part of the prefix). The
+        // tag value is read from the struct field, NOT derived from
+        // the body discriminant — keeping author-set msg_id / body in
+        // sync is the caller's responsibility (v1 keeps the layout
+        // simple; future extensions may auto-sync via a typed setter).
+        // Append the active arm's encoded bytes.
+        match &self.body {
+            WireexprViewVariant::WireexprNonlocal(b) => {
+                b.encode(w, n)?;
+            }
+            WireexprViewVariant::WireexprLocal(b) => {
+                b.encode(w, n)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Heap-backed convenience facade over [`Self::encode`].
     #[cfg(feature = "alloc")]
     pub fn encode_to_vec(&self, n: u8) -> Vec<u8> {
         let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);

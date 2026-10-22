@@ -27,6 +27,12 @@ use super::encoding::Encoding;
 use super::ext_entry::ExtEntry;
 use super::zbuf_slice::ZbufSlice;
 
+use sce_forge_runtime::codec::ListView;
+use super::timestamp::TimestampView;
+use super::encoding::EncodingView;
+use super::ext_entry::ExtEntryView;
+use super::zbuf_slice::ZbufSliceView;
+
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
@@ -337,6 +343,311 @@ impl<'a> MsgPut<'a> {
         self.encode(&mut _sce_sink)?;
         Ok(_sce_v)
     }
+}
+
+// ── View (ADR 0049) ──────────────────────────────────────────────────
+// `MsgPutView` is what a decode of `MsgPut` learned, not a
+// copy of what the wire repeated: a scalar, a string or a bytes field is held
+// as `MsgPut` holds it, an embedded body or a variant arm as its
+// own view, and a bounded list as the frame it was read from, how many entries
+// it holds and what a walk needs to read them again (`ListView`). Its size
+// depends on the number of fields and not on any `sce:max-count`, so moving
+// one copies a few words however long its lists may be. `decode` refuses the
+// frames `MsgPut::decode` refuses, with the same error: the entries
+// are decoded once to check them, and a walk afterwards cannot fail.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct MsgPutView<'a> {
+    pub header: u8,
+    pub timestamp: Option<TimestampView<'a>>,
+    pub encoding: Option<EncodingView<'a>>,
+    pub extensions: Option<ListView<'a, ExtEntryView<'a>, 0>>,
+    pub payload_len: Option<u64>,
+    pub payload: Option<&'a [u8]>,
+    pub slice_count: Option<u32>,
+    pub slices: Option<ListView<'a, ZbufSliceView<'a>, 0>>,
+}
+
+impl<'a> Default for MsgPutView<'a> {
+    fn default() -> Self {
+        Self {
+            header: 0x01u8,
+            timestamp: Default::default(),
+            encoding: Default::default(),
+            extensions: Default::default(),
+            payload_len: Default::default(),
+            payload: Default::default(),
+            slice_count: Default::default(),
+            slices: Default::default(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> MsgPutView<'a> {
+    /// A view with every field at its own type's [`Default`]: the destination
+    /// [`Self::decode_into`] fills.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Decode the next frame from `cursor`: the bytes, the bounds and the
+    /// errors of [`MsgPut::decode`], held as a view. On success the
+    /// cursor advances past the consumed bytes.
+    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out)?;
+        Ok(_out)
+    }
+
+    /// [`Self::decode`] into a destination the caller owns, so a view that
+    /// embeds or dispatches to this one is filled where it will live. On
+    /// `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+        // Streaming cursor decode (SSOT selection: `needs_streaming`).
+        // The positional `raw[byte_off]` path is valid only when every
+        // field's absolute offset is fixed at codegen time; this branch
+        // handles every codec where it is not — present-if-gated fields
+        // (runtime presence), VLE / repeat / TLV-chain / embed fields
+        // (runtime width), string fields (UTF-8 decode), and a fixed field
+        // after a variable-length payload (offset depends on the payload
+        // length). Each field reads its own bytes from the cursor and
+        // advances past exactly what it consumed. Per-field `is_repeat` /
+        // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
+        // every other field flows through `present_if_decode_stmt`, whose
+        // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
+        let header = {
+            let raw = cursor.peek_slice(1)?;
+            let _v = raw[0];
+            cursor.advance(1)?;
+            _v
+        };
+        if (header & 0x20u8) != 0 {
+            TimestampView::decode_into(cursor, _out.timestamp.insert(TimestampView::default()))?;
+        } else {
+            _out.timestamp = None;
+        }
+        if (header & 0x40u8) != 0 {
+            EncodingView::decode_into(cursor, _out.encoding.insert(EncodingView::default()))?;
+        } else {
+            _out.encoding = None;
+        }
+        if (header & 0x80u8) != 0 {
+            let _rest = cursor.peek_slice(cursor.remaining())?;
+            let mut _count: u32 = 0;
+            let mut _more = false;
+            for _ in 0..8u32 {
+                if cursor.remaining() == 0 { break; }
+                let _entry = ExtEntryView::decode(cursor)?;
+                _more = _entry.z();
+                _count += 1;
+                if !_more { break; }
+            }
+            if _more && cursor.remaining() == 0 {
+                return Err(CodecError::NeedMoreBytes);
+            }
+            if _more {
+                return Err(CodecError::TlvChainOverflow);
+            }
+            _out.extensions = Some(ListView::new(_rest, _count, [], |_c, _a| ExtEntryView::decode(_c), |_, _| {}));
+        } else {
+            _out.extensions = None;
+        }
+        let _has_extensions_18 = _out.extensions.as_ref().is_some_and(|_c| _c.iter().any(|_e| (u64::from(_e.header) & 127u64) == 18u64));
+        let payload_len = if !_has_extensions_18 {
+            let _v = cursor.read_vle_u64()?;
+            Some(_v)
+        } else {
+            None
+        };
+        let payload = if !_has_extensions_18 {
+            let _n = payload_len.unwrap() as usize;
+            let raw = cursor.peek_slice(_n)?;
+            let _v = raw;
+            cursor.advance(_n)?;
+            Some(_v)
+        } else {
+            None
+        };
+        let slice_count = if _has_extensions_18 {
+            let _v = cursor.read_vle_u32()?;
+            Some(_v)
+        } else {
+            None
+        };
+        if _has_extensions_18 {
+            let _n = slice_count.expect("co-gating: count present-if matches repeat");
+            let _rest = cursor.peek_slice(cursor.remaining())?;
+            let mut _count: u32 = 0;
+            for _ in 0.._n {
+                ZbufSliceView::decode(cursor)?;
+                if _count == 4 {
+                    return Err(CodecError::TooManyElements);
+                }
+                _count += 1;
+            }
+            _out.slices = Some(ListView::new(_rest, _count, [], |_c, _a| ZbufSliceView::decode(_c), |_, _| {}));
+        } else {
+            _out.slices = None;
+        }
+        _out.header = header;
+        _out.payload_len = payload_len;
+        _out.payload = payload;
+        _out.slice_count = slice_count;
+        Ok(())
+    }
+
+    /// Fill `_out`, the builder form [`MsgPut`] a sender fills and
+    /// encodes, with what this view says: every field, each embedded body, the
+    /// variant arm, and each list entry as the walk yields it, built in the
+    /// destination where it will live. Fails only where the destination cannot
+    /// hold it, which a destination of the same declared bounds does.
+    pub fn into_builder(&self, _out: &mut MsgPut<'a>) -> Result<(), CodecError> {
+        _out.header = self.header;
+        match &self.timestamp {
+            Some(_b) => _b.into_builder(_out.timestamp.insert(Timestamp::default()))?,
+            None => _out.timestamp = None,
+        }
+        match &self.encoding {
+            Some(_b) => _b.into_builder(_out.encoding.insert(Encoding::default()))?,
+            None => _out.encoding = None,
+        }
+        match &self.extensions {
+            Some(_l) => {
+                let _vec = _out.extensions.insert(HeaplessVec::new());
+                _vec.clear();
+                for _e in _l.iter() {
+                    _vec.push(ExtEntry::default()).map_err(|_| CodecError::TooManyElements)?;
+                    if let Some(_slot) = _vec.last_mut() {
+                        _e.into_builder(_slot)?;
+                    }
+                }
+            }
+            None => _out.extensions = None,
+        }
+        _out.payload_len = self.payload_len;
+        _out.payload = self.payload;
+        _out.slice_count = self.slice_count;
+        match &self.slices {
+            Some(_l) => {
+                let _vec = _out.slices.insert(HeaplessVec::new());
+                _vec.clear();
+                for _e in _l.iter() {
+                    _vec.push(ZbufSlice::default()).map_err(|_| CodecError::TooManyElements)?;
+                    if let Some(_slot) = _vec.last_mut() {
+                        _e.into_builder(_slot)?;
+                    }
+                }
+            }
+            None => _out.slices = None,
+        }
+        Ok(())
+    }
+
+    /// Worst-case encoded byte count for this codec, as
+    /// [`MsgPut::MAX_ENCODED_BYTES`].
+    pub const MAX_ENCODED_BYTES: usize = 2199;
+
+    /// Encode what this view says into the caller-owned sink: the bytes
+    /// [`MsgPut::encode`] writes for the value [`Self::into_builder`]
+    /// fills, written straight from the view, walking each list, without the
+    /// builder. It writes the canonical wire, not the frame the view was decoded
+    /// from, so a frame `decode` accepted in a form that is not canonical is
+    /// not passed on as it came.
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
+        let _has_extensions_18 = self.extensions.as_ref().is_some_and(|_c| _c.iter().any(|_e| (u64::from(_e.header) & 127u64) == 18u64));
+        if !_has_extensions_18 {
+            if self.payload_len.is_none() {
+                return Err(CodecError::PresentIfMismatch);
+            }
+        } else if self.payload_len.is_some() {
+            return Err(CodecError::PresentIfMismatch);
+        }
+        if !_has_extensions_18 {
+            if self.payload.is_none() {
+                return Err(CodecError::PresentIfMismatch);
+            }
+        } else if self.payload.is_some() {
+            return Err(CodecError::PresentIfMismatch);
+        }
+        if _has_extensions_18 {
+            if self.slice_count.is_none() {
+                return Err(CodecError::PresentIfMismatch);
+            }
+        } else if self.slice_count.is_some() {
+            return Err(CodecError::PresentIfMismatch);
+        }
+        if _has_extensions_18 {
+            if self.slices.is_none() {
+                return Err(CodecError::PresentIfMismatch);
+            }
+        } else if self.slices.is_some() {
+            return Err(CodecError::PresentIfMismatch);
+        }
+        // Streaming cursor encode (SSOT selection: `needs_streaming`).
+        // Mirrors the streaming decode: every field appends its own bytes
+        // in declaration order through the per-field encode blocks, so a
+        // gated field skips its append when absent, and a fixed field after
+        // a variable-length payload lands after the payload (the positional
+        // path appends variable fields last, placing it ahead on the wire).
+        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
+        // dedicated helpers; everything else uses `present_if_encode_block`
+        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
+        w.write_u8(self.header)?;
+        if let Some(_v) = &self.timestamp {
+            _v.encode(w)?;
+        }
+        if let Some(_v) = &self.encoding {
+            _v.encode(w)?;
+        }
+        if let Some(_list) = &self.extensions {
+            for _e in _list.iter() {
+                _e.encode(w)?;
+            }
+        }
+        if let Some(_v) = self.payload_len {
+        w.write_vle_u64(_v)?;
+        }
+        if let Some(_v) = &self.payload {
+            w.write_bytes(_v)?;
+        }
+        if let Some(_v) = self.slice_count {
+        w.write_vle_u32(_v)?;
+        }
+        if let Some(_list) = &self.slices {
+            for _e in _list.iter() {
+                _e.encode(w)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Heap-backed convenience facade over [`Self::encode`], fallible where
+    /// `encode` can refuse a message whose presence disagrees with a gate.
+    #[cfg(feature = "alloc")]
+    pub fn encode_to_vec(&self) -> Result<Vec<u8>, CodecError> {
+        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_sink = VecSink::new(&mut _sce_v);
+        self.encode(&mut _sce_sink)?;
+        Ok(_sce_v)
+    }
+
+    pub fn mid(&self) -> u8 {
+        self.header & 0x1F
+    }
+
+    pub fn t(&self) -> bool {
+        (self.header & 0x20) != 0
+    }
+
+    pub fn e(&self) -> bool {
+        (self.header & 0x40) != 0
+    }
+
+    pub fn z(&self) -> bool {
+        (self.header & 0x80) != 0
+    }
+
 }
 
 // ── Owned projection (storage-parameterised native form) ─────────────

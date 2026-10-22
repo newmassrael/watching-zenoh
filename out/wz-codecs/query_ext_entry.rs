@@ -20,6 +20,10 @@ use super::ext_unit::ExtUnit;
 use super::ext_zint::ExtZint;
 use super::query_value_zbuf::QueryValueZbuf;
 
+use super::ext_unit::ExtUnitView;
+use super::ext_zint::ExtZintView;
+use super::query_value_zbuf::QueryValueZbufView;
+
 // RFC §synth-5-B variant primitive: discriminated-union body for the
 // codec's tag-field suffix. Each arm wraps an imported codec's decoded
 // value; the optional Default arm preserves the runtime tag value
@@ -245,6 +249,217 @@ impl<'a> QueryExtEntry<'a> {
             .expect("VecSink is infallible");
         _sce_v
     }
+}
+
+// ── View (ADR 0049) ──────────────────────────────────────────────────
+// `QueryExtEntryView` is what a decode of `QueryExtEntry` learned, not a
+// copy of what the wire repeated: a scalar, a string or a bytes field is held
+// as `QueryExtEntry` holds it, an embedded body or a variant arm as its
+// own view, and a bounded list as the frame it was read from, how many entries
+// it holds and what a walk needs to read them again (`ListView`). Its size
+// depends on the number of fields and not on any `sce:max-count`, so moving
+// one copies a few words however long its lists may be. `decode` refuses the
+// frames `QueryExtEntry::decode` refuses, with the same error: the entries
+// are decoded once to check them, and a walk afterwards cannot fail.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryExtEntryViewVariant<'a> {
+    CodecZenohExtUnit(ExtUnitView),
+    CodecZenohExtZint(ExtZintView),
+    CodecZenohQueryValueZbuf(QueryValueZbufView<'a>),
+    Default {
+        tag: u8,
+        body: ExtUnitView,
+    },
+}
+
+impl<'a> Default for QueryExtEntryViewVariant<'a> {
+    fn default() -> Self {
+        Self::CodecZenohExtUnit(ExtUnitView::default())
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct QueryExtEntryView<'a> {
+    pub header: u8,
+    pub body: QueryExtEntryViewVariant<'a>,
+}
+
+#[allow(dead_code)]
+impl<'a> QueryExtEntryView<'a> {
+    /// A view with every field at its own type's [`Default`]: the destination
+    /// [`Self::decode_into`] fills.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Decode the next frame from `cursor`: the bytes, the bounds and the
+    /// errors of [`QueryExtEntry::decode`], held as a view. On success the
+    /// cursor advances past the consumed bytes.
+    pub fn decode(cursor: &mut SceCursor<'a>, after_shm: u8) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out, after_shm)?;
+        Ok(_out)
+    }
+
+    /// [`Self::decode`] into a destination the caller owns, so a view that
+    /// embeds or dispatches to this one is filled where it will live. On
+    /// `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self, after_shm: u8) -> Result<(), CodecError> {
+        // Declared-but-unconsumed flag inputs: defensive suppress per declared
+        // `<sce:flag-input>` so codecs that haven't (yet) consumed an
+        // input via `present-if` compile cleanly. The validator enforces
+        // declaration; consumption is a per-codec design choice.
+        let _ = after_shm;
+        // Decode fixed prefix (RFC §synth-5-B variant primitive: fields
+        // sit before the variant suffix on the wire).
+        let raw = cursor.peek_slice(1)?;
+        let header = raw[0];
+        cursor.advance(1)?;
+        // Dispatch on the tag field; each arm decodes its body codec
+        // from the cursor. The default arm (when declared) carries the
+        // runtime tag value so encode can round-trip it back onto the
+        // wire.
+        // Each arm is installed in `_out.body` holding its body's default and
+        // that body is decoded where it sits, so no arm body is returned up
+        // through the variant wrapper.
+        match (header >> 5) & 0x03 {
+            0u8 => {
+                _out.body = QueryExtEntryViewVariant::CodecZenohExtUnit(ExtUnitView::default());
+                if let QueryExtEntryViewVariant::CodecZenohExtUnit(_b) = &mut _out.body {
+                    ExtUnitView::decode_into(cursor, _b)?;
+                }
+            }
+            1u8 => {
+                _out.body = QueryExtEntryViewVariant::CodecZenohExtZint(ExtZintView::default());
+                if let QueryExtEntryViewVariant::CodecZenohExtZint(_b) = &mut _out.body {
+                    ExtZintView::decode_into(cursor, _b)?;
+                }
+            }
+            2u8 => {
+                _out.body = QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(QueryValueZbufView::default());
+                if let QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(_b) = &mut _out.body {
+                    QueryValueZbufView::decode_into(cursor, _b, after_shm)?;
+                }
+            }
+            other => {
+                _out.body = QueryExtEntryViewVariant::Default {
+                    tag: other,
+                    body: ExtUnitView::default(),
+                };
+                if let QueryExtEntryViewVariant::Default { body: _b, .. } = &mut _out.body {
+                    ExtUnitView::decode_into(cursor, _b)?;
+                }
+            }
+        }
+        _out.header = header;
+        Ok(())
+    }
+
+    /// Fill `_out`, the builder form [`QueryExtEntry`] a sender fills and
+    /// encodes, with what this view says: every field, each embedded body, the
+    /// variant arm, and each list entry as the walk yields it, built in the
+    /// destination where it will live. Fails only where the destination cannot
+    /// hold it, which a destination of the same declared bounds does.
+    pub fn into_builder(&self, _out: &mut QueryExtEntry<'a>) -> Result<(), CodecError> {
+        _out.header = self.header;
+        match &self.body {
+            QueryExtEntryViewVariant::CodecZenohExtUnit(_b) => {
+                _out.body = QueryExtEntryVariant::CodecZenohExtUnit(ExtUnit::default());
+                if let QueryExtEntryVariant::CodecZenohExtUnit(_o) = &mut _out.body {
+                    _b.into_builder(_o)?;
+                }
+            }
+            QueryExtEntryViewVariant::CodecZenohExtZint(_b) => {
+                _out.body = QueryExtEntryVariant::CodecZenohExtZint(ExtZint::default());
+                if let QueryExtEntryVariant::CodecZenohExtZint(_o) = &mut _out.body {
+                    _b.into_builder(_o)?;
+                }
+            }
+            QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(_b) => {
+                _out.body = QueryExtEntryVariant::CodecZenohQueryValueZbuf(QueryValueZbuf::default());
+                if let QueryExtEntryVariant::CodecZenohQueryValueZbuf(_o) = &mut _out.body {
+                    _b.into_builder(_o)?;
+                }
+            }
+            QueryExtEntryViewVariant::Default { tag, body } => {
+                _out.body = QueryExtEntryVariant::Default {
+                    tag: *tag,
+                    body: ExtUnit::default(),
+                };
+                if let QueryExtEntryVariant::Default { body: _o, .. } = &mut _out.body {
+                    body.into_builder(_o)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Worst-case encoded byte count for this codec, as
+    /// [`QueryExtEntry::MAX_ENCODED_BYTES`].
+    pub const MAX_ENCODED_BYTES: usize = 1383;
+
+    /// Encode what this view says into the caller-owned sink: the bytes
+    /// [`QueryExtEntry::encode`] writes for the value [`Self::into_builder`]
+    /// fills, written straight from the view, walking each list, without the
+    /// builder. It writes the canonical wire, not the frame the view was decoded
+    /// from, so a frame `decode` accepted in a form that is not canonical is
+    /// not passed on as it came.
+    pub fn encode<S: SceSink>(&self, w: &mut S, after_shm: u8) -> Result<(), CodecError> {
+        // Declared-but-unconsumed flag inputs: see `decode` — same suppress per
+        // declared `<sce:flag-input>`.
+        let _ = after_shm;
+        // Encode fixed prefix (tag field is part of the prefix). The
+        // tag value is read from the struct field, NOT derived from
+        // the body discriminant — keeping author-set msg_id / body in
+        // sync is the caller's responsibility (v1 keeps the layout
+        // simple; future extensions may auto-sync via a typed setter).
+        w.write_u8(self.header)?;
+        // Append the active arm's encoded bytes.
+        match &self.body {
+            QueryExtEntryViewVariant::CodecZenohExtUnit(b) => {
+                b.encode(w)?;
+            }
+            QueryExtEntryViewVariant::CodecZenohExtZint(b) => {
+                b.encode(w)?;
+            }
+            QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(b) => {
+                b.encode(w, after_shm)?;
+            }
+            QueryExtEntryViewVariant::Default { body, .. } => {
+                body.encode(w)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Heap-backed convenience facade over [`Self::encode`].
+    #[cfg(feature = "alloc")]
+    pub fn encode_to_vec(&self, after_shm: u8) -> Vec<u8> {
+        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_sink = VecSink::new(&mut _sce_v);
+        self.encode(&mut _sce_sink, after_shm)
+            .expect("VecSink is infallible");
+        _sce_v
+    }
+
+    pub fn ext_id(&self) -> u8 {
+        self.header & 0x0F
+    }
+
+    pub fn m(&self) -> bool {
+        (self.header & 0x10) != 0
+    }
+
+    pub fn enc(&self) -> u8 {
+        (self.header >> 5) & 0x03
+    }
+
+    pub fn z(&self) -> bool {
+        (self.header & 0x80) != 0
+    }
+
 }
 
 // ── Owned projection (storage-parameterised native form) ─────────────

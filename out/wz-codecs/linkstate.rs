@@ -26,6 +26,11 @@ use super::linkstate_link::LinkstateLink;
 use super::linkstate_weight::LinkstateWeight;
 use super::locator::Locator;
 
+use sce_forge_runtime::codec::ListView;
+use super::linkstate_link::LinkstateLinkView;
+use super::linkstate_weight::LinkstateWeightView;
+use super::locator::LocatorView;
+
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
@@ -306,6 +311,290 @@ impl<'a> Linkstate<'a> {
             .expect("VecSink is infallible");
         _sce_v
     }
+}
+
+// ── View (ADR 0049) ──────────────────────────────────────────────────
+// `LinkstateView` is what a decode of `Linkstate` learned, not a
+// copy of what the wire repeated: a scalar, a string or a bytes field is held
+// as `Linkstate` holds it, an embedded body or a variant arm as its
+// own view, and a bounded list as the frame it was read from, how many entries
+// it holds and what a walk needs to read them again (`ListView`). Its size
+// depends on the number of fields and not on any `sce:max-count`, so moving
+// one copies a few words however long its lists may be. `decode` refuses the
+// frames `Linkstate::decode` refuses, with the same error: the entries
+// are decoded once to check them, and a walk afterwards cannot fail.
+#[allow(dead_code)]
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct LinkstateView<'a> {
+    pub options: u8,
+    pub psid: u64,
+    pub sn: u64,
+    pub zid_len: Option<u64>,
+    pub zid: Option<&'a [u8]>,
+    pub whatami: Option<u8>,
+    pub num_locators: Option<u64>,
+    pub locators: Option<ListView<'a, LocatorView<'a>, 0>>,
+    pub links_len: u64,
+    pub links: ListView<'a, LinkstateLinkView, 0>,
+    pub weights: Option<ListView<'a, LinkstateWeightView, 0>>,
+}
+
+#[allow(dead_code)]
+impl<'a> LinkstateView<'a> {
+    /// A view with every field at its own type's [`Default`]: the destination
+    /// [`Self::decode_into`] fills.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Decode the next frame from `cursor`: the bytes, the bounds and the
+    /// errors of [`Linkstate::decode`], held as a view. On success the
+    /// cursor advances past the consumed bytes.
+    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out)?;
+        Ok(_out)
+    }
+
+    /// [`Self::decode`] into a destination the caller owns, so a view that
+    /// embeds or dispatches to this one is filled where it will live. On
+    /// `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+        // Streaming cursor decode (SSOT selection: `needs_streaming`).
+        // The positional `raw[byte_off]` path is valid only when every
+        // field's absolute offset is fixed at codegen time; this branch
+        // handles every codec where it is not — present-if-gated fields
+        // (runtime presence), VLE / repeat / TLV-chain / embed fields
+        // (runtime width), string fields (UTF-8 decode), and a fixed field
+        // after a variable-length payload (offset depends on the payload
+        // length). Each field reads its own bytes from the cursor and
+        // advances past exactly what it consumed. Per-field `is_repeat` /
+        // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
+        // every other field flows through `present_if_decode_stmt`, whose
+        // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
+        let options = {
+            let raw = cursor.peek_slice(1)?;
+            let _v = raw[0];
+            cursor.advance(1)?;
+            _v
+        };
+        let psid = cursor.read_vle_u64()?;
+        let sn = cursor.read_vle_u64()?;
+        let zid_len = if (options & 0x01u8) != 0 {
+            let _v = cursor.read_vle_u64()?;
+            Some(_v)
+        } else {
+            None
+        };
+        let zid = if (options & 0x01u8) != 0 {
+            let _n = zid_len.unwrap() as usize;
+            let raw = cursor.peek_slice(_n)?;
+            let _v = raw;
+            cursor.advance(_n)?;
+            Some(_v)
+        } else {
+            None
+        };
+        let whatami = if (options & 0x02u8) != 0 {
+            let raw = cursor.peek_slice(1)?;
+            let _v = raw[0];
+            cursor.advance(1)?;
+            Some(_v)
+        } else {
+            None
+        };
+        let num_locators = if (options & 0x04u8) != 0 {
+            let _v = cursor.read_vle_u64()?;
+            Some(_v)
+        } else {
+            None
+        };
+        if (options & 0x04u8) != 0 {
+            let _n = num_locators.expect("co-gating: count present-if matches repeat");
+            let _rest = cursor.peek_slice(cursor.remaining())?;
+            let mut _count: u32 = 0;
+            for _ in 0.._n {
+                LocatorView::decode(cursor)?;
+                if _count == 64 {
+                    return Err(CodecError::TooManyElements);
+                }
+                _count += 1;
+            }
+            _out.locators = Some(ListView::new(_rest, _count, [], |_c, _a| LocatorView::decode(_c), |_, _| {}));
+        } else {
+            _out.locators = None;
+        }
+        let links_len = cursor.read_vle_u64()?;
+        {
+            let _rest = cursor.peek_slice(cursor.remaining())?;
+            let mut _count: u32 = 0;
+            for _ in 0..links_len {
+                LinkstateLinkView::decode(cursor)?;
+                if _count == 64 {
+                    return Err(CodecError::TooManyElements);
+                }
+                _count += 1;
+            }
+            _out.links = ListView::new(_rest, _count, [], |_c, _a| LinkstateLinkView::decode(_c), |_, _| {});
+        }
+        if (options & 0x08u8) != 0 {
+            let _n = links_len;
+            let _rest = cursor.peek_slice(cursor.remaining())?;
+            let mut _count: u32 = 0;
+            for _ in 0.._n {
+                LinkstateWeightView::decode(cursor)?;
+                if _count == 64 {
+                    return Err(CodecError::TooManyElements);
+                }
+                _count += 1;
+            }
+            _out.weights = Some(ListView::new(_rest, _count, [], |_c, _a| LinkstateWeightView::decode(_c), |_, _| {}));
+        } else {
+            _out.weights = None;
+        }
+        _out.options = options;
+        _out.psid = psid;
+        _out.sn = sn;
+        _out.zid_len = zid_len;
+        _out.zid = zid;
+        _out.whatami = whatami;
+        _out.num_locators = num_locators;
+        _out.links_len = links_len;
+        Ok(())
+    }
+
+    /// Fill `_out`, the builder form [`Linkstate`] a sender fills and
+    /// encodes, with what this view says: every field, each embedded body, the
+    /// variant arm, and each list entry as the walk yields it, built in the
+    /// destination where it will live. Fails only where the destination cannot
+    /// hold it, which a destination of the same declared bounds does.
+    pub fn into_builder(&self, _out: &mut Linkstate<'a>) -> Result<(), CodecError> {
+        _out.options = self.options;
+        _out.psid = self.psid;
+        _out.sn = self.sn;
+        _out.zid_len = self.zid_len;
+        _out.zid = self.zid;
+        _out.whatami = self.whatami;
+        _out.num_locators = self.num_locators;
+        match &self.locators {
+            Some(_l) => {
+                let _vec = _out.locators.insert(HeaplessVec::new());
+                _vec.clear();
+                for _e in _l.iter() {
+                    _vec.push(Locator::default()).map_err(|_| CodecError::TooManyElements)?;
+                    if let Some(_slot) = _vec.last_mut() {
+                        _e.into_builder(_slot)?;
+                    }
+                }
+            }
+            None => _out.locators = None,
+        }
+        _out.links_len = self.links_len;
+        _out.links.clear();
+        for _e in self.links.iter() {
+            _out.links.push(LinkstateLink::default()).map_err(|_| CodecError::TooManyElements)?;
+            if let Some(_slot) = _out.links.last_mut() {
+                _e.into_builder(_slot)?;
+            }
+        }
+        match &self.weights {
+            Some(_l) => {
+                let _vec = _out.weights.insert(HeaplessVec::new());
+                _vec.clear();
+                for _e in _l.iter() {
+                    _vec.push(LinkstateWeight::default()).map_err(|_| CodecError::TooManyElements)?;
+                    if let Some(_slot) = _vec.last_mut() {
+                        _e.into_builder(_slot)?;
+                    }
+                }
+            }
+            None => _out.weights = None,
+        }
+        Ok(())
+    }
+
+    /// Worst-case encoded byte count for this codec, as
+    /// [`Linkstate::MAX_ENCODED_BYTES`].
+    pub const MAX_ENCODED_BYTES: usize = 9987;
+
+    /// Encode what this view says into the caller-owned sink: the bytes
+    /// [`Linkstate::encode`] writes for the value [`Self::into_builder`]
+    /// fills, written straight from the view, walking each list, without the
+    /// builder. It writes the canonical wire, not the frame the view was decoded
+    /// from, so a frame `decode` accepted in a form that is not canonical is
+    /// not passed on as it came.
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
+        // Streaming cursor encode (SSOT selection: `needs_streaming`).
+        // Mirrors the streaming decode: every field appends its own bytes
+        // in declaration order through the per-field encode blocks, so a
+        // gated field skips its append when absent, and a fixed field after
+        // a variable-length payload lands after the payload (the positional
+        // path appends variable fields last, placing it ahead on the wire).
+        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
+        // dedicated helpers; everything else uses `present_if_encode_block`
+        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
+        w.write_u8(self.options)?;
+        w.write_vle_u64(self.psid)?;
+        w.write_vle_u64(self.sn)?;
+        if let Some(_v) = self.zid_len {
+        w.write_vle_u64(_v)?;
+        }
+        if let Some(_v) = &self.zid {
+            w.write_bytes(_v)?;
+        }
+        if let Some(_v) = self.whatami {
+            w.write_u8(_v)?;
+        }
+        if let Some(_v) = self.num_locators {
+        w.write_vle_u64(_v)?;
+        }
+        if let Some(_list) = &self.locators {
+            for _e in _list.iter() {
+                _e.encode(w)?;
+            }
+        }
+        w.write_vle_u64(self.links_len)?;
+        for _e in self.links.iter() {
+            _e.encode(w)?;
+        }
+        if let Some(_list) = &self.weights {
+            for _e in _list.iter() {
+                _e.encode(w)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Heap-backed convenience facade over [`Self::encode`].
+    #[cfg(feature = "alloc")]
+    pub fn encode_to_vec(&self) -> Vec<u8> {
+        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_sink = VecSink::new(&mut _sce_v);
+        self.encode(&mut _sce_sink)
+            .expect("VecSink is infallible");
+        _sce_v
+    }
+
+    pub fn p(&self) -> bool {
+        (self.options & 0x01) != 0
+    }
+
+    pub fn w(&self) -> bool {
+        (self.options & 0x02) != 0
+    }
+
+    pub fn l(&self) -> bool {
+        (self.options & 0x04) != 0
+    }
+
+    pub fn h(&self) -> bool {
+        (self.options & 0x08) != 0
+    }
+
+    pub fn g(&self) -> bool {
+        (self.options & 0x10) != 0
+    }
+
 }
 
 // ── Owned projection (storage-parameterised native form) ─────────────

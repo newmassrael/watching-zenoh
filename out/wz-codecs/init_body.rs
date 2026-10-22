@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
 
+
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
@@ -227,6 +228,25 @@ impl<'a> InitBody<'a> {
         self.encode(&mut _sce_sink, s, a)
             .expect("VecSink is infallible");
         _sce_v
+    }
+}
+
+// ── View (ADR 0049) ──────────────────────────────────────────────────
+// `InitBody` holds no bounded list, embedded body or variant, so a
+// view of it would hold what it holds. Its view is the codec itself under the
+// name every codec's view has, which lets a codec that embeds, lists or
+// dispatches to it name `InitBodyView` whatever kind of codec it is.
+#[allow(dead_code)]
+pub type InitBodyView<'a> = InitBody<'a>;
+
+#[allow(dead_code)]
+impl<'a> InitBody<'a> {
+    /// Fill `_out` with what this value says, as the view of any other codec
+    /// does (`InitBodyView` is this type, so it takes part in the same
+    /// call).
+    pub fn into_builder(&self, _out: &mut Self) -> Result<(), CodecError> {
+        _out.clone_from(self);
+        Ok(())
     }
 }
 

@@ -27,6 +27,12 @@ use super::ext_entry::ExtEntry;
 use super::msg_put::MsgPut;
 use super::msg_del::MsgDel;
 
+use sce_forge_runtime::codec::ListView;
+use super::wireexpr::{WireexprView, WireexprViewVariant};
+use super::ext_entry::ExtEntryView;
+use super::msg_put::MsgPutView;
+use super::msg_del::MsgDelView;
+
 // RFC §synth-5-B variant primitive: discriminated-union body for the
 // codec's tag-field suffix. Each arm wraps an imported codec's decoded
 // value; the optional Default arm preserves the runtime tag value
@@ -304,6 +310,265 @@ impl<'a> Push<'a> {
             .expect("VecSink is infallible");
         _sce_v
     }
+}
+
+// ── View (ADR 0049) ──────────────────────────────────────────────────
+// `PushView` is what a decode of `Push` learned, not a
+// copy of what the wire repeated: a scalar, a string or a bytes field is held
+// as `Push` holds it, an embedded body or a variant arm as its
+// own view, and a bounded list as the frame it was read from, how many entries
+// it holds and what a walk needs to read them again (`ListView`). Its size
+// depends on the number of fields and not on any `sce:max-count`, so moving
+// one copies a few words however long its lists may be. `decode` refuses the
+// frames `Push::decode` refuses, with the same error: the entries
+// are decoded once to check them, and a walk afterwards cannot fail.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum PushViewVariant<'a> {
+    CodecZenohMsgPut(MsgPutView<'a>),
+    CodecZenohMsgDel(MsgDelView<'a>),
+    Default {
+        tag: u8,
+        body: MsgPutView<'a>,
+    },
+}
+
+impl<'a> Default for PushViewVariant<'a> {
+    fn default() -> Self {
+        Self::CodecZenohMsgPut(MsgPutView::default())
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PushView<'a> {
+    pub header: u8,
+    pub keyexpr: WireexprView<'a>,
+    pub extensions: Option<ListView<'a, ExtEntryView<'a>, 0>>,
+    pub body: PushViewVariant<'a>,
+}
+
+impl<'a> Default for PushView<'a> {
+    fn default() -> Self {
+        Self {
+            header: 0x1du8,
+            keyexpr: Default::default(),
+            extensions: Default::default(),
+            body: PushViewVariant::default(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> PushView<'a> {
+    /// A view with every field at its own type's [`Default`]: the destination
+    /// [`Self::decode_into`] fills.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Decode the next frame from `cursor`: the bytes, the bounds and the
+    /// errors of [`Push::decode`], held as a view. On success the
+    /// cursor advances past the consumed bytes.
+    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out)?;
+        Ok(_out)
+    }
+
+    /// [`Self::decode`] into a destination the caller owns, so a view that
+    /// embeds or dispatches to this one is filled where it will live. On
+    /// `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+        // RFC §synth-5-B peek-byte / streaming-prefix:
+        // streaming prefix decode (variable-length fields supported via
+        // per-field present_if/tlv-chain/embed/repeat helpers). Peek-byte
+        // mode additionally peeks the cursor's next byte for the variant
+        // tag without advancing — the arm body decoder reads the peeked
+        // byte as its own header byte (Zenoh response/request body MID
+        // dispatch shape per network.c:347-364 + 220-235).
+        let header = {
+            let raw = cursor.peek_slice(1)?;
+            let _v = raw[0];
+            cursor.advance(1)?;
+            _v
+        };
+        WireexprView::decode_into(cursor, &mut _out.keyexpr, (header >> 5) & 0x1, (header >> 6) & 0x1)?;
+        if (header & 0x80u8) != 0 {
+            let _rest = cursor.peek_slice(cursor.remaining())?;
+            let mut _count: u32 = 0;
+            let mut _more = false;
+            for _ in 0..8u32 {
+                if cursor.remaining() == 0 { break; }
+                let _entry = ExtEntryView::decode(cursor)?;
+                _more = _entry.z();
+                _count += 1;
+                if !_more { break; }
+            }
+            if _more && cursor.remaining() == 0 {
+                return Err(CodecError::NeedMoreBytes);
+            }
+            if _more {
+                return Err(CodecError::TlvChainOverflow);
+            }
+            _out.extensions = Some(ListView::new(_rest, _count, [], |_c, _a| ExtEntryView::decode(_c), |_, _| {}));
+        } else {
+            _out.extensions = None;
+        }
+        let _peek = cursor.peek_slice(1)?[0];
+        // Dispatch on the tag field; each arm decodes its body codec
+        // from the cursor. The default arm (when declared) carries the
+        // runtime tag value so encode can round-trip it back onto the
+        // wire.
+        // Each arm is installed in `_out.body` holding its body's default and
+        // that body is decoded where it sits, so no arm body is returned up
+        // through the variant wrapper.
+        match _peek & 0x1F {
+            1u8 => {
+                _out.body = PushViewVariant::CodecZenohMsgPut(MsgPutView::default());
+                if let PushViewVariant::CodecZenohMsgPut(_b) = &mut _out.body {
+                    MsgPutView::decode_into(cursor, _b)?;
+                }
+            }
+            2u8 => {
+                _out.body = PushViewVariant::CodecZenohMsgDel(MsgDelView::default());
+                if let PushViewVariant::CodecZenohMsgDel(_b) = &mut _out.body {
+                    MsgDelView::decode_into(cursor, _b)?;
+                }
+            }
+            other => {
+                _out.body = PushViewVariant::Default {
+                    tag: other,
+                    body: MsgPutView::default(),
+                };
+                if let PushViewVariant::Default { body: _b, .. } = &mut _out.body {
+                    MsgPutView::decode_into(cursor, _b)?;
+                }
+            }
+        }
+        _out.header = header;
+        Ok(())
+    }
+
+    /// Fill `_out`, the builder form [`Push`] a sender fills and
+    /// encodes, with what this view says: every field, each embedded body, the
+    /// variant arm, and each list entry as the walk yields it, built in the
+    /// destination where it will live. Fails only where the destination cannot
+    /// hold it, which a destination of the same declared bounds does.
+    pub fn into_builder(&self, _out: &mut Push<'a>) -> Result<(), CodecError> {
+        _out.header = self.header;
+        self.keyexpr.into_builder(&mut _out.keyexpr)?;
+        match &self.extensions {
+            Some(_l) => {
+                let _vec = _out.extensions.insert(HeaplessVec::new());
+                _vec.clear();
+                for _e in _l.iter() {
+                    _vec.push(ExtEntry::default()).map_err(|_| CodecError::TooManyElements)?;
+                    if let Some(_slot) = _vec.last_mut() {
+                        _e.into_builder(_slot)?;
+                    }
+                }
+            }
+            None => _out.extensions = None,
+        }
+        match &self.body {
+            PushViewVariant::CodecZenohMsgPut(_b) => {
+                _out.body = PushVariant::CodecZenohMsgPut(MsgPut::default());
+                if let PushVariant::CodecZenohMsgPut(_o) = &mut _out.body {
+                    _b.into_builder(_o)?;
+                }
+            }
+            PushViewVariant::CodecZenohMsgDel(_b) => {
+                _out.body = PushVariant::CodecZenohMsgDel(MsgDel::default());
+                if let PushVariant::CodecZenohMsgDel(_o) = &mut _out.body {
+                    _b.into_builder(_o)?;
+                }
+            }
+            PushViewVariant::Default { tag, body } => {
+                _out.body = PushVariant::Default {
+                    tag: *tag,
+                    body: MsgPut::default(),
+                };
+                if let PushVariant::Default { body: _o, .. } = &mut _out.body {
+                    body.into_builder(_o)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Worst-case encoded byte count for this codec, as
+    /// [`Push::MAX_ENCODED_BYTES`].
+    pub const MAX_ENCODED_BYTES: usize = 2456;
+
+    /// Encode what this view says into the caller-owned sink: the bytes
+    /// [`Push::encode`] writes for the value [`Self::into_builder`]
+    /// fills, written straight from the view, walking each list, without the
+    /// builder. It writes the canonical wire, not the frame the view was decoded
+    /// from, so a frame `decode` accepted in a form that is not canonical is
+    /// not passed on as it came.
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
+        // RFC §synth-5-B parent-tag carriers — derive carrier bits from each embedded
+        // parent-tag variant's active arm before the carrier byte is
+        // emitted. Each `_derived_<carrier>` local is OR'd into the
+        // carrier's encode site (see `inject_parent_tag_carrier_suffix`).
+        let _derived_header: u8 = match &self.keyexpr.body { WireexprViewVariant::WireexprNonlocal(_) => 0x00u8, WireexprViewVariant::WireexprLocal(_) => 0x40u8 };
+
+        // RFC §synth-5-B peek-byte / streaming-prefix:
+        // streaming prefix encode (per-field present_if/tlv-chain/embed/
+        // repeat helpers). Peek-byte mode: the arm body's encode prepends
+        // its own header byte (which the decoder peeked); no separate
+        // tag byte is emitted here. Streaming-prefix mode (own-field
+        // variant): the carrier is part of the prefix fields and emits
+        // through the same per-field path.
+        w.write_u8(self.header | _derived_header)?;
+        self.keyexpr.encode(w, (self.header >> 5) & 0x1)?;
+        if let Some(_list) = &self.extensions {
+            for _e in _list.iter() {
+                _e.encode(w)?;
+            }
+        }
+        // Append the active arm's encoded bytes.
+        match &self.body {
+            PushViewVariant::CodecZenohMsgPut(b) => {
+                b.encode(w)?;
+            }
+            PushViewVariant::CodecZenohMsgDel(b) => {
+                b.encode(w)?;
+            }
+            PushViewVariant::Default { body, .. } => {
+                body.encode(w)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Heap-backed convenience facade over [`Self::encode`].
+    #[cfg(feature = "alloc")]
+    pub fn encode_to_vec(&self) -> Vec<u8> {
+        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_sink = VecSink::new(&mut _sce_v);
+        self.encode(&mut _sce_sink)
+            .expect("VecSink is infallible");
+        _sce_v
+    }
+
+    pub fn mid(&self) -> u8 {
+        self.header & 0x1F
+    }
+
+    pub fn n(&self) -> bool {
+        (self.header & 0x20) != 0
+    }
+
+    pub fn m(&self) -> bool {
+        (self.header & 0x40) != 0
+    }
+
+    pub fn z(&self) -> bool {
+        (self.header & 0x80) != 0
+    }
+
 }
 
 // ── Owned projection (storage-parameterised native form) ─────────────

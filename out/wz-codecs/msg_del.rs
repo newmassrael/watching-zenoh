@@ -25,6 +25,10 @@ use sce_forge_runtime::heapless::Vec as HeaplessVec;
 use super::timestamp::Timestamp;
 use super::ext_entry::ExtEntry;
 
+use sce_forge_runtime::codec::ListView;
+use super::timestamp::TimestampView;
+use super::ext_entry::ExtEntryView;
+
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
 // §6 codec). The kind-agnostic conformance harness only references a
 // subset of fixtures, so unused-but-pub fields/methods would otherwise
@@ -238,6 +242,190 @@ impl<'a> MsgDel<'a> {
             .expect("VecSink is infallible");
         _sce_v
     }
+}
+
+// ── View (ADR 0049) ──────────────────────────────────────────────────
+// `MsgDelView` is what a decode of `MsgDel` learned, not a
+// copy of what the wire repeated: a scalar, a string or a bytes field is held
+// as `MsgDel` holds it, an embedded body or a variant arm as its
+// own view, and a bounded list as the frame it was read from, how many entries
+// it holds and what a walk needs to read them again (`ListView`). Its size
+// depends on the number of fields and not on any `sce:max-count`, so moving
+// one copies a few words however long its lists may be. `decode` refuses the
+// frames `MsgDel::decode` refuses, with the same error: the entries
+// are decoded once to check them, and a walk afterwards cannot fail.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct MsgDelView<'a> {
+    pub header: u8,
+    pub timestamp: Option<TimestampView<'a>>,
+    pub extensions: Option<ListView<'a, ExtEntryView<'a>, 0>>,
+}
+
+impl<'a> Default for MsgDelView<'a> {
+    fn default() -> Self {
+        Self {
+            header: 0x02u8,
+            timestamp: Default::default(),
+            extensions: Default::default(),
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl<'a> MsgDelView<'a> {
+    /// A view with every field at its own type's [`Default`]: the destination
+    /// [`Self::decode_into`] fills.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Decode the next frame from `cursor`: the bytes, the bounds and the
+    /// errors of [`MsgDel::decode`], held as a view. On success the
+    /// cursor advances past the consumed bytes.
+    pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
+        let mut _out = Self::default();
+        Self::decode_into(cursor, &mut _out)?;
+        Ok(_out)
+    }
+
+    /// [`Self::decode`] into a destination the caller owns, so a view that
+    /// embeds or dispatches to this one is filled where it will live. On
+    /// `Err`, `_out` holds the fields decoded so far and is not to be read.
+    pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
+        // Streaming cursor decode (SSOT selection: `needs_streaming`).
+        // The positional `raw[byte_off]` path is valid only when every
+        // field's absolute offset is fixed at codegen time; this branch
+        // handles every codec where it is not — present-if-gated fields
+        // (runtime presence), VLE / repeat / TLV-chain / embed fields
+        // (runtime width), string fields (UTF-8 decode), and a fixed field
+        // after a variable-length payload (offset depends on the payload
+        // length). Each field reads its own bytes from the cursor and
+        // advances past exactly what it consumed. Per-field `is_repeat` /
+        // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
+        // every other field flows through `present_if_decode_stmt`, whose
+        // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
+        let header = {
+            let raw = cursor.peek_slice(1)?;
+            let _v = raw[0];
+            cursor.advance(1)?;
+            _v
+        };
+        if (header & 0x20u8) != 0 {
+            TimestampView::decode_into(cursor, _out.timestamp.insert(TimestampView::default()))?;
+        } else {
+            _out.timestamp = None;
+        }
+        if (header & 0x80u8) != 0 {
+            let _rest = cursor.peek_slice(cursor.remaining())?;
+            let mut _count: u32 = 0;
+            let mut _more = false;
+            for _ in 0..8u32 {
+                if cursor.remaining() == 0 { break; }
+                let _entry = ExtEntryView::decode(cursor)?;
+                _more = _entry.z();
+                _count += 1;
+                if !_more { break; }
+            }
+            if _more && cursor.remaining() == 0 {
+                return Err(CodecError::NeedMoreBytes);
+            }
+            if _more {
+                return Err(CodecError::TlvChainOverflow);
+            }
+            _out.extensions = Some(ListView::new(_rest, _count, [], |_c, _a| ExtEntryView::decode(_c), |_, _| {}));
+        } else {
+            _out.extensions = None;
+        }
+        _out.header = header;
+        Ok(())
+    }
+
+    /// Fill `_out`, the builder form [`MsgDel`] a sender fills and
+    /// encodes, with what this view says: every field, each embedded body, the
+    /// variant arm, and each list entry as the walk yields it, built in the
+    /// destination where it will live. Fails only where the destination cannot
+    /// hold it, which a destination of the same declared bounds does.
+    pub fn into_builder(&self, _out: &mut MsgDel<'a>) -> Result<(), CodecError> {
+        _out.header = self.header;
+        match &self.timestamp {
+            Some(_b) => _b.into_builder(_out.timestamp.insert(Timestamp::default()))?,
+            None => _out.timestamp = None,
+        }
+        match &self.extensions {
+            Some(_l) => {
+                let _vec = _out.extensions.insert(HeaplessVec::new());
+                _vec.clear();
+                for _e in _l.iter() {
+                    _vec.push(ExtEntry::default()).map_err(|_| CodecError::TooManyElements)?;
+                    if let Some(_slot) = _vec.last_mut() {
+                        _e.into_builder(_slot)?;
+                    }
+                }
+            }
+            None => _out.extensions = None,
+        }
+        Ok(())
+    }
+
+    /// Worst-case encoded byte count for this codec, as
+    /// [`MsgDel::MAX_ENCODED_BYTES`].
+    pub const MAX_ENCODED_BYTES: usize = 593;
+
+    /// Encode what this view says into the caller-owned sink: the bytes
+    /// [`MsgDel::encode`] writes for the value [`Self::into_builder`]
+    /// fills, written straight from the view, walking each list, without the
+    /// builder. It writes the canonical wire, not the frame the view was decoded
+    /// from, so a frame `decode` accepted in a form that is not canonical is
+    /// not passed on as it came.
+    pub fn encode<S: SceSink>(&self, w: &mut S) -> Result<(), CodecError> {
+        // Streaming cursor encode (SSOT selection: `needs_streaming`).
+        // Mirrors the streaming decode: every field appends its own bytes
+        // in declaration order through the per-field encode blocks, so a
+        // gated field skips its append when absent, and a fixed field after
+        // a variable-length payload lands after the payload (the positional
+        // path appends variable fields last, placing it ahead on the wire).
+        // Per-field `is_repeat` / `is_tlv_chain` / `is_embed` route to their
+        // dedicated helpers; everything else uses `present_if_encode_block`
+        // (its non-gated arm covers plain fixed / tail / length-ref / VLE).
+        w.write_u8(self.header)?;
+        if let Some(_v) = &self.timestamp {
+            _v.encode(w)?;
+        }
+        if let Some(_list) = &self.extensions {
+            for _e in _list.iter() {
+                _e.encode(w)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Heap-backed convenience facade over [`Self::encode`].
+    #[cfg(feature = "alloc")]
+    pub fn encode_to_vec(&self) -> Vec<u8> {
+        let mut _sce_v: Vec<u8> = Vec::with_capacity(Self::MAX_ENCODED_BYTES);
+        let mut _sce_sink = VecSink::new(&mut _sce_v);
+        self.encode(&mut _sce_sink)
+            .expect("VecSink is infallible");
+        _sce_v
+    }
+
+    pub fn mid(&self) -> u8 {
+        self.header & 0x1F
+    }
+
+    pub fn t(&self) -> bool {
+        (self.header & 0x20) != 0
+    }
+
+    pub fn x(&self) -> bool {
+        (self.header & 0x40) != 0
+    }
+
+    pub fn z(&self) -> bool {
+        (self.header & 0x80) != 0
+    }
+
 }
 
 // ── Owned projection (storage-parameterised native form) ─────────────
