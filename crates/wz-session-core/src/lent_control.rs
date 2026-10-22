@@ -625,7 +625,11 @@ pub fn interest<'a>(
         header: interest_header(current, future),
         interest_id,
         body: Some(InterestBody {
-            header: interest_body_header(kinds, Some(keyexpr_suffix.is_some()), aggregate),
+            header: interest_body_header(
+                InterestKinds::KEYEXPRS | kinds,
+                Some(keyexpr_suffix.is_some()),
+                aggregate,
+            ),
             keyexpr: Some(local(keyexpr_mapping_id, keyexpr_suffix)),
         }),
         extensions: None,
@@ -647,7 +651,7 @@ pub fn interest_unrestricted<'a>(
         header: interest_header(current, future),
         interest_id,
         body: Some(InterestBody {
-            header: interest_body_header(kinds, None, aggregate),
+            header: interest_body_header(InterestKinds::KEYEXPRS | kinds, None, aggregate),
             keyexpr: None,
         }),
         extensions: None,

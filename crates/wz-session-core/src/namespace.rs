@@ -384,6 +384,10 @@ pub fn apply_egress_multicast_item(
         // prefixed as the reply above is.
         #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
         Item::Declare { declare } => apply_egress_declare(ns, declare)?,
+        // An interest the session asks the group (open-debt item 913): local-origin, its
+        // literal key prefixed as a unicast interest's is.
+        #[cfg(feature = "codec-push")]
+        Item::Interest { interest } => apply_egress_interest(ns, interest)?,
     }
     Ok(())
 }

@@ -232,11 +232,11 @@ pub fn build_interest_propagated(
 /// client is (see [`InterestKinds`]).
 const INTEREST_BODY_AGGREGATE: u8 = 0x80;
 
-/// WHICH DECLARATION KINDS an `Interest` asks the peer for — the `S`, `Q`
+/// WHICH DECLARATION KINDS an `Interest` asks the peer for — the `K`, `S`, `Q`
 /// and `T` bits of the `InterestBody` header, and nothing else.
 ///
-/// The kind bits are the ONLY part of that header a caller chooses. `KE`
-/// (bit 0) and `R` (bit 4) are implied by wz always attaching a keyexpr, and
+/// The kind bits are the ONLY part of that header a caller chooses. `R`
+/// (bit 4) follows from whether the builder attaches a keyexpr, and
 /// `N` / `M` are derived from the wireexpr the builder composes — deriving
 /// them rather than accepting them is what zenoh does too, in
 /// `Interest::options` (`zenoh-protocol/src/network/interest.rs:198-209`,
@@ -246,8 +246,8 @@ const INTEREST_BODY_AGGREGATE: u8 = 0x80;
 /// `interest.rs:131-136` forbids ("If R==0 then N should be set to 0").
 ///
 /// Bit values are the wire's, shared by all three implementations:
-/// `S=0x02`, `Q=0x04`, `T=0x08` — zenoh's `InterestOptions::SUBSCRIBERS`
-/// / `QUERYABLES` / `TOKENS` (`interest.rs:248-251`), zenoh-pico's
+/// `K=0x01`, `S=0x02`, `Q=0x04`, `T=0x08` — zenoh's `InterestOptions::KEYEXPRS`
+/// / `SUBSCRIBERS` / `QUERYABLES` / `TOKENS` (`interest.rs:248-251`), zenoh-pico's
 /// `_Z_INTEREST_FLAG_*` and wz's own generated
 /// `InterestBodyOwned::su` / `qu` / `to` accessors
 /// (`out/wz-codecs/interest_body.rs`).
@@ -263,6 +263,12 @@ const INTEREST_BODY_AGGREGATE: u8 = 0x80;
 pub struct InterestKinds(u8);
 
 impl InterestKinds {
+    /// Peer KEYEXPR declarations (`K`). Open-debt item 913 — zenoh-pico's multicast session asks
+    /// its group for the members' keyexpr declarations when it opens, with this kind alone and no
+    /// key (`vendor/zenoh-pico/src/session/interest.c` @
+    /// `uint8_t flags = _Z_INTEREST_FLAG_KEYEXPRS | _Z_INTEREST_FLAG_CURRENT;`).
+    pub const KEYEXPRS: Self = Self(0x01);
+
     /// Peer SUBSCRIBER declarations (`S`). zenoh emits this from
     /// `declare_publisher_inner` (`zenoh/src/api/session.rs:1373-1374`); a
     /// zenoh ROUTER propagates a subscriber declaration to a face ONLY if
@@ -282,10 +288,10 @@ impl InterestKinds {
     /// [`build_interest_liveliness_get`].
     pub const TOKENS: Self = Self(0x08);
 
-    /// The raw `S|Q|T` bits, for composition into the body header.
+    /// The raw `K|S|Q|T` bits, for composition into the body header.
     ///
     /// Deliberately no constructor from a raw `u8`: the only values this
-    /// type may hold are unions of the three constants, and a `from_bits`
+    /// type may hold are unions of the four constants, and a `from_bits`
     /// would let a caller smuggle `R` / `N` / `M` / `A` into the kind
     /// position where they would silently overwrite the derived bits.
     pub const fn bits(self) -> u8 {
@@ -295,7 +301,7 @@ impl InterestKinds {
 
 // THE EMPTY SET IS UNREPRESENTABLE, and that is the whole guard: this type
 // has no `empty()`, no `Default`, and no `from_bits`, so the only values a
-// caller can build are unions of the three constants above and every one of
+// caller can build are unions of the four constants above and every one of
 // them has at least one kind bit. An Interest naming NO kind would be a leak
 // with no observable effect — the peer registers an interest that can never
 // match a declaration and only a Final clears it — and zenoh cannot express
@@ -327,8 +333,9 @@ impl core::ops::BitOr for InterestKinds {
 /// intentional and matches zenoh-pico's `_Z_INTEREST_FLAG_COPY_MASK`
 /// reorder (the two `header` bytes are distinct wire bytes, so no
 /// collision). The inner body always sets KE (asks for keyexpr
-/// declarations); AG stays clear (wz stages no aggregate reply — see
-/// [`InterestKinds`]).
+/// declarations), as every zenoh emit site names `KEYEXPRS`; zenoh-pico's
+/// forms that leave it out go through [`build_interest_exact`]. AG stays
+/// clear (wz stages no aggregate reply — see [`InterestKinds`]).
 ///
 /// `keyexpr_suffix.is_some()` is the ONLY source of N and the `Local`
 /// wireexpr arm the only source of M, both derived here rather than passed:
@@ -346,6 +353,24 @@ impl core::ops::BitOr for InterestKinds {
 /// keyexpr too — an absent wireexpr has neither a suffix nor a mapping arm.
 #[cfg(feature = "alloc")]
 fn build_restricted_interest(
+    interest_id: u64,
+    kinds: InterestKinds,
+    current: bool,
+    future: bool,
+    keyexpr: Option<(u64, Option<&str>)>,
+) -> Result<InterestOwned, CodecError> {
+    build_interest_of_kinds(
+        interest_id,
+        InterestKinds::KEYEXPRS | kinds,
+        current,
+        future,
+        keyexpr,
+    )
+}
+
+/// [`build_restricted_interest`] asking for `kinds` exactly, `K` only when they name it.
+#[cfg(feature = "alloc")]
+fn build_interest_of_kinds(
     interest_id: u64,
     kinds: InterestKinds,
     current: bool,
@@ -394,7 +419,7 @@ pub(crate) const fn interest_header(current: bool, future: bool) -> u8 {
 }
 
 /// The `InterestBody` header of every builder in this module and of the lent
-/// writers: `KE | <kinds> | R | N | M | A`. `keyexpr` is `None` for an
+/// writers: `<kinds> | R | N | M | A`, `KE` among the kinds. `keyexpr` is `None` for an
 /// unrestricted interest (no wireexpr: `R`, `N` and `M` all clear) and
 /// `Some(has_suffix)` for a restricted one, whose `N` follows the suffix and whose
 /// `M` is the `Local` arm every builder here writes.
@@ -403,7 +428,6 @@ pub(crate) const fn interest_body_header(
     keyexpr: Option<bool>,
     aggregate: bool,
 ) -> u8 {
-    let ke_flag = 0x01u8;
     let (r_flag, n_flag, m_flag) = match keyexpr {
         Some(has_suffix) => (
             0x10u8,
@@ -417,7 +441,7 @@ pub(crate) const fn interest_body_header(
     } else {
         0x00u8
     };
-    ke_flag | kinds.bits() | r_flag | n_flag | m_flag | ag_flag
+    kinds.bits() | r_flag | n_flag | m_flag | ag_flag
 }
 
 /// [`build_restricted_interest`] with the AGGREGATE bit — the one composition
@@ -574,6 +598,27 @@ pub fn build_interest_kinds(
         keyexpr_mapping_id,
         keyexpr_suffix,
     )
+}
+
+/// An `Interest` asking for `kinds` exactly, on `keyexpr` (`(mapping_id, suffix)`) or, with
+/// `None`, on every key — zenoh-pico's own composition, where `K` is a kind its caller names or
+/// leaves out rather than a bit every Interest carries. Open-debt item 913 — a pico session at
+/// `Z_FEATURE_MULTICAST_DECLARATIONS=1` sends two such on its group: the open-time pull of the
+/// members' keyexprs, `K` alone and no key
+/// (`vendor/zenoh-pico/src/session/interest.c` @
+/// `uint8_t flags = _Z_INTEREST_FLAG_KEYEXPRS | _Z_INTEREST_FLAG_CURRENT;`), and a peer's write
+/// filter, `S` or `Q` on the entity's key and no `K`
+/// (`vendor/zenoh-pico/src/net/filtering.c` @
+/// `uint8_t flags = interest_flag | _Z_INTEREST_FLAG_RESTRICTED | _Z_INTEREST_FLAG_CURRENT;`).
+#[cfg(feature = "alloc")]
+pub fn build_interest_exact(
+    interest_id: u64,
+    kinds: InterestKinds,
+    current: bool,
+    future: bool,
+    keyexpr: Option<(u64, Option<&str>)>,
+) -> Result<InterestOwned, CodecError> {
+    build_interest_of_kinds(interest_id, kinds, current, future, keyexpr)
 }
 
 /// [`build_interest_kinds`] with the AGGREGATE bit under the caller's control.

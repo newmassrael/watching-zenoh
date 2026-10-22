@@ -194,6 +194,18 @@ pub enum MulticastTxItem {
         /// The built `Declare`, boxed to bound the enum size.
         declare: Box<wz_codecs::declare::DeclareOwned>,
     },
+    /// Open-debt item 913 — an `Interest` the session asks the group: zenoh-pico at
+    /// `Z_FEATURE_MULTICAST_DECLARATIONS=1` asks its group for the members' keyexprs when it
+    /// opens and for their subscribers or queryables when an entity's write filter is made, over
+    /// the multicast transport it holds (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `|| (zn->_tp._type == _Z_TRANSPORT_MULTICAST_TYPE)`). Framed as a `Declare` is
+    /// (`interest_frame_meta`): reliable and DEFAULT-band, as pico sends it with
+    /// `Z_RELIABILITY_RELIABLE` and no QoS of its own.
+    #[cfg(all(feature = "alloc", feature = "codec-push"))]
+    Interest {
+        /// The built `Interest`, boxed to bound the enum size.
+        interest: Box<wz_codecs::interest::InterestOwned>,
+    },
 }
 
 /// The wire datagrams one [`MulticastTxItem`] becomes, plus the channel
@@ -425,6 +437,8 @@ fn multicast_tx_reliable(item: &MulticastTxItem) -> bool {
         MulticastTxItem::DeclareReply { .. } => true,
         #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
         MulticastTxItem::Declare { .. } => true,
+        #[cfg(feature = "codec-push")]
+        MulticastTxItem::Interest { .. } => true,
     }
 }
 
@@ -560,6 +574,16 @@ where
             conf,
             queue,
         ),
+        #[cfg(feature = "codec-push")]
+        MulticastTxItem::Interest { interest } => push_frame(
+            meta,
+            wz_codecs::interest::Interest::MAX_ENCODED_BYTES,
+            crate::frame_encode::interest_body(&interest),
+            tx_sn,
+            params,
+            conf,
+            queue,
+        ),
     }
 }
 
@@ -673,6 +697,16 @@ fn frame_meta(
         MulticastTxItem::DeclareReply { declare } => declare_frame_meta(declare),
         #[cfg(all(feature = "codec-declare", feature = "codec-push"))]
         MulticastTxItem::Declare { declare } => declare_frame_meta(declare),
+        #[cfg(feature = "codec-push")]
+        MulticastTxItem::Interest { interest } => FrameMeta {
+            priority: Priority::DEFAULT,
+            ext_qos: None,
+            reliable: true,
+            droppable: is_droppable(
+                true,
+                crate::declare_ext_qos::read_interest_qos(interest).congestion(),
+            ),
+        },
     }
 }
 
@@ -1002,6 +1036,11 @@ pub fn multicast_tx_stats_class(
         MulticastTxItem::Declare { declare } => (
             crate::declare_ext_qos::read_declare_qos(declare).priority(),
             NetworkStatsClass::control(MessageLabel::Declare),
+        ),
+        #[cfg(feature = "codec-push")]
+        MulticastTxItem::Interest { interest } => (
+            crate::declare_ext_qos::read_interest_qos(interest).priority(),
+            NetworkStatsClass::control(MessageLabel::Interest),
         ),
     }
 }
