@@ -277288,6 +277288,72 @@
         "The consumer's closing tests run on its own log files once these land."
       ]
     },
+    "Round 3408": {
+      "decision_summary": "Seven of the eleven items filed in Round 3406 are paid, and two defects found on the way with them. The C drop-ins now build every header arm pico's switches produce as a library of its own: multi-thread, unstable-api and connectivity are capabilities, a build without one is the arm of the header that leaves the switch off, and a program links the build of the arm it compiled against. That rule replaces the earlier reading that one pico cdylib serves both thread arms: measured, the multi-threaded build zeroed 184 bytes into a single-threaded program's 48-byte channel slot. The zenoh-c drop-in forwards zenoh-c's default links and pubkey auth under zenoh-c's names. Items 910, 912, 913 and 914 stay open.",
+      "changes_bullets": [
+        "Item 916: a pico publisher, querier and reply on a closed session return _Z_ERR_SESSION_CLOSED, and the batch calls do on a null session (SharedSession carries the closed latch the drive loop stops on).",
+        "Item 911: wz-capi-pico forwards the ws and serial links as off-default features, each with a round trip; raw ethernet stays with item 913.",
+        "Found with 919: capi-core built TLS and QUIC dial material for every endpoint, so a path endpoint (unixsock-stream, serial) reached rustls as a server name and the whole open failed; the material now rides only the scheme that reads it.",
+        "Items 919 and 920: wz-capi-c forwards zenoh-c's default links and pubkey auth as seven capabilities and four off-default features under zenoh-c's names, reads the transport/link/tls material, and builds a staticlib that upstream z_put links statically. Cost gate capic-default 5.18 to 9.045 MB (rustls on ring, quinn, tungstenite, rsa).",
+        "Item 915: zp_start_admin_space and zp_stop_admin_space answer pico's @/<zid>/pico/** documents behind admin-space.",
+        "Item 918: multi-thread capability; off is the single-threaded arm (1-byte open options, 48-byte non-blocking channels, zp_read and its family, no task, mutex or condvar doors). The cancellation token moved to its own module.",
+        "Item 917: unstable-api and connectivity capabilities; off is upstream's default option layout, each unstable field read through one accessor per struct. build-zenoh-pico-cli.sh configures the default arm; Layer E builds wz for the -st and -default arms from their config.h.",
+        "Found with 917: capability_config could not express a capability pico has under two switches; liveliness-get now names Z_FEATURE_LIVELINESS and Z_FEATURE_QUERY, and the single-threaded build gains it.",
+        "Test helpers: PicoHeaderArm pairs an arm's headers with its wz build; a linked C program records DT_RPATH, because cargo test's LD_LIBRARY_PATH made the single-threaded program load the default build."
+      ],
+      "verification_bullets": [
+        "pico_header_arm_layout (new): a C probe compiled against each of the three header arms and linked to that arm's wz build writes nothing past fifo, ring, open options or 11 option defaults, and reads accept_replies where its header puts it; the two mismatched pairs (single-threaded and default headers against the reference build) fail, so the probe sees an overrun.",
+        "pico_abi_symbol_census with --ignored against the CMake-built libzenohpico.so: 4 of 4 pass; it had been run without --ignored before, executing nothing.",
+        "pico_abi_option_layout, the single-threaded drop-in legs (z_sub_st, z_pub_st) and the header-arms leg: pass against the arm's own build.",
+        "wz-capi-pico tests in the default, unstable-off and single-threaded arms, clippy in eight feature arms, wz-capi-c tests including unixsock, ws and tls link legs, capi-core tests: pass on a build host.",
+        "Windows target cargo check in both thread arms: pass.",
+        "capability_config --check and --selftest (29 arms), capability_cost_gate (pico 802 exports; clients 1,794,085 text with connectivity absent), upstream_switch_map, nondefault-tests census, prose gate, citation anchor, negotiated and genuine axis gates: rc=0.",
+        "Each landing commit passed the pre-commit and commit-msg hooks."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Item 914 next: the local-subscriber and local-queryable arms need option fields in seven structs, delivery on the caller's thread (pico calls the callback outside its session lock, so the read task may run it at the same time), and write-filter and matching counts of local entities, which capi-core does not keep yet.",
+        "Item 913: C ABI multicast transport; the raw-ethernet link of item 911 waits on it.",
+        "Item 910: the Rust API compatibility crate (signatures and foreign globs in the surface first).",
+        "Item 912: bt and a board's USB CDC serial need hardware to witness.",
+        "admin-space and the ws and serial links are off-default features, not capabilities, so a pico config.h that turns them on does not reach them through capability_config yet.",
+        "The capi-core matching listener still installs per face and does not see a session-local declaration (R2579); item 914 meets it."
+      ],
+      "publishable_decision_summary": "Seven of the eleven items filed in Round 3406 are paid, and two defects found on the way with them. The C drop-ins now build every header arm pico's switches produce as a library of its own: multi-thread, unstable-api and connectivity are capabilities, a build without one is the arm of the header that leaves the switch off, and a program links the build of the arm it compiled against. That rule replaces the earlier reading that one pico cdylib serves both thread arms: measured, the multi-threaded build zeroed 184 bytes into a single-threaded program's 48-byte channel slot. The zenoh-c drop-in forwards zenoh-c's default links and pubkey auth under zenoh-c's names. Items 910, 912, 913 and 914 stay open.",
+      "publishable_changes_bullets": [
+        "Item 916: a pico publisher, querier and reply on a closed session return _Z_ERR_SESSION_CLOSED, and the batch calls do on a null session (SharedSession carries the closed latch the drive loop stops on).",
+        "Item 911: wz-capi-pico forwards the ws and serial links as off-default features, each with a round trip; raw ethernet stays with item 913.",
+        "Found with 919: capi-core built TLS and QUIC dial material for every endpoint, so a path endpoint (unixsock-stream, serial) reached rustls as a server name and the whole open failed; the material now rides only the scheme that reads it.",
+        "Items 919 and 920: wz-capi-c forwards zenoh-c's default links and pubkey auth as seven capabilities and four off-default features under zenoh-c's names, reads the transport/link/tls material, and builds a staticlib that upstream z_put links statically. Cost gate capic-default 5.18 to 9.045 MB (rustls on ring, quinn, tungstenite, rsa).",
+        "Item 915: zp_start_admin_space and zp_stop_admin_space answer pico's @/<zid>/pico/** documents behind admin-space.",
+        "Item 918: multi-thread capability; off is the single-threaded arm (1-byte open options, 48-byte non-blocking channels, zp_read and its family, no task, mutex or condvar doors). The cancellation token moved to its own module.",
+        "Item 917: unstable-api and connectivity capabilities; off is upstream's default option layout, each unstable field read through one accessor per struct. build-zenoh-pico-cli.sh configures the default arm; Layer E builds wz for the -st and -default arms from their config.h.",
+        "Found with 917: capability_config could not express a capability pico has under two switches; liveliness-get now names Z_FEATURE_LIVELINESS and Z_FEATURE_QUERY, and the single-threaded build gains it.",
+        "Test helpers: PicoHeaderArm pairs an arm's headers with its wz build; a linked C program records DT_RPATH, because cargo test's LD_LIBRARY_PATH made the single-threaded program load the default build."
+      ],
+      "publishable_verification_bullets": [
+        "pico_header_arm_layout (new): a C probe compiled against each of the three header arms and linked to that arm's wz build writes nothing past fifo, ring, open options or 11 option defaults, and reads accept_replies where its header puts it; the two mismatched pairs (single-threaded and default headers against the reference build) fail, so the probe sees an overrun.",
+        "pico_abi_symbol_census with --ignored against the CMake-built libzenohpico.so: 4 of 4 pass; it had been run without --ignored before, executing nothing.",
+        "pico_abi_option_layout, the single-threaded drop-in legs (z_sub_st, z_pub_st) and the header-arms leg: pass against the arm's own build.",
+        "wz-capi-pico tests in the default, unstable-off and single-threaded arms, clippy in eight feature arms, wz-capi-c tests including unixsock, ws and tls link legs, capi-core tests: pass on a build host.",
+        "Windows target cargo check in both thread arms: pass.",
+        "capability_config --check and --selftest (29 arms), capability_cost_gate (pico 802 exports; clients 1,794,085 text with connectivity absent), upstream_switch_map, nondefault-tests census, prose gate, citation anchor, negotiated and genuine axis gates: rc=0.",
+        "Each landing commit passed the pre-commit and commit-msg hooks."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Item 914 next: the local-subscriber and local-queryable arms need option fields in seven structs, delivery on the caller's thread (pico calls the callback outside its session lock, so the read task may run it at the same time), and write-filter and matching counts of local entities, which capi-core does not keep yet.",
+        "Item 913: C ABI multicast transport; the raw-ethernet link of item 911 waits on it.",
+        "Item 910: the Rust API compatibility crate (signatures and foreign globs in the surface first).",
+        "Item 912: bt and a board's USB CDC serial need hardware to witness.",
+        "admin-space and the ws and serial links are off-default features, not capabilities, so a pico config.h that turns them on does not reach them through capability_config yet.",
+        "The capi-core matching listener still installs per face and does not see a session-local declaration (R2579); item 914 meets it."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
