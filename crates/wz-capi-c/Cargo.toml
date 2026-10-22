@@ -30,10 +30,16 @@
 # The remaining upstream examples are the backlog, and the lane REPORTS the ratio
 # every run so partial coverage stays visible instead of implied.
 #
-# crate-type = ["cdylib", "rlib"]:
-#   - cdylib: the artifact a zenoh-c program links.
-#   - rlib:   so the facade can re-export it and so gate tests can drive the
-#             exported symbols in-process.
+# crate-type = ["cdylib", "staticlib", "rlib"]:
+#   - cdylib:    the artifact a zenoh-c program links.
+#   - staticlib: the same library for a program linked statically, which zenoh-c
+#                builds beside its shared one. A Rust static library carries no
+#                record of the system libraries the standard library needs, so a
+#                C link names them after it (on Linux: `-lgcc_s -lutil -lrt
+#                -lpthread -lm -ldl -lc`, what `rustc --print native-static-libs`
+#                lists).
+#   - rlib:      so the facade can re-export it and so gate tests can drive the
+#                exported symbols in-process.
 #
 # AP/std-only.
 
@@ -51,7 +57,7 @@ description = "zenoh-c-compatible C ABI (cdylib) over the wz AP session — a bi
 [lib]
 name = "wz_capi_c"
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 # The node that `client_only_dials_a_listener` dials: a build that cannot listen needs one of the
 # full build to talk to.
@@ -98,6 +104,10 @@ required-features = ["peer", "query", "queryable"]
 [[test]]
 name = "interceptors_subject"
 required-features = ["peer"]
+
+[[test]]
+name = "link_kinds_roundtrip"
+required-features = ["peer", "transport_tls", "transport_ws", "transport_unixsock-stream"]
 
 [[test]]
 name = "listen_set"
@@ -176,8 +186,31 @@ wz-cdylib-build = { path = "../wz-cdylib-build" }
 # minimum. A capability that is off is not linked: neither the ABI doors nor the plane behind
 # them are compiled in (`wz-capi-core` is taken without its default features, so a capability
 # reaches it only through the feature below). The names are `wz-capi-pico`'s, for the same
-# reason: one vocabulary across the C ABIs.
-default = ["link-udp", "timestamping", "peer", "scout", "query", "queryable", "liveliness", "liveliness-get", "advanced", "group", "gossip"]
+# reason: one vocabulary across the C ABIs. The link kinds, the handshake methods and the
+# counters are the exception, and carry zenoh-c's own feature names (`transport_tls`,
+# `auth_pubkey`, `stats`, ...): they are switches a zenoh-c build is asked for by name, and the
+# pico ABI forwards its links under names of its own. Each is on by default exactly when it is
+# in zenoh-c's own default set.
+default = [
+    "link-udp",
+    "timestamping",
+    "peer",
+    "scout",
+    "query",
+    "queryable",
+    "liveliness",
+    "liveliness-get",
+    "advanced",
+    "group",
+    "gossip",
+    "transport_tls",
+    "transport_quic",
+    "transport_quic_datagram",
+    "transport_ws",
+    "transport_unixsock-stream",
+    "transport_multilink",
+    "auth_pubkey",
+]
 # The roles beyond the client: a listener, a router or a peer, and the gossip that introduces
 # the nodes of a mesh. A build without them opens a client session to the endpoints it dials.
 peer = ["scout", "wz-capi-core/peer"]
@@ -203,6 +236,39 @@ advanced = ["liveliness", "queryable", "timestamping", "wz-capi-core/advanced"]
 group = ["wz-capi-core/group"]
 # A session told of a node by one it holds a link to dials it.
 gossip = ["peer", "wz-capi-core/gossip"]
+# The `tls/` link, dial and accept. A session reads the certificate material of
+# `transport/link/tls` (`root_ca_certificate`, `listen_certificate`, `listen_private_key`, each a
+# path) when it opens, and a path it cannot read fails the open; a `tls/` dial verifies the name
+# it dials against the peer's certificate, as upstream does when `verify_name_on_connect` is
+# left unstated.
+transport_tls = ["wz-runtime-tokio/transport-link-tls", "wz-capi-core/transport_tls"]
+# The `quic/` link, over the same certificate material as `tls/`.
+transport_quic = ["wz-runtime-tokio/transport-link-quic", "wz-capi-core/transport_quic"]
+# The `quic-datagram/` link, on the `quic/` link's connection.
+transport_quic_datagram = ["transport_quic", "wz-capi-core/transport_quic_datagram"]
+# The `ws/` link, dial and accept.
+transport_ws = ["wz-capi-core/transport_ws"]
+# The `unixsock-stream/` link, dial and accept, on a Unix target.
+transport_unixsock-stream = ["wz-capi-core/transport_unixsock-stream"]
+# The multilink establishment extension. A session holds one link per peer, which is what
+# upstream does at its default `transport/unicast/max_links` of 1.
+transport_multilink = ["wz-capi-core/transport_multilink"]
+# The public-key handshake: a config stating the RSA identity of `transport/auth/pubkey`
+# presents it to the peers the node dials and asks it of the peers the node accepts. As
+# upstream's, the set of peer keys a node built from its config admits is empty, so such a node
+# reaches the peers it dials and admits no peer that dials it. A build without the feature
+# refuses a config that states any of the four keys.
+auth_pubkey = ["wz-runtime-tokio/access-extauth-pubkey", "wz-capi-core/auth_pubkey"]
+# The links zenoh-c leaves out of its default set, and so does this crate: `serial/`, the
+# `unixpipe/` named pipe (Unix), and `vsock/` (Linux).
+transport_serial = ["wz-capi-core/transport-link-serial"]
+transport_unixpipe = ["wz-capi-core/transport-link-unixpipe"]
+transport_vsock = ["wz-capi-core/transport-link-vsock"]
+# The per-link transport counters, off by default as zenoh-c's are. The counts are kept on each
+# session's link state (`SessionLinkActions::stats_report` in the runtime) and no door of this
+# ABI reads them: zenoh-c has no C surface for them either, and reports them through its admin
+# space, which this ABI does not serve.
+stats = ["wz-capi-core/transport-stats"]
 # zenoh-c's own build flags change its ABI, so wz's must be able to follow.
 # `Z_FEATURE_UNSTABLE_API` and `Z_FEATURE_SHARED_MEMORY` are INDEPENDENT axes,
 # so "zenoh-c" names one of FOUR builds; the id for each is the argument
@@ -375,7 +441,11 @@ wz-capture = { path = "../wz-capture", default-features = false, features = ["re
 # to `z_open` afterwards, and the gap between the two is what took Layer C1cc
 # red on run 32198505957. This crate already depends on wz-runtime-tokio, so the
 # dev-dep adds no graph the tests were not already building.
-wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support" }
+# `tls-fixtures` for the self-signed `localhost` certificate `link_kinds_roundtrip` hands a
+# `tls/` listener by path, the fixture wz-capi-pico's TLS tests use.
+wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = [
+    "tls-fixtures",
+] }
 # R3070 -- `scouting_open` answers a session's Scout with the runtime's own responder, on a
 # runtime of its own, so the finding half is pinned alone. (R3071 made a session answer for
 # itself, and two rows there use one; the stand-in stays for the rows that need a node whose zid

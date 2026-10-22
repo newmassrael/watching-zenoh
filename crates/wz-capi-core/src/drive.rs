@@ -201,11 +201,11 @@ impl Dialer {
         // it always did.
         let auth = self.auth.clone();
         let stage = move |actions: &Arc<wz_runtime_tokio::session_glue::SessionLinkActions>| {
-            #[cfg(feature = "access-extauth-usrpwd")]
+            #[cfg(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey"))]
             if let Some(dispatch) = auth.as_ref().and_then(|auth| auth.dial_dispatch()) {
                 actions.install_auth_dispatch(dispatch);
             }
-            #[cfg(not(feature = "access-extauth-usrpwd"))]
+            #[cfg(not(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey")))]
             let _ = (&auth, actions);
             Ok(())
         };

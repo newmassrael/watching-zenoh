@@ -47,8 +47,9 @@ path = "src/lib.rs"
 # The receive busy-poll is on in a default build: it measured faster than zenoh-pico and
 # zenoh-c on a loopback round trip and costs a node that only listens nothing (see the feature).
 #
-# The capabilities (`liveliness-get`, `advanced`, `group`, `gossip`) are on in a default build
-# so this crate builds and tests on its own; an ABI crate takes this crate with
+# The capabilities (`liveliness-get`, `advanced`, `group`, `gossip`, and the link kinds and
+# handshake methods zenoh-c turns on by default, under zenoh-c's own feature names) are on in a
+# default build so this crate builds and tests on its own; an ABI crate takes this crate with
 # `default-features = false` and names the ones it exports, so a capability its ABI leaves out
 # is compiled into neither the ABI nor this model.
 default = [
@@ -64,6 +65,13 @@ default = [
     "advanced",
     "group",
     "gossip",
+    "transport_tls",
+    "transport_quic",
+    "transport_quic_datagram",
+    "transport_ws",
+    "transport_unixsock-stream",
+    "transport_multilink",
+    "auth_pubkey",
 ]
 # The roles beyond the CLIENT: a session that listens, that accepts the sessions of others, that
 # is a peer or a router, and what those roles bring with them: the accept loop, the listener's
@@ -111,8 +119,9 @@ transport-link-unixpipe = ["wz-runtime-tokio/transport-link-unixpipe"]
 # R311y534 — the TLS-over-TCP link, on BOTH sides. It is the third arm of the
 # same accept-config cfg the quic feature above already carries, plus the first
 # consumer of the new DIAL-side config: `dial_config` builds a `TlsDialConfig`
-# under it. Off by default like its siblings — a C ABI that never dials `tls/`
-# should not pull rustls.
+# under it. Not a capability itself, like its siblings: the pico ABI forwards it as
+# a feature of its own that is off by default, and the zenoh-c ABI reaches it
+# through the `transport_tls` capability below.
 transport-link-tls = ["wz-runtime-tokio/transport-link-tls"]
 # The WebSocket and serial links, dial and accept. Neither needs material a locator cannot
 # carry, so no config of this crate reads them: the runtime's dial and bind seams take a `ws/`
@@ -122,6 +131,44 @@ transport-link-tls = ["wz-runtime-tokio/transport-link-tls"]
 # `Z_FEATURE_LINK_WS` and `Z_FEATURE_LINK_SERIAL` are.
 transport-link-ws = ["wz-runtime-tokio/transport-link-ws"]
 transport-link-serial = ["wz-runtime-tokio/transport-link-serial"]
+# The link kinds the zenoh-c ABI forwards beside the ones above. No arm of this
+# crate is cfg'd on them: a session dials through `dial_endpoint` and binds through
+# `bind_endpoint_with_config`, and both decide by scheme in the runtime, so a scheme
+# is dialled and bound as soon as the runtime has its backend. `unixsock` and
+# `unixpipe` have one on a Unix target only and `vsock` on Linux only; elsewhere
+# the runtime answers the scheme with `Unsupported`, which fails the open.
+transport-link-quic-datagram = [
+    "transport-link-quic",
+    "wz-runtime-tokio/transport-link-quic-datagram",
+]
+transport-link-unixsock = ["wz-runtime-tokio/transport-link-unixsock"]
+transport-link-vsock = ["wz-runtime-tokio/transport-link-vsock"]
+# The multilink establishment extension. A session of this crate opens one link per
+# peer through the single-link open seams, which is what upstream does at its default
+# `transport/unicast/max_links` of 1; the aggregation above it is the runtime's
+# `peer_loop` and is not wired here.
+transport-multilink = ["wz-runtime-tokio/transport-multilink"]
+# The per-link transport counters (bytes and messages, each way), held on every
+# session's `SessionLinkActions` (`stats_report`). No door of this crate reads them.
+transport-stats = ["wz-runtime-tokio/transport-stats"]
+# The public-key authentication a node's config asks for: the RSA identity of the four
+# `transport/auth/pubkey` keys, presented to the peers it dials and asked of the peers it
+# accepts (`NodeAuth`). The pico ABI has no such key.
+access-extauth-pubkey = [
+    "wz-runtime-tokio/routing-accept",
+    "wz-runtime-tokio/access-extauth-pubkey",
+    "dep:wz-session-core",
+    "wz-session-core/session-extauth",
+]
+# The zenoh-c switches that are capabilities (`deploy/capabilities.toml`), under zenoh-c's own
+# names, each the link kind or the handshake method above.
+transport_tls = ["transport-link-tls"]
+transport_quic = ["transport-link-quic"]
+transport_quic_datagram = ["transport_quic", "transport-link-quic-datagram"]
+transport_ws = ["transport-link-ws"]
+transport_unixsock-stream = ["transport-link-unixsock"]
+transport_multilink = ["transport-multilink"]
+auth_pubkey = ["access-extauth-pubkey"]
 # The usrpwd authentication a node's config asks for: a listener that names a
 # `transport/auth/usrpwd/dictionary_file` admits only the peers that hold a user of it
 # (`NodeAuth`). Off by default for the reason the TLS feature is: the pico ABI has no such

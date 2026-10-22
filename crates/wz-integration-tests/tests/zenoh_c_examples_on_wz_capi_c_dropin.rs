@@ -50,8 +50,8 @@ use std::time::Duration;
 
 use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
-    compile_zenoh_c_example, wait_for_substring, wz_ap_demo_binary, wz_capi_c_cdylib,
-    zenoh_c_oracle, ChildGuard, PortReservation,
+    compile_zenoh_c_example, compile_zenoh_c_example_static, wait_for_substring, wz_ap_demo_binary,
+    wz_capi_c_cdylib, wz_capi_c_staticlib, zenoh_c_oracle, ChildGuard, PortReservation,
 };
 
 /// The oracle, or `None` with a LOUD note naming what to do about it.
@@ -246,6 +246,78 @@ fn upstream_z_put_links_against_wz_capi_c_and_a_real_wz_subscriber_receives_it()
         wz_len, ref_len,
         "the two arms delivered payloads of different length ({wz_len} vs {ref_len}) \
          for equal-length inputs, so wz's payload framing diverges from zenoh-c's"
+    );
+}
+
+/// The same upstream `z_put.c`, linked STATICALLY against wz's static library
+/// (`libwz_capi_c.a`), which zenoh-c builds beside its shared library and a program may
+/// link instead.
+///
+/// The program is run with an EMPTY library path, and before it runs the leg asserts that
+/// its dynamic symbol table asks for no `z_*` or `zc_*` symbol: a binary that still needed
+/// one would be resolving it from some shared library the loader found, and a delivery
+/// from it would not be the static library's. What arrives at the wz subscriber is held to
+/// the keyexpr and the payload length the program was told to put.
+#[test]
+#[ignore = "compiles an upstream zenoh-c example with cc and needs the machine-local \
+            zenoh-c oracle; run-ci Layer C1cc drives it"]
+fn upstream_z_put_linked_statically_against_wz_capi_c_reaches_a_real_wz_subscriber() {
+    let Some((include, _libdir_ref, examples)) = oracle_or_note() else {
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir for the compiled program");
+    let static_lib = wz_capi_c_staticlib();
+    let program =
+        compile_zenoh_c_example_static("z_put", dir.path(), &include, &examples, &static_lib)
+            .unwrap_or_else(|diag| {
+                panic!(
+                    "upstream z_put.c does NOT link statically against wz's static \
+                     library, so wz is not a drop-in for a statically linked zenoh-c \
+                     program.\n{diag}"
+                )
+            });
+
+    let symbols = Command::new("nm")
+        .args(["-D", "--undefined-only"])
+        .arg(&program)
+        .output_bounded()
+        .expect("nm reads the program's dynamic symbols");
+    assert!(
+        symbols.status.success(),
+        "nm could not read {}: {}",
+        program.display(),
+        String::from_utf8_lossy(&symbols.stderr)
+    );
+    let unresolved: Vec<String> = String::from_utf8_lossy(&symbols.stdout)
+        .lines()
+        .filter_map(|line| line.split_whitespace().last())
+        .filter(|name| name.starts_with("z_") || name.starts_with("zc_"))
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "the statically linked program still resolves {unresolved:?} at run time, so the \
+         static library did not provide them"
+    );
+
+    let no_libraries = tempfile::tempdir().expect("an empty library directory");
+    let payload = "STATIC-XXX";
+    let log = run_arm(
+        &program,
+        no_libraries.path(),
+        "demo/example/x",
+        payload,
+        "static",
+    );
+    let (keyexpr, len) = fired(&log).expect("the static arm's FIRED line parses");
+    assert_eq!(
+        keyexpr, "demo/example/x",
+        "the statically linked program's sample arrived under another keyexpr"
+    );
+    assert_eq!(
+        len,
+        payload.len(),
+        "the statically linked program's payload arrived with another length"
     );
 }
 

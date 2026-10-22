@@ -247,9 +247,16 @@ MANIFEST_FEATURES = {
 # default turns them all on, which keeps every build one that adds to the default and leaves the
 # default at the origin of both axes; they are classified here, by name, so that a feature the
 # manifest gains is still a decision a round has to make and not a name this gate waves through.
+# The link, authentication and counter switches named by zenoh-c's own feature names select no
+# arm either: each adds a link kind, a handshake method or the transport counters, and none moves
+# a type's footprint. The ones zenoh-c turns on by default are on in the default here too; the
+# others are off in both.
 CAPABILITY_FEATURES = frozenset({
     "peer", "scout", "query", "queryable", "liveliness", "liveliness-get", "advanced", "group",
     "gossip", "link-udp", "timestamping",
+    "auth_pubkey", "transport_multilink", "transport_quic", "transport_quic_datagram",
+    "transport_tls", "transport_unixsock-stream", "transport_ws",
+    "transport_serial", "transport_unixpipe", "transport_vsock", "stats",
 })
 
 CAPI_C_MANIFEST = "crates/wz-capi-c/Cargo.toml"

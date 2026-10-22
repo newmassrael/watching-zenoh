@@ -24,7 +24,7 @@ original reproduced by naming it. Three things follow from it:
 
 ## 2. What exists
 
-- **Capabilities of the C ABI builds** (`deploy/capabilities.toml`): eleven, all on
+- **Capabilities of the C ABI builds** (`deploy/capabilities.toml`): eighteen, all on
   by default, generated into `deploy/Kconfig.capabilities` and cargo arguments by
   `scripts/lib/capability_config.py`, which also holds the three capi manifests to
   the declared graph. No Kconfig `rsource`s the generated file; the MCU images do
@@ -218,7 +218,7 @@ fragment. A preset file starts with `# wz-preset: 1`, `# catalog: <version>` and
 
 Each step lands with its own done-when; sizes are not estimated here.
 
-1. **One declaration and its generator** (C1, C2, C3, C6, C10, C11). Move the eleven
+1. **One declaration and its generator** (C1, C2, C3, C6, C10, C11). Move the eighteen
    capabilities, the limits and the axis-like symbols of the MCU images into
    `deploy/wz-config.toml`; the generator absorbs `capability_config.py` and
    `limit_config.py`; the images use the generated Kconfig and CMake bridge; place

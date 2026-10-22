@@ -199,38 +199,27 @@ ZENOH_C_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
      "the batch compression codec, through session-extcompression"),
     ("transport_tcp", "always", "crates/wz-capi-core/Cargo.toml", "the tcp/ link"),
     ("transport_udp", "maps", "wz-capi-c/link-udp", "the udp/ link"),
-    ("auth_pubkey", "never", None,
-     "the wz runtime has the public-key handshake and the zenoh-c ABI does not forward it; "
-     "open-debt item 919"),
-    ("transport_multilink", "never", None,
-     "the wz runtime has multilink and the zenoh-c ABI does not forward it; open-debt item 919"),
-    ("transport_quic", "never", None,
-     "the wz runtime has the QUIC link and the zenoh-c ABI does not forward it; "
-     "open-debt item 919"),
-    ("transport_quic_datagram", "never", None,
-     "the wz runtime has the QUIC datagram link and the zenoh-c ABI does not forward it; "
-     "open-debt item 919"),
-    ("transport_serial", "never", None,
-     "the wz runtime has the serial link and the zenoh-c ABI does not forward it; "
-     "open-debt item 919"),
-    ("transport_tls", "never", None,
-     "the wz runtime has the TLS link and the zenoh-c ABI does not forward it; "
-     "open-debt item 919"),
-    ("transport_unixpipe", "never", None,
-     "the wz runtime has the named-pipe link and the zenoh-c ABI does not forward it; "
-     "open-debt item 919"),
-    ("transport_unixsock-stream", "never", None,
-     "the wz runtime has the unix-socket link and the zenoh-c ABI does not forward it; "
-     "open-debt item 919"),
-    ("transport_ws", "never", None,
-     "the wz runtime has the WebSocket link and the zenoh-c ABI does not forward it; "
-     "open-debt item 919"),
-    ("transport_vsock", "never", None,
-     "the wz runtime has the vsock link and the zenoh-c ABI does not forward it; "
-     "open-debt item 919"),
-    ("stats", "never", None,
-     "the wz runtime has transport counters and the zenoh-c build does not enable them; "
-     "open-debt item 919"),
+    ("auth_pubkey", "maps", "wz-capi-c/auth_pubkey",
+     "the public-key handshake, built from the four transport/auth/pubkey identity keys"),
+    ("transport_multilink", "maps", "wz-capi-c/transport_multilink",
+     "the multilink extension is built; a C session holds one link per peer, which is what "
+     "upstream does at the default max_links of 1"),
+    ("transport_quic", "maps", "wz-capi-c/transport_quic",
+     "the quic/ link, dial and accept, with the transport/link/tls certificate material"),
+    ("transport_quic_datagram", "maps", "wz-capi-c/transport_quic_datagram",
+     "the quic-datagram/ link, over the quic link's certificate material"),
+    ("transport_serial", "maps", "wz-capi-c/transport_serial", "the serial/ link"),
+    ("transport_tls", "maps", "wz-capi-c/transport_tls",
+     "the tls/ link, dial and accept, with the transport/link/tls certificate material"),
+    ("transport_unixpipe", "maps", "wz-capi-c/transport_unixpipe",
+     "the unixpipe/ link, on a Unix target"),
+    ("transport_unixsock-stream", "maps", "wz-capi-c/transport_unixsock-stream",
+     "the unixsock-stream/ link, on a Unix target"),
+    ("transport_ws", "maps", "wz-capi-c/transport_ws", "the ws/ link, dial and accept"),
+    ("transport_vsock", "maps", "wz-capi-c/transport_vsock",
+     "the vsock/ link, on a Linux target"),
+    ("stats", "maps", "wz-capi-c/stats",
+     "the per-link transport counters; zenoh-c has no C door for them and neither has wz"),
 )
 
 TABLES = {"zenoh-pico": PICO_ROWS, "zenoh-c": ZENOH_C_ROWS}

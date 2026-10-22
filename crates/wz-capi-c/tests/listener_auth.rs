@@ -16,8 +16,14 @@
 //!     lets through, and the one an attacker tries first);
 //!   * a dictionary that cannot be read fails the OPEN, where the alternative is a node that
 //!     believes it is protected and is not;
-//!   * a config that states pubkey keys, which this surface does not enforce yet, fails the open
-//!     rather than starting unprotected.
+//!   * a config whose pubkey identity cannot be held fails the open rather than starting
+//!     unprotected: one whose key files cannot be read, and, in a build without `auth_pubkey`,
+//!     any config that states the keys at all.
+//!
+//! With `auth_pubkey` a node that states an RSA identity uses it on both sides, as upstream's
+//! does: it presents the key to the peers it dials, and it asks a key of the peers it accepts
+//! and admits none of them, because the set of peer keys a node builds from its config is empty
+//! upstream (`AuthPubKey::from_config` leaves it so, and nothing in the config fills it).
 
 use std::ffi::CString;
 use std::io::Write as _;
@@ -208,7 +214,7 @@ fn a_dictionary_that_cannot_be_read_fails_the_open() {
 }
 
 #[test]
-fn a_config_that_states_pubkey_keys_fails_the_open_until_they_are_enforced() {
+fn a_config_whose_pubkey_identity_cannot_be_held_fails_the_open() {
     let port = free_port();
     let entries = vec![
         ("scouting/multicast/enabled", "false".to_owned()),
@@ -229,7 +235,183 @@ fn a_config_that_states_pubkey_keys_fails_the_open_until_they_are_enforced() {
     unsafe { close_session(session) };
     assert_eq!(
         rc, Z_EINVAL,
-        "a config stating pubkey authentication opened a node that does not enforce it"
+        "a config stating a pubkey identity that cannot be loaded opened a node without it"
+    );
+}
+
+/// A fresh RSA identity as the two inline PEM texts a config carries, public first, and the
+/// private key itself for a test that builds a method from it.
+#[cfg(feature = "auth_pubkey")]
+fn pubkey_identity() -> (String, String, wz_runtime_tokio::rsa::RsaPrivateKey) {
+    use wz_runtime_tokio::extauth_pubkey::generate_keypair;
+    use wz_runtime_tokio::rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
+    use wz_runtime_tokio::rsa::RsaPublicKey;
+
+    let key = generate_keypair(512).expect("a 512-bit test key");
+    let public = RsaPublicKey::from(&key)
+        .to_pkcs1_pem(LineEnding::LF)
+        .expect("public PEM");
+    let private = key
+        .to_pkcs1_pem(LineEnding::LF)
+        .expect("private PEM")
+        .to_string();
+    (public, private, key)
+}
+
+/// The two config entries that state an identity inline. `{:?}` writes each PEM as a JSON5 string
+/// with its line breaks escaped.
+#[cfg(feature = "auth_pubkey")]
+fn pubkey_entries(public: &str, private: &str) -> [(&'static str, String); 2] {
+    [
+        (
+            "transport/auth/pubkey/public_key_pem",
+            format!("{public:?}"),
+        ),
+        (
+            "transport/auth/pubkey/private_key_pem",
+            format!("{private:?}"),
+        ),
+    ]
+}
+
+/// A peer that dials `port` presenting `key` through the public-key method, and what its open
+/// came to. Its own set of responder keys is disabled, so the only refusal it can meet is the
+/// listener's.
+#[cfg(feature = "auth_pubkey")]
+fn dial_with_key(port: u16, key: wz_runtime_tokio::rsa::RsaPrivateKey) -> Result<(), OpenError> {
+    use wz_runtime_tokio::extauth_pubkey::PubKeyMethod;
+
+    let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+    runtime.block_on(async {
+        let locator = parse_any_locator(&format!("tcp/127.0.0.1:{port}")).expect("a locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x08; 4];
+        let auth = AuthDispatch::new(vec![Box::new(PubKeyMethod::initiator(key)) as _]);
+        connect_and_open_session_with_auth(
+            locator,
+            params,
+            auth,
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(OPEN_ITERATIONS),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .map(|_| ())
+    })
+}
+
+/// A listener that states a pubkey identity admits no peer, whether the peer presents a key or
+/// none: the set of keys it admits is upstream's from-config one, which is empty. The control is
+/// the same plain dial to a listener that states no identity, which is admitted, so the refusals
+/// are the identity's and not the dialler's.
+#[cfg(feature = "auth_pubkey")]
+#[test]
+fn a_listener_with_a_pubkey_identity_admits_no_peer_as_upstreams_does() {
+    let control_port = free_port();
+    // SAFETY: a fresh config and session.
+    let (rc, control) = unsafe {
+        open_with(&[
+            ("scouting/multicast/enabled", "false".to_owned()),
+            ("mode", "\"peer\"".to_owned()),
+            (
+                "listen/endpoints",
+                format!("[\"tcp/127.0.0.1:{control_port}\"]"),
+            ),
+        ])
+    };
+    assert_eq!(rc, Z_OK, "the control listener opens");
+    let control_outcome = dial(control_port, None);
+    // SAFETY: the control is live and owned here.
+    unsafe { close_session(control) };
+    assert!(
+        control_outcome.is_ok(),
+        "a plain dial to a listener stating no identity was refused: {control_outcome:?}, so \
+         the refusals below prove nothing"
+    );
+
+    let (public, private, _) = pubkey_identity();
+    let port = free_port();
+    let mut entries = vec![
+        ("scouting/multicast/enabled", "false".to_owned()),
+        ("mode", "\"peer\"".to_owned()),
+        ("listen/endpoints", format!("[\"tcp/127.0.0.1:{port}\"]")),
+    ];
+    entries.extend(pubkey_entries(&public, &private));
+    // SAFETY: a fresh config and session.
+    let (rc, listener) = unsafe { open_with(&entries) };
+    assert_eq!(rc, Z_OK, "a listener stating a loadable identity opens");
+    let (_, _, peer_key) = pubkey_identity();
+    let with_a_key = dial_with_key(port, peer_key);
+    let with_none = dial(port, None);
+    // SAFETY: the listener is live and owned here.
+    unsafe { close_session(listener) };
+    assert!(
+        with_a_key.is_err(),
+        "a listener whose admitted set is empty admitted a peer presenting a key"
+    );
+    assert!(
+        with_none.is_err(),
+        "a listener stating a pubkey identity admitted a peer that presented none"
+    );
+}
+
+/// A client that states a pubkey identity presents it when it dials: a responder that admits
+/// exactly that key reaches Established with it. The responder asks a key of every peer, so a
+/// client that presented none would be refused and its open would fail.
+#[cfg(feature = "auth_pubkey")]
+#[test]
+fn a_client_presents_the_pubkey_identity_its_own_config_states() {
+    use wz_runtime_tokio::extauth_pubkey::{generate_keypair, PubKeyMethod};
+    use wz_runtime_tokio::rsa::RsaPublicKey;
+    use wz_runtime_tokio::session_open::{accept_and_open_session_with_auth, DialedLink};
+
+    let (public, private, client_key) = pubkey_identity();
+    let client_public = RsaPublicKey::from(&client_key);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+    let port = listener.local_addr().expect("the bound address").port();
+    listener
+        .set_nonblocking(true)
+        .expect("a listener tokio can adopt");
+
+    let responder = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+        runtime.block_on(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).expect("adopt the listener");
+            let (stream, _) = listener.accept().await.expect("the client dials");
+            let mut params = fixture_session_init_params();
+            params.zid = vec![0x09; 4];
+            let auth = AuthDispatch::new(vec![Box::new(PubKeyMethod::responder(
+                generate_keypair(512).expect("a 512-bit responder key"),
+                Some(vec![client_public]),
+            )) as _]);
+            accept_and_open_session_with_auth(
+                DialedLink::Tcp(stream),
+                params,
+                auth,
+                TokioTime::new(),
+                Some(OPEN_ITERATIONS),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .map(|_| ())
+        })
+    });
+
+    let mut entries = client_entries(port, None);
+    entries.extend(pubkey_entries(&public, &private));
+    // SAFETY: a fresh config and session.
+    let (rc, client) = unsafe { open_with(&entries) };
+    // SAFETY: a gravestone drops as a no-op, a live session closes.
+    unsafe { close_session(client) };
+    let accepted = responder.join().expect("the responder thread");
+    assert_eq!(
+        rc, Z_OK,
+        "a client stating a pubkey identity was refused by a responder admitting that key"
+    );
+    assert!(
+        accepted.is_ok(),
+        "the responder did not reach Established with the client's key: {accepted:?}"
     );
 }
 

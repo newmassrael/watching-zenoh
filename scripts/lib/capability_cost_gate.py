@@ -96,8 +96,10 @@ CASES: tuple[Case, ...] = (
          forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED), require=(SCOUTING, UDP)),
     Case("capic-peer", "wz-capi-c", "libwz_capi_c.so", "peer", 4_065_000,
          forbid=(GOSSIP, CLOCK, ADVANCED), require=(ACCEPT, RESPONDER, SCOUTING, UDP)),
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 5_180_000,
-         require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED), exports=835),
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 9_045_000,
+         require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED), exports=835,
+         note="zenoh-c's default links and pubkey auth (rustls on ring, quinn, tungstenite, "
+              "rsa): 8,866,359 measured, up from about 5.1 MB without them"),
 )
 
 

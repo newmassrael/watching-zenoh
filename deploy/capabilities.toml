@@ -111,3 +111,58 @@ kconfig = "WZ_CAP_GOSSIP"
 abis = ["core", "pico", "c"]
 implies = ["peer"]
 help = "A session told of a node by one it holds a link to dials it."
+
+# The link kinds and the handshake methods zenoh-c turns on by default. They carry zenoh-c's own
+# feature names, so a build of the zenoh-c drop-in is asked for with the switches a zenoh-c build
+# is; the pico ABI forwards its links under names of its own and has none of these. The switches
+# zenoh-c leaves off (serial, unixpipe, vsock, stats) are features of the two manifests and not
+# capabilities here, because a capability is on in every default build.
+
+[[capability]]
+id = "transport_tls"
+kconfig = "WZ_CAP_TRANSPORT_TLS"
+abis = ["core", "c"]
+implies = []
+help = "The tls/ link, dial and accept, with the certificate material of transport/link/tls."
+
+[[capability]]
+id = "transport_quic"
+kconfig = "WZ_CAP_TRANSPORT_QUIC"
+abis = ["core", "c"]
+implies = []
+help = "The quic/ link, dial and accept, with the certificate material of transport/link/tls."
+
+[[capability]]
+id = "transport_quic_datagram"
+kconfig = "WZ_CAP_TRANSPORT_QUIC_DATAGRAM"
+abis = ["core", "c"]
+implies = ["transport_quic"]
+help = "The quic-datagram/ link, over the quic link's connection and certificate material."
+
+[[capability]]
+id = "transport_ws"
+kconfig = "WZ_CAP_TRANSPORT_WS"
+abis = ["core", "c"]
+implies = []
+help = "The ws/ link, dial and accept."
+
+[[capability]]
+id = "transport_unixsock-stream"
+kconfig = "WZ_CAP_TRANSPORT_UNIXSOCK_STREAM"
+abis = ["core", "c"]
+implies = []
+help = "The unixsock-stream/ link, dial and accept, on a Unix target."
+
+[[capability]]
+id = "transport_multilink"
+kconfig = "WZ_CAP_TRANSPORT_MULTILINK"
+abis = ["core", "c"]
+implies = []
+help = "The multilink establishment extension."
+
+[[capability]]
+id = "auth_pubkey"
+kconfig = "WZ_CAP_AUTH_PUBKEY"
+abis = ["core", "c"]
+implies = []
+help = "The public-key handshake, from the RSA identity of transport/auth/pubkey."

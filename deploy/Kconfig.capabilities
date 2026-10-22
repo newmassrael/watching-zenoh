@@ -98,4 +98,54 @@ config WZ_CAP_GOSSIP
 	  A session told of a node by one it holds a link to dials it.
 	  Exported by: pico, c.
 
+config WZ_CAP_TRANSPORT_TLS
+	bool "transport_tls"
+	default y
+	help
+	  The tls/ link, dial and accept, with the certificate material of transport/link/tls.
+	  Exported by: c.
+
+config WZ_CAP_TRANSPORT_QUIC
+	bool "transport_quic"
+	default y
+	help
+	  The quic/ link, dial and accept, with the certificate material of transport/link/tls.
+	  Exported by: c.
+
+config WZ_CAP_TRANSPORT_QUIC_DATAGRAM
+	bool "transport_quic_datagram"
+	default y
+	select WZ_CAP_TRANSPORT_QUIC
+	help
+	  The quic-datagram/ link, over the quic link's connection and certificate material.
+	  Exported by: c.
+
+config WZ_CAP_TRANSPORT_WS
+	bool "transport_ws"
+	default y
+	help
+	  The ws/ link, dial and accept.
+	  Exported by: c.
+
+config WZ_CAP_TRANSPORT_UNIXSOCK_STREAM
+	bool "transport_unixsock-stream"
+	default y
+	help
+	  The unixsock-stream/ link, dial and accept, on a Unix target.
+	  Exported by: c.
+
+config WZ_CAP_TRANSPORT_MULTILINK
+	bool "transport_multilink"
+	default y
+	help
+	  The multilink establishment extension.
+	  Exported by: c.
+
+config WZ_CAP_AUTH_PUBKEY
+	bool "auth_pubkey"
+	default y
+	help
+	  The public-key handshake, from the RSA identity of transport/auth/pubkey.
+	  Exported by: c.
+
 endmenu

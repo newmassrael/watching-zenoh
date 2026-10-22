@@ -1036,6 +1036,28 @@ pub mod common {
         release
     }
 
+    /// The zenoh-c ABI's STATIC library (`crate-type` `staticlib`), which the same
+    /// `cargo build -p wz-capi-c` writes beside the shared one. Resolved and guarded as
+    /// [`wz_capi_c_cdylib`] is: the debug build first, and refused when older than the
+    /// sources it is built from.
+    pub fn wz_capi_c_staticlib() -> PathBuf {
+        let crates_dir = project_root().join("crates");
+        let candidates = [
+            crates_dir.join("target/debug/libwz_capi_c.a"),
+            crates_dir.join("target/release/libwz_capi_c.a"),
+        ];
+        for c in &candidates {
+            if c.is_file() {
+                assert_capi_cdylib_is_not_stale(c, &crates_dir, "wz-capi-c");
+                return c.clone();
+            }
+        }
+        panic!(
+            "libwz_capi_c.a not found in {candidates:?}; \
+             run `cargo build -p wz-capi-c` first"
+        );
+    }
+
     /// The zenoh-c ORACLE on this machine: its include dir, its library dir, and
     /// its example corpus.
     ///
@@ -1100,11 +1122,69 @@ pub mod common {
         libdir: &Path,
         link: &str,
     ) -> Result<PathBuf, String> {
+        compile_zenoh_c_example_linked(
+            example,
+            out_dir,
+            include,
+            examples,
+            link,
+            &[
+                format!("-L{}", libdir.display()),
+                format!("-l{link}"),
+                format!("-Wl,-rpath,{}", libdir.display()),
+            ],
+        )
+    }
+
+    /// What a C link names after a Rust static library on Linux: the system libraries the
+    /// standard library inside it calls into, which the static library does not record (the
+    /// list `rustc --print native-static-libs` prints for the GNU target). A shared library
+    /// records them as its own dependencies, which is why the dynamic legs name none.
+    pub const RUST_STATICLIB_SYSTEM_LIBS: &[&str] = &[
+        "-lgcc_s",
+        "-lutil",
+        "-lrt",
+        "-lpthread",
+        "-lm",
+        "-ldl",
+        "-lc",
+    ];
+
+    /// Compile ONE upstream zenoh-c example against a STATIC library, which is linked into the
+    /// program whole: the binary has no `DT_NEEDED` on any `z_*` provider, so nothing a loader
+    /// finds at run time can stand in for it. `static_lib` is the path of the static library;
+    /// the system libraries it needs follow it ([`RUST_STATICLIB_SYSTEM_LIBS`]).
+    pub fn compile_zenoh_c_example_static(
+        example: &str,
+        out_dir: &Path,
+        include: &Path,
+        examples: &Path,
+        static_lib: &Path,
+    ) -> Result<PathBuf, String> {
+        let mut link_args = vec![static_lib.display().to_string()];
+        link_args.extend(
+            RUST_STATICLIB_SYSTEM_LIBS
+                .iter()
+                .map(|lib| (*lib).to_owned()),
+        );
+        compile_zenoh_c_example_linked(example, out_dir, include, examples, "static", &link_args)
+    }
+
+    /// The compile both example builders share: upstream's source and headers, and `link_args`
+    /// after them. `tag` names the binary (`<example>_on_<tag>`) and the failure.
+    fn compile_zenoh_c_example_linked(
+        example: &str,
+        out_dir: &Path,
+        include: &Path,
+        examples: &Path,
+        tag: &str,
+        link_args: &[String],
+    ) -> Result<PathBuf, String> {
         let src = examples.join(format!("{example}.c"));
         if !src.is_file() {
             return Err(format!("upstream example {} missing", src.display()));
         }
-        let exe = out_dir.join(format!("{example}_on_{link}"));
+        let exe = out_dir.join(format!("{example}_on_{tag}"));
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
         let out = Command::new(&cc)
             .arg(&src)
@@ -1129,15 +1209,14 @@ pub mod common {
             .arg(format!("-I{}", examples.display()))
             .arg("-o")
             .arg(&exe)
-            .arg(format!("-L{}", libdir.display()))
-            .arg(format!("-l{link}"))
-            .arg(format!("-Wl,-rpath,{}", libdir.display()))
+            .args(link_args)
             .output_bounded()
             .unwrap_or_else(|e| panic!("failed to spawn C compiler {cc:?}: {e}"));
         if !out.status.success() {
             return Err(format!(
-                "{cc} failed for {example}.c against -l{link} (status {:?})\n\
+                "{cc} failed for {example}.c linked with {} (status {:?})\n\
                  --- stderr ---\n{}",
+                link_args.join(" "),
                 out.status.code(),
                 String::from_utf8_lossy(&out.stderr),
             ));

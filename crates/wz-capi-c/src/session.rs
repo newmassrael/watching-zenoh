@@ -273,13 +273,16 @@ pub unsafe extern "C" fn z_open(
 ///     a file that cannot be read, or that holds no user, fails the open.
 ///   * `transport/auth/usrpwd/user` and `password` make the node an initiator that presents
 ///     them when it dials; one stated without the other fails the open.
-///   * `transport/auth/pubkey/*` is not enforced by this surface yet, so a config that states any
-///     of its four keys fails the open.
+///   * `transport/auth/pubkey/*` names the node's RSA identity, presented to the peers it dials
+///     and asked of the peers it accepts (`NodeAuth::with_pubkey_config`); an identity that
+///     cannot be loaded fails the open. A build without `auth_pubkey` cannot hold one, so there
+///     a config that states any of the four keys fails the open.
 ///   * `access_control`, `low_pass_filter` and `downsampling` are compiled into the node's
 ///     traffic policy and enforced on every face in both directions; a subtree the compiler
 ///     refuses (a policy naming a rule that does not exist) fails the open, as zenoh's start
 ///     does. A disabled `access_control` and an absent filter state no policy at all.
 fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePolicy), ()> {
+    #[cfg(not(feature = "auth_pubkey"))]
     if node.pubkey_public_key_pem.is_some()
         || node.pubkey_private_key_pem.is_some()
         || node.pubkey_public_key_file.is_some()
@@ -293,8 +296,43 @@ fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePol
         node.usrpwd_password.as_ref(),
     )
     .map_err(|_| ())?;
+    #[cfg(feature = "auth_pubkey")]
+    let auth = NodeAuth::with_pubkey_config(auth, node.pubkey_pem_config()).map_err(|_| ())?;
     let policy = NodePolicy::from_node_config(node).map_err(|_| ())?;
     Ok((auth, policy))
+}
+
+/// The certificate material a config's `transport/link/tls` keys name, read for the `tls/` and
+/// `quic/` links of the session.
+///
+/// `root_ca_certificate` is what a dial verifies its peer against (with none, the public roots),
+/// and `listen_certificate` with `listen_private_key` is what a listener presents. Each is a path,
+/// read here, at the open: upstream reads the files when it first makes a link of that kind, so a
+/// path that cannot be read fails this open where upstream's would fail only once such a link
+/// was made, which is the direction a security setting fails in on this surface. A dial checks
+/// the name it dials against the peer's certificate, which is upstream's behaviour when
+/// `verify_name_on_connect` is left unstated; the reader does not read that key, nor the mutual
+/// TLS ones, so a session never presents a client certificate.
+#[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
+fn tls_of(node: &ZenohNodeConfig) -> std::io::Result<CapiTlsConfig> {
+    use wz_runtime_tokio::tls_config::read_pem_file;
+    let read = |path: Option<&String>| path.map(read_pem_file).transpose();
+    Ok(CapiTlsConfig {
+        root_ca_pem: read(node.tls_root_ca.as_ref())?,
+        verify_name_on_connect: true,
+        connect_cert_pem: None,
+        connect_key_pem: None,
+        listen_cert_pem: read(node.tls_listen_certificate.as_ref())?,
+        listen_key_pem: read(node.tls_listen_private_key.as_ref())?,
+        require_client_auth: false,
+    })
+}
+
+/// A build with neither certificate-bearing link has nothing to read the material for: a `tls/`
+/// or `quic/` endpoint is refused by the runtime as a scheme it does not have.
+#[cfg(not(any(feature = "transport_tls", feature = "transport_quic")))]
+fn tls_of(_node: &ZenohNodeConfig) -> std::io::Result<CapiTlsConfig> {
+    Ok(CapiTlsConfig::default())
 }
 
 /// The open `z_open` and `z_open_with_custom_shm_clients` both are: the same config, the same
@@ -363,6 +401,12 @@ pub(crate) unsafe fn open_session(
             Ok(Some((auth, policy))) => (auth, policy),
             Ok(None) => (None, NodePolicy::default()),
             Err(()) => return Z_EINVAL,
+        };
+        // The certificate material the config names for the `tls/` and `quic/` links, refused
+        // like a credential file when it cannot be read.
+        let tls = match node.as_ref().map(tls_of).transpose() {
+            Ok(tls) => tls.unwrap_or_default(),
+            Err(_) => return Z_EINVAL,
         };
 
         // The id this config STATES for its session, if it states one. Read off
@@ -469,13 +513,6 @@ pub(crate) unsafe fn open_session(
             return Z_EINVAL;
         };
 
-        // R311y534 — `CapiTlsConfig::default()` is the cert-free tcp/udp/ws open,
-        // which is every open this ABI currently parses: zenoh-c's config is a
-        // JSON5 document whose `transport/link/tls` block this slice does not
-        // read yet. The pico shim resolves its own numeric TLS keys and passes a
-        // populated one; when this ABI grows the JSON path it fills the same
-        // struct, which is why the parameter is typed rather than a pair of
-        // `None`s that only ever meant "no quic cert".
         // zenoh's own bounded queue and waits: this ABI stands for zenoh-c.
         let stance = OpenStance {
             tx_queue: TxQueueConf::default(),
@@ -526,14 +563,7 @@ pub(crate) unsafe fn open_session(
             },
             None => stance,
         };
-        match open_blocking(
-            connect,
-            listen,
-            CapiTlsConfig::default(),
-            whatami,
-            phase,
-            stance,
-        ) {
+        match open_blocking(connect, listen, tls, whatami, phase, stance) {
             Ok(state) => {
                 // R2957 — the session's own shared-memory provider, as its
                 // config states it; built on first ask, as upstream's is.
@@ -983,5 +1013,130 @@ mod tests {
             not(feature = "zenoh-c-no-unstable-api")
         )))]
         assert!(!session_offer(&node(true)).expect("no mode conflict").shm);
+    }
+
+    /// The node a config document reads as, through the one reader `z_open` uses.
+    fn node_of(document: &str) -> ZenohNodeConfig {
+        ZenohNodeConfig::from_json5(document)
+            .expect("the document is one the reader accepts")
+            .config
+    }
+
+    /// A document stating `transport/link/tls/<key>` as `path`.
+    #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
+    fn tls_document(key: &str, path: &std::path::Path) -> String {
+        format!(
+            "{{ transport: {{ link: {{ tls: {{ {key}: {:?} }} }} }} }}",
+            path.to_str().expect("a utf-8 path")
+        )
+    }
+
+    /// A temp file holding `text`.
+    #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
+    fn file_of(text: &str) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        let mut file = tempfile::NamedTempFile::new().expect("a temp file");
+        file.write_all(text.as_bytes()).expect("write");
+        file
+    }
+
+    /// A config that names no certificate gives the cert-free material, with the name check on.
+    #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
+    #[test]
+    fn a_config_that_names_no_certificate_reads_none() {
+        let tls = tls_of(&node_of("{}")).expect("nothing to read");
+        assert!(tls.root_ca_pem.is_none());
+        assert!(tls.listen_cert_pem.is_none());
+        assert!(tls.listen_key_pem.is_none());
+        assert!(
+            tls.verify_name_on_connect,
+            "upstream checks the name by default"
+        );
+        assert!(tls.connect_cert_pem.is_none() && tls.connect_key_pem.is_none());
+        assert!(!tls.require_client_auth);
+    }
+
+    /// Each of the three keys reaches its own slot, read from the file it names.
+    #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
+    #[test]
+    fn each_tls_key_is_read_from_the_file_it_names() {
+        let file = file_of("PEM TEXT");
+        for key in [
+            "root_ca_certificate",
+            "listen_certificate",
+            "listen_private_key",
+        ] {
+            let tls = tls_of(&node_of(&tls_document(key, file.path()))).expect("a readable file");
+            let slots = [
+                ("root_ca_certificate", tls.root_ca_pem),
+                ("listen_certificate", tls.listen_cert_pem),
+                ("listen_private_key", tls.listen_key_pem),
+            ];
+            for (slot, value) in slots {
+                if slot == key {
+                    assert_eq!(value.as_deref(), Some(&b"PEM TEXT"[..]), "{key}");
+                } else {
+                    assert!(value.is_none(), "{key} filled the {slot} slot too");
+                }
+            }
+        }
+    }
+
+    /// A path that cannot be read is an error, which fails the open.
+    #[cfg(any(feature = "transport_tls", feature = "transport_quic"))]
+    #[test]
+    fn a_certificate_path_that_cannot_be_read_is_refused() {
+        let missing = std::path::Path::new("/nonexistent/wz-tls-ca.pem");
+        assert!(tls_of(&node_of(&tls_document("root_ca_certificate", missing))).is_err());
+        let empty = file_of("");
+        assert!(tls_of(&node_of(&tls_document("listen_certificate", empty.path()))).is_err());
+    }
+
+    /// A config naming a pubkey file pair that cannot be loaded is refused: by the loader in a
+    /// build that holds the identity, and by the key alone in one that cannot.
+    #[test]
+    fn a_pubkey_identity_that_cannot_be_held_is_refused() {
+        let node = node_of(
+            r#"{ transport: { auth: { pubkey: {
+                public_key_file: "/nonexistent/wz-pub.pem",
+                private_key_file: "/nonexistent/wz-priv.pem" } } } }"#,
+        );
+        assert!(node_security_of(&node).is_err());
+    }
+
+    /// A config that names no pubkey key builds no authentication from it.
+    #[test]
+    fn a_config_without_pubkey_keys_builds_no_authentication() {
+        let (auth, _policy) = node_security_of(&node_of("{}")).expect("nothing to refuse");
+        assert!(auth.is_none());
+    }
+
+    /// A loadable identity is held, in a build that has the method.
+    #[cfg(feature = "auth_pubkey")]
+    #[test]
+    fn a_loadable_pubkey_identity_is_held() {
+        use wz_runtime_tokio::extauth_pubkey::generate_keypair;
+        use wz_runtime_tokio::rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
+        use wz_runtime_tokio::rsa::RsaPublicKey;
+
+        let private = generate_keypair(512).expect("a 512-bit test key");
+        let public = RsaPublicKey::from(&private)
+            .to_pkcs1_pem(LineEnding::LF)
+            .expect("public PEM");
+        let private = private
+            .to_pkcs1_pem(LineEnding::LF)
+            .expect("private PEM")
+            .to_string();
+        let node = node_of(&format!(
+            "{{ transport: {{ auth: {{ pubkey: {{ public_key_pem: {public:?}, \
+             private_key_pem: {private:?} }} }} }} }}"
+        ));
+        let (auth, _policy) = node_security_of(&node).expect("a loadable identity");
+        let auth = auth.expect("the identity is held");
+        assert!(auth.dial_dispatch().is_some(), "the node presents its key");
+        assert!(
+            auth.accept_dispatch().is_some(),
+            "and asks one of its peers"
+        );
     }
 }

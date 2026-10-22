@@ -4735,7 +4735,7 @@ impl FaceForwarder for CApiForwarder {
     }
 
     /// What the node's config asks of the peers its listener accepts.
-    #[cfg(feature = "access-extauth-usrpwd")]
+    #[cfg(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey"))]
     fn session_auth(&self) -> Option<wz_runtime_tokio::accept_loop::SessionAuth> {
         self.shared
             .node_auth()
