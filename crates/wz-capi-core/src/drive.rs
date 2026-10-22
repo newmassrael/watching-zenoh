@@ -2710,15 +2710,26 @@ fn listen_accept_config(tls: &CapiTlsConfig) -> std::io::Result<AcceptConfig> {
 /// passing the caller's `Option` straight through: `None` means the public
 /// roots, which is what a pico application dialing a publicly-trusted peer
 /// expects and what it could not get before.
+///
+/// The material is built only for the scheme that reads it: `tls/` reads the tls slot,
+/// `quic/` and `quic-datagram/` the quic one, and every other link ignores both. Built for
+/// every endpoint, a path-addressed one (`unixsock-stream/<path>`, `serial/<dev>`) handed its
+/// path to rustls as a server name, which refused it and failed the whole open before
+/// anything was dialled.
 fn dial_config(tls: &CapiTlsConfig, endpoint: &str) -> std::io::Result<DialConfig> {
     let cfg = DialConfig::default();
     let root_ca = tls.root_ca_pem.as_deref();
     // The dialed host doubles as SNI and, under `Verify`, as the name checked
     // against the peer cert's SAN.
     let server_name = locator_host(endpoint).unwrap_or("localhost");
+    let scheme = endpoint
+        .split_once('/')
+        .map_or(endpoint, |(scheme, _)| scheme);
 
     #[cfg(feature = "transport-link-tls")]
-    let cfg = {
+    let cfg = if scheme != "tls" {
+        cfg
+    } else {
         use wz_runtime_tokio::session_open::TlsDialConfig;
         use wz_runtime_tokio::tls_config::ServerNameVerification;
         let verification = if tls.verify_name_on_connect {
@@ -2735,13 +2746,15 @@ fn dial_config(tls: &CapiTlsConfig, endpoint: &str) -> std::io::Result<DialConfi
     };
 
     #[cfg(feature = "transport-link-quic")]
-    let cfg = {
+    let cfg = if !matches!(scheme, "quic" | "quic-datagram") {
+        cfg
+    } else {
         use wz_runtime_tokio::session_open::QuicDialConfig;
         cfg.with_quic(QuicDialConfig::from_ca_pem(root_ca, server_name)?)
     };
 
     #[cfg(not(any(feature = "transport-link-tls", feature = "transport-link-quic")))]
-    let _ = (root_ca, server_name);
+    let _ = (root_ca, server_name, scheme);
 
     Ok(cfg)
 }
@@ -3942,6 +3955,37 @@ mod tests {
             !is_expected_peer(Some(&[0x0a, 0x0b, 0x0d, 0x00]), &trimmed),
             "another node whose id has a zero tail is another node"
         );
+    }
+
+    /// The certificate material rides only the scheme that reads it. A path-addressed endpoint
+    /// has no host to name, and before this its path reached rustls as a server name, which
+    /// refused it and failed the open.
+    #[test]
+    fn a_dial_carries_certificate_material_only_for_the_scheme_that_reads_it() {
+        let tls = CapiTlsConfig::default();
+        for endpoint in [
+            "unixsock-stream//tmp/wz-dial/hub.sock",
+            "serial//dev/ttyUSB0#baudrate=115200",
+            "tcp/127.0.0.1:7447",
+            "ws/127.0.0.1:7447",
+        ] {
+            let cfg = dial_config(&tls, endpoint)
+                .unwrap_or_else(|e| panic!("{endpoint} has a dial config: {e}"));
+            #[cfg(feature = "transport-link-tls")]
+            assert!(cfg.tls.is_none(), "{endpoint} carries tls material");
+            #[cfg(feature = "transport-link-quic")]
+            assert!(cfg.quic.is_none(), "{endpoint} carries quic material");
+            let _ = cfg;
+        }
+        #[cfg(feature = "transport-link-tls")]
+        assert!(dial_config(&tls, "tls/127.0.0.1:7447")
+            .unwrap()
+            .tls
+            .is_some());
+        #[cfg(feature = "transport-link-quic")]
+        for endpoint in ["quic/127.0.0.1:7447", "quic-datagram/127.0.0.1:7447"] {
+            assert!(dial_config(&tls, endpoint).unwrap().quic.is_some());
+        }
     }
 
     fn runtime() -> tokio::runtime::Runtime {
