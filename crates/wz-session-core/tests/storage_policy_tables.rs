@@ -229,7 +229,7 @@ mod declarations {
     }
 
     #[cfg(feature = "declare-subscriber")]
-    pub mod subscribers {
+    pub(crate) mod subscribers {
         use super::*;
         use wz_session_core::declare::subscriber::{RemoteSubscriberPeer, RemoteSubscriberTable};
 
@@ -239,7 +239,7 @@ mod declarations {
 
         /// The id past `MAX_REMOTE_DECLS` is refused and counted where the capacity is
         /// hard, taken where it is not; the ids that fit are all there either way.
-        pub fn fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
+        pub(crate) fn fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
             let mut table: RemoteSubscriberTable<NoopDeclSink, NoopUndeclSink, P> =
                 RemoteSubscriberTable::default();
             let mut peer: RemoteSubscriberPeer<P> = RemoteSubscriberPeer::default();
@@ -269,7 +269,7 @@ mod declarations {
 
         /// A flood of one session's peer table is that session's own: the other
         /// peer's table, built from the same type, holds its single declaration.
-        pub fn one_peer_flooding_leaves_the_other_untouched<P: Storage>() {
+        pub(crate) fn one_peer_flooding_leaves_the_other_untouched<P: Storage>() {
             let mut table: RemoteSubscriberTable<NoopDeclSink, NoopUndeclSink, P> =
                 RemoteSubscriberTable::default();
             let mut flooded: RemoteSubscriberPeer<P> = RemoteSubscriberPeer::default();
@@ -295,7 +295,7 @@ mod declarations {
     }
 
     #[cfg(feature = "declare-queryable")]
-    pub mod queryables {
+    pub(crate) mod queryables {
         use super::*;
         use wz_session_core::declare::queryable::{RemoteQueryablePeer, RemoteQueryableTable};
 
@@ -303,7 +303,7 @@ mod declarations {
             fx::declare_envelope_decl_queryable(fx::decl_queryable(id, 0, Some(ke)))
         }
 
-        pub fn fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
+        pub(crate) fn fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
             let mut table: RemoteQueryableTable<NoopDeclSink, NoopUndeclSink, P> =
                 RemoteQueryableTable::default();
             let mut peer: RemoteQueryablePeer<P> = RemoteQueryablePeer::default();
@@ -329,7 +329,7 @@ mod declarations {
             assert!(peer.has_matching("peer/1"));
         }
 
-        pub fn one_peer_flooding_leaves_the_other_untouched<P: Storage>() {
+        pub(crate) fn one_peer_flooding_leaves_the_other_untouched<P: Storage>() {
             let mut table: RemoteQueryableTable<NoopDeclSink, NoopUndeclSink, P> =
                 RemoteQueryableTable::default();
             let mut flooded: RemoteQueryablePeer<P> = RemoteQueryablePeer::default();
@@ -353,7 +353,7 @@ mod declarations {
     }
 
     #[cfg(feature = "liveliness-subscriber")]
-    pub mod tokens {
+    pub(crate) mod tokens {
         use super::*;
         use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleSink};
         use wz_session_core::declare::liveliness_subscriber::{
@@ -369,7 +369,7 @@ mod declarations {
             fx::declare_envelope_decl_token(fx::decl_token(id, 0, Some(ke)))
         }
 
-        pub fn fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
+        pub(crate) fn fills_to_n_and_refuses_at_n_plus_one<P: Storage>() {
             let mut table: LivelinessSubscriberTable<NoopTokenSink, P> =
                 LivelinessSubscriberTable::default();
             let mut peer: PeerTokens<P> = PeerTokens::default();
@@ -391,7 +391,7 @@ mod declarations {
             }
         }
 
-        pub fn one_peer_flooding_leaves_the_other_untouched<P: Storage>() {
+        pub(crate) fn one_peer_flooding_leaves_the_other_untouched<P: Storage>() {
             let mut table: LivelinessSubscriberTable<NoopTokenSink, P> =
                 LivelinessSubscriberTable::default();
             let mut flooded: PeerTokens<P> = PeerTokens::default();
@@ -417,7 +417,7 @@ mod declarations {
     /// The peer's alias table read through `MappingSpaces`: a keyexpr declared with an
     /// id resolves to its literal on both policies, and an id the table does not hold
     /// does not resolve, so the policy is not visible to the reader.
-    pub fn peer_aliases_resolve_the_same_on_both<P: Storage>() {
+    pub(crate) fn peer_aliases_resolve_the_same_on_both<P: Storage>() {
         let aliases = PeerAliases::<P>::default();
         let spaces = MappingSpaces::for_aliases::<P>(&aliases, None);
         assert!(spaces.peer().is_empty());
@@ -463,43 +463,59 @@ case!(
     pending_query_keyexpr_case,
     pending_query_keyexpr_past_the_bound
 );
+// The cases that need a feature sit in a private module of their own, with the
+// `cfg` on the module and not on each `case!` call: the public-surface census counts
+// a macro call under a `cfg` as an item that may expand to a public one, and these
+// are test functions.
 #[cfg(feature = "liveliness-get")]
-case!(
-    liveliness_gets_fill_case,
-    liveliness_gets_fill_to_n_and_refuse_at_n_plus_one
-);
+mod liveliness_get_cases {
+    use super::*;
+    case!(
+        liveliness_gets_fill_case,
+        liveliness_gets_fill_to_n_and_refuse_at_n_plus_one
+    );
+}
 #[cfg(feature = "codec-declare")]
-case!(
-    peer_aliases_resolve_the_same_on_both_case,
-    declarations::peer_aliases_resolve_the_same_on_both
-);
+mod declaration_cases {
+    use super::*;
+    case!(
+        peer_aliases_resolve_the_same_on_both_case,
+        declarations::peer_aliases_resolve_the_same_on_both
+    );
+}
 #[cfg(all(feature = "codec-declare", feature = "declare-subscriber"))]
-case!(
-    remote_subscribers_fill_case,
-    declarations::subscribers::fills_to_n_and_refuses_at_n_plus_one
-);
-#[cfg(all(feature = "codec-declare", feature = "declare-subscriber"))]
-case!(
-    remote_subscribers_isolation_case,
-    declarations::subscribers::one_peer_flooding_leaves_the_other_untouched
-);
+mod remote_subscriber_cases {
+    use super::*;
+    case!(
+        remote_subscribers_fill_case,
+        declarations::subscribers::fills_to_n_and_refuses_at_n_plus_one
+    );
+    case!(
+        remote_subscribers_isolation_case,
+        declarations::subscribers::one_peer_flooding_leaves_the_other_untouched
+    );
+}
 #[cfg(all(feature = "codec-declare", feature = "declare-queryable"))]
-case!(
-    remote_queryables_fill_case,
-    declarations::queryables::fills_to_n_and_refuses_at_n_plus_one
-);
-#[cfg(all(feature = "codec-declare", feature = "declare-queryable"))]
-case!(
-    remote_queryables_isolation_case,
-    declarations::queryables::one_peer_flooding_leaves_the_other_untouched
-);
+mod remote_queryable_cases {
+    use super::*;
+    case!(
+        remote_queryables_fill_case,
+        declarations::queryables::fills_to_n_and_refuses_at_n_plus_one
+    );
+    case!(
+        remote_queryables_isolation_case,
+        declarations::queryables::one_peer_flooding_leaves_the_other_untouched
+    );
+}
 #[cfg(all(feature = "codec-declare", feature = "liveliness-subscriber"))]
-case!(
-    peer_tokens_fill_case,
-    declarations::tokens::fills_to_n_and_refuses_at_n_plus_one
-);
-#[cfg(all(feature = "codec-declare", feature = "liveliness-subscriber"))]
-case!(
-    peer_tokens_isolation_case,
-    declarations::tokens::one_peer_flooding_leaves_the_other_untouched
-);
+mod peer_token_cases {
+    use super::*;
+    case!(
+        peer_tokens_fill_case,
+        declarations::tokens::fills_to_n_and_refuses_at_n_plus_one
+    );
+    case!(
+        peer_tokens_isolation_case,
+        declarations::tokens::one_peer_flooding_leaves_the_other_untouched
+    );
+}
