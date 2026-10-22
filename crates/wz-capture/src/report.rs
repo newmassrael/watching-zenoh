@@ -1837,11 +1837,23 @@ impl<'a> CaptureReport<'a> {
         // capture rather than a counter, and which the health document has no
         // place for. Printing the identity a third time would be three
         // spellings of one fact in one document.
+        //
+        // WHOLE or PART, because the two are different consequences. A file
+        // whose every packet was on an unread link type was not dissected; a
+        // multi-interface file with one such interface was, apart from that
+        // interface, and the sentence used to say the first about the second.
         if !sk.unsupported_link_types.is_empty() {
-            s.push_str(
-                "  this capture was not dissected: its link type is not \
-                 decapsulated by this build\n",
-            );
+            if sk.unsupported_link_type >= d.next_packet_index() {
+                s.push_str(
+                    "  this capture was not dissected: its link type is not \
+                     decapsulated by this build\n",
+                );
+            } else {
+                s.push_str(
+                    "  part of this capture was not dissected: the packets on \
+                     a link type this build does not decapsulate\n",
+                );
+            }
         }
         // R311y648 (§1.2a) — the line that stops an encrypted capture reading
         // as an idle one. Printed only when there IS such a flow, like every
@@ -3123,6 +3135,22 @@ fn skips_json(sk: &crate::SkipCensus, s: &mut String) {
         }
         s.push_str(&format!("{dlt}"));
     }
+    // WHERE those link types were: one object per interface whose link type
+    // this build does not read, in the container's numbering, with how many of
+    // its packets were skipped. `link_types` names what to add; this names
+    // which interface of a multi-interface file went unread and how much of it,
+    // which `link_types` cannot. The `packets` summed are
+    // `unsupported_link_type`.
+    s.push_str("],\"link_type_interfaces\":[");
+    for (i, (unread, packets)) in sk.unsupported_link_type_interfaces.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!(
+            "{{\"interface\":{},\"link_type\":{},\"packets\":{packets}}}",
+            unread.interface_id, unread.link_type
+        ));
+    }
     // R311y862 — the two protocol SETS beside the link-type one, on the same
     // reasoning: the actionable fact is WHICH number, and `not_transport_protos`
     // in particular is how a reader checks the furniture claim rather than
@@ -3445,6 +3473,13 @@ fn skips_text(sk: &crate::SkipCensus, s: &mut String) {
         s.push_str(&format!(
             "    link type(s) not read by this build: {dlts}\n"
         ));
+        // Per interface, so a file with several says which one went unread.
+        for (unread, packets) in &sk.unsupported_link_type_interfaces {
+            s.push_str(&format!(
+                "      interface {} (link type {}): {packets} packet(s) skipped\n",
+                unread.interface_id, unread.link_type
+            ));
+        }
     }
 }
 

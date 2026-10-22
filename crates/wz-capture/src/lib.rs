@@ -478,6 +478,7 @@ mod transport_layout_json_tests;
 mod unresolved_chain_tests;
 pub mod ws;
 
+use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
@@ -574,6 +575,22 @@ pub struct SkipCensus {
     /// WHICH one, and a reader holding it can say "DLT 147" rather than "some
     /// packets were skipped". A count alone cannot name what to add.
     pub unsupported_link_types: BTreeSet<u32>,
+    /// The INTERFACES behind that count: each interface whose link type this
+    /// build cannot read, with that link type and how many of its packets were
+    /// skipped.
+    ///
+    /// The set above names WHAT to add and cannot say WHERE it was: a pcapng
+    /// file with several interfaces, one of them carrying a link type the
+    /// writer defined for its own records, reads as "some packets of link type
+    /// 147" with no word on which interface they came off or whether the others
+    /// lost any. The sum of these counts is [`Self::unsupported_link_type`],
+    /// and the counts of one link type summed are that link type's share.
+    ///
+    /// An interface is numbered as the container numbers it, which is
+    /// per-section in a pcapng: two sections that both declare interface 0 with
+    /// the same link type fold into one entry here. A classic pcap and a packet
+    /// pushed without one are interface 0.
+    pub unsupported_link_type_interfaces: BTreeMap<UnreadInterface, usize>,
     /// Shorter than the headers it declared.
     pub truncated: usize,
     /// Not IP: ARP, LLDP, and the ordinary furniture of a real capture.
@@ -748,11 +765,19 @@ impl SkipCensus {
         self.total() == 0
     }
 
-    fn note(&mut self, reason: SkipReason) {
+    /// Count one skipped packet, which arrived on `interface_id`.
+    fn note(&mut self, reason: SkipReason, interface_id: u32) {
         match reason {
             SkipReason::UnsupportedLinkType(dlt) => {
                 self.unsupported_link_type += 1;
                 self.unsupported_link_types.insert(dlt);
+                *self
+                    .unsupported_link_type_interfaces
+                    .entry(UnreadInterface {
+                        interface_id,
+                        link_type: dlt,
+                    })
+                    .or_default() += 1;
             }
             SkipReason::Truncated => self.truncated += 1,
             SkipReason::NotIp => self.not_ip += 1,
@@ -781,6 +806,19 @@ impl SkipCensus {
     }
 }
 
+/// One interface of a capture whose link type this build does not read: the
+/// key of [`SkipCensus::unsupported_link_type_interfaces`].
+///
+/// Ordered by interface first, so the census lists a file's interfaces in the
+/// order the file numbered them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UnreadInterface {
+    /// The interface the packets arrived on, as the container numbers it.
+    pub interface_id: u32,
+    /// The link type that interface declared.
+    pub link_type: u32,
+}
+
 /// A packet the dissector could not turn into stream bytes, and why.
 ///
 /// Carried rather than counted: "17 packets skipped" is not actionable, and a
@@ -789,6 +827,11 @@ impl SkipCensus {
 pub struct SkippedPacket {
     /// Index of the packet in the capture.
     pub packet_index: usize,
+    /// The interface it arrived on, as the container numbers it (0 for a
+    /// classic pcap and for a packet pushed without one). A skip found after
+    /// IP reassembly carries the interface of the piece that completed the
+    /// datagram.
+    pub interface_id: u32,
     /// Why it produced nothing.
     pub reason: SkipReason,
 }
@@ -5009,7 +5052,11 @@ impl Dissection {
     /// that list means. The difference is that the bytes are no longer gone —
     /// they are in the table, and the packet that completes the datagram is
     /// the one that produces frames.
-    fn push_fragment(&mut self, piece: link::IpFragment, ts_nanos: Option<u64>) {
+    ///
+    /// `interface_id` is the interface the piece arrived on, which a skip found
+    /// after reassembly is attributed to: the piece that completed the datagram
+    /// is the packet the skip names.
+    fn push_fragment(&mut self, piece: link::IpFragment, interface_id: u32, ts_nanos: Option<u64>) {
         // R311y863 — a LOOP, because completing one datagram can yield a piece
         // of ANOTHER. A reassembled carrier is walked into by
         // `transport_from_ip`, and what it finds inside may itself be a
@@ -5034,7 +5081,7 @@ impl Dissection {
                 .fragments
                 .push(piece, ts_nanos.map(|ns| ns / NANOS_PER_MILLI))
             else {
-                self.note_skip(packet_index, SkipReason::IpFragmentPending);
+                self.note_skip(packet_index, interface_id, SkipReason::IpFragmentPending);
                 return;
             };
             // The transport checksum covers the whole datagram, so this is the
@@ -5099,6 +5146,7 @@ impl Dissection {
                         // pair of functions.
                         self.note_skip(
                             done.packet_index,
+                            interface_id,
                             SkipReason::EncapsulationTooDeep(done.key.proto),
                         );
                         return;
@@ -5110,11 +5158,15 @@ impl Dissection {
                 // ignored so the impossibility is observable if it ever stops
                 // being one.
                 Ok(Transport::Vsock(_)) => {
-                    self.note_skip(done.packet_index, SkipReason::NotTransport(done.key.proto));
+                    self.note_skip(
+                        done.packet_index,
+                        interface_id,
+                        SkipReason::NotTransport(done.key.proto),
+                    );
                     return;
                 }
                 Err(reason) => {
-                    self.note_skip(done.packet_index, reason);
+                    self.note_skip(done.packet_index, interface_id, reason);
                     return;
                 }
             }
@@ -5271,10 +5323,11 @@ impl Dissection {
     /// themselves; each was a place a new reason could be added without ever
     /// reaching a total. The census is incremented here, BEFORE the trim, so a
     /// capture past the cap still counts what it dropped.
-    fn note_skip(&mut self, packet_index: usize, reason: SkipReason) {
-        self.skip_census.note(reason);
+    fn note_skip(&mut self, packet_index: usize, interface_id: u32, reason: SkipReason) {
+        self.skip_census.note(reason, interface_id);
         self.skipped.push(SkippedPacket {
             packet_index,
+            interface_id,
             reason,
         });
         self.trim_skipped();
@@ -6627,7 +6680,7 @@ impl Dissection {
             self.push_serial(interface_id, packet_index, ts_nanos, bytes);
             return;
         }
-        self.push_packet_inner(link_type, packet_index, ts_nanos, bytes)
+        self.push_packet_inner(link_type, packet_index, interface_id, ts_nanos, bytes)
     }
 
     /// R311y720 (§D M3) — one read of a declared serial line.
@@ -6731,6 +6784,7 @@ impl Dissection {
         &mut self,
         link_type: u32,
         packet_index: usize,
+        interface_id: u32,
         ts_nanos: Option<u64>,
         bytes: &[u8],
     ) {
@@ -6787,11 +6841,11 @@ impl Dissection {
             // transport strip a whole datagram takes, so nothing downstream
             // learns that this one arrived in pieces.
             Ok(Transport::IpFragment(f)) => {
-                self.push_fragment(f, ts_nanos);
+                self.push_fragment(f, interface_id, ts_nanos);
                 return;
             }
             Err(reason) => {
-                self.note_skip(packet_index, reason);
+                self.note_skip(packet_index, interface_id, reason);
                 return;
             }
         };
@@ -9652,6 +9706,10 @@ mod datagram_tests {
         let SkipCensus {
             unsupported_link_type: _,
             unsupported_link_types: _,
+            // A breakdown of `unsupported_link_type` by interface and not a
+            // reason of its own: its counts sum to that count, so it is in that
+            // count's class and adds nothing to `total`.
+            unsupported_link_type_interfaces: _,
             truncated: _,
             not_ip: _,
             not_transport: _,
@@ -11873,6 +11931,8 @@ mod datagram_tests {
         let SkipCensus {
             unsupported_link_type: _,
             unsupported_link_types: _,
+            // Moves with `unsupported_link_type`, which is not inert.
+            unsupported_link_type_interfaces: _,
             truncated: _,
             not_ip: _,
             not_transport: _,
@@ -14448,6 +14508,83 @@ mod datagram_tests {
             d.skipped()
         );
         assert_eq!(d.skipped()[0].packet_index, 1);
+    }
+
+    /// The skip census says WHICH interface went unread and how much of it, not
+    /// only which link type.
+    ///
+    /// Three interfaces, two of them on link types this build does not read and
+    /// one of those two declared twice: interface 1 and interface 3 are both
+    /// 147, so a census keyed by link type alone would fold them, and the per-
+    /// interface counts are the only place the two are told apart. Interface 0
+    /// is Ethernet and is the control: it is read, and appears nowhere here.
+    #[test]
+    fn the_skip_census_names_each_unread_interface_with_its_count() {
+        let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+        let pkt = udp_packet([10, 0, 0, 1], 7447, [224, 0, 0, 224], 7446, &keepalive);
+        let file = crate::pcapng::write(
+            &[(LINKTYPE_ETHERNET, 6), (147, 6), (250, 6), (147, 6)],
+            &[
+                (0, 0, &pkt),
+                (1, 0, &pkt),
+                (1, 0, &pkt),
+                (2, 0, &pkt),
+                (3, 0, &pkt),
+                (1, 0, &pkt),
+                (0, 0, &pkt),
+            ],
+        );
+        let d = Dissection::from_capture(&file).expect("parse");
+        let sk = d.skip_census();
+        let per_interface: Vec<(u32, u32, usize)> = sk
+            .unsupported_link_type_interfaces
+            .iter()
+            .map(|(u, n)| (u.interface_id, u.link_type, *n))
+            .collect();
+        assert_eq!(
+            per_interface,
+            alloc::vec![(1, 147, 3), (2, 250, 1), (3, 147, 1)],
+            "each unread interface with its own count, in the file's numbering"
+        );
+        assert_eq!(
+            per_interface.iter().map(|(_, _, n)| n).sum::<usize>(),
+            sk.unsupported_link_type,
+            "the breakdown sums to the count it breaks down"
+        );
+        // The packets are still numbered as the file numbers them: skipping one
+        // does not move the coordinates of those after it.
+        let skipped: Vec<(usize, u32)> = d
+            .skipped()
+            .iter()
+            .map(|s| (s.packet_index, s.interface_id))
+            .collect();
+        assert_eq!(skipped, alloc::vec![(1, 1), (2, 1), (3, 2), (4, 3), (5, 1)]);
+        assert_eq!(
+            d.datagram_flows().len(),
+            1,
+            "the Ethernet interface is read"
+        );
+
+        let health = crate::report::health_json(&d);
+        assert!(
+            health.contains(
+                "\"link_type_interfaces\":[{\"interface\":1,\"link_type\":147,\"packets\":3},\
+                 {\"interface\":2,\"link_type\":250,\"packets\":1},\
+                 {\"interface\":3,\"link_type\":147,\"packets\":1}]"
+            ),
+            "the health document carries the breakdown: {health}"
+        );
+        let text = crate::report::CaptureReport::of(&d).to_text();
+        assert!(
+            text.contains("interface 1 (link type 147): 3 packet(s) skipped"),
+            "the text names the interface too: {text}"
+        );
+        // Part of this file was read, so the text must not say none of it was.
+        assert!(
+            text.contains("part of this capture was not dissected")
+                && !text.contains("  this capture was not dissected"),
+            "a file with a read interface was dissected in part: {text}"
+        );
     }
 
     /// The CONTROL: the untimestamped entry point leaves the clock alone, so

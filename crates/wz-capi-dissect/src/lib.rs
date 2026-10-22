@@ -9136,7 +9136,13 @@ mod tests {
         let documents: Vec<(&str, Vec<String>)> = vec![
             (
                 rev::SUMMARY,
-                vec![call_summary(&stream).expect("the summary door reads a pcap")],
+                // And a file with an interface this build does not read, the
+                // only shape that puts a row under `link_type_interfaces`.
+                vec![
+                    call_summary(&stream).expect("the summary door reads a pcap"),
+                    call_summary(&unread_interface_capture())
+                        .expect("the summary door reads a pcapng"),
+                ],
             ),
             (rev::READABLE_SURFACES, vec![call_readable_surfaces()]),
             (rev::SELECTOR_DIAGNOSE, vec![selector_ok, selector_bad]),
@@ -13786,7 +13792,49 @@ mod tests {
         push_live(fed, WZ_DISSECT_NO_TIMESTAMP, &packet);
         let datagram_only = live_health(fed).expect("a fed handle");
         unsafe { wz_dissect_live_close(fed) };
-        vec![rich, datagram_only]
+
+        let unread = replay(&unread_interface_capture(), WZ_DISSECT_LIMITS_NONE)
+            .expect("a pcapng with an unread interface replays");
+        let with_unread_interface = live_health(unread).expect("a replayed handle");
+        unsafe { wz_dissect_live_close(unread) };
+        vec![rich, datagram_only, with_unread_interface]
+    }
+
+    /// A pcapng with an Ethernet interface and an interface on `LINKTYPE_USER0`
+    /// (147), which this build does not decapsulate: two packets on the first
+    /// and three on the second, interleaved.
+    fn unread_interface_capture() -> Vec<u8> {
+        let packet = udp_packet([10, 0, 0, 1], 7447, [10, 0, 0, 2], 7447, &KEEPALIVE);
+        let own_record = [0xA5u8; 12];
+        wz_capture::pcapng::write(
+            &[(LINKTYPE_ETHERNET, 6), (147, 6)],
+            &[
+                (0, 1_000, &packet),
+                (1, 2_000, &own_record),
+                (1, 3_000, &own_record),
+                (0, 4_000, &packet),
+                (1, 5_000, &own_record),
+            ],
+        )
+    }
+
+    /// A replayed file whose second interface is on a link type this build does
+    /// not read: the file is read, the readable interface is dissected, and the
+    /// health document names the unread interface with its count.
+    #[test]
+    fn a_replay_skips_an_unread_interface_and_names_it_in_health() {
+        let handle = replay(&unread_interface_capture(), WZ_DISSECT_LIMITS_NONE)
+            .expect("a file with an unread interface is not refused");
+        let doc = live_health(handle).expect("health");
+        unsafe { wz_dissect_live_close(handle) };
+        assert!(
+            doc.contains(
+                "\"link_type_interfaces\":[{\"interface\":1,\"link_type\":147,\"packets\":3}]"
+            ),
+            "the unread interface, with its count: {doc}"
+        );
+        assert!(doc.contains("\"unsupported_link_type\":3"), "{doc}");
+        assert!(doc.contains("\"link_types\":[147]"), "{doc}");
     }
 
     /// The `health` key of a live handle's document is the summary's `health`

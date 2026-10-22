@@ -2295,6 +2295,20 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: &[],
     },
+    // Revision 8 ADDS `link_type_interfaces`, inside `health.skips`, and retires
+    // nothing: one object per interface whose link type this build does not
+    // read, with `interface`, `link_type` and `packets`, the counts summing to
+    // `unsupported_link_type`. `link_types` stays and says what it said. A
+    // consumer pinned to revision 7 loses nothing.
+    DocumentShape {
+        document: SUMMARY,
+        revision: 8,
+        keys: SUMMARY_R8_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
     DocumentShape {
         document: READABLE_SURFACES,
         revision: 1,
@@ -3089,6 +3103,18 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         document: HEALTH,
         revision: 4,
         keys: HEALTH_R4_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
+    // Revision 5 ADDS `link_type_interfaces`, inside `skips`, and retires
+    // nothing, for the reason summary revision 8 gives: the same group, from the
+    // same emitter.
+    DocumentShape {
+        document: HEALTH,
+        revision: 5,
+        keys: HEALTH_R5_KEYS,
         retiring: &[],
         families: &[],
         planes: &[],
@@ -16177,6 +16203,107 @@ pub const SUMMARY_R7_KEYS: &[&str] = &[
     "ws_resync_skipped_bytes",
 ];
 
+/// The keys the summary document carries at revision 8: revision 7's PLUS
+/// `link_type_interfaces` inside `skips`, and the three keys of each of its
+/// objects: `interface`, `link_type` and `packets`.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives.
+pub const SUMMARY_R8_KEYS: &[&str] = &[
+    "bytes_absent",
+    "caps",
+    "capture_reported_drops",
+    "completed",
+    "datagram_flows",
+    "desyncs",
+    "document",
+    "dropped_by_limits",
+    "duplicates",
+    "encapsulation_depth_bound",
+    "encapsulation_too_deep",
+    "encapsulations",
+    "evicted",
+    "expired",
+    "flows",
+    "fragments",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "framing",
+    "gap_bytes_missing",
+    "gaps",
+    "gaps_forced",
+    "gre_payload",
+    "gre_payloads",
+    "health",
+    "held",
+    "inert_counters",
+    "interface",
+    "ip_checksum_absent",
+    "ip_checksum_invalid",
+    "ip_checksum_valid",
+    "ip_fragment_pending",
+    "ipv4_fragment",
+    "ipv6_extension_chain",
+    "ipv6_fragment",
+    "link_type",
+    "link_type_interfaces",
+    "link_types",
+    "malformed",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "missing",
+    "name",
+    "not_ip",
+    "not_this_protocol",
+    "not_transport",
+    "not_transport_protos",
+    "open",
+    "out_of_order",
+    "out_of_window",
+    "overlapping",
+    "packets",
+    "partial_overlaps",
+    "pieces",
+    "recoveries",
+    "reserved_headers",
+    "resync_skipped_bytes",
+    "retransmits",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sequence",
+    "skipped",
+    "skipped_packets",
+    "skips",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "streams",
+    "tcp_flows",
+    "too_deep_protos",
+    "total",
+    "transport_checksum_absent",
+    "transport_checksum_invalid",
+    "transport_checksum_partial",
+    "transport_checksum_valid",
+    "truncated",
+    "tunnel_checksum_absent",
+    "tunnel_checksum_invalid",
+    "tunnel_checksum_valid",
+    "unaccounted_batch_bytes",
+    "uncorroborated_layers",
+    "undefined_mandatory_exts",
+    "unfinished",
+    "unfinished_bytes",
+    "unsupported_link_type",
+    "unwalked_encapsulation",
+    "vsock_non_payload",
+    "without_resolution",
+    "ws_desyncs",
+    "ws_recoveries",
+    "ws_resync_skipped_bytes",
+];
+
 /// The health document's key set at revision 3: revision 2's PLUS
 /// `transport_checksum_partial`.
 ///
@@ -16331,6 +16458,108 @@ pub const HEALTH_R4_KEYS: &[&str] = &[
     "out_of_order",
     "out_of_window",
     "overlapping",
+    "partial_overlaps",
+    "pieces",
+    "recoveries",
+    "reserved_headers",
+    "resync_skipped_bytes",
+    "retransmits",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sequence",
+    "skipped",
+    "skipped_packets",
+    "skips",
+    "stream",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "streams",
+    "too_deep_protos",
+    "total",
+    "transport_checksum_absent",
+    "transport_checksum_invalid",
+    "transport_checksum_partial",
+    "transport_checksum_valid",
+    "truncated",
+    "tunnel_checksum_absent",
+    "tunnel_checksum_invalid",
+    "tunnel_checksum_valid",
+    "unaccounted_batch_bytes",
+    "uncorroborated_layers",
+    "undefined_mandatory_exts",
+    "unfinished",
+    "unfinished_bytes",
+    "unsupported_link_type",
+    "unwalked_encapsulation",
+    "vsock_non_payload",
+    "without_resolution",
+    "ws_desyncs",
+    "ws_recoveries",
+    "ws_resync_skipped_bytes",
+];
+
+/// The keys the health document carries at revision 5: revision 4's PLUS
+/// `link_type_interfaces` inside `skips`, and the three keys of each of its
+/// objects: `interface`, `link_type` and `packets`.
+///
+/// Written out rather than aliased, for the reason [`SUMMARY_R6_KEYS`] gives.
+pub const HEALTH_R5_KEYS: &[&str] = &[
+    "bytes_absent",
+    "caps",
+    "capture_reported_drops",
+    "completed",
+    "datagram",
+    "datagram_sequence",
+    "desyncs",
+    "document",
+    "dropped_by_limits",
+    "duplicates",
+    "encapsulation_depth_bound",
+    "encapsulation_too_deep",
+    "encapsulations",
+    "evicted",
+    "expired",
+    "flows",
+    "flows_seen",
+    "fragments",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "framing",
+    "gap_bytes_missing",
+    "gaps",
+    "gaps_forced",
+    "gre_payload",
+    "gre_payloads",
+    "health",
+    "held",
+    "inert_counters",
+    "interface",
+    "ip_checksum_absent",
+    "ip_checksum_invalid",
+    "ip_checksum_valid",
+    "ip_fragment_pending",
+    "ipv4_fragment",
+    "ipv6_extension_chain",
+    "ipv6_fragment",
+    "link_type",
+    "link_type_interfaces",
+    "link_types",
+    "malformed",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "missing",
+    "name",
+    "not_ip",
+    "not_this_protocol",
+    "not_transport",
+    "not_transport_protos",
+    "open",
+    "out_of_order",
+    "out_of_window",
+    "overlapping",
+    "packets",
     "partial_overlaps",
     "pieces",
     "recoveries",
@@ -17891,7 +18120,9 @@ mod tests {
             // stopped counting a segment the sender's offload left unfinished.
             // To 7 when `caps` gained `frames_total`, the ceiling over every
             // flow: one key, no word moves and nothing retires.
-            (SUMMARY, 7),
+            // To 8 when `skips` gained `link_type_interfaces`, each unread
+            // interface with its link type and count: nothing retires.
+            (SUMMARY, 8),
             // R2175 (open-debt item 552) — to 3 when it gained
             // `value_families`, the catalogue of every switchable key's words.
             // R2184 (item 556) — to 4 when the `value_families` rows gained
@@ -17996,7 +18227,9 @@ mod tests {
             // the datagram links alone.
             // To 3 on the summary's move to 6: the same `health` object.
             // To 4 on the summary's move to 7: `caps` gained `frames_total`.
-            (HEALTH, 4),
+            // To 5 on the summary's move to 8: `skips` gained
+            // `link_type_interfaces`.
+            (HEALTH, 5),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");

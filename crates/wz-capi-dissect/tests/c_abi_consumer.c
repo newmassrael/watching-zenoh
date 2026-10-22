@@ -3256,8 +3256,10 @@ int main(void) {
      * `transport_checksum_invalid` stops counting a segment the sender's
      * transmit offload left unfinished.
      * 7: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
-     * flow. A key arrives; nothing retires. */
-    revisioned[1].revision = 7;
+     * flow. A key arrives; nothing retires.
+     * 8: `skips` gains `link_type_interfaces`, the unread interfaces each with
+     * its link type and count. A key arrives; nothing retires. */
+    revisioned[1].revision = 8;
     revisioned[1].doc = NULL;
     rc = wz_dissect_pcap_summary(pcap, sizeof pcap, &revisioned[1].doc);
     CHECK(rc == WZ_DISSECT_OK, "summary rc=%d", rc);
@@ -3470,8 +3472,9 @@ int main(void) {
     revisioned[5].name = "health";
     /* 2 when it gained `datagram_sequence`; 3 on the summary's move to 6, the
      * same `health` object; 4 on the summary's move to 7, `caps` gaining
-     * `frames_total`. */
-    revisioned[5].revision = 4;
+     * `frames_total`; 5 on the summary's move to 8, `skips` gaining
+     * `link_type_interfaces`. */
+    revisioned[5].revision = 5;
     revisioned[5].doc = NULL;
     {
         wz_dissect_live *healthy = NULL;

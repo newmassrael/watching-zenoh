@@ -1727,7 +1727,24 @@ int wz_dissect_transport_message_in(const char *context_json,
  * `transport_checksum_invalid` stopped counting what is now `partial`. A
  * consumer that read `invalid` as "this reader could not verify it" adds the
  * two. A capture that held no such segment reads exactly as before, with a zero
- * under the new key. */
+ * under the new key.
+ *
+ * (summary revision 8, health revision 5) AN UNREAD INTERFACE, in
+ * `health.skips`. A packet on a link type this build does not decapsulate is
+ * skipped and the file is still read: the other interfaces' packets are
+ * dissected, and every packet keeps the number the file gives it, so a skip
+ * moves no later coordinate. `unsupported_link_type` counts those packets and
+ * `link_types` lists their link types. `link_type_interfaces` says where they
+ * were: one object per interface whose link type is not read, as
+ *
+ *     {"interface":1,"link_type":147,"packets":3}
+ *
+ * in the container's own interface numbering (per section in a pcapng; a
+ * classic pcap is interface 0), ordered by interface. The `packets` summed are
+ * `unsupported_link_type`, and summed over one link type they are that link
+ * type's share. Two pcapng sections that both declare the same interface number
+ * with the same link type are one entry. The live handle's health document
+ * carries the same group from the same emitter. */
 int wz_dissect_pcap_summary(const unsigned char *bytes, size_t len, char **out);
 
 /* R311y748 (ABI 2) — the same summary, read under BOUNDED memory.
@@ -6147,6 +6164,11 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  * claim, and the rule for `uncorroborated_layers` are the summary's (see
  * wz_dissect_pcap_summary, revision 6) and are the same here: one emitter
  * writes both.
+ *
+ * (health revision 5) `skips.link_type_interfaces` names each interface whose
+ * link type is not read, with that link type and how many of its packets were
+ * skipped; see wz_dissect_pcap_summary, revision 8, which writes it from the
+ * same emitter.
  *
  * A READ, and `h` is const to say so: the counters are read where they sit, no
  * record is handed out and no id is settled, so the next
