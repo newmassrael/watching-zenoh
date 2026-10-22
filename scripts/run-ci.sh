@@ -17700,6 +17700,17 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # (the z_sub check above covers it — the same build script emits both).
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_subscriber_from_pico_multicast -- --ignored --quiet) || return 1
+    # Open-debt item 913 — upstream's own multicast peer test (`tests/z_test_peer_multicast.c`):
+    # four sessions in one process join `udp/224.0.0.224:7447#iface=lo` and put and get among
+    # themselves, first against the real libzenohpico (the calibration: can this host carry the
+    # test at all) and then against wz's pico drop-in, which this lane builds here as Layer E
+    # does. Past the pico-CLI guard above, because the same build script makes the library and
+    # the headers the test compiles against. One at a time, since both runs join one group port.
+    # Count-guarded at 2: the legs are `#[ignore]`, so a rename would select nothing and pass.
+    (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
+    _runci_guarded_test "M pico multicast peer test on wz" 2 \
+        cargo test -p wz-integration-tests \
+        --test pico_peer_multicast_on_wz_capi -- --ignored --test-threads=1 || return 1
     # R2586 — the `#join=` key with a FOREIGN sender: pico `z_pub` in its own
     # network namespace publishes to a group wz reaches only through `#join=` on
     # the `#iface=`-pinned veth end. The namespace is what makes the silent arms
