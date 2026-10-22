@@ -61,7 +61,7 @@
 
 use core::fmt;
 
-use crate::bounded::{BoundedString, BoundedVec};
+use crate::bounded::{BoundedString, BoundedVec, Profile, Storage};
 use crate::caps::MAX_KEYEXPR_BYTES;
 use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
 
@@ -229,8 +229,21 @@ pub fn canonize_keyexpr_in(
     input: &str,
     dialect: KeyexprDialect,
 ) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, KeyexprCanonError> {
-    let collapsed = collapse_dsl_runs(input)?;
-    canonize_chunks(&collapsed, dialect)
+    canonize_keyexpr_as::<Profile>(input, dialect)
+}
+
+/// [`canonize_keyexpr_in`] over a storage policy `P`: the two passes' scratch buffers
+/// and the OUTPUT are all held by `P`, so what a table of that policy stores a keyexpr
+/// pattern in is written once where it is made and not copied into place afterwards,
+/// and the bound that refuses an over-long input is the policy's own: it is refused as
+/// [`KeyexprCanonError::ExceedsCapacity`] where `P` enforces [`MAX_KEYEXPR_BYTES`] (or
+/// [`MAX_KEYEXPR_CHUNKS`]), and taken where it does not.
+pub fn canonize_keyexpr_as<P: Storage>(
+    input: &str,
+    dialect: KeyexprDialect,
+) -> Result<BoundedString<MAX_KEYEXPR_BYTES, P>, KeyexprCanonError> {
+    let collapsed = collapse_dsl_runs::<P>(input)?;
+    canonize_chunks::<P>(&collapsed, dialect)
 }
 
 /// Collapse runs of consecutive `$*` tokens into a single `$*`.
@@ -242,9 +255,11 @@ pub fn canonize_keyexpr_in(
 /// `$*foo` and `pre$*$*post` collapses to `pre$*post`. The
 /// transform is idempotent; running it twice yields the same
 /// result as once.
-fn collapse_dsl_runs(input: &str) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, KeyexprCanonError> {
+fn collapse_dsl_runs<P: Storage>(
+    input: &str,
+) -> Result<BoundedString<MAX_KEYEXPR_BYTES, P>, KeyexprCanonError> {
     const DSL: &str = "$*";
-    let mut out = BoundedString::new();
+    let mut out = BoundedString::default();
     let mut cursor = 0;
     while cursor < input.len() {
         let rest = &input[cursor..];
@@ -290,11 +305,11 @@ fn collapse_dsl_runs(input: &str) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, Ke
 /// `home/**/*/temp` and each answered `home/*/**/temp`, where wz
 /// answered `home/**/temp`. The two ABIs' pure-function oracles
 /// now drive that comparison on every run.
-fn canonize_chunks(
+fn canonize_chunks<P: Storage>(
     input: &str,
     dialect: KeyexprDialect,
-) -> Result<BoundedString<MAX_KEYEXPR_BYTES>, KeyexprCanonError> {
-    let mut out_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
+) -> Result<BoundedString<MAX_KEYEXPR_BYTES, P>, KeyexprCanonError> {
+    let mut out_chunks: BoundedVec<&str, MAX_KEYEXPR_CHUNKS, P> = BoundedVec::default();
     // The wild run being accumulated: how many `*` chunks it has
     // contained so far, and whether any of them was a `**`.
     let mut run_single_stars: usize = 0;
@@ -302,8 +317,8 @@ fn canonize_chunks(
 
     // Emit the pending wild run in canonical order: every `*`, then
     // at most one `**`.
-    fn flush_run(
-        out: &mut BoundedVec<&str, MAX_KEYEXPR_CHUNKS>,
+    fn flush_run<P: Storage>(
+        out: &mut BoundedVec<&str, MAX_KEYEXPR_CHUNKS, P>,
         singles: usize,
         has_double: bool,
     ) -> Result<(), KeyexprCanonError> {
@@ -356,7 +371,7 @@ fn canonize_chunks(
     flush_run(&mut out_chunks, run_single_stars, run_has_double_star)?;
 
     // Join by '/' into a fresh bounded buffer (replaces `Vec::join`).
-    let mut out = BoundedString::new();
+    let mut out = BoundedString::default();
     for (i, c) in out_chunks.iter().enumerate() {
         if i > 0 {
             out.push('/')
@@ -1155,9 +1170,9 @@ mod tests {
     #[test]
     fn collapse_dsl_runs_idempotent_on_canonical_input() {
         let canonical = "home/foo$*bar";
-        let once = collapse_dsl_runs(canonical).unwrap();
+        let once = collapse_dsl_runs::<Profile>(canonical).unwrap();
         assert_eq!(once, canonical);
-        let twice = collapse_dsl_runs(once.as_str()).unwrap();
+        let twice = collapse_dsl_runs::<Profile>(once.as_str()).unwrap();
         assert_eq!(twice, canonical);
     }
 

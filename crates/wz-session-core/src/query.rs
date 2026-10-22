@@ -98,7 +98,7 @@ use alloc::vec::Vec;
 
 // R311gb (Track 2) — bounded backing + the capacity SSOT for the
 // no-alloc control plane (queryable table + per-row keyexpr pattern).
-use crate::bounded::{BoundedString, BoundedVec};
+use crate::bounded::{BoundedString, BoundedVec, Profile, Storage};
 use crate::caps;
 #[cfg(feature = "storage-profile")]
 use crate::keyexpr_match::MAX_KEYEXPR_CHUNKS;
@@ -425,7 +425,7 @@ impl QueryableId {
 // `QueryResponder`) stay `all(codec-request, alloc)` / `alloc`-gated.
 // This brings the queryable side in line with `SubscriberRegistry`,
 // whose control plane is likewise always-compiled.
-struct Queryable<C: QuerySink> {
+struct Queryable<C: QuerySink, P: Storage = Profile> {
     id: QueryableId,
     /// R311gb (Track 2) — the canonical keyexpr pattern, stored as one
     /// [`BoundedString`] (no-alloc backing on MCU). Matching splits it
@@ -435,7 +435,7 @@ struct Queryable<C: QuerySink> {
     /// wildcard), `**` (zero-or-more-chunk wildcard), and `$*` intra-
     /// chunk substring wildcards (R220) match via the shared
     /// [`keyexpr_pattern_matches`] helper.
-    pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }>,
+    pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P>,
     /// R223 — locality filter applied before the callback fires.
     /// Identical semantics to
     /// [`crate::pubsub::SubscriberRegistry`] —
@@ -458,7 +458,7 @@ struct Queryable<C: QuerySink> {
     sink: C,
 }
 
-impl<C: QuerySink> Queryable<C> {
+impl<C: QuerySink, P: Storage> Queryable<C, P> {
     /// R311gb (Track 2) — the shared match SSOT for both the wire fire
     /// path ([`QueryableRegistry::fire_matching_queryables`]) and the
     /// no-heap borrowed fire ([`QueryableRegistry::dispatch_borrowed`]):
@@ -1821,8 +1821,8 @@ pub enum QueryableInterestReply {
 /// plane (un-gated). The owned-reply wire-dispatch methods
 /// (`dispatch_request` / `local_query` / `dispatch_messages`) live in a
 /// separate `all(codec-request, alloc)` impl block below.
-pub struct QueryableRegistry<C: QuerySink> {
-    queryables: BoundedVec<Queryable<C>, { caps::MAX_QUERYABLES }>,
+pub struct QueryableRegistry<C: QuerySink, P: Storage = Profile> {
+    queryables: BoundedVec<Queryable<C, P>, { caps::MAX_QUERYABLES }, P>,
     next_id: u64,
     /// transport-shm -- the receive side of shared memory for the VALUE of a
     /// query: the same state a push and a reply have (the negotiated capability,
@@ -1834,9 +1834,14 @@ pub struct QueryableRegistry<C: QuerySink> {
     shm: crate::extshm::ShmReceiveState,
 }
 
-impl<C: QuerySink> Default for QueryableRegistry<C> {
+impl<C: QuerySink, P: Storage> Default for QueryableRegistry<C, P> {
     fn default() -> Self {
-        Self::with_sink_backing()
+        Self {
+            queryables: BoundedVec::default(),
+            next_id: 1,
+            #[cfg(feature = "transport-shm")]
+            shm: crate::extshm::ShmReceiveState::default(),
+        }
     }
 }
 
@@ -1845,10 +1850,10 @@ impl<C: QuerySink> Default for QueryableRegistry<C> {
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 mod in_place;
 
-impl<C: QuerySink> QueryableRegistry<C> {
-    /// New empty registry over an explicit sink backing `C`. Queryable
-    /// ids start at 1 so 0 stays available as a sentinel "no queryable"
-    /// value for any caller-side wrapper that needs one.
+impl<C: QuerySink> QueryableRegistry<C, Profile> {
+    /// New empty registry over an explicit sink backing `C`, of this build's
+    /// storage profile. Queryable ids start at 1 so 0 stays available as a
+    /// sentinel "no queryable" value for any caller-side wrapper that needs one.
     ///
     /// R311gb-3b — the generic constructor (the no-`alloc` / MCU entry
     /// point, paired with [`register_sink`](Self::register_sink)). AP
@@ -1857,16 +1862,15 @@ impl<C: QuerySink> QueryableRegistry<C> {
     /// `HashMap::new` / `with_hasher` split (and
     /// [`crate::pubsub::SubscriberRegistry::with_sink_backing`]), so a
     /// bare `QueryableRegistry::new()` resolves its type parameter
-    /// without a turbofish.
+    /// without a turbofish. Defined for the profile alone, so it names its storage
+    /// policy by itself; code generic over a policy builds a registry with
+    /// `Default`.
     pub fn with_sink_backing() -> Self {
-        Self {
-            queryables: BoundedVec::new(),
-            next_id: 1,
-            #[cfg(feature = "transport-shm")]
-            shm: crate::extshm::ShmReceiveState::default(),
-        }
+        Self::default()
     }
+}
 
+impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     /// transport-shm -- install the resolver the shared-memory slices of a query's
     /// value are read through. Shared with the other registries by the session,
     /// so a query's value is read by the same resolver a push is. Without one a
@@ -1966,8 +1970,11 @@ impl<C: QuerySink> QueryableRegistry<C> {
         // breaking; the matcher still operates). An over-capacity
         // canonical form is a hard no-alloc failure. On the `alloc`
         // backing neither capacity branch is ever taken.
-        let pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }> =
-            match crate::keyexpr_canon::canonize_keyexpr(keyexpr_pattern) {
+        let pattern: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> =
+            match crate::keyexpr_canon::canonize_keyexpr_as::<P>(
+                keyexpr_pattern,
+                crate::keyexpr_canon::KeyexprDialect::Pico,
+            ) {
                 Ok(canon) => canon,
                 Err(crate::keyexpr_canon::KeyexprCanonError::ExceedsCapacity) => {
                     return Err(RegisterError::KeyexprTooLong);
@@ -1978,7 +1985,7 @@ impl<C: QuerySink> QueryableRegistry<C> {
                          canonical ({err}); storing raw form. The matcher still operates \
                          but the stored chunks may drift from the canonical form a peer emits."
                     );
-                    let mut raw = BoundedString::new();
+                    let mut raw = BoundedString::default();
                     raw.push_str(keyexpr_pattern)
                         .map_err(|_| RegisterError::KeyexprTooLong)?;
                     raw
@@ -2332,7 +2339,7 @@ impl DispatchOutcome {
 // accumulator). The control plane above (table + register + matching +
 // `dispatch_borrowed`) stays un-gated.
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
-impl<C: QuerySink> QueryableRegistry<C> {
+impl<C: QuerySink, P: Storage> QueryableRegistry<C, P> {
     /// Route an inbound [`Request`] through the queryable table.
     ///
     /// - Requests whose body is not `RequestVariant::CodecZenohQuery`
@@ -6839,4 +6846,208 @@ mod shm_reply_tests {
             "the same buffer on a face that lists its protocol is the descriptor"
         );
     }
+}
+
+/// The queryable table, written once and run on every storage policy: the same bodies
+/// on `Static` and on `Heap`, in one build, with the policy's own contract read from
+/// `P::ENFORCES_CAPACITY` and never from a feature gate.
+#[cfg(all(test, feature = "storage-profile", feature = "alloc"))]
+mod storage_policy_tests {
+    use super::*;
+    use crate::bounded::{Heap, Static};
+    use crate::keyexpr_canon::{canonize_keyexpr_as, KeyexprCanonError, KeyexprDialect};
+    use crate::locality::Locality;
+    use crate::query_sink::BorrowedQuery;
+    use crate::reply_acceptance::ReplyKeyExpr;
+    use crate::reply_stage::ReplyStage;
+    use core::cell::Cell;
+
+    /// A sink that does nothing: the table tests only count entries.
+    struct Noop;
+
+    impl QuerySink for Noop {
+        fn handle(&mut self, _query: &dyn QueryView, _out: &mut dyn ReplyOut) {}
+    }
+
+    /// The order the sinks of a table were fired in.
+    struct Log {
+        next: Cell<usize>,
+        seen: [Cell<u8>; 8],
+    }
+
+    impl Log {
+        fn new() -> Self {
+            Self {
+                next: Cell::new(0),
+                seen: core::array::from_fn(|_| Cell::new(0)),
+            }
+        }
+
+        fn fired(&self) -> alloc::vec::Vec<u8> {
+            self.seen[..self.next.get()].iter().map(Cell::get).collect()
+        }
+    }
+
+    struct Tag<'a> {
+        id: u8,
+        log: &'a Log,
+    }
+
+    impl QuerySink for Tag<'_> {
+        fn handle(&mut self, _query: &dyn QueryView, _out: &mut dyn ReplyOut) {
+            let at = self.log.next.get();
+            self.log.seen[at].set(self.id);
+            self.log.next.set(at + 1);
+        }
+    }
+
+    /// Fill to `MAX_QUERYABLES`, then register one more: refused with the table as it
+    /// was where the capacity is hard, taken where it is not.
+    fn fill_to_n_then_refuse_at_n_plus_one<P: Storage>() {
+        let mut reg: QueryableRegistry<Noop, P> = QueryableRegistry::default();
+        for _ in 0..caps::MAX_QUERYABLES {
+            assert!(reg.register_sink("a/b", Locality::Any, false, Noop).is_ok());
+        }
+        assert_eq!(reg.len(), caps::MAX_QUERYABLES);
+
+        let beyond = reg.register_sink("a/b", Locality::Any, false, Noop);
+        if P::ENFORCES_CAPACITY {
+            assert_eq!(beyond.err(), Some(RegisterError::TableFull));
+            assert_eq!(reg.len(), caps::MAX_QUERYABLES);
+        } else {
+            assert!(beyond.is_ok());
+            assert_eq!(reg.len(), caps::MAX_QUERYABLES + 1);
+        }
+    }
+
+    /// A refused registration leaves no gap in the ids, and an unregistered slot can
+    /// be taken again.
+    fn unregister_frees_a_slot_and_ids_do_not_gap<P: Storage>() {
+        let mut reg: QueryableRegistry<Noop, P> = QueryableRegistry::default();
+        let mut first = None;
+        for _ in 0..caps::MAX_QUERYABLES {
+            let id = reg
+                .register_sink("a/b", Locality::Any, false, Noop)
+                .expect("within the capacity");
+            first.get_or_insert(id);
+        }
+        let first = first.expect("the table holds at least one");
+        assert!(reg.unregister(first));
+        assert!(!reg.unregister(first), "a second unregister finds nothing");
+        assert_eq!(reg.len(), caps::MAX_QUERYABLES - 1);
+        let again = reg.register_sink("a/b", Locality::Any, false, Noop);
+        assert!(again.is_ok(), "the freed slot is taken again");
+        assert_eq!(reg.len(), caps::MAX_QUERYABLES);
+    }
+
+    /// A pattern past `MAX_KEYEXPR_BYTES` is refused, never truncated, where the
+    /// capacity is hard; the growable policy never had that bound.
+    fn pattern_past_the_bound<P: Storage>() {
+        let long = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
+        let mut reg: QueryableRegistry<Noop, P> = QueryableRegistry::default();
+        let outcome = reg.register_sink(&long, Locality::Any, false, Noop);
+        if P::ENFORCES_CAPACITY {
+            assert_eq!(outcome.err(), Some(RegisterError::KeyexprTooLong));
+            assert_eq!(reg.len(), 0, "a refused pattern leaves the table empty");
+        } else {
+            assert!(outcome.is_ok());
+            assert_eq!(reg.len(), 1);
+        }
+    }
+
+    /// The canonizer's output is held by the policy asked for, and says the same
+    /// thing in every one for what both can hold.
+    fn canonizer_answers_in_the_policy<P: Storage>() {
+        let short: BoundedString<{ caps::MAX_KEYEXPR_BYTES }, P> =
+            canonize_keyexpr_as::<P>("home/$*/temp", KeyexprDialect::Pico).unwrap();
+        assert_eq!(short.as_str(), "home/*/temp");
+
+        let long = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
+        let refused = canonize_keyexpr_as::<P>(&long, KeyexprDialect::Pico);
+        if P::ENFORCES_CAPACITY {
+            assert_eq!(refused.err(), Some(KeyexprCanonError::ExceedsCapacity));
+        } else {
+            assert_eq!(refused.unwrap().len(), long.len());
+        }
+    }
+
+    /// Every matching queryable fires, in registration order, once; one that does
+    /// not match, or whose locality does not admit the query's origin, does not. The
+    /// matching is the table's one rule and does not depend on how it is stored.
+    fn dispatch_fires_matching_in_registration_order<P: Storage>() {
+        let log = Log::new();
+        let mut reg: QueryableRegistry<Tag<'_>, P> = QueryableRegistry::default();
+        let table = [
+            ("a/**", Locality::Any, 1u8),
+            ("a/b", Locality::Any, 2),
+            ("c/d", Locality::Any, 3),
+            ("**", Locality::Any, 4),
+            ("a/b", Locality::SessionLocal, 5),
+            ("a/b", Locality::Remote, 6),
+        ];
+        for (pattern, locality, id) in table {
+            reg.register_sink(pattern, locality, false, Tag { id, log: &log })
+                .expect("within the capacity");
+        }
+        let view = BorrowedQuery {
+            keyexpr: "a/b",
+            parameters: None,
+            attachment: None,
+            #[cfg(feature = "storage-profile")]
+            source_info: None,
+            payload: None,
+            #[cfg(feature = "alloc")]
+            encoding: None,
+            rid: 7,
+            is_local: false,
+            #[cfg(feature = "storage-profile")]
+            qos: crate::sample::QosLevel::DEFAULT,
+        };
+        let mut stage = ReplyStage::new();
+        let mut responder = QueryResponder::new(
+            7,
+            "a/b".into(),
+            ReplyKeyExpr::MatchingQuery,
+            crate::sample::QosLevel::DEFAULT,
+            &mut stage,
+        );
+
+        let remote = reg.dispatch_borrowed(&view, &mut responder, true, None);
+        assert_eq!(remote, 4);
+        assert_eq!(
+            log.fired(),
+            [1, 2, 4, 6],
+            "a remote query: not the local-only one"
+        );
+
+        let before = log.next.get();
+        let local = reg.dispatch_borrowed(&view, &mut responder, false, None);
+        assert_eq!(local, 4);
+        assert_eq!(
+            &log.fired()[before..],
+            [1, 2, 4, 5],
+            "a local query: not the remote-only one"
+        );
+    }
+
+    macro_rules! on_every_policy {
+        ($($case:ident),* $(,)?) => {
+            mod on_static {
+                use super::*;
+                $(#[test] fn $case() { super::$case::<Static>(); })*
+            }
+            mod on_heap {
+                use super::*;
+                $(#[test] fn $case() { super::$case::<Heap>(); })*
+            }
+        };
+    }
+
+    on_every_policy!(
+        fill_to_n_then_refuse_at_n_plus_one,
+        unregister_frees_a_slot_and_ids_do_not_gap,
+        pattern_past_the_bound,
+        canonizer_answers_in_the_policy,
+        dispatch_fires_matching_in_registration_order,
+    );
 }

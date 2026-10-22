@@ -108,7 +108,7 @@ fn lent_projection<'q>(query: &'q Query<'q>) -> QueryProjection<'q> {
     }
 }
 
-impl<C: QuerySink> QueryableRegistry<C> {
+impl<C: QuerySink, P: crate::bounded::Storage> QueryableRegistry<C, P> {
     /// Dispatch a Request the in-place receive path lent: the queryable side of
     /// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace),
     /// staging replies into `pending_replies` and the Final it owes into
