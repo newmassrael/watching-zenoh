@@ -222,4 +222,11 @@ config WZ_CAP_AUTH_USRPWD
 	  The user/password handshake method, and the credential check of a listener that names a dictionary file.
 	  Exported by: c.
 
+config WZ_CAP_INTERCEPTORS
+	bool "interceptors"
+	default y
+	help
+	  The traffic policy a node's config states: access_control, low_pass_filter and downsampling, enforced on every face.
+	  Exported by: c.
+
 endmenu

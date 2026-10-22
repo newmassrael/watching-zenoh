@@ -91,19 +91,19 @@ required-features = ["group", "peer"]
 
 [[test]]
 name = "interceptors"
-required-features = ["peer"]
+required-features = ["interceptors", "peer"]
 
 [[test]]
 name = "interceptors_declare"
-required-features = ["liveliness", "peer"]
+required-features = ["interceptors", "liveliness", "peer"]
 
 [[test]]
 name = "interceptors_query"
-required-features = ["peer", "query", "queryable"]
+required-features = ["interceptors", "peer", "query", "queryable"]
 
 [[test]]
 name = "interceptors_subject"
-required-features = ["peer"]
+required-features = ["interceptors", "peer"]
 
 [[test]]
 name = "link_kinds_roundtrip"
@@ -213,6 +213,7 @@ default = [
     "e2e-sender",
     "transport_compression",
     "auth_usrpwd",
+    "interceptors",
 ]
 # The roles beyond the client: a listener, a router or a peer, and the gossip that introduces
 # the nodes of a mesh. A build without them opens a client session to the endpoints it dials.
@@ -363,6 +364,9 @@ transport_compression = ["wz-capi-core/transport_compression"]
 # The user/password handshake method and the credential check of a listener that names a
 # dictionary file. Off, neither is built, as in a zenoh-c built without `auth_usrpwd`.
 auth_usrpwd = ["wz-capi-core/auth_usrpwd"]
+# The traffic policy a node's config states (`access_control`, `low_pass_filter`, `downsampling`),
+# compiled and enforced on every face. Off, a config that states one fails the open.
+interceptors = ["wz-capi-core/interceptors"]
 
 [dependencies]
 # The ABI-neutral session model, shared with wz-capi-pico.
@@ -374,7 +378,7 @@ auth_usrpwd = ["wz-capi-core/auth_usrpwd"]
 # `access-extauth-usrpwd` and `interceptors`: the credentials and the traffic policy (`access_control`,
 # `low_pass_filter`, `downsampling`) a zenoh-c node's config states are enforced, not accepted and
 # dropped.
-wz-capi-core = { path = "../wz-capi-core", default-features = false, features = ["rx-busy-poll", "transport-qos", "interceptors"] }
+wz-capi-core = { path = "../wz-capi-core", default-features = false, features = ["rx-busy-poll", "transport-qos"] }
 # `query-reply-err` is DECLARED rather than inherited from the default set, and
 # R311y568 is why: `z_query_reply_err` routes through
 # `ReplyOut::reply_err`, whose body is `#[cfg(feature = "query-reply-err")]` and

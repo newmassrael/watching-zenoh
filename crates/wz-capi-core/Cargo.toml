@@ -78,6 +78,7 @@ default = [
     "e2e-sender",
     "transport_compression",
     "auth_usrpwd",
+    "interceptors",
 ]
 # The roles beyond the CLIENT: a session that listens, that accepts the sessions of others, that
 # is a peer or a router, and what those roles bring with them: the accept loop, the listener's

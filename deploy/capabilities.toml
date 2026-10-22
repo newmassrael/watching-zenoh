@@ -267,3 +267,10 @@ kconfig = "WZ_CAP_AUTH_USRPWD"
 abis = ["core", "c"]
 implies = []
 help = "The user/password handshake method, and the credential check of a listener that names a dictionary file."
+
+[[capability]]
+id = "interceptors"
+kconfig = "WZ_CAP_INTERCEPTORS"
+abis = ["core", "c"]
+implies = []
+help = "The traffic policy a node's config states: access_control, low_pass_filter and downsampling, enforced on every face."

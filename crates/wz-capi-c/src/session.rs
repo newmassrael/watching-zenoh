@@ -282,7 +282,9 @@ pub unsafe extern "C" fn z_open(
 ///   * `access_control`, `low_pass_filter` and `downsampling` are compiled into the node's
 ///     traffic policy and enforced on every face in both directions; a subtree the compiler
 ///     refuses (a policy naming a rule that does not exist) fails the open, as zenoh's start
-///     does. A disabled `access_control` and an absent filter state no policy at all.
+///     does. A disabled `access_control` and an absent filter state no policy at all. A build
+///     without `interceptors` cannot hold a policy, so there a config that enables
+///     `access_control` or states a filter or a downsampling rule fails the open.
 fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePolicy), ()> {
     #[cfg(not(feature = "auth_pubkey"))]
     if node.pubkey_public_key_pem.is_some()
@@ -310,8 +312,55 @@ fn node_security_of(node: &ZenohNodeConfig) -> Result<(Option<NodeAuth>, NodePol
     let auth: Option<NodeAuth> = None;
     #[cfg(feature = "auth_pubkey")]
     let auth = NodeAuth::with_pubkey_config(auth, node.pubkey_pem_config()).map_err(|_| ())?;
+    #[cfg(feature = "interceptors")]
     let policy = NodePolicy::from_node_config(node).map_err(|_| ())?;
+    #[cfg(not(feature = "interceptors"))]
+    let policy = {
+        // A build without the interceptors cannot hold a traffic policy, and a node told to
+        // enforce one that starts and enforces nothing is worse than one that does not start.
+        if !node.low_pass_filter.is_empty()
+            || !node.downsampling.is_empty()
+            || node.access_control.enabled
+        {
+            return Err(());
+        }
+        NodePolicy::default()
+    };
     Ok((auth, policy))
+}
+
+/// A build without the interceptors holds no traffic policy, so a config that states one does not
+/// open (see [`node_security_of`]); one that states none does. Run by the lane that builds without
+/// the feature, and by nothing else: the default build has the feature.
+#[cfg(all(test, not(feature = "interceptors")))]
+mod without_interceptors {
+    use super::*;
+
+    fn node(document: &str) -> ZenohNodeConfig {
+        ZenohNodeConfig::from_json5(document)
+            .expect("a document a real zenohd starts on")
+            .config
+    }
+
+    #[test]
+    fn a_config_that_states_a_traffic_policy_fails_the_open() {
+        for document in [
+            r#"{ low_pass_filter: [ { messages: ["put"], key_exprs: ["a/**"], size_limit: 4 } ] }"#,
+            r#"{ access_control: { enabled: true, default_permission: "deny" } }"#,
+        ] {
+            assert!(node_security_of(&node(document)).is_err(), "{document}");
+        }
+    }
+
+    #[test]
+    fn a_config_that_states_no_policy_opens() {
+        assert!(node_security_of(&node(r#"{ mode: "client" }"#)).is_ok());
+        // CONTROL: a disabled access control is no policy, as it is in the default build.
+        assert!(node_security_of(&node(
+            r#"{ access_control: { enabled: false, default_permission: "deny" } }"#
+        ))
+        .is_ok());
+    }
 }
 
 /// The certificate material a config's `transport/link/tls` keys name, read for the `tls/` and
