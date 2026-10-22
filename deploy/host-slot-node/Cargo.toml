@@ -36,6 +36,9 @@ default = []
 # The session coalesces the messages of one send window into one datagram (zenoh-pico's
 # `Z_FEATURE_BATCHING`): off, every message is a datagram of its own.
 batching = ["wz-runtime-coop/transport-batching", "wz-session-core/transport-batching"]
+# The node can ASK: `--get KEY --count N` issues N queries one after another and reports the round
+# trips (`src/getter.rs`). Off, the node only answers, as the kit's client does.
+get = ["wz-session-mcu/query-get"]
 
 [dependencies]
 # The implementation of the `critical_section` the image glue names (`posix_image_no_heap!`). It

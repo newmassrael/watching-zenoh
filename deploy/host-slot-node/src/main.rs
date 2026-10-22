@@ -55,11 +55,15 @@ use wz_session_core::session_init_params::{
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
-use wz_session_core::slot_observer::{ObserverCell, Requesters};
+use wz_session_core::slot_observer::ObserverCell;
+#[cfg(not(feature = "get"))]
+use wz_session_core::slot_observer::Requesters;
 use wz_session_core::text_out::FixedText;
 use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
-use wz_session_mcu::app_layer::{NoReplies, SlotApp, SlotDispatch};
+#[cfg(not(feature = "get"))]
+use wz_session_mcu::app_layer::NoReplies;
+use wz_session_mcu::app_layer::{SlotApp, SlotDispatch};
 use wz_session_mcu::connect_manager::EndpointSource;
 use wz_session_mcu::slot_client::{
     register_document, Declaration, DeclarationKind, DocumentSinks, SlotClientNode,
@@ -68,6 +72,9 @@ use wz_session_mcu::slot_dial::SessionFactory;
 use wz_session_mcu::slot_host::SessionHost;
 
 wz_runtime_posix::posix_image_no_heap!();
+
+#[cfg(feature = "get")]
+mod getter;
 
 /// Sessions the node holds at most: the one it dials.
 const SESSIONS: usize = 1;
@@ -107,8 +114,18 @@ const DOCS: usize = 2;
 const ZID_LEN: usize = 16;
 
 type Clock = PosixClock;
-/// The requests a session of this node holds: none, as the kit's client asks nothing.
+/// The requests a session of this node holds: none, as the kit's client asks nothing; with `get`,
+/// the pending queries it asks itself.
+#[cfg(not(feature = "get"))]
 type Requests = Requesters<NoReplies, NoReplies>;
+#[cfg(feature = "get")]
+type Requests = getter::Requests;
+/// The application layer of a session: the dispatch to the observer, and with `get` the node's
+/// next query as well.
+#[cfg(not(feature = "get"))]
+type Events = SlotDispatch<Clock, NoReplies, NoReplies, DocumentSinks>;
+#[cfg(feature = "get")]
+type Events = getter::GetterEvents<DocumentSinks>;
 type Driver = PosixUdpDriver;
 type Stack = PosixStack;
 type Slots = SessionSlots<CoopRuntime<Clock>, CoopTime<Clock>, Driver, PosixEntropy, SESSIONS>;
@@ -234,7 +251,7 @@ struct Factory {
 
 impl SessionFactory<Clock> for Factory {
     type Entropy = PosixEntropy;
-    type Events = SlotDispatch<Clock, NoReplies, NoReplies, DocumentSinks>;
+    type Events = Events;
 
     fn entropy(&mut self) -> PosixEntropy {
         PosixEntropy
@@ -257,7 +274,10 @@ impl SessionFactory<Clock> for Factory {
     }
 
     fn events(&mut self, handle: &SessionHandle<Clock>) -> Self::Events {
-        SlotDispatch::new(self.observer, handle.clone(), Requests::new())
+        let dispatch = SlotDispatch::new(self.observer, handle.clone(), Requests::new());
+        #[cfg(feature = "get")]
+        let dispatch = getter::GetterEvents::new(dispatch);
+        dispatch
     }
 }
 
@@ -266,6 +286,10 @@ struct Args {
     router: ([u8; 4], u16),
     local: [u8; 4],
     docs: [Option<(&'static str, usize)>; DOCS],
+    /// The key to ask, how many times, and how long a query may stay pending (zero is the
+    /// default).
+    #[cfg(feature = "get")]
+    get: Option<(&'static str, u32, u32, u32)>,
 }
 
 /// A NUL-terminated argument as text that lives as long as the process does: `argv` is not freed
@@ -293,16 +317,46 @@ fn parse_peer(text: &str) -> Option<([u8; 4], u16)> {
 }
 
 fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static str> {
+    #[cfg(not(feature = "get"))]
     const USAGE: &str =
         "usage: host-slot-node <router a.b.c.d:port> [--local a.b.c.d] [--doc KEY:BYTES]...";
+    #[cfg(feature = "get")]
+    const USAGE: &str = "usage: host-slot-node <router a.b.c.d:port> [--local a.b.c.d] \
+                         [--doc KEY:BYTES]... [--get KEY --count N [--warmup N] [--timeout-ms MS]]";
     let mut router = None;
     let mut local = [0u8; 4];
     let mut docs = [None; DOCS];
     let mut taken = 0;
+    #[cfg(feature = "get")]
+    let (mut get_key, mut get_count, mut get_timeout, mut get_warmup) = (None, 0u32, 0u32, 0u32);
     let mut at = 1;
     while at < argc {
         let arg = argument(argv, at).ok_or(USAGE)?;
         match arg {
+            #[cfg(feature = "get")]
+            "--get" => {
+                at += 1;
+                let value = if at < argc { argument(argv, at) } else { None };
+                get_key = Some(value.ok_or(USAGE)?);
+            }
+            #[cfg(feature = "get")]
+            "--count" => {
+                at += 1;
+                let value = if at < argc { argument(argv, at) } else { None };
+                get_count = value.ok_or(USAGE)?.parse().map_err(|_| USAGE)?;
+            }
+            #[cfg(feature = "get")]
+            "--warmup" => {
+                at += 1;
+                let value = if at < argc { argument(argv, at) } else { None };
+                get_warmup = value.ok_or(USAGE)?.parse().map_err(|_| USAGE)?;
+            }
+            #[cfg(feature = "get")]
+            "--timeout-ms" => {
+                at += 1;
+                let value = if at < argc { argument(argv, at) } else { None };
+                get_timeout = value.ok_or(USAGE)?.parse().map_err(|_| USAGE)?;
+            }
             "--local" => {
                 at += 1;
                 let value = if at < argc { argument(argv, at) } else { None };
@@ -323,10 +377,18 @@ fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static 
         }
         at += 1;
     }
+    #[cfg(feature = "get")]
+    let get = match (get_key, get_count) {
+        (Some(key), count) if count > get_warmup => Some((key, count, get_timeout, get_warmup)),
+        (None, 0) => None,
+        _ => return Err(USAGE),
+    };
     Ok(Args {
         router: router.ok_or(USAGE)?,
         local,
         docs,
+        #[cfg(feature = "get")]
+        get,
     })
 }
 
@@ -363,8 +425,32 @@ fn install_observer(
     }
 }
 
-/// Assemble the node and run it. Returns only when it cannot start; the value is the process's exit
-/// code.
+/// The line a lab reads after a getter's run, and the exit code: 0 when every query was answered
+/// and none timed out or was refused, 1 otherwise.
+#[cfg(feature = "get")]
+fn report_gets() -> i32 {
+    let s = getter::PLAN.summary();
+    log_args(format_args!(
+        "HOST-WZ-GET done issued={} finished={} replies={} errors={} timeouts={} refused={} \
+         bytes={} timed={} min_us={} median_us={} p99_us={} max_us={}",
+        s.issued,
+        s.finished,
+        s.replies,
+        s.errors,
+        s.timeouts,
+        s.refused,
+        s.payload_bytes,
+        s.timed,
+        s.min_us,
+        s.median_us,
+        s.p99_us,
+        s.max_us
+    ));
+    i32::from(s.errors != 0 || s.timeouts != 0 || s.replies < s.finished)
+}
+
+/// Assemble the node and run it. Returns only when it cannot start (or, for a getter, when its
+/// queries have ended); the value is the process's exit code.
 fn run(args: Args) -> i32 {
     // The cookie-signing key is a secret, so it comes from the kernel's entropy and a host that
     // cannot supply it stops the node: a predictable key is worse than no node.
@@ -406,6 +492,10 @@ fn run(args: Args) -> i32 {
             return 3;
         }
     };
+    #[cfg(feature = "get")]
+    if let Some((key, count, timeout_ms, warmup)) = args.get {
+        getter::PLAN.set(key, count, timeout_ms, warmup);
+    }
     let stack = Stack::new(args.local, &NODE.rx, &NODE.tx).with_idle_wait_ms(IDLE_WAIT_MS);
     let host: Host = SessionHost::new(
         CoopLocalSet::new(&runtime),
@@ -431,10 +521,34 @@ fn run(args: Args) -> i32 {
 
     let mut established = false;
     let mut refused = (runtime.task_refusals(), runtime.timer_refusals());
+    #[cfg(feature = "get")]
+    let mut progress_at_ms = 0u64;
     loop {
         local.run_until_idle();
         let now_ms = clock.now_us() / 1000;
         node.tick(now_ms);
+        // A getter says where it is once a second, so a run that does not end can be told from
+        // one that is slow.
+        #[cfg(feature = "get")]
+        if getter::PLAN.is_set() && now_ms >= progress_at_ms {
+            progress_at_ms = now_ms + 1_000;
+            let s = getter::PLAN.progress();
+            log_args(format_args!(
+                "HOST-WZ-GET progress issued={} finished={} replies={} errors={} refused={} \
+                 last_refusal={:?}",
+                s.0,
+                s.1,
+                s.2,
+                s.3,
+                s.4,
+                getter::PLAN.last_refusal()
+            ));
+        }
+        // A getter ends when every query it was asked to make has ended, and says how they went.
+        #[cfg(feature = "get")]
+        if getter::PLAN.is_done() {
+            return report_gets();
+        }
         // A table the image sized too small refuses what it cannot hold and counts it; the
         // count moving is a node that is not doing what it was built to, so it is said.
         let now = (runtime.task_refusals(), runtime.timer_refusals());

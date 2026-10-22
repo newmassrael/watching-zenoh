@@ -350,10 +350,61 @@ Three things this shows and one it does not:
 - **A node and a stack that is not Zephyr's changed no kit image materially**:
   the fixed client's image is 173,436 B (173,468 B before this change) and its
   worst stack chain 6,816 B (6,808 B), inside the gate's tolerance.
-- It does not show the cost of a GET the node *sends*. The kit's client answers
-  queries and asks none; a heap-free requester on the slot profile does not
-  exist, so nothing here says how the host profile compares with `z_get` of the
-  tokio C ABI (86 against pico's 78 microseconds in the earlier comparison).
+- It does not show the cost of a GET the node *sends*: that is 5.2.
+
+## 5.2 The node that asks (2026-10-23)
+
+The kit's client answered queries and asked none, because a session with no
+allocator had no way to write a request: `send_request_query` built the owned
+`RequestOwned` and refused with `FeatureDisabled` where there was no heap. Three
+pieces close it, none of which allocates.
+
+- **`lent_request::RequestWriter`** writes the codec's borrowed `Request(Query)`
+  from the caller's own text (`GetParts`: a literal keyexpr, the selector
+  parameters, the consolidation, the target, the timeout and the QoS), as
+  `lent_response::ResponseWriter` writes a reply. Its test compares it with the
+  owned builder over 3,456 combinations of those fields, and fails under a
+  mutation of the timeout extension's header. A query that names a mapping id, or
+  carries a value, a source info or an attachment, still goes the way every owned
+  query goes.
+- **`SessionLinkActions::send_get_parts`** sends it into the slot the link lends;
+  `send_request_query` uses it where there is no allocator.
+- **`SlotDispatch::get`** (feature `query-get` of `wz-session-mcu`) registers a
+  pending query with the application's closed `ReplySink`, then sends the request,
+  and removes the entry again if the send fails, so a refused query leaves no row
+  that would later end with a final for a query nobody was told was asked. A
+  query past its deadline ends here too: nothing else on this profile swept the
+  pending table. The table's size is `WZ_LIMIT_MAX_PENDING_QUERIES`; at its
+  default of zero in the kit's client, every `get` is refused with
+  `Register(TableFull)`, which is how the first run of the node showed it.
+
+`host-slot-node --features get` asks `--count` queries one after another
+(`--get KEY --count N [--warmup N]`) and prints the round trips, from the request
+being written to the final reaching the sink. It declares no allocator and the
+no-allocator gate classifies it (`gated`, plain and with `get` and `batching`).
+
+Measured as in 5.1, the other way round: one responder (a zenoh queryable
+answering 1 KiB, behind a fresh router each run) and the GETTER is the thing that
+changes; the order is shuffled every repetition and 2,000 queries are timed after
+200 that are not.
+
+| | wz node | pico, one thread | pico, two threads | zenoh (Rust) | zenoh-c |
+|---|---|---|---|---|---|
+| link to the router | UDP | UDP | UDP | UDP | TCP |
+| GET median, 15 runs | 76.0 us | 80.4 us | 81.0 us | 99.9 us | 96.3 us |
+| CPU time a query, lowest of 7 runs | 9.4 us | 9.9 us | 15.8 us | 46.0 us | 45.5 us |
+
+zenoh-c in this install connects over TCP only, so its column is not the same link.
+The CPU figures were taken while the shared host was busier than for the latencies
+(load 2 to 5, against 0.3), over 20,200 queries each, and include the process's
+start-up; the lowest run is the figure. The wz node is 4 to 5 microseconds below
+pico's median in the latency comparison, and the ranges of the runs overlap in
+their extremes. On CPU the wz node and the single-thread pico are one figure: no
+order between them is claimed. Both are below the two-thread pico by a margin
+the noise does not explain, and far below zenoh.
+
+What this does not show: other payload sizes, a real network, TCP for the wz node
+(it has no stream link on the host), or a node with more than one query in flight.
 
 ## 6. Open
 
