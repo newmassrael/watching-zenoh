@@ -282150,7 +282150,7 @@
       "status": "reserved",
       "section_ref": "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
       "source": "zenoh 1.10.1 (owner decision 2026-10-22, docs/build-configuration.md C13)",
-      "reason": "RESERVED (R3406): the zenoh crate public Rust API at the pin as a drop-in over wz, so a Rust user replaces zenoh by changing one dependency line. Supersedes the reading of item 199 / Round 2162 (b) that the Rust usability layer is not a replacement axis; the census feature `unstable` moved from an exclusion to an UNANSWERED row citing open-debt item 910 in the same round. Nothing built. Plan: upstream public surface derived from rustdoc JSON, a compatibility crate over wz-capi-core SharedSession, a surface gate failing on missing, differing and added items, and upstream examples, tests and doctests built against it (docs/build-configuration.md step 12)."
+      "reason": "UNBUILT (R3406): the zenoh crate public Rust API at the pin as a drop-in over wz, so a Rust user replaces zenoh by changing one dependency line. Supersedes the reading of item 199 / Round 2162 (b) that the Rust usability layer is not a replacement axis; the census feature `unstable` moved from an exclusion to an UNANSWERED row citing open-debt item 910 in the same round. Nothing built. Plan: upstream public surface derived from rustdoc JSON, a compatibility crate over wz-capi-core SharedSession, a surface gate failing on missing, differing and added items, and upstream examples, tests and doctests built against it (docs/build-configuration.md step 12)."
     },
     "attachment-bytes": {
       "status": "active",

@@ -1185,7 +1185,11 @@ rest-http-bridge = [
 # subscriber + Put/Del receive features it calls through).
 rest-sse-subscribe = ["rest-http-bridge", "wz-rest?/rest-sse-subscribe"]
 
-# ----- §5.27 api-compat (2 atomic: 1 active, 1 reserved) -----
+# ----- §5.27 api-compat (3 atomic: 2 active, 1 reserved) -----
+# api-compat-rust is reserved: the zenoh crate's public Rust API as a drop-in over wz
+# (open-debt item 910). A reserved atom is a feature that gates nothing yet; it becomes
+# the dependency on the compatibility crate when that crate exists.
+api-compat-rust = []
 # R311y498 — api-compat-c BUILT (slice 1: upstream's own z_put.c links and runs
 # against the wz cdylib). Pulls the wz-capi-c cdylib and the tokio runtime it
 # wraps, rather than the no-op `= []` facade it was — the
@@ -1276,7 +1280,7 @@ domain-adminspace = [
     "adminspace-router-linkstate",
     "adminspace-write",
 ]
-domain-api = ["api-compat-c", "api-compat-pico"]
+domain-api = ["api-compat-c", "api-compat-pico", "api-compat-rust"]
 domain-attachment = ["attachment-bytes", "attachment-encoding-aware"]
 domain-codec = [
     "codec-close",
