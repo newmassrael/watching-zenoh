@@ -986,8 +986,19 @@ declare -A BASELINE_MC_TEXT=(
     # growth the R3387 note above records for `main` on thumbv7m (+262). The hosted
     # toolchain reads this target +36 B over the local one, inside the band.
     # data is 4 and bss 270120 on both. Old: 67060/67044.
-    ["thumbv7m-none-eabi"]=67060
-    ["thumbv7em-none-eabihf"]=67352
+    #
+    # 2026-10-22 -- thumbv7m 67060 -> 68156, thumbv7em-hf 67352 -> 68120, from one thing: the
+    # SCE pin `9bc5db4ee9` -> `c244f4e171`, which builds the engine in its slot
+    # (`Engine::new_in_place`) and keeps its call chain small. The same tree with only the
+    # pin moved reads 67276 / 67224 before (Layer Q on `c72a57ef9`, inside the band) and
+    # 68156 / 68120 after (+880 / +896 B), and `qemu-demo` does not move (24940 / 24960 on
+    # both). The SCE session measured +98 B of text per machine for the in-place constructor
+    # and the split frames on its probe; how many machines this image carries was not counted
+    # here, so the per-machine figure is the same order and is not a derivation. What the pin buys is stack, not text: the dial path of the fixed client reads
+    # 5732 -> 5044 B and the engine's frames 1800 -> 840 B on the kit. data is 4 and bss
+    # 270120 on both. Old: 67060/67352.
+    ["thumbv7m-none-eabi"]=68156
+    ["thumbv7em-none-eabihf"]=68120
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
