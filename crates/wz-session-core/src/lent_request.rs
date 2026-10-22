@@ -7,8 +7,9 @@
 //! The owned path ([`crate::request_build::RequestQueryBuilder`]) makes a `RequestOwned`
 //! (a `String` for the keyexpr, a `Vec` for the parameters, a `Vec` for the extension
 //! chain) and encodes that, which a session with no allocator cannot do, so
-//! `send_request_query` refuses it with `FeatureDisabled`. [`RequestWriter`] takes the
-//! description of the query ([`GetParts`]) with every field borrowed and writes the
+//! `send_request_query` refuses it with `FeatureDisabled`.
+//! [`RequestWriter`](crate::lent_request::RequestWriter) takes the description of the
+//! query ([`GetParts`](crate::lent_request::GetParts)) with every field borrowed and writes the
 //! `Request` the owned path writes, byte for byte, in the same way
 //! [`crate::lent_response::ResponseWriter`] writes a reply: the text and the parameters
 //! are read where they lie and the few numbers it has to make go in the codec's own
@@ -24,7 +25,7 @@
 //! equality for every combination the description can state.
 //!
 //! A description the wire cannot carry (an empty keyexpr) is REFUSED with a
-//! [`RequestRefusal`] and not repaired.
+//! [`RequestRefusal`](crate::lent_request::RequestRefusal) and not repaired.
 
 use sce_forge_runtime::codec::{CodecError, SceSink};
 use sce_forge_runtime::heapless::Vec as HeaplessVec;

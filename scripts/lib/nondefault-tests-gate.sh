@@ -281,6 +281,10 @@ transport-link-unixpipe,transport-link-ws|"
     # every other test of the crate is written against pico's default build NOT doing.
     # `--test=local_delivery` covers that target by construction.
     "wz-capi-pico|hook|local-subscriber,local-queryable|--test=local_delivery"
+    # Open-debt item 911 -- `z_open` with a `reth/` listen endpoint opens pico's raweth
+    # transport, or fails as its raw socket does where `CAP_NET_RAW` is absent. The target is
+    # compiled only with `raweth-transport` on Linux, which no other leg turns on.
+    "wz-capi-pico|hook|raweth-transport|--test=raweth_door"
     # The two node-config features the zenoh-c ABI turns on: the usrpwd
     # credential machinery and the interceptor chain (`access_control`,
     # `low_pass_filter`, `downsampling`). Both are off here by default, so the
