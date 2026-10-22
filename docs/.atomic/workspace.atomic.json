@@ -277876,6 +277876,42 @@
         "Items 910 and 912 remain open."
       ]
     },
+    "Round 3419": {
+      "decision_summary": "The Platform run of Round 3417's push was red in one job, C ABI on Windows: wz-capi-c's test that a client presents the pubkey identity its own config states failed its open with Z_ENETWORK at 3.37 s, the client's 3 s connect bound. The responder generated its 512-bit RSA key after accepting the client, and a prime search takes a random time, so on a debug Windows build the key generation alone could spend the client's whole bound. The key is now made before the client dials, so the bound holds only the handshake. The test had passed in the four runs before, and no change between the green run and the red one touches the pubkey path.",
+      "changes_bullets": [
+        "crates/wz-capi-c/tests/listener_auth.rs: the responder's key is generated before the responder thread starts and moved into it.",
+        "docs/hosted-red-acks.md: one row for run 39789668210, read from its own log."
+      ],
+      "verification_bullets": [
+        "The hosted log: the test failed at 3.37 s with -4; every other step of the job passed.",
+        "On a Linux build host: listener_auth passes 10 of 10, and clippy of wz-capi-c with its tests is clean.",
+        "The next Platform run grades the change on Windows."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the C ABI (windows-latest) job of this push's Platform run.",
+        "Item 913 continues at step D, zenoh-c's group door."
+      ],
+      "publishable_decision_summary": "The Platform run of Round 3417's push was red in one job, C ABI on Windows: wz-capi-c's test that a client presents the pubkey identity its own config states failed its open with Z_ENETWORK at 3.37 s, the client's 3 s connect bound. The responder generated its 512-bit RSA key after accepting the client, and a prime search takes a random time, so on a debug Windows build the key generation alone could spend the client's whole bound. The key is now made before the client dials, so the bound holds only the handshake. The test had passed in the four runs before, and no change between the green run and the red one touches the pubkey path.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/tests/listener_auth.rs: the responder's key is generated before the responder thread starts and moved into it.",
+        "docs/hosted-red-acks.md: one row for run 39789668210, read from its own log."
+      ],
+      "publishable_verification_bullets": [
+        "The hosted log: the test failed at 3.37 s with -4; every other step of the job passed.",
+        "On a Linux build host: listener_auth passes 10 of 10, and clippy of wz-capi-c with its tests is clean.",
+        "The next Platform run grades the change on Windows."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the C ABI (windows-latest) job of this push's Platform run.",
+        "Item 913 continues at step D, zenoh-c's group door."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
