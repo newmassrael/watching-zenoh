@@ -961,6 +961,11 @@ pub mod common {
         /// option structs gain `allowed_origin` / `allowed_destination`, and a
         /// session delivers to its own entities (open-debt item 914).
         Local,
+        /// The reference arm with `Z_FEATURE_MULTICAST_DECLARATIONS=1` (`-mcdecl`): no struct
+        /// changes, and wz's build with `multicast-declarations` (open-debt item 913). The one
+        /// arm whose pico is BUILT as well as configured, for the reference programs
+        /// ([`zenoh_pico_mcdecl_cli_binary`]) and library ([`zenoh_pico_mcdecl_library_dir`]).
+        McastDeclarations,
     }
 
     impl PicoHeaderArm {
@@ -971,6 +976,7 @@ pub mod common {
                 Self::SingleThreaded => "-st",
                 Self::UpstreamDefault => "-default",
                 Self::Local => "-local",
+                Self::McastDeclarations => "-mcdecl",
             }
         }
 
@@ -981,6 +987,7 @@ pub mod common {
                 Self::SingleThreaded => "target/wz-capi-pico-st",
                 Self::UpstreamDefault => "target/wz-capi-pico-default",
                 Self::Local => "target/wz-capi-pico-local",
+                Self::McastDeclarations => "target/wz-capi-pico-mcdecl",
             }
         }
 
@@ -989,7 +996,7 @@ pub mod common {
             match self {
                 Self::MultiThreaded => zenoh_pico_include_dirs(),
                 Self::SingleThreaded => zenoh_pico_include_dirs_single_threaded(),
-                Self::UpstreamDefault | Self::Local => {
+                Self::UpstreamDefault | Self::Local | Self::McastDeclarations => {
                     let root = project_root();
                     let generated = root.join(format!(
                         "target/zenoh-pico-build{}/zenohpico/include",
@@ -1006,7 +1013,7 @@ pub mod common {
                     // TLS headers; upstream's default has TLS off, and its third slot
                     // repeats the vendored headers rather than naming a directory the
                     // arm does not use.
-                    let third = if self == Self::Local {
+                    let third = if matches!(self, Self::Local | Self::McastDeclarations) {
                         mbedtls_include_dir()
                     } else {
                         vendored.clone()
@@ -1778,6 +1785,36 @@ pub mod common {
              scripts/build-zenoh-pico-cli.sh first",
             dir.display()
         );
+        dir
+    }
+
+    /// Open-debt item 913 — a zenoh-pico CLI of the MULTICAST-DECLARATIONS arm
+    /// (`Z_FEATURE_MULTICAST_DECLARATIONS=1`, `target/zenoh-pico-cli-mcdecl`), the reference a
+    /// leg of wz's build with `multicast-declarations` is held to. Checked fresh as
+    /// [`zenoh_pico_cli_binary`] is.
+    pub fn zenoh_pico_mcdecl_cli_binary(name: &str) -> PathBuf {
+        let root = project_root().join("target/zenoh-pico-cli-mcdecl");
+        let path = root.join(name);
+        assert!(
+            path.is_file(),
+            "{name} binary missing at {}; run scripts/build-zenoh-pico-cli.sh first",
+            path.display()
+        );
+        assert_zenoh_pico_oracle_fresh(&root);
+        path
+    }
+
+    /// Open-debt item 913 — the MULTICAST-DECLARATIONS arm's `libzenohpico` directory
+    /// (`target/zenoh-pico-build-mcdecl/lib`), checked fresh.
+    pub fn zenoh_pico_mcdecl_library_dir() -> PathBuf {
+        let root = project_root().join("target/zenoh-pico-build-mcdecl");
+        let dir = root.join("lib");
+        assert!(
+            dir.is_dir(),
+            "zenoh-pico mcdecl lib dir missing at {}; run scripts/build-zenoh-pico-cli.sh first",
+            dir.display()
+        );
+        assert_zenoh_pico_oracle_fresh(&root);
         dir
     }
 
@@ -6917,31 +6954,76 @@ pub mod common {
     pub const PICO_BATCH_MULTICAST_SIZE: u16 = 2_048; // CMakeLists.txt BATCH_MULTICAST_SIZE
 
     /// Open-debt item 913 — every declaration body and interest the datagrams of a group carry,
-    /// each as `name(id, key)`: the dissector's body name (`decl_*`, `undecl_*`) or an
-    /// `Interest`, the id it carries, and the key suffix it carries, if any. A set, so a
-    /// declaration a program repeats (a pico peer re-declares at every interest it answers)
-    /// counts once, and two programs compare by WHAT they put on the group. A datagram the
-    /// dissector cannot walk adds nothing.
+    /// each as one line: a declaration as `name(id, scope:suffix)` (the dissector's body name,
+    /// `decl_*` / `undecl_*`, the entity or keyexpr id it carries, and the key it names, by the
+    /// keyexpr id it is scoped to and the suffix after it); an interest as
+    /// `Interest(id, [flags], scope:suffix)`. A set, so a declaration a program repeats (a pico
+    /// peer re-declares at every interest it answers) counts once, and two programs compare by
+    /// WHAT they put on the group. A datagram the dissector cannot walk adds nothing.
     pub fn group_declarations(datagrams: &[Vec<u8>]) -> std::collections::BTreeSet<String> {
         use wz_session_core::dissect::{Field, FieldValue};
+
+        fn uint(field: Option<&Field>) -> String {
+            match field.map(|f| &f.value) {
+                Some(FieldValue::Uint(n)) => n.to_string(),
+                _ => String::new(),
+            }
+        }
+
+        fn text(field: Option<&Field>) -> &str {
+            match field.map(|f| &f.value) {
+                Some(FieldValue::Text(text)) => text.as_str(),
+                _ => "",
+            }
+        }
+
+        /// The key a field names, `scope:suffix`, or the empty string for none.
+        fn key(field: &Field) -> String {
+            match field.find("keyexpr") {
+                Some(keyexpr) => format!(
+                    "{}:{}",
+                    uint(keyexpr.find("id")),
+                    text(keyexpr.find("suffix"))
+                ),
+                None => text(field.find("suffix")).to_owned(),
+            }
+        }
 
         fn walk(field: &Field, out: &mut std::collections::BTreeSet<String>) {
             let FieldValue::Nested(children) = &field.value else {
                 return;
             };
-            if field.name.starts_with("decl_")
-                || field.name.starts_with("undecl_")
-                || field.name.contains("Interest")
-            {
-                let key = match field.find("suffix").map(|f| &f.value) {
-                    Some(FieldValue::Text(text)) => text.as_str(),
-                    _ => "",
-                };
-                let id = match field.find("id").map(|f| &f.value) {
-                    Some(FieldValue::Uint(id)) => id.to_string(),
-                    _ => String::new(),
-                };
-                out.insert(format!("{}({id}, {key})", field.name));
+            if field.name.starts_with("decl_") || field.name.starts_with("undecl_") {
+                out.insert(format!(
+                    "{}({}, {})",
+                    field.name,
+                    uint(field.find("id")),
+                    key(field)
+                ));
+            } else if field.name.contains("Interest") {
+                let flags: Vec<&str> = [
+                    "current",
+                    "future",
+                    "keyexprs",
+                    "subscribers",
+                    "queryables",
+                    "tokens",
+                    "restricted",
+                ]
+                .into_iter()
+                .filter(|flag| {
+                    matches!(
+                        field.find(flag).map(|f| &f.value),
+                        Some(FieldValue::Flag(true))
+                    )
+                })
+                .collect();
+                out.insert(format!(
+                    "Interest({}, [{}], {})",
+                    uint(field.find("interest_id")),
+                    flags.join(","),
+                    key(field)
+                ));
             }
             for child in children {
                 walk(child, out);

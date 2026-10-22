@@ -665,6 +665,42 @@ for switch in Z_FEATURE_LOCAL_SUBSCRIBER Z_FEATURE_LOCAL_QUERYABLE; do
     fi
 done
 
+# --- the MULTICAST-DECLARATIONS arm ------------------------------------------
+#
+# Open-debt item 913 — the reference arm with `Z_FEATURE_MULTICAST_DECLARATIONS=1`
+# (`-mcdecl`; vendor default 0). On a multicast transport the switch sends interests (the
+# open-time pull of the members' keyexprs, a write filter's interest), declares keyexprs, and
+# lets the write filter hold a write back. It changes no struct, so wz's drop-in for it is
+# built from this arm's config.h like the others; unlike them it is BUILT, not only
+# configured, because the reference behaviour it is compared against is the library's, and
+# upstream's own CI runs `tests/z_test_peer_multicast` at both values of the switch
+# (`vendor/zenoh-pico/.github/workflows/ci.yml` @
+# `Z_FEATURE_MULTICAST_DECLARATIONS: ${{ matrix.feature_declarations }}`).
+cmake -B "${BUILD_DIR}-mcdecl" -S "$EXAMPLES_DIR" \
+    -DCMAKE_C_STANDARD=11 \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DZ_FEATURE_UNSTABLE_API=ON \
+    -DZ_FEATURE_ADVANCED_PUBLICATION=1 \
+    -DZ_FEATURE_ADVANCED_SUBSCRIPTION=1 \
+    -DZ_FEATURE_LINK_SERIAL=1 \
+    -DZ_FEATURE_LINK_TLS=1 \
+    -DZ_FEATURE_CONNECTIVITY=1 \
+    -DZ_FEATURE_MULTICAST_DECLARATIONS=1 >&2
+
+GENERATED_CONFIG_MCDECL="${BUILD_DIR}-mcdecl/zenohpico/include/zenoh-pico/config.h"
+if [[ ! -f "$GENERATED_CONFIG_MCDECL" ]]; then
+    echo "build-zenoh-pico-cli: mcdecl-arm config.h missing: $GENERATED_CONFIG_MCDECL" >&2
+    exit 1
+fi
+if ! grep -qx "#define Z_FEATURE_MULTICAST_DECLARATIONS 1" "$GENERATED_CONFIG_MCDECL"; then
+    echo "build-zenoh-pico-cli: the mcdecl arm did NOT take Z_FEATURE_MULTICAST_DECLARATIONS" >&2
+    exit 1
+fi
+
+# The programs the arm's legs run as the reference: a member that publishes through a write
+# filter, one that subscribes, one that answers, one that holds a token, one that gets.
+MCDECL_TARGETS=(z_pub z_sub z_queryable z_liveliness z_get z_info)
+
 # Build only the curated CLI targets (avoids the full examples target
 # set; faster + smaller install surface).
 cmake --build "$BUILD_DIR" --target "${TARGETS[@]}" -j"$(nproc)" >&2
@@ -678,6 +714,19 @@ for bin in "${TARGETS[@]}"; do
         exit 1
     fi
     install -m 0755 "$src" "$INSTALL_DIR/$bin"
+done
+
+# The multicast-declarations arm's programs, and its library beside them in its own build
+# directory, staged into a root of its own.
+cmake --build "${BUILD_DIR}-mcdecl" --target "${MCDECL_TARGETS[@]}" -j"$(nproc)" >&2
+mkdir -p "${INSTALL_DIR}-mcdecl"
+for bin in "${MCDECL_TARGETS[@]}"; do
+    src="${BUILD_DIR}-mcdecl/$bin"
+    if [[ ! -x "$src" ]]; then
+        echo "build-zenoh-pico-cli: expected mcdecl binary missing: $src" >&2
+        exit 1
+    fi
+    install -m 0755 "$src" "${INSTALL_DIR}-mcdecl/$bin"
 done
 
 # R2326 (unregistered open-debt item 10) — record WHICH vendor/zenoh-pico state
@@ -702,6 +751,8 @@ done
 # makes the stamp permanently unmatchable.
 vendored_oracle_stamp_root "$INSTALL_DIR" "$_wzpico_token"
 vendored_oracle_stamp_root "$BUILD_DIR" "$_wzpico_token"
+vendored_oracle_stamp_root "${INSTALL_DIR}-mcdecl" "$_wzpico_token"
+vendored_oracle_stamp_root "${BUILD_DIR}-mcdecl" "$_wzpico_token"
 
 # R2327b — verify the contract this script has just asserted, HERE, rather than
 # leaving a hosted lane to discover it. R2326 shipped a stamp that could never
@@ -718,6 +769,10 @@ restore_pico_example_patches
 vendored_oracle_assert_fresh "$INSTALL_DIR" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 vendored_oracle_assert_fresh "$BUILD_DIR" build-zenoh-pico-cli \
+    vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
+vendored_oracle_assert_fresh "${INSTALL_DIR}-mcdecl" build-zenoh-pico-cli \
+    vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
+vendored_oracle_assert_fresh "${BUILD_DIR}-mcdecl" build-zenoh-pico-cli \
     vendored_oracle_recipe_token "$VENDOR_DIR" "${BASH_SOURCE[0]}" || exit 1
 
 echo "build-zenoh-pico-cli: installed ${#TARGETS[@]} binaries to $INSTALL_DIR" >&2

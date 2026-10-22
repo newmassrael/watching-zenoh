@@ -84,6 +84,9 @@ LIB_RS = REPO_ROOT / "crates" / "wz-integration-tests" / "src" / "lib.rs"
 # running A4 at R311y386). Any future feature-variant oracle resolver belongs here too.
 FOREIGN_ROOTS = {
     "zenoh_pico_cli_binary": "pico",
+    # Open-debt item 913 — the same CLIs built with `Z_FEATURE_MULTICAST_DECLARATIONS=1`, the
+    # reference for wz's `multicast-declarations` build: a feature-variant pico oracle.
+    "zenoh_pico_mcdecl_cli_binary": "pico",
     "zenohd_binary": "zenohd",
     "zenohd_unixpipe_binary": "zenohd",
     "zenohd_vsock_binary": "zenohd",
@@ -146,6 +149,8 @@ FOREIGN_ROOTS = {
     # so the resolver is the thing that must be shared, not the path.
     "zenoh_pico_shared_library": "pico-lib",
     "zenoh_pico_library_dir": "pico-lib",
+    # Open-debt item 913 — the multicast-declarations arm's library, the same shape.
+    "zenoh_pico_mcdecl_library_dir": "pico-lib",
     # (R2566 registered a second resolver here, `zenoh_pico_census_shared_library`,
     # for the oracle built without the connectivity plane. R2984 removed the
     # resolver with the build arm it resolved, so the row is gone with it: a
