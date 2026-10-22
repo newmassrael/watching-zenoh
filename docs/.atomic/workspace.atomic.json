@@ -277912,6 +277912,46 @@
         "Item 913 continues at step D, zenoh-c's group door."
       ]
     },
+    "Round 3420": {
+      "decision_summary": "A consumer reading numbers out of the Custom Data of a packet block (a time the packet had before it was replayed) needs the byte order of the section the packet is in. The door read the organization number in that order but did not say which it was, so the consumer assumed little-endian, which is right only for files it wrote itself. Each Custom Option now carries the byte order of its section: CustomOption.byte_order in wz-capture, taken from the same value the organization number is read with, and big_endian in the C record of wz_dissect_pcap_custom_options_of_link_type. The order is per record because two sections of one container may differ. The record grows from 32 to 40 bytes with seven zero reserved bytes, so the memory rule moves and the ABI is 48; no symbol is added.",
+      "changes_bullets": [
+        "wz-capture pcapng.rs: OptionList::byte_order and CustomOption.byte_order (the section's order, public ByteOrder), one value feeding both the organization number and the field. lib.rs: the two-section test also asserts the order each option reports.",
+        "wz-capi-dissect: WzDissectCustomOption gains big_endian (1 for big) and seven reserved zero bytes, 40 bytes; ABI 48 in the header define, the Rust constant, the abi_version test and capi_abi_pin.py (EXPECTED_VERSION; the symbol set is unchanged). The header comment and the layout test are updated.",
+        "Tests: the writer round trip, the generated-list test and the arbitrary-bytes test assert the order in both byte orders; the file editcap wrote reads as little; the C consumer checks big_endian and the reserved bytes on its little-endian and big-endian arrays and the new offsets."
+      ],
+      "verification_bullets": [
+        "On a build host: wz-capture lib tests 1226 passed (default) and 1538 passed (dissect), wz-capi-dissect 221 passed; clippy -D warnings clean for both crates; Layer C1bo passed (ABI 48, 61 exported symbols, symbol set unchanged, the C consumer ran with its new checks, header agrees).",
+        "One mutation, reverted and the diff checked: reading every section as little-endian failed 3 tests (the writer round trip in both orders, the generated-list test, the arbitrary-bytes test).",
+        "Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3412, sections 266."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted runs of the push that carries this round. The CI run of the push before it (the custom-options door) ended in failure and its job list could not be read when this was written (the API answered 502); a Layer C0 repair of a test of that push was reported by another session, and whether it is the whole of that red is not established.",
+        "A consumer holding the ABI 47 record size must move to 48 with the pin. The byte order says how a number the organization wrote in the Custom Data is read unless the organization's definition says otherwise; the door does not look at the data."
+      ],
+      "publishable_decision_summary": "A consumer reading numbers out of the Custom Data of a packet block (a time the packet had before it was replayed) needs the byte order of the section the packet is in. The door read the organization number in that order but did not say which it was, so the consumer assumed little-endian, which is right only for files it wrote itself. Each Custom Option now carries the byte order of its section: CustomOption.byte_order in wz-capture, taken from the same value the organization number is read with, and big_endian in the C record of wz_dissect_pcap_custom_options_of_link_type. The order is per record because two sections of one container may differ. The record grows from 32 to 40 bytes with seven zero reserved bytes, so the memory rule moves and the ABI is 48; no symbol is added.",
+      "publishable_changes_bullets": [
+        "wz-capture pcapng.rs: OptionList::byte_order and CustomOption.byte_order (the section's order, public ByteOrder), one value feeding both the organization number and the field. lib.rs: the two-section test also asserts the order each option reports.",
+        "wz-capi-dissect: WzDissectCustomOption gains big_endian (1 for big) and seven reserved zero bytes, 40 bytes; ABI 48 in the header define, the Rust constant, the abi_version test and capi_abi_pin.py (EXPECTED_VERSION; the symbol set is unchanged). The header comment and the layout test are updated.",
+        "Tests: the writer round trip, the generated-list test and the arbitrary-bytes test assert the order in both byte orders; the file editcap wrote reads as little; the C consumer checks big_endian and the reserved bytes on its little-endian and big-endian arrays and the new offsets."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: wz-capture lib tests 1226 passed (default) and 1538 passed (dissect), wz-capi-dissect 221 passed; clippy -D warnings clean for both crates; Layer C1bo passed (ABI 48, 61 exported symbols, symbol set unchanged, the C consumer ran with its new checks, header agrees).",
+        "One mutation, reverted and the diff checked: reading every section as little-endian failed 3 tests (the writer round trip in both orders, the generated-list test, the arbitrary-bytes test).",
+        "Baseline before this entry: validate-workspace T1 orphan 14 (ledger 14, new +0), T3 warn 4, T4 info 15, entries 3412, sections 266."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted runs of the push that carries this round. The CI run of the push before it (the custom-options door) ended in failure and its job list could not be read when this was written (the API answered 502); a Layer C0 repair of a test of that push was reported by another session, and whether it is the whole of that red is not established.",
+        "A consumer holding the ABI 47 record size must move to 48 with the pin. The byte order says how a number the organization wrote in the Custom Data is read unless the organization's definition says otherwise; the door does not look at the data."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
