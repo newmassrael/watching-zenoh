@@ -17706,11 +17706,12 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # test at all) and then against wz's pico drop-in, which this lane builds here as Layer E
     # does. Past the pico-CLI guard above, because the same build script makes the library and
     # the headers the test compiles against. One at a time, since both runs join one group port.
-    # The same file holds the three legs across the two libraries (the real z_pub to wz's
-    # z_sub, wz's z_pub to the real z_sub, and z_info on each reporting one real member).
-    # Count-guarded at 5: the legs are `#[ignore]`, so a rename would select nothing and pass.
+    # The same file holds the four legs across the two libraries (the real z_pub to wz's
+    # z_sub, wz's z_pub to the real z_sub, z_info on each reporting one real member, and the
+    # declarations z_sub, z_queryable and z_liveliness put on the group's wire on each).
+    # Count-guarded at 6: the legs are `#[ignore]`, so a rename would select nothing and pass.
     (cd crates && cargo build -p wz-capi-pico --quiet) || return 1
-    _runci_guarded_test "M pico multicast peer test on wz" 5 \
+    _runci_guarded_test "M pico multicast peer test on wz" 6 \
         cargo test -p wz-integration-tests \
         --test pico_peer_multicast_on_wz_capi -- --ignored --test-threads=1 || return 1
     # Open-debt item 913 — the zenoh-c ABI's group: a stock zenohd joins

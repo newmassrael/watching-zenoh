@@ -6916,6 +6916,47 @@ pub mod common {
     pub const PICO_SN_RESOLUTION: u8 = 0x02; // config.h.in Z_SN_RESOLUTION / Z_REQ_RESOLUTION
     pub const PICO_BATCH_MULTICAST_SIZE: u16 = 2_048; // CMakeLists.txt BATCH_MULTICAST_SIZE
 
+    /// Open-debt item 913 — every declaration body and interest the datagrams of a group carry,
+    /// each as `name(id, key)`: the dissector's body name (`decl_*`, `undecl_*`) or an
+    /// `Interest`, the id it carries, and the key suffix it carries, if any. A set, so a
+    /// declaration a program repeats (a pico peer re-declares at every interest it answers)
+    /// counts once, and two programs compare by WHAT they put on the group. A datagram the
+    /// dissector cannot walk adds nothing.
+    pub fn group_declarations(datagrams: &[Vec<u8>]) -> std::collections::BTreeSet<String> {
+        use wz_session_core::dissect::{Field, FieldValue};
+
+        fn walk(field: &Field, out: &mut std::collections::BTreeSet<String>) {
+            let FieldValue::Nested(children) = &field.value else {
+                return;
+            };
+            if field.name.starts_with("decl_")
+                || field.name.starts_with("undecl_")
+                || field.name.contains("Interest")
+            {
+                let key = match field.find("suffix").map(|f| &f.value) {
+                    Some(FieldValue::Text(text)) => text.as_str(),
+                    _ => "",
+                };
+                let id = match field.find("id").map(|f| &f.value) {
+                    Some(FieldValue::Uint(id)) => id.to_string(),
+                    _ => String::new(),
+                };
+                out.insert(format!("{}({id}, {key})", field.name));
+            }
+            for child in children {
+                walk(child, out);
+            }
+        }
+
+        let mut out = std::collections::BTreeSet::new();
+        for datagram in datagrams {
+            if let Ok(message) = wz_session_core::dissect::dissect_transport_message(datagram, 0) {
+                walk(&message, &mut out);
+            }
+        }
+        out
+    }
+
     /// The default-route interface name, e.g. `wlp0s20f3`. This is the
     /// interface wz's `INADDR_ANY` multicast egress/join selects (no
     /// explicit `224.0.0.0/4` route → kernel uses the default route), so

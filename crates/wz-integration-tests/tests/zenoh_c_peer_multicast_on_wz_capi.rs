@@ -37,8 +37,8 @@ use std::time::{Duration, Instant};
 
 use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
-    assert_zenoh_c_arm_pairing, compile_zenoh_c_example, graceful_terminate, read_captured,
-    wait_for_substring, wz_capi_c_cdylib, zenoh_c_oracle, zenohd_binary, ChildGuard,
+    assert_zenoh_c_arm_pairing, compile_zenoh_c_example, graceful_terminate, group_declarations,
+    read_captured, wait_for_substring, wz_capi_c_cdylib, zenoh_c_oracle, zenohd_binary, ChildGuard,
 };
 
 /// The group: a port of its own, so a leg never hears another file's, on the loopback
@@ -425,42 +425,9 @@ fn recorded_on_group(label: &str, exe: &Path, args: &[&str]) -> Vec<Vec<u8>> {
     datagrams
 }
 
-/// Every declaration body and interest in `field`, each as `name(id, key)`: the body's name (the
-/// dissector's `decl_*` / `undecl_*`, or `Interest`), the id it carries and the key suffix it
-/// carries, if any.
-fn declarations(field: &wz_session_core::dissect::Field, out: &mut BTreeSet<String>) {
-    use wz_session_core::dissect::FieldValue;
-    let FieldValue::Nested(children) = &field.value else {
-        return;
-    };
-    if field.name.starts_with("decl_")
-        || field.name.starts_with("undecl_")
-        || field.name.contains("Interest")
-    {
-        let key = match field.find("suffix").map(|f| &f.value) {
-            Some(FieldValue::Text(text)) => text.as_str(),
-            _ => "",
-        };
-        let id = match field.find("id").map(|f| &f.value) {
-            Some(FieldValue::Uint(id)) => id.to_string(),
-            _ => String::new(),
-        };
-        out.insert(format!("{}({id}, {key})", field.name));
-    }
-    for child in children {
-        declarations(child, out);
-    }
-}
-
 /// The declarations and interests a program put on the group, from its datagrams.
 fn declared_on_group(label: &str, exe: &Path, args: &[&str]) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for datagram in recorded_on_group(label, exe, args) {
-        if let Ok(message) = wz_session_core::dissect::dissect_transport_message(&datagram, 0) {
-            declarations(&message, &mut out);
-        }
-    }
-    out
+    group_declarations(&recorded_on_group(label, exe, args))
 }
 
 /// A subscriber on a group is announced on it as zenoh announces one: upstream's `z_sub.c` puts

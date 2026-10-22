@@ -53,9 +53,9 @@ use std::time::Duration;
 
 use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
-    compile_pico_example_against_wz_capi, compile_pico_source, graceful_terminate, project_root,
-    read_captured, wait_for_substring, zenoh_pico_cli_binary, zenoh_pico_include_dirs,
-    zenoh_pico_library_dir, ChildGuard, PicoHeaderArm,
+    compile_pico_example_against_wz_capi, compile_pico_source, graceful_terminate,
+    group_declarations, project_root, read_captured, wait_for_substring, zenoh_pico_cli_binary,
+    zenoh_pico_include_dirs, zenoh_pico_library_dir, ChildGuard, PicoHeaderArm,
 };
 
 /// The program sleeps 5 s, puts for 5 s, gets for 5 s and sleeps 5 s more in each of its
@@ -218,6 +218,87 @@ const CROSS_GROUP: &str = "udp/224.0.0.225:7449#iface=lo";
 /// How long a member waits to hear another: two of pico's 2.5 s JOIN intervals and the
 /// one-second cadence of `z_pub`, with room.
 const HEARD_WITHIN: Duration = Duration::from_secs(30);
+
+/// The cross group's address, joined by the recorder on the loopback interface.
+const CROSS_ADDR: ([u8; 4], u16) = ([224, 0, 0, 225], 7449);
+
+/// Every datagram sent to the cross group while `exe` ran with `args`, read by a socket of this
+/// test's own that joins it on loopback. `SO_REUSEADDR` is load-bearing: the program binds the
+/// same port, and without the option the second socket on a multicast port receives nothing.
+fn recorded_on_group(label: &str, exe: &Path, args: &[&str]) -> Vec<Vec<u8>> {
+    let raw = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )
+    .expect("open a UDP socket");
+    raw.set_reuse_address(true).expect("SO_REUSEADDR");
+    raw.bind(&std::net::SocketAddrV4::new(std::net::Ipv4Addr::UNSPECIFIED, CROSS_ADDR.1).into())
+        .expect("bind the group's port");
+    let socket: std::net::UdpSocket = raw.into();
+    socket
+        .join_multicast_v4(&CROSS_ADDR.0.into(), &std::net::Ipv4Addr::LOCALHOST)
+        .expect("join the group on loopback");
+    socket
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .expect("a read timeout, so a silent group cannot hang this test");
+    let (mut child, _out) = spawn_on_group(label, exe, args);
+    let mut datagrams = Vec::new();
+    let mut buf = [0u8; 65_535];
+    let until = std::time::Instant::now() + Duration::from_secs(6);
+    while std::time::Instant::now() < until {
+        if let Ok((n, _)) = socket.recv_from(&mut buf) {
+            datagrams.push(buf[..n].to_vec());
+        }
+    }
+    graceful_terminate(child.child_mut(), Duration::from_secs(5));
+    datagrams
+}
+
+/// Upstream's `z_sub.c`, `z_queryable.c` and `z_liveliness.c` put the same declarations on the
+/// group on wz's drop-in as on the real library, which sends a session's declarations over
+/// whatever transport it holds (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `z_result_t _z_send_declare(`), its multicast declarations switch left at its default 0.
+///
+/// # Control
+///
+/// The reference must put something on the group for each program, or there is nothing to
+/// compare: each set is required to name the program's key.
+// wz-proves: api-compat-pico wz->pico partial
+#[test]
+#[ignore = "joins a multicast group on the loopback interface; run by run-ci Layer M"]
+fn upstream_examples_on_wz_declare_on_a_group_as_the_real_library_does() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled examples");
+    let mut differ = Vec::new();
+    for (example, key, args) in [
+        ("z_sub", "demo/mc/**", ["-k", "demo/mc/**"]),
+        ("z_queryable", "demo/mc/q", ["-k", "demo/mc/q"]),
+        ("z_liveliness", "demo/mc/token", ["-k", "demo/mc/token"]),
+    ] {
+        let real = group_declarations(&recorded_on_group(
+            &format!("real zenoh-pico {example}"),
+            &zenoh_pico_cli_binary(example),
+            &args,
+        ));
+        let wz = group_declarations(&recorded_on_group(
+            &format!("{example}.c on wz-capi-pico"),
+            &on_wz(example, dir.path()),
+            &args,
+        ));
+        assert!(
+            real.iter().any(|d| d.contains(key)),
+            "the real {example} declared nothing on {key}: {real:#?}"
+        );
+        if wz != real {
+            differ.push(format!("{example}: real {real:?}, wz {wz:?}"));
+        }
+    }
+    assert!(
+        differ.is_empty(),
+        "upstream's examples on wz declare on the group otherwise than on the real library:\n{}",
+        differ.join("\n")
+    );
+}
 
 /// A process of `exe` on the cross group, its output captured to a file it shares with the
 /// returned reader.
