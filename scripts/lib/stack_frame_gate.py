@@ -99,13 +99,17 @@ IMAGES = (
     # The Zephyr node on the fixed-memory profile: its main thread's stack is the overlay's
     # `CONFIG_MAIN_STACK_SIZE`, and the image is built by west into a directory Layer Qzb
     # owns, so the caller names the ELF and the objdump of the SDK that linked it.
+    # The node's loop (`fixed_node::run`) is inlined into `start`, the function the board's
+    # `wz_app_main` calls, so `start` is the frame the loop's own locals lie in (4,680 bytes
+    # in the image of 2026-10-22). It was a function of its own once, and the gate named it
+    # then; a name that has no frame is a gate that judged nothing, which it now says.
     Image(
         key="zephyr-fixed",
         elf=None,
         source="deploy/zephyr-admin-node/overlays/t2g_fixed.conf",
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
-        entry="fixed_node::run",
+        entry="wz_zephyr_admin_node::start",
     ),
     # The Zephyr CLIENT on the fixed-memory profile: the same rule, over the overlay of its own.
     # Its `run` is inlined into the board's `wz_app_main`, which is the thread's entry symbol.
