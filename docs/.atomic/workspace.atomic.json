@@ -279154,6 +279154,52 @@
         "No run holds the zenoh values yet to zenoh's own default features."
       ]
     },
+    "Round 3448": {
+      "decision_summary": "Step 2 of docs/build-configuration.md gets its upstream defconfigs. Each of zenoh, zenoh-c and zenoh-pico now has a generated configs file that states the original's own default build in wz's switches: its choice of role, and every capability it is judged for whose value differs from the Kconfig default. The role options name the originals whose default they are, read from the pinned sources: zenoh's default mode is the peer and zenoh-c's config is zenoh's, and zenoh-pico's default mode is the client. A preset is now merged onto the defconfig of the original its base line names, as section 6 orders it, so it states only how it differs from that original; presets of two originals are refused. The pre-push hook and Layer C0 resolve each defconfig strictly and hold it to its original's values. The original is not a Kconfig symbol, because nothing a build compiles reads it. The target axis and the MCU defconfig wait for the images' trees.",
+      "changes_bullets": [
+        "configs/zenoh_defconfig, configs/zenoh-c_defconfig, configs/zenoh-pico_defconfig: generated; zenoh and zenoh-c are the peer with advanced, group and e2e-sender off; zenoh-pico is the client with advanced, gossip, unstable-api and connectivity off.",
+        "deploy/wz-config.toml: the client role names zenoh-pico and the peer role zenoh and zenoh-c, each citing the pinned default.",
+        "scripts/lib/wz_config.py: --emit defconfig:ORIGINAL, held by --check; a global axis that names originals names each once, and an image axis names none; resolution merges the base original's defconfig first; --check-presets holds each defconfig to its original; --check-equivalence takes the three defconfigs as inputs; seven selftest arms.",
+        "docs/build-configuration.md: section 6 and the interpreter paragraph say what the defconfigs are and how a preset merges.",
+        ".githooks/pre-push: the comment on what feeds the generator's checks names the defconfigs."
+      ],
+      "verification_bullets": [
+        "--check-presets: the registered profile still resolves to the query feature alone on its zenoh-c base, and each defconfig reproduces its original: zenoh-pico 18 capabilities and the client, zenoh-c and zenoh 23 each and the peer.",
+        "A defconfig with its gossip line removed is reported stale by --check and as not reproducing zenoh-pico by --check-presets; regenerated, both pass.",
+        "--check-equivalence: five inputs give the same configuration on the pinned kconfiglib and Zephyr's.",
+        "wz_config selftest 103 of 103; the prose, floor, pin, reach, licence, NDA selftest, hook reference and boundary gates and the switch map pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Step 2 is done when each host defconfig's build passes its interop lane: the pico C programs, the zenoh-c examples, zenohd.",
+        "The zenoh values are not yet held by any run to zenoh's own default features.",
+        "The target axis and the MCU defconfig wait for the image trees to resolve the host declaration's symbols."
+      ],
+      "publishable_decision_summary": "Step 2 of docs/build-configuration.md gets its upstream defconfigs. Each of zenoh, zenoh-c and zenoh-pico now has a generated configs file that states the original's own default build in wz's switches: its choice of role, and every capability it is judged for whose value differs from the Kconfig default. The role options name the originals whose default they are, read from the pinned sources: zenoh's default mode is the peer and zenoh-c's config is zenoh's, and zenoh-pico's default mode is the client. A preset is now merged onto the defconfig of the original its base line names, as section 6 orders it, so it states only how it differs from that original; presets of two originals are refused. The pre-push hook and Layer C0 resolve each defconfig strictly and hold it to its original's values. The original is not a Kconfig symbol, because nothing a build compiles reads it. The target axis and the MCU defconfig wait for the images' trees.",
+      "publishable_changes_bullets": [
+        "configs/zenoh_defconfig, configs/zenoh-c_defconfig, configs/zenoh-pico_defconfig: generated; zenoh and zenoh-c are the peer with advanced, group and e2e-sender off; zenoh-pico is the client with advanced, gossip, unstable-api and connectivity off.",
+        "deploy/wz-config.toml: the client role names zenoh-pico and the peer role zenoh and zenoh-c, each citing the pinned default.",
+        "scripts/lib/wz_config.py: --emit defconfig:ORIGINAL, held by --check; a global axis that names originals names each once, and an image axis names none; resolution merges the base original's defconfig first; --check-presets holds each defconfig to its original; --check-equivalence takes the three defconfigs as inputs; seven selftest arms.",
+        "docs/build-configuration.md: section 6 and the interpreter paragraph say what the defconfigs are and how a preset merges.",
+        ".githooks/pre-push: the comment on what feeds the generator's checks names the defconfigs."
+      ],
+      "publishable_verification_bullets": [
+        "--check-presets: the registered profile still resolves to the query feature alone on its zenoh-c base, and each defconfig reproduces its original: zenoh-pico 18 capabilities and the client, zenoh-c and zenoh 23 each and the peer.",
+        "A defconfig with its gossip line removed is reported stale by --check and as not reproducing zenoh-pico by --check-presets; regenerated, both pass.",
+        "--check-equivalence: five inputs give the same configuration on the pinned kconfiglib and Zephyr's.",
+        "wz_config selftest 103 of 103; the prose, floor, pin, reach, licence, NDA selftest, hook reference and boundary gates and the switch map pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 2 is done when each host defconfig's build passes its interop lane: the pico C programs, the zenoh-c examples, zenohd.",
+        "The zenoh values are not yet held by any run to zenoh's own default features.",
+        "The target axis and the MCU defconfig wait for the image trees to resolve the host declaration's symbols."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
