@@ -54,6 +54,55 @@ config WZ_TX_BATCHING
 	  is one datagram for the router to read where there were two. Off, every message is a
 	  datagram of its own.
 
+config WZ_GET
+	bool "The client asks a query and says how it went"
+	depends on WZ_ROLE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	help
+	  The client asks the query below over its session, as `z_get` with its default options
+	  does, once the session is established and until the count is reached, and says the round
+	  trips on the console ("ZEPHYR-WZ-GET done ..."). It goes on answering its own queries
+	  afterwards. This is the getter `deploy/host-slot-node --get` runs: one module for both.
+	  The session's table of pending queries needs `CONFIG_WZ_LIMIT_MAX_PENDING_QUERIES` of at
+	  least the in-flight number and one more (the row a late final of the last still holds; a
+	  build with fewer stops); `overlays/t2g_client_get.conf` states it. The session task's cell
+	  grows with those rows and the build sizes it. The time of a query is read from the kernel's
+	  tick, so its resolution is one tick.
+
+config WZ_GET_KEY
+	string "The key expression the client asks"
+	default "demo/bench"
+	depends on WZ_GET
+	help
+	  At most `CONFIG_WZ_LIMIT_MAX_KEYEXPR_BYTES` long. It is read when the image is built.
+
+config WZ_GET_COUNT
+	int "How many queries, the warm-up included"
+	default 1000
+	range 1 1000000
+	depends on WZ_GET
+
+config WZ_GET_WARMUP
+	int "How many of the first queries are not timed"
+	default 50
+	range 0 100000
+	depends on WZ_GET
+	help
+	  Fewer than the count.
+
+config WZ_GET_INFLIGHT
+	int "How many queries are pending at once"
+	default 1
+	range 1 4
+	depends on WZ_GET
+
+config WZ_GET_TIMEOUT_MS
+	int "How long a query may stay pending, in milliseconds"
+	default 0
+	range 0 60000
+	depends on WZ_GET
+	help
+	  0 is the default of `z_get`.
+
 # What the Zephyr-sockets backend needs of Zephyr is stated HERE, as defaults of
 # the symbols it needs, rather than as lines in prj.conf: the other backend then
 # does not inherit a network stack it does not use, and a board conf never has to

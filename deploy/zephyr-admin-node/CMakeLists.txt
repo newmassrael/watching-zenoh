@@ -56,6 +56,17 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
       if(CONFIG_WZ_TX_BATCHING)
         list(APPEND backend_feature batching)
       endif()
+      # The client asks (the getter every slot-profile node shares): the query, how many times and
+      # how, stated here once as constants the Rust side checks when it compiles.
+      if(CONFIG_WZ_GET)
+        list(APPEND backend_feature get)
+        list(APPEND backend_env
+          WZ_GET_KEY=${CONFIG_WZ_GET_KEY}
+          WZ_GET_COUNT=${CONFIG_WZ_GET_COUNT}
+          WZ_GET_WARMUP=${CONFIG_WZ_GET_WARMUP}
+          WZ_GET_INFLIGHT=${CONFIG_WZ_GET_INFLIGHT}
+          WZ_GET_TIMEOUT_MS=${CONFIG_WZ_GET_TIMEOUT_MS})
+      endif()
     endif()
   endif()
 

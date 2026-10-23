@@ -191,6 +191,11 @@ fixed-client = [
     "wz-session-mcu/client-slot",
     "wz-session-core/session-slot",
 ]
+# The fixed client ASKS (`CONFIG_WZ_GET`): the getter of `wz_session_mcu::slot_getter`, which
+# `deploy/host-slot-node` runs too, asks the query the build states (`CONFIG_WZ_GET_KEY`,
+# `_COUNT`, ...) over the session and says the round trips on the console. Off, the client only
+# answers, as before. The queries are asked in the session's event, with no mailbox.
+get = ["fixed-client", "wz-session-mcu/query-get"]
 # The messages of one send window leave as one datagram (`CONFIG_WZ_TX_BATCHING`): a reply and the
 # final that ends its query are one frame. Off, every message is a datagram of its own.
 batching = [

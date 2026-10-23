@@ -637,9 +637,104 @@ same directory, with the node in `fixed_client.rs` (before) and on the module (a
   `.bss` and stack chain, and differ from the measured ones in 3 bytes at offsets 849 to 851 of
   the image, which was not looked into; the kit did not run the rebuilt ones.
 
-Not yet: the getter on the kit (step 3), which nothing claims until the kit has run it. The
-loop's `run` is bound to a socket, so what exercises it is a run on the host or the kit;
-hosted CI has no lane that runs a node.
+The getter on the kit is step 3 (section 5.6). The loop's `run` is bound to a socket, so what
+exercises it is a run on the host or the kit; hosted CI has no lane that runs a node.
+
+## 5.6 The getter on the kit (2026-10-23)
+
+The getter of 5.2 (the host node's `--get`) is `wz_session_mcu::slot_getter` now, one module for
+both platforms, and the kit's fixed client runs it when built with `CONFIG_WZ_GET`
+(`overlays/t2g_client_get.conf`). The module holds what the host file held: the plan (the query, the
+count, the in-flight number, the round trips in a table the image declares), the sink a pending
+query carries (the slot of its row in the plan), the session layer that asks and the application
+that reports. A platform supplies the clock, the table's sizes and a `GetterReport` (where the
+figures go and whether the end exits). The host's `getter.rs` went from 422 to 86 lines; the
+kit's `fixed_get.rs` is 153. The kit asks in the session's event, with no mailbox, and says
+`ZEPHYR-WZ-GET done ...` once when every query has ended, and goes on answering its own queries.
+The query, its count and its in-flight number (1 to 4) are Kconfig values read by the build as
+constants.
+
+Built and measured on the T2G kit against a responder (the host node, answering a document of 165
+bytes) through the bench host's zenohd, over the kit's own Ethernet, 2,050 queries with 50 of
+warm-up:
+
+| | answering client | asking client, 1 in flight |
+|---|---|---|
+| flash (text) | 160,000 B | 169,160 B |
+| `.data` | 1,524 B | 1,524 B |
+| `.bss` | 109,346 B | 121,114 B |
+| main stack declared | 9,216 B | 12,288 B |
+| worst stack chain, direct calls | 6,904 B | 7,672 B |
+| main stack peak, the firmware's own | 6,000 B | 8,144 B |
+
+- **`.bss` grows by 11,768 B**, of which 8,192 are the round trips the plan keeps (2,048 of 4
+  bytes); the rest (3,576 B) was not split. `.data` does not move: the plan is all zero bytes (its
+  key is an `Option`, its in-flight number reads 0 as 1, its last refusal is uninitialised), which
+  the first build of it was not, and then `.data` grew by 8,312 B.
+- **The static chain is not a bound for this image.** The firmware's own reading (8,144 B) is
+  472 B over the chain (7,672 B): the reply sink and the reply view are called through a register
+  (12 such calls on the path), which the stack gate's reader does not follow. The resource gate
+  calls a reading over the chain "a chain that misses a path the image takes", which is right of a
+  chain the reader should have followed and wrong of this one, so a row may now say
+  `chain_misses` with its reason: the key is true only while the reading is over the chain, and
+  what holds the stack is then the reading, which must leave a quarter of the stack free
+  (8,144 of 12,288 leaves a third; four in flight reads 8,816 and leaves 28 percent). Eight
+  mutants of the new rules are each caught by the gate's selftest.
+- **The latency is the image's own round trip as the asker**, at the resolution of the kernel tick
+  (100 us), so a median is a multiple of it. With one query in flight the median was 300 us in
+  8 of 8 clean runs of the afternoon (16:08 to 16:13; p99 1,300 to 1,400 us, max 4,000 to 5,100
+  us). The same code run in the evening, with the bench host loaded (its load average was about
+  25 when last read), read 300 to 400 us with a p99 of 1,400 to 3,300 us and a longest query of
+  39.5 ms once: this figure follows the load of the host that runs the router and the responder,
+  and the row holds 300 us with 50 percent either way, which a loaded host can leave. The stack
+  figures do not move with load. No comparison with zenoh-pico's asker was made, and none is
+  claimed.
+- **In flight 1 to 4** (each three runs, answers 2,050 of 2,050 every time):
+
+  | in flight | pending rows | task cell | stack peak | median | queries a second |
+  |---|---|---|---|---|---|
+  | 1 | 2 | 768 B | 8,144 B | 300 to 400 us | 2,200 to 2,700 |
+  | 2 | 3 | 1,024 B | 8,368 B | 300 to 400 us | 4,260 to 4,690 |
+  | 3 | 4 | 1,280 B | 8,592 B | 600 to 700 us | 4,060 to 4,230 |
+  | 4 | 5 | 1,536 B | 8,816 B | 800 to 900 us | 4,010 to 4,050 |
+
+  (Queries a second is 2,050 over the time from the first query to the last ending.) Two in
+  flight nearly doubles what one does, and more than two does not add: what saturates (the kit's
+  loop, the link, or the router and responder on the host) was not found.
+- **A task cell too small does not stop the build**: the runtime refuses the session's task,
+  counts it, and the node says "wz: FAIL - the runtime refused a task" and never opens a session,
+  so an image of four queries in flight with the cell of one (1,024 B) read as a getter that
+  finished 2,050 queries with no answers, and a first run against a responder the router did not
+  show read the same. The sizes were measured by building the image with each and running it:
+
+  | pending rows | refused at | held at |
+  |---|---|---|
+  | 2 | 384, 512 B | 640, 768, 896, 1,024 B |
+  | 5 | 1,024, 1,152 B | 1,216, 1,280, 1,536, 2,048 B |
+
+  The cell is now `256 + 256 * rows` (768 for 2 rows, 1,536 for 5), which leaves at least a fifth
+  over the held size at both ends, and a build asserts that the pending table has a row more than
+  the queries in flight. A run was taken as holding when its console had no refusal and the
+  getter's own line came after the reset; for 768, 1,216 and 1,536 B the script took the line of
+  the boot before the reset (the kit runs the image once after the flash, with no router yet),
+  so those three show a refusal count of 0 and the reply-handling stack peak of the second boot,
+  and not its line. The script waits for the line after the reset since.
+- **The host node had the same fault and nobody saw it.** The answering host node's cell of 1,024
+  B refused its session task on every revision tried (`2b360e763`, `f4b566cae`, `864d052a1`,
+  `a256cf133`), so it never opened a session; it is refused at 2,112 B and held at 2,176, and the
+  asking node is refused at 2,304 and held at 2,560. The cells are 2,560 and 3,072 B now. Why
+  the state grew beyond 1,024 B was not looked into.
+- **Where the kit's images were built.** pc2, where the kit is attached, no longer has its Zephyr
+  workspace (`~/zephyrproject` is gone, and a search for the SDK found none; they were installed
+  there on 2026-10-11), so the images measured after the afternoon were built on the development
+  host, at nice 10 and with eight jobs, as the kit worker did before pc2 had the toolchain, and
+  flashed and run from pc2. The sizes (text, `.data`, `.bss`) of the answering and the asking
+  image built there equal the ones pc2 built the same day to the byte; the images' hashes were not
+  compared.
+
+Not held: the asking image's latency in a lane (the resource gate's `--measure` reads the getter
+line and holds it, and no lane runs it), more than four queries in flight, a getter with a mailbox
+on the kit, and a round trip of a document other than 165 bytes.
 
 ## 6. Open
 

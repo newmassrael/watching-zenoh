@@ -498,6 +498,26 @@ IMAGES: dict[str, Image] = {
                 label="cyt4bf-sockets-client-fixed-idle-batching",
                 no_default_features=True,
             ),
+            # The widest the client is made: it also ASKS (`CONFIG_WZ_GET`), the getter of
+            # `wz_session_mcu::slot_getter` over the session's pending-query table. The query and
+            # how it is asked are the build's values, read as constants.
+            Build(
+                V7EMHF,
+                None,
+                ("fixed-client", "rx-in-place", "mac-cyt4bf", "zeth-driver", "batching", "get"),
+                env=ZEPHYR_BUILD_VALUES
+                + (
+                    ("WZ_CLIENT_ENDPOINT", "udp/192.0.2.1:7447"),
+                    ("WZ_IDLE_WAIT_MS", "1000"),
+                    ("WZ_GET_KEY", "demo/bench"),
+                    ("WZ_GET_COUNT", "2050"),
+                    ("WZ_GET_WARMUP", "50"),
+                    ("WZ_GET_INFLIGHT", "1"),
+                    ("WZ_GET_TIMEOUT_MS", "0"),
+                ),
+                label="cyt4bf-sockets-client-fixed-get",
+                no_default_features=True,
+            ),
         ),
         ci=False,
     ),

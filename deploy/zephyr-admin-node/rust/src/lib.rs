@@ -88,6 +88,8 @@ use wz_session_mcu::connect_manager::StaticEndpoints;
 
 #[cfg(all(role_client, storage_fixed))]
 mod fixed_client;
+#[cfg(all(feature = "get", role_client, storage_fixed))]
+mod fixed_get;
 #[cfg(all(role_admin, storage_fixed))]
 mod fixed_node;
 #[cfg(feature = "mac-cyt4bf")]

@@ -40,9 +40,10 @@ use wz_runtime_coop::session_drive::SlotStack;
 use wz_runtime_coop::{CoopRuntime, CoopTime};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_slot::SessionSlots;
+#[cfg(not(feature = "get"))]
+use wz_session_mcu::slot_node::Answering;
 use wz_session_mcu::slot_node::{
-    Answering, ClientNode, Declared, Document, NodeIdentity, NodePort, NodeStorage,
-    SIGNING_KEY_BYTES,
+    ClientNode, Declared, Document, NodeIdentity, NodePort, NodeStorage, SIGNING_KEY_BYTES,
 };
 
 use crate::{
@@ -58,8 +59,13 @@ const TASKS: usize = SESSIONS;
 /// few pointers, because a node that asks nothing keeps no table of requests (`Answering`, with
 /// the pending-query limits at 0), and an `async fn` holds a by-value argument twice. A task the
 /// cell cannot hold is refused and counted, and the loop says so on the console ("wz: FAIL - ...")
-/// rather than run a node that never starts a session.
+/// rather than run a node that never starts a session. A node that asks (`get`) keeps the session's
+/// pending queries in that state, so its cell grows with the rows of that table
+/// (`fixed_get::TASK_BYTES`, from sizes measured on the kit).
+#[cfg(not(feature = "get"))]
 const TASK_BYTES: usize = 384;
+#[cfg(feature = "get")]
+const TASK_BYTES: usize = crate::fixed_get::TASK_BYTES;
 /// Timers the runtime holds: the handshake and lease deadlines of the session.
 const TIMERS: usize = 4;
 /// Extra bytes a link's receive buffer holds beyond one batch, so a datagram that carries a batch
@@ -79,28 +85,38 @@ const ADDRESS_WAIT_MS: u32 = 30_000;
 /// The most the node's link sleeps when its session has nothing due sooner
 /// (`CONFIG_WZ_IDLE_WAIT_MS`, handed to cargo as `WZ_IDLE_WAIT_MS`); 0 keeps the tick. The node
 /// holds ONE session and its loop waits on nothing else, which is what lets its link sleep.
-const IDLE_WAIT_MS: u32 = decimal(match option_env!("WZ_IDLE_WAIT_MS") {
+const IDLE_WAIT_MS: u32 = match parse_decimal(match option_env!("WZ_IDLE_WAIT_MS") {
     Some(text) => text,
     None => "0",
-});
+}) {
+    Some(value) => value,
+    None => panic!("WZ_IDLE_WAIT_MS is not a decimal number"),
+};
 
 /// A decimal number read when the image compiles, so that a value the build was given that is not
-/// one stops the build instead of reading as zero.
-const fn decimal(text: &str) -> u32 {
+/// one (empty, a sign, a letter, past `u32`) stops the build instead of reading as zero.
+pub(crate) const fn parse_decimal(text: &str) -> Option<u32> {
     let bytes = text.as_bytes();
-    assert!(!bytes.is_empty(), "WZ_IDLE_WAIT_MS is empty");
+    if bytes.is_empty() {
+        return None;
+    }
     let mut value = 0u32;
     let mut at = 0;
     while at < bytes.len() {
         let digit = bytes[at];
-        assert!(
-            digit.is_ascii_digit(),
-            "WZ_IDLE_WAIT_MS is not a decimal number"
-        );
-        value = value * 10 + (digit - b'0') as u32;
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        value = match value.checked_mul(10) {
+            Some(shifted) => match shifted.checked_add((digit - b'0') as u32) {
+                Some(next) => next,
+                None => return None,
+            },
+            None => return None,
+        };
         at += 1;
     }
-    value
+    Some(value)
 }
 
 /// How often the loop says how many times it went round: the figure that tells a node that
@@ -115,7 +131,7 @@ const IDLE_SLEEP: u32 = {
     IDLE_SLEEP_US as u32
 };
 
-type Clock = ZephyrClock<TICK_HZ>;
+pub(crate) type Clock = ZephyrClock<TICK_HZ>;
 type Stack = ZephyrStack;
 
 /// The table of session slots this image places, as the node's storage holds it: one type for the
@@ -251,6 +267,14 @@ pub fn run() -> i32 {
     } else {
         stack
     };
+    // A node that asks has its getter's layer and application; one that only answers has neither.
+    #[cfg(not(feature = "get"))]
+    let (layer, mut app) = (Answering, ());
+    #[cfg(feature = "get")]
+    let (layer, mut app) = {
+        crate::fixed_get::PLAN.set(&crate::fixed_get::ASK);
+        (crate::fixed_get::layer(), crate::fixed_get::app())
+    };
     let node = ClientNode {
         storage: &NODE,
         declared: &DECLARED,
@@ -261,7 +285,7 @@ pub fn run() -> i32 {
         entropy: || ZephyrEntropy,
         endpoints: &ENDPOINTS,
         documents: &DOCUMENTS,
-        layer: Answering,
+        layer,
         idle_sleep_us: IDLE_SLEEP,
         report_every_ms: LOOP_REPORT_MS,
     };
@@ -271,7 +295,7 @@ pub fn run() -> i32 {
     };
     // The line a lane (or a person at the console) waits for: who the node claims to be and the
     // router it dials.
-    node.run(&mut port, &mut (), |_, zid_hex| {
+    node.run(&mut port, &mut app, |_, zid_hex| {
         log_args(format_args!(
             "ZEPHYR-WZ-CLIENT READY {} {} {}",
             NODE_ID,

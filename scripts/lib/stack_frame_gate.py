@@ -174,6 +174,28 @@ IMAGES = (
         entry="wz_app_main",
         peak=7204,
     ),
+    # The fixed client that ASKS (`overlays/t2g_client_get.conf`): the getter of
+    # `wz_session_mcu::slot_getter` is the application layer the observer's drain runs inside, and
+    # its query path (`get`, the request written into the slot the link lends) is under that drain
+    # too. Its stack is the overlay's own.
+    #
+    # `peak` is 7,672 bytes in the image of 2026-10-23 (one query in flight; 8,588 with four, whose
+    # worst path is another). ⚠ It is BELOW what the kit's own reading of the same image reaches
+    # over 2,050 answered queries, 8,144 bytes: the reader does not follow a call through a register
+    # (12 on this path), and the reply sink the getter hands the session is called through one
+    # (`ReplySink::on_reply`/`on_final`, which write the plan). So for this image the chain is a
+    # figure a change moves and not a bound on the stack: the stack is sized from the kit's reading
+    # (12,288 bytes leaves a third free at 8,144), and the resource budget's row for it says so
+    # (`chain_misses`) and holds the reading to a quarter of the stack free.
+    Image(
+        key="zephyr-client-fixed-get",
+        elf=None,
+        source="deploy/zephyr-admin-node/overlays/t2g_client_get.conf",
+        pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
+        unit=1,
+        entry="wz_app_main",
+        peak=7672,
+    ),
 )
 
 _HEAD = re.compile(r"^([0-9a-f]{8}) <(.*)>:$")
