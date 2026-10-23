@@ -59,9 +59,17 @@ original reproduced by naming it. Three things follow from it:
   document builds with the same cargo line as before the move
   (`scripts/lib/zephyr_cargo_lines.py`). What a board or a driver adds (the MAC, the
   pools, 10BASE-T1S, the SPI probe) and the client's parameters stay in the image's
-  own Kconfig and CMake. The crate's features are still per combination (the client on
-  the heap is `client-node`, on statics `fixed-client`), so a rule names two options;
-  one feature per axis option is step 4.
+  own Kconfig and CMake. The crate's features are per combination (the client on the
+  heap is `client-node`, on statics `fixed-client`), and they stay so: cargo cannot
+  express "this option and that one" with one feature per option (C3), so a
+  conjunction is a `[[cargo_rule]]` whose `when` names both options.
+- **Global axes**: an `[[axis]]` with no `image` belongs to no one image. The
+  generator writes it to `deploy/Kconfig.axes`, which the root `deploy/Kconfig`
+  sources first. Its options may `implies` capabilities, which become `select`s, and
+  an image's cargo rule may name them. An image's Kconfig that sources
+  `../Kconfig.axes` must also source `../Kconfig.capabilities`, and `--check` holds
+  that. The declaration has no global axis yet: `family` and `target` come with step 2,
+  `role` with step 4.
 - **Storage policy** (D1 step 6, landed): `trait Storage` with `Heap` and `Static`
   (`bounded.rs`), associated types for the sequence, the text, the arena offset,
   the id table and the change epoch; the registries are generic over it and one

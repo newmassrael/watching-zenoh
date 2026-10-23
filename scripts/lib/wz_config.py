@@ -14,6 +14,8 @@ them, what they imply, zenoh-pico's own switch for them) and the limits an image
 itself (their Kconfig symbol, default and help). This tool is everything that derives from it:
 
     --emit kconfig-root           print deploy/Kconfig, the root of the host configuration
+    --emit kconfig-axes           print deploy/Kconfig.axes, the axes no one image owns (written
+                                  only while the declaration has one)
     --emit kconfig-capabilities   print deploy/Kconfig.capabilities
     --emit kconfig-limits         print deploy/Kconfig.limits
     --emit rust-limits            print crates/wz-session-core/src/caps_generated.rs
@@ -102,6 +104,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DECL = ROOT / "deploy" / "wz-config.toml"
 KCONFIG_ROOT = ROOT / "deploy" / "Kconfig"
+KCONFIG_AXES = ROOT / "deploy" / "Kconfig.axes"
 KCONFIG_CAPS = ROOT / "deploy" / "Kconfig.capabilities"
 PROFILES = ROOT / "configs" / "profiles"
 KCONFIG_VENV = ROOT / "target" / "kconfig-venv"
@@ -200,7 +203,11 @@ def read_decl_toml(text: str) -> dict:
 
 
 def load_decl(path: pathlib.Path = DECL) -> dict:
-    data = read_decl_toml(path.read_text(encoding="utf-8"))
+    return decl_of(read_decl_toml(path.read_text(encoding="utf-8")))
+
+
+def decl_of(data: dict) -> dict:
+    """A read declaration, validated, in the shape the derivations take."""
     problems = validate_decl(data)
     if problems:
         raise ValueError("; ".join(problems))
@@ -243,15 +250,25 @@ def validate_decl(data: dict) -> list[str]:
 
 IMAGE_KEYS = {"id", "dir"}
 AXIS_KEYS = {"id", "image", "kconfig", "prompt", "default", "help"}
-OPTION_KEYS = {"id", "axis", "kconfig", "prompt", "requires", "help"}
+OPTION_KEYS = {"id", "axis", "kconfig", "prompt", "requires", "implies", "help"}
 RULE_KEYS = {"image", "when", "features", "defaults"}
 
 
-def validate_images(data: dict) -> list[str]:
-    """The images, their axes, the axes' options and the cargo rules hold together.
+def is_global(axis: dict) -> bool:
+    """An axis no one image owns (`family`, `role` ...): it has no `image` and lives in the host
+    tree's deploy/Kconfig.axes, which an image's tree may source as well."""
+    return "image" not in axis
 
-    A rule may only name the options of its own image's axes: what it adds to a crate's build is
-    then decided by choices this file declares, never by a symbol of the image's own Kconfig.
+
+def validate_images(data: dict) -> list[str]:
+    """The images, the axes, the axes' options and the cargo rules hold together.
+
+    A rule may only name the options of its own image's axes and of the global axes: what it adds
+    to a crate's build is then decided by choices this file declares, never by a symbol of the
+    image's own Kconfig. An option's `implies` names capabilities it selects, and only a global
+    axis's option may have one: an image's own axes are in a tree that carries no capability
+    symbols, while a tree that sources the global axes sources the capabilities with them (held
+    by `--check`).
     """
     out: list[str] = []
     sections = (("image", IMAGE_KEYS), ("axis", AXIS_KEYS), ("axis_option", OPTION_KEYS),
@@ -266,7 +283,7 @@ def validate_images(data: dict) -> list[str]:
         out.append("an image id is declared twice")
     axes = {}
     for axis in data.get("axis", []):
-        if axis.get("image") not in images:
+        if not is_global(axis) and axis.get("image") not in images:
             out.append(f"axis {axis.get('id')!r} names image {axis.get('image')!r}, which is not declared")
         if axis.get("id") in axes:
             out.append(f"axis {axis.get('id')!r} is declared twice")
@@ -277,6 +294,19 @@ def validate_images(data: dict) -> list[str]:
             out.append(f"option {option.get('id')!r} names axis {option.get('axis')!r}, which is not declared")
             continue
         options[option["axis"]].append(option)
+        implied = option.get("implies")
+        if implied is None:
+            continue
+        if not isinstance(implied, list):
+            out.append(f"option {option.get('id')!r}: `implies` is not an array of capability ids")
+            continue
+        if not is_global(axes[option["axis"]]):
+            out.append(f"option {option.get('id')!r} of the image axis {option['axis']!r} implies "
+                       f"capabilities; only a global axis's option can")
+        caps = {c.get("id") for c in data.get("capability", [])}
+        for cid in implied:
+            if cid not in caps:
+                out.append(f"option {option.get('id')!r} implies `{cid}`, which is no capability")
     for aid, axis in axes.items():
         ids = [o["id"] for o in options[aid]]
         if len(ids) < 2:
@@ -290,14 +320,15 @@ def validate_images(data: dict) -> list[str]:
         if image not in images:
             out.append(f"a cargo rule names image {image!r}, which is not declared")
             continue
-        own = {o["kconfig"] for aid, axis in axes.items() if axis.get("image") == image
-               for o in options[aid]}
+        own = {o["kconfig"] for aid, axis in axes.items()
+               if is_global(axis) or axis.get("image") == image for o in options[aid]}
         when = rule.get("when") or []
         if not when:
             out.append(f"a cargo rule of {image!r} names no option in `when`")
         for symbol in when:
             if symbol not in own:
-                out.append(f"a cargo rule of {image!r} names {symbol}, which is no option of its axes")
+                out.append(f"a cargo rule of {image!r} names {symbol}, which is no option of its "
+                           f"axes or of a global axis")
         if not rule.get("features") and rule.get("defaults") != "off":
             out.append(f"a cargo rule of {image!r} when {when} adds nothing")
         if rule.get("defaults", "off") != "off":
@@ -526,12 +557,20 @@ def emit_rust_limits(decl: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def global_axes(decl: dict) -> list[dict]:
+    return [a for a in decl["axes"] if is_global(a)]
+
+
 def emit_kconfig_root(decl: dict) -> str:
     """The root of the host build configuration: every generated menu, read by kconfiglib."""
     out = generated_header("#", "kconfig-root") + [
         "",
         'mainmenu "wz build configuration"',
         "",
+    ]
+    if global_axes(decl):
+        out.append('rsource "Kconfig.axes"')
+    out += [
         'rsource "Kconfig.capabilities"',
         'rsource "Kconfig.limits"',
     ]
@@ -542,10 +581,11 @@ def help_lines(text: str) -> list[str]:
     return [f"\t  {line}" if line else "\t" for line in text.strip().splitlines()]
 
 
-def emit_image_kconfig(decl: dict, image: str) -> str:
-    """The axes of `image` as Kconfig choices, each option `depends on` what it requires."""
-    out = generated_header("#", f"image-kconfig:{image}")
-    for axis in (a for a in decl["axes"] if a["image"] == image):
+def axes_kconfig(decl: dict, axes: list[dict]) -> list[str]:
+    """`axes` as Kconfig choices: each option `depends on` what it requires and `select`s the
+    capabilities it implies."""
+    out: list[str] = []
+    for axis in axes:
         members = [o for o in decl["options"] if o["axis"] == axis["id"]]
         default = next(o["kconfig"] for o in members if o["id"] == axis["default"])
         out += ["", f"choice {axis['kconfig']}", f'\tprompt "{axis["prompt"]}"', f"\tdefault {default}"]
@@ -555,10 +595,30 @@ def emit_image_kconfig(decl: dict, image: str) -> str:
             out += ["", f"config {option['kconfig']}", f'\tbool "{option["prompt"]}"']
             if option.get("requires"):
                 out.append(f"\tdepends on {option['requires']}")
+            for cid in option.get("implies", []):
+                out.append(f"\tselect {decl['caps'][cid]['kconfig']}")
             if option.get("help"):
                 out += ["\thelp"] + help_lines(option["help"])
         out += ["", "endchoice"]
-    return "\n".join(out) + "\n"
+    return out
+
+
+def emit_kconfig_axes(decl: dict) -> str:
+    """The global axes. Their options select capability symbols, so a tree that sources this file
+    sources deploy/Kconfig.capabilities too."""
+    out = generated_header("#", "kconfig-axes") + [
+        "#",
+        "# The axes no one image owns. An option selects the capabilities it implies, so a",
+        "# Kconfig tree that sources this file sources Kconfig.capabilities as well.",
+    ]
+    return "\n".join(out + axes_kconfig(decl, global_axes(decl))) + "\n"
+
+
+def emit_image_kconfig(decl: dict, image: str) -> str:
+    """The axes of `image` as Kconfig choices, each option `depends on` what it requires."""
+    out = generated_header("#", f"image-kconfig:{image}")
+    axes = [a for a in decl["axes"] if a.get("image") == image]
+    return "\n".join(out + axes_kconfig(decl, axes)) + "\n"
 
 
 def emit_image_cmake(decl: dict, image: str) -> str:
@@ -592,11 +652,27 @@ def generated_files(decl: dict) -> dict[str, tuple[pathlib.Path, str]]:
     """Every derived file, by the `--emit` kind that prints it: the host files and, for each
     declared image, its axes' Kconfig and the CMake that maps them to cargo."""
     out = {kind: (path, emit(decl)) for kind, (path, emit) in GENERATED.items()}
+    if global_axes(decl):
+        out["kconfig-axes"] = (KCONFIG_AXES, emit_kconfig_axes(decl))
     for image in decl["images"]:
         base = ROOT / decl["image_dirs"][image]
         out[f"image-kconfig:{image}"] = (base / "Kconfig.axes", emit_image_kconfig(decl, image))
         out[f"image-cmake:{image}"] = (base / "wz_axes.cmake", emit_image_cmake(decl, image))
     return out
+
+
+RSOURCE_RE = re.compile(r'^\s*rsource\s+"([^"]+)"', re.MULTILINE)
+
+
+def check_image_sources(image: str, text: str) -> list[str]:
+    """An image's Kconfig that sources the global axes sources the capabilities too: an option of a
+    global axis selects capability symbols, and Zephyr refuses a select of a symbol the tree does
+    not define."""
+    sourced = set(RSOURCE_RE.findall(text))
+    if "../Kconfig.axes" in sourced and "../Kconfig.capabilities" not in sourced:
+        return [f"{image}: its Kconfig sources ../Kconfig.axes but not ../Kconfig.capabilities, "
+                "whose symbols the global axes select"]
+    return []
 
 
 # ---------------------------------------------------------------------------------------------
@@ -928,6 +1004,13 @@ def cmd_check() -> int:
             findings.append(f"{rel} is missing (--emit {kind} prints it)")
         elif path.read_text(encoding="utf-8") != text:
             findings.append(f"{rel} is stale: regenerate it with --write")
+    if "kconfig-axes" not in files and KCONFIG_AXES.exists():
+        findings.append(f"{KCONFIG_AXES.relative_to(ROOT)} exists, but the declaration has no "
+                        "global axis: remove it")
+    for image in decl["images"]:
+        kconfig = ROOT / decl["image_dirs"][image] / "Kconfig"
+        if kconfig.is_file():
+            findings += check_image_sources(image, kconfig.read_text(encoding="utf-8"))
     findings += check_caps_rs(decl, CAPS_RS.read_text(encoding="utf-8"))
     for abi, path in MANIFESTS.items():
         try:
@@ -940,9 +1023,10 @@ def cmd_check() -> int:
         print(f"  wz-config FAIL: {finding}", file=sys.stderr)
     if findings:
         return 1
+    n_global = len(global_axes(decl))
     print(f"  wz-config: {len(decl['order'])} capabilities, {len(decl['limits'])} limits, "
-          f"{len(decl['axes'])} image axes, {len(files)} generated files current, caps.rs bound, "
-          f"{len(MANIFESTS)} manifests agree")
+          f"{n_global} global and {len(decl['axes']) - n_global} image axes, {len(files)} "
+          f"generated files current, caps.rs bound, {len(MANIFESTS)} manifests agree")
     return 0
 
 
@@ -1011,6 +1095,42 @@ image = "img"
 when = ["WZ_SIDE_R"]
 features = ["right"]
 defaults = "off"
+"""
+
+
+GLOBAL_SAMPLE = """\
+
+[[capability]]
+id = "b"
+kconfig = "WZ_CAP_B"
+abis = ["core"]
+default = "off"
+implies = []
+help = "B."
+
+[[axis]]
+id = "mode"
+kconfig = "WZ_MODE"
+prompt = "Mode"
+default = "c"
+
+[[axis_option]]
+id = "c"
+axis = "mode"
+kconfig = "WZ_MODE_C"
+prompt = "Client"
+
+[[axis_option]]
+id = "p"
+axis = "mode"
+kconfig = "WZ_MODE_P"
+prompt = "Peer"
+implies = ["b"]
+
+[[cargo_rule]]
+image = "img"
+when = ["WZ_MODE_P", "WZ_SIDE_L"]
+features = ["peer-left"]
 """
 
 
@@ -1179,6 +1299,40 @@ def cmd_selftest() -> int:
     expect("an option symbol declared twice is refused",
            image_refused('kconfig = "WZ_SIDE_R"', 'kconfig = "WZ_SIDE_L"', "declared twice"))
 
+    # Global axes: in the host tree, rsourced by the root, their options selecting capabilities.
+    with_global = with_image + GLOBAL_SAMPLE
+    expect("a sample global axis validates", validate_decl(read_decl_toml(with_global)) == [])
+    gdecl = decl_of(read_decl_toml(with_global))
+    axes_kconfig_text = emit_kconfig_axes(gdecl)
+    expect("a global axis is a choice whose option selects what it implies",
+           "choice WZ_MODE\n\tprompt \"Mode\"\n\tdefault WZ_MODE_C\n" in axes_kconfig_text
+           and "config WZ_MODE_P\n\tbool \"Peer\"\n\tselect WZ_CAP_B\n" in axes_kconfig_text
+           and "WZ_SIDE" not in axes_kconfig_text)
+    expect("an image's Kconfig holds its own axes and no global one",
+           "WZ_MODE" not in emit_image_kconfig(gdecl, "img"))
+    expect("the root sources the global axes when there are some, and not otherwise",
+           'rsource "Kconfig.axes"\nrsource "Kconfig.capabilities"' in emit_kconfig_root(gdecl)
+           and "Kconfig.axes" not in emit_kconfig_root(decl_of(read_decl_toml(with_image))))
+    expect("a rule may name a global axis's option",
+           "if(CONFIG_WZ_MODE_P AND CONFIG_WZ_SIDE_L)\n  list(APPEND wz_axes_features peer-left)"
+           in emit_image_cmake(gdecl, "img"))
+
+    def global_refused(old: str, new: str, words: str) -> bool:
+        return any(words in p for p in validate_decl(read_decl_toml(with_global.replace(old, new))))
+
+    expect("an option implying no capability is refused",
+           global_refused('implies = ["b"]', 'implies = ["z"]', "is no capability"))
+    expect("an option of an image axis implying a capability is refused",
+           global_refused('requires = "WZ_SOMETHING"', 'requires = "WZ_SOMETHING"\nimplies = ["a"]',
+                          "only a global axis"))
+    expect("an implies that is not an array is refused",
+           global_refused('implies = ["b"]', 'implies = "b"', "not an array"))
+    expect("an image Kconfig sourcing the global axes without the capabilities is a finding",
+           check_image_sources("img", 'rsource "../Kconfig.axes"\n') != []
+           and check_image_sources(
+               "img", 'rsource "../Kconfig.capabilities"\nrsource "../Kconfig.axes"\n') == []
+           and check_image_sources("img", 'rsource "Kconfig.axes"\n') == [])
+
     # The reader must refuse what it does not read, and must agree with `tomllib` on the
     # shipped file wherever the interpreter has one (3.11+; the hosted floor does not, which is
     # why the import is by name and not a statement the floor lint reads).
@@ -1270,6 +1424,20 @@ def cmd_selftest() -> int:
                    resolved_caps(decl, resolve([preset(d, "empty.conf", "")]))
                    == {cid for cid, cap in caps.items() if default_on(cap)}
                    and resolved_limit_env(decl, resolve([preset(d, "empty2.conf", "")])) == [])
+            # The emitted tree of the global sample, read by the interpreter: the default option
+            # leaves the off capability off, and the option that implies it turns it on.
+            tree = d / "tree"
+            tree.mkdir()
+            for name, emit in (("Kconfig", emit_kconfig_root), ("Kconfig.axes", emit_kconfig_axes),
+                               ("Kconfig.capabilities", emit_kconfig_capabilities),
+                               ("Kconfig.limits", emit_kconfig_limits)):
+                (tree / name).write_text(emit(gdecl), encoding="utf-8")
+            kconf = kconfiglib_module().Kconfig(str(tree / "Kconfig"), warn_to_stderr=False)
+            off_by_default = kconf.syms["WZ_CAP_B"].tri_value == 0
+            kconf.syms["WZ_MODE_P"].set_value(2)
+            expect("the interpreter reads the global axes, and an option turns on what it implies",
+                   off_by_default and kconf.syms["WZ_CAP_B"].tri_value == 2
+                   and kconf.warnings == [])
     print(f"  wz-config selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
