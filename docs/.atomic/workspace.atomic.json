@@ -280274,6 +280274,52 @@
         "The capability cost gate still names its feature sets by hand; a build a deployer gets from the Kconfig declaration is not what it grades."
       ]
     },
+    "Round 3473": {
+      "decision_summary": "Layer E7s, the starved router that must keep its links, was a product fault and not a flake: on a build host it failed five runs of five at bcb1b50a4, the last commit the hosted run passed. 1400 to 2000 of 2048 clients closed on their own lease expiry; the router's loop took 25000 events a second but ran about 120 lease checks and 100 keepalive writes a second where 600 were due. A session loop took the next event with no suspension, so a face with a backlog kept the thread and one pass over 2048 faces outlasted the 10 s lease. The loop now yields after eight events in a row. The same test then passed three runs of three and the whole E7s binary at 8, 32 and 128; admission to the starved router rose from 12 of 320 to 320 of 320 at a bound of 8, and the cost table did not move (12.5 us a message against 13.2). A yield after every write changed nothing. The cache-class declaration of the job b2be19228 added is completed.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: the drive loop counts the events it takes in a row, in both poll arms, and yields its thread after TURN_EVENT_BUDGET (8); the constant carries the measurement and the worst-case arithmetic, and a unit test holds the one-yield-per-budget behaviour.",
+        "docs/reason-review-pins.md: the row of session-close-ingress for session_glue.rs moves to the file's new blob, after reading its one clause on the file (the out-of-band check at the head of every iteration and the wait on it in both arms), which this change leaves as it was.",
+        ".github/cache-classes.json: ci.yml:nondefault-legs joins the owners of rocksdb-engine and apt-archives and the readers of rust-ci, which the cache budget gate reported missing since b2be19228; no budget figure moves.",
+        "scripts/lib/kit_rest_probe.py: its header names round 3470 for the provenance gate, which failed the push hook of every session on the file as it came in."
+      ],
+      "verification_bullets": [
+        "On a build host, four cores: the starved-router test failed 5 of 5 at bcb1b50a4 and 4 of 5 at the tree before this change, and passed 3 of 3 with a bound of 8; the whole binary at no bound, 8, 32 and 128 gave one failure (3 faces down), then three passes, with 2048 subscribers at 13.2, 12.5, 20.3 and 16.3 us a message.",
+        "wz-runtime-tokio clippy with warnings denied reports nothing; the new unit test passes (1 of 1 run, not a filtered zero); wz-capi-pico passes 158 tests in 31 binaries; the four count guards the range reaches are 1, 9, 1 and 6 as declared.",
+        "The hook's round-fed gate array (110) passes in parallel, the reason-review pin gate and the cache budget gate pass, and validate-workspace keeps 14 T1 orphans.",
+        "Not measured: the latency of one request and reply with the yield in the loop (a yield costs one reschedule per eighth event); a build host's load was not constant between the sweep's budgets, so the cost figures carry that spread."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "The starved router forwards 35% of the offered load at a bound of 8 and 52% at 32; no figure exists at no bound to compare with, because that run collapsed. The test prints the share and asserts none, and the share a router owes at what CPU is the owner's to state.",
+        "The next hosted run decides E7s on the hosted runner. The round-3464 attribution of Layer Q is complete: slot +8 B is 054886cc1, text +1532 B is 6c31caba5 and +88 B is a256cf133, each built on its own, and other sessions have already moved the record and the baseline.",
+        "The isolated-crate lanes (C1bz) were cancelled in the run of 209000259 and their verdict is still unread.",
+        "The latency of one request and reply in the AP client, measured last on pc3 at 86 to 92 us, should be re-measured with the yield in the loop."
+      ],
+      "publishable_decision_summary": "Layer E7s, the starved router that must keep its links, was a product fault and not a flake: on a build host it failed five runs of five at bcb1b50a4, the last commit the hosted run passed. 1400 to 2000 of 2048 clients closed on their own lease expiry; the router's loop took 25000 events a second but ran about 120 lease checks and 100 keepalive writes a second where 600 were due. A session loop took the next event with no suspension, so a face with a backlog kept the thread and one pass over 2048 faces outlasted the 10 s lease. The loop now yields after eight events in a row. The same test then passed three runs of three and the whole E7s binary at 8, 32 and 128; admission to the starved router rose from 12 of 320 to 320 of 320 at a bound of 8, and the cost table did not move (12.5 us a message against 13.2). A yield after every write changed nothing. The cache-class declaration of the job b2be19228 added is completed.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: the drive loop counts the events it takes in a row, in both poll arms, and yields its thread after TURN_EVENT_BUDGET (8); the constant carries the measurement and the worst-case arithmetic, and a unit test holds the one-yield-per-budget behaviour.",
+        "docs/reason-review-pins.md: the row of session-close-ingress for session_glue.rs moves to the file's new blob, after reading its one clause on the file (the out-of-band check at the head of every iteration and the wait on it in both arms), which this change leaves as it was.",
+        ".github/cache-classes.json: ci.yml:nondefault-legs joins the owners of rocksdb-engine and apt-archives and the readers of rust-ci, which the cache budget gate reported missing since b2be19228; no budget figure moves.",
+        "scripts/lib/kit_rest_probe.py: its header names round 3470 for the provenance gate, which failed the push hook of every session on the file as it came in."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, four cores: the starved-router test failed 5 of 5 at bcb1b50a4 and 4 of 5 at the tree before this change, and passed 3 of 3 with a bound of 8; the whole binary at no bound, 8, 32 and 128 gave one failure (3 faces down), then three passes, with 2048 subscribers at 13.2, 12.5, 20.3 and 16.3 us a message.",
+        "wz-runtime-tokio clippy with warnings denied reports nothing; the new unit test passes (1 of 1 run, not a filtered zero); wz-capi-pico passes 158 tests in 31 binaries; the four count guards the range reaches are 1, 9, 1 and 6 as declared.",
+        "The hook's round-fed gate array (110) passes in parallel, the reason-review pin gate and the cache budget gate pass, and validate-workspace keeps 14 T1 orphans.",
+        "Not measured: the latency of one request and reply with the yield in the loop (a yield costs one reschedule per eighth event); a build host's load was not constant between the sweep's budgets, so the cost figures carry that spread."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The starved router forwards 35% of the offered load at a bound of 8 and 52% at 32; no figure exists at no bound to compare with, because that run collapsed. The test prints the share and asserts none, and the share a router owes at what CPU is the owner's to state.",
+        "The next hosted run decides E7s on the hosted runner. The round-3464 attribution of Layer Q is complete: slot +8 B is 054886cc1, text +1532 B is 6c31caba5 and +88 B is a256cf133, each built on its own, and other sessions have already moved the record and the baseline.",
+        "The isolated-crate lanes (C1bz) were cancelled in the run of 209000259 and their verdict is still unread.",
+        "The latency of one request and reply in the AP client, measured last on pc3 at 86 to 92 us, should be re-measured with the yield in the loop."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
