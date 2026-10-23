@@ -56,8 +56,18 @@ wz still owes for an upstream original are found at all.
 `deploy/wz-config.toml` names zenoh-pico's switch for a capability (`pico_flag`).
 That is the same fact as a `maps` row here, written twice until the upstream map moves
 into the declaration (docs/build-configuration.md, step 2), so both directions are
-checked: a capability's `pico_flag` must have a `maps` row to that capability, and a
-`maps` row to a capability must be that capability's `pico_flag`.
+checked: a capability's `pico_flag` must have a `maps` row to that capability, each
+switch of a `pico_flags_all` must have a `maps` row, and the switches mapped to a
+capability must include one it names.
+
+The declaration also states each original's own default (`upstream_on` /
+`upstream_off`, docs/build-configuration.md step 2). Each run holds the original it
+grades: the default run every capability zenoh-pico has a switch for against the
+first definition of that switch in the pinned CMakeLists (on when every switch the
+capability names is on), `--zenoh-c` every capability a zenoh-c `maps` row reaches
+against zenoh-c's `default` features. A capability neither reaches (the query plane in
+zenoh-c, which has no switch for it) is judged in the declaration alone, and the run
+names the zenoh-pico ones.
 
 ## What this does NOT claim
 
@@ -327,36 +337,53 @@ def shape_arm(
     return failures
 
 
+def pico_switches_of(cap: dict) -> list[str]:
+    """The pico switches a capability names: its own `pico_flag`, or the `pico_flags_all` it is on
+    under (every one of them on)."""
+    return [cap["pico_flag"]] if "pico_flag" in cap else list(cap.get("pico_flags_all", []))
+
+
 def declaration_arm(rows: tuple[tuple[str, str, str | None, str], ...], decl: dict) -> list[str]:
-    """Do the pico rows and the capability declaration's `pico_flag` agree, both ways?"""
+    """Do the pico rows and the capability declaration's pico switches agree, both ways?
+
+    `decl` is `wz_config.load_decl()`'s shape (capabilities under `caps`). A capability's own
+    `pico_flag` must have a `maps` row to it; each switch of a `pico_flags_all` must have a `maps`
+    row at all (to it, or to the capabilities it is the conjunction of). The relation is many
+    switches to one capability (pico splits the advanced publisher and subscriber, wz builds them
+    as one plane), so the second direction asks that the switches mapped to a capability include
+    at least one it names, not that they are all it names.
+    """
     failures: list[str] = []
     by_switch = {r[0]: r for r in rows}
-    caps = {c["id"]: c for c in decl.get("capability", [])}
+    caps = decl["caps"]
     for cap_id, cap in sorted(caps.items()):
-        flag = cap.get("pico_flag")
-        if not flag:
-            continue
-        row = by_switch.get(flag)
-        want = f"wz-capi-pico/{cap_id}"
-        if row is None or row[1] != "maps" or row[2] != want:
-            got = "no row" if row is None else f"`{row[1]}` {row[2]}"
-            failures.append(
-                f"capability `{cap_id}` declares pico_flag `{flag}`, but its row here is {got}, "
-                f"not `maps` {want}"
-            )
-    # The relation is many switches to one capability (pico splits the advanced publisher
-    # and subscriber, wz builds them as one plane), so the second direction asks that a
-    # capability's single pico_flag be ONE of the switches mapped to it, not the only one.
+        if "pico_flag" in cap:
+            flag = cap["pico_flag"]
+            row = by_switch.get(flag)
+            want = f"wz-capi-pico/{cap_id}"
+            if row is None or row[1] != "maps" or row[2] != want:
+                got = "no row" if row is None else f"`{row[1]}` {row[2]}"
+                failures.append(
+                    f"capability `{cap_id}` declares pico_flag `{flag}`, but its row here is {got}, "
+                    f"not `maps` {want}"
+                )
+        for flag in cap.get("pico_flags_all", []):
+            row = by_switch.get(flag)
+            if row is None or row[1] != "maps":
+                got = "no row" if row is None else f"`{row[1]}`"
+                failures.append(
+                    f"capability `{cap_id}` is on under pico's `{flag}`, whose row here is {got}, "
+                    f"not `maps`"
+                )
     mapped_to: dict[str, set[str]] = {}
     for switch, cls, anchor, _ in rows:
         if cls == "maps" and anchor and anchor.startswith("wz-capi-pico/"):
             mapped_to.setdefault(anchor.split("/", 1)[1], set()).add(switch)
     for cap_id, switches in sorted(mapped_to.items()):
-        flag = caps.get(cap_id, {}).get("pico_flag")
-        if cap_id in caps and flag not in switches:
+        if cap_id in caps and not switches & set(pico_switches_of(caps[cap_id])):
             failures.append(
-                f"zenoh-pico: {sorted(switches)} map to capability `{cap_id}`, whose pico_flag "
-                f"is `{flag}` -- one fact written two ways"
+                f"zenoh-pico: {sorted(switches)} map to capability `{cap_id}`, which names "
+                f"{pico_switches_of(caps[cap_id]) or 'no pico switch'} -- one fact written two ways"
             )
     return failures
 
@@ -364,6 +391,14 @@ def declaration_arm(rows: tuple[tuple[str, str, str | None, str], ...], decl: di
 # ── the upstream arms ───────────────────────────────────────────────────────
 
 PICO_SWITCH = re.compile(r"\b(?:set|option)\(\s*(Z_FEATURE_[A-Z0-9_]+)\b")
+# A switch's default is its FIRST definition at the start of a line: `set(<name> 0|1 CACHE ...)`
+# or `option(<name> "<help>" ON|OFF)`. The later definitions are `FORCE`d inside conditionals
+# (a platform without the facility, a switch another one needs), not the default.
+PICO_DEFAULT = re.compile(
+    r'^(?:set\(\s*(Z_FEATURE_[A-Z0-9_]+)\s+([01])\s+CACHE\b'
+    r'|option\(\s*(Z_FEATURE_[A-Z0-9_]+)\s+"[^"]*"\s+(ON|OFF)\s*\))',
+    re.MULTILINE,
+)
 
 
 def pico_switches(source: Path) -> tuple[str, set[str]]:
@@ -381,12 +416,62 @@ def pico_switches(source: Path) -> tuple[str, set[str]]:
     return version_file.read_text().strip(), switches
 
 
+def pico_defaults(source: Path) -> dict[str, bool]:
+    """Each switch of a zenoh-pico CMakeLists to whether its default build has it on."""
+    out: dict[str, bool] = {}
+    text = (source / "CMakeLists.txt").read_text(errors="replace")
+    for m in PICO_DEFAULT.finditer(text):
+        name = m.group(1) or m.group(3)
+        out.setdefault(name, (m.group(2) or m.group(4)) in ("1", "ON"))
+    return out
+
+
+def upstream_default_arm(original: str, decl: dict, expected: dict[str, bool]) -> list[str]:
+    """Does each capability's declared default for `original` equal what the original's own
+    default build has? `expected` maps a capability id to the value the pinned source gives."""
+    failures: list[str] = []
+    for cap_id, want in sorted(expected.items()):
+        got = wz_config.upstream_default(decl["caps"][cap_id], original)
+        if got is None:
+            failures.append(f"capability `{cap_id}` states no default for {original}, whose "
+                            f"default build has it {'on' if want else 'off'}")
+        elif got != want:
+            failures.append(f"capability `{cap_id}` is declared {'on' if got else 'off'} in "
+                            f"{original}'s default build, and the pinned source has it "
+                            f"{'on' if want else 'off'}")
+    return failures
+
+
+def pico_expected(decl: dict, defaults: dict[str, bool]) -> dict[str, bool]:
+    """The capabilities zenoh-pico has a switch for, to the value its defaults give: on when
+    every switch the capability names is on."""
+    out: dict[str, bool] = {}
+    for cap_id, cap in decl["caps"].items():
+        flags = pico_switches_of(cap)
+        if flags:
+            out[cap_id] = all(defaults.get(f, False) for f in flags)
+    return out
+
+
+def zenoh_c_expected(decl: dict, rows, default_features: set[str]) -> dict[str, bool]:
+    """The capabilities a zenoh-c `maps` row reaches (`wz-capi-c/<capability>`), to whether that
+    zenoh-c feature is in its `default`."""
+    out: dict[str, bool] = {}
+    for switch, cls, anchor, _ in rows:
+        if cls == "maps" and anchor and anchor.startswith("wz-capi-c/"):
+            cap_id = anchor.split("/", 1)[1]
+            if cap_id in decl["caps"]:
+                out[cap_id] = switch in default_features
+    return out
+
+
 def zenoh_c_source() -> Path:
     return Path(os.environ.get("WZ_ZENOH_C_REF", Path.home() / "zenoh-c-ref"))
 
 
-def zenoh_c_switches(source: Path) -> tuple[str, set[str], dict[str, str]]:
-    """(version, capability features, {derived feature: why}) of a zenoh-c checkout."""
+def zenoh_c_switches(source: Path) -> tuple[str, set[str], dict[str, str], set[str]]:
+    """(version, capability features, {derived feature: why}, default features) of a zenoh-c
+    checkout."""
     injected = os.environ.get("WZ_ZENOH_C_METADATA")
     if injected:
         try:
@@ -415,7 +500,7 @@ def zenoh_c_switches(source: Path) -> tuple[str, set[str], dict[str, str]]:
             derived[name] = "cargo's `default` aggregate"
         elif name in optional and body == [f"dep:{name}"]:
             derived[name] = f"cargo's implicit feature for the optional dependency `{name}`"
-    return pkg.get("version", ""), set(features) - set(derived), derived
+    return pkg.get("version", ""), set(features) - set(derived), derived, set(features.get("default", []))
 
 
 def upstream_arm(
@@ -477,10 +562,13 @@ def selftest() -> int:
         ("Z_FEATURE_LINK_BLUETOOTH", "never", None, "absent; open-debt item 1"),
         ("Z_FEATURE_BATCH_TX_MUTEX", "n/a", None, "a mutex strategy of the C implementation"),
     )
-    decl = {"capability": [
-        {"id": "link-udp", "pico_flag": "Z_FEATURE_LINK_UDP_UNICAST"},
-        {"id": "query", "pico_flag": "Z_FEATURE_QUERY"},
-    ]}
+    # The shape `wz_config.load_decl()` returns, which is what main() passes: a fixture of any
+    # other shape let the declaration arm grade nothing in the real run while its cases passed.
+    decl = {"caps": {
+        "link-udp": {"id": "link-udp", "pico_flag": "Z_FEATURE_LINK_UDP_UNICAST",
+                     "upstream_on": ["zenoh-pico"]},
+        "query": {"id": "query", "pico_flag": "Z_FEATURE_QUERY", "upstream_off": ["zenoh-pico"]},
+    }}
     switches = {r[0] for r in control}
 
     def swap(i: int, row: tuple) -> tuple:
@@ -514,16 +602,48 @@ def selftest() -> int:
         ("a pico_flag with no maps row fails",
          swap(1, ("Z_FEATURE_QUERY", "never", None, "open-debt item 1")), decl, False),
         ("a maps row to a capability with another pico_flag fails", control,
-         {"capability": [{"id": "link-udp", "pico_flag": "Z_FEATURE_LINK_UDP_UNICAST"},
-                         {"id": "query", "pico_flag": "Z_FEATURE_QUERYABLE"}]}, False),
+         {"caps": {"link-udp": {"id": "link-udp", "pico_flag": "Z_FEATURE_LINK_UDP_UNICAST"},
+                   "query": {"id": "query", "pico_flag": "Z_FEATURE_QUERYABLE"}}}, False),
         ("two switches mapping to one capability agree when one is its pico_flag",
          control + (("Z_FEATURE_LOCAL_QUERY", "maps", "wz-capi-pico/query", "x"),), decl, True),
+        ("a capability on under several switches agrees when each has a maps row",
+         control, {"caps": {**decl["caps"], "both": {
+             "id": "both", "pico_flags_all": ["Z_FEATURE_LINK_UDP_UNICAST", "Z_FEATURE_QUERY"]}}},
+         True),
+        ("a capability on under a switch whose row is not maps fails",
+         control, {"caps": {**decl["caps"], "both": {
+             "id": "both", "pico_flags_all": ["Z_FEATURE_QUERY", "Z_FEATURE_BATCH_TX_MUTEX"]}}},
+         False),
     ]
     for label, rows, d, want_ok in decl_cases:
         got_ok = not declaration_arm(rows, d)
         if got_ok != want_ok:
             print(f"  selftest FAIL [{label}]: expected {'pass' if want_ok else 'FAIL'}", file=sys.stderr)
             return 1
+
+    # An original's defaults: link-udp is declared on and query off in zenoh-pico.
+    default_cases: list[tuple[str, dict[str, bool], bool]] = [
+        ("defaults that agree pass", {"link-udp": True, "query": False}, True),
+        ("a capability declared on that the original leaves off fails", {"link-udp": False}, False),
+        ("a capability declared off that the original turns on fails", {"query": True}, False),
+    ]
+    for label, expected, want_ok in default_cases:
+        got_ok = not upstream_default_arm("zenoh-pico", decl, expected)
+        if got_ok != want_ok:
+            print(f"  selftest FAIL [{label}]: expected {'pass' if want_ok else 'FAIL'}", file=sys.stderr)
+            return 1
+    if upstream_default_arm("zenoh-c", decl, {"query": True}) == []:
+        print("  selftest FAIL [an original a capability states nothing for]: ACCEPTED", file=sys.stderr)
+        return 1
+    mapped = zenoh_c_expected(
+        {"caps": {"link-udp": {}, "query": {}}},
+        (("transport_udp", "maps", "wz-capi-c/link-udp", "x"), ("stats", "maps", "wz-capi-c/stats", "x"),
+         ("transport_tcp", "always", "crates/x", "x")),
+        {"transport_udp"},
+    )
+    if mapped != {"link-udp": True}:
+        print(f"  selftest FAIL [the zenoh-c expectation]: {mapped}", file=sys.stderr)
+        return 1
 
     up_cases: list[tuple[str, str, str | None, set[str], bool]] = [
         ("the faithful upstream passes", "1.0.0", "1.0.0", switches, True),
@@ -544,11 +664,18 @@ def selftest() -> int:
         (src / "version.txt").write_text("1.0.0\n")
         (src / "CMakeLists.txt").write_text(
             'set(Z_FEATURE_QUERY 1 CACHE STRING "q")\noption(Z_FEATURE_LINK_TCP "t" ON)\n'
+            'set(Z_FEATURE_RX_CACHE 0 CACHE STRING "r")\n'
             "# Z_FEATURE_COMMENTED is not a definition\n"
+            'if(NOT Z_FEATURE_LINK_TCP)\n  set(Z_FEATURE_QUERY 0 CACHE STRING "q" FORCE)\nendif()\n'
         )
         version, found = pico_switches(src)
-        if version != "1.0.0" or found != {"Z_FEATURE_QUERY", "Z_FEATURE_LINK_TCP"}:
+        if version != "1.0.0" or found != {"Z_FEATURE_QUERY", "Z_FEATURE_LINK_TCP", "Z_FEATURE_RX_CACHE"}:
             print(f"  selftest FAIL [the pico reader]: read {version} {sorted(found)}", file=sys.stderr)
+            return 1
+        defaults = pico_defaults(src)
+        if defaults != {"Z_FEATURE_QUERY": True, "Z_FEATURE_LINK_TCP": True, "Z_FEATURE_RX_CACHE": False}:
+            print(f"  selftest FAIL [the pico default reader, a FORCE inside a branch is not the "
+                  f"default]: {defaults}", file=sys.stderr)
             return 1
         (src / "CMakeLists.txt").write_text("project(x)\n")
         try:
@@ -567,11 +694,12 @@ def selftest() -> int:
         }]}))
         os.environ["WZ_ZENOH_C_METADATA"] = str(meta)
         try:
-            version, caps, derived = zenoh_c_switches(src)
+            version, caps, derived, default_features = zenoh_c_switches(src)
         finally:
             os.environ.pop("WZ_ZENOH_C_METADATA", None)
-        if caps != {"a", "b"} or set(derived) != {"default", "zenoh-ext"}:
-            print(f"  selftest FAIL [the zenoh-c reader]: {sorted(caps)} {sorted(derived)}", file=sys.stderr)
+        if caps != {"a", "b"} or set(derived) != {"default", "zenoh-ext"} or default_features != {"a"}:
+            print(f"  selftest FAIL [the zenoh-c reader]: {sorted(caps)} {sorted(derived)} "
+                  f"{sorted(default_features)}", file=sys.stderr)
             return 1
         for label, text in (("an empty file", ""), ("JSON with no packages", '{"x": 1}'),
                             ("packages that is not an array", '{"packages": {}}'),
@@ -593,7 +721,7 @@ def selftest() -> int:
 
     print(
         f"  upstream-switch-map: selftest {len(shape_cases)} shape + {len(decl_cases)} declaration "
-        f"+ {len(up_cases)} upstream case(s) and the two readers pass"
+        f"+ {len(default_cases) + 2} default + {len(up_cases)} upstream case(s) and the readers pass"
     )
     return 0
 
@@ -626,10 +754,14 @@ def main() -> int:
 
     try:
         if args.zenoh_c:
-            version, caps, derived = zenoh_c_switches(zenoh_c_source())
+            version, caps, derived, default_features = zenoh_c_switches(zenoh_c_source())
             for name, why in sorted(derived.items()):
                 print(f"    zenoh-c not a switch: {name} -- {why}")
             failures += upstream_arm("zenoh-c", ZENOH_C_ROWS, version, pinned["zenoh-c"], caps)
+            expected = zenoh_c_expected(decl, ZENOH_C_ROWS, default_features)
+            failures += upstream_default_arm("zenoh-c", decl, expected)
+            print(f"    zenoh-c defaults: {len(expected)} capability default(s) held to its "
+                  f"`default` features")
             print(
                 "    -- zenoh-pico upstream arm DEFERRED: the default run grades it, in a lane "
                 "whose checkout carries the submodule's tags."
@@ -637,6 +769,12 @@ def main() -> int:
         else:
             version, switches = pico_switches(PICO_SOURCE)
             failures += upstream_arm("zenoh-pico", PICO_ROWS, version, pinned["zenoh-pico"], switches)
+            expected = pico_expected(decl, pico_defaults(PICO_SOURCE))
+            failures += upstream_default_arm("zenoh-pico", decl, expected)
+            unswitched = sorted(cid for cid, cap in decl["caps"].items()
+                                if "zenoh-pico" in wz_config.upstream_families(cap) and cid not in expected)
+            print(f"    zenoh-pico defaults: {len(expected)} capability default(s) held to its "
+                  f"CMakeLists; judged with no pico switch: {', '.join(unswitched) or 'none'}")
             print(
                 "    -- zenoh-c upstream arm DEFERRED: run with --zenoh-c where the pinned "
                 "zenoh-c checkout is provisioned. Without it, a switch zenoh-c GREW cannot be seen."

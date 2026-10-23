@@ -360,6 +360,7 @@ def validate_caps(data: dict) -> list[str]:
         for flag in [c.get("pico_flag", "Z_FEATURE_")] + c.get("pico_flags_all", []):
             if not flag.startswith("Z_FEATURE_"):
                 out.append(f"{c['id']}: pico switch `{flag}` is not Z_FEATURE_*")
+        out += validate_upstream_defaults(c)
     # A dependency cycle would make the closure below loop.
     for start in caps:
         seen: set[str] = set()
@@ -372,6 +373,47 @@ def validate_caps(data: dict) -> list[str]:
             if cur not in seen:
                 seen.add(cur)
                 stack.extend(d for d in caps[cur]["implies"] if d in caps)
+    return out
+
+
+def upstream_families(cap: dict) -> set[str]:
+    """The originals a capability is judged against: zenoh-pico where the pico ABI exports it,
+    zenoh-c and zenoh where the zenoh-c ABI does. A capability of the pico ABI alone (pico's
+    header arms, its admin space) has no counterpart switch in the other two."""
+    out: set[str] = set()
+    if "pico" in cap.get("abis", []):
+        out.add("zenoh-pico")
+    if "c" in cap.get("abis", []):
+        out |= {"zenoh-c", "zenoh"}
+    return out
+
+
+def upstream_default(cap: dict, family: str) -> bool | None:
+    """Whether `family`'s own default build has the capability; None where it is not judged."""
+    if family in cap.get("upstream_on", []):
+        return True
+    if family in cap.get("upstream_off", []):
+        return False
+    return None
+
+
+def validate_upstream_defaults(cap: dict) -> list[str]:
+    out: list[str] = []
+    on, off = cap.get("upstream_on", []), cap.get("upstream_off", [])
+    for key, value in (("upstream_on", on), ("upstream_off", off)):
+        if not isinstance(value, list):
+            out.append(f"{cap['id']}: `{key}` is not an array of originals")
+            return out
+        for family in value:
+            if family not in BASE_ABI:
+                out.append(f"{cap['id']}: `{key}` names `{family}`, which is none of {sorted(BASE_ABI)}")
+    both = set(on) & set(off)
+    if both:
+        out.append(f"{cap['id']}: {sorted(both)} is in both upstream_on and upstream_off")
+    stated, want = set(on) | set(off), upstream_families(cap)
+    if stated != want:
+        out.append(f"{cap['id']}: its ABIs make it judged against {sorted(want)}, "
+                   f"and upstream_on/upstream_off state {sorted(stated)}")
     return out
 
 
@@ -1051,6 +1093,7 @@ c = []
 id = "a"
 kconfig = "WZ_CAP_A"
 abis = ["core", "pico"]
+upstream_on = ["zenoh-pico"]
 implies = []
 help = "A."
 
@@ -1264,6 +1307,22 @@ def cmd_selftest() -> int:
     two_para = SAMPLE.replace("A table.\n'''", "A table.\n\nMore.\n'''")
     expect("a limit help of two paragraphs is refused",
            any("paragraph" in p for p in validate_decl(read_decl_toml(two_para))))
+    def caps_refused(old: str, new: str, words: str) -> bool:
+        return any(words in p for p in validate_decl(read_decl_toml(SAMPLE.replace(old, new))))
+
+    expect("a capability that states no default for an original its ABIs reach is refused",
+           caps_refused('upstream_on = ["zenoh-pico"]\n', "", "judged against ['zenoh-pico']"))
+    expect("a capability stating an original its ABIs do not reach is refused",
+           caps_refused('upstream_on = ["zenoh-pico"]', 'upstream_on = ["zenoh-pico", "zenoh-c"]',
+                        "judged against"))
+    expect("an original in both upstream_on and upstream_off is refused",
+           caps_refused('upstream_on = ["zenoh-pico"]',
+                        'upstream_on = ["zenoh-pico"]\nupstream_off = ["zenoh-pico"]', "in both"))
+    expect("an unknown original is refused",
+           caps_refused('upstream_on = ["zenoh-pico"]', 'upstream_on = ["pico"]', "none of"))
+    expect("the shipped declaration judges every capability against exactly its originals",
+           all(upstream_default(c, f) is not None for c in caps.values()
+               for f in upstream_families(c)))
     expect("a declaration of another schema is refused",
            any("schema_version" in p for p in validate_decl(read_decl_toml(
                SAMPLE.replace("schema_version = 1", "schema_version = 2")))))

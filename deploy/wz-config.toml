@@ -38,6 +38,15 @@
 # pico has no switch of its own for but has whenever several switches are all on (the liveliness
 # get, which pico declares inside both the liveliness and the query switch).
 #
+# `upstream_on` and `upstream_off` say what each upstream original's own default build has
+# (docs/build-configuration.md, C2 and step 2): the originals are `zenoh`, `zenoh-c` and
+# `zenoh-pico`. A capability names `zenoh-pico` when the pico ABI exports it, and `zenoh-c` and
+# `zenoh` when the zenoh-c ABI does, in exactly one of the two keys. These are not `default`:
+# `default` is the drop-in's own default, which keeps what the reference builds turn on, while
+# an original's defaults reach a build only through that original's defconfig. zenoh-pico's
+# values are held to its CMakeLists at the pin and zenoh-c's to its default cargo features by
+# `upstream_switch_map.py`. A wz-own door (no upstream counterpart) is off in every original.
+#
 # `base` is what an ABI build needs that is not a capability.
 #
 # ## Limits
@@ -71,6 +80,7 @@ c = []
 [[capability]]
 id = "link-udp"
 kconfig = "WZ_CAP_LINK_UDP"
+upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 pico_flag = "Z_FEATURE_LINK_UDP_UNICAST"
 implies = []
@@ -79,6 +89,7 @@ help = "A udp/ endpoint to dial, and the transport the scouting group rides."
 [[capability]]
 id = "timestamping"
 kconfig = "WZ_CAP_TIMESTAMPING"
+upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "The node clock a role that stamps its messages holds (zenoh's router does by default)."
@@ -86,6 +97,7 @@ help = "The node clock a role that stamps its messages holds (zenoh's router doe
 [[capability]]
 id = "scout"
 kconfig = "WZ_CAP_SCOUT"
+upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 pico_flag = "Z_FEATURE_SCOUTING"
 implies = ["link-udp"]
@@ -94,6 +106,7 @@ help = "z_scout, the hello family, and a client finding its router by scouting."
 [[capability]]
 id = "peer"
 kconfig = "WZ_CAP_PEER"
+upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 pico_flag = "Z_FEATURE_UNICAST_PEER"
 implies = ["scout"]
@@ -105,6 +118,7 @@ help = "A listener, a router or a peer: the roles beyond the client. Off, z_open
 [[capability]]
 id = "multicast-transport"
 kconfig = "WZ_CAP_MULTICAST_TRANSPORT"
+upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 pico_flags_all = ["Z_FEATURE_MULTICAST_TRANSPORT", "Z_FEATURE_LINK_UDP_MULTICAST"]
 implies = ["link-udp", "peer"]
@@ -116,6 +130,7 @@ help = "A UDP multicast group a peer joins: one transport to every member of the
 [[capability]]
 id = "multicast-declarations"
 kconfig = "WZ_CAP_MULTICAST_DECLARATIONS"
+upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 pico_flag = "Z_FEATURE_MULTICAST_DECLARATIONS"
 default = "off"
@@ -127,6 +142,7 @@ help = "pico's multicast declarations: interests, keyexpr declarations and the w
 [[capability]]
 id = "raweth-transport"
 kconfig = "WZ_CAP_RAWETH_TRANSPORT"
+upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 pico_flag = "Z_FEATURE_RAWETH_TRANSPORT"
 default = "off"
@@ -136,6 +152,7 @@ help = "pico's raw Ethernet transport: a group over L2 frames on one interface (
 [[capability]]
 id = "query"
 kconfig = "WZ_CAP_QUERY"
+upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 pico_flag = "Z_FEATURE_QUERY"
 implies = []
@@ -144,6 +161,7 @@ help = "z_get and the querier: the requesting end of a query."
 [[capability]]
 id = "queryable"
 kconfig = "WZ_CAP_QUERYABLE"
+upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 pico_flag = "Z_FEATURE_QUERYABLE"
 implies = []
@@ -152,6 +170,7 @@ help = "z_declare_queryable and the replies: the answering end of a query."
 [[capability]]
 id = "liveliness"
 kconfig = "WZ_CAP_LIVELINESS"
+upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 pico_flag = "Z_FEATURE_LIVELINESS"
 implies = []
@@ -160,6 +179,7 @@ help = "The liveliness token and subscriber."
 [[capability]]
 id = "liveliness-get"
 kconfig = "WZ_CAP_LIVELINESS_GET"
+upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 pico_flags_all = ["Z_FEATURE_LIVELINESS", "Z_FEATURE_QUERY"]
 implies = ["liveliness", "query"]
@@ -168,6 +188,7 @@ help = "The snapshot get of the liveliness plane; it is a query."
 [[capability]]
 id = "advanced"
 kconfig = "WZ_CAP_ADVANCED"
+upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 pico_flag = "Z_FEATURE_ADVANCED_PUBLICATION"
 implies = ["liveliness", "queryable", "timestamping", "unstable-api"]
@@ -176,6 +197,7 @@ help = "The advanced publisher and subscriber (cache, history, miss detection)."
 [[capability]]
 id = "group"
 kconfig = "WZ_CAP_GROUP"
+upstream_off = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "zenoh-ext group membership."
@@ -183,6 +205,8 @@ help = "zenoh-ext group membership."
 [[capability]]
 id = "gossip"
 kconfig = "WZ_CAP_GOSSIP"
+upstream_on = ["zenoh", "zenoh-c"]
+upstream_off = ["zenoh-pico"]
 abis = ["core", "pico", "c"]
 implies = ["peer"]
 help = "A session told of a node by one it holds a link to dials it."
@@ -196,6 +220,7 @@ help = "A session told of a node by one it holds a link to dials it."
 [[capability]]
 id = "unstable-api"
 kconfig = "WZ_CAP_UNSTABLE_API"
+upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 pico_flag = "Z_FEATURE_UNSTABLE_API"
 implies = []
@@ -206,6 +231,7 @@ help = "pico's unstable API: entity ids, reliability, source info, the cancellat
 [[capability]]
 id = "connectivity"
 kconfig = "WZ_CAP_CONNECTIVITY"
+upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 pico_flag = "Z_FEATURE_CONNECTIVITY"
 implies = ["unstable-api"]
@@ -218,6 +244,7 @@ help = "pico's connectivity plane: transport and link snapshots, and their event
 [[capability]]
 id = "admin-space"
 kconfig = "WZ_CAP_ADMIN_SPACE"
+upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 pico_flag = "Z_FEATURE_ADMIN_SPACE"
 default = "off"
@@ -233,6 +260,7 @@ help = "pico's admin space: zp_start_admin_space, zp_stop_admin_space and the @/
 [[capability]]
 id = "local-subscriber"
 kconfig = "WZ_CAP_LOCAL_SUBSCRIBER"
+upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 pico_flag = "Z_FEATURE_LOCAL_SUBSCRIBER"
 default = "off"
@@ -242,6 +270,7 @@ help = "pico's session-local subscriptions: a session's own put reaches its own 
 [[capability]]
 id = "local-queryable"
 kconfig = "WZ_CAP_LOCAL_QUERYABLE"
+upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 pico_flag = "Z_FEATURE_LOCAL_QUERYABLE"
 default = "off"
@@ -258,6 +287,7 @@ help = "pico's session-local queryables: a session's own get reaches its own que
 [[capability]]
 id = "multi-thread"
 kconfig = "WZ_CAP_MULTI_THREAD"
+upstream_on = ["zenoh-pico"]
 abis = ["core", "pico"]
 pico_flag = "Z_FEATURE_MULTI_THREAD"
 implies = []
@@ -272,6 +302,7 @@ help = "pico's multi-threaded C ABI (task doors, host sync, blocking channels); 
 [[capability]]
 id = "transport_tls"
 kconfig = "WZ_CAP_TRANSPORT_TLS"
+upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "The tls/ link, dial and accept, with the certificate material of transport/link/tls."
@@ -279,6 +310,7 @@ help = "The tls/ link, dial and accept, with the certificate material of transpo
 [[capability]]
 id = "transport_quic"
 kconfig = "WZ_CAP_TRANSPORT_QUIC"
+upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "The quic/ link, dial and accept, with the certificate material of transport/link/tls."
@@ -286,6 +318,7 @@ help = "The quic/ link, dial and accept, with the certificate material of transp
 [[capability]]
 id = "transport_quic_datagram"
 kconfig = "WZ_CAP_TRANSPORT_QUIC_DATAGRAM"
+upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = ["transport_quic"]
 help = "The quic-datagram/ link, over the quic link's connection and certificate material."
@@ -293,6 +326,7 @@ help = "The quic-datagram/ link, over the quic link's connection and certificate
 [[capability]]
 id = "transport_ws"
 kconfig = "WZ_CAP_TRANSPORT_WS"
+upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "The ws/ link, dial and accept."
@@ -300,6 +334,7 @@ help = "The ws/ link, dial and accept."
 [[capability]]
 id = "transport_unixsock-stream"
 kconfig = "WZ_CAP_TRANSPORT_UNIXSOCK_STREAM"
+upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "The unixsock-stream/ link, dial and accept, on a Unix target."
@@ -307,6 +342,7 @@ help = "The unixsock-stream/ link, dial and accept, on a Unix target."
 [[capability]]
 id = "transport_multilink"
 kconfig = "WZ_CAP_TRANSPORT_MULTILINK"
+upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "The multilink establishment extension."
@@ -314,6 +350,7 @@ help = "The multilink establishment extension."
 [[capability]]
 id = "auth_pubkey"
 kconfig = "WZ_CAP_AUTH_PUBKEY"
+upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "The public-key handshake, from the RSA identity of transport/auth/pubkey."
@@ -321,6 +358,7 @@ help = "The public-key handshake, from the RSA identity of transport/auth/pubkey
 [[capability]]
 id = "e2e-sender"
 kconfig = "WZ_CAP_E2E_SENDER"
+upstream_off = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "The sending side of an end-to-end protected message (wz_capi_c_e2e_sender_*, wz-own doors) and the frame writer behind it."
@@ -328,6 +366,7 @@ help = "The sending side of an end-to-end protected message (wz_capi_c_e2e_sende
 [[capability]]
 id = "transport_compression"
 kconfig = "WZ_CAP_TRANSPORT_COMPRESSION"
+upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "The batch compression extension: a session offers it and accepts a compressed batch."
@@ -335,6 +374,7 @@ help = "The batch compression extension: a session offers it and accepts a compr
 [[capability]]
 id = "auth_usrpwd"
 kconfig = "WZ_CAP_AUTH_USRPWD"
+upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "The user/password handshake method, and the credential check of a listener that names a dictionary file."
@@ -342,6 +382,7 @@ help = "The user/password handshake method, and the credential check of a listen
 [[capability]]
 id = "interceptors"
 kconfig = "WZ_CAP_INTERCEPTORS"
+upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "The traffic policy a node's config states: access_control, low_pass_filter and downsampling, enforced on every face."
