@@ -280542,6 +280542,50 @@
         "Step 3 of the size-gap structure, the pico C ABI as a thin facade over the cooperative engine (no_std, panic=abort), is not started: it needs the owner's ruling on the threading model of the C facade and coordination with the session that owns the runtime axis. lwIP and Zephyr have no stream socket yet; each refuses tcp/ by name until one is written against StreamSocket. Read the hosted run of this push at the start of the next round."
       ]
     },
+    "Round 3479": {
+      "decision_summary": "Step 4a of open-debt item 924, with the plan reordered on what the code showed. The folds that walk a capture in packet order took one Vec of references to every row and sorted it, which a list that decodes a row on demand cannot serve without decoding the whole capture at once; and step 4 does not need step 3 first, since a stream row's bytes are still in the reassembled stream. So rows are now handed out as Row, a reference that can later own a frame decoded for its reader, and Dissection's capture-order walk sorts keys (packet, list, position) and resolves each row as the walk reaches it. MessageBytes and the live handle's reassembled bytes carry Cow, owned where the bytes live in the decoded frame. No behaviour moves: every fields document and the census over the consumer generator's 40k and 409k captures hash the same as before, with the same walk work. The producer lint learned that a field borrowing a list is a view and not a producer.",
+      "changes_bullets": [
+        "wz-session-core passive_messages.rs: Row and RowIter; get, first, iter and rows_from hand out Row; MessageList::row replaces Index and IndexMut",
+        "wz-capture: CaptureOrder (keys plus the lists, flow per list) from message_frames_in_capture_order and capture_order_since; planes, fields walk, node census, selection and selected packets read Row; MessageBytes::Retained is Cow; wz-capi-dissect resolve returns Row and ReassembledBytes::Joined is Cow; wz-analyze, wz-integration-tests and wz-runtime-tokio callers follow",
+        "scripts/lib/message_producer_lint.py holds_a_list with a selftest run in Layer C0; docs/dissect-row-index.md reordered to 4a, 4b, 3, 4c, 5 with 4a marked landed"
+      ],
+      "verification_bullets": [
+        "Output equivalence through LiveDissection against a build of origin 270780967: FNV-1a over every fields_since_windowed(8192) document and the census, 93d8563ae992c893 both at 40k packets and 597f6bfe96ebb705 both at 409k; FieldsStats equal (50 resumed, 1 restart, 409,064 walked)",
+        "cargo test: wz-session-core 1222, wz-capture 1559 and 1003 at no-default-features, wz-capi-dissect and wz-analyze 367, 0 failed; cargo check --workspace --all-targets green",
+        "clippy -D warnings: wz-session-core, wz-capture (both feature sets), wz-capi-dissect, wz-analyze, wz-integration-tests, wz-session-mcu slot profile",
+        "Layer C0 green (message-producer selftest 12 cases, lint OK 5 lists); C1bz for the four crates; discard_site_lint OK; accessor_reach_census ok after CaptureOrder kept no len or is_empty; guarded_count_gate 22 of 22"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 4b of docs/dissect-row-index.md: stream rows become index entries with sparse facts, decoded again on demand under a bounded cache from the reassembled stream; the step where resident memory falls, measured on the consumer generator's 409k and 1.39M captures",
+        "Key computation in the capture-order walk still reads each row; under 4b it must read the index fields only, or the walk decodes every row once per call"
+      ],
+      "publishable_decision_summary": "Step 4a of open-debt item 924, with the plan reordered on what the code showed. The folds that walk a capture in packet order took one Vec of references to every row and sorted it, which a list that decodes a row on demand cannot serve without decoding the whole capture at once; and step 4 does not need step 3 first, since a stream row's bytes are still in the reassembled stream. So rows are now handed out as Row, a reference that can later own a frame decoded for its reader, and Dissection's capture-order walk sorts keys (packet, list, position) and resolves each row as the walk reaches it. MessageBytes and the live handle's reassembled bytes carry Cow, owned where the bytes live in the decoded frame. No behaviour moves: every fields document and the census over the consumer generator's 40k and 409k captures hash the same as before, with the same walk work. The producer lint learned that a field borrowing a list is a view and not a producer.",
+      "publishable_changes_bullets": [
+        "wz-session-core passive_messages.rs: Row and RowIter; get, first, iter and rows_from hand out Row; MessageList::row replaces Index and IndexMut",
+        "wz-capture: CaptureOrder (keys plus the lists, flow per list) from message_frames_in_capture_order and capture_order_since; planes, fields walk, node census, selection and selected packets read Row; MessageBytes::Retained is Cow; wz-capi-dissect resolve returns Row and ReassembledBytes::Joined is Cow; wz-analyze, wz-integration-tests and wz-runtime-tokio callers follow",
+        "scripts/lib/message_producer_lint.py holds_a_list with a selftest run in Layer C0; docs/dissect-row-index.md reordered to 4a, 4b, 3, 4c, 5 with 4a marked landed"
+      ],
+      "publishable_verification_bullets": [
+        "Output equivalence through LiveDissection against a build of origin 270780967: FNV-1a over every fields_since_windowed(8192) document and the census, 93d8563ae992c893 both at 40k packets and 597f6bfe96ebb705 both at 409k; FieldsStats equal (50 resumed, 1 restart, 409,064 walked)",
+        "cargo test: wz-session-core 1222, wz-capture 1559 and 1003 at no-default-features, wz-capi-dissect and wz-analyze 367, 0 failed; cargo check --workspace --all-targets green",
+        "clippy -D warnings: wz-session-core, wz-capture (both feature sets), wz-capi-dissect, wz-analyze, wz-integration-tests, wz-session-mcu slot profile",
+        "Layer C0 green (message-producer selftest 12 cases, lint OK 5 lists); C1bz for the four crates; discard_site_lint OK; accessor_reach_census ok after CaptureOrder kept no len or is_empty; guarded_count_gate 22 of 22"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 4b of docs/dissect-row-index.md: stream rows become index entries with sparse facts, decoded again on demand under a bounded cache from the reassembled stream; the step where resident memory falls, measured on the consumer generator's 409k and 1.39M captures",
+        "Key computation in the capture-order walk still reads each row; under 4b it must read the index fields only, or the walk decodes every row once per call"
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
