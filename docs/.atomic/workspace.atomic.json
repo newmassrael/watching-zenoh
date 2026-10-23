@@ -279726,6 +279726,42 @@
         "The kit's flash cost of the shared node (456 B) was not split by symbol."
       ]
     },
+    "Round 3461": {
+      "decision_summary": "A consumer claim from the analyzer session: a protobuf body read by a schema showed a nested message field as one len row with no fields under it, because the message's own bytes were all printable and the schema-less walk reads printable bytes as a string. The walk now takes the declarations' word where it has one: a field the declarations name fields under is read as a message first, and falls back to the text rule only when its bytes are not a message. The declarations are the ones declarations_from_proto already writes, so no new input. A field nothing is declared under reads as before, so the text-wins rule for a bare walk is unchanged.",
+      "changes_bullets": [
+        "wz-capture (68f673924): MessagePaths and PayloadFormat::decode_declared (default is decode); FormatMap and Declarations gain declares_under, which does not mark a declaration applied; Protobuf and the end-to-end body format override decode_declared; decode_payload passes the paths for the resolved keyexpr; the walk tries a declared path as a message before the text rule.",
+        "run-ci C1bn pins the three new tests by name in the dissect arm."
+      ],
+      "verification_bullets": [
+        "On a build machine, on the tree rebased on Round 3460: wz-capture lib tests with dissect and network-codecs 1548 passed, including the claim's own 126-byte body read through declarations_from_proto and decode_payload (position at depth 0, x_cm, y_cm and frame at depth 1, all named) and two walk tests (printable declared message walked; a declared field that is not a message, or is text, falls back); the same lib without default features 1001 passed; clippy -D warnings rc 0 on both arms; rustdoc broken-link check rc 0; wz-capi-dissect tests 225 passed.",
+        "feature_public_surface_census --check, guarded_count_lattice_gate and hook_default_region_gate each rc 0. The consumer-visible door is unchanged in shape: no document revision moves."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding"
+      ],
+      "carry_forward_bullets": [
+        "The analyzer session pins the commit and reads the body again; its page sentence follows from the answer sent to it.",
+        "A message field the schema declares but whose bytes are ALSO a valid message of other fields is walked as the declared message, which is the declaration's reading; a bare walk with no declaration still reads printable bytes as text, because the wire format cannot tell them apart.",
+        "This round is not a milestone round: REMAINING is unchanged."
+      ],
+      "publishable_decision_summary": "A consumer claim from the analyzer session: a protobuf body read by a schema showed a nested message field as one len row with no fields under it, because the message's own bytes were all printable and the schema-less walk reads printable bytes as a string. The walk now takes the declarations' word where it has one: a field the declarations name fields under is read as a message first, and falls back to the text rule only when its bytes are not a message. The declarations are the ones declarations_from_proto already writes, so no new input. A field nothing is declared under reads as before, so the text-wins rule for a bare walk is unchanged.",
+      "publishable_changes_bullets": [
+        "wz-capture (68f673924): MessagePaths and PayloadFormat::decode_declared (default is decode); FormatMap and Declarations gain declares_under, which does not mark a declaration applied; Protobuf and the end-to-end body format override decode_declared; decode_payload passes the paths for the resolved keyexpr; the walk tries a declared path as a message before the text rule.",
+        "run-ci C1bn pins the three new tests by name in the dissect arm."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine, on the tree rebased on Round 3460: wz-capture lib tests with dissect and network-codecs 1548 passed, including the claim's own 126-byte body read through declarations_from_proto and decode_payload (position at depth 0, x_cm, y_cm and frame at depth 1, all named) and two walk tests (printable declared message walked; a declared field that is not a message, or is text, falls back); the same lib without default features 1001 passed; clippy -D warnings rc 0 on both arms; rustdoc broken-link check rc 0; wz-capi-dissect tests 225 passed.",
+        "feature_public_surface_census --check, guarded_count_lattice_gate and hook_default_region_gate each rc 0. The consumer-visible door is unchanged in shape: no document revision moves."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-19-encoding"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The analyzer session pins the commit and reads the body again; its page sentence follows from the answer sent to it.",
+        "A message field the schema declares but whose bytes are ALSO a valid message of other fields is walked as the declared message, which is the declaration's reading; a bare walk with no declaration still reads printable bytes as text, because the wire format cannot tell them apart.",
+        "This round is not a milestone round: REMAINING is unchanged."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
