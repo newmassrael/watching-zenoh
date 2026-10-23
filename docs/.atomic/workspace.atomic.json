@@ -278676,6 +278676,42 @@
         "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
       ]
     },
+    "Round 3437": {
+      "decision_summary": "The last job of the CI run that carried item 913 is red on Layer M, in the calibration leg of item 911's raweth scenario, where the real library's subscriber hears the real library's publisher. The subscriber printed all ten puts and then did not end with status 0 within the leg's 40 s. It ends by closing its session, and the real library's close joins its read task, which waits in recvfrom on a raw socket that has no receive timeout; once the publisher had put its ten and exited, a quiet runner sent no frame to release it. Upstream's scenario stops the publisher after ten as well and relies on the same frame arriving. The leg now gives the publisher no count, so it keeps putting until the subscriber has ended, and a failed leg says whether the subscriber exited and with what status, or was still running.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/pico_raweth_on_wz_capi.rs: the publisher of each leg runs with no -n; ended_well_within returns why a subscriber did not end well, and the leg's assertion prints it; the scenario's doc says why the publisher keeps putting.",
+        "docs/hosted-red-acks.md: the row for the Layer M red of run 39860923670."
+      ],
+      "verification_bullets": [
+        "Locally under sudo, against the real library built by the repository's script and wz's raweth library built with Layer M's features: all three legs pass, none skipped.",
+        "On a build host: clippy of wz-integration-tests with all targets is clean; rustfmt accepts the file.",
+        "The red was read from its job's log to its end; the subscriber's captured output holds all ten puts, and the publisher's holds all ten."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "carry_forward_bullets": [
+        "Read the CI and Platform runs of this push job by job; the CI run of 57b030403 is the first to carry every repair since item 913 landed.",
+        "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
+      ],
+      "publishable_decision_summary": "The last job of the CI run that carried item 913 is red on Layer M, in the calibration leg of item 911's raweth scenario, where the real library's subscriber hears the real library's publisher. The subscriber printed all ten puts and then did not end with status 0 within the leg's 40 s. It ends by closing its session, and the real library's close joins its read task, which waits in recvfrom on a raw socket that has no receive timeout; once the publisher had put its ten and exited, a quiet runner sent no frame to release it. Upstream's scenario stops the publisher after ten as well and relies on the same frame arriving. The leg now gives the publisher no count, so it keeps putting until the subscriber has ended, and a failed leg says whether the subscriber exited and with what status, or was still running.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/pico_raweth_on_wz_capi.rs: the publisher of each leg runs with no -n; ended_well_within returns why a subscriber did not end well, and the leg's assertion prints it; the scenario's doc says why the publisher keeps putting.",
+        "docs/hosted-red-acks.md: the row for the Layer M red of run 39860923670."
+      ],
+      "publishable_verification_bullets": [
+        "Locally under sudo, against the real library built by the repository's script and wz's raweth library built with Layer M's features: all three legs pass, none skipped.",
+        "On a build host: clippy of wz-integration-tests with all targets is clean; rustfmt accepts the file.",
+        "The red was read from its job's log to its end; the subscriber's captured output holds all ten puts, and the publisher's holds all ten."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the CI and Platform runs of this push job by job; the CI run of 57b030403 is the first to carry every repair since item 913 landed.",
+        "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
