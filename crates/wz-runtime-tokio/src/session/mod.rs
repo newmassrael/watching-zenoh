@@ -2977,32 +2977,35 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
         use wz_session_core::send_wire_error::SendWireError;
         let GroupKey { mapping_id, suffix } = key;
-        let declare = match what {
+        // Typed, and the last arm a value rather than a `return`: a build with none of the
+        // three kinds has that arm alone, and must still know what the match makes.
+        let declare: Result<wz_codecs::declare::DeclareOwned, SendWireError> = match what {
             #[cfg(feature = "declare-subscriber")]
             GroupDeclaration::Subscriber => {
                 wz_session_core::declare_build::build_declare_subscriber(id, mapping_id, suffix)
+                    .map_err(SendWireError::Codec)
             }
             #[cfg(feature = "declare-queryable")]
             GroupDeclaration::Queryable { complete } => {
-                wz_session_core::declare_build::build_declare_queryable(id, mapping_id, suffix).map(
-                    |mut declare| {
+                wz_session_core::declare_build::build_declare_queryable(id, mapping_id, suffix)
+                    .map(|mut declare| {
                         wz_session_core::declare_build::set_declare_queryable_info(
                             &mut declare,
                             wz_session_core::queryable_info::QueryableInfo::local(complete),
                         );
                         declare
-                    },
-                )
+                    })
+                    .map_err(SendWireError::Codec)
             }
             #[cfg(feature = "liveliness-token")]
             GroupDeclaration::Token => {
                 wz_session_core::declare_build::build_declare_token(id, mapping_id, suffix)
+                    .map_err(SendWireError::Codec)
             }
             #[allow(unreachable_patterns)]
-            _ => return Err(SendWireError::FeatureDisabled),
-        }
-        .map_err(SendWireError::Codec)?;
-        self.send_declare_to_group(declare)
+            _ => Err(SendWireError::FeatureDisabled),
+        };
+        self.send_declare_to_group(declare?)
     }
 
     /// Open-debt item 913 — retract the entity `what` the session announced: an `Undeclare` of
@@ -3018,30 +3021,33 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     ) -> Result<(), wz_session_core::send_wire_error::SendWireError> {
         use wz_session_core::send_wire_error::SendWireError;
         let (mapping_id, suffix) = (key.mapping_id, key.suffix.unwrap_or(""));
-        let declare = match what {
+        // Typed with a value for the last arm, for the reason `announce` states.
+        let declare: Result<wz_codecs::declare::DeclareOwned, SendWireError> = match what {
             #[cfg(feature = "declare-subscriber")]
             GroupDeclaration::Subscriber => {
                 wz_session_core::declare_build::build_undeclare_subscriber_on_wire(
                     id, mapping_id, suffix,
                 )
+                .map_err(SendWireError::Codec)
             }
             #[cfg(feature = "declare-queryable")]
             GroupDeclaration::Queryable { .. } => {
                 wz_session_core::declare_build::build_undeclare_queryable_on_wire(
                     id, mapping_id, suffix,
                 )
+                .map_err(SendWireError::Codec)
             }
             #[cfg(feature = "liveliness-token")]
             GroupDeclaration::Token => {
                 wz_session_core::declare_build::build_undeclare_token_on_wire(
                     id, mapping_id, suffix,
                 )
+                .map_err(SendWireError::Codec)
             }
             #[allow(unreachable_patterns)]
-            _ => return Err(SendWireError::FeatureDisabled),
-        }
-        .map_err(SendWireError::Codec)?;
-        self.send_declare_to_group(declare)
+            _ => Err(SendWireError::FeatureDisabled),
+        };
+        self.send_declare_to_group(declare?)
     }
 
     /// Open-debt item 913 — declare `keyexpr` to the group as `mapping_id`, as zenoh-pico
