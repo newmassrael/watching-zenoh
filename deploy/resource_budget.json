@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "images": {
+    "zephyr-client-fixed": {
+      "built_as": "the fixed-memory client of overlays/t2g_client_fixed.conf with the idle wait and batching off (main stack 9216 bytes)",
+      "static_chain_bytes": 6808,
+      "peak_stack_bytes": 5936,
+      "peak_stack_tolerance_bytes": 16,
+      "get_median_us": 399,
+      "get_median_tolerance_pct": 30,
+      "measured": "2026-10-23, the T2G kit (CYT4BF M7) on its own Ethernet to a zenohd on the bench host; the stack line is the same in 3 of 3 runs, the GET figure is the median of 6 medians (0.310 to 0.478 ms) of 2000 queries for each of the node's two documents",
+      "evidence": "docs/storage-policy-and-link-layer.md section 5.3"
+    },
+    "zephyr-client-fixed-batching": {
+      "built_as": "the fixed-memory client of overlays/t2g_client_batching.conf with one send window sent as one datagram, the idle wait off (main stack 10240 bytes)",
+      "static_chain_bytes": 7140,
+      "peak_stack_bytes": 5952,
+      "peak_stack_tolerance_bytes": 16,
+      "get_median_us": 351,
+      "get_median_tolerance_pct": 30,
+      "measured": "2026-10-23, the T2G kit (CYT4BF M7) on its own Ethernet to a zenohd on the bench host; the stack line is the same in 3 of 3 runs, the GET figure is the median of 6 medians (0.275 to 0.363 ms) of 2000 queries for each of the node's two documents",
+      "evidence": "docs/storage-policy-and-link-layer.md section 5.3"
+    }
+  }
+}

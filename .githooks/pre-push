@@ -985,6 +985,9 @@ round_fed_gates=(
     # source; a text read, no build. The frame check itself needs the linked ELF
     # and runs in Layer Q.
     "stack_frame_gate.py --population"
+    # R3449 -- the measured figures of an image are a row that copies the stack gate's worst
+    # chain; a text and JSON read, no build.
+    "resource_budget_gate.py --check"
     "prose_build_closure_gate.py --check"
     "root_relative_exclusion_lint.py"
     "negotiated_axis_witness_gate.py --check"

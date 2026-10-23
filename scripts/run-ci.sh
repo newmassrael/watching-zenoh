@@ -2041,6 +2041,11 @@ layer_c0_test_discipline() {
     # The ELF half runs in Layer Q (Q.frt, Q.frt2), where the images are built.
     python3 scripts/lib/stack_frame_gate.py --selftest || return 1
     python3 scripts/lib/stack_frame_gate.py --population || return 1
+    # R3449 -- the resource budget (D5, build-configuration step 13): each image whose worst chain
+    # the stack gate commits has a row of figures the kit measured, the row copies that chain, and a
+    # measured peak lies under it. No hardware here; `--measure` is the kit lane's.
+    python3 scripts/lib/resource_budget_gate.py --selftest || return 1
+    python3 scripts/lib/resource_budget_gate.py --check || return 1
     # R311y717 (§C G5) — the DISCARD-SITE gate. R311y713 made the flow table's
     # exit an obligation a TYPE enforces and closed that one invariant; the
     # register carried "the other multi-exit sites have not been looked at" as

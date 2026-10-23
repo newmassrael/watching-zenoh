@@ -520,6 +520,32 @@ GETs in all, none wrong); the router is a zenohd on the host, the kit its UDP cl
   differ among themselves by more than the images differ (0.31 to 0.48 ms for the
   base). The batching images were lower in the medians, by about 0.04 ms, and the
   ranges overlap: a small effect in the direction the host showed, not a margin.
+
+## 5.4 The resource budget is a committed row (2026-10-23)
+
+The figures above were quoted in a table and checked by nobody. `deploy/resource_budget.json`
+now holds one row for each image whose static worst chain the stack gate commits, and
+`scripts/lib/resource_budget_gate.py` holds the rows:
+
+- `static_chain_bytes` is a copy of the stack gate's figure, held equal to it, so a change
+  that moves the chain moves the row in the same commit or is red;
+- `peak_stack_bytes`, the firmware's own high-water mark (`stack: peak N of M bytes`), is a
+  count of words written, the same in every run of an image (5,936, 5,944, 5,952 and 5,960 B
+  for the four images of 5.3), so its tolerance is 16 bytes; it lies under the static chain
+  (the chain would miss a path otherwise) and under the declared stack;
+- `get_median_us`, the host's view of a GET, varies from run to run, so it holds a tolerance
+  in percent (30), in both directions: a run much faster than the row says the row is stale.
+
+`--check` needs no hardware and runs in Layer C0 and the pre-push gates. `--measure KEY --log
+LOG --result JSON...` is the kit lane's: it reads the last stack line of a serial log and
+the GET round trips the kit harness writes, and fails outside the row. Run on the base and
+the batching images of 5.3 it passes, and the base row refuses the log of the image with
+both options on (a stack peak of 5,960 B against 5,936 +/- 16, and a main stack of 10,240
+against 9,216).
+
+Not held: the images with the idle wait on (their rows share a key with the base, and the
+stack peak moves by 8 bytes), the heap images, and a latency measured on a network other than
+the kit's own Ethernet to the bench host.
 - **The base image file is 1,244 B larger** than the one of 5.1 (174,740 B against
   173,496 B), from this change and from every commit that came to the tree since; the
   idle wait adds 24 B to the file.
