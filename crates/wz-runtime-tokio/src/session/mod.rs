@@ -2969,6 +2969,16 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// whatever it declared. `Err` for a key past the codec's bound, or a kind this build cannot
     /// declare.
     #[cfg(all(feature = "codec-push", feature = "codec-declare"))]
+    // A build with none of the three kinds has only the refusing arm, which reads neither the id
+    // nor the key (Layer C1y's `access-acl-multicast` build is one).
+    #[cfg_attr(
+        not(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )),
+        allow(unused_variables)
+    )]
     pub fn announce(
         &self,
         what: GroupDeclaration,
@@ -3013,6 +3023,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     /// (`vendor/zenoh-pico/src/net/primitives.c` @
     /// `declaration = _z_make_undecl_subscriber(sub->_entity_id, &expr);`).
     #[cfg(all(feature = "codec-push", feature = "codec-declare"))]
+    // The same as `announce`: with none of the three kinds the id and the key go unread.
+    #[cfg_attr(
+        not(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )),
+        allow(unused_variables)
+    )]
     pub fn retract(
         &self,
         what: GroupDeclaration,
