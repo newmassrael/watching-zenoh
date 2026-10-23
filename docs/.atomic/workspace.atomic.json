@@ -279336,6 +279336,54 @@
         "zenoh: its host build is the core ABI, which no program links; its interop is step 12's compatibility crate. Its capability values are not yet held to zenoh's default features."
       ]
     },
+    "Round 3452": {
+      "decision_summary": "The rule that turns an installed zenoh-c's zenoh_configure.h into the wz-capi-c build its programs link now lives in the declaration and one tool, not in a shell copy: the zenoh-c rows of the unstable API and of shared memory, the two switches that move C types, name the macro zenoh-c writes for each (its own table in buildrs/cbindgen_generator.rs) and the unstable one its inverse sense, and wz_config.py --drop-in-features c prints the arm's features, qualified by package, added to the default. Layer C1cc's selector calls it, the archive-arm gate grades the rule on all four arms, and the switch map holds the macros to zenoh-c's table. A consumer that copied the old rule can call it instead. Turning the inverse feature into an additive capability was considered and rejected: the default must stay at the origin of both axes, since a dependent enabling the default undoes a selection by subtraction, and a switch that changes the shape of the code is an axis, not a feature.",
+      "changes_bullets": [
+        "deploy/wz-config.toml: macro on the shared-memory and unstable rows, sense = \"inverse\" on the unstable one, and the rule in the section's header.",
+        "scripts/lib/wz_config.py: drop_in_arm and --drop-in-features c HEADER; macro and sense validated; two selftest arms.",
+        "scripts/run-ci.sh: _runci_build_capi_c_for_oracle calls the tool instead of two greps.",
+        "scripts/lib/zenoh_c_archive_arm.py: the selector must call the tool and must not subtract; the declaration's rule is graded on the header of each of the four arms; selftest cases for a rule blind to an axis and one reading the inverse axis the other way round.",
+        "scripts/lib/upstream_switch_map.py: the --zenoh-c run holds each declared macro to zenoh-c's RUST_TO_C_FEATURES table.",
+        "docs/build-configuration.md: the drop-in arm rule and why the layout switches are axes."
+      ],
+      "verification_bullets": [
+        "On the installed oracle header and three synthetic ones, the tool's features equal the old rule's: the default features plus the no-unstable feature without the unstable macro and the shared-memory feature with its macro; a commented-out define is not read as one.",
+        "A wrong macro name on the unstable row fails the switch map's zenoh-c run against zenoh-c's table and the archive-arm gate on two arms; restored, both pass.",
+        "On a build host, cargo check of wz-capi-c with the package-qualified arm features passes; shellcheck of run-ci.sh reports nothing.",
+        "wz_config selftest 105 of 105, archive-arm selftest 39 of 39, switch map selftest and both runs pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The analyzer keeps two copies of the old rule and calls wz's the canonical one; it is told to call the tool.",
+        "zenoh-c's defconfig still cannot state its no-unstable arm, since that is an axis and not a capability; the arm becomes a value with C12, and until then the zenoh-c interop of step 2 runs on the oracle's arm."
+      ],
+      "publishable_decision_summary": "The rule that turns an installed zenoh-c's zenoh_configure.h into the wz-capi-c build its programs link now lives in the declaration and one tool, not in a shell copy: the zenoh-c rows of the unstable API and of shared memory, the two switches that move C types, name the macro zenoh-c writes for each (its own table in buildrs/cbindgen_generator.rs) and the unstable one its inverse sense, and wz_config.py --drop-in-features c prints the arm's features, qualified by package, added to the default. Layer C1cc's selector calls it, the archive-arm gate grades the rule on all four arms, and the switch map holds the macros to zenoh-c's table. A consumer that copied the old rule can call it instead. Turning the inverse feature into an additive capability was considered and rejected: the default must stay at the origin of both axes, since a dependent enabling the default undoes a selection by subtraction, and a switch that changes the shape of the code is an axis, not a feature.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml: macro on the shared-memory and unstable rows, sense = \"inverse\" on the unstable one, and the rule in the section's header.",
+        "scripts/lib/wz_config.py: drop_in_arm and --drop-in-features c HEADER; macro and sense validated; two selftest arms.",
+        "scripts/run-ci.sh: _runci_build_capi_c_for_oracle calls the tool instead of two greps.",
+        "scripts/lib/zenoh_c_archive_arm.py: the selector must call the tool and must not subtract; the declaration's rule is graded on the header of each of the four arms; selftest cases for a rule blind to an axis and one reading the inverse axis the other way round.",
+        "scripts/lib/upstream_switch_map.py: the --zenoh-c run holds each declared macro to zenoh-c's RUST_TO_C_FEATURES table.",
+        "docs/build-configuration.md: the drop-in arm rule and why the layout switches are axes."
+      ],
+      "publishable_verification_bullets": [
+        "On the installed oracle header and three synthetic ones, the tool's features equal the old rule's: the default features plus the no-unstable feature without the unstable macro and the shared-memory feature with its macro; a commented-out define is not read as one.",
+        "A wrong macro name on the unstable row fails the switch map's zenoh-c run against zenoh-c's table and the archive-arm gate on two arms; restored, both pass.",
+        "On a build host, cargo check of wz-capi-c with the package-qualified arm features passes; shellcheck of run-ci.sh reports nothing.",
+        "wz_config selftest 105 of 105, archive-arm selftest 39 of 39, switch map selftest and both runs pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The analyzer keeps two copies of the old rule and calls wz's the canonical one; it is told to call the tool.",
+        "zenoh-c's defconfig still cannot state its no-unstable arm, since that is an axis and not a capability; the arm becomes a value with C12, and until then the zenoh-c interop of step 2 runs on the oracle's arm."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
