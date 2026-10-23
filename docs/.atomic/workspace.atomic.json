@@ -279384,6 +279384,40 @@
         "zenoh-c's defconfig still cannot state its no-unstable arm, since that is an axis and not a capability; the arm becomes a value with C12, and until then the zenoh-c interop of step 2 runs on the oracle's arm."
       ]
     },
+    "Round 3453": {
+      "decision_summary": "The Platform run of c53ddfe2a was red in one job, the C ABI on Windows, and none of the push's code was in it: its only crate change is a pico test this job does not build. The failing leg is the wz-capi-c listener test in which a client stating a pubkey identity opens against a responder that admits its key, and it failed as it did when round 3419 acknowledged it, with the network error near the 3 s the client is given to open. That round moved the responder's key before the dial, which took a random prime search out of the bound, but the handshake still signs and verifies with RSA in a debug build while the other legs search for their keys beside it. The bound is the leg's fixture and not what it measures, so the leg now gives the client 30 s, and the acknowledgement row records the run.",
+      "changes_bullets": [
+        "crates/wz-capi-c/tests/listener_auth.rs: the pubkey client leg sets connect/timeout_ms to 30000 and says why.",
+        "docs/hosted-red-acks.md: the row for run 39900618976."
+      ],
+      "verification_bullets": [
+        "The red job's log was read to its end: every other step passed, and the leg failed with -4 against 0.",
+        "The Platform runs of bd9008005 and of the five pushes before it passed the same job, and between bd9008005 and c53ddfe2a no change touches wz-capi-c or the pubkey path.",
+        "On a build host the leg passes with the change, 1 passed; cargo fmt --check of wz-capi-c passes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The next Platform run grades the leg on Windows; if it fails again with more than the bound to spend, the handshake itself is to be measured there."
+      ],
+      "publishable_decision_summary": "The Platform run of c53ddfe2a was red in one job, the C ABI on Windows, and none of the push's code was in it: its only crate change is a pico test this job does not build. The failing leg is the wz-capi-c listener test in which a client stating a pubkey identity opens against a responder that admits its key, and it failed as it did when round 3419 acknowledged it, with the network error near the 3 s the client is given to open. That round moved the responder's key before the dial, which took a random prime search out of the bound, but the handshake still signs and verifies with RSA in a debug build while the other legs search for their keys beside it. The bound is the leg's fixture and not what it measures, so the leg now gives the client 30 s, and the acknowledgement row records the run.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/tests/listener_auth.rs: the pubkey client leg sets connect/timeout_ms to 30000 and says why.",
+        "docs/hosted-red-acks.md: the row for run 39900618976."
+      ],
+      "publishable_verification_bullets": [
+        "The red job's log was read to its end: every other step passed, and the leg failed with -4 against 0.",
+        "The Platform runs of bd9008005 and of the five pushes before it passed the same job, and between bd9008005 and c53ddfe2a no change touches wz-capi-c or the pubkey path.",
+        "On a build host the leg passes with the change, 1 passed; cargo fmt --check of wz-capi-c passes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The next Platform run grades the leg on Windows; if it fails again with more than the bound to spend, the handshake itself is to be measured there."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
