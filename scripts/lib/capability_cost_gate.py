@@ -33,6 +33,19 @@ choosing it is what this gate exists to refuse. The sizes are `size` text on the
 (`rust-toolchain.toml`) and are comparable only to themselves: a different compiler moves them,
 which is why the margin is a percentage and not a byte count.
 
+## The denominator
+
+A pico case is also measured against zenoh-pico built as the SAME build: the pinned submodule,
+Release and shared, with every switch `deploy/wz-config.toml` answers set from that answer for
+the case's features (`wz_config.pico_reference`). The gate builds it on the host it builds wz on,
+reads back the header pico generated to find any switch pico built otherwise than asked, and
+prints the ratio. The ratio is printed, not graded: the text budget already holds wz's size, and
+what this adds is that a size claim against pico is a number this gate printed, with its
+toolchain beside it, and never one copied from elsewhere. Rounds 3393 to 3395 divided by a
+libzenohpico of unrecorded build; round 3472 corrected them with a reference whose switches were
+chosen by hand, and three of them (interest, matching, the receive cache) were set otherwise
+than the declaration says wz has them.
+
 Usage:
     capability_cost_gate.py --check [ID...]    build every case (or the named ones), grade it
     capability_cost_gate.py --measure [ID...]  build the same and print what was measured
@@ -41,14 +54,25 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
+import io
+import os
 import pathlib
 import re
 import subprocess
 import sys
+import tarfile
 from dataclasses import dataclass, field
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import wz_config  # noqa: E402  (the one declaration, and its resolver)
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 CRATES = ROOT / "crates"
+PICO_SOURCE = ROOT / "vendor" / "zenoh-pico"
+# The reference builds, one directory per (pin, switches, toolchain), so a run that asks for the
+# same build again reads it instead of building it.
+PICO_BUILDS = CRATES / "target" / "pico-reference"
 TARGET = CRATES / "target" / "release"
 
 PICO_BASE = "serial-drive-own-thread,rx-busy-poll"
@@ -190,6 +214,88 @@ def build(case: Case) -> Measured:
     return Measured(text=text, symbols=symbols, exports=exports)
 
 
+@dataclass(frozen=True)
+class Reference:
+    """zenoh-pico built as the same build as a case: its text, the pin it was built from, the
+    toolchain, and the switches pico built otherwise than asked."""
+
+    text: int
+    pin: str
+    toolchain: str
+    refused: tuple[str, ...]
+
+
+def case_features(case: Case) -> set[str]:
+    """The features of the case's package its build turns on, as cargo resolves them."""
+    feats = wz_config.manifest_features(CRATES / case.package / "Cargo.toml")
+    start = ["default"] if case.features is None else [f for f in case.features.split(",") if f]
+    return wz_config.enabled_features(feats, start)
+
+
+def first_line(cmd: list[str]) -> str:
+    return subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.splitlines()[0]
+
+
+def run_quiet(cmd: list[str]) -> None:
+    """Run a build step with its output held, and show the end of it if the step fails: a
+    reference that could not be built is a failure of this gate, and it says why."""
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stdout + proc.stderr).splitlines()[-20:])
+        raise RuntimeError(f"`{' '.join(cmd)}` exited {proc.returncode}:\n{tail}")
+
+
+def refused_switches(asked: dict[str, int], header: str) -> list[str]:
+    """The switches pico's generated header states otherwise than `asked`: pico's CMake turns
+    some off when another is off (matching without interest, scouting without the UDP unicast
+    link), and a reference that silently differs from the build it stands for is the defect this
+    gate's denominator exists to remove."""
+    on, _ = wz_config.pico_flag_states(header)
+    return sorted(s for s, v in asked.items() if (s in on) != bool(v))
+
+
+def pico_reference_build(asked: dict[str, int]) -> Reference:
+    """Build zenoh-pico with `asked` set, from an export of the pinned submodule (pico's CMake
+    writes a header into its source tree, which must not dirty the submodule), and measure it."""
+    pin = subprocess.run(["git", "-C", str(PICO_SOURCE), "rev-parse", "HEAD"], capture_output=True,
+                         text=True, check=True).stdout.strip()
+    toolchain = f"{first_line(['cc', '--version'])}; {first_line(['cmake', '--version'])}"
+    flags = [f"-D{s}={v}" for s, v in sorted(asked.items())]
+    key = hashlib.sha256("\n".join([pin, toolchain, *flags]).encode()).hexdigest()[:16]
+    work = PICO_BUILDS / key
+    lib = work / "build" / "lib" / "libzenohpico.so"
+    if not lib.exists():
+        archive = subprocess.run(["git", "-C", str(PICO_SOURCE), "archive", "--format=tar", "HEAD"],
+                                 capture_output=True, check=True).stdout
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            tar.extractall(work / "src", filter="data")
+        run_quiet(["cmake", "-S", str(work / "src"), "-B", str(work / "build"),
+                   "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=ON",
+                   "-DBUILD_EXAMPLES=OFF", "-DBUILD_TESTING=OFF", *flags])
+        run_quiet(["cmake", "--build", str(work / "build"), "--parallel", str(os.cpu_count() or 1)])
+    header = (work / "build" / "include" / "zenoh-pico" / "config.h").read_text()
+    size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
+    return Reference(text=int(size_out.splitlines()[1].split()[0]), pin=pin[:12],
+                     toolchain=toolchain, refused=tuple(refused_switches(asked, header)))
+
+
+def report_reference(case: Case, got: Measured) -> None:
+    """Print the case's size against zenoh-pico built as the same build. Only the pico ABI's
+    cases have one here: zenoh-c's original is a Rust build of its own the lanes that install the
+    oracle provision, and this lane does not."""
+    if case.package != "wz-capi-pico":
+        print(f"  capability-cost: {case.id}: no same-build reference in this lane (zenoh-c's is "
+              f"provisioned only where the oracle is installed)")
+        return
+    asked = wz_config.pico_reference(wz_config.load_decl(), case_features(case))
+    ref = pico_reference_build(asked)
+    print(f"  capability-cost: {case.id}: zenoh-pico {ref.pin} as the same build: text "
+          f"{ref.text}; wz is {got.text / ref.text:.2f} times it ({ref.toolchain})")
+    if ref.refused:
+        print(f"  capability-cost: {case.id}: pico built {', '.join(ref.refused)} otherwise than "
+              f"asked, so the two builds differ there")
+
+
 def cmd_check(measure_only: bool, only: list[str]) -> int:
     unknown = [i for i in only if i not in {c.id for c in CASES}]
     if unknown:
@@ -202,6 +308,7 @@ def cmd_check(measure_only: bool, only: list[str]) -> int:
         got = build(case)
         print(f"  capability-cost: {case.id}: text {got.text} of {case.max_text} "
               f"({100 * got.text // case.max_text}%), {got.exports} exports")
+        report_reference(case, got)
         if measure_only:
             continue
         for finding in grade(case, got):
@@ -256,6 +363,19 @@ def cmd_selftest() -> int:
                (UDP, "wz_runtime_tokio::udp_pipeline::wire_udp_socket"),
                (CLOCK, "uhlc::HLC::new_timestamp"),
                (ADVANCED, "wz_runtime_tokio::advanced_publisher::put"))))
+    # The denominator's own check: a switch pico built otherwise than asked is named, both ways.
+    asked = {"Z_FEATURE_MATCHING": 1, "Z_FEATURE_INTEREST": 0, "Z_FEATURE_QUERY": 0}
+    expect("a reference built as asked differs nowhere",
+           refused_switches(asked, "#define Z_FEATURE_MATCHING 1\n#define Z_FEATURE_INTEREST 0\n"
+                                   "#define Z_FEATURE_QUERY 0\n") == [])
+    expect("a switch pico turned off, or on, against the ask is named",
+           refused_switches(asked, "#define Z_FEATURE_MATCHING 0\n#define Z_FEATURE_INTEREST 0\n"
+                                   "#define Z_FEATURE_QUERY 1\n")
+           == ["Z_FEATURE_MATCHING", "Z_FEATURE_QUERY"])
+    expect("a case's features are its package's as cargo resolves them",
+           {"serial-drive-own-thread", "rx-busy-poll"}
+           <= case_features(next(c for c in CASES if c.id == "pico-client"))
+           and "peer" in case_features(next(c for c in CASES if c.id == "pico-default")))
     print(f"  capability-cost selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 

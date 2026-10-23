@@ -1951,9 +1951,11 @@ jobs:
             apt-${{ runner.os }}-${{ github.job }}-
 
       - name: Install system dependencies
-        # No `cmake`: nothing this job builds reaches `zenoh-pico-sys`.
+        # `cmake`: the gate builds zenoh-pico from the submodule as the same build as each pico
+        # case, the denominator of the size it prints (capability_cost_gate.py "The
+        # denominator").
         run: |
-          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config
+          bash scripts/lib/apt-install.sh libclang-dev clang perl pkg-config cmake
 
       - name: Save apt archives
         if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'

@@ -672,6 +672,48 @@ def cargo_args(decl: dict, abi: str, on: set[str]) -> str:
     return "--no-default-features" + (f" --features {','.join(feats)}" if feats else "")
 
 
+def enabled_features(feats: dict, start: list[str]) -> set[str]:
+    """The features of one package a build with `start` turns on, as cargo resolves them: each
+    feature's entries that name another feature of the same package, transitively. An entry
+    that names a dependency (`dep:x`) or a dependency's feature (`x/f`) is not this package's."""
+    out: set[str] = set()
+    stack = list(start)
+    while stack:
+        feat = stack.pop()
+        if feat in out:
+            continue
+        if feat not in feats:
+            raise KeyError(f"`{feat}` is no feature of this package")
+        out.add(feat)
+        stack.extend(e for e in feats[feat] if "/" not in e and not e.startswith("dep:"))
+    return out
+
+
+def pico_reference(decl: dict, enabled: set[str]) -> dict[str, int]:
+    """The zenoh-pico build that carries what a wz-capi-pico build with the features `enabled`
+    carries: every pico switch the declaration answers, set from that answer.
+
+    `always` is on (wz has the capability in every build, so a reference without it would be
+    smaller for a reason that is not the comparison's), `never` is off (wz has no such plane to
+    be compared with), and `maps` is on exactly when the build has the row's feature. A switch
+    the declaration calls `n/a` is not wz's to set: the reference keeps upstream's default.
+    This is the denominator a size ratio is taken against, derived and never written by hand:
+    a hand-written one is how the ratios of rounds 3393 to 3395 came to rest on a build nobody
+    recorded."""
+    out: dict[str, int] = {}
+    for row in decl["switches"]:
+        if row.get("original") != "zenoh-pico":
+            continue
+        cls = row["class"]
+        if cls == "always":
+            out[row["switch"]] = 1
+        elif cls == "never":
+            out[row["switch"]] = 0
+        elif cls == "maps":
+            out[row["switch"]] = int(row["anchor"].removeprefix(PICO_DROP_IN) in enabled)
+    return out
+
+
 # ---------------------------------------------------------------------------------------------
 # the derived files
 # ---------------------------------------------------------------------------------------------
@@ -1497,6 +1539,25 @@ def cmd_selftest() -> int:
     expect("advanced and connectivity pull the unstable API in pico",
            "unstable-api" in features_for(decl, "pico", {"advanced"})
            and "unstable-api" in features_for(decl, "pico", {"connectivity"}))
+    feats = {"default": ["a"], "a": ["b", "dep:x", "y/z"], "b": [], "c": []}
+    expect("a build's features are cargo's closure within the package",
+           enabled_features(feats, ["default"]) == {"default", "a", "b"}
+           and enabled_features(feats, []) == set())
+    try:
+        enabled_features(feats, ["nope"])
+        expect("a feature the package lacks is refused", False)
+    except KeyError:
+        pass
+    bare = pico_reference(decl, set())
+    expect("the reference has every always switch on, every never one off, a maps one as built",
+           bare["Z_FEATURE_PUBLICATION"] == 1 and bare["Z_FEATURE_INTEREST"] == 1
+           and bare["Z_FEATURE_LINK_BLUETOOTH"] == 0 and bare["Z_FEATURE_QUERY"] == 0
+           and pico_reference(decl, {"query"})["Z_FEATURE_QUERY"] == 1)
+    expect("an n/a switch is left at upstream's default", "Z_FEATURE_BATCH_TX_MUTEX" not in bare)
+    built = set(features_for(decl, "pico", {"peer"}))
+    header = "".join(f"#define {s} {v}\n" for s, v in pico_reference(decl, built).items())
+    expect("the reference reads back as the build it was derived from",
+           read_config(decl, header) == closure(decl["caps"], {"peer"}))
     expect("cargo args of nothing", cargo_args(decl, "c", set()) == "--no-default-features")
     expect("cargo args name the base then the closure",
            cargo_args(decl, "pico", {"peer"}).endswith("rx-busy-poll,link-udp,scout,peer"))
