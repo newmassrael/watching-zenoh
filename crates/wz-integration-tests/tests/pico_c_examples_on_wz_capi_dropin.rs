@@ -473,6 +473,7 @@ fn pico_zsub_source_on_wz_capi_receives_from_real_pico_zput() {
 /// option structs the program allocates are upstream's default layout, which no other leg of
 /// this file links; a wz build of another arm under these headers would be the open-debt
 /// item 917 mismatch.
+// wz-proves: api-compat-pico pico->wz partial
 #[test]
 #[ignore = "spawns the real zenoh-pico z_put CLI and a cc-compiled binary; \
             run by run-ci Layer E"]
