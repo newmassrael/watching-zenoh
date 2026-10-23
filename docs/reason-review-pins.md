@@ -41,7 +41,7 @@ normal state once nothing remains.
 |---|---|---|---|
 | session-close-ingress | crates/wz-integration-tests/tests/wz_router_hat_connect_reconcile.rs | 31cee437ba6c4c3bf6eeab254f30dcdf9c7bd423 | R3450 |
 | session-close-ingress | crates/wz-routing-graph/src/lib.rs | 2123f96404cdfc158a6c875d4440a7febca3e3c5 | R3450 |
-| session-close-ingress | crates/wz-runtime-coop/src/session_drive.rs | 145736236a1347b0c747218597c2f8470e37690b | R3458 |
+| session-close-ingress | crates/wz-runtime-coop/src/session_drive.rs | 7f713a33f3114ef7053720414f974bf0b4738f7c | R3471 |
 | session-close-ingress | crates/wz-runtime-tokio/src/accept_loop.rs | 0b4e6090dddc0ee8a3023a9ef5cf55fa78183084 | R3450 |
 | session-close-ingress | crates/wz-runtime-tokio/src/observer.rs | b13f2a243e1e899b3e2b308640af196c6f0bf7b8 | R3450 |
 | session-close-ingress | crates/wz-runtime-tokio/src/session_glue.rs | b57f12bee4cc4154a118102b3e06d832f17a0f02 | R3458 |
@@ -53,5 +53,5 @@ normal state once nothing remains.
 | session-close-ingress | crates/wz-session-core/src/session_actions.rs | 5221ced98ac031d98eca9759874e0b3cf5a724f6 | R3463 |
 | session-close-ingress | crates/wz-session-core/src/switchboard.rs | 563daafb74015478bc16e6b876631db745435de6 | R3450 |
 | session-close-ingress | crates/wz-session-core/src/zid_hex.rs | eb5aa0a91c1dc61610401a4f4cd348a01ee49910 | R3450 |
-| session-close-ingress | crates/wz-session-lwip/src/session_drive.rs | 4c58301e49765a8372e105f1f2551a1c9c15aed0 | R3458 |
+| session-close-ingress | crates/wz-session-lwip/src/session_drive.rs | 6c40f4e55e19ab82dbacd2b88085d79a58efa918 | R3471 |
 | session-close-ingress | crates/wz-session-mcu/src/slot_host.rs | 0807ee1708c3d5d23c3e4c6f132db911e273d509 | R3450 |

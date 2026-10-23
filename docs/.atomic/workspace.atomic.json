@@ -280184,6 +280184,96 @@
         "Read the hosted runs for this push per job at the start of the next round, the Windows C ABI job of the previous push (ledger 3468) in particular: it was green on the Platform run of 209000259."
       ]
     },
+    "Round 3471": {
+      "decision_summary": "Make a unicast datagram link's peer its identity, fixed once known. The MCU UDP links (coop over BSD-style sockets, and lwIP) sent their replies to the source of the last datagram they took, so one datagram from another address pointed an established session's replies and keep-alives at that address until the peer spoke again; on the kit one stray stalled a session for about twenty seconds. wz_session_core::datagram_peer now decides this once for both drivers, as upstream's UDP link does with a connected socket and a link per source: a dialled link is bound from the dial, an accepting link by the first InitSyn it takes, and a bound link hands its session only the peer's datagrams, discarding and counting strays and other sources' InitSyns. A driver on a listener's shared socket leaves another session's datagram in place.",
+      "changes_bullets": [
+        "wz-session-core: datagram_peer (unconditional) holds is_init_syn, moved from inbound, and PeerBinding: dialled or accepting, admit binds an acceptor at its first InitSyn and judges every later datagram Peer, Stray or Refused, counting the two it discards.",
+        "wz-codecs: FLAG_T_INIT_A ungated, on T_MID_INIT's reasoning, since the binding asks it of every build with a unicast link.",
+        "wz-runtime-coop UdpDriver: the peer is a PeerBinding; both receives discard what it does not admit, the wait's stashed datagram included; endpoints are written when the peer is known; foreign() reports the counts. The SessionDatagramLink contract no longer says a receive retargets.",
+        "wz-session-lwip LwipUdpDriver: new is a bound link, accepting the acceptor's; on its own socket it discards and counts a stranger's datagram, on a listener's it leaves it for the session it belongs to, which replaces the link's head check; sends with no peer are WriterGone. links.rs opens an acceptor unbound.",
+        "wz-session-mcu MemoryEnd, the in-memory network that keeps the real link's behaviour, keeps this one too.",
+        "Tests that relied on an acceptor learning its peer from any datagram send an InitSyn first; new tests cover a stranger before and after the binding on each link."
+      ],
+      "verification_bullets": [
+        "pc2: wz-session-core datagram_peer 5 passed with defaults and with no features, and the classifier agrees with the full decode; clippy -D warnings for wz-session-core (no features and defaults, all targets) and wz-codecs (no features).",
+        "pc2: wz-runtime-coop udp_link 19 passed with alloc and session-unicast, clippy -D warnings over all targets; the new tests cover a stranger before and after an acceptor's binding, on both receives and on a datagram the wait took.",
+        "pc2: Layer C1m passes, 58 of 58 legs, and Layer C1n passes. The first runs were red where tests relied on the old behaviour: tests in four lwIP files built an acceptor bound to a placeholder address or sent it data before an InitSyn, and the in-memory network's legs moved 3 to 4, 4 to 5, 12 to 13, 7 to 8 and 22 to 23 with its new test.",
+        "The upstream citation anchor gate exits 0 with the two new anchors on the pinned checkout.",
+        "Not run here: the Zephyr images, Layer Q and the kit."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction"
+      ],
+      "carry_forward_bullets": [
+        "A dialled socket is not connected at the kernel, so a stranger's datagram still wakes the loop before the link discards it; DatagramSocket could gain a connect for the platforms that have one.",
+        "The fix has not been run on the T2G kit, where the twenty-second stall was seen; the Zephyr images and Layer Q are left to hosted CI.",
+        "The foreign counts are not yet reported by any admin or status surface."
+      ],
+      "publishable_decision_summary": "Make a unicast datagram link's peer its identity, fixed once known. The MCU UDP links (coop over BSD-style sockets, and lwIP) sent their replies to the source of the last datagram they took, so one datagram from another address pointed an established session's replies and keep-alives at that address until the peer spoke again; on the kit one stray stalled a session for about twenty seconds. wz_session_core::datagram_peer now decides this once for both drivers, as upstream's UDP link does with a connected socket and a link per source: a dialled link is bound from the dial, an accepting link by the first InitSyn it takes, and a bound link hands its session only the peer's datagrams, discarding and counting strays and other sources' InitSyns. A driver on a listener's shared socket leaves another session's datagram in place.",
+      "publishable_changes_bullets": [
+        "wz-session-core: datagram_peer (unconditional) holds is_init_syn, moved from inbound, and PeerBinding: dialled or accepting, admit binds an acceptor at its first InitSyn and judges every later datagram Peer, Stray or Refused, counting the two it discards.",
+        "wz-codecs: FLAG_T_INIT_A ungated, on T_MID_INIT's reasoning, since the binding asks it of every build with a unicast link.",
+        "wz-runtime-coop UdpDriver: the peer is a PeerBinding; both receives discard what it does not admit, the wait's stashed datagram included; endpoints are written when the peer is known; foreign() reports the counts. The SessionDatagramLink contract no longer says a receive retargets.",
+        "wz-session-lwip LwipUdpDriver: new is a bound link, accepting the acceptor's; on its own socket it discards and counts a stranger's datagram, on a listener's it leaves it for the session it belongs to, which replaces the link's head check; sends with no peer are WriterGone. links.rs opens an acceptor unbound.",
+        "wz-session-mcu MemoryEnd, the in-memory network that keeps the real link's behaviour, keeps this one too.",
+        "Tests that relied on an acceptor learning its peer from any datagram send an InitSyn first; new tests cover a stranger before and after the binding on each link."
+      ],
+      "publishable_verification_bullets": [
+        "pc2: wz-session-core datagram_peer 5 passed with defaults and with no features, and the classifier agrees with the full decode; clippy -D warnings for wz-session-core (no features and defaults, all targets) and wz-codecs (no features).",
+        "pc2: wz-runtime-coop udp_link 19 passed with alloc and session-unicast, clippy -D warnings over all targets; the new tests cover a stranger before and after an acceptor's binding, on both receives and on a datagram the wait took.",
+        "pc2: Layer C1m passes, 58 of 58 legs, and Layer C1n passes. The first runs were red where tests relied on the old behaviour: tests in four lwIP files built an acceptor bound to a placeholder address or sent it data before an InitSyn, and the in-memory network's legs moved 3 to 4, 4 to 5, 12 to 13, 7 to 8 and 22 to 23 with its new test.",
+        "The upstream citation anchor gate exits 0 with the two new anchors on the pinned checkout.",
+        "Not run here: the Zephyr images, Layer Q and the kit."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A dialled socket is not connected at the kernel, so a stranger's datagram still wakes the loop before the link discards it; DatagramSocket could gain a connect for the platforms that have one.",
+        "The fix has not been run on the T2G kit, where the twenty-second stall was seen; the Zephyr images and Layer Q are left to hosted CI.",
+        "The foreign counts are not yet reported by any admin or status surface."
+      ]
+    },
+    "Round 3472": {
+      "decision_summary": "Correct the size ratios Rounds 3393 to 3395 stated against zenoh-pico. They divided by a libzenohpico of 1,481,734 bytes of text whose build was never recorded, and so put the pico C ABI at 2.1 and then 1.43 times pico. Built on one host from the pinned submodule, Release and shared, zenoh-pico is 505,230 bytes with its defaults and 381,643 with the planes wz's graded pico client leaves out also off (a single-threaded TCP client that publishes and subscribes; 402,724 multi-threaded). wz's pico client is 1,789,393 bytes, 4.69 times, and its default build 4,220,142, 8.35 times. The wz sizes those rounds measured stand; the denominator was wrong. Rounds 3400 to 3402 are absent from this ledger because the branch that filed them, which first measured this, never landed.",
+      "changes_bullets": [
+        "Ledger only: no source changes. Rounds 3393 to 3395 stay as filed; this entry is their correction."
+      ],
+      "verification_bullets": [
+        "pc2, gcc 13.3.0, cmake 4.4.2, vendor/zenoh-pico at the pinned commit, Release, BUILD_SHARED_LIBS=ON, examples and tests off: `size` text 505,230 (defaults); 402,724 with Z_FEATURE_QUERY, QUERYABLE, LIVELINESS, SCOUTING, LINK_UDP_MULTICAST, LINK_UDP_UNICAST, MULTICAST_TRANSPORT, UNICAST_PEER, MATCHING and INTEREST at 0; 381,643 with MULTI_THREAD also at 0.",
+        "Same host, rustc 1.97.0: capability_cost_gate.py --measure reads libwz_capi_pico.so text 1,789,393 for pico-client (441 exports) and 4,220,142 for pico-default (802 exports), each under its budget.",
+        "Ratios: 1,789,393 / 381,643 = 4.69; against the multi-threaded pico 4.44; 4,220,142 / 505,230 = 8.35."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "The pico client is 4.69 times zenoh-pico on the AP profile; the unwind tables and std's backtrace support are part of it, and a panic=abort build profile measured about 18 percent smaller on the unlanded branch but is not in this tree.",
+        "The comparison matches the planes by feature switch, not symbol by symbol: whether wz's client carries something pico's has off (interest, matching) is not checked.",
+        "The capability cost gate still names its feature sets by hand; a build a deployer gets from the Kconfig declaration is not what it grades."
+      ],
+      "publishable_decision_summary": "Correct the size ratios Rounds 3393 to 3395 stated against zenoh-pico. They divided by a libzenohpico of 1,481,734 bytes of text whose build was never recorded, and so put the pico C ABI at 2.1 and then 1.43 times pico. Built on one host from the pinned submodule, Release and shared, zenoh-pico is 505,230 bytes with its defaults and 381,643 with the planes wz's graded pico client leaves out also off (a single-threaded TCP client that publishes and subscribes; 402,724 multi-threaded). wz's pico client is 1,789,393 bytes, 4.69 times, and its default build 4,220,142, 8.35 times. The wz sizes those rounds measured stand; the denominator was wrong. Rounds 3400 to 3402 are absent from this ledger because the branch that filed them, which first measured this, never landed.",
+      "publishable_changes_bullets": [
+        "Ledger only: no source changes. Rounds 3393 to 3395 stay as filed; this entry is their correction."
+      ],
+      "publishable_verification_bullets": [
+        "pc2, gcc 13.3.0, cmake 4.4.2, vendor/zenoh-pico at the pinned commit, Release, BUILD_SHARED_LIBS=ON, examples and tests off: `size` text 505,230 (defaults); 402,724 with Z_FEATURE_QUERY, QUERYABLE, LIVELINESS, SCOUTING, LINK_UDP_MULTICAST, LINK_UDP_UNICAST, MULTICAST_TRANSPORT, UNICAST_PEER, MATCHING and INTEREST at 0; 381,643 with MULTI_THREAD also at 0.",
+        "Same host, rustc 1.97.0: capability_cost_gate.py --measure reads libwz_capi_pico.so text 1,789,393 for pico-client (441 exports) and 4,220,142 for pico-default (802 exports), each under its budget.",
+        "Ratios: 1,789,393 / 381,643 = 4.69; against the multi-threaded pico 4.44; 4,220,142 / 505,230 = 8.35."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The pico client is 4.69 times zenoh-pico on the AP profile; the unwind tables and std's backtrace support are part of it, and a panic=abort build profile measured about 18 percent smaller on the unlanded branch but is not in this tree.",
+        "The comparison matches the planes by feature switch, not symbol by symbol: whether wz's client carries something pico's has off (interest, matching) is not checked.",
+        "The capability cost gate still names its feature sets by hand; a build a deployer gets from the Kconfig declaration is not what it grades."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
