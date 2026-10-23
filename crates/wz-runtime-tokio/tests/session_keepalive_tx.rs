@@ -387,4 +387,160 @@ mod keepalive_emitter {
             "the emits reached the wire as bare 0x04 frames, got {keepalive_frames}"
         );
     }
+
+    /// A link that is readable at every call and never suspends on its own: a session with an
+    /// endless backlog. It counts the events it hands out and, at `notify_at`, wakes a task
+    /// that was waiting, which stands for any other task of the thread (another session's
+    /// timer, say) becoming ready in the middle of the backlog.
+    #[cfg(feature = "codec-keep-alive")]
+    struct FloodDriver {
+        handed_out: Arc<std::sync::atomic::AtomicUsize>,
+        total: usize,
+        notify_at: usize,
+        wake: Arc<tokio::sync::Notify>,
+    }
+
+    #[cfg(feature = "codec-keep-alive")]
+    impl wz_runtime_tokio::LinkDriver for FloodDriver {
+        async fn open(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn send(
+            &mut self,
+            _frame: &wz_runtime_tokio::TxFrame<'_>,
+            _reliability: wz_session_core::reliability::Reliability,
+        ) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn close(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        async fn poll_event(&mut self) -> wz_session_core::link::LinkEvent {
+            use wz_session_core::link::{LinkEvent, LostCause, RxFrame};
+            let n = self
+                .handed_out
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if n == self.notify_at {
+                self.wake.notify_one();
+            }
+            if n > self.total {
+                return LinkEvent::Lost {
+                    cause: LostCause::PeerClosed,
+                };
+            }
+            // A KeepAlive from the peer: one event of one unit, valid in Established.
+            LinkEvent::Rx(RxFrame::new(vec![0x04]))
+        }
+    }
+
+    /// What the thread's other task sees: how many events of the flood had been handed out when
+    /// it first ran, after it was woken at `notify_at`.
+    #[cfg(feature = "codec-keep-alive")]
+    async fn handed_out_when_the_other_task_ran<F, Fut>(
+        driver_runs: F,
+        total: usize,
+        notify_at: usize,
+    ) -> usize
+    where
+        F: FnOnce(FloodDriver) -> Fut,
+        Fut: core::future::Future<Output = ()>,
+    {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let handed_out = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(AtomicUsize::new(0));
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let other = {
+            let (handed_out, seen, wake) = (handed_out.clone(), seen.clone(), wake.clone());
+            tokio::spawn(async move {
+                wake.notified().await;
+                seen.store(handed_out.load(Ordering::SeqCst), Ordering::SeqCst);
+            })
+        };
+        let driver = FloodDriver {
+            handed_out,
+            total,
+            notify_at,
+            wake,
+        };
+        driver_runs(driver).await;
+        other.await.expect("the other task ends");
+        seen.load(Ordering::SeqCst)
+    }
+
+    /// The property Layer E7s depends on, without a clock or a loaded machine: while a session
+    /// has a backlog, a task that becomes ready on its thread runs within one turn of that
+    /// session, which is `TURN_UNIT_BUDGET` (8) units, and not when the backlog is gone. One
+    /// thread, one endless flood of one-unit events, a second task woken at the thousandth.
+    #[cfg(feature = "codec-keep-alive")]
+    #[tokio::test]
+    async fn a_task_that_wakes_during_a_backlog_runs_within_one_turn() {
+        use wz_runtime_tokio::session_glue::{drive_session_until_terminal, SessionTimeouts};
+        const TOTAL: usize = 20_000;
+        const NOTIFY_AT: usize = 1_000;
+        const TURN_UNITS: usize = 8;
+
+        let (_rec, actions, mut engine) = recording_setup();
+        drive_to_established(&mut engine);
+        let clock = TokioTime::new();
+        let seen = handed_out_when_the_other_task_ran(
+            |mut driver| async move {
+                let _ = drive_session_until_terminal(
+                    &mut driver,
+                    &actions,
+                    &mut engine,
+                    Some(2 * TOTAL),
+                    &clock,
+                    &SessionTimeouts::spec_defaults(),
+                    |_| {},
+                )
+                .await;
+            },
+            TOTAL,
+            NOTIFY_AT,
+        )
+        .await;
+        assert!(
+            seen >= NOTIFY_AT,
+            "the other task ran before it was woken: {seen}"
+        );
+        assert!(
+            seen - NOTIFY_AT <= TURN_UNITS,
+            "the other task was woken at event {NOTIFY_AT} and ran at event {seen}: the backlog \
+             kept the thread for {} events, more than one turn of {TURN_UNITS}",
+            seen - NOTIFY_AT
+        );
+    }
+
+    /// The control of the test above: the same flood and the same second task, driven by a bare
+    /// loop that takes the next event and does nothing else. The link never suspends, so the
+    /// second task runs only when the flood is over. This is what proves that what lets it run in
+    /// the test above is the session loop's yield and not the link's behaviour.
+    #[cfg(feature = "codec-keep-alive")]
+    #[tokio::test]
+    async fn without_the_loops_yield_the_same_flood_keeps_the_thread() {
+        use wz_runtime_tokio::LinkDriver;
+        const TOTAL: usize = 20_000;
+        const NOTIFY_AT: usize = 1_000;
+        let seen = handed_out_when_the_other_task_ran(
+            |mut driver| async move {
+                loop {
+                    if matches!(
+                        driver.poll_event().await,
+                        wz_session_core::link::LinkEvent::Lost { .. }
+                    ) {
+                        break;
+                    }
+                }
+            },
+            TOTAL,
+            NOTIFY_AT,
+        )
+        .await;
+        assert!(
+            seen > TOTAL,
+            "the second task ran at event {seen}, inside the flood of {TOTAL}: the link yields \
+             by itself, so the test above would prove nothing"
+        );
+    }
 }

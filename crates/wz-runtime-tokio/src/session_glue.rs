@@ -1509,6 +1509,7 @@ where
                         // an enforcer must see the stripped form, which is also
                         // the form this session's own alias table holds.
                         ingress(&mut outcome);
+                        let units = event_units(&outcome);
                         // The same decorator again for a chain that completes inside this
                         // call: that outcome is made there, not here, and skipped it.
                         #[cfg(feature = "reassembly")]
@@ -1563,7 +1564,7 @@ where
                             &mut on_event,
                         )
                         .await;
-                        turn.after_event().await;
+                        turn.after_event(units).await;
                     }
                     // The armed steady-state timer fired. It was armed for the
                     // deadline of some earlier iteration, so the real one may be
@@ -1649,6 +1650,7 @@ where
                 actions.apply_namespace_ingress(&mut outcome);
                 // R2702 — same order as the select arm; see there.
                 ingress(&mut outcome);
+                let units = event_units(&outcome);
                 #[cfg(feature = "reassembly")]
                 report_outcome_reassembling_with(
                     &outcome,
@@ -1666,14 +1668,14 @@ where
                 // same seam, because "which arm the loop happened to take" is
                 // not a reason for delivery to behave differently.
                 park_on_drain(after_dispatch(), actions, engine, clock, &mut on_event).await;
-                turn.after_event().await;
+                turn.after_event(units).await;
             }
         }
     }
 }
 
-/// How many events one session's loop takes in a row before it lets the other tasks of its
-/// thread run.
+/// How much work one session's loop does in a row before it lets the other tasks of its
+/// thread run, in units of one record.
 ///
 /// A loop that finds its link readable takes the next event with no await that suspends, and a
 /// read that is served from bytes already buffered does not spend tokio's cooperative budget
@@ -1686,30 +1688,66 @@ where
 /// failed five runs of five on a build host, and on the commit that was green on the hosted
 /// runner).
 ///
-/// Bounding the turn bounds the return: a session waits for at most
-/// `sessions x TURN_EVENT_BUDGET x the cost of one event / the share of the CPU the thread
-/// has`, which is about 0.7 s for 2048 sessions at 2 us an event and a twentieth of a core,
-/// against the 10 s lease. MEASURED on a build host over the whole E7s binary at 4 cores:
-/// no bound lost 3 faces of 2048 and admitted 12 of 320 new sessions to a starved router; a
-/// bound of 8 lost none and admitted 320 of 320, at 12.5 us a message against 13.2 for no
-/// bound (2048 subscribers, unstarved), so the yield costs nothing that shows; a bound of 32
-/// and 128 also passed on that machine, at 20.3 and 16.3 us, and 128 has a worst-case return
-/// about the length of the lease, which is a pass owed to a quiet machine.
-const TURN_EVENT_BUDGET: u32 = 8;
+/// Bounding the turn bounds the return. Count the work in UNITS, one unit for each record an
+/// event carries ([`event_units`]); the turn is [`TURN_UNIT_BUDGET`] units, and a session
+/// that has yielded comes back after every other task of the thread has had its turn, so it
+/// waits for at most `tasks x TURN_UNIT_BUDGET x the cost of a unit / the share of the CPU
+/// the thread has`.
+///
+/// The unit's cost is an UPPER bound that does not need the split of an event's cost between
+/// what it pays once (the read, the sequence-number gate, the stamp) and what it pays for each
+/// record: an event of k records costs `a + k b`, which is at most `k (a + b)` for k of one or
+/// more, and `a + b` is what an event of one record costs. MEASURED on a build host with
+/// four cores shared with the clients, Layer E7s, events of one record each: 6.5 to 11 us of
+/// wall clock per event across five unloaded runs (the keepalive emission itself 4.5 us, the
+/// small write behind it 4 to 11 us). At 11 us, 2048 sessions and a twentieth of a core the
+/// bound is 3.6 s, at 6.5 us it is 2.1 s, against the 10 s lease. (Round 3473 wrote 0.7 s
+/// from an assumed 2 us an event; the measurement above replaces it.)
+///
+/// MEASURED over the whole E7s binary at 4 cores, with the turn counted in events, which are
+/// units in that workload: no bound lost 3 faces of 2048 and admitted 12 of 320 new sessions
+/// to a starved router; a bound of 8 lost none and admitted 320 of 320, at 12.5 us a message
+/// against 13.2 for no bound (2048 subscribers, unstarved), so the yield costs nothing that
+/// shows; a bound of 32 and 128 also passed on that machine, at 20.3 and 16.3 us, and 128 has
+/// a worst-case return about the length of the lease, which is a pass owed to a quiet machine.
+///
+/// This is deficit round robin (Shreedhar and Varghese, 1995) with the runtime's run queue as
+/// the round: each yield is one round for the other tasks, a session is credited one quantum
+/// a round, and an event that costs more than the quantum pays the excess in rounds, by
+/// yielding as many times, so that whatever the size of its frames every session gets the same
+/// share of the thread in the long run ([`Turn::after_event`]).
+const TURN_UNIT_BUDGET: u32 = 8;
 
-/// The events one loop has taken since it last yielded (see [`TURN_EVENT_BUDGET`]).
+/// The work one event costs the loop, in the units of [`TURN_UNIT_BUDGET`]: the records it
+/// carries, and one for an event that carries none or no records of its own (a keepalive, a
+/// close, a lost link). Never more than the records a batch can hold: a batch is at most
+/// 65535 bytes, so the figure bounds the yields one event can owe.
+fn event_units(outcome: &DriverLoopOutcome) -> u32 {
+    let records = match outcome {
+        DriverLoopOutcome::FramePayload { messages, .. } => messages.len(),
+        DriverLoopOutcome::FramePlainPuts { puts, .. } => puts.len(),
+        _ => 1,
+    };
+    u32::try_from(records)
+        .unwrap_or(u32::MAX)
+        .clamp(1, u32::from(u16::MAX))
+}
+
+/// What one loop has spent of its turn since it last yielded (see [`TURN_UNIT_BUDGET`]).
 #[derive(Default)]
 struct Turn {
-    taken: u32,
+    spent: u32,
 }
 
 impl Turn {
-    /// Count one event and, when the turn is spent, yield the thread: the task goes to the back
-    /// of its runtime's queue, behind whatever woke while it ran, a timer that fired included.
-    async fn after_event(&mut self) {
-        self.taken += 1;
-        if self.taken >= TURN_EVENT_BUDGET {
-            self.taken = 0;
+    /// Charge one event of `units` and yield the thread once for each whole quantum the turn
+    /// has now spent: the task goes to the back of its runtime's queue, behind whatever woke
+    /// while it ran, a timer that fired included. What is left of a quantum carries into the
+    /// next event.
+    async fn after_event(&mut self, units: u32) {
+        self.spent = self.spent.saturating_add(units);
+        while self.spent >= TURN_UNIT_BUDGET {
+            self.spent -= TURN_UNIT_BUDGET;
             tokio::task::yield_now().await;
         }
     }
@@ -1717,43 +1755,100 @@ impl Turn {
 
 #[cfg(test)]
 mod turn_tests {
-    use super::{now_or_never, Turn, TURN_EVENT_BUDGET};
+    use super::{event_units, Turn, TURN_UNIT_BUDGET};
     use core::future::Future;
     use std::sync::Arc;
+    use wz_session_core::driver_loop::DriverLoopOutcome;
+    use wz_session_core::link::LostCause;
+    use wz_session_core::network_message::NetworkMessage;
+    use wz_session_core::qos::Priority;
 
-    /// A loop's turn is bounded: the events before the budget's last go through without
-    /// suspending, the one that spends it yields the thread once, and the next turn starts
-    /// again from zero. Without the yield one session with a backlog keeps its thread until
-    /// the backlog is gone (see [`TURN_EVENT_BUDGET`]).
-    #[test]
-    fn a_turn_yields_the_thread_once_per_budget_of_events() {
+    /// How many times charging `units` to `turn` suspends the task before it returns, which
+    /// is how many rounds the other tasks of the thread get.
+    fn yields(turn: &mut Turn, units: u32) -> usize {
         struct NoWake;
         impl std::task::Wake for NoWake {
             fn wake(self: Arc<Self>) {}
         }
-        let mut turn = Turn::default();
-        for taken in 1..TURN_EVENT_BUDGET {
-            assert!(
-                now_or_never(turn.after_event()).is_some(),
-                "event {taken} of {TURN_EVENT_BUDGET} must not suspend"
-            );
-        }
         let waker = std::task::Waker::from(Arc::new(NoWake));
         let mut cx = std::task::Context::from_waker(&waker);
-        {
-            let mut spent = core::pin::pin!(turn.after_event());
-            assert!(
-                spent.as_mut().poll(&mut cx).is_pending(),
-                "the event that spends the budget must yield"
-            );
-            assert!(
-                spent.as_mut().poll(&mut cx).is_ready(),
-                "a yield returns on the next poll"
+        let mut charged = core::pin::pin!(turn.after_event(units));
+        let mut suspended = 0;
+        while charged.as_mut().poll(&mut cx).is_pending() {
+            suspended += 1;
+            assert!(suspended < 1_000_000, "a charge never ends");
+        }
+        suspended
+    }
+
+    /// A turn is bounded: the events before the budget's last go through without
+    /// suspending, the one that spends it yields the thread once, and the next turn starts
+    /// from zero. Without the yield one session with a backlog keeps its thread until the
+    /// backlog is gone (see [`TURN_UNIT_BUDGET`]).
+    #[test]
+    fn a_turn_yields_the_thread_once_per_budget_of_units() {
+        let mut turn = Turn::default();
+        for taken in 1..TURN_UNIT_BUDGET {
+            assert_eq!(
+                yields(&mut turn, 1),
+                0,
+                "unit {taken} of {TURN_UNIT_BUDGET} must not suspend"
             );
         }
-        assert!(
-            now_or_never(turn.after_event()).is_some(),
-            "the turn after a yield starts from zero"
+        assert_eq!(
+            yields(&mut turn, 1),
+            1,
+            "the unit that spends the budget yields"
+        );
+        assert_eq!(yields(&mut turn, 1), 0, "the next turn starts from zero");
+    }
+
+    /// An event that costs more than a turn pays the excess in rounds, as deficit round
+    /// robin does: it yields once for each whole quantum it overdrew, and what is left of a
+    /// quantum is charged to the event after it.
+    #[test]
+    fn an_event_larger_than_the_turn_yields_the_rounds_it_overdrew() {
+        let mut turn = Turn::default();
+        let big = 3 * TURN_UNIT_BUDGET + 2;
+        assert_eq!(yields(&mut turn, big), 3, "three whole quanta");
+        // Two units are left over: five more make seven, one short of a quantum, and one
+        // more completes it.
+        assert_eq!(yields(&mut turn, TURN_UNIT_BUDGET - 3), 0, "one short");
+        assert_eq!(
+            yields(&mut turn, 1),
+            1,
+            "the carried two and these make eight"
+        );
+    }
+
+    /// An event is charged for the records it carries, and an event with none, or one that is
+    /// not a frame at all, is charged one.
+    #[test]
+    fn an_event_is_charged_the_records_it_carries() {
+        let frame = |records: usize| DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: (0..records)
+                .map(|_| NetworkMessage::Unknown {
+                    mid: 0,
+                    body: Vec::new(),
+                })
+                .collect(),
+            has_ext: false,
+            extensions: Vec::new(),
+            priority: Priority::DEFAULT,
+        };
+        assert_eq!(
+            event_units(&frame(0)),
+            1,
+            "an empty batch still costs a read"
+        );
+        assert_eq!(event_units(&frame(1)), 1);
+        assert_eq!(event_units(&frame(37)), 37);
+        assert_eq!(
+            event_units(&DriverLoopOutcome::LinkLost(LostCause::PeerClosed)),
+            1,
+            "an event that is not a frame costs one"
         );
     }
 }

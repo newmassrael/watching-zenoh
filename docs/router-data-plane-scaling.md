@@ -136,7 +136,7 @@ I6. Each invariant above is held by a test that can fail for exactly one reason 
 
 - Keepalive and lease handling for a face does not wait behind that face's, or any face's, data.
 - A face is served at most a fixed number of messages per scheduling round, so one busy face cannot
-  starve the rest.
+  starve the rest. (Built, as a quantum of work units with deficit round robin: section 7.2.)
 - When the per-face or router-wide queue passes a bound, data messages are dropped and counted
   (reliable and best-effort treated as the protocol defines them); links are kept. The counter is
   exposed on the admin space next to the existing ones.
@@ -234,6 +234,10 @@ the three hogs left it most of the core and the first attempt measured nothing):
 face goes DOWN; the second prints and asserts nothing.) The window is 20 s and the lease is 10 s, so
 a face whose keepalive was starved would have shown.
 
+(Section 7.2 corrects this paragraph: the count of faces that went DOWN was the router's own, and a
+starved router sees a face go down only when its loop comes back to that face, so the count was
+a race and not the invariant.)
+
 So the invariant I4 states holds on this measurement: links are kept while data is shed, and the
 data is shed by the senders' own flow control, not by the router dropping links. What does degrade
 is admission: a starved, overloaded router takes in new sessions at about half the rate they knock.
@@ -243,3 +247,54 @@ sessions knock at once), not something to fix by default. 4.3 as written (a new 
 per-round fairness, a router-wide shed counter) is therefore not built. What would reopen it is a
 face going DOWN under these conditions on the real micro VM, or an admission rate the service cannot
 live with.
+
+### 7.2 What 7.1 missed, and what was built (measured 2026-10-23 and 24)
+
+7.1 counted the faces the router saw go DOWN. A starved router sees one only when its loop comes
+back to that face, and the loop did that once per pass over all its faces, which under starvation was
+up to 18 s. So the count inside a 20 s window was a race with the window, and the test passed or failed
+by it. The property is the CLIENTS' side: in every starved run about 1400 to 2000 of the 2048 clients
+closed on their own lease expiry (their staged close reason was `Expired`; the unstarved control had
+none, measured in round 3467). On a build host with four cores the test failed five runs of five at the last commit
+the hosted runner had passed.
+
+**Cause.** The session loop took its next event with no await that suspends, and a read served from
+bytes already buffered does not spend tokio's cooperative budget, so a face with a backlog kept the
+thread until the backlog was gone. The thread's return to any other face was the sum of those turns.
+Counters on the router: about 25000 inbound events a second, and about 120 lease checks and 100
+keepalive writes a second where 600 were due. Ruled out by experiment: yielding after every write of
+the writer task (no change), the lifecycle and `rx/max_message_size` commits (the same failure at the
+green commit).
+
+**What holds the property now (`session_glue.rs`, `Turn`).** The loop's turn is a quantum of
+`TURN_UNIT_BUDGET` (8) work units; an event costs one unit for each record it carries, and an event
+that costs more than the quantum pays the excess by yielding that many rounds, which is deficit round
+robin with the run queue as the round. A task that becomes ready meanwhile, another face's timer
+included, runs within one turn, whatever the size of the frames. Two tests hold it without a clock or a
+loaded machine (`session_keepalive_tx.rs`, `a_task_that_wakes_during_a_backlog_runs_within_one_turn`
+and its control, which shows the same flood keeps the thread without the loop's yield).
+
+**The bound, and what is measured about it.** A session returns after at most
+`faces x quantum x cost of a unit / share of the CPU`. The cost of a unit is an upper bound that needs
+no split of an event's cost into a fixed part and a part per record (`a + k b <= k (a + b)`), so it is
+what an event of one record costs. Measured on a build host with the clients on the same four cores
+(Layer E7s, five unloaded runs): 6.5 to 11 us of wall clock per event, of which a keepalive emission is
+4.5 us, and the small write behind it 4 to 11 us. So for 2048 faces on a twentieth of a core the return
+is 2.1 to 3.6 s against the 10 s lease, and the keepalives alone (2048 per 3.3 s at about 9 to 16 us)
+take about 1% of a core. The first figure given for this bound, 0.7 s, used an assumed 2 us an event
+and is withdrawn.
+
+**Result** (whole E7s binary, 4 cores): clients that closed on `Expired` in the 20 s window, 1400 to
+2000 before and none after; faces DOWN 3 before, none after; new sessions admitted by the starved
+router 12 of 320 before and 320 of 320 after; the cost table 13.2 us a message before and 12.5 after;
+the starved router forwards 25 to 35% of what is offered, and there is no figure for it before
+because those runs collapsed.
+
+**Not built, and why it is still wanted.** The quantum bounds the return in proportion to the number
+of faces and inversely to the CPU share, and nothing yet states the share and the number of faces
+below which the bound is promised. What remains of 4.3: keepalive and lease work in an executor of its
+own with strict priority over data (a stage measured on a saturated shared runtime put a 100 ms timer
+late by up to 2.4 s, and on a dedicated one-thread runtime by at most 31 ms), a capacity model that
+admits a session only while the control work it adds fits the configured budget, a stated drop policy
+for data with counters on the admin space, and a test that asserts the latest a timer was served
+and not the count of faces that went DOWN.
