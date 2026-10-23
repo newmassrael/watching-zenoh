@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-zenoh — the public Rust API of the pinned `zenoh` crate, over wz (inventory atom
+# `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13 and step 12).
+#
+# A Rust user replaces zenoh by changing one dependency line and nothing else:
+#
+#     zenoh = { package = "wz-zenoh", version = "1.10.1" }
+#
+# so the library is named `zenoh` and the version is the pinned zenoh's, and every public path,
+# kind and trait relation is upstream's. The surface it must equal is the one rustdoc JSON gives
+# for upstream at the pin (`deploy/upstream-api/zenoh-1.10.1-*.surface`), and
+# `scripts/lib/rust_api_surface.py` holds this crate to it: no line upstream does not have (C10:
+# a wz-only door is in `wz::ext`, never here), and the count of lines still missing may only
+# fall. The crate is built slice by slice in the order a user meets the API; until a slice lands
+# it is not here at all, rather than here and unimplemented.
+#
+# Features carry zenoh's names and join with the slice that gives them meaning, so a feature
+# this manifest declares is one that does something.
+
+[package]
+name = "wz-zenoh"
+version = "1.10.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The public Rust API of the zenoh crate (1.10.1) as a drop-in over watching-zenoh."
+
+[lib]
+name = "zenoh"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -3392,6 +3392,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-zenoh"
+version = "1.10.1"
+
+[[package]]
 name = "x509-parser"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
