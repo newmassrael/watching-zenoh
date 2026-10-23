@@ -280408,6 +280408,48 @@
         "Steps 3 and 4 are where resident memory falls; step 2 lowered the heap reservation only"
       ]
     },
+    "Round 3476": {
+      "decision_summary": "Pay the two gate reds Round 3475's push left on main, reported by another session whose push waited on them. discard_site_lint: the chunk store behind MessageList removes the oldest row and drops an emptied chunk, and neither site was registered; both now are, with ChunkLog narrowed to crate-private so the receipt-bearing discard_oldest is the only door to them. accessor_reach_census: five accessors the step added are asked by no shipped surface. MessageList::last and the Rows view's len, get and is_empty were removed, since the view is only ever walked; MessageList::is_empty is kept and rostered, because clippy's len_without_is_empty requires it beside a reached len, the precedent StreamAssembler::is_empty already set. A third red seen while checking, C1bz at 499 against 495 in wz-session-core, is not this tree's: the four links were added by the datagram peer commit 9334ea20a, measured before and after it.",
+      "changes_bullets": [
+        "wz-session-core passive_messages.rs: ChunkLog pub(crate); MessageList::last and Rows::len, get, is_empty removed; tests read the last row and the view's size through iteration",
+        "wz-capture lib.rs and record_clock_tests.rs: test reads of the last row through iter().next_back()",
+        "scripts/lib/discard_site_lint.py: two ALLOWED rows for the chunk store; scripts/lib/accessor_reach_census.py: roster row MessageList::is_empty with its reason"
+      ],
+      "verification_bullets": [
+        "discard_site_lint.py FAIL reproduced on origin d26249ac2, then OK: 57 removal sites, 34 registered",
+        "accessor_reach_census.py on freshly built artifacts: ok, 130 accessors across 38 types, 112 reached, 18 rostered",
+        "cargo test wz-session-core passive_messages and wz-capture with dissect, fixtures, compression green; cargo check wz-capi-dissect, wz-analyze, wz-integration-tests all targets green; clippy -D warnings wz-session-core, wz-capture and wz-capture no-default-features green",
+        "C1bz wz-session-core: rustdoc error lines 496 at 9334ea20a's parent and 500 at 9334ea20a (DatagramVerdict::Refused, DatagramVerdict::Stray, PeerBinding::admit, PeerBinding::is_peer); the same 500 on origin d26249ac2 and with this fix"
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "carry_forward_bullets": [
+        "C1bz wz-session-core 499 against 495 belongs to the datagram peer commit 9334ea20a; reported to its reporter, not repaid here",
+        "Open-debt item 924 continues at step 4a (rows handed out as Row, the capture-order walk sorting keys)"
+      ],
+      "publishable_decision_summary": "Pay the two gate reds Round 3475's push left on main, reported by another session whose push waited on them. discard_site_lint: the chunk store behind MessageList removes the oldest row and drops an emptied chunk, and neither site was registered; both now are, with ChunkLog narrowed to crate-private so the receipt-bearing discard_oldest is the only door to them. accessor_reach_census: five accessors the step added are asked by no shipped surface. MessageList::last and the Rows view's len, get and is_empty were removed, since the view is only ever walked; MessageList::is_empty is kept and rostered, because clippy's len_without_is_empty requires it beside a reached len, the precedent StreamAssembler::is_empty already set. A third red seen while checking, C1bz at 499 against 495 in wz-session-core, is not this tree's: the four links were added by the datagram peer commit 9334ea20a, measured before and after it.",
+      "publishable_changes_bullets": [
+        "wz-session-core passive_messages.rs: ChunkLog pub(crate); MessageList::last and Rows::len, get, is_empty removed; tests read the last row and the view's size through iteration",
+        "wz-capture lib.rs and record_clock_tests.rs: test reads of the last row through iter().next_back()",
+        "scripts/lib/discard_site_lint.py: two ALLOWED rows for the chunk store; scripts/lib/accessor_reach_census.py: roster row MessageList::is_empty with its reason"
+      ],
+      "publishable_verification_bullets": [
+        "discard_site_lint.py FAIL reproduced on origin d26249ac2, then OK: 57 removal sites, 34 registered",
+        "accessor_reach_census.py on freshly built artifacts: ok, 130 accessors across 38 types, 112 reached, 18 rostered",
+        "cargo test wz-session-core passive_messages and wz-capture with dissect, fixtures, compression green; cargo check wz-capi-dissect, wz-analyze, wz-integration-tests all targets green; clippy -D warnings wz-session-core, wz-capture and wz-capture no-default-features green",
+        "C1bz wz-session-core: rustdoc error lines 496 at 9334ea20a's parent and 500 at 9334ea20a (DatagramVerdict::Refused, DatagramVerdict::Stray, PeerBinding::admit, PeerBinding::is_peer); the same 500 on origin d26249ac2 and with this fix"
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec"
+      ],
+      "publishable_carry_forward_bullets": [
+        "C1bz wz-session-core 499 against 495 belongs to the datagram peer commit 9334ea20a; reported to its reporter, not repaid here",
+        "Open-debt item 924 continues at step 4a (rows handed out as Row, the capture-order walk sorting keys)"
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
