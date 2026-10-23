@@ -278934,6 +278934,50 @@
         "The role axis and the image's sourcing of the global axes are step 4, by the session that owns the image files."
       ]
     },
+    "Round 3443": {
+      "decision_summary": "Step 2 of docs/build-configuration.md starts with what each upstream original's own default build has. Every capability now states it for the originals its ABIs reach: zenoh-pico where the pico ABI exports it, zenoh-c and zenoh where the zenoh-c ABI does. This is not the capability's default, which stays the drop-in's own default, so no existing build changes. An original's defaults will reach a build only through that original's generated defconfig. The switch map gate holds the zenoh-pico values to the first definition of each switch in the pinned CMakeLists, and the zenoh-c values to zenoh-c's default features; the judgements no switch reaches were read from the pinned sources. The round also repairs a defect of round 3430: the gate's agreement between the pico rows and the declaration's pico switches had graded nothing since that round changed the declaration's shape, and it never handled a capability that pico has under several switches.",
+      "changes_bullets": [
+        "deploy/wz-config.toml: upstream_on and upstream_off on all 31 capabilities, and the rule in the file's header. The three that differ from pico's defaults are the ones the interop reference build turns on: advanced, unstable-api and connectivity. group and e2e-sender are wz-own and off in every original.",
+        "scripts/lib/wz_config.py: a capability must state exactly the originals its ABIs reach, each in one of the two keys; five selftest arms.",
+        "scripts/lib/upstream_switch_map.py: the pico default reader (a FORCE inside a branch is not the default), the default arm in both runs, and the declaration arm on the declaration's real shape with pico_flags_all."
+      ],
+      "verification_bullets": [
+        "The switch map's default run holds 17 zenoh-pico defaults and its zenoh-c run 10 zenoh-c defaults, both against the pinned 1.10.1 sources; gossip is the one zenoh-pico judgement no switch reaches.",
+        "Declaring multi-thread off in zenoh-pico fails the default run, and declaring transport_tls off in zenoh-c fails the zenoh-c run; restored, both pass.",
+        "Before the repair, a pico row damaged to never left the declaration arm silent on the input the real run passes; after it, the arm names the damage.",
+        "wz_config selftest 83 of 83 and --check pass; the switch map selftest passes; zephyr_board_table_gate, python_floor_lint, gate_test_pin_lint, round_fed_gate_reach, gate_provenance_lint, armed_skip_guard, hook_script_reference_gate and self_counted_table_gate pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The zenoh values are judged from the pinned zenoh source but no run holds them yet to zenoh's default features.",
+        "The switch rows move into the declaration next; where several pico switches reach one capability, whether it is on when any or when all of them are must be stated per capability.",
+        "Then the family and target choices and the generated defconfigs."
+      ],
+      "publishable_decision_summary": "Step 2 of docs/build-configuration.md starts with what each upstream original's own default build has. Every capability now states it for the originals its ABIs reach: zenoh-pico where the pico ABI exports it, zenoh-c and zenoh where the zenoh-c ABI does. This is not the capability's default, which stays the drop-in's own default, so no existing build changes. An original's defaults will reach a build only through that original's generated defconfig. The switch map gate holds the zenoh-pico values to the first definition of each switch in the pinned CMakeLists, and the zenoh-c values to zenoh-c's default features; the judgements no switch reaches were read from the pinned sources. The round also repairs a defect of round 3430: the gate's agreement between the pico rows and the declaration's pico switches had graded nothing since that round changed the declaration's shape, and it never handled a capability that pico has under several switches.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml: upstream_on and upstream_off on all 31 capabilities, and the rule in the file's header. The three that differ from pico's defaults are the ones the interop reference build turns on: advanced, unstable-api and connectivity. group and e2e-sender are wz-own and off in every original.",
+        "scripts/lib/wz_config.py: a capability must state exactly the originals its ABIs reach, each in one of the two keys; five selftest arms.",
+        "scripts/lib/upstream_switch_map.py: the pico default reader (a FORCE inside a branch is not the default), the default arm in both runs, and the declaration arm on the declaration's real shape with pico_flags_all."
+      ],
+      "publishable_verification_bullets": [
+        "The switch map's default run holds 17 zenoh-pico defaults and its zenoh-c run 10 zenoh-c defaults, both against the pinned 1.10.1 sources; gossip is the one zenoh-pico judgement no switch reaches.",
+        "Declaring multi-thread off in zenoh-pico fails the default run, and declaring transport_tls off in zenoh-c fails the zenoh-c run; restored, both pass.",
+        "Before the repair, a pico row damaged to never left the declaration arm silent on the input the real run passes; after it, the arm names the damage.",
+        "wz_config selftest 83 of 83 and --check pass; the switch map selftest passes; zephyr_board_table_gate, python_floor_lint, gate_test_pin_lint, round_fed_gate_reach, gate_provenance_lint, armed_skip_guard, hook_script_reference_gate and self_counted_table_gate pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The zenoh values are judged from the pinned zenoh source but no run holds them yet to zenoh's default features.",
+        "The switch rows move into the declaration next; where several pico switches reach one capability, whether it is on when any or when all of them are must be stated per capability.",
+        "Then the family and target choices and the generated defconfigs."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
