@@ -279472,6 +279472,46 @@
         "The socket-bound ClientNode::run is exercised by a host run only; a hosted lane that runs host-slot-node against a router would hold it."
       ]
     },
+    "Round 3455": {
+      "decision_summary": "Land step 1a of docs/session-lifecycle-intent.md: a lifecycle verb is taken only from a peer whose zid a credential proved. A zid is derived from a credential's public key (wz_session_core::credential_identity). The acceptor of a public-key handshake carries the initiator's derived zid through the accept cookie and records it at OpenSyn; a TLS or QUIC link records the zid of its peer certificate's key; the session answers peer_identity_verified, and the injector refuses an unverified commander for both verbs before its authority is asked. Residual (1) of session-close-ingress is corrected, not paid: the initiator's check of the responder key was built by R311y576 and admits a key without proving it, because upstream's initiator checks the OpenAck for presence only, so a public-key handshake verifies nobody to the initiator. What remains of step 1 is 1b. REMAINING is unchanged.",
+      "changes_bullets": [
+        "wz-session-core (864d052a1): new credential_identity module (SHA-256 of the SubjectPublicKeyInfo to a zid, written as upstream writes a zid); the auth accept state gains a 17-byte pubkey credential member, the widest accept cookie now 125 of 128 bytes; Link and the session carry the proven zid and answer peer_identity_verified; drive.rs records it at OpenSyn and the lifecycle injector refuses an unverified commander before admits_open.",
+        "wz-runtime-tokio (864d052a1): the public-key acceptor stage reports the initiator's derived zid; TLS and QUIC record the zid of the peer certificate's key at the three sites that fill the certificate name; the other struct literals gain the field.",
+        "Inventory session-close-ingress: a STEP 1a paragraph appended to its reason, old body unchanged. docs/session-lifecycle-intent.md: step 1 split into 1a (landed) and 1b, and the initiator-proves-nobody fact added. docs/reason-review-pins.md: the three cited files this round edits re-pinned to R3455."
+      ],
+      "verification_bullets": [
+        "Built and tested on a build machine: wz-session-core lib tests for credential_identity, accept_state, accept_cookie and auth_dispatch at the session-extauth feature set (37 passed, the two width tests included); a no-allocator check of wz-session-core with session-close-ingress; wz-runtime-tokio session_close_ingress (17), pubkey_handshake_e2e (2) and the extauth_pubkey and stream_link lib tests (43); wz-access-control (19); clippy -D warnings on the three crates. Each rc 0. The derivation is checked against the FIPS 180-2 SHA-256 vectors and the TLS case against an SPKI that rcgen serialises independently of x509-parser.",
+        "nondefault-tests-gate --census rc 0 on a build machine, on the tree rebased on Round 3451 (it peaks near 52 GB, which ended the earlier local run); the commits up to Round 3454 touch no crate this round edits. On the tree rebased on Round 3454, each rc 0: depth_axis_census, reason_review_pin_gate, store_reason_citation_gate, store_reasons_resolve, audit-catalog-status (REMAINING 2), grading_pin_ratchet, upstream_citation_anchor_gate and the prose gates; validate-workspace reports no new T1 orphan."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "Step 1b of the document is next: the lifecycle verbs fail to compile in a build with no credential path, and the fixed-memory profile gets a credential path that verifies a peer. Steps 2 to 7 are not started.",
+        "A peer that authenticates by public key only, as the initiator of the handshake, cannot be verified by the side it dials; a certificate is the only credential that verifies an acceptor. Whether to propose an OpenAck proof upstream is the owner's decision.",
+        "This round is not a milestone round: REMAINING stays 2 (api-compat-rust, session-close-ingress)."
+      ],
+      "publishable_decision_summary": "Land step 1a of docs/session-lifecycle-intent.md: a lifecycle verb is taken only from a peer whose zid a credential proved. A zid is derived from a credential's public key (wz_session_core::credential_identity). The acceptor of a public-key handshake carries the initiator's derived zid through the accept cookie and records it at OpenSyn; a TLS or QUIC link records the zid of its peer certificate's key; the session answers peer_identity_verified, and the injector refuses an unverified commander for both verbs before its authority is asked. Residual (1) of session-close-ingress is corrected, not paid: the initiator's check of the responder key was built by R311y576 and admits a key without proving it, because upstream's initiator checks the OpenAck for presence only, so a public-key handshake verifies nobody to the initiator. What remains of step 1 is 1b. REMAINING is unchanged.",
+      "publishable_changes_bullets": [
+        "wz-session-core (864d052a1): new credential_identity module (SHA-256 of the SubjectPublicKeyInfo to a zid, written as upstream writes a zid); the auth accept state gains a 17-byte pubkey credential member, the widest accept cookie now 125 of 128 bytes; Link and the session carry the proven zid and answer peer_identity_verified; drive.rs records it at OpenSyn and the lifecycle injector refuses an unverified commander before admits_open.",
+        "wz-runtime-tokio (864d052a1): the public-key acceptor stage reports the initiator's derived zid; TLS and QUIC record the zid of the peer certificate's key at the three sites that fill the certificate name; the other struct literals gain the field.",
+        "Inventory session-close-ingress: a STEP 1a paragraph appended to its reason, old body unchanged. docs/session-lifecycle-intent.md: step 1 split into 1a (landed) and 1b, and the initiator-proves-nobody fact added. docs/reason-review-pins.md: the three cited files this round edits re-pinned to R3455."
+      ],
+      "publishable_verification_bullets": [
+        "Built and tested on a build machine: wz-session-core lib tests for credential_identity, accept_state, accept_cookie and auth_dispatch at the session-extauth feature set (37 passed, the two width tests included); a no-allocator check of wz-session-core with session-close-ingress; wz-runtime-tokio session_close_ingress (17), pubkey_handshake_e2e (2) and the extauth_pubkey and stream_link lib tests (43); wz-access-control (19); clippy -D warnings on the three crates. Each rc 0. The derivation is checked against the FIPS 180-2 SHA-256 vectors and the TLS case against an SPKI that rcgen serialises independently of x509-parser.",
+        "nondefault-tests-gate --census rc 0 on a build machine, on the tree rebased on Round 3451 (it peaks near 52 GB, which ended the earlier local run); the commits up to Round 3454 touch no crate this round edits. On the tree rebased on Round 3454, each rc 0: depth_axis_census, reason_review_pin_gate, store_reason_citation_gate, store_reasons_resolve, audit-catalog-status (REMAINING 2), grading_pin_ratchet, upstream_citation_anchor_gate and the prose gates; validate-workspace reports no new T1 orphan."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 1b of the document is next: the lifecycle verbs fail to compile in a build with no credential path, and the fixed-memory profile gets a credential path that verifies a peer. Steps 2 to 7 are not started.",
+        "A peer that authenticates by public key only, as the initiator of the handshake, cannot be verified by the side it dials; a certificate is the only credential that verifies an acceptor. Whether to propose an OpenAck proof upstream is the owner's decision.",
+        "This round is not a milestone round: REMAINING stays 2 (api-compat-rust, session-close-ingress)."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
