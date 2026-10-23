@@ -279994,6 +279994,48 @@
         "The expected memory after step 4 (about 0.5x the file with a lent buffer, 1.5x with an owned copy) and the re-walk CPU are estimates until step 4 measures them"
       ]
     },
+    "Round 3467": {
+      "decision_summary": "Pay two of the four reds that the hosted run of fed150b13 still showed after Round 3463 paid its C1bz, each at its own cause; a third, A4, another session paid the same way. Layer Q: the session slot record follows the eight bytes of the application wake deadline that 054886cc1 added to the session, and the multicast footprint baseline follows two features, each found by building the tree at the commit, 6c31caba5 (the multicast transmit item for an interest, +1532 text) and a256cf133 (the configured receive bound, +88). The passive-dissection lane read 92 to 94 percent of its 1800 s budget, so its `--all-legs` half moves to a lane and a job of its own, C1bnl. A lane id registered twice is now refused, because C1bw was given to a second lane and ran with the first. Not paid here: the hosted E7s run, whose cause is measured below and is a defect of the router.",
+      "changes_bullets": [
+        "deploy/session_slot_bytes.json: mcu-admin-node 36736 to 36744 and zephyr-admin-node 36728 to 36736, which the check measured on the tree before 054886cc1 (equal to the old record) and at it (+8 on both).",
+        "scripts/check-footprint.sh: the multicast-e2e text baseline 68156 to 69776 (thumbv7m) and 68120 to 69864 (thumbv7em-hf), with the attribution written beside it; the tree at 8e77cda07 reads +0, at 6c31caba5 +1532, at 864d052a1 +1532, and the hosted run of d4dfa8f96 +1620.",
+        ".github/workflows/ci.yml, scripts/run-ci.sh, scripts/lib/nondefault-tests-gate.sh, scripts/lib/apt_package_census.py: a job `nondefault-legs` and a lane C1bnl that run `nondefault-tests-gate.sh --all-legs`, the call removed from C1bn; the apt census rows of the packages that job installs.",
+        "scripts/lib/unwired_lane_lint.py: a lane id registered more than once in run-ci.sh fails; a scratch copy with C1bw twice is refused and the real tree passes 172 lanes."
+      ],
+      "verification_bullets": [
+        "On the tree rebased on Round 3466, each on a build machine: session_slot_bytes --check rc 0 (36744 and 36736, equal to the record); check-footprint multicast-e2e text +0 on both targets under Layer Q's path remap. Layer C1bnl rc 0 in 549 s as one lane, measured on the tree before that rebase (an earlier try under the id C1bw ran two lanes, which is how the collision was seen), and the non-default test census rc 0 on a tree before it too; neither run touches a file the rebase changed. Gates rc 0 after the rebase: apt_package_census, unwired_lane_lint, armed_oracle_census and decline_arming_gate with --check, gate_provenance_lint, job_budget_binding, store_reader_lane_lint, lane_locality_claim_gate, zephyr_board_table_gate, actionlint, the confidential-vocabulary scan; validate-workspace reports no new T1 orphan.",
+        "Measured about the E7s run, not changed: it failed on 4 of 10 four-core runs at bcb1b50a4, which passed hosted, so it is not a regression of this line. In every starved run, with all cores or four, about 1700 of 2048 client sessions expire their lease inside the window, against none in the unstarved control; the test counts only the faces the starved router processes down before the window ends, which is why it passes or fails by a race. The router emits about 15 keepalives a second after the load starts where 620 are due, its keepalive pacers emit 3 in 16 s, and giving its transmit runtime four workers raises the pacers tenfold and halves the expiries."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "The router keeps no keepalive plane of its own: under a CPU share of about 22 percent for three busy threads its pacers and writers wait behind data work in the transmit runtime, and a client with a 10 s lease is lost after one missed window. Whether to isolate the keepalive emission from data scheduling, or to state the CPU share below which links are not promised, is the owner's decision; the I4 test as written passes by a race and asserts neither.",
+        "Layer Q's session-slot-bytes and multicast footprint, A4 and the C1bn budget are paid by this round and by the A4 fix another session pushed; the hosted E7s run stays red.",
+        "Not a milestone round."
+      ],
+      "publishable_decision_summary": "Pay two of the four reds that the hosted run of fed150b13 still showed after Round 3463 paid its C1bz, each at its own cause; a third, A4, another session paid the same way. Layer Q: the session slot record follows the eight bytes of the application wake deadline that 054886cc1 added to the session, and the multicast footprint baseline follows two features, each found by building the tree at the commit, 6c31caba5 (the multicast transmit item for an interest, +1532 text) and a256cf133 (the configured receive bound, +88). The passive-dissection lane read 92 to 94 percent of its 1800 s budget, so its `--all-legs` half moves to a lane and a job of its own, C1bnl. A lane id registered twice is now refused, because C1bw was given to a second lane and ran with the first. Not paid here: the hosted E7s run, whose cause is measured below and is a defect of the router.",
+      "publishable_changes_bullets": [
+        "deploy/session_slot_bytes.json: mcu-admin-node 36736 to 36744 and zephyr-admin-node 36728 to 36736, which the check measured on the tree before 054886cc1 (equal to the old record) and at it (+8 on both).",
+        "scripts/check-footprint.sh: the multicast-e2e text baseline 68156 to 69776 (thumbv7m) and 68120 to 69864 (thumbv7em-hf), with the attribution written beside it; the tree at 8e77cda07 reads +0, at 6c31caba5 +1532, at 864d052a1 +1532, and the hosted run of d4dfa8f96 +1620.",
+        ".github/workflows/ci.yml, scripts/run-ci.sh, scripts/lib/nondefault-tests-gate.sh, scripts/lib/apt_package_census.py: a job `nondefault-legs` and a lane C1bnl that run `nondefault-tests-gate.sh --all-legs`, the call removed from C1bn; the apt census rows of the packages that job installs.",
+        "scripts/lib/unwired_lane_lint.py: a lane id registered more than once in run-ci.sh fails; a scratch copy with C1bw twice is refused and the real tree passes 172 lanes."
+      ],
+      "publishable_verification_bullets": [
+        "On the tree rebased on Round 3466, each on a build machine: session_slot_bytes --check rc 0 (36744 and 36736, equal to the record); check-footprint multicast-e2e text +0 on both targets under Layer Q's path remap. Layer C1bnl rc 0 in 549 s as one lane, measured on the tree before that rebase (an earlier try under the id C1bw ran two lanes, which is how the collision was seen), and the non-default test census rc 0 on a tree before it too; neither run touches a file the rebase changed. Gates rc 0 after the rebase: apt_package_census, unwired_lane_lint, armed_oracle_census and decline_arming_gate with --check, gate_provenance_lint, job_budget_binding, store_reader_lane_lint, lane_locality_claim_gate, zephyr_board_table_gate, actionlint, the confidential-vocabulary scan; validate-workspace reports no new T1 orphan.",
+        "Measured about the E7s run, not changed: it failed on 4 of 10 four-core runs at bcb1b50a4, which passed hosted, so it is not a regression of this line. In every starved run, with all cores or four, about 1700 of 2048 client sessions expire their lease inside the window, against none in the unstarved control; the test counts only the faces the starved router processes down before the window ends, which is why it passes or fails by a race. The router emits about 15 keepalives a second after the load starts where 620 are due, its keepalive pacers emit 3 in 16 s, and giving its transmit runtime four workers raises the pacers tenfold and halves the expiries."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The router keeps no keepalive plane of its own: under a CPU share of about 22 percent for three busy threads its pacers and writers wait behind data work in the transmit runtime, and a client with a 10 s lease is lost after one missed window. Whether to isolate the keepalive emission from data scheduling, or to state the CPU share below which links are not promised, is the owner's decision; the I4 test as written passes by a race and asserts neither.",
+        "Layer Q's session-slot-bytes and multicast footprint, A4 and the C1bn budget are paid by this round and by the A4 fix another session pushed; the hosted E7s run stays red.",
+        "Not a milestone round."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
