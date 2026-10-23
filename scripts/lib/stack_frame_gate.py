@@ -144,10 +144,13 @@ IMAGES = (
     #
     # `peak` is the worst chain of direct calls the reader follows (the handshake path:
     # `wz_app_main`, the polled pump task, `dispatch_copied`, the observer's drain and
-    # `dispatch_network_message_at`), read from the image of 2026-10-22. The kit's own reading of
-    # the same image over a dial, a handshake and 2000 answered queries is 5,928 bytes of the
-    # main stack, so the chain is above what a run reaches: it counts a call no run makes in that
-    # order. It is the figure a change to the code moves, and is held for that.
+    # `dispatch_network_message_at`), read from the image of 2026-10-23 whose node is
+    # `wz_session_mcu::slot_node`, shared with the host node: 6,904 bytes, 64 more than the
+    # image of the same tree with the node written in `fixed_client.rs` (6,840), all of it in
+    # `wz_app_main`'s own frame (1,552 against 1,488). The kit's own reading of that image over a
+    # dial, a handshake and 4000 answered queries is 6,000 bytes of the main stack, so the chain
+    # is above what a run reaches: it counts a call no run makes in that order. It is the figure a
+    # change to the code moves, and is held for that.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -155,12 +158,13 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=6808,
+        peak=6904,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
-    # frames under the observer's drain, which the overlay says: 7,140 bytes in the image of
-    # 2026-10-23, against 6,840 for the client without them. Its stack is the overlay's own.
+    # frames under the observer's drain, which the overlay says: 7,204 bytes in the image of
+    # 2026-10-23 on the shared node, against 6,904 for the client without them (and 7,140 with
+    # the node written in `fixed_client.rs`). Its stack is the overlay's own.
     Image(
         key="zephyr-client-fixed-batching",
         elf=None,
@@ -168,7 +172,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=7140,
+        peak=7204,
     ),
 )
 

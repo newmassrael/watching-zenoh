@@ -592,12 +592,54 @@ layer and the application that ask. What holds it:
   with no error and exit with the same code. Their latency figures differ; they were not
   measured under controlled conditions, so neither is claimed faster or equal.
 
-Not yet: the kit on the module (step 2; the one behaviour that changes is that the refusal
-counters are read every round rather than at the stack check's interval, and its proof is
-the stack gate's rows, the rows of 5.4, the flash text, the allocator gate's Zephyr rows
-and a flashed kit answering every GET), and the getter on the kit (step 3). The loop's
-`run` is bound to a socket, so what exercises it is the host run above; hosted CI has no
-lane that runs a node.
+**Step 2, the kit on it.** `fixed_client.rs` keeps what is the board's: its address,
+identity and entropy (and the exit codes when one is missing), the assertions that hold the
+tables to the deploy file, the slot-size probe, and a `ZephyrPort` whose check is the stack
+watch. One behaviour changes: the runtime's refusal counters are read every round, not at the
+stack check's interval. `Declared` became `Declared<N>`, sized by the image (2 here) and
+starting uninitialised, because a placeholder declaration holds a key pointer and would have
+moved the list into `.data`.
+
+The comparison is of new code, so it is not an identical image: the same tree, built in the
+same directory, with the node in `fixed_client.rs` (before) and on the module (after).
+
+| | base, before | base, after | batching, before | batching, after |
+|---|---|---|---|---|
+| flash (text) | 159,544 B | 160,000 B | 167,676 B | 168,104 B |
+| `.data` | 1,524 B | 1,524 B | 1,524 B | 1,524 B |
+| `.bss` | 109,318 B | 109,346 B | 110,390 B | 110,418 B |
+| worst stack chain, direct calls | 6,840 B | 6,904 B | 7,140 B | 7,204 B |
+| main stack peak, the firmware's own | 5,936 B | 6,000 B | 5,952 B | 6,016 B |
+
+- **The shared node costs 456 B of flash (428 with batching), 28 B of RAM and 64 B of
+  stack.** The 28 B are the two declarations and their count, in `.bss` (`.data` does not
+  move). The 64 B are all in `wz_app_main`'s own frame (1,552 B against 1,488 B), and the
+  firmware's peak moves by the same 64 B in every run. Where the flash goes was not split by
+  symbol.
+- **Every GET was answered**: 7 runs of the base image after and 7 before, 3 of each
+  batching image, 2,000 queries for each of the node's two documents per run, the order
+  shuffled, 0 wrong. The console prints the same kinds of line.
+- **The latency is not distinguished.** Whole runs fall into a slower mode (a median near
+  0.46 ms, and more than 20 of a document's 2,000 queries over 1 ms) in both nodes: base
+  before in 2 of 7 runs, base after in 3 of 7 (all three in the first set of 3), each batching
+  image in 1 of 3. The second set of 4 each, shuffled again, gave base medians of 0.366 ms
+  (0.313 to 0.456) before and 0.379 ms (0.320 to 0.402) after, with no run of the new node
+  in the slow mode; the ranges overlap, so neither is claimed faster or equal. What brings a
+  run into the slow mode is not established.
+- The stack gate's rows and the rows of 5.4 now hold the shared node's figures (6,904 and
+  7,204 B; 6,000 and 6,016 B; 402 and 361 us), and `--measure` takes every run of the new
+  images and refuses the old base image's runs (a stack peak of 5,936 B against 6,000 +/- 16).
+  `no_allocator_link_gate.py --image zephyr-client-fixed` is clean on both of its builds, and
+  so is `zephyr-admin-node-fixed`, which shares two constants of the image crate.
+- **What was measured is the build before two `cfg` edits.** The kit runs above are of the
+  images built before `BUSY_PASSES_MAX` and `LISTEN_PORT` were limited to the nodes that use
+  them (they warned as unused in the client). The rebuilt images have the same text, `.data`,
+  `.bss` and stack chain, and differ from the measured ones in 3 bytes at offsets 849 to 851 of
+  the image, which was not looked into; the kit did not run the rebuilt ones.
+
+Not yet: the getter on the kit (step 3), which nothing claims until the kit has run it. The
+loop's `run` is bound to a socket, so what exercises it is a run on the host or the kit;
+hosted CI has no lane that runs a node.
 
 ## 6. Open
 

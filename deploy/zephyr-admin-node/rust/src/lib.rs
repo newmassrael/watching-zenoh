@@ -139,7 +139,10 @@ const IDLE_SLEEP_US: i32 = {
 };
 
 /// How many passes in a row may skip the sleep because the one before took a frame
-/// in: a stream of frames cannot keep this thread from ever giving the CPU away.
+/// in: a stream of frames cannot keep this thread from ever giving the CPU away. The
+/// loops that skip a sleep are this file's and `fixed_node`'s; the fixed client's is
+/// `wz_session_mcu::slot_node`'s, which sleeps only between two dials.
+#[cfg(not(all(role_client, storage_fixed)))]
 const BUSY_PASSES_MAX: u32 = 64;
 
 /// The core clock this image was built for: the board's
@@ -156,7 +159,9 @@ fn uptime_ms() -> u64 {
     ZephyrClock::<TICK_HZ>.now_us() / 1000
 }
 
-/// The port the node listens on: zenoh's default.
+/// The port the node listens on: zenoh's default. Only the admin node listens; the
+/// client dials.
+#[cfg(role_admin)]
 const LISTEN_PORT: u16 = 7447;
 
 /// The largest IP packet one Ethernet frame carries: the MTU of every interface

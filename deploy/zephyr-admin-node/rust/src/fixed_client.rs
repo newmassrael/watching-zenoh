@@ -2,9 +2,11 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The client node of the Zephyr image on the fixed-memory profile: the node of `run_client` in
-//! `lib.rs` with every table it holds in a `static` this file declares, over the session host and
-//! the dialler every stack shares (`wz_session_mcu::slot_host`, `slot_dial`, `slot_client`) and
-//! Zephyr's sockets as the stack (`wz_runtime_zephyr::net::ZephyrStack`).
+//! `lib.rs` with every table it holds in a `static` this file declares. The node itself (its
+//! storage, its factory, its documents and the loop that drives it) is
+//! `wz_session_mcu::slot_node`, which `deploy/host-slot-node` runs too; this file is the board's
+//! half of it: Zephyr's sockets as the stack (`wz_runtime_zephyr::net::ZephyrStack`), the board's
+//! clock, entropy, address and identity, and its console and stack watch as the [`ZephyrPort`].
 //!
 //! | what | where | bound |
 //! | --- | --- | --- |
@@ -13,7 +15,7 @@
 //! | the frame being sent | `NODE.tx`, claimed by the session's driver | [`TX`] bytes |
 //! | the observer, with the two queryables | `NODE.app` | the registry's own capacity |
 //! | the endpoint it dials | [`crate::ENDPOINTS`], a `static` list | the connect manager's rows |
-//! | the declarations it sends | [`DECLARATIONS`], a `static` slice | its length |
+//! | the declarations it sends | [`DECLARED`], a `static` list | [`DOCS`] |
 //!
 //! # What this build is, and is not
 //!
@@ -28,31 +30,20 @@
 //! The CMake build selects this profile with `CONFIG_WZ_FIXED_MEMORY` for the client node
 //! (`CONFIG_WZ_ROLE_CLIENT`), the same switch the lwIP admin node has.
 
-use core::cell::RefCell;
+use core::fmt;
 
 use wz::runtime_zephyr::glue::{log, log_args, stack_usage, yield_us};
-use wz::runtime_zephyr::net::{await_board_ipv4, board_zid_fixed, FixedUdpDriver, ZephyrStack};
+use wz::runtime_zephyr::net::{await_board_ipv4, board_zid_fixed, ZephyrStack};
 use wz::runtime_zephyr::stack::StackWatch;
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
-use wz_runtime_coop::session_drive::{DriverPump, PumpSlots};
-use wz_runtime_coop::session_runtime::SessionHandle;
-use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
-use wz_session_core::byte_cells::ByteCells;
+use wz_runtime_coop::session_drive::SlotStack;
+use wz_runtime_coop::{CoopRuntime, CoopTime};
 use wz_session_core::entropy::EntropySource;
-use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
-use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::signing_key::SigningKey;
-use wz_session_core::slot_observer::{ObserverCell, Requesters};
-use wz_session_core::text_out::FixedText;
-use wz_session_core::zid_hex::write_zenoh_hex;
-use wz_session_core::WhatAmI;
-use wz_session_mcu::app_layer::{NoReplies, SlotApp, SlotDispatch};
-use wz_session_mcu::slot_client::{
-    register_document, Declaration, DeclarationKind, DocumentSinks, SlotClientNode,
+use wz_session_mcu::slot_node::{
+    Answering, ClientNode, Declared, Document, NodeIdentity, NodePort, NodeStorage,
+    SIGNING_KEY_BYTES,
 };
-use wz_session_mcu::slot_dial::SessionFactory;
-use wz_session_mcu::slot_host::SessionHost;
 
 use crate::{
     BATCH_SIZE, CONFIG_BODY, CONFIG_KEY, ENDPOINTS, IDLE_SLEEP_US, NODE_ID, STACK_CHECK_MS,
@@ -64,9 +55,9 @@ const SESSIONS: usize = 1;
 /// The runtime's task table: a pump task per session, and nothing else runs as a task.
 const TASKS: usize = SESSIONS;
 /// Bytes of one task cell: the pump's handle and the application layer's state. The layer is a
-/// few pointers, because a node that asks nothing keeps no table of requests (`Requests`, with the
-/// pending-query limits at 0), and an `async fn` holds a by-value argument twice. A task the cell
-/// cannot hold is refused and counted, and the loop says so on the console ("wz: FAIL - ...")
+/// few pointers, because a node that asks nothing keeps no table of requests (`Answering`, with
+/// the pending-query limits at 0), and an `async fn` holds a by-value argument twice. A task the
+/// cell cannot hold is refused and counted, and the loop says so on the console ("wz: FAIL - ...")
 /// rather than run a node that never starts a session.
 const TASK_BYTES: usize = 384;
 /// Timers the runtime holds: the handshake and lease deadlines of the session.
@@ -79,6 +70,8 @@ const RX: usize = BATCH_SIZE as usize + RX_SLACK;
 /// The storage the session's frames are encoded into: the largest frame it sends is one batch, which
 /// is the budget the driver states as its link's frame bound.
 const TX: usize = BATCH_SIZE as usize;
+/// The queryables the node declares: its status and its config.
+const DOCS: usize = 2;
 /// How long the node waits for the board to have an address: a DHCP lease on a slow link takes
 /// seconds, and a board with no link or no server never gets one.
 const ADDRESS_WAIT_MS: u32 = 30_000;
@@ -114,17 +107,26 @@ const fn decimal(text: &str) -> u32 {
 /// sleeps from one that polls.
 const LOOP_REPORT_MS: u64 = 5_000;
 
+/// The loop's sleep between two dials, in the unit the node takes. The kernel sleep the image
+/// states ([`IDLE_SLEEP_US`]) is a signed microsecond count, and one that is not positive would
+/// let the loop spin above the network stack's threads.
+const IDLE_SLEEP: u32 = {
+    assert!(IDLE_SLEEP_US > 0, "the idle sleep is not positive");
+    IDLE_SLEEP_US as u32
+};
+
 type Clock = ZephyrClock<TICK_HZ>;
-/// The requests a session of this node holds: as many as the image's limits say, and the overlay of
-/// this node (`overlays/t2g_client_fixed.conf`) says none. It answers queries and asks none, so it
-/// keeps no table of pending gets, and the application layer its task holds is a few pointers.
-type Requests = Requesters<NoReplies, NoReplies>;
-type Driver = FixedUdpDriver;
 type Stack = ZephyrStack;
 
-/// The table of session slots this image places: one type for the assertion below and the
-/// probe.
-type Slots = SessionSlots<CoopRuntime<Clock>, CoopTime<Clock>, Driver, ZephyrEntropy, SESSIONS>;
+/// The table of session slots this image places, as the node's storage holds it: one type for the
+/// assertion below and the probe.
+type Slots = SessionSlots<
+    CoopRuntime<Clock>,
+    CoopTime<Clock>,
+    <Stack as SlotStack>::Driver,
+    ZephyrEntropy,
+    SESSIONS,
+>;
 /// The bytes ONE typed session slot takes in this image, as the compiler lays it out for the
 /// target the image is built for.
 const SLOT_BYTES: usize = Slots::slot_bytes();
@@ -137,11 +139,11 @@ pub static WZ_SESSION_SLOT_BYTES: [u8; SLOT_BYTES] = [0; SLOT_BYTES];
 
 // The tables are held under the numbers the deploy file states for the machine (`session_pool`):
 // the sessions fit the generated table, the runtime's tables fit the task and timer ceilings,
-// and ONE typed session slot, as the compiler lays it out for the target, fits the generated slot
-// ceiling. A deploy file that lowers a number, or an image that outgrows one, is a build failure
-// that names the line.
+// ONE typed session slot, as the compiler lays it out for the target, fits the generated slot
+// ceiling, and the registry holds the node's queryables. A deploy file that lowers a number, or
+// an image that outgrows one, is a build failure that names the line.
 const _: () = {
-    use wz_session_core::caps::{MAX_TASKS, MAX_TIMERS};
+    use wz_session_core::caps::{MAX_QUERYABLES, MAX_TASKS, MAX_TIMERS};
     use wz_session_core::session_slot_pool_mcu::{SLOT_COUNT, SLOT_SIZE};
     assert!(
         SESSIONS <= SLOT_COUNT,
@@ -159,114 +161,67 @@ const _: () = {
         SLOT_BYTES <= SLOT_SIZE,
         "one typed session slot exceeds the generated slot ceiling"
     );
+    assert!(
+        DOCS <= MAX_QUERYABLES,
+        "DOCS exceeds the registry's queryable limit"
+    );
 };
-
-type Host = SessionHost<Clock, Stack, ZephyrEntropy, SESSIONS, SESSIONS>;
 
 /// The node's big tables, in one `static` whose initial value is ALL ZERO BYTES, so the linker
 /// places it in `.bss` (RAM) and not in `.data` (RAM and a copy of it in flash): one non-zero byte
-/// anywhere in a `static` moves all of it.
-struct Statics {
-    runtime: RuntimeCell<Clock, TASKS, TASK_BYTES, TIMERS>,
-    sessions: Slots,
-    pumps: PumpSlots<Clock, DriverPump<Driver>, SESSIONS>,
-    app: SlotApp<DocumentSinks>,
-    /// The receive buffers the links claim, one batch long each.
-    rx: ByteCells<RX, SESSIONS>,
-    /// The buffers the links' frames are encoded into, one batch long each.
-    tx: ByteCells<TX, SESSIONS>,
-}
+/// anywhere in a `static` moves all of it (`wz_session_mcu::slot_node`, shared with the host).
+type Storage =
+    NodeStorage<Clock, Stack, ZephyrEntropy, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX>;
 
-// SAFETY: the profile's rule, stated on the type: the node is driven by one cooperative loop on
-// one thread, which is the only thing that reaches these tables; each member is `Sync` by the
-// same rule.
-unsafe impl Sync for Statics {}
-
-impl Statics {
-    const fn new() -> Self {
-        Self {
-            runtime: RuntimeCell::new(),
-            sessions: SessionSlots::new(),
-            pumps: PumpSlots::new(),
-            app: SlotApp::new(),
-            rx: ByteCells::new(),
-            tx: ByteCells::new(),
-        }
-    }
-}
-
-static NODE: Statics = Statics::new();
+static NODE: Storage = Storage::new();
 
 /// The queryables the node declares on each session, in the order of their registrations.
-static DECLARATIONS: [Declaration; 2] = [
-    Declaration {
-        kind: DeclarationKind::Queryable,
+static DECLARED: Declared<DOCS> = Declared::new();
+
+/// What the node answers: its connect status and its config, under its admin keys.
+const DOCUMENTS: [Document; DOCS] = [
+    Document {
         key: STATUS_KEY,
+        body: STATUS_BODY,
     },
-    Declaration {
-        kind: DeclarationKind::Queryable,
+    Document {
         key: CONFIG_KEY,
+        body: CONFIG_BODY,
     },
 ];
 
-/// What the node makes its sessions from: the entropy, the parameters and the application layer
-/// (the process-wide observer, with the two queryables registered on it).
-struct Factory {
-    zid: [u8; wz::runtime_zephyr::net::ZID_MAX],
-    zid_len: usize,
-    key: [u8; 32],
-    observer: &'static ObserverCell<DocumentSinks>,
+/// The board's console and sleep, and its stack watch: what the node's loop cannot know.
+struct ZephyrPort {
+    stack_watch: StackWatch,
+    next_stack_check_ms: u64,
 }
 
-impl SessionFactory<Clock> for Factory {
-    type Entropy = ZephyrEntropy;
-    type Events = SlotDispatch<Clock, NoReplies, NoReplies, DocumentSinks>;
+impl NodePort for ZephyrPort {
+    const NAME: &'static str = "zephyr-wz-client";
 
-    fn entropy(&mut self) -> ZephyrEntropy {
-        ZephyrEntropy
+    fn log(&mut self, line: fmt::Arguments<'_>) {
+        log_args(line);
     }
 
-    /// zenoh 1.x's handshake shape, with a batch the MCU's receive slot holds whole.
-    fn params(&mut self) -> SessionInitParams {
-        SessionInitParams {
-            whatami: WhatAmI::Client,
-            zid: zid_bytes(&self.zid[..self.zid_len]),
-            seq_num_res: 2,
-            req_id_res: 2,
-            batch_size: BATCH_SIZE,
-            lease_ms: 10_000,
-            initial_sn: 0,
-            cookie: cookie_bytes(&[]),
-            tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
-            link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
-            cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
+    fn idle(&mut self, us: u32) {
+        yield_us(i32::try_from(us).unwrap_or(i32::MAX));
+    }
+
+    /// The stack's high-water mark, when it rises. The read walks the whole stack, so it is made
+    /// every [`STACK_CHECK_MS`] and not on every round; the mark persists, so a peak between two
+    /// reads is not lost.
+    fn observe(&mut self, now_ms: u64) {
+        if now_ms < self.next_stack_check_ms {
+            return;
         }
-    }
-
-    fn events(&mut self, handle: &SessionHandle<Clock>) -> Self::Events {
-        SlotDispatch::new(self.observer, handle.clone(), Requests::new())
-    }
-}
-
-/// Build the observer in `NODE.app`, where it stays, and register the node's two queryables on
-/// it. The reason, as the console line, when one is refused.
-///
-/// Its own function, not inlined into [`run`], for the stack: the observer itself is large and is
-/// never a value (see `fixed_node::install_observer`).
-#[inline(never)]
-fn install_observer() -> Result<&'static ObserverCell<DocumentSinks>, &'static core::ffi::CStr> {
-    let installed = NODE.app.install_with(|observer| {
-        if register_document(&mut observer.queryables, STATUS_KEY, STATUS_BODY).is_err()
-            || register_document(&mut observer.queryables, CONFIG_KEY, CONFIG_BODY).is_err()
-        {
-            return Err(c"wz: FAIL - the node's observer refused a queryable");
+        self.next_stack_check_ms = now_ms + STACK_CHECK_MS;
+        if let Some(usage) = self.stack_watch.observe_peak(stack_usage()) {
+            log_args(format_args!(
+                "stack: peak {} of {} bytes",
+                usage.peak(),
+                usage.size
+            ));
         }
-        Ok(())
-    });
-    match installed {
-        Ok((observer, Ok(()))) => Ok(observer),
-        Ok((_, Err(why))) => Err(why),
-        Err(_) => Err(c"wz: FAIL - the observer was installed twice"),
     }
 }
 
@@ -275,7 +230,7 @@ fn install_observer() -> Result<&'static ObserverCell<DocumentSinks>, &'static c
 pub fn run() -> i32 {
     // The cookie-signing key is a secret, so it comes from the board's entropy source and a board
     // that cannot supply it stops the node: a predictable key is worse than no node.
-    let mut key = [0u8; 32];
+    let mut key = [0u8; SIGNING_KEY_BYTES];
     if ZephyrEntropy.try_fill_bytes(&mut key).is_err() {
         log(c"wz: FAIL - the board's entropy source could not fill the signing key");
         return 2;
@@ -284,32 +239,10 @@ pub fn run() -> i32 {
         log(c"wz: FAIL - the board's interface never got an IPv4 address");
         return 1;
     };
-    let Some((zid, zid_len)) = board_zid_fixed() else {
+    let identity = board_zid_fixed().and_then(|(zid, len)| NodeIdentity::new(&zid[..len], key));
+    let Some(identity) = identity else {
         log(c"wz: FAIL - the board gave no identity to derive a zenoh id from");
         return 1;
-    };
-
-    let clock = Clock::default();
-    let Some(runtime) = NODE.runtime.start(clock) else {
-        log(c"wz: FAIL - the runtime was started twice");
-        return 3;
-    };
-    let local = CoopLocalSet::new(&runtime);
-
-    // The zid in the zenoh hex form, in fixed text.
-    let mut zid_text: FixedText<33> = FixedText::new();
-    let _ = write_zenoh_hex(&zid[..zid_len], &mut zid_text);
-    let zid_hex = zid_text.prefix();
-
-    // The application's registrations, on the observer the session dispatches to. A node whose
-    // registrations were refused would declare what nothing answers: stop instead, with the
-    // reason.
-    let observer = match install_observer() {
-        Ok(observer) => observer,
-        Err(why) => {
-            log(why);
-            return 3;
-        }
     };
 
     let stack = Stack::new(address, &NODE.rx, &NODE.tx);
@@ -318,95 +251,32 @@ pub fn run() -> i32 {
     } else {
         stack
     };
-    let host: Host = SessionHost::new(
-        CoopLocalSet::new(&runtime),
-        &NODE.sessions,
-        &NODE.pumps,
+    let node = ClientNode {
+        storage: &NODE,
+        declared: &DECLARED,
+        clock: Clock::default(),
         stack,
-    );
-    let factory = RefCell::new(Factory {
-        zid,
-        zid_len,
-        key,
-        observer,
-    });
-    let mut node = SlotClientNode::new(
-        &host,
-        stack,
-        &factory,
-        &ENDPOINTS,
-        SessionTimeouts::spec_defaults(),
-        &DECLARATIONS,
-    );
+        identity,
+        batch_size: BATCH_SIZE,
+        entropy: || ZephyrEntropy,
+        endpoints: &ENDPOINTS,
+        documents: &DOCUMENTS,
+        layer: Answering,
+        idle_sleep_us: IDLE_SLEEP,
+        report_every_ms: LOOP_REPORT_MS,
+    };
+    let mut port = ZephyrPort {
+        stack_watch: StackWatch::new(),
+        next_stack_check_ms: 0,
+    };
     // The line a lane (or a person at the console) waits for: who the node claims to be and the
     // router it dials.
-    log_args(format_args!(
-        "ZEPHYR-WZ-CLIENT READY {} {} {}",
-        NODE_ID,
-        zid_hex,
-        env!("WZ_CLIENT_ENDPOINT")
-    ));
-
-    let mut established = false;
-    let mut stack_watch = StackWatch::new();
-    let mut next_stack_check_ms = 0u64;
-    let mut refused = (runtime.task_refusals(), runtime.timer_refusals());
-    let mut rounds = 0u32;
-    let mut next_report_ms = 0u64;
-    let mut reported_ms = 0u64;
-    loop {
-        local.run_until_idle();
-        let now_ms = clock.now_us() / 1000;
-        node.tick(now_ms);
-        rounds = rounds.wrapping_add(1);
-        if now_ms >= next_report_ms {
-            // The first line only starts the interval; the ones after it say what the node did
-            // in it.
-            if reported_ms != 0 {
-                log_args(format_args!(
-                    "zephyr-wz-client: loop {} rounds in {} ms",
-                    rounds,
-                    now_ms - reported_ms
-                ));
-            }
-            rounds = 0;
-            reported_ms = now_ms;
-            next_report_ms = now_ms + LOOP_REPORT_MS;
-        }
-        if now_ms >= next_stack_check_ms {
-            next_stack_check_ms = now_ms + STACK_CHECK_MS;
-            // A table the image sized too small refuses what it cannot hold and counts it; the
-            // count moving is a firmware that is not doing what it was built to, so it is said.
-            let now = (runtime.task_refusals(), runtime.timer_refusals());
-            if now != refused {
-                refused = now;
-                log_args(format_args!(
-                    "wz: FAIL - the runtime refused a task or a timer: no cell {}, too large {}, timers {}",
-                    now.0.no_task_cell, now.0.too_large, now.1
-                ));
-            }
-            if let Some(usage) = stack_watch.observe_peak(stack_usage()) {
-                log_args(format_args!(
-                    "stack: peak {} of {} bytes",
-                    usage.peak(),
-                    usage.size
-                ));
-            }
-        }
-        // A line when the session comes and goes, which is all a lab waits for.
-        if node.is_established() != established {
-            established = !established;
-            log_args(format_args!(
-                "zephyr-wz-client: session {}",
-                if established { "established" } else { "lost" }
-            ));
-        }
-        // The stack's own wait on a socket is what gives the CPU away while a session is held
-        // (its read waits for a datagram). Between two dials of a router that is not up the node
-        // holds no socket: it sleeps the tick itself then, or it spins above the network stack's
-        // threads and starves them.
-        if !node.holds_session() {
-            yield_us(IDLE_SLEEP_US);
-        }
-    }
+    node.run(&mut port, &mut (), |_, zid_hex| {
+        log_args(format_args!(
+            "ZEPHYR-WZ-CLIENT READY {} {} {}",
+            NODE_ID,
+            zid_hex,
+            env!("WZ_CLIENT_ENDPOINT")
+        ));
+    })
 }

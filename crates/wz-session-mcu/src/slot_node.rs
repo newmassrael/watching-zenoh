@@ -43,13 +43,13 @@
 
 use core::cell::{Cell, RefCell, UnsafeCell};
 use core::fmt;
+use core::mem::MaybeUninit;
 use core::ops::ControlFlow;
 
 use wz_runtime_coop::session_drive::{Bind, PumpSlots, SlotStack};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::byte_cells::ByteCells;
-use wz_session_core::caps::MAX_QUERYABLES;
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_init_params::{
     cookie_bytes, zid_bytes, LinkRxConf, SessionInitParams, TxQueueConf,
@@ -199,27 +199,26 @@ pub struct Document {
 }
 
 /// The declarations the node sends on each session, in the order of their registrations: a
-/// `&'static [Declaration]` whose length the image chose, held in storage the image declares. As
-/// many as the registry holds queryables (`caps::MAX_QUERYABLES`), since each document is one.
-pub struct Declared {
-    items: UnsafeCell<[Declaration; MAX_QUERYABLES]>,
+/// `&'static [Declaration]` of at most `N`, held in storage the image declares. `N` is the image's
+/// number of documents (each is one queryable), so the list is no longer than what it holds.
+///
+/// The cells start uninitialised, not as a placeholder declaration: a placeholder's key is a
+/// pointer, which is not zero, and one non-zero byte would move the `static` from `.bss` to
+/// `.data`, which costs its bytes twice (in RAM and in flash).
+pub struct Declared<const N: usize> {
+    items: UnsafeCell<[MaybeUninit<Declaration>; N]>,
     len: Cell<usize>,
 }
 
 // SAFETY: the profile's rule: one thread runs the program, and the list is written only by
 // `install_documents`, before the node that reads it exists.
-unsafe impl Sync for Declared {}
+unsafe impl<const N: usize> Sync for Declared<N> {}
 
-const NO_DECLARATION: Declaration = Declaration {
-    kind: DeclarationKind::Queryable,
-    key: "",
-};
-
-impl Declared {
+impl<const N: usize> Declared<N> {
     /// An empty list.
     pub const fn new() -> Self {
         Self {
-            items: UnsafeCell::new([NO_DECLARATION; MAX_QUERYABLES]),
+            items: UnsafeCell::new([const { MaybeUninit::uninit() }; N]),
             len: Cell::new(0),
         }
     }
@@ -227,12 +226,12 @@ impl Declared {
     /// Add a declaration. `false` when the list is full.
     fn push(&self, declaration: Declaration) -> bool {
         let at = self.len.get();
-        if at == MAX_QUERYABLES {
+        if at == N {
             return false;
         }
         // SAFETY: nothing holds a reference into the list yet (`all` is called after the last
         // push), and one thread runs the program.
-        unsafe { (*self.items.get())[at] = declaration };
+        unsafe { (*self.items.get())[at] = MaybeUninit::new(declaration) };
         self.len.set(at + 1);
         true
     }
@@ -240,14 +239,15 @@ impl Declared {
     /// The declarations made so far, as the node holds them for the life of the process.
     fn all(&'static self) -> &'static [Declaration] {
         // SAFETY: called once, after the last `push`; nothing writes the list afterwards. The
-        // pointer is to the first of `MAX_QUERYABLES` declarations and `len` is at most that.
+        // first `len` cells (at most `N`) were written by `push`, and `MaybeUninit<Declaration>`
+        // has the layout of a `Declaration`.
         unsafe {
             core::slice::from_raw_parts(self.items.get().cast::<Declaration>(), self.len.get())
         }
     }
 }
 
-impl Default for Declared {
+impl<const N: usize> Default for Declared<N> {
     fn default() -> Self {
         Self::new()
     }
@@ -282,10 +282,10 @@ impl InstallRefused {
 /// Its own function, not inlined into the loop, for the stack: the observer itself is large and
 /// is never a value.
 #[inline(never)]
-pub fn install_documents(
+pub fn install_documents<const N: usize>(
     app: &'static SlotApp<DocumentSinks>,
     documents: &[Document],
-    declared: &Declared,
+    declared: &Declared<N>,
 ) -> Result<&'static ObserverCell<DocumentSinks>, InstallRefused> {
     let installed = app.install_with(|observer| {
         for document in documents {
@@ -600,7 +600,7 @@ pub const EXIT_OBSERVER: i32 = 3;
 ///
 /// The type parameters are the platform's: the clock `C`, the stack `T`, the entropy `E` a
 /// session owns, and the layer `L` its iterations are reported to; the numbers are
-/// [`NodeStorage`]'s.
+/// [`NodeStorage`]'s, and `DOCS` is [`Declared`]'s.
 pub struct ClientNode<
     'a,
     C,
@@ -613,6 +613,7 @@ pub struct ClientNode<
     const SESSIONS: usize,
     const RX: usize,
     const TX: usize,
+    const DOCS: usize,
 > where
     C: ClockSource + Copy + 'static,
     T: SlotStack + Bind<T::Driver> + Copy,
@@ -621,8 +622,8 @@ pub struct ClientNode<
 {
     /// The tables.
     pub storage: &'static NodeStorage<C, T, E, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX>,
-    /// The declarations [`install_documents`] fills.
-    pub declared: &'static Declared,
+    /// The declarations [`install_documents`] fills, one for each of `documents`.
+    pub declared: &'static Declared<DOCS>,
     /// The clock the runtime and the loop read.
     pub clock: C,
     /// The stack, built over `storage.rx` and `storage.tx`.
@@ -656,7 +657,8 @@ impl<
         const SESSIONS: usize,
         const RX: usize,
         const TX: usize,
-    > ClientNode<'_, C, T, E, L, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX>
+        const DOCS: usize,
+    > ClientNode<'_, C, T, E, L, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, DOCS>
 where
     C: ClockSource + Copy + 'static,
     T: SlotStack + Bind<T::Driver> + Copy,
@@ -776,6 +778,7 @@ where
 mod tests {
     use super::*;
     use alloc::boxed::Box;
+    use wz_session_core::caps::MAX_QUERYABLES;
     use wz_session_core::session_init_params::zid_bytes;
 
     /// A watch over counters that are one number, with a report every 5 s.
@@ -897,13 +900,13 @@ mod tests {
         Box::leak(Box::new(SlotApp::new()))
     }
 
-    fn declared() -> &'static Declared {
+    fn declared<const N: usize>() -> &'static Declared<N> {
         Box::leak(Box::new(Declared::new()))
     }
 
     #[test]
     fn each_document_is_registered_and_declared_in_order() {
-        let declared = declared();
+        let declared = declared::<2>();
         let documents = [
             Document {
                 key: "demo/a",
@@ -926,30 +929,52 @@ mod tests {
 
     #[test]
     fn a_node_with_no_documents_declares_nothing() {
-        let declared = declared();
+        let declared = declared::<2>();
         install_documents(app(), &[], declared).unwrap();
         assert!(declared.all().is_empty());
     }
 
     #[test]
-    fn one_document_too_many_stops_the_node_and_the_observer_is_not_built_twice() {
+    fn more_documents_than_the_image_declares_stops_the_node() {
+        let documents = [
+            Document {
+                key: "demo/a",
+                body: "{}",
+            },
+            Document {
+                key: "demo/b",
+                body: "{}",
+            },
+        ];
+        // The registry takes both, so the refusal is the declarations' own.
+        assert!(MAX_QUERYABLES >= documents.len());
+        assert_eq!(
+            install_documents(app(), &documents, declared::<1>()).err(),
+            Some(InstallRefused::TooManyDeclarations)
+        );
+    }
+
+    #[test]
+    fn more_documents_than_the_registry_holds_stops_the_node() {
         let documents: alloc::vec::Vec<Document> = (0..=MAX_QUERYABLES)
             .map(|_| Document {
                 key: "demo/k",
                 body: "{}",
             })
             .collect();
-        // The registry and the declarations are the same size, so the registry says no first.
-        let refused = install_documents(app(), &documents, declared()).err();
-        assert!(matches!(
-            refused,
-            Some(InstallRefused::Registry | InstallRefused::TooManyDeclarations)
-        ));
-
-        let shared = app();
-        install_documents(shared, &[], declared()).unwrap();
+        // The declarations would hold them all, so the refusal is the registry's.
         assert_eq!(
-            install_documents(shared, &[], declared()).err(),
+            install_documents(app(), &documents, declared::<{ MAX_QUERYABLES + 1 }>()).err(),
+            Some(InstallRefused::Registry)
+        );
+    }
+
+    #[test]
+    fn the_observer_is_not_built_twice() {
+        let shared = app();
+        install_documents(shared, &[], declared::<0>()).unwrap();
+        assert_eq!(
+            install_documents(shared, &[], declared::<0>()).err(),
             Some(InstallRefused::Twice)
         );
     }

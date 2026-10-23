@@ -148,9 +148,9 @@ impl EndpointSource for Router {
 }
 
 /// The queryables the node declares on each session, in the order of their registrations: a
-/// `&'static [Declaration]` whose length the command line chose, held in storage this file
-/// declares.
-static DECLARED: Declared = Declared::new();
+/// `&'static [Declaration]` whose length the command line chose (at most [`DOCS`]), held in
+/// storage this file declares.
+static DECLARED: Declared<DOCS> = Declared::new();
 
 /// The host's console and its sleep: what the node's loop cannot know (`wz_session_mcu::slot_node`).
 struct Port;
