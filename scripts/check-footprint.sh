@@ -997,8 +997,24 @@ declare -A BASELINE_MC_TEXT=(
     # here, so the per-machine figure is the same order and is not a derivation. What the pin buys is stack, not text: the dial path of the fixed client reads
     # 5732 -> 5044 B and the engine's frames 1800 -> 840 B on the kit. data is 4 and bss
     # 270120 on both. Old: 67060/67352.
-    ["thumbv7m-none-eabi"]=68156
-    ["thumbv7em-none-eabihf"]=68120
+    #
+    # 2026-10-23 -- thumbv7m 68156 -> 69776, thumbv7em-hf 68120 -> 69864, from two features, each
+    # attributed by building the tree at the commit with Layer Q's remap flags (one host, one
+    # toolchain) and reading this gate. (1) `6c31caba5`, a group carries an interest: the
+    # multicast transmit item `MulticastTxItem::Interest` is framed, classified for QoS and counted
+    # for stats on this path, +1532 on thumbv7m (the commit before it, `8e77cda07`, reads +0, the
+    # commit reads +1532, and `1742ee965` four commits later reads the same). (2) `a256cf133`, the
+    # session honours `transport/link/rx/max_message_size`: its reassembler takes the configured
+    # bound, +88 on thumbv7m (the tree at `864d052a1` and the hosted run of `3ef516a72` read 69688,
+    # the hosted run of `d4dfa8f96` reads 69776, and `a256cf133` is the only commit between them
+    # that changes crates, deploy or this script). The hosted runs split thumbv7em-hf the same
+    # way, +1636 and +108. Both are feature growth with its code reachable from this image, not a
+    # leak. Step 1a of the session lifecycle work (`864d052a1`) and its correction do not move
+    # this image: it reads 69688 at that commit and carries no auth extension. data is 4 and bss
+    # 270120 on both here (hosted 270112, the toolchain term). The hosted toolchain reads
+    # thumbv7em-hf +40 B over this host's figure, inside the band. Old: 68156/68120.
+    ["thumbv7m-none-eabi"]=69776
+    ["thumbv7em-none-eabihf"]=69864
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
