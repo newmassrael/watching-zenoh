@@ -1146,6 +1146,7 @@ mod tests {
             kind: None,
             interfaces: None,
             cert_common_name: cert_common_name.map(str::to_string),
+            cert_credential_zid: None,
         }
     }
 

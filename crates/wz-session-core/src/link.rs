@@ -1034,6 +1034,19 @@ pub struct LinkSubject {
     /// would invent a distinction no rule can express and no upstream document
     /// can request.
     pub cert_common_name: Option<String>,
+    /// The zid the public key of the peer's LEAF certificate names
+    /// ([`crate::credential_identity::zid_from_spki_der`] over its
+    /// `SubjectPublicKeyInfo`), or `None` for a link with no peer certificate.
+    ///
+    /// A credential, not a label: the TLS handshake made the peer sign with
+    /// that certificate's private key (TLS 1.3's `CertificateVerify`), so the
+    /// zid it names is one the peer proved. That is what lets
+    /// [`crate::session_actions::SessionLinkActions::peer_identity_verified`]
+    /// read it beside the key the auth extension proves (decision D1 of
+    /// `docs/session-lifecycle-intent.md`). Whether the chain also reaches a
+    /// trusted root is a separate question, the link's, and this field does not
+    /// answer it.
+    pub cert_credential_zid: Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]>,
 }
 
 #[cfg(feature = "alloc")]
@@ -1045,6 +1058,7 @@ impl LinkSubject {
         kind: None,
         interfaces: None,
         cert_common_name: None,
+        cert_credential_zid: None,
     };
 
     /// R2794 — the protocol a RULE sees this link as, derived from its
@@ -1067,6 +1081,18 @@ impl LinkSubject {
     #[must_use]
     pub fn with_cert_common_name(mut self, cert_common_name: Option<String>) -> Self {
         self.cert_common_name = cert_common_name;
+        self
+    }
+
+    /// This subject with the zid its peer certificate's key names filled in,
+    /// for the reason and at the moment [`Self::with_cert_common_name`] is:
+    /// the chain is readable only inside the link's own wiring.
+    #[must_use]
+    pub fn with_cert_credential_zid(
+        mut self,
+        zid: Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]>,
+    ) -> Self {
+        self.cert_credential_zid = zid;
         self
     }
 

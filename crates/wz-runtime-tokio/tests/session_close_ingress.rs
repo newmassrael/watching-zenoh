@@ -42,16 +42,23 @@ use std::cell::RefCell;
 use wz_codecs::push::{Push, PushOwnedVariant};
 use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
 use wz_codecs::wireexpr_local::WireexprLocal;
+use wz_runtime_core::Runtime;
 use wz_runtime_tokio::observer::ApplicationLayerObserver;
+use wz_runtime_tokio::runtime_impl::TokioRuntime;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_fsm_unicast::{
     SessionFsmUnicastEvent, SessionFsmUnicastPolicy, SessionFsmUnicastState,
 };
+use wz_runtime_tokio::session_glue::LinkSendOutcome;
 use wz_runtime_tokio::session_glue::{
     new_session_actions, new_session_engine, BoxedLinkDriver, DriverLoopOutcome, IterationEvent,
     NetworkMessage, SessionActionsBinding, SessionLinkActions,
 };
+use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
+use wz_session_core::credential_identity::zid_from_spki_der;
+use wz_session_core::link::LinkSubject;
+use wz_session_core::session_init_params::zid_bytes;
 use wz_session_core::wire::{PushOwned, WireStorage};
 
 use wz_session_core::drive::{
@@ -190,14 +197,79 @@ fn frame_event(push: PushOwned) -> DriverLoopOutcome {
     }
 }
 
+/// The `SubjectPublicKeyInfo` this witness's commanding peer "holds". Any bytes
+/// do: what the session checks is that the zid it hashes to is the zid the peer
+/// claimed, and `credential_identity`'s own tests pin the hash.
+const COMMANDER_SPKI: &[u8] = b"the commanding peer's SubjectPublicKeyInfo";
+
+/// A link whose peer presented a certificate with [`COMMANDER_SPKI`]'s key: the
+/// state a TLS link reports after its handshake (`tls_pipeline` fills the same
+/// field from the leaf). Inert otherwise, as `NoopOutboundDriver` is.
+struct CertifiedDriver {
+    subject: LinkSubject,
+}
+
+impl BoxedLinkDriver for CertifiedDriver {
+    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+        LinkSendOutcome::Sent
+    }
+    fn open_blocking(&self) {}
+    fn close_blocking(&self) {}
+    fn link_subject(&self) -> Option<&LinkSubject> {
+        Some(&self.subject)
+    }
+}
+
 /// A session standing in `Established` — the only state whose document carries
 /// a `session.close` transition, so a witness that stopped at `Init` would
-/// assert nothing about closing.
+/// assert nothing about closing — whose peer is VERIFIED (decision D1 of
+/// `docs/session-lifecycle-intent.md`): its certificate's key names the zid it
+/// claimed, which is what a lifecycle verb now requires before anything else.
+///
+/// The claimed zid is written into the slot the INIT exchange writes, because
+/// the engine walk below raises events and parses no INIT body. The exchange
+/// that fills it is witnessed by the session's own handshake tests; what this
+/// file witnesses starts where both facts are in place.
 fn established_session() -> (
     Arc<SessionLinkActions>,
     Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
 ) {
-    let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(NoopOutboundDriver::default());
+    let zid = zid_from_spki_der(COMMANDER_SPKI);
+    let driver = CertifiedDriver {
+        subject: LinkSubject::UNKNOWN.with_cert_credential_zid(Some(zid)),
+    };
+    let (actions, engine) = established_session_over(Arc::new(driver));
+    <TokioRuntime as Runtime>::with_mutex_mut(&actions.remote_peer_zid, |slot| {
+        *slot = Some(zid_bytes(&zid));
+    });
+    assert!(
+        actions.peer_identity_verified(),
+        "the fixture's premise: the commanding peer is verified"
+    );
+    (actions, engine)
+}
+
+/// The same `Established` session over a link with no certificate, claiming
+/// the same zid: nothing proved it.
+fn established_unverified_session() -> (
+    Arc<SessionLinkActions>,
+    Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+) {
+    let (actions, engine) = established_session_over(Arc::new(NoopOutboundDriver::default()));
+    let zid = zid_from_spki_der(COMMANDER_SPKI);
+    <TokioRuntime as Runtime>::with_mutex_mut(&actions.remote_peer_zid, |slot| {
+        *slot = Some(zid_bytes(&zid));
+    });
+    assert!(!actions.peer_identity_verified());
+    (actions, engine)
+}
+
+fn established_session_over(
+    outbound: Arc<dyn BoxedLinkDriver + Send + Sync>,
+) -> (
+    Arc<SessionLinkActions>,
+    Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+) {
     let actions = new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
     let mut engine = new_session_engine(&actions);
     engine.initialize();
@@ -259,6 +331,48 @@ fn session_close_ingress_closes_a_running_session() {
     assert!(
         !check_requested_close(&actions, &mut engine),
         "the request was consumed by the first drain"
+    );
+}
+
+/// D2 — the same frame, row and admitting authority as the arm above, from a
+/// peer that only CLAIMS the zid. Nothing is staged, so nothing closes, and the
+/// authority is never consulted: it would be judging a zid anyone can claim.
+/// Paired with the arm above, which differs only in the certificate.
+#[test]
+fn a_lifecycle_command_from_an_unverified_peer_is_refused() {
+    let (actions, mut engine) = established_unverified_session();
+    let mut observer = ApplicationLayerObserver::new();
+    observer
+        .switchboard
+        .register_command(CLOSE_KEYEXPR, CLOSE_EVENT);
+    let opener = RecordingOpener {
+        accept: true,
+        ..RecordingOpener::default()
+    };
+    observer
+        .switchboard
+        .register_command(OPEN_KEYEXPR, OPEN_EVENT);
+
+    let admit = AdmitAll;
+    for keyexpr in [CLOSE_KEYEXPR, OPEN_KEYEXPR] {
+        let outcome = frame_event(put_push(keyexpr));
+        let fired = {
+            let mut injector = SessionLifecycleInjector::new(&actions, &admit, Some(&opener));
+            observer.dispatch_switchboard(IterationEvent::Poll(&outcome), &mut injector)
+        };
+        assert_eq!(fired, 0, "{keyexpr}: a refused command is not an injection");
+    }
+    assert!(
+        !check_requested_close(&actions, &mut engine),
+        "no close was staged"
+    );
+    assert_eq!(
+        engine.get_current_state(),
+        SessionFsmUnicastState::Established
+    );
+    assert!(
+        opener.asked.borrow().is_empty(),
+        "no open reached the opener"
     );
 }
 

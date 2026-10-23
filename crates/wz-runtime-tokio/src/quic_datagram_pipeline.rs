@@ -507,7 +507,8 @@ pub fn wire_quic_datagram(
     // a side effect this round should smuggle in. Measured both ways: the
     // residue is 657 without this spelling and 664 with it.
     let subject = ip_link_subject(LinkKind::QuicDatagram, endpoint.local_addr().ok())
-        .with_cert_common_name(crate::quic_pipeline::peer_chain_common_name(&connection));
+        .with_cert_common_name(crate::quic_pipeline::peer_chain_common_name(&connection))
+        .with_cert_credential_zid(crate::quic_pipeline::peer_chain_credential_zid(&connection));
     // R311y474 — the adminspace `{src,dst}` pair. `Connection::remote_address` is
     // infallible (a completed handshake HAS a peer), so the only `None` arm is a
     // failed `local_addr`. The scheme carries the `?rel=0` datagram marker via

@@ -96,6 +96,7 @@ pub fn ip_link_subject(kind: LinkKind, local: Option<SocketAddr>) -> LinkSubject
         // `wire_*`, and this helper is called from every IP transport including
         // the ones that never see a certificate.
         cert_common_name: None,
+        cert_credential_zid: None,
     }
 }
 
@@ -124,6 +125,7 @@ pub fn multicast_link_subject(iface: Option<&str>) -> LinkSubject {
         kind: Some(LinkKind::Udp),
         interfaces,
         cert_common_name: None,
+        cert_credential_zid: None,
     }
 }
 
@@ -162,6 +164,7 @@ pub fn addressless_link_subject(kind: LinkKind, interfaces: Vec<String>) -> Link
         // certificate, so this is a definite absence rather than an unfilled
         // field.
         cert_common_name: None,
+        cert_credential_zid: None,
     }
 }
 

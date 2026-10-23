@@ -20216,6 +20216,7 @@ mod tests {
             kind: Some(LinkKind::Udp),
             interfaces: Some(vec!["eth0".to_owned()]),
             cert_common_name: None,
+            cert_credential_zid: None,
         };
         // (the link the router was told, the protocol the rule names, whether it is sent)
         for (link, protocol, expected_sent) in [

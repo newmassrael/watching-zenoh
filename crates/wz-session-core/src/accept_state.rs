@@ -397,6 +397,18 @@ pub struct AuthAcceptState {
     pub pubkey: Option<u64>,
     /// The usrpwd method's nonce, or none.
     pub usrpwd: Option<u64>,
+    /// The zid the initiator's public key names
+    /// ([`crate::credential_identity::zid_from_spki_der`]), captured with the
+    /// key at InitSyn, or none.
+    ///
+    /// wz's own member: upstream's pubkey state carries the challenge alone,
+    /// because upstream's OpenSyn check needs nothing else. This one is needed
+    /// because the key is released at InitAck (R2779) while the possession it
+    /// stands for is proved only at OpenSyn, and the session must then know
+    /// WHICH key was proved to bind the peer's zid to it (decision D1 of
+    /// `docs/session-lifecycle-intent.md`). The payload is private to this
+    /// node, so the member changes nothing on the wire.
+    pub pubkey_credential: Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]>,
 }
 
 impl AuthAcceptState {
@@ -428,20 +440,40 @@ impl AuthAcceptState {
     }
 }
 
+impl AuthAcceptState {
+    /// The credential slot's width: a presence byte, then the zid.
+    const CREDENTIAL_SLOT: usize = 1 + crate::credential_identity::CREDENTIAL_ZID_BYTES;
+}
+
 impl AcceptState for AuthAcceptState {
-    /// Two slots of a presence byte and a `u64`.
-    const WIDTH: usize = 2 * Self::SLOT;
+    /// Two slots of a presence byte and a `u64`, then the credential slot.
+    const WIDTH: usize = 2 * Self::SLOT + Self::CREDENTIAL_SLOT;
 
     fn encode<S: SceSink>(&self, sink: &mut S) -> Result<(), CodecError> {
         Self::encode_slot(self.pubkey, sink)?;
-        Self::encode_slot(self.usrpwd, sink)
+        Self::encode_slot(self.usrpwd, sink)?;
+        // A presence byte for the reason `encode_slot` gives: every zid is a
+        // possible derivation, so no value is left over to mean "none".
+        let (present, zid) = match self.pubkey_credential {
+            Some(zid) => (1u8, zid),
+            None => (0u8, [0u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]),
+        };
+        sink.write_u8(present)?;
+        for b in zid {
+            sink.write_u8(b)?;
+        }
+        Ok(())
     }
 
     fn decode(cursor: &mut SceCursor<'_>) -> Result<Self, CodecError> {
         let raw = cursor.peek_slice(Self::WIDTH)?;
+        let credential = &raw[2 * Self::SLOT..];
+        let mut zid = [0u8; crate::credential_identity::CREDENTIAL_ZID_BYTES];
+        zid.copy_from_slice(&credential[1..Self::CREDENTIAL_SLOT]);
         let state = Self {
             pubkey: Self::decode_slot(&raw[..Self::SLOT]),
-            usrpwd: Self::decode_slot(&raw[Self::SLOT..]),
+            usrpwd: Self::decode_slot(&raw[Self::SLOT..2 * Self::SLOT]),
+            pubkey_credential: (credential[0] != 0).then_some(zid),
         };
         cursor.advance(Self::WIDTH)?;
         Ok(state)
@@ -811,6 +843,14 @@ mod tests {
                 auth: AuthAcceptState {
                     pubkey: Some(7),
                     usrpwd: None,
+                    pubkey_credential: None,
+                },
+                ..base
+            },
+            NegotiatedExtensions {
+                auth: AuthAcceptState {
+                    pubkey_credential: Some([7; 16]),
+                    ..AuthAcceptState::default()
                 },
                 ..base
             },
@@ -922,28 +962,47 @@ mod tests {
     /// Every auth state that must stay distinguishable, and none of them
     /// SYMMETRIC: a fixture that put one value in both slots could not see a
     /// decode that read them back swapped.
-    fn auth_arms() -> [AuthAcceptState; 6] {
+    ///
+    /// The last two are the credential slot's pair: an all-zero zid against no
+    /// zid (zero bytes are a derivation a hash can produce, so they cannot mean
+    /// "absent"), and a zid beside a challenge whose bytes it does not share.
+    fn auth_arms() -> [AuthAcceptState; 8] {
         [
             AuthAcceptState::default(),
             AuthAcceptState {
                 pubkey: Some(0),
                 usrpwd: None,
+                pubkey_credential: None,
             },
             AuthAcceptState {
                 pubkey: None,
                 usrpwd: Some(0),
+                pubkey_credential: None,
             },
             AuthAcceptState {
                 pubkey: Some(0x0102_0304_0506_0708),
                 usrpwd: None,
+                pubkey_credential: None,
             },
             AuthAcceptState {
                 pubkey: None,
                 usrpwd: Some(0x0102_0304_0506_0708),
+                pubkey_credential: None,
             },
             AuthAcceptState {
                 pubkey: Some(u64::MAX),
                 usrpwd: Some(1),
+                pubkey_credential: None,
+            },
+            AuthAcceptState {
+                pubkey: None,
+                usrpwd: None,
+                pubkey_credential: Some([0; 16]),
+            },
+            AuthAcceptState {
+                pubkey: Some(u64::MAX),
+                usrpwd: None,
+                pubkey_credential: Some([0xA5; 16]),
             },
         ]
     }
@@ -957,7 +1016,7 @@ mod tests {
     /// wrong method, which then refuses a correct OpenSyn).
     #[test]
     fn every_auth_arm_survives_and_no_two_share_an_encoding() {
-        let mut seen = [[0u8; AuthAcceptState::WIDTH]; 6];
+        let mut seen = [[0u8; AuthAcceptState::WIDTH]; 8];
         for (i, arm) in auth_arms().into_iter().enumerate() {
             assert_eq!(width_check(arm), AuthAcceptState::WIDTH);
             let mut sink = SliceSink::new(&mut seen[i]);

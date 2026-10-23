@@ -779,6 +779,7 @@ mod tests {
             kind: Some(kind),
             interfaces: Some(vec![nic.to_owned()]),
             cert_common_name: None,
+            cert_credential_zid: None,
         }
     }
 
@@ -825,6 +826,7 @@ mod tests {
             kind: None,
             interfaces: Some(vec!["eth0".to_owned()]),
             cert_common_name: None,
+            cert_credential_zid: None,
         };
         assert!(unknown_proto.admit_one(t0, DownsamplingMessage::Put, "demo/x", Some(&nic_only)));
         assert!(
@@ -889,6 +891,7 @@ mod tests {
                     kind: Some(LinkKind::UnixsockStream),
                     interfaces: Some(Vec::new()),
                     cert_common_name: None,
+                    cert_credential_zid: None,
                 },
             ),
         ] {

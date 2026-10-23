@@ -284,6 +284,43 @@ pub trait AuthMethod: Send {
     /// against it. Default no-op, the pair of [`Self::accept_challenge`]'s.
     fn restore_accept_challenge(&mut self, _challenge: Option<u64>) {}
 
+    /// The zid the initiator's public key names
+    /// ([`crate::credential_identity::zid_from_spki_der`]), captured with the
+    /// key on InitSyn, for the acceptor's cookie to carry across
+    /// InitAck/OpenSyn beside the challenge; `None` for a method that carries
+    /// no public key. Default `None`.
+    ///
+    /// It travels for the reason the challenge does: the method releases its
+    /// handshake state at InitAck, and possession of the key is proved only at
+    /// OpenSyn, when the session needs to know which key that was.
+    fn accept_credential_zid(
+        &self,
+    ) -> Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]> {
+        None
+    }
+
+    /// Put back the zid [`Self::accept_credential_zid`] gave out: `None`
+    /// releases it with the rest of the handshake state, `Some` restores it at
+    /// OpenSyn before the stage that proves the key. Default no-op.
+    fn restore_accept_credential_zid(
+        &mut self,
+        _zid: Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]>,
+    ) {
+    }
+
+    /// The zid named by a peer key whose POSSESSION this method has proved in
+    /// the current handshake, or `None`. Default `None`.
+    ///
+    /// Proved, not presented: a key the peer only sent is not a credential.
+    /// A method answers `Some` only after the stage in which the peer used the
+    /// private half has passed, and only for a side on which the protocol
+    /// actually makes it do so.
+    fn proven_peer_credential_zid(
+        &self,
+    ) -> Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]> {
+        None
+    }
+
     /// R311y205 (transport-multilink IMPL-2b-ii) — the peer's captured ephemeral
     /// public key, in its canonical encoded ZPublicKey byte form, or `None` if
     /// this method captures no peer key (e.g. usrpwd) or has not yet reached the
@@ -393,7 +430,10 @@ impl AuthDispatch {
         let mut state = crate::accept_state::AuthAcceptState::default();
         for m in self.methods.iter() {
             match m.id() {
-                id::PUBKEY => state.pubkey = m.accept_challenge(),
+                id::PUBKEY => {
+                    state.pubkey = m.accept_challenge();
+                    state.pubkey_credential = m.accept_credential_zid();
+                }
                 id::USRPWD => state.usrpwd = m.accept_challenge(),
                 _ => {}
             }
@@ -412,11 +452,25 @@ impl AuthDispatch {
     pub fn restore_accept_state(&mut self, state: crate::accept_state::AuthAcceptState) {
         for m in self.methods.iter_mut() {
             match m.id() {
-                id::PUBKEY => m.restore_accept_challenge(state.pubkey),
+                id::PUBKEY => {
+                    m.restore_accept_challenge(state.pubkey);
+                    m.restore_accept_credential_zid(state.pubkey_credential);
+                }
                 id::USRPWD => m.restore_accept_challenge(state.usrpwd),
                 _ => {}
             }
         }
+    }
+
+    /// The zid a credential this handshake PROVED names, from the first
+    /// method that proved one ([`AuthMethod::proven_peer_credential_zid`]).
+    /// Read by the session after the stage that ran the proof has passed.
+    pub fn proven_peer_credential_zid(
+        &self,
+    ) -> Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]> {
+        self.methods
+            .iter()
+            .find_map(|m| m.proven_peer_credential_zid())
     }
 
     /// Multiplex per-method `(id, sub-ext)` contributions into the outer auth
@@ -948,8 +1002,83 @@ mod tests {
         d.restore_accept_state(crate::accept_state::AuthAcceptState {
             pubkey: Some(10),
             usrpwd: Some(30),
+            pubkey_credential: None,
         });
         assert_eq!(d.methods[0].accept_challenge(), Some(10));
         assert_eq!(d.methods[2].accept_challenge(), Some(30));
+    }
+
+    /// A method that captures a credential zid and, once told, has proved it.
+    struct Credentialed {
+        id: u8,
+        credential: Option<[u8; 16]>,
+        proved: bool,
+    }
+
+    impl AuthMethod for Credentialed {
+        fn id(&self) -> u8 {
+            self.id
+        }
+        fn accept_credential_zid(&self) -> Option<[u8; 16]> {
+            self.credential
+        }
+        fn restore_accept_credential_zid(&mut self, zid: Option<[u8; 16]>) {
+            self.credential = zid;
+        }
+        fn proven_peer_credential_zid(&self) -> Option<[u8; 16]> {
+            self.credential.filter(|_| self.proved)
+        }
+    }
+
+    /// The credential zid rides the PUBKEY slot only, the release drops it and
+    /// the rebuild returns it, and the dispatch reports a zid only once a
+    /// method has proved one.
+    ///
+    /// The usrpwd-id method holds a DIFFERENT zid, so a dispatch that read the
+    /// slot from the wrong method, or from any method, would carry it.
+    #[test]
+    fn the_credential_zid_rides_the_pubkey_slot_and_is_reported_only_once_proved() {
+        let mut d = AuthDispatch::new(alloc::vec![
+            Box::new(Credentialed {
+                id: id::USRPWD,
+                credential: Some([0x22; 16]),
+                proved: true,
+            }) as Box<dyn AuthMethod>,
+            Box::new(Credentialed {
+                id: id::PUBKEY,
+                credential: Some([0x11; 16]),
+                proved: false,
+            }),
+        ]);
+        assert_eq!(d.accept_state().pubkey_credential, Some([0x11; 16]));
+
+        d.restore_accept_state(crate::accept_state::AuthAcceptState::default());
+        assert_eq!(
+            d.methods[1].accept_credential_zid(),
+            None,
+            "the release drops it"
+        );
+        assert_eq!(
+            d.methods[0].accept_credential_zid(),
+            Some([0x22; 16]),
+            "a method outside the slot keeps its own"
+        );
+
+        d.restore_accept_state(crate::accept_state::AuthAcceptState {
+            pubkey_credential: Some([0x11; 16]),
+            ..crate::accept_state::AuthAcceptState::default()
+        });
+        assert_eq!(d.methods[1].accept_credential_zid(), Some([0x11; 16]));
+
+        // The usrpwd-id method claims a proof; the dispatch reports the FIRST
+        // proved zid in method order, which is that one. Taking its proof away
+        // leaves the pubkey method, which has not proved its key: none.
+        assert_eq!(d.proven_peer_credential_zid(), Some([0x22; 16]));
+        d.methods[0] = Box::new(Credentialed {
+            id: id::USRPWD,
+            credential: None,
+            proved: false,
+        });
+        assert_eq!(d.proven_peer_credential_zid(), None);
     }
 }

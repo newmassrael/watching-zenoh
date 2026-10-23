@@ -452,6 +452,12 @@ pub mod accept_cookie;
 /// cookie's declared capacity is hard rather than advisory.
 pub mod accept_state;
 
+/// The zid a credential's public key names, and whether a claimed zid is it
+/// (decision D1 of `docs/session-lifecycle-intent.md`). Ungated for the reason
+/// [`accept_state`] is: the rule allocates nothing, the MCU profile shares it,
+/// and the `sha2` it hashes with is already a dependency of every build.
+pub mod credential_identity;
+
 /// R311ej — per-deploy session handshake parameters (`SessionInitParams`:
 /// version / whatami / zid / resolutions / lease / cookie + signing
 /// key). Pure owned value type; alloc-gated (Vec zid/cookie + SigningKey).

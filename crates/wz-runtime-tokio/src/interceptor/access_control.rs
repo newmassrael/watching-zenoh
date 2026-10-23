@@ -450,6 +450,7 @@ mod tests {
                     kind: Some(kind),
                     interfaces: None,
                     cert_common_name: None,
+                    cert_credential_zid: None,
                 }),
                 username: None,
             }

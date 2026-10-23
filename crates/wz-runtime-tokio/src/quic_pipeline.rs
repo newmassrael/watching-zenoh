@@ -131,6 +131,26 @@ pub(crate) fn peer_chain_common_name(connection: &Connection) -> Option<String> 
     Some(common_name.to_string())
 }
 
+/// The zid the public key of the peer's LEAF certificate names, or `None` —
+/// [`peer_chain_common_name`]'s sibling over the same downcast, and its TLS
+/// twin's (`crate::stream_link::peer_chain_credential_zid`) over a QUIC
+/// connection. Gated by its caller, as that sibling is.
+pub(crate) fn peer_chain_credential_zid(
+    connection: &Connection,
+) -> Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]> {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    let identity = connection.peer_identity()?;
+    let chain = identity
+        .downcast::<Vec<tokio_rustls::rustls::pki_types::CertificateDer>>()
+        .ok()?;
+    let leaf = chain.first()?;
+    let (_, parsed) = X509Certificate::from_der(leaf.as_ref()).ok()?;
+    Some(wz_session_core::credential_identity::zid_from_spki_der(
+        parsed.tbs_certificate.subject_pki.raw,
+    ))
+}
+
 // R2608 — the cap moved with the loop it bounds, to
 // `crate::stream_link::EXPIRY_MAX_SLEEP`. A constant separated from its only
 // reader is the shape that goes stale unnoticed, so it travelled rather than
@@ -549,7 +569,8 @@ pub fn wire_quic_stream(link: QuicLink) -> (QuicReadDriver, Arc<StreamWriteDrive
     // outlives the wiring, so this is placed beside the subject for symmetry
     // rather than out of necessity.
     let subject = ip_link_subject(LinkKind::Quic, link.endpoint.local_addr().ok())
-        .with_cert_common_name(peer_chain_common_name(&link.connection));
+        .with_cert_common_name(peer_chain_common_name(&link.connection))
+        .with_cert_credential_zid(peer_chain_credential_zid(&link.connection));
     // R311y473 — the adminspace `{src,dst}` pair: the endpoint's bound address is
     // this end, quinn's `Connection::remote_address` the peer's.
     let endpoints = crate::link_interfaces::ip_link_endpoints(

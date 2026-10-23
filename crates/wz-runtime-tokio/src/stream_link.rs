@@ -302,6 +302,30 @@ pub(crate) fn peer_chain_common_name(
     Some(common_name.to_string())
 }
 
+/// The zid the public key of the peer's LEAF certificate names, or `None`
+/// (decision D1 of `docs/session-lifecycle-intent.md`).
+///
+/// The sibling of [`peer_chain_common_name`] over the same chain, parser and
+/// leaf, and gated by its caller the same way. The hash is taken over the
+/// leaf's `SubjectPublicKeyInfo` exactly as the certificate encodes it
+/// (`raw` is the whole DER TLV), which is the form the public-key auth method
+/// hashes its key in, so one key names one zid in either credential.
+///
+/// No chain, an empty chain or an unparsable leaf all answer `None`: there is
+/// then no key the peer signed with, and so nothing it proved.
+#[cfg(feature = "transport-link-tls")]
+pub(crate) fn peer_chain_credential_zid(
+    chain: Option<&[tokio_rustls::rustls::pki_types::CertificateDer<'_>]>,
+) -> Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]> {
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    let leaf = chain?.first()?;
+    let (_, parsed) = X509Certificate::from_der(leaf.as_ref()).ok()?;
+    Some(wz_session_core::credential_identity::zid_from_spki_der(
+        parsed.tbs_certificate.subject_pki.raw,
+    ))
+}
+
 // R2750 — `RingReadable` is bounded HERE, on the constructors, not only on the
 // `LinkDriver` impl that consumes it: the discipline is that a stream link
 // cannot be BUILT without stating whether a ring can read it, which is the
@@ -1218,6 +1242,45 @@ mod tests {
     fn peer_chain_common_name_answers_none_without_a_certificate() {
         assert_eq!(peer_chain_common_name(None), None, "no chain");
         assert_eq!(peer_chain_common_name(Some(&[])), None, "an empty chain");
+    }
+
+    /// A self-signed certificate and its key's `SubjectPublicKeyInfo` as
+    /// `rcgen` serialises it, which is the oracle: that encoding is built by
+    /// `rcgen`'s own writer, not read back through the parser under test.
+    #[cfg(feature = "transport-link-tls")]
+    fn der_and_spki() -> (
+        tokio_rustls::rustls::pki_types::CertificateDer<'static>,
+        Vec<u8>,
+    ) {
+        let params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+            .expect("valid subject alt name");
+        let key = rcgen::KeyPair::generate().expect("key");
+        let cert = params.self_signed(&key).expect("self-signed");
+        (
+            tokio_rustls::rustls::pki_types::CertificateDer::from(cert.der().to_vec()),
+            key.public_key_der(),
+        )
+    }
+
+    /// D1 — the certificate's credential zid is the LEAF key's, over the SPKI
+    /// the key's own writer produces. Two certificates with two keys, so
+    /// "read the leaf" is separated from "read any of them".
+    #[cfg(feature = "transport-link-tls")]
+    #[test]
+    fn peer_chain_credential_zid_names_the_leaf_key() {
+        use wz_session_core::credential_identity::zid_from_spki_der;
+        let (leaf, leaf_spki) = der_and_spki();
+        let (issuer, issuer_spki) = der_and_spki();
+        assert_ne!(
+            zid_from_spki_der(&leaf_spki),
+            zid_from_spki_der(&issuer_spki)
+        );
+        assert_eq!(
+            peer_chain_credential_zid(Some(&[leaf, issuer])),
+            Some(zid_from_spki_der(&leaf_spki)),
+        );
+        assert_eq!(peer_chain_credential_zid(None), None, "no chain");
+        assert_eq!(peer_chain_credential_zid(Some(&[])), None, "an empty chain");
     }
 
     /// Oversize frames are dropped by `send_blocking` rather than overflowing

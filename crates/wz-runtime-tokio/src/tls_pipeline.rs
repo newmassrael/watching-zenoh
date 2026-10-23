@@ -146,8 +146,14 @@ pub fn wire_tls_stream(
     // UNCONDITIONALLY, unlike the expiry, because no config key gates whether a
     // rule may name a peer — the deadline is opt-in behaviour, the identity is
     // just what the link knows about itself.
+    // The certificate's key names a zid too, read in the same window: a
+    // credential the peer proved by signing the handshake (D1 of
+    // `docs/session-lifecycle-intent.md`).
     let subject = ip_link_subject(LinkKind::Tls, stream.get_ref().0.local_addr().ok())
         .with_cert_common_name(crate::stream_link::peer_chain_common_name(
+            stream.get_ref().1.peer_certificates(),
+        ))
+        .with_cert_credential_zid(crate::stream_link::peer_chain_credential_zid(
             stream.get_ref().1.peer_certificates(),
         ));
     // R311y473 — the adminspace `{src,dst}` pair, read off the same wrapped TCP

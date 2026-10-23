@@ -52,6 +52,13 @@ node stays interoperable with zenoh 1.10.1 and zenoh-pico 1.10.1 peers.
   - The admin write plane inserts configuration values and nothing else, and
     has no session verb (`zenoh/src/net/runtime/adminspace.rs` @
     `fn send_push_consume(`).
+  - The public-key authentication proves the INITIATOR's key only. The
+    responder reads back a challenge sealed under the initiator's key, while
+    the initiator's last stage checks the OpenAck for presence alone
+    (`io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @
+    `async fn recv_open_ack(`), so a responder presenting another node's
+    public key completes the handshake. The initiator's lookup admits the
+    responder's key; nothing proves it.
   - The public-key authentication names no zid. Its allow list is a set of
     keys, so a holder of a known key can claim any zid
     (`io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @
@@ -70,7 +77,11 @@ by holding the private key, and no certificate authority is needed. This is the
 self-certifying identifier of HIP (RFC 7401, the Host Identity Tag) and of SFS
 (Mazières et al., 1999). A peer whose zid is not derived this way still
 exchanges data as before; it cannot command a lifecycle verb or be the
-verified target of one. Rejected: the upstream rule, a known key with any zid,
+verified target of one. A credential counts only on the side where the peer
+used its private key: the acceptor of a public-key handshake verifies the
+initiator, while either end of a TLS link verifies the other through the
+certificate the other signed with; the initiator of a public-key handshake
+verifies nobody. Rejected: the upstream rule, a known key with any zid,
 because the ACL decides on the zid and the zid would then be unauthenticated.
 Rejected: binding the zid to a name in the certificate, because that needs a
 public-key infrastructure the self-certifying form does not.
@@ -166,11 +177,21 @@ closing the transport. Proposing either upstream is the owner's decision.
 
 Each step lands with its own done-when; sizes are not estimated here.
 
-1. **D1 and D2.** The zid derivation, the binding check on the public-key and
-   TLS credential paths, and the authority on the verified zid. The initiator
-   also checks the responder's key, which `access-extauth-pubkey` lists as a
-   residual. Done when a peer with a known key and a zid not derived from it is
-   refused, and the verbs do not compile without a credential.
+1. **D1 and D2.** In two parts.
+   - **1a, landed (Round 3455).** The derivation
+     (`wz_session_core::credential_identity`), the proof on both credential
+     paths (the acceptor's public-key stage carries the initiator's zid
+     through the accept cookie and records it at OpenSyn; a TLS or QUIC link
+     records its peer certificate's), `peer_identity_verified` on the session,
+     and the lifecycle injector refusing an unverified commander before its
+     authority is asked. Witnessed end to end over TCP and through the
+     injector. An earlier draft of this step also listed the initiator's check
+     of the responder key; that check was built by R311y576, and it admits a
+     key without proving it, which is why it is not a credential here.
+   - **1b.** The verbs do not compile in a build with no credential path, and
+     the fixed-memory profile gets one. Done when a build with the lifecycle
+     feature and no credential feature fails to compile, and a fixed-memory
+     image verifies a peer.
 2. **D4.** The expected zid on every dial path. Done when a dial to a locator
    that answers with another zid closes at InitAck on AP, the C ABI and the MCU
    host.

@@ -5878,6 +5878,7 @@ mod tests {
             kind: Some(wz_session_core::link::LinkKind::Udp),
             interfaces: Some(vec!["eth0".to_owned()]),
             cert_common_name: None,
+            cert_credential_zid: None,
         }
     }
 

@@ -789,16 +789,40 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
                             // unconditionally (including `None`) so a
                             // re-handshake that authenticates nobody clears the
                             // previous principal instead of leaving it readable.
+                            //
+                            // The same stage PROVES a key (the initiator
+                            // decrypted the challenge sealed under it), so the
+                            // zid that key names lands here too, read inside
+                            // the one lock the stage already holds and assigned
+                            // the same unconditional way.
                             actions
-                                .with_auth(|d| d.accept_recv_open_syn(extensions))
-                                .map(|id| actions.set_peer_auth_id(id)),
+                                .with_auth(|d| {
+                                    d.accept_recv_open_syn(extensions)
+                                        .map(|id| (id, d.proven_peer_credential_zid()))
+                                })
+                                .map(|(id, credential)| {
+                                    actions.set_peer_auth_id(id);
+                                    actions.set_peer_auth_credential_zid(credential);
+                                }),
                         ),
+                        // The initiator's last stage. Whether it proved the
+                        // RESPONDER's key is the dispatch's answer, recorded
+                        // the way the accept arm records it; the pubkey method
+                        // answers `None` here, because its responder never uses
+                        // its private key where the initiator can see it.
                         #[cfg(feature = "codec-open-body")]
                         InboundFrame::Open {
                             is_ack: true,
                             extensions,
                             ..
-                        } => Some(actions.with_auth(|d| d.open_recv_open_ack(extensions))),
+                        } => Some(
+                            actions
+                                .with_auth(|d| {
+                                    d.open_recv_open_ack(extensions)
+                                        .map(|()| d.proven_peer_credential_zid())
+                                })
+                                .map(|credential| actions.set_peer_auth_credential_zid(credential)),
+                        ),
                         _ => None,
                     };
                     if let Some(Err(e)) = auth {
@@ -2532,6 +2556,23 @@ impl<R: SessionRuntime, T: TimeSource + 'static> crate::switchboard::EventInject
             );
             return false;
         };
+        // Decision D2 of `docs/session-lifecycle-intent.md`: a lifecycle verb
+        // runs only for a peer whose zid a credential it PROVED names. The
+        // command arrived on THIS session, so its peer is the commander, and
+        // the authority below decides on that peer's zid; an unproved zid is
+        // a claim anyone could make, so judging it would be judging nothing.
+        // Refused before the authority is asked, for both verbs, and said, for
+        // the reason the misregistration arm above is said: from outside a
+        // refusal looks like nothing happening.
+        if !self.actions.peer_identity_verified() {
+            log::warn!(
+                "SessionLifecycleInjector: a lifecycle command arrived from a peer \
+                 whose zid no credential it proved names; refusing. Lifecycle \
+                 verbs need an authenticated key whose SubjectPublicKeyInfo \
+                 hashes to the peer's zid (docs/session-lifecycle-intent.md, D1)."
+            );
+            return false;
+        }
         if event == Some(E::SessionClose) {
             if !self.authority.admits_close(&key) {
                 return false;

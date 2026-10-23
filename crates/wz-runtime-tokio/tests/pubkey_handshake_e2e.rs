@@ -255,3 +255,85 @@ async fn usrpwd_and_pubkey_challenge_the_initiator_with_different_values() {
          clear -- one value serves both methods (open-debt item 803)"
     );
 }
+
+/// One pubkey handshake over loopback TCP through the production seams, the
+/// initiator claiming `initiator_zid` and holding `init_priv`; answers whether
+/// each side's session holds a VERIFIED peer afterwards (responder, initiator).
+async fn verified_after_handshake(
+    init_priv: wz_runtime_tokio::rsa::RsaPrivateKey,
+    initiator_zid: Vec<u8>,
+) -> (bool, bool) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let init_pub = RsaPublicKey::from(&init_priv);
+
+    let acceptor_fut = async move {
+        let (stream, _peer) = listener.accept().await.expect("accept");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        let responder = AuthDispatch::new(vec![Box::new(PubKeyMethod::responder(
+            generate_keypair(KEY_BITS).expect("responder keypair"),
+            Some(vec![init_pub]),
+        )) as _]);
+        accept_and_open_session_with_auth(
+            DialedLink::Tcp(stream),
+            params,
+            responder,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+    };
+    let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+    let mut params = fixture_session_init_params();
+    params.zid = initiator_zid;
+    let cfg = DialConfig::default();
+    let initiator = AuthDispatch::new(vec![Box::new(PubKeyMethod::initiator(init_priv)) as _]);
+    let initiator_fut = connect_and_open_session_with_auth(
+        locator,
+        params,
+        initiator,
+        &cfg,
+        TokioTime::new(),
+        Some(ITER_CAP),
+        DEFAULT_OPEN_TICK_MS,
+    );
+    let (accepted, opened) = tokio::join!(acceptor_fut, initiator_fut);
+    let accepted = accepted.expect("responder reaches Established");
+    let opened = opened.expect("initiator reaches Established");
+    (
+        accepted.actions.peer_identity_verified(),
+        opened.actions.peer_identity_verified(),
+    )
+}
+
+/// D1 of `docs/session-lifecycle-intent.md`, end to end: an initiator whose zid
+/// is the one its key names is VERIFIED by the responder that watched it prove
+/// the key, through the production accept seam (which, in a build with
+/// `session-unicast-accept`, releases the auth state at InitAck and rebuilds it
+/// from the cookie at OpenSyn). The initiator verifies nobody: upstream's pubkey handshake never makes
+/// the responder use its private key where the initiator can see it.
+///
+/// CONTROL, same keys and same seams: a zid the key does not name leaves the
+/// responder unverified, so the first arm is the binding and not merely a
+/// completed handshake.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zid_derived_from_the_proved_key_is_verified_by_the_responder_only() {
+    use wz_runtime_tokio::extauth_pubkey::credential_zid;
+
+    let init_priv = generate_keypair(KEY_BITS).expect("initiator keypair");
+    let derived = credential_zid(&RsaPublicKey::from(&init_priv)).expect("a DER key");
+    assert_eq!(
+        verified_after_handshake(init_priv, derived.to_vec()).await,
+        (true, false),
+        "the responder proved the initiator's key and its zid; the initiator proved nothing"
+    );
+
+    let init_priv = generate_keypair(KEY_BITS).expect("initiator keypair");
+    assert_eq!(
+        verified_after_handshake(init_priv, vec![0x01; 4]).await,
+        (false, false),
+        "CONTROL: a claimed zid the key does not name is not verified"
+    );
+}
