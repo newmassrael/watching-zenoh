@@ -279666,6 +279666,66 @@
         "The first slice (config, open and close, the zid) turns the atom active and PARTIAL and lowers the ratchet, with upstream's examples for it run against zenohd."
       ]
     },
+    "Round 3460": {
+      "decision_summary": "Put the kit's fixed client on the shared node (storage-policy step \"shared fixed-client node\", step 2 of 3). deploy/zephyr-admin-node/rust/src/fixed_client.rs keeps only what is the board's: the address wait, the zenoh id and signing key from the board, the assertions that hold the tables to the deploy file, the slot-size probe, and a ZephyrPort whose observe is the stack watch. Its statics, factory, observer set-up and loop are wz_session_mcu::slot_node's, which deploy/host-slot-node runs too. Declared became Declared<N>, sized by the image and left uninitialised, so the list stays in .bss. The one behaviour that changes: the runtime's refusal counters are read every round, not at the stack check's interval. The proof is of new code, not an identical image: same tree, same directory, before and after, on the T2G kit. The stack gate and resource budget rows move to the shared node's figures in this commit.",
+      "changes_bullets": [
+        "deploy/zephyr-admin-node/rust/src/fixed_client.rs (411 to 282 lines): ZephyrPort (NAME, log, idle, observe = the stack watch every STACK_CHECK_MS), the documents as a table, ClientNode built from the board's pieces, run with an empty application; the entropy, address and identity failures keep their exit codes (2, 1, 1) and are taken before the node is built.",
+        "crates/wz-session-mcu/src/slot_node.rs: Declared<N> over uninitialised cells (a placeholder declaration holds a key pointer, which would have moved the list from .bss to .data), ClientNode and install_documents take N; 15 tests, the refusal that was one test with two outcomes is now one test for the declarations' limit and one for the registry's.",
+        "deploy/host-slot-node/src/main.rs: DECLARED is Declared<DOCS>; the fmt of one assertion.",
+        "scripts/lib/stack_frame_gate.py: zephyr-client-fixed 6808 to 6904, zephyr-client-fixed-batching 7140 to 7204. deploy/resource_budget.json: the rows follow (static chain, stack peak 6,000 and 6,016, GET medians 402 and 361 us), evidence section 5.5.",
+        "deploy/zephyr-admin-node/rust/src/lib.rs: BUSY_PASSES_MAX and LISTEN_PORT are limited to the nodes that use them (they warned as unused in the client, before this change too).",
+        "crates/wz-session-core/src/session_actions.rs (own commit): zid_is_bound is imported under the two features whose arms call it; the slot profile, which has neither, did not build under -D warnings after the lifecycle commit 864d052a1 (it stopped the no-allocator gate's host-slot-node rows).",
+        "docs/storage-policy-and-link-layer.md section 5.5: step 2, the before and after table, what was measured and what was not."
+      ],
+      "verification_bullets": [
+        "Same tree, same directory on the build machine, the node in fixed_client.rs (before) and on slot_node (after): text 159,544 to 160,000 B (batching 167,676 to 168,104), .data 1,524 B unchanged, .bss 109,318 to 109,346 B (+28, the declarations; batching 110,390 to 110,418), worst stack chain 6,840 to 6,904 B (7,140 to 7,204), all in wz_app_main's frame (1,488 to 1,552), the firmware's own peak 5,936 to 6,000 B (5,952 to 6,016), the same in every run. Both images are inside the stack gate's budget.",
+        "Flashed to the kit and asked 2,000 times for each of the node's two documents: 7 runs of each base image, 3 of each batching image, the order shuffled, 0 wrong answers, the same kinds of console line (ready, session established and lost, loop, stack). resource_budget_gate.py --measure holds all 10 runs of the new images to their rows (exit 0) and refuses the old base image's runs: \"the stack peak is 5936 bytes, the row holds 6000 +/- 16\" (3 of 3, exit 1). resource_budget_gate.py --selftest and --check exit 0.",
+        "Latency is NOT distinguished: base medians over the second, shuffled set of 4 runs each were 0.366 ms (0.313 to 0.456) before and 0.379 ms (0.320 to 0.402) after, ranges overlapping; whole runs fall into a slower mode (median near 0.46 ms) in both nodes, and what causes it is not established. No faster or equal claim.",
+        "The measured images are the ones built before the two cfg edits in lib.rs; the rebuilt images have the same text, .data, .bss and stack chain and the gate's committed figures, and differ from the measured ones in 3 bytes at offsets 849 to 851 (not looked into); the kit did not run the rebuilt ones. The rebuild has no unused-constant warning.",
+        "no_allocator_link_gate.py: zephyr-client-fixed (both builds) and zephyr-admin-node-fixed clean on tree4; host-slot-node (both builds) clean once the wz-session-core import was fixed. stack_frame_gate.py --selftest ok.",
+        "slot_node tests 15 pass with query-get off and on; clippy -D warnings exit 0 for wz-session-mcu (both feature sets), wz-session-core and host-slot-node (default and get,batching); cargo doc -D warnings exit 0 (query-get on); cargo fmt clean for the three packages; feature_public_surface_census.py --check exit 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted runs for this push per job at the start of the next round; the CI of the pushes before it was cancelled by newer pushes and never graded them.",
+        "Step 3: the getter on the kit through the module (GetterLayer and the mailbox are the host's today); nothing is claimed for the kit until it has run it.",
+        "Not run before this commit, left to the integration push: Layer C0 whole, the C1cn leg census of the rebased tree and the kit lane's use of --measure (no lane runs it yet).",
+        "Why a run falls into the slower latency mode on the kit (both nodes do), and the 3 bytes that differ between two builds of the same source, are not investigated.",
+        "The kit's flash cost of the shared node (456 B) was not split by symbol."
+      ],
+      "publishable_decision_summary": "Put the kit's fixed client on the shared node (storage-policy step \"shared fixed-client node\", step 2 of 3). deploy/zephyr-admin-node/rust/src/fixed_client.rs keeps only what is the board's: the address wait, the zenoh id and signing key from the board, the assertions that hold the tables to the deploy file, the slot-size probe, and a ZephyrPort whose observe is the stack watch. Its statics, factory, observer set-up and loop are wz_session_mcu::slot_node's, which deploy/host-slot-node runs too. Declared became Declared<N>, sized by the image and left uninitialised, so the list stays in .bss. The one behaviour that changes: the runtime's refusal counters are read every round, not at the stack check's interval. The proof is of new code, not an identical image: same tree, same directory, before and after, on the T2G kit. The stack gate and resource budget rows move to the shared node's figures in this commit.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-admin-node/rust/src/fixed_client.rs (411 to 282 lines): ZephyrPort (NAME, log, idle, observe = the stack watch every STACK_CHECK_MS), the documents as a table, ClientNode built from the board's pieces, run with an empty application; the entropy, address and identity failures keep their exit codes (2, 1, 1) and are taken before the node is built.",
+        "crates/wz-session-mcu/src/slot_node.rs: Declared<N> over uninitialised cells (a placeholder declaration holds a key pointer, which would have moved the list from .bss to .data), ClientNode and install_documents take N; 15 tests, the refusal that was one test with two outcomes is now one test for the declarations' limit and one for the registry's.",
+        "deploy/host-slot-node/src/main.rs: DECLARED is Declared<DOCS>; the fmt of one assertion.",
+        "scripts/lib/stack_frame_gate.py: zephyr-client-fixed 6808 to 6904, zephyr-client-fixed-batching 7140 to 7204. deploy/resource_budget.json: the rows follow (static chain, stack peak 6,000 and 6,016, GET medians 402 and 361 us), evidence section 5.5.",
+        "deploy/zephyr-admin-node/rust/src/lib.rs: BUSY_PASSES_MAX and LISTEN_PORT are limited to the nodes that use them (they warned as unused in the client, before this change too).",
+        "crates/wz-session-core/src/session_actions.rs (own commit): zid_is_bound is imported under the two features whose arms call it; the slot profile, which has neither, did not build under -D warnings after the lifecycle commit 864d052a1 (it stopped the no-allocator gate's host-slot-node rows).",
+        "docs/storage-policy-and-link-layer.md section 5.5: step 2, the before and after table, what was measured and what was not."
+      ],
+      "publishable_verification_bullets": [
+        "Same tree, same directory on the build machine, the node in fixed_client.rs (before) and on slot_node (after): text 159,544 to 160,000 B (batching 167,676 to 168,104), .data 1,524 B unchanged, .bss 109,318 to 109,346 B (+28, the declarations; batching 110,390 to 110,418), worst stack chain 6,840 to 6,904 B (7,140 to 7,204), all in wz_app_main's frame (1,488 to 1,552), the firmware's own peak 5,936 to 6,000 B (5,952 to 6,016), the same in every run. Both images are inside the stack gate's budget.",
+        "Flashed to the kit and asked 2,000 times for each of the node's two documents: 7 runs of each base image, 3 of each batching image, the order shuffled, 0 wrong answers, the same kinds of console line (ready, session established and lost, loop, stack). resource_budget_gate.py --measure holds all 10 runs of the new images to their rows (exit 0) and refuses the old base image's runs: \"the stack peak is 5936 bytes, the row holds 6000 +/- 16\" (3 of 3, exit 1). resource_budget_gate.py --selftest and --check exit 0.",
+        "Latency is NOT distinguished: base medians over the second, shuffled set of 4 runs each were 0.366 ms (0.313 to 0.456) before and 0.379 ms (0.320 to 0.402) after, ranges overlapping; whole runs fall into a slower mode (median near 0.46 ms) in both nodes, and what causes it is not established. No faster or equal claim.",
+        "The measured images are the ones built before the two cfg edits in lib.rs; the rebuilt images have the same text, .data, .bss and stack chain and the gate's committed figures, and differ from the measured ones in 3 bytes at offsets 849 to 851 (not looked into); the kit did not run the rebuilt ones. The rebuild has no unused-constant warning.",
+        "no_allocator_link_gate.py: zephyr-client-fixed (both builds) and zephyr-admin-node-fixed clean on tree4; host-slot-node (both builds) clean once the wz-session-core import was fixed. stack_frame_gate.py --selftest ok.",
+        "slot_node tests 15 pass with query-get off and on; clippy -D warnings exit 0 for wz-session-mcu (both feature sets), wz-session-core and host-slot-node (default and get,batching); cargo doc -D warnings exit 0 (query-get on); cargo fmt clean for the three packages; feature_public_surface_census.py --check exit 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted runs for this push per job at the start of the next round; the CI of the pushes before it was cancelled by newer pushes and never graded them.",
+        "Step 3: the getter on the kit through the module (GetterLayer and the mailbox are the host's today); nothing is claimed for the kit until it has run it.",
+        "Not run before this commit, left to the integration push: Layer C0 whole, the C1cn leg census of the rebased tree and the kit lane's use of --measure (no lane runs it yet).",
+        "Why a run falls into the slower latency mode on the kit (both nodes do), and the 3 bytes that differ between two builds of the same source, are not investigated.",
+        "The kit's flash cost of the shared node (456 B) was not split by symbol."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
