@@ -356,6 +356,11 @@ pub mod payload_decode;
 mod payload_described;
 pub mod pcap;
 pub mod pcapng;
+/// Open-debt item 924, step 1 — the differential gate of the two-pass
+/// dissection: every unit of a set of captures read a second time, from its
+/// bytes and its first reading's facts, must produce the same records.
+#[cfg(test)]
+mod redecode_gate;
 // No outer docs on these, for the reason the `e2e_*` modules give: an outer
 // doc is merged with the module's own `//!` docs and their links would then be
 // resolved from this scope instead of from the module.

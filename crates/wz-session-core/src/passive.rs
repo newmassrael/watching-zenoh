@@ -2139,6 +2139,9 @@ impl PassiveSession {
     /// Every message of the unit is stamped with
     /// [`PassiveFrame::unit_read_whole`] here and not as it is decoded, because
     /// whether the unit was read whole is known only once its walk has ended.
+    ///
+    /// The walk itself is [`walk_unit`], shared with [`redecode_unit`]: this
+    /// session is the [`UnitJudge`] that answers what one unit's bytes cannot.
     fn decode_framing_unit(
         &mut self,
         direction: Direction,
@@ -2147,270 +2150,25 @@ impl PassiveSession {
         handshake: LinkHandshake,
         resync: Option<StreamResync>,
     ) -> Vec<PassiveFrame> {
-        let seat = usize::from(direction == Direction::B);
-        let unaccounted = self.unaccounted_batch_bytes[seat];
-        // The end of the bytes this unit was handed as, which is what the wire
-        // carried whether or not the body turns out to be an lz4 batch.
-        let wire_end = (source.anchor.space == OffsetSpace::StreamBytes)
-            .then(|| source.anchor.offset + source.prefix_width + bytes.len());
-        let mut frames = self.walk_framing_unit(direction, bytes, source, handshake, resync);
-        let whole = self.unaccounted_batch_bytes[seat] == unaccounted
-            && frames.iter().all(|f| f.frame.is_ok());
-        for frame in &mut frames {
-            frame.unit_read_whole = whole;
-            frame.wire_end = wire_end;
-        }
-        frames
-    }
-
-    /// The walk [`Self::decode_framing_unit`] describes.
-    fn walk_framing_unit(
-        &mut self,
-        direction: Direction,
-        bytes: &[u8],
-        source: UnitSource<'_>,
-        handshake: LinkHandshake,
-        mut resync: Option<StreamResync>,
-    ) -> Vec<PassiveFrame> {
         let UnitSource {
             anchor,
             prefix_width,
             instant_of,
         } = source;
-        let Anchor {
-            offset,
-            space: offset_space,
-        } = anchor;
-        // The unit's own first byte, past the prefix: the instant of a unit
-        // that is not read message by message (one that failed to decompress,
-        // and the lz4 arm below, whose messages sit in a buffer this reader made
-        // and have no byte on the wire to ask about).
-        let unit_instant = instant_of(prefix_width);
-        // R3054 — every unit that reaches this walk produces at least one
-        // record, decodable or not, so this is where a direction's last-seen
-        // instant is written. It is `None` until the observer was given a
-        // clock, and an observer that has one never loses it, so there is no
-        // earlier reading for a clockless unit to erase.
-        //
-        // The record's own instant, which for a unit that waited behind a hole
-        // is the instant of its packet and not of the moment it was read. The
-        // LATEST such instant: records of one direction come out in stream
-        // order, and a segment captured out of order can put an earlier packet
-        // behind a later one, which must not make the direction look to have
-        // fallen silent.
-        let seat = usize::from(direction == Direction::B);
-        self.note_last_seen(seat, unit_instant);
-        // The ceiling is on what the WIRE carried, so it is judged on these
-        // bytes and not on anything decompressed out of them.
-        let exceeds_negotiated_batch = self.exceeds_batch(bytes.len());
-        // THE BATCH HEADER, where this direction has one. See
-        // `FlowContext::batch_header_active` for where upstream puts it. A
-        // multicast link has no handshake to have negotiated it on.
-        let headed = handshake == LinkHandshake::Present
-            && self.context.batch_header_active(direction)
-            && !bytes.is_empty();
-        let plain: Vec<u8>;
-        // `unit` is what the messages are read out of and `pos` where the
-        // first one starts in it. The bit-clear arm keeps the WIRE bytes and
-        // steps over the header, so every coordinate below still points at the
-        // capture; only the lz4 arm reads out of a buffer this reader made.
-        let (unit, mut pos, decompressed): (&[u8], usize, bool) = if !headed {
-            (bytes, 0, false)
-        } else if bytes[0] & BATCH_HEADER_COMPRESSION == 0 {
-            (bytes, 1, false)
-        } else {
-            match decompress_unit(bytes) {
-                Some(p) => {
-                    plain = p;
-                    (&plain, 0, true)
-                }
-                None => {
-                    self.unaccounted_batch_bytes[usize::from(direction == Direction::B)] +=
-                        bytes.len() as u64;
-                    return alloc::vec![PassiveFrame {
-                        direction,
-                        stream_offset: offset,
-                        offset_space,
-                        batch_index: 0,
-                        unit_offset: 0,
-                        unit_len: bytes.len(),
-                        // Stamped by `decode_framing_unit`.
-                        wire_end: None,
-                        batch_offset: None,
-                        undefined_mandatory_ext: None,
-                        prefix_width,
-                        frame: Err(InboundParseError::CompressionFailed),
-                        context: self.context,
-                        exceeds_negotiated_batch,
-                        carried: Carried::Undecompressible,
-                        inadmissible_on_link: false,
-                        #[cfg(feature = "codec-frame")]
-                        sn_verdict: None,
-                        resync: resync.take(),
-                        observed_at_ms: unit_instant.map(|ns| ns / NANOS_PER_MILLI),
-                        observed_at_ns: unit_instant,
-                        reserved_header_bits: 0,
-                        decompressed: None,
-                        unit_read_whole: false,
-                    }];
-                }
-            }
-        };
-        let front = pos;
-        let mut out = Vec::new();
-        let mut batch_index = 0usize;
-        while pos < unit.len() {
-            let rest = &unit[pos..];
-            // R311y611 (§1.4b) — counted BEFORE the admissibility branch below:
-            // a reserved bit is a fact about the SENDER's wire-spec vintage,
-            // and it is one whether or not this link was entitled to carry the
-            // message. Read off THIS message's header, so a batch's second
-            // message is judged as well as its first — the stream path's
-            // credible-header gate gets to see only the first.
-            let lean_network = self.context.reads_bare_network(direction, rest[0]);
-            // Transport flags have no meaning on a bare network header.
-            let reserved = rest
-                .first()
-                .filter(|_| !lean_network)
-                .and_then(|h| wz_codecs::wire_const::reserved_transport_flags(*h))
-                .unwrap_or(0);
-            if reserved != 0 {
-                self.reserved_headers[usize::from(direction == Direction::B)] += 1;
-            }
-            #[cfg(feature = "codec-frame")]
-            let parsed = if lean_network {
-                Ok((
-                    InboundFrame::Network {
-                        payload: rest.to_vec(),
-                    },
-                    rest.len(),
-                ))
-            } else {
-                parse_inbound_consuming(rest)
-            };
-            #[cfg(not(feature = "codec-frame"))]
-            let parsed = parse_inbound_consuming(rest);
-            // An Init or a Join announcing another protocol version is not read
-            // past that byte: see `InboundParseError::ForeignVersion`. It takes
-            // the decode-error path from here, so it names nobody, folds
-            // nothing and, past the front of the unit, stops the walk.
-            let parsed = parsed.and_then(|(f, n)| match f.announced_version() {
-                Some(version) if version != wz_codecs::wire_const::PROTOCOL_VERSION => {
-                    Err(InboundParseError::ForeignVersion { version })
-                }
-                _ => Ok((f, n)),
-            });
-            let (frame, consumed) = match parsed {
-                Ok((f, n)) => (Ok(f), n),
-                Err(e) => (Err(e), 0),
-            };
-            // R311y631 — A MESSAGE THAT CANNOT BE MEASURED CANNOT BE LOCATED,
-            // and a record whose position is unknown is not evidence.
-            //
-            // Past the front of the unit, `consumed == 0` says the walk does
-            // not know where this candidate starts or ends: either the decode
-            // failed, or the MID carries no length this build can skip. The
-            // bytes are counted as unaccounted-for and the walk stops. It does
-            // NOT emit a record for them, because the only reason the walk is
-            // standing here is that the PREVIOUS message claimed to end here —
-            // and if that claim was wrong, everything read from this offset is
-            // manufactured. A scouting HELLO read on a transport flow is the
-            // fixture that proves it: `S_MID_HELLO` and `T_MID_OPEN` are both
-            // `0x02`, the Open body decodes off the front of a Hello, and the
-            // locator list behind it would otherwise be reported as a second
-            // transport message that nobody sent.
-            //
-            // At the FRONT of the unit the record IS emitted, error and all:
-            // there the offset is not in question — the caller handed these
-            // bytes over as one framing unit — so an undecodable datagram
-            // still reports the decode error rather than vanishing.
-            if consumed == 0 && pos > front {
-                self.unaccounted_batch_bytes[usize::from(direction == Direction::B)] +=
-                    (unit.len() - pos) as u64;
-                break;
-            }
-            let inadmissible = handshake == LinkHandshake::Absent
-                && frame.as_ref().is_ok_and(is_handshake_message);
-            if let Ok(ref f) = frame {
-                if !inadmissible {
-                    self.fold(direction, f);
-                }
-            }
-            // R311y609 (C12) — an inadmissible message is not folded, and it is
-            // not NUMBERED either: an INIT on a multicast link carries no SN,
-            // and a data frame that reaches here has one whatever the link is.
-            #[cfg(feature = "codec-frame")]
-            let sn_verdict = self.track_sn(direction, &frame);
-            let carried = self.decode_carried(direction, &frame);
-            let undefined_mandatory_ext = self.note_undefined_mandatory_ext(direction, &frame);
-            // A decompressed message's payload sits in a buffer this reader
-            // made, so it has no offset on the wire to hand out.
-            let batch_offset = if decompressed {
-                None
-            } else {
-                self.batch_offset_of(&frame, consumed)
-            };
-            let own = if decompressed {
-                let end = if consumed == 0 {
-                    unit.len()
-                } else {
-                    pos + consumed
-                };
-                Some(unit[pos..end].to_vec())
-            } else {
-                None
-            };
-            // THIS message's instant: the packet that carried ITS first byte,
-            // the byte its row's `first_byte` names. A batch can span packets,
-            // so the unit's front is not enough; a decompressed message sits in
-            // a buffer this reader made and has no wire byte to ask about, so it
-            // takes the unit's.
-            let instant = if decompressed {
-                unit_instant
-            } else {
-                instant_of(prefix_width + pos)
-            };
-            self.note_last_seen(seat, instant);
-            out.push(PassiveFrame {
+        walk_unit(
+            &mut LiveJudge {
+                session: self,
+                instant_of,
+            },
+            UnitInput {
                 direction,
-                stream_offset: offset,
-                offset_space,
-                batch_index,
-                unit_offset: pos,
-                unit_len: unit.len(),
-                // Stamped by `decode_framing_unit`.
-                wire_end: None,
-                batch_offset,
-                undefined_mandatory_ext,
+                bytes,
+                anchor,
                 prefix_width,
-                frame,
-                context: self.context,
-                exceeds_negotiated_batch,
-                carried,
-                inadmissible_on_link: inadmissible,
-                #[cfg(feature = "codec-frame")]
-                sn_verdict,
-                resync: resync.take(),
-                observed_at_ms: instant.map(|ns| ns / NANOS_PER_MILLI),
-                observed_at_ns: instant,
-                reserved_header_bits: reserved,
-                decompressed: own,
-                // Stamped by `decode_framing_unit` once the walk has ended.
-                unit_read_whole: false,
-            });
-            batch_index += 1;
-            if consumed == 0 {
-                // Front of the unit, and unmeasurable: the record above is the
-                // verdict on the whole unit, and the bytes behind it are still
-                // unaccounted for. Counting them is what makes an undecodable
-                // datagram say how much it could not explain.
-                self.unaccounted_batch_bytes[usize::from(direction == Direction::B)] +=
-                    (unit.len() - pos) as u64;
-                break;
-            }
-            pos += consumed;
-        }
-        out
+                handshake,
+            },
+            resync,
+        )
     }
 
     /// Record that `seat`'s direction produced a record captured at `instant`.
@@ -2473,22 +2231,6 @@ impl PassiveSession {
     /// [`PassiveFrame::undefined_mandatory_ext`].
     pub fn undefined_mandatory_exts(&self, direction: Direction) -> u64 {
         self.undefined_mandatory_exts[usize::from(direction == Direction::B)]
-    }
-
-    /// R311y630 — the per-frame verdict, and the counter bump that goes with
-    /// it, in ONE place because both ingestion paths need both and a fact
-    /// recorded at one site and counted at another is how the two drift.
-    fn note_undefined_mandatory_ext(
-        &mut self,
-        direction: Direction,
-        frame: &Result<InboundFrame, InboundParseError>,
-    ) -> Option<u8> {
-        let Ok(frame) = frame else { return None };
-        let crate::ext_admit::ExtAdmission::UnknownMandatory { eid } = frame.ext_admission() else {
-            return None;
-        };
-        self.undefined_mandatory_exts[usize::from(direction == Direction::B)] += 1;
-        Some(eid)
     }
 
     /// R311y610 — bytes pushed into this direction and not yet consumed.
@@ -2730,22 +2472,13 @@ impl PassiveSession {
         )
     }
 
-    /// R311y585 (A5) — did this frame's wire length break the negotiated
-    /// ceiling? Never true before an InitAck: see
-    /// [`PassiveFrame::exceeds_negotiated_batch`].
-    fn exceeds_batch(&self, wire_len: usize) -> bool {
-        self.context
-            .batch_size()
-            .is_some_and(|max| wire_len > max as usize)
-    }
-
-    /// R311y583 (A2) — take one decoded transport frame the rest of the way.
+    /// R311y583 (A2) — what this session's chain router makes of one
+    /// `Fragment`: the batch it completed, or how far the chain has got.
     ///
-    /// Runs AFTER [`Self::fold`], so the context this reads is the one in
-    /// force for this frame rather than the one before it. That ordering is
-    /// load-bearing in exactly one place and it is a real capture: the Open
-    /// that establishes a compressed session is itself uncompressed, and the
-    /// first frame after it is not.
+    /// The one part of [`carried_of`] that depends on the fragments before
+    /// this one, and therefore the one a re-read cannot answer from the unit's
+    /// bytes (see [`FragmentFate`]). Runs AFTER the fold, so the context this
+    /// reads is the one in force for this frame rather than the one before it.
     ///
     /// A fragment chain is timed by the OBSERVER's clock and not by the
     /// message's own instant ([`PassiveFrame::observed_at_ns`]): the deadline
@@ -2753,205 +2486,88 @@ impl PassiveSession {
     /// measured on the clock that does the expiring. What a record SAYS about
     /// when it was captured and when this reader judges a chain stale are two
     /// questions, and only the first was ever wrong.
-    #[cfg(feature = "codec-frame")]
-    fn decode_carried(
+    #[cfg(feature = "reassembly")]
+    fn ingest_fragment(
         &mut self,
         direction: Direction,
-        frame: &Result<InboundFrame, InboundParseError>,
-    ) -> Carried {
-        // `direction` selects a chain router, and there are none without
-        // `reassembly`.
-        #[cfg(not(feature = "reassembly"))]
-        let _ = direction;
-        let Ok(f) = frame else {
-            return Carried::Nothing;
-        };
-        match f {
-            InboundFrame::Network { payload } => {
-                let b = parse_lowlatency_payload_best_effort(payload);
-                #[cfg(all(feature = "dissect", feature = "codec-declare"))]
-                self.fold_keyexprs(direction, &b);
-                Carried::Batch(b)
-            }
-            InboundFrame::Frame { payload, .. } => {
-                let b = self.batch_of(payload);
-                #[cfg(all(feature = "dissect", feature = "codec-declare"))]
-                self.fold_keyexprs(direction, &b);
-                Carried::Batch(b)
-            }
-            #[cfg(feature = "reassembly")]
-            InboundFrame::Fragment {
+        fragment: FragmentView<'_>,
+    ) -> FragmentFate {
+        let FragmentView {
+            reliable,
+            sn,
+            more,
+            payload,
+            priority,
+            markers,
+        } = fragment;
+        // The ring is the InitAck's. Without one the router is told so and
+        // follows a chain on plain `+1` steps, which are consecutive on every
+        // ring; it is never handed a guessed mask (see [`FlowContext::sn_mask`]).
+        // The step it cannot judge ends the chain as `Unresolvable`, below.
+        let ring = self
+            .context
+            .sn_mask()
+            .map_or(SnRing::Unknown, SnRing::Known);
+        let markers_on = self.context.fragmentation_markers();
+        let idx = usize::from(direction == Direction::B);
+        // Read BEFORE the router is borrowed: the clock and the router are both
+        // fields of `self`.
+        let now_ms = self.now_ms();
+        let router = &mut self.reasm[idx];
+        router.set_fragmentation_markers(markers_on);
+        let mut joined: Option<Vec<u8>> = None;
+        // The peer key is the DIRECTION, one byte, because an observer holds
+        // one router per half-session (see the field docs).
+        let key = [idx as u8];
+        let outcome = router.ingest_in_ring(
+            ReasmFragment {
+                peer_key: &key,
                 reliable,
                 sn,
-                more,
+                more: u8::from(more),
                 payload,
                 priority,
                 markers,
-                ..
-            } => {
-                // The ring is the InitAck's. Without one the router is told so
-                // and follows a chain on plain `+1` steps, which are consecutive
-                // on every ring; it is never handed a guessed mask (see
-                // [`FlowContext::sn_mask`]). The step it cannot judge ends the
-                // chain as `Unresolvable`, below.
-                let ring = self
-                    .context
-                    .sn_mask()
-                    .map_or(SnRing::Unknown, SnRing::Known);
-                let markers_on = self.context.fragmentation_markers();
-                let idx = usize::from(direction == Direction::B);
-                // Read BEFORE the router is borrowed: the clock and the router
-                // are both fields of `self`.
-                let now_ms = self.now_ms();
-                let router = &mut self.reasm[idx];
-                router.set_fragmentation_markers(markers_on);
-                let mut joined: Option<Vec<u8>> = None;
-                // The peer key is the DIRECTION, one byte, because an observer
-                // holds one router per half-session (see the field docs).
-                let key = [idx as u8];
-                let outcome = router.ingest_in_ring(
-                    ReasmFragment {
-                        peer_key: &key,
-                        reliable: *reliable,
-                        sn: *sn,
-                        more: u8::from(*more),
-                        payload,
-                        priority: *priority,
-                        markers: *markers,
-                    },
-                    ring,
-                    // R311y594 — the observation instant, which an observer
-                    // takes from the capture rather than from the host (see
-                    // `now_ms`). Stays 0 for a caller that never advances it,
-                    // and a deadline armed at 0 against the default
-                    // `u64::MAX` window is unreachable — so this is the
-                    // previous behaviour until someone supplies a clock.
-                    now_ms,
-                    |bytes| joined = Some(bytes.to_vec()),
-                );
-                match joined {
-                    Some(bytes) => {
-                        let b = self.batch_of(&bytes);
-                        #[cfg(all(feature = "dissect", feature = "codec-declare"))]
-                        self.fold_keyexprs(direction, &b);
-                        // R2706 — the buffer travels WITH the parse. It was
-                        // already owned here and dropped one line later,
-                        // taking the referent of `b.spans` with it.
-                        Carried::Reassembled {
-                            batch: b,
-                            joined: bytes,
-                        }
-                    }
-                    // The one outcome that is not a chain's progress or a loss
-                    // the router judged: the fragment it could not place.
-                    None if outcome == IngestOutcome::Aborted(AbortReason::Unresolvable) => {
-                        Carried::FragmentWithoutResolution
-                    }
-                    None => Carried::Fragment(outcome),
-                }
+            },
+            ring,
+            // R311y594 — the observation instant, which an observer takes from
+            // the capture rather than from the host (see `now_ms`). Stays 0 for
+            // a caller that never advances it, and a deadline armed at 0 against
+            // the default `u64::MAX` window is unreachable — so this is the
+            // previous behaviour until someone supplies a clock.
+            now_ms,
+            |bytes| joined = Some(bytes.to_vec()),
+        );
+        match joined {
+            Some(bytes) => FragmentFate::Joined(bytes),
+            // The one outcome that is not a chain's progress or a loss the
+            // router judged: the fragment it could not place.
+            None if outcome == IngestOutcome::Aborted(AbortReason::Unresolvable) => {
+                FragmentFate::WithoutResolution
             }
-            _ => Carried::Nothing,
+            None => FragmentFate::Pending(outcome),
         }
     }
 
-    /// R311y645 (§1.1n / §4.37) — where a `Frame`'s payload begins within the
-    /// message, when the bytes of that payload are the wire's own.
+    /// Advance the observed context by one decoded frame, and note the two
+    /// per-direction facts the session keeps beside it.
     ///
-    /// The length is not re-derived from the layout: the payload is the
-    /// message's TAIL, so everything ahead of it — the header, the sn and the
-    /// Z-gated ext chain — is exactly the difference between what the decode
-    /// consumed and what it kept. A reader that re-walked the header instead
-    /// would be a second opinion on a length this walk already measured, and
-    /// the two could disagree.
-    ///
-    /// A message decompressed out of an lz4 batch never reaches here: its
-    /// caller answers `None` for it, because its offsets index a buffer this
-    /// reader made (see [`PassiveFrame::decompressed`]).
-    #[cfg(feature = "codec-frame")]
-    fn batch_offset_of(
-        &self,
-        frame: &Result<InboundFrame, InboundParseError>,
-        consumed: usize,
-    ) -> Option<usize> {
-        if matches!(frame, Ok(InboundFrame::Network { .. })) {
-            return Some(0);
-        }
-        let Ok(InboundFrame::Frame { payload, .. }) = frame else {
-            return None;
-        };
-        consumed.checked_sub(payload.len())
-    }
-
-    /// Walk a `Frame`'s (or a joined chain's) batch of network messages.
-    ///
-    /// No decompression HERE any more. This used to lz4-decode a
-    /// `Frame`'s payload on a compressed session, which is not where upstream
-    /// compresses: the whole BATCH is wrapped, header byte first, and it is
-    /// unwrapped before any transport message is read — see
-    /// [`FlowContext::batch_header_active`] and [`decompress_unit`]. A payload
-    /// reaching this function is therefore already plain.
-    #[cfg(feature = "codec-frame")]
-    fn batch_of(&self, body: &[u8]) -> BatchParse {
-        parse_frame_payload_best_effort(body)
-    }
-
-    /// Advance the observed context by one decoded frame.
-    ///
-    /// Init folds the capabilities (once per direction). Open advances to
-    /// Established — and only from `InitComplete`, so a capture that starts
-    /// mid-session and sees an Open with no Inits does NOT claim a
-    /// negotiation it never observed. Close ends the session, and settles
-    /// nothing about the negotiation: it moves the phase and leaves
-    /// [`FlowContext::init_seen`] as it found it, so a flow that begins at its
-    /// Close reads `Closed` and `negotiated() == false`.
+    /// The context's part is [`FlowContext::fold_frame`], which a re-read of
+    /// the unit repeats. The lease a direction's first Open states and the
+    /// Close it carried are this session's own record and are written here
+    /// only.
     fn fold(&mut self, direction: Direction, frame: &InboundFrame) {
+        self.context.fold_frame(direction, frame);
+        let seat = usize::from(direction == Direction::B);
         match frame {
-            InboundFrame::Init {
-                is_ack,
-                body,
-                extensions,
-                ..
-            } => {
-                let idx = usize::from(direction == Direction::B);
-                if self.context.init_seen[idx] {
-                    return;
-                }
-                self.context.init_seen[idx] = true;
-                self.context.fold_init(extensions);
-                self.context.fold_version(*is_ack, body.version);
-                // R311y583 (A5) — the ACK's size parameters ARE the session's.
-                // See `FlowContext::caps` for why this is an assignment and
-                // not a fold.
-                if *is_ack {
-                    self.context.caps =
-                        Some(PeerInitCaps::from_init_body(body.sn_res, body.batch_size));
-                }
-                self.context.phase = if self.context.negotiated() {
-                    SessionPhase::InitComplete
-                } else {
-                    SessionPhase::HalfInit
-                };
-            }
+            // R3054 — the first Open of a direction states its lease, in
+            // milliseconds: the wire's seconds form is already projected back
+            // during parse. First wins, like `init_seen`, because a repeated
+            // Open is a replay and not a new announcement.
             InboundFrame::Open { body, .. } => {
-                // R2789 (open debt 812) — the DIRECTION's own transition. The
-                // phase below is the session's and still moves on the first
-                // Open; the width does not, because the peer is still narrow
-                // until it carries its own.
-                let seat = usize::from(direction == Direction::B);
-                self.context.open_seen[seat] = true;
-                // R3054 — the first Open of a direction states its lease, in
-                // milliseconds: the wire's seconds form is already projected
-                // back during parse. First wins, like `init_seen`, because a
-                // repeated Open is a replay and not a new announcement.
                 self.lease_ms[seat].get_or_insert(body.lease);
-                if self.context.phase == SessionPhase::InitComplete {
-                    self.context.phase = SessionPhase::Established;
-                }
             }
-            InboundFrame::Close { .. } => {
-                self.context.phase = SessionPhase::Closed;
-                self.close_seen[usize::from(direction == Direction::B)] = true;
-            }
+            InboundFrame::Close { .. } => self.close_seen[seat] = true,
             _ => {}
         }
     }
@@ -2969,6 +2585,788 @@ impl PassiveSession {
             Direction::B => &self.b,
         }
     }
+}
+
+impl FlowContext {
+    /// Advance this context by one decoded frame.
+    ///
+    /// Init folds the capabilities (once per direction). Open advances to
+    /// Established — and only from `InitComplete`, so a capture that starts
+    /// mid-session and sees an Open with no Inits does NOT claim a
+    /// negotiation it never observed. Close ends the session, and settles
+    /// nothing about the negotiation: it moves the phase and leaves
+    /// [`FlowContext::init_seen`] as it found it, so a flow that begins at its
+    /// Close reads `Closed` and `negotiated() == false`.
+    ///
+    /// A function of the context and the frame alone, which is what lets a
+    /// unit be read again from the context in force at its front (see
+    /// [`redecode_unit`]).
+    fn fold_frame(&mut self, direction: Direction, frame: &InboundFrame) {
+        match frame {
+            InboundFrame::Init {
+                is_ack,
+                body,
+                extensions,
+                ..
+            } => {
+                let idx = usize::from(direction == Direction::B);
+                if self.init_seen[idx] {
+                    return;
+                }
+                self.init_seen[idx] = true;
+                self.fold_init(extensions);
+                self.fold_version(*is_ack, body.version);
+                // R311y583 (A5) — the ACK's size parameters ARE the session's.
+                // See `FlowContext::caps` for why this is an assignment and
+                // not a fold.
+                if *is_ack {
+                    self.caps = Some(PeerInitCaps::from_init_body(body.sn_res, body.batch_size));
+                }
+                self.phase = if self.negotiated() {
+                    SessionPhase::InitComplete
+                } else {
+                    SessionPhase::HalfInit
+                };
+            }
+            InboundFrame::Open { .. } => {
+                // R2789 (open debt 812) — the DIRECTION's own transition. The
+                // phase below is the session's and still moves on the first
+                // Open; the width does not, because the peer is still narrow
+                // until it carries its own.
+                self.open_seen[usize::from(direction == Direction::B)] = true;
+                if self.phase == SessionPhase::InitComplete {
+                    self.phase = SessionPhase::Established;
+                }
+            }
+            InboundFrame::Close { .. } => self.phase = SessionPhase::Closed,
+            _ => {}
+        }
+    }
+}
+
+/// What a `Fragment` came to, as the chain router judged it.
+///
+/// The one per-message outcome of the walk that depends on OTHER messages:
+/// whether this fragment completed a chain depends on every fragment before it,
+/// so a re-read of one unit cannot work it out and is handed it instead (see
+/// [`MessageFacts::fragment`]).
+#[cfg(feature = "reassembly")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FragmentFate {
+    /// The fragment completed its chain; the bytes are the joined batch.
+    Joined(Vec<u8>),
+    /// The router could not place the fragment on any ring
+    /// ([`Carried::FragmentWithoutResolution`]).
+    WithoutResolution,
+    /// The chain's progress, or the loss the router judged
+    /// ([`Carried::Fragment`]).
+    Pending(IngestOutcome),
+}
+
+/// The parts of a decoded `Fragment` the chain router reads.
+#[cfg(feature = "reassembly")]
+#[derive(Debug, Clone, Copy)]
+struct FragmentView<'a> {
+    reliable: bool,
+    sn: u64,
+    more: bool,
+    payload: &'a [u8],
+    priority: crate::qos::Priority,
+    markers: crate::extfragment::FragmentMarkers,
+}
+
+/// The one framing unit a walk reads, and what the caller knows about where
+/// it came from.
+#[derive(Debug, Clone, Copy)]
+pub struct UnitInput<'a> {
+    /// The direction the unit travelled.
+    pub direction: Direction,
+    /// The unit's bytes as they crossed the wire: past a stream unit's length
+    /// prefix, the whole of a datagram.
+    pub bytes: &'a [u8],
+    /// Where the unit stands, in the space the caller counted in.
+    pub anchor: Anchor,
+    /// Width of the length prefix that framed it; `0` for a datagram.
+    pub prefix_width: usize,
+    /// Whether the link the unit arrived on carries a handshake.
+    pub handshake: LinkHandshake,
+}
+
+/// What a framing unit's walk asks of the reader it walks for.
+///
+/// [`walk_unit`] decides everything one unit's bytes and the flow's context
+/// decide. What it cannot decide alone it asks through this trait: the context
+/// it reads and folds, the capture instant of a byte, the SN verdict (which
+/// depends on the previous SN of the same conduit) and the fate of a fragment
+/// (which depends on the fragments before it). The counters a session keeps
+/// are told through it as well, so a reader that keeps none ignores them.
+///
+/// Two readers answer: a [`PassiveSession`] reading the capture for the first
+/// time, which judges and counts, and [`redecode_unit`]'s, which replays the
+/// first reading's answers ([`UnitFacts`]).
+trait UnitJudge {
+    /// The context in force, which the walk reads and folds in place.
+    fn context(&mut self) -> &mut FlowContext;
+    /// The capture instant of the byte `from_unit_start` bytes from the unit's
+    /// first byte (its length prefix, for a stream unit).
+    fn instant_of(&self, from_unit_start: usize) -> Option<u64>;
+    /// Fold one admissible decoded frame: the context's part and the reader's.
+    fn fold(&mut self, direction: Direction, frame: &InboundFrame);
+    /// The SN verdict of the message at `index` in the unit.
+    fn track_sn(
+        &mut self,
+        direction: Direction,
+        index: usize,
+        frame: &Result<InboundFrame, InboundParseError>,
+    ) -> Option<SnVerdict>;
+    /// What the `Fragment` at `index` in the unit came to.
+    #[cfg(feature = "reassembly")]
+    fn fragment(
+        &mut self,
+        direction: Direction,
+        index: usize,
+        fragment: FragmentView<'_>,
+    ) -> FragmentFate;
+    /// A batch of network messages the walk has read.
+    fn batch_read(&mut self, direction: Direction, batch: &BatchParse);
+    /// A record of `seat`'s direction captured at `instant`.
+    fn note_last_seen(&mut self, seat: usize, instant: Option<u64>);
+    /// `bytes` of the unit that no decoded message accounts for.
+    fn count_unaccounted(&mut self, seat: usize, bytes: u64);
+    /// A message whose header sets a bit its MID does not define.
+    fn count_reserved_header(&mut self, seat: usize);
+    /// A message carrying a mandatory extension its space does not define.
+    fn count_undefined_mandatory_ext(&mut self, seat: usize);
+}
+
+/// A [`PassiveSession`] reading a unit for the first time: it judges, folds
+/// and counts.
+struct LiveJudge<'s, 'f> {
+    session: &'s mut PassiveSession,
+    instant_of: &'f dyn Fn(usize) -> Option<u64>,
+}
+
+impl UnitJudge for LiveJudge<'_, '_> {
+    fn context(&mut self) -> &mut FlowContext {
+        &mut self.session.context
+    }
+
+    fn instant_of(&self, from_unit_start: usize) -> Option<u64> {
+        (self.instant_of)(from_unit_start)
+    }
+
+    fn fold(&mut self, direction: Direction, frame: &InboundFrame) {
+        self.session.fold(direction, frame);
+    }
+
+    fn track_sn(
+        &mut self,
+        direction: Direction,
+        _index: usize,
+        frame: &Result<InboundFrame, InboundParseError>,
+    ) -> Option<SnVerdict> {
+        self.session.track_sn(direction, frame)
+    }
+
+    #[cfg(feature = "reassembly")]
+    fn fragment(
+        &mut self,
+        direction: Direction,
+        _index: usize,
+        fragment: FragmentView<'_>,
+    ) -> FragmentFate {
+        self.session.ingest_fragment(direction, fragment)
+    }
+
+    fn batch_read(&mut self, direction: Direction, batch: &BatchParse) {
+        #[cfg(all(feature = "dissect", feature = "codec-declare"))]
+        self.session.fold_keyexprs(direction, batch);
+        #[cfg(not(all(feature = "dissect", feature = "codec-declare")))]
+        let _ = (direction, batch);
+    }
+
+    fn note_last_seen(&mut self, seat: usize, instant: Option<u64>) {
+        self.session.note_last_seen(seat, instant);
+    }
+
+    fn count_unaccounted(&mut self, seat: usize, bytes: u64) {
+        self.session.unaccounted_batch_bytes[seat] += bytes;
+    }
+
+    fn count_reserved_header(&mut self, seat: usize) {
+        self.session.reserved_headers[seat] += 1;
+    }
+
+    fn count_undefined_mandatory_ext(&mut self, seat: usize) {
+        self.session.undefined_mandatory_exts[seat] += 1;
+    }
+}
+
+/// R311y631 (§1.2b) — the walk [`PassiveSession::decode_framing_unit`]
+/// describes: every transport message of one framing unit, in order.
+///
+/// Everything here follows from the unit's bytes and the context `judge`
+/// holds; what does not is asked of `judge` (see [`UnitJudge`]). That split is
+/// what lets a unit be read a second time, from its bytes and the first
+/// reading's answers, and come out the same ([`redecode_unit`]).
+fn walk_unit(
+    judge: &mut dyn UnitJudge,
+    input: UnitInput<'_>,
+    mut resync: Option<StreamResync>,
+) -> Vec<PassiveFrame> {
+    let UnitInput {
+        direction,
+        bytes,
+        anchor,
+        prefix_width,
+        handshake,
+    } = input;
+    let Anchor {
+        offset,
+        space: offset_space,
+    } = anchor;
+    // The end of the bytes this unit was handed as, which is what the wire
+    // carried whether or not the body turns out to be an lz4 batch.
+    let wire_end =
+        (offset_space == OffsetSpace::StreamBytes).then(|| offset + prefix_width + bytes.len());
+    // Whether any byte of the unit went unaccounted for, which with every
+    // message decoded is what "read whole" means.
+    let mut unaccounted = false;
+    // The unit's own first byte, past the prefix: the instant of a unit that is
+    // not read message by message (one that failed to decompress, and the lz4
+    // arm below, whose messages sit in a buffer this reader made and have no
+    // byte on the wire to ask about).
+    let unit_instant = judge.instant_of(prefix_width);
+    // R3054 — every unit that reaches this walk produces at least one record,
+    // decodable or not, so this is where a direction's last-seen instant is
+    // written. It is `None` until the observer was given a clock, and an
+    // observer that has one never loses it, so there is no earlier reading for
+    // a clockless unit to erase.
+    //
+    // The record's own instant, which for a unit that waited behind a hole is
+    // the instant of its packet and not of the moment it was read. The LATEST
+    // such instant: records of one direction come out in stream order, and a
+    // segment captured out of order can put an earlier packet behind a later
+    // one, which must not make the direction look to have fallen silent.
+    let seat = usize::from(direction == Direction::B);
+    judge.note_last_seen(seat, unit_instant);
+    // R311y585 (A5) — the ceiling is on what the WIRE carried, so it is judged
+    // on these bytes and not on anything decompressed out of them. Never true
+    // before an InitAck: see [`PassiveFrame::exceeds_negotiated_batch`].
+    let exceeds_negotiated_batch = judge
+        .context()
+        .batch_size()
+        .is_some_and(|max| bytes.len() > max as usize);
+    // THE BATCH HEADER, where this direction has one. See
+    // `FlowContext::batch_header_active` for where upstream puts it. A
+    // multicast link has no handshake to have negotiated it on.
+    let headed = handshake == LinkHandshake::Present
+        && judge.context().batch_header_active(direction)
+        && !bytes.is_empty();
+    let plain: Vec<u8>;
+    // `unit` is what the messages are read out of and `pos` where the first one
+    // starts in it. The bit-clear arm keeps the WIRE bytes and steps over the
+    // header, so every coordinate below still points at the capture; only the
+    // lz4 arm reads out of a buffer this reader made.
+    let (unit, mut pos, decompressed): (&[u8], usize, bool) = if !headed {
+        (bytes, 0, false)
+    } else if bytes[0] & BATCH_HEADER_COMPRESSION == 0 {
+        (bytes, 1, false)
+    } else {
+        match decompress_unit(bytes) {
+            Some(p) => {
+                plain = p;
+                (&plain, 0, true)
+            }
+            None => {
+                judge.count_unaccounted(seat, bytes.len() as u64);
+                return alloc::vec![PassiveFrame {
+                    direction,
+                    stream_offset: offset,
+                    offset_space,
+                    batch_index: 0,
+                    unit_offset: 0,
+                    unit_len: bytes.len(),
+                    wire_end,
+                    batch_offset: None,
+                    undefined_mandatory_ext: None,
+                    prefix_width,
+                    frame: Err(InboundParseError::CompressionFailed),
+                    context: *judge.context(),
+                    exceeds_negotiated_batch,
+                    carried: Carried::Undecompressible,
+                    inadmissible_on_link: false,
+                    #[cfg(feature = "codec-frame")]
+                    sn_verdict: None,
+                    resync: resync.take(),
+                    observed_at_ms: unit_instant.map(|ns| ns / NANOS_PER_MILLI),
+                    observed_at_ns: unit_instant,
+                    reserved_header_bits: 0,
+                    decompressed: None,
+                    unit_read_whole: false,
+                }];
+            }
+        }
+    };
+    let front = pos;
+    let mut out = Vec::new();
+    let mut batch_index = 0usize;
+    while pos < unit.len() {
+        let rest = &unit[pos..];
+        // R311y611 (§1.4b) — counted BEFORE the admissibility branch below: a
+        // reserved bit is a fact about the SENDER's wire-spec vintage, and it is
+        // one whether or not this link was entitled to carry the message. Read
+        // off THIS message's header, so a batch's second message is judged as
+        // well as its first — the stream path's credible-header gate gets to
+        // see only the first.
+        let lean_network = judge.context().reads_bare_network(direction, rest[0]);
+        // Transport flags have no meaning on a bare network header.
+        let reserved = rest
+            .first()
+            .filter(|_| !lean_network)
+            .and_then(|h| wz_codecs::wire_const::reserved_transport_flags(*h))
+            .unwrap_or(0);
+        if reserved != 0 {
+            judge.count_reserved_header(seat);
+        }
+        #[cfg(feature = "codec-frame")]
+        let parsed = if lean_network {
+            Ok((
+                InboundFrame::Network {
+                    payload: rest.to_vec(),
+                },
+                rest.len(),
+            ))
+        } else {
+            parse_inbound_consuming(rest)
+        };
+        #[cfg(not(feature = "codec-frame"))]
+        let parsed = parse_inbound_consuming(rest);
+        // An Init or a Join announcing another protocol version is not read past
+        // that byte: see `InboundParseError::ForeignVersion`. It takes the
+        // decode-error path from here, so it names nobody, folds nothing and,
+        // past the front of the unit, stops the walk.
+        let parsed = parsed.and_then(|(f, n)| match f.announced_version() {
+            Some(version) if version != wz_codecs::wire_const::PROTOCOL_VERSION => {
+                Err(InboundParseError::ForeignVersion { version })
+            }
+            _ => Ok((f, n)),
+        });
+        let (frame, consumed) = match parsed {
+            Ok((f, n)) => (Ok(f), n),
+            Err(e) => (Err(e), 0),
+        };
+        // R311y631 — A MESSAGE THAT CANNOT BE MEASURED CANNOT BE LOCATED, and a
+        // record whose position is unknown is not evidence.
+        //
+        // Past the front of the unit, `consumed == 0` says the walk does not
+        // know where this candidate starts or ends: either the decode failed,
+        // or the MID carries no length this build can skip. The bytes are
+        // counted as unaccounted-for and the walk stops. It does NOT emit a
+        // record for them, because the only reason the walk is standing here is
+        // that the PREVIOUS message claimed to end here — and if that claim was
+        // wrong, everything read from this offset is manufactured. A scouting
+        // HELLO read on a transport flow is the fixture that proves it:
+        // `S_MID_HELLO` and `T_MID_OPEN` are both `0x02`, the Open body decodes
+        // off the front of a Hello, and the locator list behind it would
+        // otherwise be reported as a second transport message that nobody sent.
+        //
+        // At the FRONT of the unit the record IS emitted, error and all: there
+        // the offset is not in question — the caller handed these bytes over as
+        // one framing unit — so an undecodable datagram still reports the
+        // decode error rather than vanishing.
+        if consumed == 0 && pos > front {
+            judge.count_unaccounted(seat, (unit.len() - pos) as u64);
+            unaccounted = true;
+            break;
+        }
+        let inadmissible =
+            handshake == LinkHandshake::Absent && frame.as_ref().is_ok_and(is_handshake_message);
+        if let Ok(ref f) = frame {
+            if !inadmissible {
+                judge.fold(direction, f);
+            }
+        }
+        // R311y609 (C12) — an inadmissible message is not folded, and it is not
+        // NUMBERED either: an INIT on a multicast link carries no SN, and a data
+        // frame that reaches here has one whatever the link is.
+        #[cfg(feature = "codec-frame")]
+        let sn_verdict = judge.track_sn(direction, batch_index, &frame);
+        let carried = carried_of(judge, direction, batch_index, &frame);
+        // R311y630 — the per-frame verdict and the counter bump that goes with
+        // it, in ONE place because both ingestion paths need both and a fact
+        // recorded at one site and counted at another is how the two drift.
+        let undefined_mandatory_ext = match frame.as_ref().map(InboundFrame::ext_admission) {
+            Ok(crate::ext_admit::ExtAdmission::UnknownMandatory { eid }) => {
+                judge.count_undefined_mandatory_ext(seat);
+                Some(eid)
+            }
+            _ => None,
+        };
+        // A decompressed message's payload sits in a buffer this reader made,
+        // so it has no offset on the wire to hand out.
+        let batch_offset = if decompressed {
+            None
+        } else {
+            batch_offset_of(&frame, consumed)
+        };
+        let own = if decompressed {
+            let end = if consumed == 0 {
+                unit.len()
+            } else {
+                pos + consumed
+            };
+            Some(unit[pos..end].to_vec())
+        } else {
+            None
+        };
+        // THIS message's instant: the packet that carried ITS first byte, the
+        // byte its row's `first_byte` names. A batch can span packets, so the
+        // unit's front is not enough; a decompressed message sits in a buffer
+        // this reader made and has no wire byte to ask about, so it takes the
+        // unit's.
+        let instant = if decompressed {
+            unit_instant
+        } else {
+            judge.instant_of(prefix_width + pos)
+        };
+        judge.note_last_seen(seat, instant);
+        out.push(PassiveFrame {
+            direction,
+            stream_offset: offset,
+            offset_space,
+            batch_index,
+            unit_offset: pos,
+            unit_len: unit.len(),
+            wire_end,
+            batch_offset,
+            undefined_mandatory_ext,
+            prefix_width,
+            frame,
+            context: *judge.context(),
+            exceeds_negotiated_batch,
+            carried,
+            inadmissible_on_link: inadmissible,
+            #[cfg(feature = "codec-frame")]
+            sn_verdict,
+            resync: resync.take(),
+            observed_at_ms: instant.map(|ns| ns / NANOS_PER_MILLI),
+            observed_at_ns: instant,
+            reserved_header_bits: reserved,
+            decompressed: own,
+            // Stamped below once the walk has ended.
+            unit_read_whole: false,
+        });
+        batch_index += 1;
+        if consumed == 0 {
+            // Front of the unit, and unmeasurable: the record above is the
+            // verdict on the whole unit, and the bytes behind it are still
+            // unaccounted for. Counting them is what makes an undecodable
+            // datagram say how much it could not explain.
+            judge.count_unaccounted(seat, (unit.len() - pos) as u64);
+            unaccounted = true;
+            break;
+        }
+        pos += consumed;
+    }
+    // Whether the unit was read whole is known only once its walk has ended.
+    let whole = !unaccounted && out.iter().all(|f| f.frame.is_ok());
+    for frame in &mut out {
+        frame.unit_read_whole = whole;
+    }
+    out
+}
+
+/// R311y583 (A2) — take one decoded transport frame the rest of the way: the
+/// batch of network messages a `Frame` (or a completed chain) carries.
+///
+/// Runs AFTER the fold, so the context in force is the one for this frame
+/// rather than the one before it. That ordering is load-bearing in exactly one
+/// place and it is a real capture: the Open that establishes a compressed
+/// session is itself uncompressed, and the first frame after it is not.
+///
+/// No decompression HERE. The whole BATCH is wrapped, header byte first, and it
+/// is unwrapped before any transport message is read — see
+/// [`FlowContext::batch_header_active`] and [`decompress_unit`]. A payload
+/// reaching this function is therefore already plain.
+fn carried_of(
+    judge: &mut dyn UnitJudge,
+    direction: Direction,
+    index: usize,
+    frame: &Result<InboundFrame, InboundParseError>,
+) -> Carried {
+    #[cfg(not(feature = "reassembly"))]
+    let _ = index;
+    let Ok(f) = frame else {
+        return Carried::Nothing;
+    };
+    match f {
+        InboundFrame::Network { payload } => {
+            let b = parse_lowlatency_payload_best_effort(payload);
+            judge.batch_read(direction, &b);
+            Carried::Batch(b)
+        }
+        InboundFrame::Frame { payload, .. } => {
+            let b = parse_frame_payload_best_effort(payload);
+            judge.batch_read(direction, &b);
+            Carried::Batch(b)
+        }
+        #[cfg(feature = "reassembly")]
+        InboundFrame::Fragment {
+            reliable,
+            sn,
+            more,
+            payload,
+            priority,
+            markers,
+            ..
+        } => match judge.fragment(
+            direction,
+            index,
+            FragmentView {
+                reliable: *reliable,
+                sn: *sn,
+                more: *more,
+                payload,
+                priority: *priority,
+                markers: *markers,
+            },
+        ) {
+            FragmentFate::Joined(bytes) => {
+                let b = parse_frame_payload_best_effort(&bytes);
+                judge.batch_read(direction, &b);
+                // R2706 — the buffer travels WITH the parse, as the referent of
+                // `b.spans`.
+                Carried::Reassembled {
+                    batch: b,
+                    joined: bytes,
+                }
+            }
+            FragmentFate::WithoutResolution => Carried::FragmentWithoutResolution,
+            FragmentFate::Pending(outcome) => Carried::Fragment(outcome),
+        },
+        _ => Carried::Nothing,
+    }
+}
+
+/// R311y645 (§1.1n / §4.37) — where a `Frame`'s payload begins within the
+/// message, when the bytes of that payload are the wire's own.
+///
+/// The length is not re-derived from the layout: the payload is the message's
+/// TAIL, so everything ahead of it — the header, the sn and the Z-gated ext
+/// chain — is exactly the difference between what the decode consumed and what
+/// it kept. A reader that re-walked the header instead would be a second
+/// opinion on a length this walk already measured, and the two could disagree.
+///
+/// A message decompressed out of an lz4 batch never reaches here: its caller
+/// answers `None` for it, because its offsets index a buffer this reader made
+/// (see [`PassiveFrame::decompressed`]).
+fn batch_offset_of(
+    frame: &Result<InboundFrame, InboundParseError>,
+    consumed: usize,
+) -> Option<usize> {
+    if matches!(frame, Ok(InboundFrame::Network { .. })) {
+        return Some(0);
+    }
+    let Ok(InboundFrame::Frame { payload, .. }) = frame else {
+        return None;
+    };
+    consumed.checked_sub(payload.len())
+}
+
+/// What one message of a unit needs from its first reading to be read again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageFacts {
+    /// Where the message starts in the unit it was read out of
+    /// ([`PassiveFrame::unit_offset`]).
+    pub unit_offset: usize,
+    /// The capture instant of its first byte ([`PassiveFrame::observed_at_ns`]).
+    pub observed_at_ns: Option<u64>,
+    /// Its SN verdict ([`PassiveFrame::sn_verdict`]).
+    #[cfg(feature = "codec-frame")]
+    pub sn_verdict: Option<SnVerdict>,
+    /// What it came to, when it is a `Fragment`.
+    #[cfg(feature = "reassembly")]
+    pub fragment: Option<FragmentFate>,
+}
+
+/// What a unit's first reading knew that its bytes do not say: the input of
+/// [`redecode_unit`] beside the bytes.
+///
+/// Every field is read off the rows the first reading produced, plus the
+/// context in force at the unit's front. Nothing here is a second computation
+/// of something the walk computes; it is the walk's own answer, kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitFacts {
+    /// The context in force before the unit's first message was folded.
+    pub start: FlowContext,
+    /// The resynchronisation the unit's first record carried.
+    pub resync: Option<StreamResync>,
+    /// The instant of the unit's first byte, where a record carries it.
+    pub unit_instant: Option<u64>,
+    /// One entry per record of the unit, in order.
+    pub messages: Vec<MessageFacts>,
+}
+
+impl UnitFacts {
+    /// The facts of the unit whose records are `frames`, read in the context
+    /// `start`.
+    ///
+    /// `frames` must be ALL the records of one unit, in order. They need not
+    /// sit together in their holder: a stream unit's later records wait in the
+    /// session until their direction is asked again, so the other direction's
+    /// records can fall between them in a list.
+    pub fn of<'a>(start: FlowContext, frames: impl IntoIterator<Item = &'a PassiveFrame>) -> Self {
+        let frames: Vec<&PassiveFrame> = frames.into_iter().collect();
+        let first = frames.first();
+        Self {
+            start,
+            resync: first.and_then(|f| f.resync),
+            unit_instant: first.and_then(|f| f.observed_at_ns),
+            messages: frames
+                .iter()
+                .map(|f| MessageFacts {
+                    unit_offset: f.unit_offset,
+                    observed_at_ns: f.observed_at_ns,
+                    #[cfg(feature = "codec-frame")]
+                    sn_verdict: f.sn_verdict,
+                    #[cfg(feature = "reassembly")]
+                    fragment: match &f.carried {
+                        Carried::Reassembled { joined, .. } => {
+                            Some(FragmentFate::Joined(joined.clone()))
+                        }
+                        Carried::FragmentWithoutResolution => Some(FragmentFate::WithoutResolution),
+                        Carried::Fragment(outcome) => Some(FragmentFate::Pending(*outcome)),
+                        _ => None,
+                    },
+                })
+                .collect(),
+        }
+    }
+}
+
+/// [`redecode_unit`]'s judge: the first reading's answers, replayed.
+struct Recorded<'f> {
+    context: FlowContext,
+    prefix_width: usize,
+    facts: &'f UnitFacts,
+    /// Set when the walk asked for an answer `facts` does not hold, which says
+    /// the facts are not this unit's.
+    unanswered: bool,
+}
+
+impl UnitJudge for Recorded<'_> {
+    fn context(&mut self) -> &mut FlowContext {
+        &mut self.context
+    }
+
+    fn instant_of(&self, from_unit_start: usize) -> Option<u64> {
+        // The walk asks for the unit's front and for each message's first byte;
+        // a message's answer is the one its record carried.
+        self.facts
+            .messages
+            .iter()
+            .find(|m| self.prefix_width + m.unit_offset == from_unit_start)
+            .map_or(self.facts.unit_instant, |m| m.observed_at_ns)
+    }
+
+    fn fold(&mut self, direction: Direction, frame: &InboundFrame) {
+        self.context.fold_frame(direction, frame);
+    }
+
+    fn track_sn(
+        &mut self,
+        _direction: Direction,
+        index: usize,
+        _frame: &Result<InboundFrame, InboundParseError>,
+    ) -> Option<SnVerdict> {
+        #[cfg(feature = "codec-frame")]
+        let verdict = self.facts.messages.get(index).and_then(|m| m.sn_verdict);
+        #[cfg(not(feature = "codec-frame"))]
+        let verdict = {
+            let _ = index;
+            None
+        };
+        verdict
+    }
+
+    #[cfg(feature = "reassembly")]
+    fn fragment(
+        &mut self,
+        _direction: Direction,
+        index: usize,
+        _fragment: FragmentView<'_>,
+    ) -> FragmentFate {
+        match self
+            .facts
+            .messages
+            .get(index)
+            .and_then(|m| m.fragment.clone())
+        {
+            Some(fate) => fate,
+            None => {
+                // The walk read a fragment where the first reading recorded
+                // none. The value stands in so the walk can end; the result is
+                // refused (see `redecode_unit`).
+                self.unanswered = true;
+                FragmentFate::WithoutResolution
+            }
+        }
+    }
+
+    fn batch_read(&mut self, _direction: Direction, _batch: &BatchParse) {}
+
+    fn note_last_seen(&mut self, _seat: usize, _instant: Option<u64>) {}
+
+    fn count_unaccounted(&mut self, _seat: usize, _bytes: u64) {}
+
+    fn count_reserved_header(&mut self, _seat: usize) {}
+
+    fn count_undefined_mandatory_ext(&mut self, _seat: usize) {}
+}
+
+/// Read one framing unit AGAIN, from its bytes and the facts its first reading
+/// kept, and produce the records that reading produced.
+///
+/// The second half of the two-pass dissection in `docs/dissect-row-index.md`:
+/// the walk is the same function the first reading ran (`walk_unit`), and
+/// only the answers it cannot work out from `input` alone come from `facts`. A
+/// holder of rows may therefore keep the unit's coordinates and `facts` and let
+/// the decoded records go.
+///
+/// # Errors
+///
+/// [`RedecodeError`] when `facts` are not this unit's: the walk produced a
+/// different number of records, or asked for a fragment's fate the facts do
+/// not hold. Records read with answers that were not the first reading's are
+/// not handed back.
+pub fn redecode_unit(
+    input: UnitInput<'_>,
+    facts: &UnitFacts,
+) -> Result<Vec<PassiveFrame>, RedecodeError> {
+    let mut judge = Recorded {
+        context: facts.start,
+        prefix_width: input.prefix_width,
+        facts,
+        unanswered: false,
+    };
+    let frames = walk_unit(&mut judge, input, facts.resync);
+    if judge.unanswered || frames.len() != facts.messages.len() {
+        return Err(RedecodeError {
+            records: frames.len(),
+            facts: facts.messages.len(),
+        });
+    }
+    Ok(frames)
+}
+
+/// [`redecode_unit`] was handed facts that are not the unit's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RedecodeError {
+    /// Records the walk produced.
+    pub records: usize,
+    /// Records the facts describe.
+    pub facts: usize,
 }
 
 /// R311y609 — read a length prefix of `width` bytes at `at`.

@@ -181,6 +181,15 @@ re-walk of 1.39M rows costs about 1.5 s more than it does now.
 
 1. Split `walk_framing_unit` into the pure parse and the stateful judgments;
    build the differential gate (D4). No memory changes yet.
+   Landed: `walk_unit` is the one walk, a `UnitJudge` answers what a unit's
+   bytes cannot (the session on the first reading, `UnitFacts` on a second),
+   and `redecode_unit` is the second reading. The gate
+   (`crates/wz-capture/src/redecode_gate.rs`) reads every stream and
+   datagram unit of the tracked captures and of built captures for batches,
+   gaps, duplicates, resynchronisation, compression and fragment chains
+   again, and compares each record. Units sent in packet space over a stream
+   (WebSocket) and QUIC payloads are counted as out of its reach; step 3
+   gives them a byte source.
 2. Chunked row storage (D2's store) with the rows unchanged: removes the
    doubling slack and the large copies.
 3. Segment map and byte source (D1): the reassembled stream copy goes.
