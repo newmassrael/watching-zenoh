@@ -279552,6 +279552,38 @@
         "This round is not a milestone round: REMAINING is unchanged."
       ]
     },
+    "Round 3457": {
+      "decision_summary": "The declaration has stated each capability's value in zenoh's own default build since round 3443, and no run held those values to zenoh until now. The census's upstream run, which Layer Z gives the pinned zenoh, now holds them to zenoh's default cargo features. The capabilities it reaches are the ones the declaration's zenoh-c rows reach, because every zenoh-c capability feature passes through to the zenoh feature of the same name, so the row that judges zenoh-c's switch judges zenoh's; the ten such values agree with the pinned 1.10.1. A capability no zenoh feature reaches, such as the query plane, stays judged in the declaration alone, as it is for zenoh-c.",
+      "changes_bullets": [
+        "scripts/lib/upstream_feature_census.py: zenoh_defaults_arm, run with --upstream, reusing the switch map's zenoh-c expectation and default arm; one selftest case on a one-row declaration."
+      ],
+      "verification_bullets": [
+        "--upstream against the pinned zenoh: 10 capability defaults held, the run passes.",
+        "Declaring transport_ws off in zenoh fails it with the capability named; restored, it passes.",
+        "The census selftest, its default run, wz_config --check, the floor, reach, pin and provenance gates pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "zenoh's interop of step 2 is step 12's compatibility crate; zenoh-c's needs its layout arm to become a value (C12)."
+      ],
+      "publishable_decision_summary": "The declaration has stated each capability's value in zenoh's own default build since round 3443, and no run held those values to zenoh until now. The census's upstream run, which Layer Z gives the pinned zenoh, now holds them to zenoh's default cargo features. The capabilities it reaches are the ones the declaration's zenoh-c rows reach, because every zenoh-c capability feature passes through to the zenoh feature of the same name, so the row that judges zenoh-c's switch judges zenoh's; the ten such values agree with the pinned 1.10.1. A capability no zenoh feature reaches, such as the query plane, stays judged in the declaration alone, as it is for zenoh-c.",
+      "publishable_changes_bullets": [
+        "scripts/lib/upstream_feature_census.py: zenoh_defaults_arm, run with --upstream, reusing the switch map's zenoh-c expectation and default arm; one selftest case on a one-row declaration."
+      ],
+      "publishable_verification_bullets": [
+        "--upstream against the pinned zenoh: 10 capability defaults held, the run passes.",
+        "Declaring transport_ws off in zenoh fails it with the capability named; restored, it passes.",
+        "The census selftest, its default run, wz_config --check, the floor, reach, pin and provenance gates pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "zenoh's interop of step 2 is step 12's compatibility crate; zenoh-c's needs its layout arm to become a value (C12)."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
