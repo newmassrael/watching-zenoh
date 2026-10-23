@@ -280364,6 +280364,50 @@
         "The fixed-memory MCU images are not compared by this gate; their last comparison with pico is a kit measurement of 2026-10-21."
       ]
     },
+    "Round 3475": {
+      "decision_summary": "Step 2 of open-debt item 924: MessageList keeps its rows in a ChunkLog (1024-row chunks, every chunk one run, later chunks allocated whole) and readers get rows instead of a slice: len, get, first, last, iter, iter_mut, rows_from, iter_mut_from and indexing. The slice Deref is gone, so no reader depends on how rows are stored, which step 4 needs to change what a row is. Dissection::frame_lists, message_lists and serial_frames hand out lists, and the two plaintext sink records carry a row view. A defect found by measuring rather than by tests: the first iterator's nth re-read a chunk when a skip landed in the last one, so the field walk lost its resume and restarted (3 restarts against 1 at 409k rows, output unchanged); fixed and now pinned by a test that fails on the defect. The heap a replayed handle holds falls 13 to 21 percent; its RSS does not move, because the slack removed was never touched. That is said to the consumer as it is.",
+      "changes_bullets": [
+        "wz-session-core passive_messages.rs: ChunkLog with a slice-run Iter (nth, nth_back, count, last answered by chunk), Rows view, row API on MessageList, Index and IndexMut, no Deref",
+        "wz-capture: frame_lists, message_lists, serial_frames return lists; DecryptedStream and RecoveredDatagram frames are a Rows view; observe_flow_where and observe_frames take any iterator of rows; NodeCensus takes the list and a start",
+        "wz-capi-dissect live.rs: drain reads the rows it hands out as one run; docs/dissect-row-index.md step 2 marked landed with its measurement"
+      ],
+      "verification_bullets": [
+        "C probe, consumer generator captures, release cdylib against the step-1 build: heap after census 348.0 to 303.1 MiB at 409,064 rows and 1,354.9 to 1,075.3 MiB at 1,386,564 rows; peak RSS 404,752 to 404,268 kB and 1,363,140 to 1,363,804 kB",
+        "Time, median of six alternating pairs on one pinned core at 1.39M rows: replay 1053 to 1045 ms, drain 24 to 20, fields windows 7513 to 7633, census 814 to 816",
+        "Field walk work at 409k and 1.39M rows equal to the baseline after the nth fix (170 resumed, 1 restart, 1,386,564 walked); callgrind with cache simulation at 409k: Ir +0.09 percent, LL read misses +0.07 percent",
+        "Chunk test: every position, forward, backward, nth and nth_back into every run including the last, rows_from, across trims; mutation removing the nth fix fails it",
+        "cargo test: wz-session-core 1222, wz-capture 1559, wz-capi-dissect and wz-analyze 367, wz-capture no-default-features green; clippy -D warnings on the three crates, no-default wz-capture, default wz-session-core and the slot profile; C1bz for the three crates; guarded count gate 3 of 3"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Step 3 of docs/dissect-row-index.md: one byte source per handle and a per-direction segment map in place of the reassembled stream copy, with the redecode gate widened to the units it does not reach today",
+        "Steps 3 and 4 are where resident memory falls; step 2 lowered the heap reservation only"
+      ],
+      "publishable_decision_summary": "Step 2 of open-debt item 924: MessageList keeps its rows in a ChunkLog (1024-row chunks, every chunk one run, later chunks allocated whole) and readers get rows instead of a slice: len, get, first, last, iter, iter_mut, rows_from, iter_mut_from and indexing. The slice Deref is gone, so no reader depends on how rows are stored, which step 4 needs to change what a row is. Dissection::frame_lists, message_lists and serial_frames hand out lists, and the two plaintext sink records carry a row view. A defect found by measuring rather than by tests: the first iterator's nth re-read a chunk when a skip landed in the last one, so the field walk lost its resume and restarted (3 restarts against 1 at 409k rows, output unchanged); fixed and now pinned by a test that fails on the defect. The heap a replayed handle holds falls 13 to 21 percent; its RSS does not move, because the slack removed was never touched. That is said to the consumer as it is.",
+      "publishable_changes_bullets": [
+        "wz-session-core passive_messages.rs: ChunkLog with a slice-run Iter (nth, nth_back, count, last answered by chunk), Rows view, row API on MessageList, Index and IndexMut, no Deref",
+        "wz-capture: frame_lists, message_lists, serial_frames return lists; DecryptedStream and RecoveredDatagram frames are a Rows view; observe_flow_where and observe_frames take any iterator of rows; NodeCensus takes the list and a start",
+        "wz-capi-dissect live.rs: drain reads the rows it hands out as one run; docs/dissect-row-index.md step 2 marked landed with its measurement"
+      ],
+      "publishable_verification_bullets": [
+        "C probe, consumer generator captures, release cdylib against the step-1 build: heap after census 348.0 to 303.1 MiB at 409,064 rows and 1,354.9 to 1,075.3 MiB at 1,386,564 rows; peak RSS 404,752 to 404,268 kB and 1,363,140 to 1,363,804 kB",
+        "Time, median of six alternating pairs on one pinned core at 1.39M rows: replay 1053 to 1045 ms, drain 24 to 20, fields windows 7513 to 7633, census 814 to 816",
+        "Field walk work at 409k and 1.39M rows equal to the baseline after the nth fix (170 resumed, 1 restart, 1,386,564 walked); callgrind with cache simulation at 409k: Ir +0.09 percent, LL read misses +0.07 percent",
+        "Chunk test: every position, forward, backward, nth and nth_back into every run including the last, rows_from, across trims; mutation removing the nth fix fails it",
+        "cargo test: wz-session-core 1222, wz-capture 1559, wz-capi-dissect and wz-analyze 367, wz-capture no-default-features green; clippy -D warnings on the three crates, no-default wz-capture, default wz-session-core and the slot profile; C1bz for the three crates; guarded count gate 3 of 3"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 3 of docs/dissect-row-index.md: one byte source per handle and a per-direction segment map in place of the reassembled stream copy, with the redecode gate widened to the units it does not reach today",
+        "Steps 3 and 4 are where resident memory falls; step 2 lowered the heap reservation only"
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
