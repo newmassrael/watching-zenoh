@@ -2281,7 +2281,7 @@ impl<R: SessionRuntime> LinkState<R> {
     /// `send_blocking` on `self.driver` directly; this accessor erases
     /// the per-profile refcount wrapper through [`R::link_driver`]. Reached
     /// from [`SessionLinkActions::link_driver`], which forwards to this.
-    fn link_driver(&self) -> &dyn BoxedLinkDriver {
+    pub(crate) fn link_driver(&self) -> &dyn BoxedLinkDriver {
         R::link_driver(&self.driver)
     }
 
@@ -3742,7 +3742,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             if let Err(why) = fill(&mut slot) {
                 return Lend::Refused(why);
             }
-            self.emit_on_link(link, &[], Some(&mut slot), reliability, priority);
+            self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
             Lend::Sent
         })
     }
@@ -4053,7 +4053,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(not(feature = "tx-lend-only"))]
         use crate::tx_buf::TxBuf;
         if self.conduit_routes_to(link, channel, priority) {
-            self.emit_on_link(link, &[], Some(&mut slot), channel, priority);
+            self.emit_on_link(link, &[], Some(&mut slot), channel, priority, false);
             return;
         }
         // Fixed-memory step S4 — the conduit now routes to another link, which
@@ -4482,10 +4482,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // queue by (`BoxedLinkDriver::send_prioritized`).
         #[cfg(feature = "transport-multilink")]
         if let Some(target) = self.select_link(reliability, priority) {
-            self.emit_on_link(&target, bytes, None, reliability, priority);
+            self.emit_on_link(&target, bytes, None, reliability, priority, false);
             return;
         }
-        self.emit_on_link(&self.link, bytes, None, reliability, priority);
+        self.emit_on_link(&self.link, bytes, None, reliability, priority, false);
     }
 
     /// R311y205 (transport-multilink IMPL-2b-iii) — emit a wire batch on ONE
@@ -4526,6 +4526,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         lent: Option<&mut crate::tx_lease::TxLease<'_>>,
         reliability: Reliability,
         priority: Priority,
+        // The frame carries no sequence number and may overtake what the link has queued
+        // ([`BoxedLinkDriver::send_urgent`]); only the keepalive says so.
+        urgent: bool,
     ) {
         // ARCHITECTURE section 9.1 — when the caller encoded the frame into a
         // slot THIS link lent (`lent`), the frame IS that slot's bytes, `bytes`
@@ -4540,7 +4543,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             None => bytes,
         };
         let now = self.clock.now_monotonic_ms();
-        R::with_mutex_mut(&link.last_outbound_at, |slot| *slot = Some(now));
+        // The keepalive baseline is the time the LINE last spoke. A driver that writes inline
+        // spoke at the hand-over, so every frame stamps. A driver with a queue speaks later,
+        // when its writer gets to the frame, and says so itself
+        // ([`BoxedLinkDriver::ms_since_wire_write`], which `keepalive_wake_deadline` reads):
+        // only a control frame stamps here, which is what keeps the emitter to one keepalive
+        // per interval while the writer is behind, and a data frame waiting in the queue is
+        // not activity the peer can hear.
+        if priority == Priority::Control || !link.link_driver().reports_wire_writes() {
+            R::with_mutex_mut(&link.last_outbound_at, |slot| *slot = Some(now));
+        }
 
         // R2371 (`transport-stats`) — charge ONE wire write to the counters, on
         // the side the driver's `LinkSendOutcome` puts it.
@@ -4682,9 +4694,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // gives it back to its link.
             let wrapped = crate::compression::compress_batch(frame);
             // transport-stats — count the ACTUAL wire bytes (post-compression).
-            let outcome = link
-                .link_driver()
-                .send_prioritized(&wrapped, reliability, priority);
+            let outcome = if urgent {
+                link.link_driver().send_urgent(&wrapped, reliability)
+            } else {
+                link.link_driver()
+                    .send_prioritized(&wrapped, reliability, priority)
+            };
             count_tx_wire(wrapped.len(), outcome);
             dispose(outcome);
             return;
@@ -4693,6 +4708,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let outcome = match lent {
             // The slot the frame was encoded into goes to the link as it is.
             Some(slot) => slot.hand_over(reliability, priority),
+            None if urgent => link.link_driver().send_urgent(bytes, reliability),
             None => link
                 .link_driver()
                 .send_prioritized(bytes, reliability, priority),
@@ -4718,14 +4734,29 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// (`io/zenoh-transport/src/unicast/universal/transport.rs`
     /// @ `p.push_transport_message(msg, Priority::Background);`).
     // Fixed-memory step S4 — under `tx-lend-only` a close leaves through
-    // `send_control_lent`, so only the keep-alive (a one-byte constant array,
-    // which needs no buffer of the session's) still reaches this byte door.
-    #[cfg(any(
-        all(feature = "codec-close", not(feature = "tx-lend-only")),
-        feature = "transport-keepalive",
+    // `send_control_lent`, so this byte door is the close's alone; the keep-alive
+    // leaves through `send_wire_urgent_this_link`.
+    // `send_link_close` (multilink) reaches it whichever the profile.
+    #[cfg(all(
+        feature = "codec-close",
+        any(not(feature = "tx-lend-only"), feature = "transport-multilink"),
     ))]
     fn send_wire_this_link(&self, bytes: &[u8], reliability: Reliability, priority: Priority) {
-        self.emit_on_link(&self.link, bytes, None, reliability, priority);
+        self.emit_on_link(&self.link, bytes, None, reliability, priority, false);
+    }
+
+    /// [`Self::send_wire_this_link`] for a message that may overtake what the link has queued
+    /// ([`BoxedLinkDriver::send_urgent`]): the keepalive, which carries no sequence number.
+    #[cfg(feature = "transport-keepalive")]
+    fn send_wire_urgent_this_link(&self, bytes: &[u8], reliability: Reliability) {
+        self.emit_on_link(
+            &self.link,
+            bytes,
+            None,
+            reliability,
+            Priority::Control,
+            true,
+        );
     }
 
     /// Fixed-memory step S4 — the lend-only form of the handshake and close
@@ -4773,7 +4804,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Dropping the lease gives the slot back unsent.
             return Err(self.refuse_tx(crate::link::LinkDropCause::NoTxSlot));
         }
-        self.emit_on_link(link, &[], Some(&mut slot), reliability, priority);
+        self.emit_on_link(link, &[], Some(&mut slot), reliability, priority, false);
         Ok(())
     }
 
@@ -13218,7 +13249,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // the reliability-routed data link. `send_wire_this_link` bypasses the
             // aggregation selector. R2919 — at `Priority::Control`, ahead of any
             // queued data, as zenoh's tx task writes its keepalive.
-            self.send_wire_this_link(&bytes, Reliability::Reliable, Priority::Control);
+            //
+            // And not queued behind the data in a lane either: the keepalive is the one
+            // frame whose lateness costs the peer its lease, so it takes the link's urgent
+            // path ([`BoxedLinkDriver::send_urgent`]).
+            self.send_wire_urgent_this_link(&bytes, Reliability::Reliable);
         }
     }
 

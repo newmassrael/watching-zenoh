@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! Subsystem runtime partitioning — five isolated tokio runtimes.
+//! Subsystem runtime partitioning — six isolated tokio runtimes: upstream's
+//! five and wz's own `ctl`.
 //!
 //! [`runtime_impl::TokioRuntime`](crate::runtime_impl::TokioRuntime) spawns
 //! onto whichever runtime is *ambient*, so every wz subsystem competes for one
@@ -29,6 +30,21 @@
 //! operator's tuning knowledge transfers verbatim: `app`, `acc`, `tx`, `rx`,
 //! `net`. So do the default worker counts — `rx` gets two workers, everything
 //! else one, and all five allow 50 blocking threads.
+//!
+//! ## The sixth subsystem
+//!
+//! `ctl` is wz's own, and the only one upstream does not have. Upstream writes
+//! its keepalive from the per-link tx task on `TX` (`io/zenoh-transport/src/unicast/universal/link.rs`
+//! @ `fn write_loop`), behind whatever data that runtime is running, so a
+//! router whose `TX` workers are short of CPU stops keeping its peers' leases
+//! alive and loses every link at once. MEASURED on this tree (a router held to
+//! one core at nice 10 beside three CPU hogs, 2048 sessions): the router's
+//! keepalive emissions fell from about 600 a second to about 15, a 100 ms timer
+//! on `tx` ran up to 2.4 s late where the same timer on a thread of its own ran
+//! at most 31 ms late, and about 85% of the clients' leases expired. `ctl`
+//! carries the keepalive timers and the keepalive frame writes and no data, so
+//! its timers are not queued behind it. It has one worker, like `tx`, and is
+//! tuned the same way (`WZ_RUNTIME='ctl:worker_threads=2'`).
 //!
 //! ## Choosing a runtime
 //!
@@ -164,16 +180,22 @@ pub enum WzRuntime {
     Rx,
     /// Network-tier background work: scouting, gossip and linkstate upkeep.
     Net,
+    /// Session liveness: the keepalive timers and the keepalive frame writes, and
+    /// nothing else. wz-only: upstream has no such subsystem, and its keepalive
+    /// rides the same `TX` runtime as the data (see the module doc, "The sixth
+    /// subsystem").
+    Control,
 }
 
 impl WzRuntime {
     /// Every subsystem, in upstream's declaration order.
-    pub const ALL: [WzRuntime; 5] = [
+    pub const ALL: [WzRuntime; 6] = [
         WzRuntime::Application,
         WzRuntime::Acceptor,
         WzRuntime::Tx,
         WzRuntime::Rx,
         WzRuntime::Net,
+        WzRuntime::Control,
     ];
 
     /// The configuration and thread-name spelling — `app`, `acc`, `tx`, `rx`,
@@ -186,6 +208,7 @@ impl WzRuntime {
             WzRuntime::Tx => "tx",
             WzRuntime::Rx => "rx",
             WzRuntime::Net => "net",
+            WzRuntime::Control => "ctl",
         }
     }
 
@@ -204,6 +227,7 @@ impl WzRuntime {
             WzRuntime::Tx => 2,
             WzRuntime::Rx => 3,
             WzRuntime::Net => 4,
+            WzRuntime::Control => 5,
         }
     }
 
@@ -359,9 +383,9 @@ impl RuntimeParam {
     }
 }
 
-/// Tuning for all five subsystems.
+/// Tuning for all six subsystems.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RuntimeParams([RuntimeParam; 5]);
+pub struct RuntimeParams([RuntimeParam; 6]);
 
 impl Default for RuntimeParams {
     fn default() -> Self {
@@ -378,6 +402,7 @@ impl RuntimeParams {
             RuntimeParam::defaults_for(WzRuntime::Tx),
             RuntimeParam::defaults_for(WzRuntime::Rx),
             RuntimeParam::defaults_for(WzRuntime::Net),
+            RuntimeParam::defaults_for(WzRuntime::Control),
         ])
     }
 
@@ -573,11 +598,11 @@ impl std::error::Error for RuntimeConfigError {}
 /// through the environment.
 pub struct RuntimePool {
     params: RuntimeParams,
-    runtimes: [OnceLock<TokioRt>; 5],
+    runtimes: [OnceLock<TokioRt>; 6],
     /// Per-subsystem thread numbering. Shared rather than owned because
     /// tokio's `thread_name_fn` must be `'static`, so the counter cannot be
     /// borrowed out of the pool.
-    thread_index: [Arc<AtomicUsize>; 5],
+    thread_index: [Arc<AtomicUsize>; 6],
 }
 
 impl RuntimePool {
@@ -588,7 +613,7 @@ impl RuntimePool {
         params.validate()?;
         Ok(Self {
             params,
-            runtimes: [const { OnceLock::new() }; 5],
+            runtimes: [const { OnceLock::new() }; 6],
             thread_index: core::array::from_fn(|_| Arc::new(AtomicUsize::new(0))),
         })
     }
@@ -717,6 +742,8 @@ impl PartitionedRuntime {
     pub const RX: Self = Self::new(WzRuntime::Rx);
     /// Network-tier background work — scouting, gossip, beacons, upkeep.
     pub const NET: Self = Self::new(WzRuntime::Net);
+    /// Session liveness — keepalive timers and keepalive writes, nothing else.
+    pub const CONTROL: Self = Self::new(WzRuntime::Control);
 
     /// Which subsystem this spawns onto.
     pub const fn subsystem(self) -> WzRuntime {

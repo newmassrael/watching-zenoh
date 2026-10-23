@@ -556,6 +556,26 @@ where
         R::link_driver(&sink).tx_slot_abort(inner)
     }
 
+    // The keepalive emitter measures the line from the live link's last write, so a
+    // reconnecting session must pass the question on, as the writes themselves are.
+    fn reports_wire_writes(&self) -> bool {
+        R::with_mutex_mut(&self.inner, |sink| {
+            R::link_driver(sink).reports_wire_writes()
+        })
+    }
+
+    fn ms_since_wire_write(&self) -> Option<u64> {
+        R::with_mutex_mut(&self.inner, |sink| {
+            R::link_driver(sink).ms_since_wire_write()
+        })
+    }
+
+    fn send_urgent(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        R::with_mutex_mut(&self.inner, |sink| {
+            R::link_driver(sink).send_urgent(bytes, reliability)
+        })
+    }
+
     fn link_mtu(&self) -> usize {
         R::with_mutex_mut(&self.inner, |sink| R::link_driver(sink).link_mtu())
     }
@@ -706,6 +726,18 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
     fn tx_slot_abort(&self, slot: TxSlot) {
         let (sink, inner) = self.lent.borrow_mut().settle(slot);
         R::link_driver(&sink).tx_slot_abort(inner)
+    }
+
+    fn reports_wire_writes(&self) -> bool {
+        R::link_driver(&self.inner.borrow()).reports_wire_writes()
+    }
+
+    fn ms_since_wire_write(&self) -> Option<u64> {
+        R::link_driver(&self.inner.borrow()).ms_since_wire_write()
+    }
+
+    fn send_urgent(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        R::link_driver(&self.inner.borrow()).send_urgent(bytes, reliability)
     }
 
     fn link_mtu(&self) -> usize {

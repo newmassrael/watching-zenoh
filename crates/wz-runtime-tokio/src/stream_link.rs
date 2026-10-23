@@ -863,6 +863,27 @@ impl StreamWriteDriver {
         }
     }
 
+    /// `bytes` as the stream carries it, in a buffer of its own: behind the length prefix of the
+    /// framing this link negotiated. `bytes.len() <= u16::MAX` is the caller's to guarantee.
+    fn heap_wire(&self, bytes: &[u8]) -> Vec<u8> {
+        if self.lowlatency.load(Ordering::Acquire) {
+            // transport-lowlatency — 4-byte LE u32 length prefix + payload (zenoh's
+            // lowlatency streamed framing), NOT the u16 batch prefix.
+            let mut wire = Vec::with_capacity(4 + bytes.len());
+            wire.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+            wire.extend_from_slice(bytes);
+            wire
+        } else {
+            // Codec-routed wire shape (single source of truth for the streamed-link
+            // envelope); `bytes.len() <= u16::MAX` is the caller's to guarantee.
+            StreamEnvelope {
+                payload_len: bytes.len() as u16,
+                payload: bytes,
+            }
+            .encode_to_vec()
+        }
+    }
+
     /// Take a lent buffer back out of the table, freeing its number.
     fn take_lent(&self, slot: TxSlot) -> Lent {
         let mut lent = self.lent.lock().expect("lent frames poisoned");
@@ -891,6 +912,37 @@ impl BoxedLinkDriver for StreamWriteDriver {
     // session counts it inside the negotiated batch, as zenoh and zenoh-pico do.
     fn batch_length_prefixed(&self) -> bool {
         true
+    }
+
+    // The writer queue sits between a frame's hand-over and its write, and stamps the end of
+    // every write: the keepalive emitter measures the line from that, not from the hand-over.
+    fn reports_wire_writes(&self) -> bool {
+        true
+    }
+
+    fn ms_since_wire_write(&self) -> Option<u64> {
+        self.tx.ms_since_wire_write()
+    }
+
+    // A keepalive does not wait in a lane: it is the one frame whose lateness costs the peer its
+    // lease, and a lane (or a writer short of CPU) would hold it as long as the data.
+    fn send_urgent(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+        if bytes.len() > u16::MAX as usize {
+            log::warn!(
+                "wz-runtime-tokio: urgent frame {} bytes > 65535; dropping",
+                bytes.len()
+            );
+            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
+        }
+        match self.tx.send_urgent(self.heap_wire(bytes)) {
+            Ok(()) => LinkSendOutcome::Sent,
+            Err(e) => {
+                log::warn!(
+                    "wz-runtime-tokio: outbound channel closed; dropping urgent frame ({e})"
+                );
+                LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
+            }
+        }
     }
 
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
@@ -968,22 +1020,7 @@ impl BoxedLinkDriver for StreamWriteDriver {
                 }
             };
         }
-        let wire = if self.lowlatency.load(Ordering::Acquire) {
-            // transport-lowlatency — 4-byte LE u32 length prefix + payload (zenoh's
-            // lowlatency streamed framing), NOT the u16 batch prefix.
-            let mut wire = Vec::with_capacity(4 + bytes.len());
-            wire.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-            wire.extend_from_slice(bytes);
-            wire
-        } else {
-            // Codec-routed wire shape (single source of truth for the streamed-link
-            // envelope); `bytes.len() <= u16::MAX` is guaranteed above.
-            StreamEnvelope {
-                payload_len: bytes.len() as u16,
-                payload: bytes,
-            }
-            .encode_to_vec()
-        };
+        let wire = self.heap_wire(bytes);
         if let Err(e) = self.tx.send(priority, wire) {
             log::warn!("wz-runtime-tokio: outbound channel closed; dropping frame ({e})");
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);

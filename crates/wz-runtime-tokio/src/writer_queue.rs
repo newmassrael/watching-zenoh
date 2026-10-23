@@ -145,6 +145,7 @@ pub fn outbound_channel_with_capacity(
 ) -> (OutboundTx, OutboundRx) {
     let shared = Arc::new(Lanes {
         state: Mutex::new(LaneState {
+            urgent: VecDeque::new(),
             lanes: std::array::from_fn(|_| VecDeque::new()),
             capacity: queue_size.map(|n| n * batch_bytes),
             batch_bytes,
@@ -174,6 +175,7 @@ pub fn outbound_channel_with_capacity(
         staged_at_flush: AtomicU64::new(0),
         epoch: Instant::now(),
         last_flush_ns: AtomicU64::new(NEVER_FLUSHED),
+        last_write_ns: AtomicU64::new(NEVER_FLUSHED),
         inline: std::sync::OnceLock::new(),
         role: AtomicBool::new(false),
     });
@@ -308,6 +310,11 @@ struct Lanes {
     /// than a flush can be written, and a flush per message would turn them into a system
     /// call each, where the writer coalesces them.
     last_flush_ns: AtomicU64,
+    /// When a write of this queue's frames last finished, in nanoseconds from `epoch`:
+    /// the writer's or an inline sender's, [`NEVER_FLUSHED`] before the first. The keepalive
+    /// emitter reads it, because the line has spoken when bytes left and not when a frame was
+    /// queued ([`OutboundTx::ms_since_wire_write`]).
+    last_write_ns: AtomicU64,
     /// How a thread other than the writer puts bytes on the link, when the link has a way
     /// ([`OutboundTx::set_inline_write`]). Set once, before the first frame.
     inline: std::sync::OnceLock<Arc<dyn InlineWrite>>,
@@ -323,6 +330,17 @@ impl Lanes {
     /// Nanoseconds since the queue was made.
     fn now_ns(&self) -> u64 {
         self.epoch.elapsed().as_nanos() as u64
+    }
+
+    /// A write of this queue's frames has finished: the line has spoken now.
+    fn note_wire_write(&self) {
+        self.last_write_ns.store(self.now_ns(), Ordering::Relaxed);
+    }
+
+    /// Milliseconds since [`Self::note_wire_write`] last ran, `None` before the first.
+    fn ms_since_wire_write(&self) -> Option<u64> {
+        let last = self.last_write_ns.load(Ordering::Relaxed);
+        (last != NEVER_FLUSHED).then(|| self.now_ns().saturating_sub(last) / 1_000_000)
     }
 
     /// A frame landed in a lane: wake the writer, and tell a writer that is letting producers
@@ -395,16 +413,27 @@ impl Lanes {
     /// through `sink` until the queue is empty or the link takes no more. The caller holds the
     /// role. Answers whether the rest of a frame was left in the carry.
     fn write_inline(self: &Arc<Self>, sink: &dyn InlineWrite) -> bool {
+        self.write_inline_scope(sink, InlineScope::All)
+    }
+
+    /// [`Self::write_inline`] over `scope`: everything queued, or the urgent frames alone.
+    fn write_inline_scope(self: &Arc<Self>, sink: &dyn InlineWrite, scope: InlineScope) -> bool {
         loop {
             let (carried, taken, freed) = {
                 let mut st = self.state.lock().expect("outbound lanes poisoned");
                 match st.carry.take() {
                     Some(carried) => (Some(carried), Taken::Empty, false),
-                    None => {
-                        let budget = st.batch_bytes.max(1);
-                        let (taken, freed) = st.take_next_packed(budget);
-                        (None, taken, freed)
-                    }
+                    None => match scope {
+                        InlineScope::All => {
+                            let budget = st.batch_bytes.max(1);
+                            let (taken, freed) = st.take_next_packed(budget);
+                            (None, taken, freed)
+                        }
+                        InlineScope::Urgent => {
+                            let (taken, freed) = st.take_urgent_only();
+                            (None, taken, freed)
+                        }
+                    },
                 }
             };
             if freed {
@@ -454,11 +483,12 @@ impl Lanes {
     /// rest of one.
     fn has_queued(&self) -> bool {
         let st = self.state.lock().expect("outbound lanes poisoned");
-        st.carry.is_some() || st.lanes.iter().any(|lane| !lane.is_empty())
+        st.carry.is_some() || !st.urgent.is_empty() || st.lanes.iter().any(|lane| !lane.is_empty())
     }
 
     /// The thread that wrote `wire` out is done with it: what [`OutboundRx::recycle_wire`] does.
     fn recycle_wire(&self, wire: WireFrame) {
+        self.note_wire_write();
         match wire.0 {
             Wire::Heap(bytes) => self
                 .state
@@ -469,6 +499,15 @@ impl Lanes {
             Wire::Slot(mut slot) => slot.written = true,
         }
     }
+}
+
+/// What an inline write takes off the lanes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InlineScope {
+    /// Whatever is queued, in the writer's order and packing.
+    All,
+    /// The urgent frames alone.
+    Urgent,
 }
 
 thread_local! {
@@ -602,6 +641,11 @@ impl RoomSignal {
 }
 
 struct LaneState {
+    /// Transport messages that carry no sequence number and may pass whatever the lanes hold:
+    /// the keepalive ([`OutboundTx::send_urgent`]). Each is a whole wire frame, taken before
+    /// any lane's at the next frame boundary. Not counted against a lane's bound: a keepalive
+    /// is a few bytes, and refusing one on a full lane is how a peer's lease is lost.
+    urgent: VecDeque<Vec<u8>>,
     /// Each lane's frames, each with the priority it was sent at.
     lanes: [VecDeque<Entry>; Priority::NUM],
     /// Each lane's bound, in bytes.
@@ -875,6 +919,11 @@ impl LaneState {
     /// its lane's when the lanes are one.
     fn take_next(&mut self) -> (Taken, bool) {
         let freed = self.release_in_flight();
+        // A keepalive passes every lane, at this frame boundary: zenoh's tx task writes it
+        // between batches, and a lane it queued behind would hold it as long as the data.
+        if let Some(urgent) = self.take_urgent() {
+            return (urgent, freed);
+        }
         for lane in 0..Priority::NUM {
             match self.take_from(lane) {
                 Taken::Empty => continue,
@@ -882,6 +931,21 @@ impl LaneState {
             }
         }
         (Taken::Empty, freed)
+    }
+
+    /// The next urgent frame, if one is waiting: the keepalive that passes the lanes.
+    fn take_urgent(&mut self) -> Option<Taken> {
+        self.urgent
+            .pop_front()
+            .map(|frame| Taken::Frame(Priority::Control, Out::Heap(frame)))
+    }
+
+    /// The urgent frames alone, made the taker's: what a thread that carries only the
+    /// session's liveness takes ([`OutboundTx::send_urgent`]), so that it writes a keepalive
+    /// and never someone's data.
+    fn take_urgent_only(&mut self) -> (Taken, bool) {
+        let freed = self.release_in_flight();
+        (self.take_urgent().unwrap_or(Taken::Empty), freed)
     }
 
     /// The next item of `lane`, made the writer's.
@@ -1055,6 +1119,10 @@ impl LaneState {
             return self.take_next();
         }
         let freed = self.release_in_flight();
+        // The keepalive leaves alone, ahead of the lanes (see `take_next`).
+        if let Some(urgent) = self.take_urgent() {
+            return (urgent, freed);
+        }
         // What is queued now: the occupancy minus nothing, the previous take
         // having just been released above.
         let queued: usize = self.occupied.iter().sum();
@@ -1262,6 +1330,66 @@ impl OutboundTx {
             shared.ready.notify_one();
         }
         true
+    }
+
+    /// Queue `frame` as an URGENT frame: a whole wire frame that carries no sequence number (the
+    /// keepalive), which the writer takes ahead of every lane at its next frame boundary, as
+    /// zenoh's tx task writes a keepalive between batches. It is not counted against a lane's
+    /// bound and is never refused for room.
+    ///
+    /// The writer of a link whose runtime is short of CPU may not run for seconds, and a
+    /// keepalive that waits for it is a peer's lease spent for nothing; so on a link that can be
+    /// written from another thread ([`InlineWrite`]) it is written from the calling thread now,
+    /// when the writer does not hold the role mid-write. When it cannot be, it stays queued
+    /// and the writer, woken here, takes it first.
+    pub fn send_urgent(&self, frame: Vec<u8>) -> Result<(), OutboundClosed> {
+        {
+            let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+            if st.closed {
+                return Err(OutboundClosed(frame));
+            }
+            st.urgent.push_back(frame);
+        }
+        self.shared.frame_landed();
+        self.flush_urgent_inline();
+        Ok(())
+    }
+
+    /// Write the urgent frames on THIS thread, and only them: the thread that does it carries
+    /// session liveness and never takes on data. A write the link takes part of leaves the
+    /// rest in the carry, which the writer finishes first and is woken to.
+    fn flush_urgent_inline(&self) {
+        let shared = &self.shared;
+        let Some(sink) = shared.inline.get() else {
+            return;
+        };
+        let Some(role) = shared.try_acquire_role() else {
+            return;
+        };
+        if shared.state.lock().expect("outbound lanes poisoned").closed {
+            return;
+        }
+        let left = shared.write_inline_scope(sink.as_ref(), InlineScope::Urgent);
+        drop(role);
+        // The writer is owed a wake for what this left (the rest of a frame, an urgent frame the
+        // link would not take), not for the data it was woken for when that was queued.
+        let urgent_left = !shared
+            .state
+            .lock()
+            .expect("outbound lanes poisoned")
+            .urgent
+            .is_empty();
+        if left || urgent_left {
+            shared.ready.notify_one();
+        }
+    }
+
+    /// How long ago, in milliseconds, a write of this queue's frames last finished, or `None`
+    /// when none has. A frame still queued has not been written: this is when the LINE last
+    /// spoke, which is what a keepalive must measure and the time a frame was enqueued is not
+    /// ([`wz_session_core::link::BoxedLinkDriver::ms_since_wire_write`]).
+    pub fn ms_since_wire_write(&self) -> Option<u64> {
+        self.shared.ms_since_wire_write()
     }
 
     /// Enqueue `frame` on `priority`'s lane, whatever the lane holds.
@@ -2097,6 +2225,7 @@ impl OutboundRx {
     /// the receiving half itself (the multicast transmit task) as well as for
     /// [`OutboundQueue::recycle_wire`].
     pub fn recycle_wire(&self, wire: WireFrame) {
+        self.shared.note_wire_write();
         match wire.0 {
             Wire::Heap(bytes) => self.recycle(bytes),
             #[cfg(feature = "runtime-zero-copy")]
@@ -2992,6 +3121,109 @@ mod tests {
                 .extend_from_slice(&buf[..take]);
             Ok(take)
         }
+    }
+
+    /// The line has spoken when a write FINISHES, not when a frame is queued: a queue that has
+    /// had frames handed to it and written none reports no write, and one the writer has
+    /// finished with reports the time since.
+    #[tokio::test]
+    async fn the_write_report_moves_when_the_writer_finishes_and_not_when_a_frame_is_queued() {
+        let (tx, mut rx) = outbound_channel();
+        assert_eq!(tx.ms_since_wire_write(), None, "nothing written yet");
+
+        tx.send(Priority::Data, b"frame".to_vec()).expect("open");
+        assert_eq!(
+            tx.ms_since_wire_write(),
+            None,
+            "a queued frame has not been written"
+        );
+
+        let wire = rx.recv_wire().await.expect("the frame");
+        assert_eq!(
+            tx.ms_since_wire_write(),
+            None,
+            "a frame the writer has taken but not finished has not been written"
+        );
+        rx.recycle_wire(wire);
+        let ago = tx
+            .ms_since_wire_write()
+            .expect("the writer finished a write");
+        assert!(ago < 1_000, "the report is the time since: {ago} ms");
+    }
+
+    /// The thread that carries session liveness writes a keepalive without the writer, and takes
+    /// nothing but it: the data queued beside it stays for the writer. The queue puts every
+    /// frame in one lane (no QoS), which is the case that has no control lane to take from.
+    #[tokio::test]
+    async fn an_urgent_frame_is_written_inline_ahead_of_the_data() {
+        let (tx, rx) = outbound_channel();
+        rx.shared.state.lock().expect("lanes").single_lane = true;
+        let link = FakeLink::new(usize::MAX, 0);
+        tx.set_inline_write(link.clone());
+        tx.send(Priority::Control, b"data".to_vec()).expect("open");
+
+        tx.send_urgent(b"keepalive".to_vec()).expect("open");
+
+        assert_eq!(link.bytes(), b"keepalive", "only the urgent frame left");
+        assert!(rx.shared.has_queued(), "the data is still the writer's");
+        assert!(
+            tx.ms_since_wire_write().is_some(),
+            "a finished urgent write is the line speaking"
+        );
+    }
+
+    /// Without a way to write from another thread an urgent frame waits for the writer, which
+    /// takes it before every lane at its next frame boundary, whatever the lanes hold.
+    #[tokio::test]
+    async fn an_urgent_frame_is_the_writers_next_frame_whatever_the_lanes_hold() {
+        let (tx, mut rx) = outbound_channel();
+        tx.send(Priority::Data, b"first".to_vec()).expect("open");
+        tx.send(Priority::Data, b"second".to_vec()).expect("open");
+        tx.send_urgent(b"keepalive".to_vec()).expect("open");
+
+        assert_eq!(rx.recv().await.expect("a frame"), b"keepalive");
+        assert_eq!(rx.recv().await.expect("a frame"), b"first");
+        assert_eq!(rx.recv().await.expect("a frame"), b"second");
+    }
+
+    /// An urgent frame is never refused for room: a full lane is where a keepalive is most
+    /// needed, and the lane's bound does not count it.
+    #[tokio::test]
+    async fn an_urgent_frame_is_not_counted_against_a_lane() {
+        let (tx, rx) = outbound_channel_with_capacity([1; Priority::NUM], 1);
+        tx.send(Priority::Data, vec![0u8; 64]).expect("open");
+        let occupied = rx.shared.state.lock().expect("lanes").occupied;
+
+        tx.send_urgent(b"keepalive".to_vec()).expect("open");
+
+        assert_eq!(
+            rx.shared.state.lock().expect("lanes").occupied,
+            occupied,
+            "no lane's bytes moved"
+        );
+    }
+
+    /// An urgent frame does not start past the rest of a partly written one: the carry goes
+    /// first, so the bytes of two frames never interleave.
+    #[tokio::test]
+    async fn an_urgent_frame_waits_for_the_carried_rest_of_a_frame() {
+        let (tx, rx) = outbound_channel();
+        // Takes three bytes a call, and blocks on every second call.
+        let link = FakeLink::new(3, 2);
+        tx.set_inline_write(link.clone());
+        tx.send(Priority::Data, b"abcdef".to_vec()).expect("open");
+        // The writer's own inline write takes "abc" and leaves "def" in the carry.
+        assert!(rx.shared.write_inline(link.as_ref()), "the rest is carried");
+        assert_eq!(link.bytes(), b"abc", "the link took part of the frame");
+
+        tx.send_urgent(b"KA".to_vec()).expect("open");
+
+        assert_eq!(
+            link.bytes(),
+            b"abcdef",
+            "the carried rest is written first; the keepalive after it, not inside it"
+        );
+        assert!(rx.shared.has_queued(), "the keepalive waits in the carry");
     }
 
     /// A lone message staged on a link that can be written from a sender's thread is flushed,

@@ -713,6 +713,52 @@ pub trait BoxedLinkDriver {
     /// writer to wake.
     fn tx_staged(&self) {}
 
+    /// Send a transport message that carries no sequence number (the keepalive) so that it
+    /// passes whatever the link has queued: at the next frame boundary, ahead of every lane, and
+    /// from the calling thread when the link can write from one. Upstream's tx task writes its
+    /// keepalive between batches, never behind them
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs` @ `fn write_loop`), and a link whose
+    /// writer is short of CPU or behind a long lane would otherwise hold it for as long as the
+    /// data, which is a peer's lease spent for nothing.
+    ///
+    /// Only for a message that may overtake queued frames: a Frame or Fragment carries a
+    /// sequence number the receiver checks, and reordering one is a lost message.
+    ///
+    /// The default is the driver with no queue to pass, where this is the send it always was.
+    fn send_urgent(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
+        self.send_prioritized(bytes, reliability, crate::qos::Priority::Control)
+    }
+
+    /// Whether this driver answers [`Self::ms_since_wire_write`], which is to say whether it has
+    /// a queue between the hand-over of a frame and the write of its bytes and can tell the two
+    /// apart. Constant for the life of the driver, and cheap: the session asks it on every send.
+    ///
+    /// The default is the driver that writes inline, whose hand-over IS the write.
+    fn reports_wire_writes(&self) -> bool {
+        false
+    }
+
+    /// How long ago, in milliseconds, this link last finished putting bytes on its wire; `None`
+    /// when it has written nothing yet. Meaningful only where [`Self::reports_wire_writes`]
+    /// holds.
+    ///
+    /// The keepalive emitter asks the line whether it has been idle for a lease interval. The
+    /// stamp the session keeps itself is the time a frame was HANDED to the link, and that is
+    /// the time it was written only while the link's queue is empty: a link whose writer is
+    /// behind holds frames that have not left, and counting them as line activity silences the
+    /// keepalive exactly when the peer is hearing nothing. zenoh-pico sets its `_transmitted`
+    /// flag where the bytes are written (`src/transport/common/tx.c`), and zenoh resets its
+    /// keepalive tracker after `send_batch(..).await` has returned
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs`, `write_loop`); this is that point
+    /// for a driver with a queue. The answer is an elapsed time and not a timestamp, so the driver's clock and the
+    /// session's never have to agree on an epoch.
+    ///
+    /// A driver that WRAPS another must forward both methods, or the session behind it keeps
+    /// the hand-over stamp that overstates the line's activity.
+    fn ms_since_wire_write(&self) -> Option<u64> {
+        None
+    }
+
     fn open_blocking(&self);
     fn close_blocking(&self);
 

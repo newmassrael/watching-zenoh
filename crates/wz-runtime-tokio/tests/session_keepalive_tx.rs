@@ -249,6 +249,96 @@ mod keepalive_emitter {
         );
     }
 
+    /// A driver with a queue between the hand-over of a frame and its write: it
+    /// reports when its writer last finished a write, which the test sets.
+    struct QueuedDriver {
+        ms_since_write: std::sync::Mutex<Option<u64>>,
+    }
+
+    impl BoxedLinkDriver for QueuedDriver {
+        fn send_blocking(
+            &self,
+            _bytes: &[u8],
+            _reliability: wz_runtime_tokio::Reliability,
+        ) -> wz_runtime_tokio::session_glue::LinkSendOutcome {
+            wz_runtime_tokio::session_glue::LinkSendOutcome::Sent
+        }
+        fn reports_wire_writes(&self) -> bool {
+            true
+        }
+        fn ms_since_wire_write(&self) -> Option<u64> {
+            *self.ms_since_write.lock().unwrap()
+        }
+        fn open_blocking(&self) {}
+        fn close_blocking(&self) {}
+    }
+
+    fn queued_setup(
+        ms_since_write: Option<u64>,
+    ) -> (
+        Arc<QueuedDriver>,
+        Arc<SessionLinkActions>,
+        Engine<SessionFsmUnicastPolicy<SessionActionsBinding>>,
+    ) {
+        let driver = Arc::new(QueuedDriver {
+            ms_since_write: std::sync::Mutex::new(ms_since_write),
+        });
+        let outbound: Arc<dyn BoxedLinkDriver + Send + Sync> = driver.clone();
+        let actions =
+            new_session_actions(outbound, fixture_session_init_params(), TokioTime::new());
+        let mut engine = new_session_engine(&actions);
+        engine.initialize();
+        (driver, actions, engine)
+    }
+
+    /// A frame handed to a link that has a queue is not line activity: only the
+    /// writer's own report of a finished write moves the keepalive baseline. A
+    /// non-control emit (CLOSE, at background priority) must leave the stamp
+    /// empty on such a link, where the same emit stamps it on an inline link
+    /// (`close_emit_stamps_last_outbound_at`).
+    #[cfg(feature = "codec-close")]
+    #[test]
+    fn a_handover_to_a_queued_link_does_not_stamp_the_line() {
+        use wz_runtime_tokio::session_glue::CloseReason;
+        let (_driver, actions, _engine) = queued_setup(None);
+        actions.send_close_with_reason(CloseReason::Generic);
+        assert!(
+            actions.link.last_outbound_at.lock().unwrap().is_none(),
+            "a frame still in the writer's queue has not spoken on the line"
+        );
+    }
+
+    /// The wake deadline follows the driver's write report: a write that finished
+    /// just now pushes the next keepalive a full interval out, and a link that
+    /// reports an old write (its writer stuck behind data) leaves it at the
+    /// establishment baseline, so the emitter fires.
+    #[test]
+    fn the_wake_deadline_follows_the_drivers_write_report() {
+        use wz_runtime_tokio::session_glue::keepalive_wake_deadline;
+        let (driver, actions, mut engine) = queued_setup(None);
+        drive_to_established(&mut engine);
+        let established = keepalive_wake_deadline(&actions).expect("armed once established");
+
+        // The writer finished a write 0 ms ago: the deadline moves past the
+        // establishment baseline, to at least now + interval.
+        *driver.ms_since_write.lock().unwrap() = Some(0);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let after_write = keepalive_wake_deadline(&actions).expect("still armed");
+        assert!(
+            after_write > established,
+            "a fresh write must defer the keepalive: {after_write} vs {established}"
+        );
+
+        // A write the writer finished long ago (older than the session): the
+        // establishment baseline wins and the deadline falls back to it.
+        *driver.ms_since_write.lock().unwrap() = Some(3_600_000);
+        assert_eq!(
+            keepalive_wake_deadline(&actions),
+            Some(established),
+            "an old write report must not defer the keepalive"
+        );
+    }
+
     /// Wire self-parity: the emitted frame parses back as a KeepAlive on
     /// the inbound side and resets the receiver's lease stamp — the
     /// full liveness round trip the emitter exists for.

@@ -51,8 +51,10 @@
 //! down, or the reconnect supervisor re-established it, which starts a pacer of
 //! its own.
 //!
-//! It runs on [`WzRuntime::Tx`], the subsystem whose threads never run
-//! application callbacks.
+//! It runs on [`WzRuntime::Control`], the subsystem that carries keepalive
+//! timers and nothing else. It used to run on `Tx`, behind the data the link
+//! writers were writing, and a router short of CPU woke its pacers seconds late
+//! and let its peers' leases lapse (see `runtime_pool`, "The sixth subsystem").
 
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -81,7 +83,7 @@ pub(crate) fn spawn_keepalive_pacer(actions: &Arc<SessionLinkActions>, clock: To
         return;
     };
     let weak = Arc::downgrade(actions);
-    drop(WzRuntime::Tx.spawn(pace(weak, clock, generation)));
+    drop(WzRuntime::Control.spawn(pace(weak, clock, generation)));
 }
 
 fn established_at(actions: &SessionLinkActions) -> Option<u64> {

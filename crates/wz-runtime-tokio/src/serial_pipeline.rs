@@ -1191,6 +1191,15 @@ impl BoxedLinkDriver for SerialWriteDriver {
         self.endpoints.as_ref()
     }
 
+    // The writer queue stamps the end of every write; see the stream driver.
+    fn reports_wire_writes(&self) -> bool {
+        true
+    }
+
+    fn ms_since_wire_write(&self) -> Option<u64> {
+        self.tx.ms_since_wire_write()
+    }
+
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
         self.send_prioritized(bytes, reliability, wz_session_core::qos::Priority::DEFAULT)
     }

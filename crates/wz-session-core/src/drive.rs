@@ -2661,8 +2661,20 @@ pub fn keepalive_wake_deadline<R: SessionRuntime, T: TimeSource>(
     }
     let outbound = R::with_mutex_mut(&actions.link.last_outbound_at, |g| *g);
     let established = R::with_mutex_mut(&actions.link.established_at, |g| *g);
+    // A driver with a queue between hand-over and write reports when its writer last finished
+    // a write, and that is when the line spoke (the stamp above then holds only the control
+    // frames, which are the keepalives themselves). Folded in as a stamp on the session's
+    // clock: the driver answers an elapsed time, so the two clocks need no common epoch.
+    let driver = actions.link.link_driver();
+    let written = if driver.reports_wire_writes() {
+        driver
+            .ms_since_wire_write()
+            .map(|ago| actions.clock.now_monotonic_ms().saturating_sub(ago))
+    } else {
+        None
+    };
     let interval = (actions.adopted_lease_ms() / crate::lease::LEASE_EXPIRE_FACTOR).max(1);
-    max_stamp(established, outbound).map(|b| b.saturating_add(interval))
+    max_stamp(max_stamp(established, outbound), written).map(|b| b.saturating_add(interval))
 }
 
 /// R311kx — run one keepalive TX deadline check: when the link's keepalive
