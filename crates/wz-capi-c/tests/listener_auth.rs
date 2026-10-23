@@ -404,6 +404,17 @@ fn a_client_presents_the_pubkey_identity_its_own_config_states() {
 
     let mut entries = client_entries(port, None);
     entries.extend(pubkey_entries(&public, &private));
+    // The open bound is this leg's fixture, not its subject: the handshake signs and verifies
+    // with RSA, which a debug build does slowly, and `cargo test` runs the other legs' key
+    // searches beside it. Hosted Windows spent the 3 s of `client_entries` twice (Platform runs
+    // 39789668210 and 39900618976, `Z_ENETWORK` near 3 s), the second time after the
+    // responder's key had moved before the dial, so the bound here is one the handshake does
+    // not approach.
+    for entry in entries.iter_mut() {
+        if entry.0 == "connect/timeout_ms" {
+            entry.1 = "30000".to_owned();
+        }
+    }
     // SAFETY: a fresh config and session.
     let (rc, client) = unsafe { open_with(&entries) };
     // SAFETY: a gravestone drops as a no-op, a live session closes.
