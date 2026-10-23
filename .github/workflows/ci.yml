@@ -6022,7 +6022,11 @@ jobs:
         run: (cd crates && cargo build -p wz-ap-demo)
 
       - name: Layer E — wz-ap-demo round-trip vs zenoh-pico z_put
-        run: bash scripts/run-ci.sh --layer E
+        # The lane holds wz's build of pico's default arm to configs/zenoh-pico_defconfig,
+        # which the one pinned Kconfig interpreter resolves (docs/build-configuration.md C11).
+        run: |
+          bash scripts/provision-kconfiglib.sh
+          bash scripts/run-ci.sh --layer E
 
       - name: Budget margin — this job may not approach its timeout in silence
         # 1080s to match `timeout-minutes: 18`; the two numbers are one fact, so

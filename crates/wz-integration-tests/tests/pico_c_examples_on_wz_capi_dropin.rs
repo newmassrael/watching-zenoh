@@ -462,6 +462,110 @@ fn pico_zsub_source_on_wz_capi_receives_from_real_pico_zput() {
     graceful_terminate(sub.child_mut(), Duration::from_secs(5));
 }
 
+/// LEG 1d — LEG 1 on zenoh-pico's OWN default build: upstream's `z_sub.c` compiled against
+/// the header arm pico configures when no switch is passed, linked to wz's build of that arm,
+/// receives a sample from the REAL zenoh-pico `z_put`.
+///
+/// That build is the one `configs/zenoh-pico_defconfig` resolves to: Layer E builds the arm
+/// from the arm's `config.h` and refuses to go on if its cargo arguments differ from the
+/// defconfig's (docs/build-configuration.md step 2, whose done-when is that each upstream
+/// defconfig's host build passes an interop lane). The arm has no unstable API, so the
+/// option structs the program allocates are upstream's default layout, which no other leg of
+/// this file links; a wz build of another arm under these headers would be the open-debt
+/// item 917 mismatch.
+#[test]
+#[ignore = "spawns the real zenoh-pico z_put CLI and a cc-compiled binary; \
+            run by run-ci Layer E"]
+fn pico_zsub_on_the_upstream_default_arm_receives_from_real_pico_zput() {
+    let dir = tempfile::tempdir().expect("tempdir for the compiled drop-in");
+    let dropin = match compile_pico_example_against_wz_capi_in(
+        "z_sub",
+        dir.path(),
+        PicoHeaderArm::UpstreamDefault,
+    ) {
+        Ok(exe) => exe,
+        Err(diag) => panic!(
+            "§5.27 api-compat-pico: upstream z_sub.c does NOT link against wz's build of \
+             zenoh-pico's default header arm.\n{diag}"
+        ),
+    };
+    let z_put = zenoh_pico_cli_binary("z_put");
+
+    let reservation = PortReservation::pick();
+    let port = reservation.port();
+    let endpoint = format!("tcp/127.0.0.1:{port}");
+    let payload = "PAYLOAD-FROM-REAL-PICO-ZPUT-TO-THE-DEFAULT-ARM";
+    let key = "demo/dropin/leg1d";
+
+    let mut sub_out = tempfile::tempfile().expect("subscriber stdout capture");
+    let writer = sub_out.try_clone().expect("dup subscriber stdout handle");
+    let mut sub = ChildGuard::wrap(
+        "z_sub.c on wz-capi-pico, upstream default arm",
+        Command::new("stdbuf")
+            .args(["-oL", "-eL"])
+            .arg(&dropin)
+            .args([
+                "-l",
+                &endpoint,
+                "-m",
+                "peer",
+                "-k",
+                "demo/dropin/**",
+                "-n",
+                "1",
+            ])
+            .stdout(Stdio::from(writer))
+            .stderr(Stdio::from(sub_out.try_clone().expect("dup stderr handle")))
+            .spawn()
+            .expect("spawn the compiled z_sub drop-in"),
+    );
+
+    if let Err(why) = wait_for_tcp_accept_alive(sub.child_mut(), port, LISTEN_TIMEOUT) {
+        panic!(
+            "the default-arm z_sub.c drop-in never accepted on {endpoint} — {why}; capture so \
+             far:\n{}",
+            read_captured(&mut sub_out)
+        );
+    }
+    drop(reservation);
+
+    let mut put_out = tempfile::tempfile().expect("foreign z_put stdout capture");
+    let put_writer = put_out.try_clone().expect("dup foreign z_put handle");
+    let put = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(&z_put)
+        .args(["-e", &endpoint, "-m", "client", "-k", key, "-v", payload])
+        .stdout(Stdio::from(put_writer))
+        .stderr(Stdio::from(put_out.try_clone().expect("dup stderr handle")))
+        .status_bounded()
+        .expect("run the real zenoh-pico z_put");
+    assert!(
+        put.success(),
+        "real zenoh-pico z_put exited {put:?}\n--- its stdout+stderr ---\n{}",
+        read_captured(&mut put_out)
+    );
+
+    let captured =
+        wait_for_substring(&mut sub_out, payload, EXCHANGE_TIMEOUT).unwrap_or_else(|captured| {
+            let driver = read_captured(&mut put_out);
+            panic!(
+                "upstream z_sub.c on wz's build of pico's default header arm never reported \
+                 the payload published by the REAL zenoh-pico z_put.\nexpected substring: \
+                 {payload}\nthe foreign publisher reached its put: {}\n\
+                 --- z_sub.c (on wz) stdout ---\n{captured}\n\
+                 --- REAL pico z_put (driver) stdout ---\n{driver}",
+                driver.contains("Putting Data"),
+            )
+        });
+    assert!(
+        captured.contains(key),
+        "the payload arrived but not on the key the foreign publisher used ({key}).\n\
+         --- stdout+stderr ---\n{captured}"
+    );
+
+    graceful_terminate(sub.child_mut(), Duration::from_secs(5));
+}
+
 /// LEG 2 (`wz->pico`) — upstream's `z_queryable.c`, running on wz, answers a
 /// query from the REAL zenoh-pico `z_get` binary, and the FOREIGN process is
 /// what reports the reply.

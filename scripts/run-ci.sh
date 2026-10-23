@@ -15716,6 +15716,22 @@ layer_e_ap_demo_round_trip() {
         # shellcheck disable=SC2086 # the cargo arguments are words on purpose
         (cd crates && cargo build -p wz-capi-pico $arm_features \
             --target-dir "target/wz-capi-pico-$arm" --quiet) || return 1
+        # Step 2 of docs/build-configuration.md: the default arm is zenoh-pico configured with no
+        # switch passed, so wz's build of it must be the build configs/zenoh-pico_defconfig
+        # resolves to, and the default-arm leg below is then that defconfig's interop lane. The
+        # job provisions the pinned interpreter; --original-features never skips.
+        if [[ "$arm" == default ]]; then
+            local defconfig_features
+            defconfig_features="$(python3 scripts/lib/wz_config.py --original-features zenoh-pico)" \
+                || return 1
+            if [[ "$defconfig_features" != "$arm_features" ]]; then
+                echo "  Layer E FAIL: wz's build of pico's default arm is not the build" >&2
+                echo "    configs/zenoh-pico_defconfig resolves to:" >&2
+                echo "    arm:       $arm_features" >&2
+                echo "    defconfig: $defconfig_features" >&2
+                return 1
+            fi
+        fi
     done
     # R121e + R121f + R121f1 + R121g: bundle the integration tests
     # into a single cargo invocation so the compilation/link step

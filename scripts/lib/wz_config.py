@@ -30,6 +30,8 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --resolve-features ABI PRESET...
                                   merge presets onto the defaults (kconfiglib) and print the cargo
                                   arguments of ABI
+    --original-features ORIGINAL  resolve configs/<ORIGINAL>_defconfig alone and print the cargo
+                                  arguments of the ABI that original is built through
     --resolve-env PRESET...       the same merge; print WZ_LIMIT_<NAME>=<value> for each limit it
                                   sets off its default
     --check-presets               every registered profile (configs/profiles) resolves strictly,
@@ -1811,6 +1813,18 @@ def main(argv: list[str]) -> int:
             print(f"  wz-config FAIL: {exc}", file=sys.stderr)
             return 1
         print(cargo_args(decl, argv[2], resolved_caps(decl, kconf)))
+        return 0
+    if len(argv) == 3 and argv[1] == "--original-features" and argv[2] in BASE_ABI:
+        # An upstream original's own default build: its defconfig alone, resolved strictly, as the
+        # cargo arguments of the ABI it is built through. A lane compares this with the build its
+        # interop legs link. It never skips: the lane that asks provisions the interpreter.
+        decl = load_decl()
+        try:
+            kconf = resolve([], original=argv[2])
+        except PresetError as exc:
+            print(f"  wz-config FAIL: {exc}", file=sys.stderr)
+            return 1
+        print(cargo_args(decl, BASE_ABI[argv[2]], resolved_caps(decl, kconf)))
         return 0
     if len(argv) >= 3 and argv[1] == "--resolve-env":
         decl = load_decl()
