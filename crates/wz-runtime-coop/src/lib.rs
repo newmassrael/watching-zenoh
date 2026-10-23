@@ -278,6 +278,17 @@ pub mod session_drive;
 #[cfg(feature = "session-unicast")]
 pub mod udp_link;
 
+// The memory a link lends its session to encode outbound frames into, and the book of which of it
+// is out: one for both links of this crate, the datagram link above and the stream link below.
+#[cfg(feature = "session-unicast")]
+pub mod link_storage;
+
+// The session's link over a byte stream (TCP), written once for every stack with BSD-style
+// sockets under a cooperative loop, as the datagram link is: a platform supplies the socket
+// (`stream_link::StreamSocket`), and the batch framing and the driver are here.
+#[cfg(feature = "session-unicast")]
+pub mod stream_link;
+
 // The multicast group session's seam to the network stack, the twin of
 // `session_drive::SessionDatagramLink`. The trait carries no dependency and no
 // allocator, so it is not feature-gated: a stack's crate names it to supply a

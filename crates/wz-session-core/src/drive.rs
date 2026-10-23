@@ -147,6 +147,19 @@ fn count_rx_transport_message<R: SessionRuntime, T: TimeSource>(
     });
 }
 
+/// The link under a session is gone (`cause` says how): the FSM is told, and
+/// the outcome names the cause. What [`dispatch_link_event`] does with a
+/// `LinkEvent::Lost`, and what a loop with no allocator does with a link that
+/// reports itself lost: such a build has no `LinkEvent` (its `Rx` arm holds an
+/// owned frame), and a stream link can still be closed under it.
+pub fn dispatch_link_lost<R: SessionRuntime, T: TimeSource>(
+    engine: &mut Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>,
+    cause: crate::link::LostCause,
+) -> DriverLoopOutcome {
+    engine.process_event(crate::session_fsm_unicast::SessionFsmUnicastEvent::LinkLost);
+    DriverLoopOutcome::LinkLost(cause)
+}
+
 /// Drive one already-polled `LinkEvent` through the inbound chain so the
 /// engine-free session FSM advances. The synchronous core of
 /// `wz-runtime-tokio::poll_and_dispatch_one` (whose sole `.await` —
@@ -164,10 +177,7 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
             engine.process_event(E::LinkOpened);
             DriverLoopOutcome::AdvancedFsm
         }
-        LinkEvent::Lost { cause } => {
-            engine.process_event(E::LinkLost);
-            DriverLoopOutcome::LinkLost(cause)
-        }
+        LinkEvent::Lost { cause } => dispatch_link_lost(engine, cause),
         LinkEvent::Rx(rx) => {
             // transport-stats — count the RAW link bytes received (the on-the-
             // wire total, BEFORE the optional decompression below), the zenoh

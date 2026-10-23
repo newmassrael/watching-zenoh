@@ -60,6 +60,7 @@ use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::link::BoxedLinkDriver;
 #[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
 use wz_session_core::link::LinkEvent;
+use wz_session_core::link::LostCause;
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
 #[cfg(feature = "rx-in-place")]
@@ -164,6 +165,16 @@ pub trait SessionDatagramLink {
     /// (see the form above); with no allocator a link states it.
     #[cfg(not(feature = "alloc"))]
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool;
+
+    /// Whether the link under the session is gone, and how: a stream whose peer
+    /// closed it or whose socket failed. Asked once a step finds nothing to
+    /// receive, so what was queued before the end is read first; the loop then
+    /// tells the session, which closes. The provided form answers `None`: a
+    /// datagram link has no connection to lose, and its peer's silence is the
+    /// lease's to judge.
+    fn lost(&self) -> Option<LostCause> {
+        None
+    }
 }
 
 /// A shared link is a link: the same object is usually the session's
@@ -192,6 +203,10 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
 
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
         (**self).recv_with(f)
+    }
+
+    fn lost(&self) -> Option<LostCause> {
+        (**self).lost()
     }
 }
 
@@ -852,6 +867,15 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
             return None;
         }
 
+        // Nothing left to read and the link is gone (a stream whose peer closed
+        // it): the session is told, after everything queued before the end has
+        // been read. The next step finds the engine final.
+        if let Some(cause) = self.link.lost() {
+            let outcome = wz_session_core::drive::dispatch_link_lost(&mut self.engine, cause);
+            on_event(IterationEvent::Poll(&outcome));
+            return None;
+        }
+
         // No inbound: the handshake / lease deadline. The tracker yields the
         // active handshake deadline; in Established it disarms and the
         // lease-expiry deadline applies — armed via the shared
@@ -1091,6 +1115,10 @@ impl<D: SessionDatagramLink + 'static> SessionDatagramLink for DriverPump<D> {
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
         self.0.recv_with(f)
     }
+
+    fn lost(&self) -> Option<LostCause> {
+        self.0.lost()
+    }
 }
 
 /// The pump table an image declares: `N` cells, each holding the pump of one
@@ -1316,6 +1344,8 @@ mod wake_budget_tests {
     use wz_session_core::session_timeouts::SessionTimeouts;
     use wz_session_core::signing_key::SigningKey;
 
+    use wz_session_core::driver_loop::DriverLoopOutcome;
+
     use crate::session_runtime::new_session_actions;
     use crate::time::{ClockSource, CoopTime};
     use crate::CoopRuntime;
@@ -1328,10 +1358,12 @@ mod wake_budget_tests {
         }
     }
 
-    /// A link that takes the permission to wait and records what it was told it could wait.
+    /// A link that takes the permission to wait and records what it was told it could wait, and
+    /// says it is gone when the test says so.
     #[derive(Default)]
     struct Recording {
         budgets: RefCell<Vec<u64>>,
+        gone: core::cell::Cell<Option<LostCause>>,
     }
 
     impl SessionDatagramLink for Recording {
@@ -1344,6 +1376,9 @@ mod wake_budget_tests {
         }
         fn try_recv(&self) -> Option<RxFrame> {
             None
+        }
+        fn lost(&self) -> Option<LostCause> {
+            self.gone.get()
         }
     }
 
@@ -1442,6 +1477,42 @@ mod wake_budget_tests {
         assert_eq!(wakes, 0, "not yet due: no event");
         assert!(left.is_some(), "and the deadline is kept for when it is");
         assert_eq!(raised(None), (0, None), "none stated: no event");
+    }
+
+    /// A stream whose peer closed it: the loop tells the session, which ends, and the pump stops
+    /// on the next step. A link that is not gone raises nothing of the kind.
+    #[test]
+    fn a_link_that_is_gone_ends_its_session() {
+        let runtime = CoopRuntime::new(Stopped);
+        let clock = CoopTime::new(&runtime);
+        let sink: Rc<dyn BoxedLinkDriver> = Rc::new(Null);
+        let actions = new_session_actions(sink, params(), clock.clone(), Counting(0));
+        let link = Rc::new(Recording::default());
+        let config = SessionDriveConfig {
+            timeouts: SessionTimeouts::spec_defaults(),
+            role: SessionRole::Acceptor,
+            max_iters: None,
+        };
+        let mut pump = SessionPump::new(runtime, link.clone(), actions, clock, config);
+        let mut lost = Vec::new();
+        let mut record = |event: IterationEvent<'_>| {
+            if let IterationEvent::Poll(DriverLoopOutcome::LinkLost(cause)) = event {
+                lost.push(*cause);
+            }
+        };
+        assert_eq!(pump.step(&mut record), None);
+        link.gone.set(Some(LostCause::PeerClosed));
+        assert_eq!(
+            pump.step(&mut record),
+            None,
+            "the step that tells the session"
+        );
+        assert_eq!(pump.step(&mut record), Some(DriverOutcome::Terminated));
+        assert_eq!(
+            lost,
+            vec![LostCause::PeerClosed],
+            "told once, with its cause"
+        );
     }
 
     #[test]

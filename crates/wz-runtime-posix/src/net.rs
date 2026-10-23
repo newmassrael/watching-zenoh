@@ -22,7 +22,7 @@ use wz_runtime_coop::udp_link::{DatagramSocket, Received, SERVICE_WAIT_MS};
 /// Why a socket call failed: the call, and the `errno` it left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PosixNetError {
-    /// `socket(AF_INET, SOCK_DGRAM)` failed with this `errno`.
+    /// `socket(AF_INET, ...)` failed with this `errno`.
     Socket(c_int),
     /// `setsockopt(SO_RCVTIMEO)` failed with this `errno`.
     ReceiveTimeout(c_int),
@@ -38,12 +38,20 @@ pub enum PosixNetError {
     Send(isize, c_int),
     /// `poll` failed with this `errno`.
     Poll(c_int),
-    /// `recvfrom` failed with this `errno`.
+    /// `recvfrom` (or a stream's `recv`) failed with this `errno`.
     Recv(c_int),
+    /// `connect` failed with this `errno`.
+    Connect(c_int),
+    /// `setsockopt(TCP_NODELAY)` failed with this `errno`.
+    NoDelay(c_int),
+    /// `getpeername` failed with this `errno`.
+    PeerName(c_int),
+    /// A stream's `sendmsg` failed with this `errno`.
+    Write(c_int),
 }
 
 /// The calling thread's `errno`.
-fn errno() -> c_int {
+pub(crate) fn errno() -> c_int {
     // SAFETY: `__errno_location` returns the address of the calling thread's `errno`, valid for
     // the thread's life.
     unsafe { *libc::__errno_location() }
@@ -73,7 +81,7 @@ fn set_receive_timeout_ms(fd: c_int, ms: c_int) -> Result<(), c_int> {
     }
 }
 
-fn sockaddr(addr: [u8; 4], port: u16) -> libc::sockaddr_in {
+pub(crate) fn sockaddr(addr: [u8; 4], port: u16) -> libc::sockaddr_in {
     libc::sockaddr_in {
         sin_family: libc::AF_INET as libc::sa_family_t,
         sin_port: port.to_be(),

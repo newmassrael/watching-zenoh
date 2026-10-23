@@ -38,8 +38,9 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use wz_runtime_coop::group_transport::GroupTransport;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-pub use wz_runtime_coop::udp_link::HeapTx;
-pub use wz_runtime_coop::udp_link::{DatagramSocket, TxStore, SERVICE_WAIT_MS, UDP_RX_CAPACITY};
+pub use wz_runtime_coop::link_storage::HeapTx;
+pub use wz_runtime_coop::link_storage::TxStore;
+pub use wz_runtime_coop::udp_link::{DatagramSocket, SERVICE_WAIT_MS, UDP_RX_CAPACITY};
 use wz_session_core::byte_cells::ByteBuf;
 use zephyr_sys::socket::{
     bind, close, getsockname, poll, recvfrom, sendto, setsockopt, socket, IpMreqn, PollFd, SockLen,
