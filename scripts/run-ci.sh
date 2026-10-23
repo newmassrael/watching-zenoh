@@ -14390,11 +14390,21 @@ layer_c1bn_passive_dissection_features() {
     # applies in both places instead of only this one.
     #
     # R2156 (item 543) — `--all-legs`, which is what makes the hook/lane split in
-    # that table honest. The hook runs the legs marked `hook`; this lane runs
-    # EVERY leg, so a leg deferred for being slow is still a leg that RUNS. Drop
-    # this flag and the `lane` rows would be covered on paper and executed
-    # nowhere, which is the exact shape item 543 was filed about.
-    bash scripts/lib/nondefault-tests-gate.sh --all-legs || return 1
+    # that table honest. The hook runs the legs marked `hook`; a lane runs EVERY
+    # leg, so a leg deferred for being slow is still a leg that RUNS. Drop that
+    # flag and the `lane` rows would be covered on paper and executed nowhere,
+    # which is the exact shape item 543 was filed about.
+    #
+    # R3464 -- THE CALL MOVED to Layer C1bnl, which has a job of its own. This lane
+    # read 1596 s to 1697 s of a 1800 s budget on four of the five hosted runs
+    # between `2bdca595c` and `fed150b13` (92 to 94 percent against an alarm at 90;
+    # the fifth, warm, read 1175 s), so the margin step failed with every gate in
+    # the job green. Of that the legs are the part that grows with every row of
+    # the table (43 legs, each a `cargo test` at its own feature set, 614 s on a
+    # 21-core build machine with a warm cache), and the table gains a row with
+    # each feature that has non-default tests. The workflow's rule for a job over
+    # its alarm is to split it and not to raise the ceiling, and `nondefault` was
+    # split the same way when its census crossed the line.
 
     # The keylog feature's OWN arms. Each pairs it with the link it installs the
     # sink on; a lane that never selects a feature is a lane that never lints it.
@@ -14464,6 +14474,17 @@ layer_c1bn_passive_dissection_features() {
     # at both feature sets, so the probe's dependencies are warm: measured 33s
     # cold and 1s warm, against a probe that would otherwise pay for 75 crates.
     python3 scripts/lib/feature_gate_diagnostic.py || return 1
+}
+
+# ─── Layer C1bnl — every leg of the non-default test table ─────────
+#
+# R3464. The half of Layer C1bn that grows with the table: `nondefault-tests-gate.sh
+# --all-legs` runs every row, the `hook` rows pre-push gate 2h also runs and the
+# `lane` rows only a lane runs. It moved out of C1bn into a job of its own, see the
+# note where the call used to be. Nothing else changed: the same script, the same
+# flag, and the same "a filter that matches no test is a FAIL" guard inside it.
+layer_c1bnl_all_nondefault_test_legs() {
+    bash scripts/lib/nondefault-tests-gate.sh --all-legs || return 1
 }
 
 # ─── Layer C1bg — storage-backend-filesystem: durable fs Volume/Storage ─
@@ -23644,6 +23665,7 @@ run_layer C1bd layer_c1bd_locator_iface || overall=1
 run_layer C1be layer_c1be_cargo_test_query_value || overall=1
 run_layer C1bf layer_c1bf_cargo_clippy_all_features || overall=1
 run_layer C1bn layer_c1bn_passive_dissection_features || overall=1
+run_layer C1bnl layer_c1bnl_all_nondefault_test_legs || overall=1
 run_layer C1bo layer_c1bo_dissect_c_abi || overall=1
 run_layer C1cj layer_c1cj_replay_c_abi || overall=1
 run_layer C1so layer_c1so_cdylib_soname || overall=1

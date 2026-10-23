@@ -2120,7 +2120,9 @@ jobs:
       - name: Layer C1bn — passive-dissection feature set, RUN (R311y579)
         # Created by R311y579, the round that closed the "no lane at all" debt
         # for this feature set; wired into CI by R311y581; moved here by R2165
-        # for the budget reason above. The lane itself is unchanged.
+        # for the budget reason above. The lane itself was unchanged until R3464,
+        # which moved its `--all-legs` call to Layer C1bnl and the `nondefault-legs`
+        # job below it, for the same reason a second time.
         run: bash scripts/run-ci.sh --layer C1bn
 
       - name: Budget margin — this job's own clock
@@ -2128,6 +2130,124 @@ jobs:
         # reason: a job holding ONE lane is exactly the case the floor exists
         # to catch, so if C1bn ever shrinks under a fifth of this budget it
         # should hand the budget back rather than sit on it.
+        if: always()
+        run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
+
+  # ─────────────────────────────────────────────────────────────────
+  # R3464 — the NON-DEFAULT TEST LEGS job, peeled off the `dissect` job above.
+  #
+  # THE TRIGGER, from the hosted runs rather than a guess: that job's own step read
+  # 1619 s (`2bdca595c`), 1616 s (`bcb1b50a4`) and 1598 s (`fed150b13`) of its
+  # 1800 s budget, with its margin step failing at 92 to 94 percent against an
+  # alarm at 90 every time; the one warm run between them read 1175 s. Every
+  # gate in the job was green. Its run history also holds the sentence the
+  # earlier peel wrote: "predicted landing 772 s, 42.9 percent", from a job that
+  # held 688 s of lane C1bn; the lane is now more than twice that.
+  #
+  # WHAT MOVED: only `nondefault-tests-gate.sh --all-legs`, the 43 legs of that
+  # table, each a `cargo test` at its own feature set. It is the part of the
+  # lane that grows with the table (a row per feature that has non-default
+  # tests), and it measured 614 s on a 21-core build machine with a warm cache,
+  # on a hosted 4-core runner more. The three adjudicators and everything else
+  # stay in `dissect`. Nothing in the legs needs an adjudicator tool: their
+  # tests live in `wz-integration-tests`, which the legs do not select, so this
+  # job takes `nondefault`'s package list and not `dissect`'s.
+  #
+  # WHY SPLIT AND NOT RAISE `timeout-minutes`: the rule the jobs above state, and
+  # the reason is the same, a bigger number buys one atom's worth of time and
+  # re-arms the failure because the cost grows monotonically.
+  #
+  # PREDICTION, so the next run can judge it, and honestly an estimate: the legs
+  # were not timed on a hosted runner before this split, so the two halves are
+  # not known; the 1600 s that was one job is expected to divide into two jobs
+  # each under 1100 s, inside the 90 percent alarm. If either reads under 360 s
+  # (the 20 percent floor) the budget below should be handed back.
+  #
+  # The prune is `nondefault`'s, for its stated reason: a job that compiles the
+  # feature matrix filled the runner's disk there ("Free space left: 9 MB").
+  nondefault-legs:
+    name: non-default test legs (Layer C1bnl)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Budget stamp — start this job's own clock
+        # Same reason the `ci` and `nondefault` jobs stamp: `timeout-minutes`
+        # measures from when the job is CREATED, and the margin gate needs
+        # elapsed RUN time.
+        run: date +%s > "$RUNNER_TEMP/wz_job_start"
+
+      - name: Free runner disk space (headroom for the feature-matrix legs)
+        run: |
+          echo "=== free space BEFORE prune ==="
+          df -h /
+          prune() {
+            local started=$SECONDS
+            "$@" || true
+            echo "prune: $* took $((SECONDS - started))s"
+          }
+          prune sudo rm -rf /usr/share/dotnet &
+          prune sudo rm -rf /usr/local/lib/android &
+          prune sudo rm -rf /opt/ghc &
+          prune sudo rm -rf /usr/local/share/boost &
+          prune sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          prune sudo docker image prune --all --force &
+          wait
+          echo "=== free space AFTER prune ==="
+          df -h /
+
+      - name: Checkout (with submodules)
+        # `submodules: recursive` is load-bearing: the members these legs
+        # compile resolve through vendor/sce path deps.
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Restore apt archives (R311y882 — keep the mirror off the path)
+        # See the `verdict-legs` copy for the measurement and for why RESTORE
+        # and SAVE are split.
+        id: apt-archives
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: apt-${{ runner.os }}-${{ github.job }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ runner.os }}-${{ github.job }}-
+
+      - name: Install system dependencies
+        # No `libxml2-dev` (R3009): only the jobs that run `xtask` need it.
+        run: |
+          bash scripts/lib/apt-install.sh libsnappy-dev liblz4-dev libzstd-dev zlib1g-dev libbz2-dev \
+            cmake libclang-dev clang perl pkg-config
+
+      - name: Save apt archives
+        if: always() && github.ref == 'refs/heads/main' && env.WZ_APT_CACHE_DIRTY == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/wz-apt
+          key: ${{ steps.apt-archives.outputs.cache-primary-key }}-${{ github.run_id }}
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`): it restores and
+        # never saves. See there.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: crates -> target
+
+      - name: Reuse the RocksDB native engine across feature sets
+        uses: ./.github/actions/rocksdb-engine
+
+      - name: Layer C1bnl — every leg of the non-default test table
+        run: bash scripts/run-ci.sh --layer C1bnl
+
+      - name: Budget margin — this job's own clock
+        # Floor 20, alarm 90, the `nondefault` and `dissect` settings: a job
+        # holding ONE lane is the case the floor exists to catch.
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1800 90 20 '${{ job.status }}'
 

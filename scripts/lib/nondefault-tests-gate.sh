@@ -37,9 +37,9 @@
 # ## Why a shared script and not a line in the hook
 #
 # The lane and the hook must not be able to disagree about WHAT to run. Layer
-# C1bn used to carry the command inline; it now calls this file, so there is one
-# spelling of the leg and one guard on its result. Adding a leg is one row in
-# LEGS below and both callers get it.
+# C1bn used to carry the command inline; it called this file, and since R3464 the
+# call is Layer C1bnl's, so there is one spelling of the leg and one guard on its
+# result. Adding a leg is one row in LEGS below and both callers get it.
 #
 # ## What it refuses
 #
@@ -129,7 +129,7 @@ repo="$(cd "$here/../.." && pwd)"
 # item 543's criterion. The item asks of every candidate leg whether it is "safe
 # AND QUICK to run on a developer's machine"; `hook` says yes to both, `lane`
 # says the leg is safe but too slow to sit in front of every push. A `lane` leg
-# still RUNS -- Layer C1bn takes the whole table -- and `--census` counts it as
+# still RUNS -- Layer C1bnl takes the whole table -- and `--census` counts it as
 # claimed either way, so the split changes WHERE a leg runs and never whether it
 # is covered. Every `lane` row carries its measured seconds.
 #
@@ -1301,7 +1301,7 @@ if [[ "${1:-}" == "--census" ]]; then
     exit $rc
 fi
 
-# `--all-legs` is Layer C1bn's shape: hosted CI runs the whole table. With no
+# `--all-legs` is Layer C1bnl's shape: hosted CI runs the whole table. With no
 # argument this is the HOOK's shape and runs only the `hook` legs.
 want_all=0
 [[ "${1:-}" == "--all-legs" ]] && want_all=1
@@ -1468,7 +1468,7 @@ done
 # is named here, with the reader pointed at where it does run -- the "print the
 # breakdown, not the total" rule this project keeps relearning.
 if [[ ${#deferred[@]} -gt 0 ]]; then
-    echo "  nondefault-tests: ${#deferred[@]} leg(s) deferred to Layer C1bn" \
+    echo "  nondefault-tests: ${#deferred[@]} leg(s) deferred to Layer C1bnl" \
          "(scope=lane; hosted CI runs them via --all-legs):"
     for d in "${deferred[@]}"; do
         echo "    deferred: $d"

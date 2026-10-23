@@ -173,11 +173,11 @@ def _add(pkg: str, why: str, jobs: list[str]) -> None:
 # shared library at runtime, including on a cache hit.
 for _codec_package in ("libsnappy-dev", "liblz4-dev", "libzstd-dev", "zlib1g-dev", "libbz2-dev"):
     _add(_codec_package, "The cached RocksDB engine's five compression codecs.",
-         ["ci", "nondefault", "dissect", "interop", "feature-gates",
+         ["ci", "nondefault", "nondefault-legs", "dissect", "interop", "feature-gates",
           "transport-modes", "capi-c-arms", "e2e-demo", "e2e-demo-pico",
           "e2e-router-scale"])
 _add("cmake", "Builds the cached native RocksDB engine via the local composite action.",
-     ["nondefault"])
+     ["nondefault", "nondefault-legs"])
 
 
 # bindgen, which is where libclang is consumed. 25.2 MB of a 32.3 MB job, and
@@ -231,6 +231,10 @@ _add(
         # this row that reaches a member reaches it. Its Rust lanes do not reach
         # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
+        # R3464 -- Layer C1bnl's own job, peeled off `dissect`: the legs of the
+        # non-default test table build the same members at the same features
+        # `nondefault` does, so whatever this row says reaches it too.
+        "nondefault-legs",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It
@@ -278,6 +282,10 @@ _add(
         # this row that reaches a member reaches it. Its Rust lanes do not reach
         # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
+        # R3464 -- Layer C1bnl's own job, peeled off `dissect`: the legs of the
+        # non-default test table build the same members at the same features
+        # `nondefault` does, so whatever this row says reaches it too.
+        "nondefault-legs",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It
@@ -328,6 +336,10 @@ _add(
         # this row that reaches a member reaches it. Its Rust lanes do not reach
         # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
+        # R3464 -- Layer C1bnl's own job, peeled off `dissect`: the legs of the
+        # non-default test table build the same members at the same features
+        # `nondefault` does, so whatever this row says reaches it too.
+        "nondefault-legs",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It
@@ -518,6 +530,10 @@ _add(
         # this row that reaches a member reaches it. Its Rust lanes do not reach
         # zenoh-pico-sys; R2805 independently adds cmake for the native engine.
         "nondefault",
+        # R3464 -- Layer C1bnl's own job, peeled off `dissect`: the legs of the
+        # non-default test table build the same members at the same features
+        # `nondefault` does, so whatever this row says reaches it too.
+        "nondefault-legs",
         # R2525 — Layer C0 + C1cf's own job, peeled off `ci` for item 590's
         # budget. C1cf builds EVERY workspace member with default features OFF,
         # so every reason on this row that reaches a member reaches it. ⚠ It

@@ -42,7 +42,8 @@ def main() -> int:
             print(f"unwired-lane lint FAIL: {path} not found (wrong cwd?)", file=sys.stderr)
             return 1
 
-    registered = set(RUN_LAYER.findall(runci_path.read_text()))
+    registered_ids = RUN_LAYER.findall(runci_path.read_text())
+    registered = set(registered_ids)
     wired = set(CI_LAYER.findall(ciyml_path.read_text()))
 
     if not registered:
@@ -51,6 +52,21 @@ def main() -> int:
             "has drifted from run-ci.sh and this check asserted nothing",
             file=sys.stderr,
         )
+        return 1
+
+    # R3464 -- ONE ID, ONE LANE. `--layer X` runs every `run_layer X` line, so a
+    # second registration under a taken id does not fail anywhere: it makes the
+    # two lanes run together under one name, and the set difference below, which
+    # reads ids and not lanes, reports the new one as wired because the old one
+    # is. That is how `C1bw` was given to a second lane and passed this lint.
+    duplicated = sorted({lane for lane in registered_ids if registered_ids.count(lane) > 1})
+    if duplicated:
+        print("Layer C0 FAIL: lane id(s) registered more than once in run-ci.sh:", file=sys.stderr)
+        for lane in duplicated:
+            print(f"    - {lane}", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("  `--layer <id>` runs every lane under that id, so the second one", file=sys.stderr)
+        print("  rides the first one's job unseen. Give it an id of its own.", file=sys.stderr)
         return 1
 
     missing = sorted(registered - wired)
