@@ -65,13 +65,19 @@ mod getter;
 const SESSIONS: usize = 1;
 /// The runtime's task table: a pump task per session, and nothing else runs as a task.
 const TASKS: usize = SESSIONS;
-/// Bytes of one task cell: the pump's handle and the application layer's state. Wider than the
-/// kit's 384 because a pointer is eight bytes here, not four. A task the cell cannot hold is
-/// refused and counted, and the loop says so on the console rather than run a node that never
-/// starts a session. A node that asks (`get`) keeps the session's pending queries in that state,
-/// nine rows of the key text and the sink each, which is what the larger cell is for (the first run
-/// of the node with them said so on the console).
-const TASK_BYTES: usize = if cfg!(feature = "get") { 3072 } else { 1024 };
+/// Bytes of one task cell: the pump's handle and the application layer's state. A task the cell
+/// cannot hold is refused and counted, and the loop says so on the console rather than run a node
+/// that never starts a session. A node that asks (`get`) keeps the session's pending queries in
+/// that state, nine rows of the key text and the sink each, which is what the larger cell is for.
+///
+/// Measured on 2026-10-23 by building the node with each size and running it against a port
+/// nobody listens on, which spawns the session's task and says whether the cell held it: the
+/// answering node is refused at 2,112 bytes and held at 2,176, and the asking node is refused at
+/// 2,304 and held at 2,560. The cells are the next steps up with about a fifth to spare. The 1,024
+/// bytes the answering node had before refused its task, and so did the revision before
+/// `slot_node` (so it is not that change's doing). The kit's cell is 384 bytes
+/// (`fixed_client.rs`) and holds the session there.
+const TASK_BYTES: usize = if cfg!(feature = "get") { 3072 } else { 2560 };
 /// Timers the runtime holds: the handshake and lease deadlines of the session.
 const TIMERS: usize = 4;
 /// The batch the node advertises: an Ethernet frame less the IPv4 and UDP headers, as the kit's.
@@ -316,31 +322,6 @@ fn documents(
     Ok((out, taken))
 }
 
-/// The line a lab reads after a getter's run, and the exit code: 0 when every query was answered
-/// and none timed out or was refused, 1 otherwise.
-#[cfg(feature = "get")]
-fn report_gets() -> i32 {
-    let s = getter::PLAN.summary();
-    log_args(format_args!(
-        "HOST-WZ-GET done issued={} finished={} replies={} errors={} timeouts={} refused={} \
-         bytes={} timed={} min_us={} median_us={} p99_us={} max_us={} elapsed_us={}",
-        s.issued,
-        s.finished,
-        s.replies,
-        s.errors,
-        s.timeouts,
-        s.refused,
-        s.payload_bytes,
-        s.timed,
-        s.min_us,
-        s.median_us,
-        s.p99_us,
-        s.max_us,
-        s.elapsed_us
-    ));
-    i32::from(s.errors != 0 || s.timeouts != 0 || s.replies < s.finished)
-}
-
 /// Assemble the node and run it. Returns only when it cannot start (or, for a getter, when its
 /// queries have ended); the value is the process's exit code.
 fn run(args: Args) -> i32 {
@@ -391,7 +372,7 @@ fn run(args: Args) -> i32 {
         #[cfg(not(feature = "get"))]
         layer: Answering,
         #[cfg(feature = "get")]
-        layer: getter::GetterLayer,
+        layer: getter::layer(),
         idle_sleep_us: IDLE_SLEEP_US,
         // The kit says how many times its loop went round to tell a node that sleeps from one
         // that polls; the host's lab reads the getter's own lines instead.
@@ -400,7 +381,7 @@ fn run(args: Args) -> i32 {
     #[cfg(not(feature = "get"))]
     let mut app = ();
     #[cfg(feature = "get")]
-    let mut app = getter::GetterApp::new();
+    let mut app = getter::app();
     // The line a lab (or a person at the console) waits for, once the node is built: who it claims
     // to be and the router it dials.
     node.run(&mut Port, &mut app, |port, zid_hex| {

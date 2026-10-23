@@ -88,6 +88,14 @@ pub mod slot_client;
 // the loop that drives it. A platform is a `NodePort` and nothing of the loop.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_node;
+// The same node as a getter: it asks one query again and again and keeps the round trips, for
+// every platform. What the platform supplies is a clock, the table's sizes and where the figures go.
+#[cfg(all(
+    feature = "session-slot",
+    feature = "client-core",
+    feature = "query-get"
+))]
+pub mod slot_getter;
 // R2830 — the node keeps a session with every endpoint the control names and
 // re-dials on upstream's retry schedule; the dialling is behind a trait.
 #[cfg(feature = "dial")]
