@@ -46,7 +46,7 @@ config WZ_CAP_MULTICAST_TRANSPORT
 	select WZ_CAP_PEER
 	help
 	  A UDP multicast group a peer joins: one transport to every member of the group.
-	  zenoh-pico has it when all of these are on: Z_FEATURE_MULTICAST_TRANSPORT, Z_FEATURE_LINK_UDP_MULTICAST.
+	  zenoh-pico has it when all of these are on: Z_FEATURE_LINK_UDP_MULTICAST, Z_FEATURE_MULTICAST_TRANSPORT.
 	  Exported by: pico, c.
 
 config WZ_CAP_MULTICAST_DECLARATIONS
@@ -110,7 +110,7 @@ config WZ_CAP_ADVANCED
 	select WZ_CAP_UNSTABLE_API
 	help
 	  The advanced publisher and subscriber (cache, history, miss detection).
-	  zenoh-pico's switch for it: Z_FEATURE_ADVANCED_PUBLICATION.
+	  zenoh-pico's switches for it, either of which asks for it: Z_FEATURE_ADVANCED_PUBLICATION, Z_FEATURE_ADVANCED_SUBSCRIPTION.
 	  Exported by: pico, c.
 
 config WZ_CAP_GROUP

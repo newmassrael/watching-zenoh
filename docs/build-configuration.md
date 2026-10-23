@@ -80,10 +80,19 @@ original reproduced by naming it. Three things follow from it:
 - **Upstream switch sets at the pins**, each judged switch by switch:
   `upstream_feature_census.py` for the `zenoh` crate's cargo features, and
   `upstream_switch_map.py` for zenoh-pico's 38 `Z_FEATURE_*` switches and zenoh-c's
-  17 cargo features. The relation is not one to one: pico's advanced publication
-  and subscription switches are one wz plane, and pico's liveliness get needs two of
-  its switches where wz has one capability. The `pico_flag` of a capability in
-  `deploy/wz-config.toml` names its switch and is held to the map.
+  17 cargo features. The pico and zenoh-c rows are the declaration's `[[upstream_switch]]`
+  (step 2), and a zenoh-pico `maps` row to a capability is its pico switch, written once.
+  The relation is not one to one: either of pico's advanced switches asks for the one
+  wz advanced plane, the multicast transport needs both of its switches
+  (`pico_combine = "all"`), and pico's liveliness get needs two switches of other
+  capabilities (`pico_flags_all`). A pico header that states off a capability wz would
+  have to add for one it turns on (the advanced subscription with the unstable API
+  off, since wz's advanced plane implies it) is refused by `--features` rather than
+  built with other struct layouts.
+- **Each original's own defaults** (step 2): every capability states, for the originals
+  its ABIs reach, whether that original's default build has it (`upstream_on` /
+  `upstream_off`); the switch map holds zenoh-pico's to its CMakeLists and zenoh-c's to
+  its default features. The capability's `default` stays the drop-in's own.
 - **No Rust API compatibility atom.** `api-compat-c` and `api-compat-pico` exist;
   nothing makes wz a drop-in for the `zenoh` crate's public API.
 - **One pinned Kconfig interpreter on the host** (step 1, C11): `kconfiglib` 14.1.0, the

@@ -33,10 +33,12 @@
 # capability is exported (core is the model under both ABIs and always has it). `default` is
 # whether a build that names nothing has it: on unless declared `default = "off"`, so the drop-in
 # exports what the reference build does, and `off` is for a switch the reference library itself
-# leaves off. `pico_flag` is zenoh-pico's own switch for it, where it has one, so a deployer who
-# already writes a pico `config.h` can state the same intent. `pico_flags_all` is for a capability
-# pico has no switch of its own for but has whenever several switches are all on (the liveliness
-# get, which pico declares inside both the liveliness and the query switch).
+# leaves off. zenoh-pico's own switches for a capability are the `maps` rows to it under the
+# upstream switches below, so a deployer who already writes a pico `config.h` can state the same
+# intent: the capability is on when one of them is on, or when all are where it says
+# `pico_combine = "all"`. `pico_flags_all` is for a capability no row reaches but which pico has
+# whenever several switches are all on (the liveliness get, which pico declares inside both the
+# liveliness and the query switch).
 #
 # `upstream_on` and `upstream_off` say what each upstream original's own default build has
 # (docs/build-configuration.md, C2 and step 2): the originals are `zenoh`, `zenoh-c` and
@@ -82,7 +84,6 @@ id = "link-udp"
 kconfig = "WZ_CAP_LINK_UDP"
 upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
-pico_flag = "Z_FEATURE_LINK_UDP_UNICAST"
 implies = []
 help = "A udp/ endpoint to dial, and the transport the scouting group rides."
 
@@ -99,7 +100,6 @@ id = "scout"
 kconfig = "WZ_CAP_SCOUT"
 upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
-pico_flag = "Z_FEATURE_SCOUTING"
 implies = ["link-udp"]
 help = "z_scout, the hello family, and a client finding its router by scouting."
 
@@ -108,7 +108,6 @@ id = "peer"
 kconfig = "WZ_CAP_PEER"
 upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
-pico_flag = "Z_FEATURE_UNICAST_PEER"
 implies = ["scout"]
 help = "A listener, a router or a peer: the roles beyond the client. Off, z_open refuses them."
 
@@ -120,7 +119,7 @@ id = "multicast-transport"
 kconfig = "WZ_CAP_MULTICAST_TRANSPORT"
 upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
-pico_flags_all = ["Z_FEATURE_MULTICAST_TRANSPORT", "Z_FEATURE_LINK_UDP_MULTICAST"]
+pico_combine = "all"
 implies = ["link-udp", "peer"]
 help = "A UDP multicast group a peer joins: one transport to every member of the group."
 
@@ -132,7 +131,6 @@ id = "multicast-declarations"
 kconfig = "WZ_CAP_MULTICAST_DECLARATIONS"
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
-pico_flag = "Z_FEATURE_MULTICAST_DECLARATIONS"
 default = "off"
 implies = ["multicast-transport"]
 help = "pico's multicast declarations: interests, keyexpr declarations and the write filter on a group."
@@ -144,7 +142,6 @@ id = "raweth-transport"
 kconfig = "WZ_CAP_RAWETH_TRANSPORT"
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
-pico_flag = "Z_FEATURE_RAWETH_TRANSPORT"
 default = "off"
 implies = ["multicast-transport"]
 help = "pico's raw Ethernet transport: a group over L2 frames on one interface (Linux, CAP_NET_RAW)."
@@ -154,7 +151,6 @@ id = "query"
 kconfig = "WZ_CAP_QUERY"
 upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
-pico_flag = "Z_FEATURE_QUERY"
 implies = []
 help = "z_get and the querier: the requesting end of a query."
 
@@ -163,7 +159,6 @@ id = "queryable"
 kconfig = "WZ_CAP_QUERYABLE"
 upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
-pico_flag = "Z_FEATURE_QUERYABLE"
 implies = []
 help = "z_declare_queryable and the replies: the answering end of a query."
 
@@ -172,7 +167,6 @@ id = "liveliness"
 kconfig = "WZ_CAP_LIVELINESS"
 upstream_on = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
-pico_flag = "Z_FEATURE_LIVELINESS"
 implies = []
 help = "The liveliness token and subscriber."
 
@@ -190,7 +184,6 @@ id = "advanced"
 kconfig = "WZ_CAP_ADVANCED"
 upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
-pico_flag = "Z_FEATURE_ADVANCED_PUBLICATION"
 implies = ["liveliness", "queryable", "timestamping", "unstable-api"]
 help = "The advanced publisher and subscriber (cache, history, miss detection)."
 
@@ -222,7 +215,6 @@ id = "unstable-api"
 kconfig = "WZ_CAP_UNSTABLE_API"
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
-pico_flag = "Z_FEATURE_UNSTABLE_API"
 implies = []
 help = "pico's unstable API: entity ids, reliability, source info, the cancellation token, and their option fields."
 
@@ -233,7 +225,6 @@ id = "connectivity"
 kconfig = "WZ_CAP_CONNECTIVITY"
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
-pico_flag = "Z_FEATURE_CONNECTIVITY"
 implies = ["unstable-api"]
 help = "pico's connectivity plane: transport and link snapshots, and their event listeners."
 
@@ -246,7 +237,6 @@ id = "admin-space"
 kconfig = "WZ_CAP_ADMIN_SPACE"
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
-pico_flag = "Z_FEATURE_ADMIN_SPACE"
 default = "off"
 implies = ["queryable", "unstable-api"]
 help = "pico's admin space: zp_start_admin_space, zp_stop_admin_space and the @/<zid>/pico/** documents."
@@ -262,7 +252,6 @@ id = "local-subscriber"
 kconfig = "WZ_CAP_LOCAL_SUBSCRIBER"
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
-pico_flag = "Z_FEATURE_LOCAL_SUBSCRIBER"
 default = "off"
 implies = []
 help = "pico's session-local subscriptions: a session's own put reaches its own subscribers."
@@ -272,7 +261,6 @@ id = "local-queryable"
 kconfig = "WZ_CAP_LOCAL_QUERYABLE"
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
-pico_flag = "Z_FEATURE_LOCAL_QUERYABLE"
 default = "off"
 implies = []
 help = "pico's session-local queryables: a session's own get reaches its own queryables."
@@ -289,7 +277,6 @@ id = "multi-thread"
 kconfig = "WZ_CAP_MULTI_THREAD"
 upstream_on = ["zenoh-pico"]
 abis = ["core", "pico"]
-pico_flag = "Z_FEATURE_MULTI_THREAD"
 implies = []
 help = "pico's multi-threaded C ABI (task doors, host sync, blocking channels); off, the single-threaded one."
 
@@ -386,6 +373,402 @@ upstream_on = ["zenoh", "zenoh-c"]
 abis = ["core", "c"]
 implies = []
 help = "The traffic policy a node's config states: access_control, low_pass_filter and downsampling, enforced on every face."
+
+# ## The upstream switches (docs/build-configuration.md, C7)
+#
+# Every build switch of zenoh-pico (each `Z_FEATURE_*` its CMakeLists defines) and of zenoh-c
+# (each cargo feature it declares, less `default` and the implicit ones of optional dependencies),
+# judged against the drop-in of that original: `maps` (a wz feature of the drop-in crate toggles
+# the same thing; `anchor` is `<crate>/<feature>`), `always` (wz has it in that build with no
+# switch; `anchor` is the tracked file that shows it), `never` (wz does not have it; the note
+# cites the open-debt item that owns the gap) or `n/a` (no meaning for wz; the note says why).
+# `upstream_switch_map.py` holds the rows to the pinned sources both ways.
+#
+# A zenoh-pico `maps` row to a capability is that capability's pico switch: a pico `config.h`
+# turns the capability on when one of its switches is on, or when all are where the capability
+# says `pico_combine = "all"`. A capability no row reaches but which pico has whenever several
+# switches are all on names them in `pico_flags_all`.
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_UNSTABLE_API"
+class = "maps"
+anchor = "wz-capi-pico/unstable-api"
+note = "the entity ids, reliability, source info and the cancellation token, and the option fields that carry them; off, every option struct has upstream's default layout"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_CONNECTIVITY"
+class = "maps"
+anchor = "wz-capi-pico/connectivity"
+note = "the connectivity status and event doors; implies unstable-api, as upstream's CMake forces it off without the unstable API"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_PUBLICATION"
+class = "always"
+anchor = "crates/wz-capi-pico/src/pubsub.rs"
+note = "the publisher and z_put"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_ADVANCED_PUBLICATION"
+class = "maps"
+anchor = "wz-capi-pico/advanced"
+note = "the advanced publisher; one wz plane answers both advanced switches"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_SUBSCRIPTION"
+class = "always"
+anchor = "crates/wz-capi-pico/src/pubsub.rs"
+note = "the subscriber"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_ADVANCED_SUBSCRIPTION"
+class = "maps"
+anchor = "wz-capi-pico/advanced"
+note = "the advanced subscriber; the same wz plane as the publication switch"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_QUERY"
+class = "maps"
+anchor = "wz-capi-pico/query"
+note = "z_get and the querier"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_QUERYABLE"
+class = "maps"
+anchor = "wz-capi-pico/queryable"
+note = "z_declare_queryable and the replies"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_LIVELINESS"
+class = "maps"
+anchor = "wz-capi-pico/liveliness"
+note = "the token and the liveliness subscriber; pico's liveliness get needs QUERY as well, which wz spells as its own `liveliness-get` capability"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_INTEREST"
+class = "always"
+anchor = "crates/wz-capi-core/Cargo.toml"
+note = "declare-interest is part of every capi-core build"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_FRAGMENTATION"
+class = "always"
+anchor = "crates/wz-capi-pico/Cargo.toml"
+note = "transport-fragmentation is enabled unconditionally"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_ENCODING_VALUES"
+class = "always"
+anchor = "crates/wz-capi-pico/src/encoding.rs"
+note = "the predefined encoding table, held to the oracle"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_MULTI_THREAD"
+class = "maps"
+anchor = "wz-capi-pico/multi-thread"
+note = "which header arm the library is the drop-in for: on, the task doors, host sync and blocking channels; off, zp_read / zp_send_keep_alive / zp_send_join / zp_spin_once, a one-byte z_open_options_t and 48-byte channel collections. A session drives itself on its own runtime in both"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_LINK_TCP"
+class = "always"
+anchor = "crates/wz-capi-core/Cargo.toml"
+note = "the tcp/ link is part of every capi-core build"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_LINK_BLUETOOTH"
+class = "never"
+note = "no bt/ scheme in any wz build; open-debt item 912"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_LINK_WS"
+class = "maps"
+anchor = "wz-capi-pico/transport-link-ws"
+note = "the ws/ link, dial and accept; upstream allows it only on emscripten, wz on its host runtime"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_LINK_SERIAL"
+class = "maps"
+anchor = "wz-capi-pico/transport-link-serial"
+note = "the serial/ link, dial and accept, one peer at a time on a listener"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_LINK_SERIAL_USB"
+class = "never"
+note = "the USB CDC serial link of one board family; absent from wz; open-debt item 912"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_LINK_TLS"
+class = "maps"
+anchor = "wz-capi-pico/transport-link-tls"
+note = "the tls/ link, dial and accept"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_SCOUTING"
+class = "maps"
+anchor = "wz-capi-pico/scout"
+note = "z_scout and the hello family"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_LINK_UDP_MULTICAST"
+class = "maps"
+anchor = "wz-capi-pico/multicast-transport"
+note = "the udp/ group link a listen endpoint with an interface joins; one capability with the multicast transport, as both switches are needed for it in pico"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_LINK_UDP_UNICAST"
+class = "maps"
+anchor = "wz-capi-pico/link-udp"
+note = "a udp/ endpoint to dial"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_MULTICAST_TRANSPORT"
+class = "maps"
+anchor = "wz-capi-pico/multicast-transport"
+note = "z_open joins a group as the session's one transport, held as a group face beside the unicast ones"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_UNICAST_TRANSPORT"
+class = "always"
+anchor = "crates/wz-capi-core/Cargo.toml"
+note = "the unicast transport"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_RAWETH_TRANSPORT"
+class = "maps"
+anchor = "wz-capi-pico/raweth-transport"
+note = "a reth/ listen endpoint joins a group over raw ethernet, one frame per message, its destination from the endpoint's mapping; linux only, as pico's"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_TCP_NODELAY"
+class = "always"
+anchor = "crates/wz-runtime-tokio/src/lib.rs"
+note = "set on every TCP-backed link, as zenoh does; turning it off would be a policy"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_LOCAL_SUBSCRIBER"
+class = "maps"
+anchor = "wz-capi-pico/local-subscriber"
+note = "a session's own put reaches its own subscribers inside the call; allowed_origin and allowed_destination in the option structs; the write filter and matching count them"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_SESSION_CHECK"
+class = "always"
+anchor = "crates/wz-capi-pico/tests/session_check.rs"
+note = "a put, delete or get on an entity whose session was closed, and a reply on a query held past it, answer the session-closed error, as upstream's default does"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_BATCHING"
+class = "always"
+anchor = "crates/wz-capi-pico/src/session.rs"
+note = "zp_batch_start / flush / stop"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_BATCH_TX_MUTEX"
+class = "n/a"
+note = "which of pico's own mutexes a batch window holds; wz's batch window is per-face state"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_BATCH_PEER_MUTEX"
+class = "n/a"
+note = "the same locking choice of the C implementation, for the peer list"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_MATCHING"
+class = "always"
+anchor = "crates/wz-capi-pico/src/matching.rs"
+note = "the matching status and listeners"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_RX_CACHE"
+class = "always"
+anchor = "crates/wz-session-core/src/pubsub.rs"
+note = "a receive-path memo of which subscriptions a key matched (`MatchMemo`), always on in the host build where upstream's default is off; behaviour-neutral"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_UNICAST_PEER"
+class = "maps"
+anchor = "wz-capi-pico/peer"
+note = "the roles beyond the client; a stronger cut than pico's, which keeps a lone listener"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_AUTO_RECONNECT"
+class = "always"
+anchor = "crates/wz-capi-pico/src/session.rs"
+note = "the redial of a lost link"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_MULTICAST_DECLARATIONS"
+class = "maps"
+anchor = "wz-capi-pico/multicast-declarations"
+note = "on a group: keyexpr declarations, the open-time and write-filter interests, and a write filter that holds a write back"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_LOCAL_QUERYABLE"
+class = "maps"
+anchor = "wz-capi-pico/local-queryable"
+note = "a session's own get reaches its own queryables, and their replies it, inside the calls; allowed_origin and allowed_destination in the option structs"
+
+[[upstream_switch]]
+original = "zenoh-pico"
+switch = "Z_FEATURE_ADMIN_SPACE"
+class = "maps"
+anchor = "wz-capi-pico/admin-space"
+note = "zp_start_admin_space / zp_stop_admin_space and the open flag, serving pico's @/<zid>/pico/** documents; the session-local connectivity half has no observer while the local switches are off"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "shared-memory"
+class = "maps"
+anchor = "wz-capi-c/zenoh-c-shared-memory"
+note = "the SHM provider and buffer doors"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "unstable"
+class = "maps"
+anchor = "wz-capi-c/zenoh-c-no-unstable-api"
+note = "in the inverse sense: the unstable surface is built unless this feature removes it, where upstream's default is without it"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "auth_usrpwd"
+class = "maps"
+anchor = "wz-capi-c/auth_usrpwd"
+note = "the user/password handshake extension, and the credential check of a listener that names a dictionary file"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "transport_compression"
+class = "maps"
+anchor = "wz-capi-c/transport_compression"
+note = "the batch compression codec, through session-extcompression"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "transport_tcp"
+class = "always"
+anchor = "crates/wz-capi-core/Cargo.toml"
+note = "the tcp/ link"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "transport_udp"
+class = "maps"
+anchor = "wz-capi-c/link-udp"
+note = "the udp/ link"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "auth_pubkey"
+class = "maps"
+anchor = "wz-capi-c/auth_pubkey"
+note = "the public-key handshake, built from the four transport/auth/pubkey identity keys"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "transport_multilink"
+class = "maps"
+anchor = "wz-capi-c/transport_multilink"
+note = "the multilink extension is built; a C session holds one link per peer, which is what upstream does at the default max_links of 1"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "transport_quic"
+class = "maps"
+anchor = "wz-capi-c/transport_quic"
+note = "the quic/ link, dial and accept, with the transport/link/tls certificate material"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "transport_quic_datagram"
+class = "maps"
+anchor = "wz-capi-c/transport_quic_datagram"
+note = "the quic-datagram/ link, over the quic link's certificate material"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "transport_serial"
+class = "maps"
+anchor = "wz-capi-c/transport_serial"
+note = "the serial/ link"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "transport_tls"
+class = "maps"
+anchor = "wz-capi-c/transport_tls"
+note = "the tls/ link, dial and accept, with the transport/link/tls certificate material"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "transport_unixpipe"
+class = "maps"
+anchor = "wz-capi-c/transport_unixpipe"
+note = "the unixpipe/ link, on a Unix target"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "transport_unixsock-stream"
+class = "maps"
+anchor = "wz-capi-c/transport_unixsock-stream"
+note = "the unixsock-stream/ link, on a Unix target"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "transport_ws"
+class = "maps"
+anchor = "wz-capi-c/transport_ws"
+note = "the ws/ link, dial and accept"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "transport_vsock"
+class = "maps"
+anchor = "wz-capi-c/transport_vsock"
+note = "the vsock/ link, on a Linux target"
+
+[[upstream_switch]]
+original = "zenoh-c"
+switch = "stats"
+class = "maps"
+anchor = "wz-capi-c/stats"
+note = "the per-link transport counters; zenoh-c has no C door for them and neither has wz"
 
 [[limit]]
 id = "MAX_KEYEXPR_BYTES"

@@ -223,6 +223,7 @@ def decl_of(data: dict) -> dict:
         "axes": list(data.get("axis", [])),
         "options": list(data.get("axis_option", [])),
         "rules": list(data.get("cargo_rule", [])),
+        "switches": list(data.get("upstream_switch", [])),
     }
 
 
@@ -240,6 +241,7 @@ def validate_decl(data: dict) -> list[str]:
     out += validate_caps(data)
     out += validate_limits(data["limit"])
     out += validate_images(data)
+    out += validate_switches(data)
     symbols = [c["kconfig"] for c in data["capability"]] + [l["kconfig"] for l in data["limit"]]
     symbols += [a["kconfig"] for a in data.get("axis", [])]
     symbols += [o["kconfig"] for o in data.get("axis_option", [])]
@@ -355,9 +357,10 @@ def validate_caps(data: dict) -> list[str]:
             out.append(f"{c['id']}: Kconfig symbol `{c['kconfig']}` is not WZ_CAP_*")
         if c.get("default", "on") not in ("on", "off"):
             out.append(f"{c['id']}: default is `{c['default']}`, which is neither on nor off")
-        if "pico_flag" in c and "pico_flags_all" in c:
-            out.append(f"{c['id']} names both a pico_flag and pico_flags_all; it is one or the other")
-        for flag in [c.get("pico_flag", "Z_FEATURE_")] + c.get("pico_flags_all", []):
+        if "pico_flag" in c:
+            out.append(f"{c['id']} names a pico_flag; a capability's pico switches are the "
+                       "zenoh-pico `maps` rows to it under the upstream switches")
+        for flag in c.get("pico_flags_all", []):
             if not flag.startswith("Z_FEATURE_"):
                 out.append(f"{c['id']}: pico switch `{flag}` is not Z_FEATURE_*")
         out += validate_upstream_defaults(c)
@@ -417,6 +420,68 @@ def validate_upstream_defaults(cap: dict) -> list[str]:
     return out
 
 
+SWITCH_KEYS = {"original", "switch", "class", "anchor", "note"}
+# The originals whose build switches are rows here; the zenoh crate's cargo features are
+# `upstream_feature_census.py`'s.
+SWITCH_ORIGINALS = ("zenoh-pico", "zenoh-c")
+SWITCH_CLASSES = ("maps", "always", "never", "n/a")
+PICO_DROP_IN = "wz-capi-pico/"
+
+
+def pico_rows_to(switches: list[dict], cid: str) -> list[str]:
+    """The zenoh-pico switches a `maps` row anchors to capability `cid`, in row order."""
+    return [s["switch"] for s in switches
+            if s.get("original") == "zenoh-pico" and s.get("class") == "maps"
+            and s.get("anchor") == PICO_DROP_IN + cid]
+
+
+def pico_switches(decl: dict, cid: str) -> tuple[list[str], str]:
+    """The zenoh-pico switches of a capability and how they combine: `any` (on when one of them
+    is) or `all`. The `maps` rows to it, combined as it says; or, where no row reaches it, the
+    `pico_flags_all` it is on under. Empty for a capability pico has no switch for."""
+    cap = decl["caps"][cid]
+    mapped = pico_rows_to(decl["switches"], cid)
+    if mapped:
+        return mapped, cap.get("pico_combine", "any")
+    return list(cap.get("pico_flags_all", [])), "all"
+
+
+def validate_switches(data: dict) -> list[str]:
+    """The rows' shape, and how the capabilities read them. What each anchor names is held by
+    `upstream_switch_map.py`, which asks cargo for the drop-ins' features."""
+    out: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for row in data.get("upstream_switch", []):
+        where = f"upstream switch {row.get('original')}/{row.get('switch')}"
+        unknown = set(row) - SWITCH_KEYS
+        if unknown:
+            out.append(f"{where} has keys this reader does not know: {sorted(unknown)}")
+        if row.get("original") not in SWITCH_ORIGINALS:
+            out.append(f"{where}: original is none of {list(SWITCH_ORIGINALS)}")
+        if row.get("class") not in SWITCH_CLASSES:
+            out.append(f"{where}: class {row.get('class')!r} is none of {list(SWITCH_CLASSES)}")
+        if not str(row.get("note", "")).strip():
+            out.append(f"{where} carries no note -- a verdict with no reason is not one")
+        if (row.get("class") in ("maps", "always")) != ("anchor" in row):
+            out.append(f"{where}: a `maps` or `always` row names an anchor and no other does")
+        key = (row.get("original"), row.get("switch"))
+        if key in seen:
+            out.append(f"{where} has two rows -- two answers to one question")
+        seen.add(key)
+    switches = data.get("upstream_switch", [])
+    for cap in data.get("capability", []):
+        mapped = pico_rows_to(switches, cap["id"])
+        if mapped and "pico_flags_all" in cap:
+            out.append(f"{cap['id']}: rows map {mapped} to it, so it names no pico_flags_all")
+        combine = cap.get("pico_combine")
+        if combine is not None and (combine != "all" or len(mapped) < 2):
+            out.append(f"{cap['id']}: pico_combine is only \"all\", for a capability two or more "
+                       f"rows map to; {len(mapped)} do")
+        if mapped and "pico" not in cap.get("abis", []):
+            out.append(f"{cap['id']}: zenoh-pico rows map to it and the pico ABI does not export it")
+    return out
+
+
 def validate_limits(limits: list[dict]) -> list[str]:
     out: list[str] = []
     ids = [l.get("id") for l in limits]
@@ -468,34 +533,71 @@ DEFINE_RE = re.compile(r"^\s*#\s*define\s+(Z_FEATURE_[A-Z0-9_]+)\s+([01])\b")
 # pico writes one switch, `Z_FEATURE_UNSTABLE_API`, through `#cmakedefine`: a bare `#define`
 # when it is on and `/* #undef ... */` when it is off, and its headers test it with `#ifdef`.
 BARE_DEFINE_RE = re.compile(r"^\s*#\s*define\s+(Z_FEATURE_[A-Z0-9_]+)\s*(?://.*|/\*.*)?$")
+UNDEF_RE = re.compile(r"^\s*/\*\s*#\s*undef\s+(Z_FEATURE_[A-Z0-9_]+)\s*\*/")
+
+
+def pico_flag_states(text: str) -> tuple[set[str], set[str]]:
+    """The pico switches a header turns on, and those it states off (`0`, or `#cmakedefine`'s
+    `/* #undef */`). A switch it does not mention is in neither."""
+    on: set[str] = set()
+    off: set[str] = set()
+    for line in text.splitlines():
+        d = DEFINE_RE.match(line)
+        if d:
+            (on if d.group(2) == "1" else off).add(d.group(1))
+            continue
+        b = BARE_DEFINE_RE.match(line)
+        if b:
+            on.add(b.group(1))
+            continue
+        u = UNDEF_RE.match(line)
+        if u:
+            off.add(u.group(1))
+    return on, off
+
+
+def pico_header_conflicts(decl: dict, abi: str, text: str) -> list[str]:
+    """Capabilities a pico header states off that the ones it turns on imply in wz.
+
+    wz's capability graph can need more than pico does for the same switch: the advanced plane
+    implies the unstable API, which pico's CMake does not force for the advanced subscription. A
+    build that added the implied capability would change the option struct layouts the program
+    was compiled against, so the header is refused rather than built differently from its own
+    statement."""
+    caps = decl["caps"]
+    on = read_config(decl, text)
+    flags_on, flags_off = pico_flag_states(text)
+    out: list[str] = []
+    for cid in sorted(closure(caps, on) - on):
+        if abi not in caps[cid]["abis"]:
+            continue
+        flags, _ = pico_switches(decl, cid)
+        if flags and all(f in flags_on | flags_off for f in flags):
+            askers = sorted(x for x in on if cid in closure(caps, {x}) and x != cid)
+            out.append(f"the header states {cid} off ({', '.join(flags)}), and {', '.join(askers)}, "
+                       f"which it turns on, implies it in wz")
+    return out
 
 
 def read_config(decl: dict, text: str) -> set[str]:
     """The capabilities a `.config` or pico header turns ON. Unmentioned means off.
 
-    A capability with a `pico_flag` is on when that switch is; one with `pico_flags_all`
-    has no switch of its own in pico and is on when every switch it names is (the
-    liveliness get exists where pico has both the liveliness and the query plane).
+    A capability's pico switches are the `maps` rows to it (`pico_switches`): it is on when one
+    of them is (the advanced plane, which either advanced switch asks for), or when all are where
+    it says so (the multicast transport, which pico has only with its group link). One no row
+    reaches is on when every switch of its `pico_flags_all` is (the liveliness get exists where
+    pico has both the liveliness and the query plane).
     """
     by_kconfig = {c["kconfig"]: cid for cid, c in decl["caps"].items()}
     on: set[str] = set()
-    flags_on: set[str] = set()
     for line in text.splitlines():
         m = CONFIG_RE.match(line)
         if m and m.group(1) in by_kconfig:
             on.add(by_kconfig[m.group(1)])
-            continue
-        d = DEFINE_RE.match(line)
-        if d and d.group(2) == "1":
-            flags_on.add(d.group(1))
-            continue
-        b = BARE_DEFINE_RE.match(line)
-        if b:
-            flags_on.add(b.group(1))
-    for cid, cap in decl["caps"].items():
-        if cap.get("pico_flag") in flags_on:
-            on.add(cid)
-        elif cap.get("pico_flags_all") and set(cap["pico_flags_all"]) <= flags_on:
+    flags_on, _ = pico_flag_states(text)
+    for cid in decl["caps"]:
+        flags, combine = pico_switches(decl, cid)
+        if flags and (all if combine == "all" else any)(f in flags_on for f in flags):
             on.add(cid)
     return on
 
@@ -543,12 +645,14 @@ def emit_kconfig_capabilities(decl: dict) -> str:
             lines.append(f"\tselect {caps[dep]['kconfig']}")
         lines.append("\thelp")
         lines.append(f"\t  {cap['help']}")
-        flag = cap.get("pico_flag")
-        if flag:
-            lines.append(f"\t  zenoh-pico's switch for it: {flag}.")
-        flags = cap.get("pico_flags_all")
-        if flags:
+        flags, combine = pico_switches(decl, cid)
+        if len(flags) == 1:
+            lines.append(f"\t  zenoh-pico's switch for it: {flags[0]}.")
+        elif flags and combine == "all":
             lines.append(f"\t  zenoh-pico has it when all of these are on: {', '.join(flags)}.")
+        elif flags:
+            lines.append(f"\t  zenoh-pico's switches for it, either of which asks for it: "
+                         f"{', '.join(flags)}.")
         lines.append(f"\t  Exported by: {', '.join(a for a in cap['abis'] if a != 'core')}.")
         lines.append("")
     lines.append("endmenu")
@@ -1214,6 +1318,28 @@ def cmd_selftest() -> int:
                decl, "#define Z_FEATURE_LIVELINESS 1\n#define Z_FEATURE_QUERY 1\n")
            and "liveliness-get" not in read_config(
                decl, "#define Z_FEATURE_LIVELINESS 1\n#define Z_FEATURE_QUERY 0\n"))
+    expect("either advanced switch asks for the advanced plane",
+           "advanced" in read_config(decl, "#define Z_FEATURE_ADVANCED_SUBSCRIPTION 1\n")
+           and "advanced" in read_config(decl, "#define Z_FEATURE_ADVANCED_PUBLICATION 1\n"))
+    sub_only = "#define Z_FEATURE_ADVANCED_PUBLICATION 0\n#define Z_FEATURE_ADVANCED_SUBSCRIPTION 1\n"
+    expect("a header that asks for the advanced plane with the unstable API stated off is refused",
+           any("unstable-api" in c for c in pico_header_conflicts(
+               decl, "pico", sub_only + "/* #undef Z_FEATURE_UNSTABLE_API */\n")))
+    expect("the same header with the unstable API on, or silent on it, is not",
+           pico_header_conflicts(decl, "pico", sub_only + "#define Z_FEATURE_UNSTABLE_API\n") == []
+           and pico_header_conflicts(decl, "pico", sub_only) == [])
+    expect("a header reads a 0 and an #undef as stated off and a bare define as on",
+           pico_flag_states("#define Z_FEATURE_A 0\n/* #undef Z_FEATURE_B */\n#define Z_FEATURE_C\n")
+           == ({"Z_FEATURE_C"}, {"Z_FEATURE_A", "Z_FEATURE_B"}))
+    expect("the multicast transport needs both of its switches",
+           "multicast-transport" not in read_config(decl, "#define Z_FEATURE_MULTICAST_TRANSPORT 1\n")
+           and "multicast-transport" in read_config(
+               decl, "#define Z_FEATURE_MULTICAST_TRANSPORT 1\n#define Z_FEATURE_LINK_UDP_MULTICAST 1\n"))
+    expect("a capability's pico switches are the maps rows to it",
+           pico_switches(decl, "query") == (["Z_FEATURE_QUERY"], "any")
+           and pico_switches(decl, "liveliness-get")
+           == (["Z_FEATURE_LIVELINESS", "Z_FEATURE_QUERY"], "all")
+           and pico_switches(decl, "gossip") == ([], "all"))
     expect("a bare #define is on and a #cmakedefine's #undef is off",
            read_config(decl, "#define Z_FEATURE_UNSTABLE_API\n") == {"unstable-api"}
            and read_config(decl, "/* #undef Z_FEATURE_UNSTABLE_API */\n") == set())
@@ -1320,6 +1446,31 @@ def cmd_selftest() -> int:
                         'upstream_on = ["zenoh-pico"]\nupstream_off = ["zenoh-pico"]', "in both"))
     expect("an unknown original is refused",
            caps_refused('upstream_on = ["zenoh-pico"]', 'upstream_on = ["pico"]', "none of"))
+    row = ('\n[[upstream_switch]]\noriginal = "zenoh-pico"\nswitch = "Z_FEATURE_A"\nclass = "maps"\n'
+           'anchor = "wz-capi-pico/a"\nnote = "a"\n')
+    with_row = SAMPLE + row
+
+    def row_refused(text: str, words: str) -> bool:
+        return any(words in p for p in validate_decl(read_decl_toml(text)))
+
+    expect("a sample with a switch row validates", validate_decl(read_decl_toml(with_row)) == [])
+    expect("a capability naming a pico_flag is refused",
+           row_refused(SAMPLE.replace('abis = ["core", "pico"]', 'abis = ["core", "pico"]\npico_flag = "Z_FEATURE_A"'),
+                       "names a pico_flag"))
+    expect("a pico_flags_all on a capability a row reaches is refused",
+           row_refused(with_row.replace('abis = ["core", "pico"]',
+                                        'abis = ["core", "pico"]\npico_flags_all = ["Z_FEATURE_B"]'),
+                       "names no pico_flags_all"))
+    expect("pico_combine on a capability one row reaches is refused",
+           row_refused(with_row.replace('abis = ["core", "pico"]', 'abis = ["core", "pico"]\npico_combine = "all"'),
+                       "pico_combine"))
+    expect("a switch row of an unknown class, or a maps row with no anchor, is refused",
+           row_refused(with_row.replace('class = "maps"', 'class = "maybe"'), "class")
+           and row_refused(with_row.replace('anchor = "wz-capi-pico/a"\n', ""), "anchor"))
+    expect("two rows for one switch are refused", row_refused(with_row + row, "two rows"))
+    expect("a pico row to a capability the pico ABI does not export is refused",
+           row_refused(with_row.replace('abis = ["core", "pico"]', 'abis = ["core"]')
+                       .replace('upstream_on = ["zenoh-pico"]\n', ""), "pico ABI does not export"))
     expect("the shipped declaration judges every capability against exactly its originals",
            all(upstream_default(c, f) is not None for c in caps.values()
                for f in upstream_families(c)))
@@ -1515,8 +1666,13 @@ def main(argv: list[str]) -> int:
             return 0
     if len(argv) == 4 and argv[1] == "--features" and argv[2] in ABIS:
         decl = load_decl()
-        on = read_config(decl, pathlib.Path(argv[3]).read_text(encoding="utf-8"))
-        print(cargo_args(decl, argv[2], on))
+        text = pathlib.Path(argv[3]).read_text(encoding="utf-8")
+        conflicts = pico_header_conflicts(decl, argv[2], text)
+        for conflict in conflicts:
+            print(f"  wz-config FAIL: {argv[3]}: {conflict}", file=sys.stderr)
+        if conflicts:
+            return 1
+        print(cargo_args(decl, argv[2], read_config(decl, text)))
         return 0
     if len(argv) == 2 and argv[1] == "--check-presets":
         return cmd_check_presets()

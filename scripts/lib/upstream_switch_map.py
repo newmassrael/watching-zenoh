@@ -53,12 +53,10 @@ wz still owes for an upstream original are found at all.
 
 ## Agreement with the capability declaration
 
-`deploy/wz-config.toml` names zenoh-pico's switch for a capability (`pico_flag`).
-That is the same fact as a `maps` row here, written twice until the upstream map moves
-into the declaration (docs/build-configuration.md, step 2), so both directions are
-checked: a capability's `pico_flag` must have a `maps` row to that capability, each
-switch of a `pico_flags_all` must have a `maps` row, and the switches mapped to a
-capability must include one it names.
+The rows live in `deploy/wz-config.toml` (`[[upstream_switch]]`, docs/build-configuration.md
+step 2), and a zenoh-pico `maps` row to a capability IS that capability's pico switch: the
+fact is written once. What is left to agree is a `pico_flags_all`, whose every switch must be
+a `maps` row.
 
 The declaration also states each original's own default (`upstream_on` /
 `upstream_off`, docs/build-configuration.md step 2). Each run holds the original it
@@ -105,142 +103,19 @@ ZENOH_C_PACKAGE = "zenoh-c"
 CLASSES = ("maps", "always", "never", "n/a")
 DEBT_CITATION = "open-debt item "
 
-# One row per zenoh-pico switch: (switch, class, anchor, note). Judged against
-# `crates/wz-capi-pico`, the pico C ABI drop-in, at the pin. A `maps` anchor is a feature of
-# that crate; an `always` anchor is the file that shows the capability is unconditional.
-PICO_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
-    ("Z_FEATURE_UNSTABLE_API", "maps", "wz-capi-pico/unstable-api",
-     "the entity ids, reliability, source info and the cancellation token, and the option "
-     "fields that carry them; off, every option struct has upstream's default layout"),
-    ("Z_FEATURE_CONNECTIVITY", "maps", "wz-capi-pico/connectivity",
-     "the connectivity status and event doors; implies unstable-api, as upstream's CMake "
-     "forces it off without the unstable API"),
-    ("Z_FEATURE_PUBLICATION", "always", "crates/wz-capi-pico/src/pubsub.rs",
-     "the publisher and z_put"),
-    ("Z_FEATURE_ADVANCED_PUBLICATION", "maps", "wz-capi-pico/advanced",
-     "the advanced publisher; one wz plane answers both advanced switches"),
-    ("Z_FEATURE_SUBSCRIPTION", "always", "crates/wz-capi-pico/src/pubsub.rs",
-     "the subscriber"),
-    ("Z_FEATURE_ADVANCED_SUBSCRIPTION", "maps", "wz-capi-pico/advanced",
-     "the advanced subscriber; the same wz plane as the publication switch"),
-    ("Z_FEATURE_QUERY", "maps", "wz-capi-pico/query", "z_get and the querier"),
-    ("Z_FEATURE_QUERYABLE", "maps", "wz-capi-pico/queryable",
-     "z_declare_queryable and the replies"),
-    ("Z_FEATURE_LIVELINESS", "maps", "wz-capi-pico/liveliness",
-     "the token and the liveliness subscriber; pico's liveliness get needs QUERY as well, "
-     "which wz spells as its own `liveliness-get` capability"),
-    ("Z_FEATURE_INTEREST", "always", "crates/wz-capi-core/Cargo.toml",
-     "declare-interest is part of every capi-core build"),
-    ("Z_FEATURE_FRAGMENTATION", "always", "crates/wz-capi-pico/Cargo.toml",
-     "transport-fragmentation is enabled unconditionally"),
-    ("Z_FEATURE_ENCODING_VALUES", "always", "crates/wz-capi-pico/src/encoding.rs",
-     "the predefined encoding table, held to the oracle"),
-    ("Z_FEATURE_MULTI_THREAD", "maps", "wz-capi-pico/multi-thread",
-     "which header arm the library is the drop-in for: on, the task doors, host sync and "
-     "blocking channels; off, zp_read / zp_send_keep_alive / zp_send_join / zp_spin_once, "
-     "a one-byte z_open_options_t and 48-byte channel collections. A session drives itself "
-     "on its own runtime in both"),
-    ("Z_FEATURE_LINK_TCP", "always", "crates/wz-capi-core/Cargo.toml",
-     "the tcp/ link is part of every capi-core build"),
-    ("Z_FEATURE_LINK_BLUETOOTH", "never", None,
-     "no bt/ scheme in any wz build; open-debt item 912"),
-    ("Z_FEATURE_LINK_WS", "maps", "wz-capi-pico/transport-link-ws",
-     "the ws/ link, dial and accept; upstream allows it only on emscripten, wz on its host "
-     "runtime"),
-    ("Z_FEATURE_LINK_SERIAL", "maps", "wz-capi-pico/transport-link-serial",
-     "the serial/ link, dial and accept, one peer at a time on a listener"),
-    ("Z_FEATURE_LINK_SERIAL_USB", "never", None,
-     "the USB CDC serial link of one board family; absent from wz; open-debt item 912"),
-    ("Z_FEATURE_LINK_TLS", "maps", "wz-capi-pico/transport-link-tls",
-     "the tls/ link, dial and accept"),
-    ("Z_FEATURE_SCOUTING", "maps", "wz-capi-pico/scout", "z_scout and the hello family"),
-    ("Z_FEATURE_LINK_UDP_MULTICAST", "maps", "wz-capi-pico/multicast-transport",
-     "the udp/ group link a listen endpoint with an interface joins; one capability with the "
-     "multicast transport, as both switches are needed for it in pico"),
-    ("Z_FEATURE_LINK_UDP_UNICAST", "maps", "wz-capi-pico/link-udp",
-     "a udp/ endpoint to dial"),
-    ("Z_FEATURE_MULTICAST_TRANSPORT", "maps", "wz-capi-pico/multicast-transport",
-     "z_open joins a group as the session's one transport, held as a group face beside "
-     "the unicast ones"),
-    ("Z_FEATURE_UNICAST_TRANSPORT", "always", "crates/wz-capi-core/Cargo.toml",
-     "the unicast transport"),
-    ("Z_FEATURE_RAWETH_TRANSPORT", "maps", "wz-capi-pico/raweth-transport",
-     "a reth/ listen endpoint joins a group over raw ethernet, one frame per message, "
-     "its destination from the endpoint's mapping; linux only, as pico's"),
-    ("Z_FEATURE_TCP_NODELAY", "always", "crates/wz-runtime-tokio/src/lib.rs",
-     "set on every TCP-backed link, as zenoh does; turning it off would be a policy"),
-    ("Z_FEATURE_LOCAL_SUBSCRIBER", "maps", "wz-capi-pico/local-subscriber",
-     "a session's own put reaches its own subscribers inside the call; allowed_origin and "
-     "allowed_destination in the option structs; the write filter and matching count them"),
-    ("Z_FEATURE_SESSION_CHECK", "always", "crates/wz-capi-pico/tests/session_check.rs",
-     "a put, delete or get on an entity whose session was closed, and a reply on a query "
-     "held past it, answer the session-closed error, as upstream's default does"),
-    ("Z_FEATURE_BATCHING", "always", "crates/wz-capi-pico/src/session.rs",
-     "zp_batch_start / flush / stop"),
-    ("Z_FEATURE_BATCH_TX_MUTEX", "n/a", None,
-     "which of pico's own mutexes a batch window holds; wz's batch window is per-face state"),
-    ("Z_FEATURE_BATCH_PEER_MUTEX", "n/a", None,
-     "the same locking choice of the C implementation, for the peer list"),
-    ("Z_FEATURE_MATCHING", "always", "crates/wz-capi-pico/src/matching.rs",
-     "the matching status and listeners"),
-    ("Z_FEATURE_RX_CACHE", "always", "crates/wz-session-core/src/pubsub.rs",
-     "a receive-path memo of which subscriptions a key matched (`MatchMemo`), always on in "
-     "the host build where upstream's default is off; behaviour-neutral"),
-    ("Z_FEATURE_UNICAST_PEER", "maps", "wz-capi-pico/peer",
-     "the roles beyond the client; a stronger cut than pico's, which keeps a lone listener"),
-    ("Z_FEATURE_AUTO_RECONNECT", "always", "crates/wz-capi-pico/src/session.rs",
-     "the redial of a lost link"),
-    ("Z_FEATURE_MULTICAST_DECLARATIONS", "maps", "wz-capi-pico/multicast-declarations",
-     "on a group: keyexpr declarations, the open-time and write-filter interests, and a "
-     "write filter that holds a write back"),
-    ("Z_FEATURE_LOCAL_QUERYABLE", "maps", "wz-capi-pico/local-queryable",
-     "a session's own get reaches its own queryables, and their replies it, inside the "
-     "calls; allowed_origin and allowed_destination in the option structs"),
-    ("Z_FEATURE_ADMIN_SPACE", "maps", "wz-capi-pico/admin-space",
-     "zp_start_admin_space / zp_stop_admin_space and the open flag, serving pico's "
-     "@/<zid>/pico/** documents; the session-local connectivity half has no observer "
-     "while the local switches are off"),
-)
+# The rows are the declaration's `[[upstream_switch]]` (deploy/wz-config.toml), one per switch of
+# an original: (switch, class, anchor, note). zenoh-pico's are judged against
+# `crates/wz-capi-pico`, the pico C ABI drop-in, and zenoh-c's against `crates/wz-capi-c`, at the
+# pin. A `maps` anchor is a feature of that crate; an `always` anchor is the file that shows the
+# capability is unconditional.
+ORIGINALS = ("zenoh-pico", "zenoh-c")
 
-# One row per zenoh-c capability feature: (feature, class, anchor, note). Judged against
-# `crates/wz-capi-c`, the zenoh-c drop-in, at the pin.
-ZENOH_C_ROWS: tuple[tuple[str, str, str | None, str], ...] = (
-    ("shared-memory", "maps", "wz-capi-c/zenoh-c-shared-memory",
-     "the SHM provider and buffer doors"),
-    ("unstable", "maps", "wz-capi-c/zenoh-c-no-unstable-api",
-     "in the inverse sense: the unstable surface is built unless this feature removes it, "
-     "where upstream's default is without it"),
-    ("auth_usrpwd", "maps", "wz-capi-c/auth_usrpwd",
-     "the user/password handshake extension, and the credential check of a listener that "
-     "names a dictionary file"),
-    ("transport_compression", "maps", "wz-capi-c/transport_compression",
-     "the batch compression codec, through session-extcompression"),
-    ("transport_tcp", "always", "crates/wz-capi-core/Cargo.toml", "the tcp/ link"),
-    ("transport_udp", "maps", "wz-capi-c/link-udp", "the udp/ link"),
-    ("auth_pubkey", "maps", "wz-capi-c/auth_pubkey",
-     "the public-key handshake, built from the four transport/auth/pubkey identity keys"),
-    ("transport_multilink", "maps", "wz-capi-c/transport_multilink",
-     "the multilink extension is built; a C session holds one link per peer, which is what "
-     "upstream does at the default max_links of 1"),
-    ("transport_quic", "maps", "wz-capi-c/transport_quic",
-     "the quic/ link, dial and accept, with the transport/link/tls certificate material"),
-    ("transport_quic_datagram", "maps", "wz-capi-c/transport_quic_datagram",
-     "the quic-datagram/ link, over the quic link's certificate material"),
-    ("transport_serial", "maps", "wz-capi-c/transport_serial", "the serial/ link"),
-    ("transport_tls", "maps", "wz-capi-c/transport_tls",
-     "the tls/ link, dial and accept, with the transport/link/tls certificate material"),
-    ("transport_unixpipe", "maps", "wz-capi-c/transport_unixpipe",
-     "the unixpipe/ link, on a Unix target"),
-    ("transport_unixsock-stream", "maps", "wz-capi-c/transport_unixsock-stream",
-     "the unixsock-stream/ link, on a Unix target"),
-    ("transport_ws", "maps", "wz-capi-c/transport_ws", "the ws/ link, dial and accept"),
-    ("transport_vsock", "maps", "wz-capi-c/transport_vsock",
-     "the vsock/ link, on a Linux target"),
-    ("stats", "maps", "wz-capi-c/stats",
-     "the per-link transport counters; zenoh-c has no C door for them and neither has wz"),
-)
 
-TABLES = {"zenoh-pico": PICO_ROWS, "zenoh-c": ZENOH_C_ROWS}
+def rows_of(decl: dict, original: str) -> tuple[tuple[str, str, str | None, str], ...]:
+    """The declaration's rows for `original`, in the order the declaration writes them."""
+    return tuple((r["switch"], r["class"], r.get("anchor"), r["note"])
+                 for r in decl["switches"] if r["original"] == original)
+
 
 
 class InputError(RuntimeError):
@@ -337,36 +212,17 @@ def shape_arm(
     return failures
 
 
-def pico_switches_of(cap: dict) -> list[str]:
-    """The pico switches a capability names: its own `pico_flag`, or the `pico_flags_all` it is on
-    under (every one of them on)."""
-    return [cap["pico_flag"]] if "pico_flag" in cap else list(cap.get("pico_flags_all", []))
+def declaration_arm(decl: dict) -> list[str]:
+    """Is every pico switch a capability is on under a `maps` row?
 
-
-def declaration_arm(rows: tuple[tuple[str, str, str | None, str], ...], decl: dict) -> list[str]:
-    """Do the pico rows and the capability declaration's pico switches agree, both ways?
-
-    `decl` is `wz_config.load_decl()`'s shape (capabilities under `caps`). A capability's own
-    `pico_flag` must have a `maps` row to it; each switch of a `pico_flags_all` must have a `maps`
-    row at all (to it, or to the capabilities it is the conjunction of). The relation is many
-    switches to one capability (pico splits the advanced publisher and subscriber, wz builds them
-    as one plane), so the second direction asks that the switches mapped to a capability include
-    at least one it names, not that they are all it names.
+    A capability's pico switches are the `maps` rows to it, so those cannot disagree with it. What
+    can is a `pico_flags_all` (a capability no row reaches, on whenever several switches are all
+    on): each switch it names must be a `maps` row, to whatever capability, or wz would read a
+    pico `config.h` by a switch it has not judged. `decl` is `wz_config.load_decl()`'s shape.
     """
     failures: list[str] = []
-    by_switch = {r[0]: r for r in rows}
-    caps = decl["caps"]
-    for cap_id, cap in sorted(caps.items()):
-        if "pico_flag" in cap:
-            flag = cap["pico_flag"]
-            row = by_switch.get(flag)
-            want = f"wz-capi-pico/{cap_id}"
-            if row is None or row[1] != "maps" or row[2] != want:
-                got = "no row" if row is None else f"`{row[1]}` {row[2]}"
-                failures.append(
-                    f"capability `{cap_id}` declares pico_flag `{flag}`, but its row here is {got}, "
-                    f"not `maps` {want}"
-                )
+    by_switch = {r[0]: r for r in rows_of(decl, "zenoh-pico")}
+    for cap_id, cap in sorted(decl["caps"].items()):
         for flag in cap.get("pico_flags_all", []):
             row = by_switch.get(flag)
             if row is None or row[1] != "maps":
@@ -375,16 +231,6 @@ def declaration_arm(rows: tuple[tuple[str, str, str | None, str], ...], decl: di
                     f"capability `{cap_id}` is on under pico's `{flag}`, whose row here is {got}, "
                     f"not `maps`"
                 )
-    mapped_to: dict[str, set[str]] = {}
-    for switch, cls, anchor, _ in rows:
-        if cls == "maps" and anchor and anchor.startswith("wz-capi-pico/"):
-            mapped_to.setdefault(anchor.split("/", 1)[1], set()).add(switch)
-    for cap_id, switches in sorted(mapped_to.items()):
-        if cap_id in caps and not switches & set(pico_switches_of(caps[cap_id])):
-            failures.append(
-                f"zenoh-pico: {sorted(switches)} map to capability `{cap_id}`, which names "
-                f"{pico_switches_of(caps[cap_id]) or 'no pico switch'} -- one fact written two ways"
-            )
     return failures
 
 
@@ -443,13 +289,14 @@ def upstream_default_arm(original: str, decl: dict, expected: dict[str, bool]) -
 
 
 def pico_expected(decl: dict, defaults: dict[str, bool]) -> dict[str, bool]:
-    """The capabilities zenoh-pico has a switch for, to the value its defaults give: on when
-    every switch the capability names is on."""
+    """The capabilities zenoh-pico has a switch for, to the value its defaults give, read as a
+    pico `config.h` is read (`wz_config.pico_switches`): on when one of its switches is, or all
+    where it combines them so."""
     out: dict[str, bool] = {}
-    for cap_id, cap in decl["caps"].items():
-        flags = pico_switches_of(cap)
+    for cap_id in decl["caps"]:
+        flags, combine = wz_config.pico_switches(decl, cap_id)
         if flags:
-            out[cap_id] = all(defaults.get(f, False) for f in flags)
+            out[cap_id] = (all if combine == "all" else any)(defaults.get(f, False) for f in flags)
     return out
 
 
@@ -562,13 +409,24 @@ def selftest() -> int:
         ("Z_FEATURE_LINK_BLUETOOTH", "never", None, "absent; open-debt item 1"),
         ("Z_FEATURE_BATCH_TX_MUTEX", "n/a", None, "a mutex strategy of the C implementation"),
     )
+    def as_switches(rows: tuple, original: str = "zenoh-pico") -> list[dict]:
+        out = []
+        for switch, cls, anchor, note in rows:
+            row = {"original": original, "switch": switch, "class": cls, "note": note}
+            if anchor is not None:
+                row["anchor"] = anchor
+            out.append(row)
+        return out
+
     # The shape `wz_config.load_decl()` returns, which is what main() passes: a fixture of any
     # other shape let the declaration arm grade nothing in the real run while its cases passed.
-    decl = {"caps": {
-        "link-udp": {"id": "link-udp", "pico_flag": "Z_FEATURE_LINK_UDP_UNICAST",
-                     "upstream_on": ["zenoh-pico"]},
-        "query": {"id": "query", "pico_flag": "Z_FEATURE_QUERY", "upstream_off": ["zenoh-pico"]},
-    }}
+    decl = {
+        "caps": {
+            "link-udp": {"id": "link-udp", "upstream_on": ["zenoh-pico"]},
+            "query": {"id": "query", "upstream_off": ["zenoh-pico"]},
+        },
+        "switches": as_switches(control),
+    }
     switches = {r[0] for r in control}
 
     def swap(i: int, row: tuple) -> tuple:
@@ -597,29 +455,35 @@ def selftest() -> int:
             print(f"  selftest FAIL [{label}]: expected {'pass' if want_ok else 'FAIL'}", file=sys.stderr)
             return 1
 
-    decl_cases: list[tuple[str, tuple, dict, bool]] = [
-        ("the declaration agrees", control, decl, True),
-        ("a pico_flag with no maps row fails",
-         swap(1, ("Z_FEATURE_QUERY", "never", None, "open-debt item 1")), decl, False),
-        ("a maps row to a capability with another pico_flag fails", control,
-         {"caps": {"link-udp": {"id": "link-udp", "pico_flag": "Z_FEATURE_LINK_UDP_UNICAST"},
-                   "query": {"id": "query", "pico_flag": "Z_FEATURE_QUERYABLE"}}}, False),
-        ("two switches mapping to one capability agree when one is its pico_flag",
-         control + (("Z_FEATURE_LOCAL_QUERY", "maps", "wz-capi-pico/query", "x"),), decl, True),
+    def with_all(flags: list[str]) -> dict:
+        return {**decl, "caps": {**decl["caps"], "both": {"id": "both", "pico_flags_all": flags}}}
+
+    decl_cases: list[tuple[str, dict, bool]] = [
+        ("the declaration agrees", decl, True),
         ("a capability on under several switches agrees when each has a maps row",
-         control, {"caps": {**decl["caps"], "both": {
-             "id": "both", "pico_flags_all": ["Z_FEATURE_LINK_UDP_UNICAST", "Z_FEATURE_QUERY"]}}},
-         True),
+         with_all(["Z_FEATURE_LINK_UDP_UNICAST", "Z_FEATURE_QUERY"]), True),
         ("a capability on under a switch whose row is not maps fails",
-         control, {"caps": {**decl["caps"], "both": {
-             "id": "both", "pico_flags_all": ["Z_FEATURE_QUERY", "Z_FEATURE_BATCH_TX_MUTEX"]}}},
-         False),
+         with_all(["Z_FEATURE_QUERY", "Z_FEATURE_BATCH_TX_MUTEX"]), False),
+        ("a capability on under a switch no row judges fails",
+         with_all(["Z_FEATURE_QUERY", "Z_FEATURE_NO_SUCH"]), False),
     ]
-    for label, rows, d, want_ok in decl_cases:
-        got_ok = not declaration_arm(rows, d)
+    for label, d, want_ok in decl_cases:
+        got_ok = not declaration_arm(d)
         if got_ok != want_ok:
             print(f"  selftest FAIL [{label}]: expected {'pass' if want_ok else 'FAIL'}", file=sys.stderr)
             return 1
+
+    # A capability two rows map to reads pico's defaults as a config.h is read: either switch on
+    # asks for it, unless it combines them with `all`.
+    two = {"caps": {"adv": {"id": "adv"}}, "switches": as_switches((
+        ("Z_FEATURE_PUB", "maps", "wz-capi-pico/adv", "x"),
+        ("Z_FEATURE_SUB", "maps", "wz-capi-pico/adv", "x")))}
+    half_on = {"Z_FEATURE_PUB": True, "Z_FEATURE_SUB": False}
+    both_needed = {**two, "caps": {"adv": {"id": "adv", "pico_combine": "all"}}}
+    if pico_expected(two, half_on) != {"adv": True} or pico_expected(both_needed, half_on) != {"adv": False}:
+        print("  selftest FAIL [two switches to one capability, any and all]: "
+              f"{pico_expected(two, half_on)} {pico_expected(both_needed, half_on)}", file=sys.stderr)
+        return 1
 
     # An original's defaults: link-udp is declared on and query off in zenoh-pico.
     default_cases: list[tuple[str, dict[str, bool], bool]] = [
@@ -636,7 +500,7 @@ def selftest() -> int:
         print("  selftest FAIL [an original a capability states nothing for]: ACCEPTED", file=sys.stderr)
         return 1
     mapped = zenoh_c_expected(
-        {"caps": {"link-udp": {}, "query": {}}},
+        {"caps": {"link-udp": {}, "query": {}}, "switches": []},
         (("transport_udp", "maps", "wz-capi-c/link-udp", "x"), ("stats", "maps", "wz-capi-c/stats", "x"),
          ("transport_tcp", "always", "crates/x", "x")),
         {"transport_udp"},
@@ -742,23 +606,24 @@ def main() -> int:
         features = crate_features()
         pinned = pins()
         decl = wz_config.load_decl()
-    except InputError as e:
+    except (InputError, ValueError) as e:
         print(f"  upstream-switch-map: INPUT -- {e}", file=sys.stderr)
         return 2
 
     failures: list[str] = []
-    for table, rows in TABLES.items():
+    tables = {original: rows_of(decl, original) for original in ORIGINALS}
+    for table, rows in tables.items():
         report(table, rows)
         failures += shape_arm(table, rows, features)
-    failures += declaration_arm(PICO_ROWS, decl)
+    failures += declaration_arm(decl)
 
     try:
         if args.zenoh_c:
             version, caps, derived, default_features = zenoh_c_switches(zenoh_c_source())
             for name, why in sorted(derived.items()):
                 print(f"    zenoh-c not a switch: {name} -- {why}")
-            failures += upstream_arm("zenoh-c", ZENOH_C_ROWS, version, pinned["zenoh-c"], caps)
-            expected = zenoh_c_expected(decl, ZENOH_C_ROWS, default_features)
+            failures += upstream_arm("zenoh-c", tables["zenoh-c"], version, pinned["zenoh-c"], caps)
+            expected = zenoh_c_expected(decl, tables["zenoh-c"], default_features)
             failures += upstream_default_arm("zenoh-c", decl, expected)
             print(f"    zenoh-c defaults: {len(expected)} capability default(s) held to its "
                   f"`default` features")
@@ -768,7 +633,8 @@ def main() -> int:
             )
         else:
             version, switches = pico_switches(PICO_SOURCE)
-            failures += upstream_arm("zenoh-pico", PICO_ROWS, version, pinned["zenoh-pico"], switches)
+            failures += upstream_arm("zenoh-pico", tables["zenoh-pico"], version, pinned["zenoh-pico"],
+                                     switches)
             expected = pico_expected(decl, pico_defaults(PICO_SOURCE))
             failures += upstream_default_arm("zenoh-pico", decl, expected)
             unswitched = sorted(cid for cid, cap in decl["caps"].items()
