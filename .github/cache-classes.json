@@ -13,6 +13,7 @@
       "owners": [
         "ci.yml:ci",
         "ci.yml:nondefault",
+        "ci.yml:nondefault-legs",
         "ci.yml:dissect",
         "ci.yml:interop",
         "ci.yml:feature-gates",
@@ -73,6 +74,7 @@
         "ci.yml:verdict-legs",
         "ci.yml:session-planes",
         "ci.yml:nondefault",
+        "ci.yml:nondefault-legs",
         "ci.yml:defaults-off",
         "ci.yml:gate-provenance",
         "ci.yml:capability-cost",
@@ -111,6 +113,7 @@
       "readers": [
         "ci.yml:session-planes",
         "ci.yml:nondefault",
+        "ci.yml:nondefault-legs",
         "ci.yml:defaults-off",
         "ci.yml:gate-provenance",
         "ci.yml:capability-cost",
