@@ -279250,6 +279250,48 @@
         "Open-debt item 922 (a terminated chain of nine extensions is refused) is in the register."
       ]
     },
+    "Round 3450": {
+      "decision_summary": "Record the owner's ruling of 2026-10-23 on opening, closing and resetting a session (docs/session-lifecycle-intent.md, cost not counted), and regrade session-close-ingress COMPLETE to PARTIAL because it widens what that atom's verbs mean. A lifecycle peer's zid derives from the public key of the credential it authenticates with (the public-key extension or TLS); only an authenticated peer may command a verb. A zid resolves to locators through a soft-state directory and every dial carries the expected zid, checked at InitAck as upstream does. Each peer has an SCXML state machine whose administrative events are the verbs (the BGP model). Intent is held apart from status, every verb is idempotent and reset carries a generation. One contract serves an in-band keyexpr, a test agent's own control channel and a build-time peer set. Decision 2 of open-debt item 761 keeps its grammar; its meaning is amended.",
+      "changes_bullets": [
+        "docs/session-lifecycle-intent.md (new, f8a3889c1): what is built and measured, decisions D1 to D8 with the rejected alternatives, seven steps and three open questions.",
+        "Inventory session-close-ingress (b5f34c7ed): the reason's head token COMPLETE becomes PARTIAL, its old body unchanged byte for byte, and a REGRADE paragraph is appended naming the seven residuals in the document's order and two corrections found by the review below. A second atom was not filed: a second cargo feature would gate the same verbs.",
+        "scripts/lib/depth_axis_census.py: PIN_REACHED 0 to 1, PIN_WZ_CITATIONS 0 to 20, PIN_AMBIGUOUS 0 to 1, each read off the census's own FAIL line. docs/reason-review-pins.md: 16 rows, one per file the PARTIAL reason cites, round R3450."
+      ],
+      "verification_bullets": [
+        "Measured before deciding: LinkstateOpener sends ConnectReconcile::Add with locators only; wz-capi-core open_scouted compares the peer after the session opened; wz-session-mcu SessionHost opens in S static slots; wz-session-lwip forwards no session-close-ingress. Upstream at the pin, read directly: Runtime::connect_peer is idempotent, open_link compares the expected zid at InitAck and closes with INVALID, the admin write plane only inserts configuration, the public-key lookup is a set of keys with no zid; zenoh-pico 1.10.1 has TLS with mutual authentication and no authentication extension.",
+        "Review of the reason against its 16 cited files: every cited symbol is present; two clauses no longer held and are corrected in the appended paragraph (switchboard.rs now reads 2 access-control identifiers, both comments; the fixed-memory profile now has a session host, though no crate of it depends on wz-routing-graph).",
+        "Each rc 0 on the final tree: depth_axis_census and its selftest, reason_review_pin_gate, store_reason_citation_gate, store_reasons_resolve, audit-catalog-status (REMAINING 1 to 2: api-compat-rust, session-close-ingress), apfull_membership, grading_pin_ratchet, audit-crossimpl-proof, debt_plane_census, and on the document upstream_citation_anchor_gate and the four prose gates; the confidential-vocabulary scan finds nothing; validate-workspace reports no new T1 orphan."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "Steps 1 to 7 of the document are not started; step 1 goes first (the zid derivation, the credential binding, and the initiator's check of the responder key that access-extauth-pubkey lists as a residual). The atom returns to COMPLETE when all seven residuals of its REGRADE paragraph are paid.",
+        "Not measured: whether a Push on an @/ key reaches a zenohd plugin's subscriber, and the cost of public-key authentication on the fixed-memory profile.",
+        "This round is not a milestone round: REMAINING rose by one because the scope widened, and nothing built was withdrawn."
+      ],
+      "publishable_decision_summary": "Record the owner's ruling of 2026-10-23 on opening, closing and resetting a session (docs/session-lifecycle-intent.md, cost not counted), and regrade session-close-ingress COMPLETE to PARTIAL because it widens what that atom's verbs mean. A lifecycle peer's zid derives from the public key of the credential it authenticates with (the public-key extension or TLS); only an authenticated peer may command a verb. A zid resolves to locators through a soft-state directory and every dial carries the expected zid, checked at InitAck as upstream does. Each peer has an SCXML state machine whose administrative events are the verbs (the BGP model). Intent is held apart from status, every verb is idempotent and reset carries a generation. One contract serves an in-band keyexpr, a test agent's own control channel and a build-time peer set. Decision 2 of open-debt item 761 keeps its grammar; its meaning is amended.",
+      "publishable_changes_bullets": [
+        "docs/session-lifecycle-intent.md (new, f8a3889c1): what is built and measured, decisions D1 to D8 with the rejected alternatives, seven steps and three open questions.",
+        "Inventory session-close-ingress (b5f34c7ed): the reason's head token COMPLETE becomes PARTIAL, its old body unchanged byte for byte, and a REGRADE paragraph is appended naming the seven residuals in the document's order and two corrections found by the review below. A second atom was not filed: a second cargo feature would gate the same verbs.",
+        "scripts/lib/depth_axis_census.py: PIN_REACHED 0 to 1, PIN_WZ_CITATIONS 0 to 20, PIN_AMBIGUOUS 0 to 1, each read off the census's own FAIL line. docs/reason-review-pins.md: 16 rows, one per file the PARTIAL reason cites, round R3450."
+      ],
+      "publishable_verification_bullets": [
+        "Measured before deciding: LinkstateOpener sends ConnectReconcile::Add with locators only; wz-capi-core open_scouted compares the peer after the session opened; wz-session-mcu SessionHost opens in S static slots; wz-session-lwip forwards no session-close-ingress. Upstream at the pin, read directly: Runtime::connect_peer is idempotent, open_link compares the expected zid at InitAck and closes with INVALID, the admin write plane only inserts configuration, the public-key lookup is a set of keys with no zid; zenoh-pico 1.10.1 has TLS with mutual authentication and no authentication extension.",
+        "Review of the reason against its 16 cited files: every cited symbol is present; two clauses no longer held and are corrected in the appended paragraph (switchboard.rs now reads 2 access-control identifiers, both comments; the fixed-memory profile now has a session host, though no crate of it depends on wz-routing-graph).",
+        "Each rc 0 on the final tree: depth_axis_census and its selftest, reason_review_pin_gate, store_reason_citation_gate, store_reasons_resolve, audit-catalog-status (REMAINING 1 to 2: api-compat-rust, session-close-ingress), apfull_membership, grading_pin_ratchet, audit-crossimpl-proof, debt_plane_census, and on the document upstream_citation_anchor_gate and the four prose gates; the confidential-vocabulary scan finds nothing; validate-workspace reports no new T1 orphan."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Steps 1 to 7 of the document are not started; step 1 goes first (the zid derivation, the credential binding, and the initiator's check of the responder key that access-extauth-pubkey lists as a residual). The atom returns to COMPLETE when all seven residuals of its REGRADE paragraph are paid.",
+        "Not measured: whether a Push on an @/ key reaches a zenohd plugin's subscriber, and the cost of public-key authentication on the fixed-memory profile.",
+        "This round is not a milestone round: REMAINING rose by one because the scope widened, and nothing built was withdrawn."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
