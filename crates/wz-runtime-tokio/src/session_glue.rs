@@ -1389,6 +1389,7 @@ where
     // [`wait_revised`]).
     let mut revision = deadline_revised.map(|n| Box::pin(n.notified()));
     let mut iter: usize = 0;
+    let mut turn = Turn::default();
     loop {
         if engine.is_in_final_state() {
             return DriverOutcome::Terminated;
@@ -1562,6 +1563,7 @@ where
                             &mut on_event,
                         )
                         .await;
+                        turn.after_event().await;
                     }
                     // The armed steady-state timer fired. It was armed for the
                     // deadline of some earlier iteration, so the real one may be
@@ -1664,8 +1666,95 @@ where
                 // same seam, because "which arm the loop happened to take" is
                 // not a reason for delivery to behave differently.
                 park_on_drain(after_dispatch(), actions, engine, clock, &mut on_event).await;
+                turn.after_event().await;
             }
         }
+    }
+}
+
+/// How many events one session's loop takes in a row before it lets the other tasks of its
+/// thread run.
+///
+/// A loop that finds its link readable takes the next event with no await that suspends, and a
+/// read that is served from bytes already buffered does not spend tokio's cooperative budget
+/// either, so a session with a backlog kept the thread for as long as the backlog lasted. One
+/// session's turn is then as long as its backlog, and a thread that serves N sessions comes
+/// back to a session after the SUM of those turns: with 2048 sessions under load and a core
+/// that is mostly someone else's, that was longer than the lease (10 s), so a peer's keepalive
+/// was not written and the peer closed the session as expired, 1400 to 2000 of 2048 in one
+/// run (Layer E7s, `wz_router_hat_keeps_its_links_when_overloaded_and_short_of_cpu`, which
+/// failed five runs of five on a build host, and on the commit that was green on the hosted
+/// runner).
+///
+/// Bounding the turn bounds the return: a session waits for at most
+/// `sessions x TURN_EVENT_BUDGET x the cost of one event / the share of the CPU the thread
+/// has`, which is about 0.7 s for 2048 sessions at 2 us an event and a twentieth of a core,
+/// against the 10 s lease. MEASURED on a build host over the whole E7s binary at 4 cores:
+/// no bound lost 3 faces of 2048 and admitted 12 of 320 new sessions to a starved router; a
+/// bound of 8 lost none and admitted 320 of 320, at 12.5 us a message against 13.2 for no
+/// bound (2048 subscribers, unstarved), so the yield costs nothing that shows; a bound of 32
+/// and 128 also passed on that machine, at 20.3 and 16.3 us, and 128 has a worst-case return
+/// about the length of the lease, which is a pass owed to a quiet machine.
+const TURN_EVENT_BUDGET: u32 = 8;
+
+/// The events one loop has taken since it last yielded (see [`TURN_EVENT_BUDGET`]).
+#[derive(Default)]
+struct Turn {
+    taken: u32,
+}
+
+impl Turn {
+    /// Count one event and, when the turn is spent, yield the thread: the task goes to the back
+    /// of its runtime's queue, behind whatever woke while it ran, a timer that fired included.
+    async fn after_event(&mut self) {
+        self.taken += 1;
+        if self.taken >= TURN_EVENT_BUDGET {
+            self.taken = 0;
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use super::{now_or_never, Turn, TURN_EVENT_BUDGET};
+    use core::future::Future;
+    use std::sync::Arc;
+
+    /// A loop's turn is bounded: the events before the budget's last go through without
+    /// suspending, the one that spends it yields the thread once, and the next turn starts
+    /// again from zero. Without the yield one session with a backlog keeps its thread until
+    /// the backlog is gone (see [`TURN_EVENT_BUDGET`]).
+    #[test]
+    fn a_turn_yields_the_thread_once_per_budget_of_events() {
+        struct NoWake;
+        impl std::task::Wake for NoWake {
+            fn wake(self: Arc<Self>) {}
+        }
+        let mut turn = Turn::default();
+        for taken in 1..TURN_EVENT_BUDGET {
+            assert!(
+                now_or_never(turn.after_event()).is_some(),
+                "event {taken} of {TURN_EVENT_BUDGET} must not suspend"
+            );
+        }
+        let waker = std::task::Waker::from(Arc::new(NoWake));
+        let mut cx = std::task::Context::from_waker(&waker);
+        {
+            let mut spent = core::pin::pin!(turn.after_event());
+            assert!(
+                spent.as_mut().poll(&mut cx).is_pending(),
+                "the event that spends the budget must yield"
+            );
+            assert!(
+                spent.as_mut().poll(&mut cx).is_ready(),
+                "a yield returns on the next poll"
+            );
+        }
+        assert!(
+            now_or_never(turn.after_event()).is_some(),
+            "the turn after a yield starts from zero"
+        );
     }
 }
 
