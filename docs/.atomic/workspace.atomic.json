@@ -279762,6 +279762,42 @@
         "This round is not a milestone round: REMAINING is unchanged."
       ]
     },
+    "Round 3462": {
+      "decision_summary": "The lifecycle round that makes a verb count only from a verified peer added tests in four places and moved none of the four count guards that count them in run-ci.sh: the dispatch's credential zid witness (C1y auth_dispatch, 9 to 10), three tests of the pubkey method (C1y extauth_pubkey, 12 to 15) and one handshake witness that lands in both pubkey e2e legs (1 to 2, and with usrpwd 2 to 3). No hosted run graded them, because each run was cancelled by the next push, and the count-guard gate of this session's own pushes selected none of them. The gate found the first when a later range selected the crate's guards, and the other three when asked over the adding commit's own range. Each number is what its command printed on a build host, and the gate now judges all forty guards that every commit since reaches. The round that added the tests is another session's; the numbers move here so the lane is not red while it is told.",
+      "changes_bullets": [
+        "docs/reason-review-pins.md: the row of session-close-ingress for session_actions.rs moves to the file's current hash and this round, after a re-read of the reason's one citation of it (the OutOfBand slot, present once) against the one change, an import gated by cfg inside peer_identity_verified.",
+        "scripts/run-ci.sh Layer C1y: the guards \"C1y auth_dispatch\" 9 to 10, \"C1y extauth_pubkey\" 12 to 15, \"C1y pubkey e2e\" 1 to 2 and \"C1y pubkey+usrpwd e2e\" 2 to 3, each with a note naming the tests that moved it."
+      ],
+      "verification_bullets": [
+        "On a build host the four commands print 10, 15, 2 and 3 passed; before the change the gate reported 9, 12, 1 and 2 declared against them.",
+        "The count-guard gate over the adding commit's range passes with 28 guards reached, and over every commit since with 40 of 40 judged.",
+        "The reason-review pin gate, red on a change to a file another session's atom cites, passes after the row moves.",
+        "shellcheck of run-ci.sh reports nothing; the preflight derived from the pre-push hook body passes."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "carry_forward_bullets": [
+        "The session that added the tests is told. A push whose range selects none of a crate's guards cannot see a count its earlier commit left behind, so the next range that does select them is where it shows."
+      ],
+      "publishable_decision_summary": "The lifecycle round that makes a verb count only from a verified peer added tests in four places and moved none of the four count guards that count them in run-ci.sh: the dispatch's credential zid witness (C1y auth_dispatch, 9 to 10), three tests of the pubkey method (C1y extauth_pubkey, 12 to 15) and one handshake witness that lands in both pubkey e2e legs (1 to 2, and with usrpwd 2 to 3). No hosted run graded them, because each run was cancelled by the next push, and the count-guard gate of this session's own pushes selected none of them. The gate found the first when a later range selected the crate's guards, and the other three when asked over the adding commit's own range. Each number is what its command printed on a build host, and the gate now judges all forty guards that every commit since reaches. The round that added the tests is another session's; the numbers move here so the lane is not red while it is told.",
+      "publishable_changes_bullets": [
+        "docs/reason-review-pins.md: the row of session-close-ingress for session_actions.rs moves to the file's current hash and this round, after a re-read of the reason's one citation of it (the OutOfBand slot, present once) against the one change, an import gated by cfg inside peer_identity_verified.",
+        "scripts/run-ci.sh Layer C1y: the guards \"C1y auth_dispatch\" 9 to 10, \"C1y extauth_pubkey\" 12 to 15, \"C1y pubkey e2e\" 1 to 2 and \"C1y pubkey+usrpwd e2e\" 2 to 3, each with a note naming the tests that moved it."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host the four commands print 10, 15, 2 and 3 passed; before the change the gate reported 9, 12, 1 and 2 declared against them.",
+        "The count-guard gate over the adding commit's range passes with 28 guards reached, and over every commit since with 40 of 40 judged.",
+        "The reason-review pin gate, red on a change to a file another session's atom cites, passes after the row moves.",
+        "shellcheck of run-ci.sh reports nothing; the preflight derived from the pre-push hook body passes."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The session that added the tests is told. A push whose range selects none of a crate's guards cannot see a count its earlier commit left behind, so the next range that does select them is where it shows."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
