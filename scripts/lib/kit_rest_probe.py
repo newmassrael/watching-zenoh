@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""The GET round trip of a kit image that ANSWERS, as the bench host sees it (kit lane, scripts/kit-lane.sh).
+"""R3470 (no register item) -- the GET round trip of a kit image that ANSWERS, as the bench host sees it (kit lane, scripts/kit-lane.sh).
 
     kit_rest_probe.py <rest port> <node key id> <out.json> <gets>
 
