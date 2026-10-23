@@ -95,6 +95,12 @@ UNRESOLVED_DECLARED: dict[tuple[str, str], str] = {
         "is a vendored foreign crate and this workspace's metadata cannot "
         "adjudicate its features"
     ),
+    ("scripts/kit-lane.sh", "get"): (
+        "builds `deploy/host-slot-node`, the asking image's responder, which is a standalone "
+        "workspace of its own (`[workspace]` in its manifest) outside `crates/`, so this "
+        "workspace's metadata cannot adjudicate its features; its `get` feature is the one that "
+        "node's own `--get` needs"
+    ),
     ("scripts/lib/guarded_count_gate.py", "zenoh-config"): (
         "a FIXTURE string naming an invented package (`demo-crate`), which is "
         "that gate's own test input rather than a command anyone runs"

@@ -724,17 +724,98 @@ warm-up:
   `a256cf133`), so it never opened a session; it is refused at 2,112 B and held at 2,176, and the
   asking node is refused at 2,304 and held at 2,560. The cells are 2,560 and 3,072 B now. Why
   the state grew beyond 1,024 B was not looked into.
-- **Where the kit's images were built.** pc2, where the kit is attached, no longer has its Zephyr
-  workspace (`~/zephyrproject` is gone, and a search for the SDK found none; they were installed
+- **Where the kit's images were built.** pc2, where the kit is attached, lost its Zephyr
+  workspace (`~/zephyrproject` was gone, and a search for the SDK found none; they were installed
   there on 2026-10-11), so the images measured after the afternoon were built on the development
   host, at nice 10 and with eight jobs, as the kit worker did before pc2 had the toolchain, and
   flashed and run from pc2. The sizes (text, `.data`, `.bss`) of the answering and the asking
   image built there equal the ones pc2 built the same day to the byte; the images' hashes were not
-  compared.
+  compared. Section 5.7 puts the workspace back by a script and the lane on top of it.
 
-Not held: the asking image's latency in a lane (the resource gate's `--measure` reads the getter
-line and holds it, and no lane runs it), more than four queries in flight, a getter with a mailbox
-on the kit, and a round trip of a document other than 165 bytes.
+Not held: more than four queries in flight, a getter with a mailbox on the kit, and a round trip
+of a document other than 165 bytes. The latency of the asking image is held by the lane of 5.7,
+which a person runs and nothing schedules.
+
+## 5.7 The kit lane, and the workspace under it (2026-10-24)
+
+What 5.3 to 5.6 did by hand on the bench host (build, flash, boot, ask, read the figures) is one
+command now, and what hosted CI knows about the Zephyr workspace is a script a host can check
+itself with.
+
+**`scripts/provision-zephyr.sh`** is the Zephyr workspace and SDK at the pins hosted CI builds
+with. The pins are read from `ci.yml` (`ZEPHYR_REF`, `ZEPHYR_SDK_VERSION`, and a stop if the jobs
+that state them disagree), and the steps are the workflow's `Provision Zephyr` step. `--check`
+runs what it names and does not stat it (a venv whose interpreter is gone still has an
+executable `west`): the venv's `west`, the pinned revision, every project of the workspace on
+disk, the SDK's version, its arm compiler, and that the cmake registry names THIS SDK (the
+registry is per user, so a non-empty one proves nothing about the directory just checked, which
+the first version of the check got wrong). No flag provisions what is missing and checks again;
+`--dry-run` says the steps. A check over a missing workspace and over a venv with a dead
+interpreter fails, as it must.
+
+- **From nothing, the recipe reproduces the image.** In an isolated home on the development host
+  it provisioned a workspace in one run (6 of 6 checks failing before, 6 of 6 passing after,
+  8.3 GB), and the lane's `build` over that workspace and that SDK gave the answering image at
+  text 160,000, `.data` 1,524, `.bss` 109,346, the sizes of the workspaces copied by hand, with the
+  stack gate's chain at the committed 6,904. The hand-made workspaces list one project more
+  (`zephyr-lang-rust`, an optional module of the development host that the recipe does not take);
+  the image does not depend on it.
+- **pc2 was put back on 2026-10-23** by the owner's instruction, by hand (the workspace copied
+  from the development host, the venv from its `pip freeze`, the SDK by `west sdk install`), and
+  `--check` passes there, which also says the hand-made one is the pinned one. Why the workspace
+  was gone is not known.
+
+**`scripts/kit-lane.sh`** is the lane, run from a checkout (or a copy of a tree) on the host the
+kit is cabled to. It is a lab lane: hosted CI cannot run it and it is not a `run_layer`.
+
+| step | what it does | its verdict |
+|---|---|---|
+| `preflight` | the workspace and SDK (`provision-zephyr.sh --check`), `west`, `cargo` and the tree's toolchain for the kit's target, the objcopy, `openocd`, the router and its REST plugin, the console free, the interface, `sudo` without a password, no debugger or capture running; `--deep` reads the CM0+ region back and compares it with the hash the lab recorded | one line each |
+| `build <image>` | `west build` in a stable directory, the padded 512 KiB image and its sha256, the stack gate on the ELF | sizes, hash, the chain |
+| `run <image>` | the flash written and read back, the interface given its address, the console and the router started, the kit reset, the lines that come AFTER the reset, the host's 2,000 GETs through the router (answering images) or the getter's own line (the asking one), then `resource_budget_gate.py --measure` | the gate's own sentence |
+| `all <image>...`, `build-responder`, `list`, `--selftest` | | |
+
+The judgement is the repository's own gates (`stack_frame_gate.py`, `resource_budget_gate.py`), so
+the lane cannot hold an image to anything the rows do not say; the lane adds the flow, the
+refusals and a record per run (image hash, router version, date, the tree). The refusals: a file
+that is not the padded region just built, a console that is held, a debugger, capture or ping
+running, a second run while the lock is held, a responder the router does not show (a getter
+against none finishes with finals and no answers, which measures nothing). It writes the M7_0
+region only; the CM0+ launcher must be in place, and `--deep` is how to tell when it is not (a
+run then has no boot line and nothing else to say).
+
+What belongs to the host is a lab file outside the repository (`~/.config/wz-kit-lab.env`: the
+debugger's tools, the router, the cable's interface and address, the console, the CM0+ hash), whose
+keys the script's header lists. The router there is `zenohd` 1.10.0 with its REST plugin, which is
+not the oracle pin of the repository (1.10.1): every kit figure so far was taken against it, and the
+run's record says which one ran.
+
+- **All three images passed on the kit**, each built through the lane (an incremental build in the
+  lane's stable directory), with the stack gate, the flash, the boot and the row all `ok`: the answering image (stack peak 6,000 B,
+  4,000 GETs with none wrong, median 357 us), the batching one (6,016 B, none wrong, 330 us), and
+  the asking one (its run inside its row; the console of that run was overwritten by the controls
+  below, so its figures are not kept here). The medians are of one run each, taken while the bench
+  host carried other work, and 5.3 showed them moving by more than a hundred microseconds from run
+  to run: they say the rows hold, not that one image is faster than another.
+- **Controls, each failing as it should.** The asking image held to the answering image's row:
+  refused, "the stack peak is 8144 bytes, the row holds 6000 +/- 16", and "the firmware says its
+  stack is 12288 bytes and the image declares 9216". A responder that cannot be reached: "no
+  responder was reachable through the router in three tries", with nothing left running and the
+  interface address removed. A preflight with `cargo` out of reach: "cargo does not run".
+  `--selftest` with an image removed from the lane's table: "the lane has [...] and the stack gate
+  has [...]".
+- **The first run of the lane failed, and the cause was the lane's.** The answering images died in
+  `west build` with "no such file or directory" because an `ssh` shell does not read the profile
+  that puts `cargo` on the path, and the preflight did not look for `cargo`. The lane now reads
+  `~/.cargo/env` itself and the preflight runs `cargo` and asks the tree's toolchain for the kit's
+  target.
+
+Not covered: nothing runs the lane on a schedule or on a push (a person starts it on the host), the
+workspace is checked and provisioned by a script that hosted CI does not run (CI's own `Verify`
+step checks less: the registry only for being there, the compiler only for being a file, and
+neither the revision nor the projects), the script's provisioning steps are a copy of the
+workflow's that nothing holds equal to it, the lab file and the router are the host's, and the CM0+
+launcher is checked against the hash a person recorded.
 
 ## 6. Open
 
