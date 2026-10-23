@@ -39,3 +39,19 @@ normal state once nothing remains.
 
 | atom | file | blob | round |
 |---|---|---|---|
+| session-close-ingress | crates/wz-integration-tests/tests/wz_router_hat_connect_reconcile.rs | 31cee437ba6c4c3bf6eeab254f30dcdf9c7bd423 | R3450 |
+| session-close-ingress | crates/wz-routing-graph/src/lib.rs | 2123f96404cdfc158a6c875d4440a7febca3e3c5 | R3450 |
+| session-close-ingress | crates/wz-runtime-coop/src/session_drive.rs | 6286ec71d43da8ea506affc292ab122ccd8ff508 | R3450 |
+| session-close-ingress | crates/wz-runtime-tokio/src/accept_loop.rs | 0b4e6090dddc0ee8a3023a9ef5cf55fa78183084 | R3450 |
+| session-close-ingress | crates/wz-runtime-tokio/src/observer.rs | b13f2a243e1e899b3e2b308640af196c6f0bf7b8 | R3450 |
+| session-close-ingress | crates/wz-runtime-tokio/src/session_glue.rs | b2f2a41cf5e5f07833fe83298ef1798a8650eb58 | R3450 |
+| session-close-ingress | crates/wz-runtime-tokio/src/session_lifecycle_open.rs | ea1ce534d88d6f88f8382e2f00dba2e0d56e0707 | R3450 |
+| session-close-ingress | crates/wz-runtime-tokio/src/session_open.rs | a6b817b728ae6e86f415a2674840ff765a008938 | R3450 |
+| session-close-ingress | crates/wz-runtime-tokio/tests/session_close_ingress.rs | 31b3e6c8a986b0a8f55e7ac1deb0693f16e5d155 | R3450 |
+| session-close-ingress | crates/wz-session-core/src/drive.rs | 142df36cdbc9c41f3eed1e318e44f372f9884958 | R3450 |
+| session-close-ingress | crates/wz-session-core/src/observer.rs | c2ad4774a53f8f30f2a5f626f57111caec323841 | R3450 |
+| session-close-ingress | crates/wz-session-core/src/session_actions.rs | daa515b492368eb896bd4fc0102274d48d3ec058 | R3450 |
+| session-close-ingress | crates/wz-session-core/src/switchboard.rs | 563daafb74015478bc16e6b876631db745435de6 | R3450 |
+| session-close-ingress | crates/wz-session-core/src/zid_hex.rs | eb5aa0a91c1dc61610401a4f4cd348a01ee49910 | R3450 |
+| session-close-ingress | crates/wz-session-lwip/src/session_drive.rs | 508a9c84e12b5ac475e4978747bbe3171fb4aa69 | R3450 |
+| session-close-ingress | crates/wz-session-mcu/src/slot_host.rs | 0807ee1708c3d5d23c3e4c6f132db911e273d509 | R3450 |

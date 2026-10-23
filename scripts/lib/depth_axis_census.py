@@ -1216,7 +1216,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # empty set when COMPLETE atoms prove the reader reads grades). UNREACHED and
 # NO_SYMBOL hold at 0 and 0. READ off the census's own FAIL line, `reached: 0
 # against a pin of 1`.
-PIN_REACHED = 0
+# R3450 -- REACHED 0 -> 1, an ARRIVAL. `session-close-ingress` is regraded
+# COMPLETE -> PARTIAL on the owner's ruling of 2026-10-23 (Round 3450): the
+# session lifecycle decision widened the scope of its verbs past what COMPLETE
+# covered, the R2697 move again. It arrives already reached (its crate tests name
+# its symbols), so UNREACHED and NO_SYMBOL hold at 0 and 0. READ off the
+# census's own FAIL line, `reached: 1 against a pin of 0`.
+PIN_REACHED = 1
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 0
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2747,7 +2753,14 @@ PIN_NO_SYMBOL = 0
 # paragraph of its reason among them: the paragraph is appended in the same
 # commit that grades the atom, so none of its anchors is counted here. No
 # PARTIAL atom is left.
-PIN_WZ_CITATIONS = 0
+# R3450 -- 0 -> 20, an ARRIVAL. `session-close-ingress` re-enters the PARTIAL
+# population (Round 3450's lifecycle decision) and brings its reason's wz
+# citations with it: 18 from the body it already had, and 2 from the corrections
+# the regrade paragraph makes after the review this gate's sibling demands
+# (`switchboard.rs` re-counted, and the fixed-memory `SessionHost` the old
+# measurement predates). READ off the census's own FAIL lines, `wz citations: 18
+# against a pin of 0` and then `20 against a pin of 18`.
+PIN_WZ_CITATIONS = 20
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
@@ -2825,7 +2838,11 @@ PIN_WZ_CITATIONS = 0
 # citations that remained: the two PARTIAL atoms left cite none, which is what
 # the census now reads. READ off the census's own FAIL line, `ambiguous
 # citations: 0 against a pin of 2`.
-PIN_AMBIGUOUS = 0
+# R3450 -- 0 -> 1. `session-close-ingress` re-enters PARTIAL (Round 3450)
+# carrying ONE ambiguous citation (R2697 also counted one when it arrived the
+# first time). READ off the census's own FAIL line, `ambiguous citations: 1
+# against a pin of 0`.
+PIN_AMBIGUOUS = 1
 
 
 class Fatal(Exception):
