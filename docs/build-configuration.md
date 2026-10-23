@@ -98,9 +98,10 @@ original reproduced by naming it. Three things follow from it:
 - **One pinned Kconfig interpreter on the host** (step 1, C11): `kconfiglib` 14.1.0, the
   version Zephyr bundles, pinned by hash (`scripts/requirements-kconfig.txt`) and provisioned
   into `target/kconfig-venv` by `scripts/provision-kconfiglib.sh`. `wz_config.py
-  --resolve-features` / `--resolve-env` merge presets onto the generated tree's defaults,
-  strictly (C9, with Zephyr's merge settings and its two value checks as errors), and Layer C0
-  resolves every registered profile. `wz_config.py --check-equivalence` resolves the defaults
+  --resolve-features` / `--resolve-env` merge presets onto the defconfig of the original
+  their `# base:` names (section 6), strictly (C9, with Zephyr's merge settings and its two
+  value checks as errors), and Layer C0 resolves every registered profile and every upstream
+  defconfig. `wz_config.py --check-equivalence` resolves the defaults, the upstream defconfigs
   and every registered profile with both the pinned copy and the one Zephyr's build runs and
   compares every symbol's value; Layer Qz runs it where the Zephyr tree is, armed. The
   upstream defconfigs join its inputs when step 2 writes them.
@@ -245,7 +246,17 @@ configs/profiles/*.conf        registered profiles (C14)
 ```
 
 An upstream defconfig is that original's own defaults: for zenoh-pico, the values
-its `CMakeLists.txt` sets. wz's pico interop lanes compare against a reference build
+its `CMakeLists.txt` sets. The three host ones are generated (`wz_config.py --emit
+defconfig:<original>`, held by `--check`): the original's choice on each global axis
+(the global axes' options name the originals whose choice they are, `upstream_on`; the
+role is the only one so far) and every capability it is judged for whose value differs
+from the Kconfig default (`upstream_on` / `upstream_off` on the capabilities). Layer
+C0's `--check-presets` resolves each one strictly and holds it to its original's
+values. The original is not a Kconfig symbol: nothing a build compiles reads it, and a
+preset names it in its `# base:` line, which is what selects the defconfig it merges
+onto. `target` and the MCU defconfig wait for the images' trees to resolve the host
+declaration's symbols (the admin node sources the global axes since round 3445; its
+own symbols are not in the host tree). wz's pico interop lanes compare against a reference build
 configured differently (`scripts/build-zenoh-pico-cli.sh`: the unstable API, the
 advanced publication and subscription, serial, TLS and connectivity on), and the
 pico drop-in's struct layouts are fixed to that build today. That configuration

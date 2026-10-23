@@ -19,6 +19,8 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --emit kconfig-capabilities   print deploy/Kconfig.capabilities
     --emit kconfig-limits         print deploy/Kconfig.limits
     --emit rust-limits            print crates/wz-session-core/src/caps_generated.rs
+    --emit defconfig:ORIGINAL     print configs/<ORIGINAL>_defconfig, an upstream original's own
+                                  default build in wz's switches (zenoh, zenoh-c, zenoh-pico)
     --emit image-kconfig:IMAGE    print the axes of a declared image as Kconfig choices
                                   (<dir>/Kconfig.axes)
     --emit image-cmake:IMAGE      print the CMake that maps those choices to the image crate's
@@ -30,7 +32,8 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   arguments of ABI
     --resolve-env PRESET...       the same merge; print WZ_LIMIT_<NAME>=<value> for each limit it
                                   sets off its default
-    --check-presets               every registered profile (configs/profiles) resolves strictly
+    --check-presets               every registered profile (configs/profiles) resolves strictly,
+                                  and each upstream defconfig resolves to its original's values
     --check-equivalence           the pinned kconfiglib and the copy Zephyr runs give the same
                                   configuration from the defaults and every registered profile
     --check                       hold every derived file, caps.rs and the three manifests to it
@@ -106,7 +109,8 @@ DECL = ROOT / "deploy" / "wz-config.toml"
 KCONFIG_ROOT = ROOT / "deploy" / "Kconfig"
 KCONFIG_AXES = ROOT / "deploy" / "Kconfig.axes"
 KCONFIG_CAPS = ROOT / "deploy" / "Kconfig.capabilities"
-PROFILES = ROOT / "configs" / "profiles"
+CONFIGS = ROOT / "configs"
+PROFILES = CONFIGS / "profiles"
 KCONFIG_VENV = ROOT / "target" / "kconfig-venv"
 # A job that provisions kconfiglib arms this; where it is set, an absent interpreter is a FAIL
 # in every command that needs one, never a SKIP.
@@ -252,7 +256,7 @@ def validate_decl(data: dict) -> list[str]:
 
 IMAGE_KEYS = {"id", "dir"}
 AXIS_KEYS = {"id", "image", "kconfig", "prompt", "default", "help"}
-OPTION_KEYS = {"id", "axis", "kconfig", "prompt", "requires", "implies", "help"}
+OPTION_KEYS = {"id", "axis", "kconfig", "prompt", "requires", "implies", "upstream_on", "help"}
 RULE_KEYS = {"image", "when", "features", "defaults"}
 
 
@@ -310,6 +314,17 @@ def validate_images(data: dict) -> list[str]:
             if cid not in caps:
                 out.append(f"option {option.get('id')!r} implies `{cid}`, which is no capability")
     for aid, axis in axes.items():
+        # An option's `upstream_on` names the originals whose own default build is that choice.
+        # Only a global axis has them (an image is no original), and an axis that states it for
+        # one original states it for every one, once.
+        named = [(o["id"], f) for o in options[aid] for f in o.get("upstream_on", [])]
+        if named and not is_global(axis):
+            out.append(f"axis {aid!r} is an image's; only a global axis's options name originals")
+        if named:
+            stated = sorted(f for _, f in named)
+            if stated != sorted(BASE_ABI):
+                out.append(f"axis {aid!r} names the originals {stated}; each of "
+                           f"{sorted(BASE_ABI)} is named by exactly one of its options")
         ids = [o["id"] for o in options[aid]]
         if len(ids) < 2:
             out.append(f"axis {aid!r} has {len(ids)} option(s); a choice needs two")
@@ -786,6 +801,43 @@ def emit_image_cmake(decl: dict, image: str) -> str:
     return "\n".join(out) + "\n"
 
 
+def defconfig_path(original: str) -> pathlib.Path:
+    return CONFIGS / f"{original}_defconfig"
+
+
+def original_choices(decl: dict, original: str) -> list[dict]:
+    """The options of the global axes that are `original`'s own default build's choice."""
+    return [o for a in global_axes(decl) for o in decl["options"]
+            if o["axis"] == a["id"] and original in o.get("upstream_on", [])]
+
+
+def original_values(decl: dict, original: str) -> dict[str, bool]:
+    """Every capability `original` is judged for, to whether its own default build has it."""
+    return {cid: upstream_default(cap, original) for cid, cap in decl["caps"].items()
+            if original in upstream_families(cap)}
+
+
+def emit_defconfig(decl: dict, original: str) -> str:
+    """`original`'s own default build in wz's switches: its choices on the global axes, and every
+    capability it is judged for whose value differs from the Kconfig default."""
+    out = generated_header("#", f"defconfig:{original}") + [
+        "#",
+        f"# {original}'s own default build in wz's switches (docs/build-configuration.md step 2):",
+        "# its choice on each global axis, and every capability it is judged for whose value",
+        "# differs from the Kconfig default. A capability its ABIs do not reach keeps the default.",
+        f"# A preset whose `# base:` is {original} is merged onto this file.",
+        f"# catalog: {decl['catalog_version']}",
+        f"# original: {original}",
+    ]
+    for option in original_choices(decl, original):
+        out.append(f"CONFIG_{option['kconfig']}=y")
+    values = original_values(decl, original)
+    for cid in decl["order"]:
+        if cid in values and values[cid] != default_on(decl["caps"][cid]):
+            out.append(f"CONFIG_{decl['caps'][cid]['kconfig']}={'y' if values[cid] else 'n'}")
+    return "\n".join(out) + "\n"
+
+
 GENERATED = {
     "kconfig-root": (KCONFIG_ROOT, emit_kconfig_root),
     "kconfig-capabilities": (KCONFIG_CAPS, emit_kconfig_capabilities),
@@ -800,6 +852,8 @@ def generated_files(decl: dict) -> dict[str, tuple[pathlib.Path, str]]:
     out = {kind: (path, emit(decl)) for kind, (path, emit) in GENERATED.items()}
     if global_axes(decl):
         out["kconfig-axes"] = (KCONFIG_AXES, emit_kconfig_axes(decl))
+    for original in BASE_ABI:
+        out[f"defconfig:{original}"] = (defconfig_path(original), emit_defconfig(decl, original))
     for image in decl["images"]:
         base = ROOT / decl["image_dirs"][image]
         out[f"image-kconfig:{image}"] = (base / "Kconfig.axes", emit_image_kconfig(decl, image))
@@ -983,10 +1037,15 @@ def zephyr_kconfiglib_module():
     return module
 
 
-def resolve(fragments: list[pathlib.Path], kconfiglib=None):
+def resolve(fragments: list[pathlib.Path], kconfiglib=None, original: str | None = None):
     """The configuration the generated Kconfig gives when `fragments` are merged in order onto
     its defaults, a later fragment overriding an earlier one, read by `kconfiglib` (the pinned
     interpreter when not given).
+
+    The merge starts from the original the presets name in their `# base:` line: its generated
+    defconfig is merged first (docs/build-configuration.md section 6), so a preset says only how
+    it differs from that original. Presets of two originals are one build of neither and are
+    refused. `original` merges that original's defconfig with no preset (`fragments` empty).
 
     Strict (C9): a symbol the tree does not have, a value outside a symbol's type or range and an
     assignment its dependencies do not allow are each refused with kconfiglib's own words,
@@ -997,10 +1056,20 @@ def resolve(fragments: list[pathlib.Path], kconfiglib=None):
         raise PresetError("kconfiglib is not installed: run scripts/provision-kconfiglib.sh")
     decl = load_decl()
     problems: list[str] = []
+    bases: set[str] = set()
     for frag in fragments:
-        problems += check_preset_header(decl, frag.name, frag.read_text(encoding="utf-8"))
+        text = frag.read_text(encoding="utf-8")
+        problems += check_preset_header(decl, frag.name, text)
+        bases.add(preset_header(text).get("base"))
+    if len(bases) > 1:
+        problems.append(f"the presets name {sorted(map(str, bases))} as their base; one build has "
+                        "one original")
     if problems:
         raise PresetError("; ".join(problems))
+    if fragments:
+        original = bases.pop()
+    if original is not None:
+        fragments = [defconfig_path(original)] + list(fragments)
     kconf = kconfiglib.Kconfig(str(KCONFIG_ROOT), warn_to_stderr=False)
     # The interpreter's settings while fragments are merged are Zephyr's
     # (zephyr/scripts/kconfig/kconfig.py): an assignment to a symbol the tree does not have is
@@ -1074,7 +1143,38 @@ def cmd_check_presets() -> int:
         abi = BASE_ABI[preset_header(profile.read_text(encoding="utf-8"))["base"]]
         print(f"  wz-config presets: {profile.name} -> {abi}: "
               f"{cargo_args(decl, abi, resolved_caps(decl, kconf))}")
+    for original in BASE_ABI:
+        try:
+            kconf = resolve([], original=original)
+        except PresetError as exc:
+            print(f"  wz-config presets FAIL: {defconfig_path(original).name}: {exc}", file=sys.stderr)
+            bad += 1
+            continue
+        differences = original_differences(decl, original, kconf)
+        for difference in differences:
+            print(f"  wz-config presets FAIL: {defconfig_path(original).name}: {difference}",
+                  file=sys.stderr)
+        bad += bool(differences)
+        if not differences:
+            print(f"  wz-config presets: {defconfig_path(original).name} reproduces {original}: "
+                  f"{len(original_values(decl, original))} capabilities, "
+                  f"{', '.join(o['id'] for o in original_choices(decl, original))}")
     return 1 if bad else 0
+
+
+def original_differences(decl: dict, original: str, kconf) -> list[str]:
+    """Where the resolved defconfig of `original` is not that original's own default build: a
+    capability it is judged for with another value, or a global choice not taken."""
+    out: list[str] = []
+    have = resolved_caps(decl, kconf)
+    for cid, want in sorted(original_values(decl, original).items()):
+        if (cid in have) != want:
+            out.append(f"{cid} resolves {'on' if cid in have else 'off'}, and {original}'s own "
+                       f"default build has it {'on' if want else 'off'}")
+    for option in original_choices(decl, original):
+        if kconf.syms[option["kconfig"]].tri_value != 2:
+            out.append(f"{option['kconfig']} is not the choice taken, and it is {original}'s")
+    return out
 
 
 def configuration(kconf) -> dict[str, str]:
@@ -1109,13 +1209,14 @@ def cmd_check_equivalence() -> int:
             return 1
         print(f"  wz-config equivalence SKIP: {missing} is absent")
         return 0
-    inputs: list[tuple[str, list[pathlib.Path]]] = [("the defaults", [])]
-    inputs += [(p.name, [p]) for p in sorted(PROFILES.glob("*.conf"))]
+    inputs: list[tuple[str, list[pathlib.Path], str | None]] = [("the defaults", [], None)]
+    inputs += [(defconfig_path(o).name, [], o) for o in BASE_ABI]
+    inputs += [(p.name, [p], None) for p in sorted(PROFILES.glob("*.conf"))]
     bad = 0
-    for label, fragments in inputs:
+    for label, fragments, original in inputs:
         try:
-            a = configuration(resolve(fragments, pinned))
-            b = configuration(resolve(fragments, zephyr))
+            a = configuration(resolve(fragments, pinned, original))
+            b = configuration(resolve(fragments, zephyr, original))
         except PresetError as exc:
             print(f"  wz-config equivalence FAIL: {label}: {exc}", file=sys.stderr)
             bad += 1
@@ -1537,6 +1638,22 @@ def cmd_selftest() -> int:
                           "only a global axis"))
     expect("an implies that is not an array is refused",
            global_refused('implies = ["b"]', 'implies = "b"', "not an array"))
+    named = with_global.replace('prompt = "Client"', 'prompt = "Client"\nupstream_on = ["zenoh-pico"]') \
+        .replace('prompt = "Peer"', 'prompt = "Peer"\nupstream_on = ["zenoh", "zenoh-c"]')
+    expect("a global axis naming each original once validates", validate_decl(read_decl_toml(named)) == [])
+    expect("a global axis naming an original twice, or leaving one out, is refused",
+           any("exactly one" in p for p in validate_decl(read_decl_toml(
+               named.replace('upstream_on = ["zenoh-pico"]', 'upstream_on = ["zenoh-pico", "zenoh"]'))))
+           and any("exactly one" in p for p in validate_decl(read_decl_toml(
+               named.replace('upstream_on = ["zenoh", "zenoh-c"]', 'upstream_on = ["zenoh"]')))))
+    expect("an image axis's option naming an original is refused",
+           global_refused('prompt = "Left"', 'prompt = "Left"\nupstream_on = ["zenoh"]', "only a global axis"))
+    ndecl = decl_of(read_decl_toml(named))
+    expect("an original's defconfig states its choices and what differs from the defaults",
+           "\nCONFIG_WZ_MODE_C=y\n" in emit_defconfig(ndecl, "zenoh-pico")
+           and "\nCONFIG_WZ_MODE_P=y\n" in emit_defconfig(ndecl, "zenoh")
+           and "WZ_CAP_A" not in emit_defconfig(ndecl, "zenoh-pico")
+           and "# original: zenoh-pico\n" in emit_defconfig(ndecl, "zenoh-pico"))
     expect("an image Kconfig sourcing the global axes without the capabilities is a finding",
            check_image_sources("img", 'rsource "../Kconfig.axes"\n') != []
            and check_image_sources(
@@ -1630,10 +1747,18 @@ def cmd_selftest() -> int:
                    resolved_limit_env(decl, resolve([first])) == ["WZ_LIMIT_MAX_TASKS=4"])
             expect("a later preset overrides an earlier one",
                    resolved_limit_env(decl, resolve([first, later])) == ["WZ_LIMIT_MAX_TASKS=6"])
-            expect("a preset that changes nothing resolves to the defaults",
-                   resolved_caps(decl, resolve([preset(d, "empty.conf", "")]))
-                   == {cid for cid, cap in caps.items() if default_on(cap)}
+            expect("a preset that changes nothing resolves to its original's own default build",
+                   original_differences(decl, "zenoh-c", resolve([preset(d, "empty.conf", "")])) == []
                    and resolved_limit_env(decl, resolve([preset(d, "empty2.conf", "")])) == [])
+            expect("a preset that turns on what its original leaves off differs from the original",
+                   any("advanced" in x for x in original_differences(
+                       decl, "zenoh-c", resolve([preset(d, "adv.conf", "CONFIG_WZ_CAP_ADVANCED=y\n")]))))
+            expect("presets of two originals are refused",
+                   refused([preset(d, "c.conf", ""),
+                            preset(d, "p.conf", "", head.replace("base: zenoh-c", "base: zenoh-pico"))],
+                           "one original"))
+            expect("each original's defconfig resolves to that original",
+                   all(original_differences(decl, o, resolve([], original=o)) == [] for o in BASE_ABI))
             # The emitted tree of the global sample, read by the interpreter: the default option
             # leaves the off capability off, and the option that implies it turns it on.
             tree = d / "tree"

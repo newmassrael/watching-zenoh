@@ -1016,6 +1016,8 @@ id = "client"
 axis = "role"
 kconfig = "WZ_ROLE_CLIENT"
 prompt = "Client: dials a router, accepts no session"
+# zenoh-pico's `Z_CONFIG_MODE_DEFAULT` is `Z_CONFIG_MODE_CLIENT` (include/zenoh-pico/config.h.in).
+upstream_on = ["zenoh-pico"]
 help = '''
 A node that dials a router and is dialled by none: no listener, no accepted session. It
 needs nothing the peer role pulls in.
@@ -1027,6 +1029,8 @@ axis = "role"
 kconfig = "WZ_ROLE_PEER"
 prompt = "Peer: accepts sessions as well as dialling"
 implies = ["peer"]
+# zenoh-config's `defaults::mode` is `WhatAmI::Peer`, which zenoh-c's default config is too.
+upstream_on = ["zenoh", "zenoh-c"]
 help = '''
 Upstream's `mode = peer`. The capability `peer` is what a listener, a router and a peer have
 that a client does not, so the role pulls it in.

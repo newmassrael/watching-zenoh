@@ -907,8 +907,8 @@ round_fed_gates=(
     # plus one `cargo metadata --no-deps`, no build.
     "upstream_switch_map.py"
     # The build configuration's one declaration and what it generates. Round-fed by
-    # deploy/wz-config.toml, the generated Kconfig and Rust files, caps.rs and the
-    # profiles under configs/profiles/. MEASURED: 0.10s and 0.04s, text reads, no
+    # deploy/wz-config.toml, the generated Kconfig, Rust and defconfig files, caps.rs and
+    # the profiles under configs/profiles/. MEASURED: 0.10s and 0.04s, text reads, no
     # build. --check-presets SKIPs, printing why, where kconfiglib is not provisioned.
     "wz_config.py --check"
     "wz_config.py --check-presets"

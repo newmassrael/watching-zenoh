@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit defconfig:zenoh-c.
+# Do not edit: `wz_config.py --check` fails when this file is stale.
+#
+# zenoh-c's own default build in wz's switches (docs/build-configuration.md step 2):
+# its choice on each global axis, and every capability it is judged for whose value
+# differs from the Kconfig default. A capability its ABIs do not reach keeps the default.
+# A preset whose `# base:` is zenoh-c is merged onto this file.
+# catalog: 2
+# original: zenoh-c
+CONFIG_WZ_ROLE_PEER=y
+CONFIG_WZ_CAP_ADVANCED=n
+CONFIG_WZ_CAP_GROUP=n
+CONFIG_WZ_CAP_E2E_SENDER=n
