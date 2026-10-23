@@ -1135,12 +1135,17 @@ mod datagram {
         tx.tx_pool_stats().expect("a pooled queue").1
     }
 
-    /// The shape an established UDP session without QoS gives its queue.
+    /// A queue shape whose one lane is bounded at two datagrams (2 x 1450
+    /// bytes), the small lane the slot-budget rule is shown on. An established
+    /// UDP session counts its lanes in the configured batch instead
+    /// (`TxQueueShape::queue_unit_bytes`), which the budget then clamps to the
+    /// pool's table.
     fn udp_shape() -> TxQueueShape {
         TxQueueShape {
             sizes: [2; Priority::NUM],
             qos: false,
             batch_bytes: 1450,
+            queue_unit_bytes: 1450,
         }
     }
 

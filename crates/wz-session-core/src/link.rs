@@ -530,11 +530,26 @@ pub struct TxQueueShape {
     /// Whether the session negotiated QoS: `false` folds every priority onto
     /// the `Priority::DEFAULT` queue.
     pub qos: bool,
-    /// R2925 — the bytes one batch holds on this link, the unit a queue size
-    /// counts in: the link's negotiated batch MTU, as upstream sizes a
-    /// pipeline's batches by the link's `batch.mtu`
+    /// R2925 — the bytes one batch holds on this link: the link's negotiated
+    /// batch MTU, as upstream sizes a pipeline's batches by the link's
+    /// `batch.mtu`
     /// (`io/zenoh-transport/src/unicast/universal/link.rs` @ `mtu: link.config.batch.mtu,`).
+    /// What a frame may weigh on the wire; it packs and fragments by it.
     pub batch_bytes: usize,
+    /// The bytes one batch counts for when a queue size bounds a lane, which
+    /// is the session's configured batch size and never less than
+    /// [`Self::batch_bytes`].
+    ///
+    /// This departs from upstream, which counts the lane in negotiated
+    /// batches (`io/zenoh-transport/src/unicast/universal/link.rs` @
+    /// `mtu: link.config.batch.mtu,`). On a link whose batch is a datagram
+    /// (UDP sends 1450 bytes) that bound is `queue_size * 1450` = 2,900 bytes
+    /// by default: three replies of 1 KiB fill the lane, the fourth waits
+    /// `wait_before_drop` and is dropped, and the query it answered times out.
+    /// Upstream's router stalls on the same load. The bound is the sender's
+    /// memory policy, so it follows the sender's configuration and not the
+    /// size of the datagram the peer can read.
+    pub queue_unit_bytes: usize,
 }
 
 impl TxQueueShape {

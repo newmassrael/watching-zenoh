@@ -175,13 +175,15 @@ impl Drop for Measurement {
 
 const P: Priority = Priority::DEFAULT;
 
-/// The shape an established UDP session without QoS gives its queue: one lane
-/// of 2 x 1450 bytes, so a slot budget of 3 small and 2 large.
+/// A queue shape whose one lane is bounded at two datagrams: 2 x 1450 bytes, so
+/// a slot budget of 3 small and 2 large. An established UDP session counts its
+/// lanes in the configured batch instead (`TxQueueShape::queue_unit_bytes`).
 fn udp_shape() -> TxQueueShape {
     TxQueueShape {
         sizes: [2; Priority::NUM],
         qos: false,
         batch_bytes: 1450,
+        queue_unit_bytes: 1450,
     }
 }
 

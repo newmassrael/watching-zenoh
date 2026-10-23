@@ -14281,12 +14281,16 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         // the link joins an established transport.
         //
         // R2925 — its batches are the link's negotiated batch MTU, as
-        // upstream's pipeline batches are the link's `batch.mtu`.
-        self.link().link_driver().shape_tx_queue(
-            a.params
-                .tx_queue
-                .shape(a.negotiated_qos(), a.negotiated_batch_mtu()),
-        );
+        // upstream's pipeline batches are the link's `batch.mtu`. What a lane
+        // is bounded by is counted in the session's CONFIGURED batch size, not
+        // in that MTU (`TxQueueShape::queue_unit_bytes` says why).
+        self.link()
+            .link_driver()
+            .shape_tx_queue(a.params.tx_queue.shape(
+                a.negotiated_qos(),
+                a.negotiated_batch_mtu(),
+                a.params.effective_batch_size() as usize,
+            ));
     }
 
     #[inline(never)]

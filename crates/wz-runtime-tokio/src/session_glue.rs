@@ -4976,6 +4976,7 @@ mod link_congestion_tests {
                 sizes,
                 qos: false,
                 batch_bytes: 1_024,
+                queue_unit_bytes: 1_024,
             }]
         );
     }
@@ -5002,7 +5003,7 @@ mod link_congestion_tests {
         }
         assert_eq!(
             *link.shapes.lock().expect("shapes"),
-            [super::TxQueueConf::default().shape(true, 65_535)]
+            [super::TxQueueConf::default().shape(true, 65_535, 65_535)]
         );
     }
 
@@ -5781,6 +5782,7 @@ mod reconnect_tx_tests {
             sizes: [3; Priority::NUM],
             qos: true,
             batch_bytes: 512,
+            queue_unit_bytes: 512,
         };
 
         let wait = RoomWait::Drop { wait_us: 0 };

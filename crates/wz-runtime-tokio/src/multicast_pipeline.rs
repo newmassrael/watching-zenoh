@@ -564,11 +564,13 @@ impl MulticastTxPlane {
             _ => params,
         };
         let (lanes, mut queued) = pipeline_lanes();
-        lanes.reshape(
-            params
-                .tx_queue
-                .shape(params.is_qos, usize::from(params.batch_size)),
-        );
+        // A multicast group sends the configured batch, so the batch the link
+        // sends and the batch a lane is counted in are the same number.
+        lanes.reshape(params.tx_queue.shape(
+            params.is_qos,
+            usize::from(params.batch_size),
+            usize::from(params.batch_size),
+        ));
         let sender = match driver.datagram_sender() {
             Ok(sender) => Some(sender),
             Err(e) => {
@@ -798,11 +800,11 @@ impl MulticastTxTap {
         ),
     ) -> (MulticastTxProducer, Self) {
         let producer = MulticastTxProducer::new();
-        lanes.reshape(
-            params
-                .tx_queue
-                .shape(params.is_qos, usize::from(params.batch_size)),
-        );
+        lanes.reshape(params.tx_queue.shape(
+            params.is_qos,
+            usize::from(params.batch_size),
+            usize::from(params.batch_size),
+        ));
         let mask = sn::mask_from_res(params.seq_num_res);
         let stages = new_stages(mask);
         producer.attach(Arc::new(Link {

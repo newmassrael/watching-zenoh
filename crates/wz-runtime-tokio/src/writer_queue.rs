@@ -791,7 +791,9 @@ impl LaneState {
     fn reshape(&mut self, shape: wz_session_core::link::TxQueueShape) {
         self.single_lane = !shape.qos;
         self.batch_bytes = shape.batch_bytes;
-        self.capacity = shape.sizes.map(|n| n * self.batch_bytes);
+        // A lane is bounded in the configured unit, not in the batch the link
+        // sends (`TxQueueShape::queue_unit_bytes` says why).
+        self.capacity = shape.sizes.map(|n| n * shape.queue_unit_bytes);
         if self.single_lane {
             // zenoh sizes a non-QoS transport's one queue by the DEFAULT
             // priority's size.
@@ -3890,6 +3892,7 @@ mod tests {
             sizes,
             qos: false,
             batch_bytes: 4,
+            queue_unit_bytes: 4,
         });
 
         tx.send(Priority::DEFAULT, b"data".to_vec())
@@ -3917,6 +3920,7 @@ mod tests {
             sizes,
             qos: true,
             batch_bytes: 4,
+            queue_unit_bytes: 4,
         });
 
         tx.send(Priority::RealTime, vec![0u8; 4]).expect("enqueue");
@@ -3932,6 +3936,43 @@ mod tests {
             "a size-3 queue still has two"
         );
         assert_eq!(rx.try_recv(), Some(vec![0u8; 4]), "RealTime still first");
+    }
+
+    /// The lane's bound is counted in the shape's `queue_unit_bytes`, not in
+    /// the batch the link sends. A datagram link sends 1450 bytes; with the
+    /// default size of two, counting in that batch bounds the lane at 2,900
+    /// bytes, three replies of 1 KiB fill it, and the fourth, a droppable
+    /// message that waits `wait_before_drop`, is dropped. Counted in the
+    /// configured 65,535 it finds room. The control is the same four frames
+    /// under the datagram unit, which refuse the fourth.
+    #[test]
+    fn a_datagram_link_does_not_shrink_a_lane_to_two_datagrams() {
+        use wz_session_core::link::TxQueueShape;
+        const REPLY: usize = 1066;
+        let four_replies = |unit: usize| {
+            let (tx, _rx) = outbound_channel_with_capacity([2; Priority::NUM], 65_535);
+            tx.reshape(TxQueueShape {
+                sizes: [2; Priority::NUM],
+                qos: false,
+                batch_bytes: 1450,
+                queue_unit_bytes: unit,
+            });
+            for _ in 0..3 {
+                tx.send(Priority::DEFAULT, vec![0u8; REPLY])
+                    .expect("enqueue");
+            }
+            tx.wait_for_room(Priority::DEFAULT, droppable(Duration::ZERO))
+        };
+        assert_eq!(
+            four_replies(65_535),
+            Room::Free,
+            "a lane counted in the configured batch has room for a fourth reply"
+        );
+        assert_eq!(
+            four_replies(1450),
+            Room::Congested,
+            "counted in the datagram, the same lane is full after three"
+        );
     }
 
     /// Within one priority the lane is FIFO: two conduits' frames minted in SN

@@ -245,13 +245,25 @@ impl TxQueueConf {
     }
 
     /// The shape a link of a session with this configuration takes at
-    /// Established, given whether the session negotiated QoS and the link's
-    /// negotiated batch MTU.
-    pub const fn shape(&self, qos: bool, batch_bytes: usize) -> crate::link::TxQueueShape {
+    /// Established, given whether the session negotiated QoS, the link's
+    /// negotiated batch MTU, and the session's configured batch size, the unit
+    /// a lane's bound counts in ([`crate::link::TxQueueShape::queue_unit_bytes`]).
+    /// The unit is never less than the batch MTU.
+    pub const fn shape(
+        &self,
+        qos: bool,
+        batch_bytes: usize,
+        configured_batch_bytes: usize,
+    ) -> crate::link::TxQueueShape {
         crate::link::TxQueueShape {
             sizes: self.sizes,
             qos,
             batch_bytes,
+            queue_unit_bytes: if configured_batch_bytes > batch_bytes {
+                configured_batch_bytes
+            } else {
+                batch_bytes
+            },
         }
     }
 }
@@ -275,6 +287,24 @@ impl SessionInitParams {
             0 => 65535,
             n => n,
         }
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::TxQueueConf;
+
+    /// A lane is bounded in the session's configured batch size, so a link
+    /// that sends datagrams does not shrink it to two datagrams; and a
+    /// configured size below what the link sends never lowers the unit under
+    /// the batch the link really sends.
+    #[test]
+    fn a_lane_is_counted_in_the_configured_batch_and_never_below_the_links() {
+        let conf = TxQueueConf::default();
+        let udp = conf.shape(true, 1450, 65535);
+        assert_eq!((udp.batch_bytes, udp.queue_unit_bytes), (1450, 65535));
+        let small = conf.shape(true, 2048, 1024);
+        assert_eq!((small.batch_bytes, small.queue_unit_bytes), (2048, 2048));
     }
 }
 
