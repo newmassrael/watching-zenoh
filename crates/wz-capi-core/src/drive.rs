@@ -5410,10 +5410,12 @@ mod multicast_face_tests {
     /// # Control
     ///
     /// With the drive's `observe` registration removed, no event is announced and the
-    /// listing stays empty: the first wait times out. Without B's Close, A drops B only when
-    /// its 10 s lease expires, well after the 2.5 s the second wait allows; on a paused clock
-    /// that wait could reach the lease, so the test runs on the real one (see
-    /// [`two_sessions_put_and_get_through_their_group_faces`]).
+    /// listing stays empty: the first wait runs out. Without B's Close, A drops B only when
+    /// its 10 s lease expires, and the second wait reads no clock, so A still lists B when its
+    /// turns run out: the test cannot pass on the lease. The Close reaches A because the bus
+    /// keeps a member's place while a send half of its link lives, as a socket does (see
+    /// `GroupBus`); the test ran on the real clock for the reason
+    /// [`two_sessions_put_and_get_through_their_group_faces`] gives.
     #[tokio::test]
     async fn a_member_is_announced_and_listed_as_a_multicast_transport() {
         use crate::faces::{FaceEventKind, FaceSnapshot};
@@ -5437,9 +5439,12 @@ mod multicast_face_tests {
                 let b_task = join(&bus, 2, &b, b_stop_rx, up_tx);
                 assert_eq!(up_rx.recv().await, Some(true), "the first face joined");
                 assert_eq!(up_rx.recv().await, Some(true), "the second face joined");
+                // B's arrival waits for B's JOIN beacon, which leaves on the loop's clock (every
+                // 100 ms), so this wait is time. Its bound is generous: a run that reaches it has
+                // not been slow, it has lost the beacon.
                 let mut waited = 0;
                 while a.group_member_snapshots().is_empty() {
-                    assert!(waited < 50, "A never listed B");
+                    assert!(waited < 200, "A never listed B");
                     tokio::time::sleep(Duration::from_millis(50)).await;
                     waited += 1;
                 }
@@ -5474,11 +5479,15 @@ mod multicast_face_tests {
 
                 b_stop.send(true).expect("B's face watches its stop");
                 b_task.await.expect("B's face ended");
-                let mut waited = 0;
+                // B's face ends after its transmit task has written everything queued, its Close
+                // included, so the Close is already in A's channel: what is left is A's loop, on
+                // this very thread, taking it. That is a matter of turns and not of time, so the
+                // bound is a count of the turns this task gives up and no clock is read.
+                let mut turns = 0;
                 while !a.group_member_snapshots().is_empty() {
-                    assert!(waited < 50, "A still lists B after its Close");
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    waited += 1;
+                    assert!(turns < 1_000, "A still lists B after its Close");
+                    tokio::task::yield_now().await;
+                    turns += 1;
                 }
                 let seen: Vec<_> = events
                     .lock()
