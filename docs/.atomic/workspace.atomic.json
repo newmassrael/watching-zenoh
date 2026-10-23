@@ -280450,6 +280450,54 @@
         "Open-debt item 924 continues at step 4a (rows handed out as Row, the capture-order walk sorting keys)"
       ]
     },
+    "Round 3477": {
+      "decision_summary": "Round 3473 bounded a session loop's turn at eight events, but an event is not a unit: one that carries thirty records costs thirty times one record. The turn is now eight records. An event pays a unit for each record it carries, one for an event with none, and an event that overdraws the turn yields once for each whole quantum it overdrew: deficit round robin with the run queue as the round, so every session has the same share of its thread whatever its frames hold. The bound in the code, 0.7 s for 2048 sessions, used an assumed 2 us an event and is replaced: an event of one record measures 6.5 to 11 us on a build host, which makes the return 2.1 to 3.6 s on a twentieth of a core against the 10 s lease. A test holds the property with no clock: one thread, an endless backlog, a second task woken in the middle runs within eight events, and the same flood without the loop's yield does not. The E7s binary passes and the cost table did not move beside the previous loop.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: the turn counts units (TURN_UNIT_BUDGET, 8) charged by event_units, and Turn::after_event yields once for each whole quantum the event overdrew and carries the remainder; the doc of the constant gives the bound with its measured cost per event and drops the figure of round 3473 that was assumed.",
+        "crates/wz-runtime-tokio/tests/session_keepalive_tx.rs: a link that is always readable and a second task woken in the backlog's middle, once through drive_session_until_terminal (the task runs within one turn) and once through a bare loop (it runs after the flood), so the first proves the loop and not the link; three unit tests of the charge in session_glue.rs.",
+        "docs/router-data-plane-scaling.md: section 7.2 records what 7.1 missed (the router's own DOWN count was a race, the clients' lease expiries are the property), the cause, the quantum, the measured bound, the result, and what of 4.3 is not built; 7.1 and 4.3 point to it.",
+        "docs/reason-review-pins.md: the row of session-close-ingress for session_glue.rs moves to the file's new blob, after reading its one clause on the file again (the out-of-band check at the head of every iteration and the wait on it in both arms, lines 1406, 1493 and 1639), which this change leaves as it was."
+      ],
+      "verification_bullets": [
+        "On a build host: the three unit tests and the eleven tests of session_keepalive_tx pass; with the budget set to a million the loop test fails with the other task running at event 20001 for a wake at 1000, so the test fails against the fault it exists for.",
+        "The whole E7s binary at four cores passes with the unit-weighted turn: the starved router loses no face and admits 316 of 316, and forwards 28% of the offered load.",
+        "The cost table, the new loop against the previous one, run alternately twice each on a host whose load swung from 7 to 22: 2048 subscribers 18.2 and 12.7 us a message against 19.9 and 19.4, so no regression shows and no gain is claimed.",
+        "clippy with warnings denied reports nothing on wz-runtime-tokio, tests included; the two count guards the range reaches are 9 and 6 as declared; the pin gate passes.",
+        "Not measured: the latency of one request and reply with the yield in; the cost of a keepalive emission under 2048 sessions beyond the 4.5 us read in one run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Step 1 of the router liveness structure the owner approved (2026-10-24) is this round. Left: a keepalive and lease executor of its own with strict priority over data, a capacity model that admits a session only while its control work fits a stated CPU budget, a stated drop policy for data with counters on the admin space, and a test that asserts the latest a timer was served and not the count of faces DOWN. The definition of the CPU budget (configured or measured) is the owner's.",
+        "Round 3473's ledger text states a bound of 0.7 s for the turn; section 7.2 of docs/router-data-plane-scaling.md and the code's doc replace it with 2.1 to 3.6 s, from a measured cost per event.",
+        "The hosted E7s run of the push of round 3473 and the isolated-crate lanes (C1bz), cancelled in the run before it, are unread.",
+        "Two gates are red on origin/main from commit 125217f45 of another session (discard_site_lint on passive_messages.rs, accessor_reach_census on MessageList and Rows); that session is told, and neither is changed here."
+      ],
+      "publishable_decision_summary": "Round 3473 bounded a session loop's turn at eight events, but an event is not a unit: one that carries thirty records costs thirty times one record. The turn is now eight records. An event pays a unit for each record it carries, one for an event with none, and an event that overdraws the turn yields once for each whole quantum it overdrew: deficit round robin with the run queue as the round, so every session has the same share of its thread whatever its frames hold. The bound in the code, 0.7 s for 2048 sessions, used an assumed 2 us an event and is replaced: an event of one record measures 6.5 to 11 us on a build host, which makes the return 2.1 to 3.6 s on a twentieth of a core against the 10 s lease. A test holds the property with no clock: one thread, an endless backlog, a second task woken in the middle runs within eight events, and the same flood without the loop's yield does not. The E7s binary passes and the cost table did not move beside the previous loop.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session_glue.rs: the turn counts units (TURN_UNIT_BUDGET, 8) charged by event_units, and Turn::after_event yields once for each whole quantum the event overdrew and carries the remainder; the doc of the constant gives the bound with its measured cost per event and drops the figure of round 3473 that was assumed.",
+        "crates/wz-runtime-tokio/tests/session_keepalive_tx.rs: a link that is always readable and a second task woken in the backlog's middle, once through drive_session_until_terminal (the task runs within one turn) and once through a bare loop (it runs after the flood), so the first proves the loop and not the link; three unit tests of the charge in session_glue.rs.",
+        "docs/router-data-plane-scaling.md: section 7.2 records what 7.1 missed (the router's own DOWN count was a race, the clients' lease expiries are the property), the cause, the quantum, the measured bound, the result, and what of 4.3 is not built; 7.1 and 4.3 point to it.",
+        "docs/reason-review-pins.md: the row of session-close-ingress for session_glue.rs moves to the file's new blob, after reading its one clause on the file again (the out-of-band check at the head of every iteration and the wait on it in both arms, lines 1406, 1493 and 1639), which this change leaves as it was."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the three unit tests and the eleven tests of session_keepalive_tx pass; with the budget set to a million the loop test fails with the other task running at event 20001 for a wake at 1000, so the test fails against the fault it exists for.",
+        "The whole E7s binary at four cores passes with the unit-weighted turn: the starved router loses no face and admits 316 of 316, and forwards 28% of the offered load.",
+        "The cost table, the new loop against the previous one, run alternately twice each on a host whose load swung from 7 to 22: 2048 subscribers 18.2 and 12.7 us a message against 19.9 and 19.4, so no regression shows and no gain is claimed.",
+        "clippy with warnings denied reports nothing on wz-runtime-tokio, tests included; the two count guards the range reaches are 9 and 6 as declared; the pin gate passes.",
+        "Not measured: the latency of one request and reply with the yield in; the cost of a keepalive emission under 2048 sessions beyond the 4.5 us read in one run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 1 of the router liveness structure the owner approved (2026-10-24) is this round. Left: a keepalive and lease executor of its own with strict priority over data, a capacity model that admits a session only while its control work fits a stated CPU budget, a stated drop policy for data with counters on the admin space, and a test that asserts the latest a timer was served and not the count of faces DOWN. The definition of the CPU budget (configured or measured) is the owner's.",
+        "Round 3473's ledger text states a bound of 0.7 s for the turn; section 7.2 of docs/router-data-plane-scaling.md and the code's doc replace it with 2.1 to 3.6 s, from a measured cost per event.",
+        "The hosted E7s run of the push of round 3473 and the isolated-crate lanes (C1bz), cancelled in the run before it, are unread.",
+        "Two gates are red on origin/main from commit 125217f45 of another session (discard_site_lint on passive_messages.rs, accessor_reach_census on MessageList and Rows); that session is told, and neither is changed here."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
