@@ -1469,16 +1469,15 @@ impl DatagramDissection {
     /// walks this is right for lists that do not exist yet, and a list added
     /// here reaches every plane at once. The rows keep their own coordinate
     /// meanings — see [`Self::quic_streams`] — so this is deliberately an
-    /// iterator of SLICES and not a flattened frame iterator, which would fuse
+    /// iterator of LISTS and not a flattened frame iterator, which would fuse
     /// two offset spaces into one sequence.
     ///
     /// R2102 — a projection of [`Self::frame_lists_with_origin`] rather than a
     /// second walk of the same fields. See that method for why the origin
     /// exists; this one drops it because every existing caller counts or folds
     /// and none of them needs to tell one list from another.
-    pub fn frame_lists(&self) -> impl Iterator<Item = &[PassiveFrame]> {
-        self.frame_lists_with_origin()
-            .map(|(_, list)| list.as_slice())
+    pub fn frame_lists(&self) -> impl Iterator<Item = &messages::MessageList> {
+        self.frame_lists_with_origin().map(|(_, list)| list)
     }
 
     /// The messages `frames_per_flow` counts against THIS flow: the cleartext
@@ -1851,8 +1850,8 @@ fn instant_of_plaintext(
 /// where that record ends (`record_ends`, one per span, header and tag
 /// included). So the two ends bound every record that carried a byte of the
 /// unit, and nothing in them is a plaintext measure.
-fn remap_decrypted_offsets(
-    frames: &mut [PassiveFrame],
+fn remap_decrypted_offsets<'f>(
+    frames: impl Iterator<Item = &'f mut PassiveFrame>,
     spans: &[(usize, usize)],
     record_ends: &[usize],
 ) {
@@ -1904,7 +1903,7 @@ pub struct DecryptedStream<'a> {
     /// Valid only during the call. `remap_decrypted_offsets` rewrites every one
     /// of these `stream_offset`s into ciphertext space the moment it returns,
     /// which is what makes this window the only one.
-    pub frames: &'a [wz_session_core::passive::PassiveFrame],
+    pub frames: messages::Rows<'a>,
     /// `(offset within `plaintext`, stream offset of the RECORD it came out of)`,
     /// in increasing order of the first.
     ///
@@ -1983,7 +1982,7 @@ pub struct RecoveredDatagram<'a> {
     /// The messages framed out of it. Their `unit_offset` and `unit_len` are
     /// offsets into [`Self::payload`]; their `stream_offset` is
     /// [`Self::packet_index`] and must not be used to slice it.
-    pub frames: &'a [PassiveFrame],
+    pub frames: messages::Rows<'a>,
 }
 
 impl PlaintextSink for () {
@@ -5571,7 +5570,7 @@ impl Dissection {
 
     /// R311y721 — the serial line's decoded messages alone, as the census
     /// planes take them.
-    pub fn serial_frames(&self) -> &[PassiveFrame] {
+    pub fn serial_frames(&self) -> &messages::MessageList {
         &self.serial_frames
     }
 
@@ -5614,9 +5613,9 @@ impl Dissection {
     /// a frame now carries its own ([`crate::anchor_space_of`]), which is where
     /// every consumer of this iterator was already reading it from — none of
     /// them ever used the space of a list with no frames in it.
-    pub fn message_lists(&self) -> impl Iterator<Item = (FlowKey, &[PassiveFrame])> {
+    pub fn message_lists(&self) -> impl Iterator<Item = (FlowKey, &messages::MessageList)> {
         self.message_lists_with_origin()
-            .map(|(flow, _, list)| (flow, list.as_slice()))
+            .map(|(flow, _, list)| (flow, list))
     }
 
     /// R2102 (open-debt item 524) — THE enumeration, saying which list each one
@@ -6205,11 +6204,11 @@ impl Dissection {
                     flow: flow.flow,
                     direction: idx_direction(index),
                     plaintext: &plaintext[index],
-                    frames: &flow.frames[before..],
+                    frames: flow.frames.rows_from(before),
                     record_origins: &spans[index],
                 });
                 remap_decrypted_offsets(
-                    &mut flow.frames[before..],
+                    flow.frames.iter_mut_from(before),
                     &spans[index],
                     &record_ends[index],
                 );
@@ -6414,17 +6413,17 @@ impl Dissection {
         }
         if walk_from < stream.frames.len() {
             let shift = base as usize;
-            for f in stream.frames[walk_from..].iter_mut() {
+            for f in stream.frames.iter_mut_from(walk_from) {
                 f.stream_offset -= shift;
             }
             sink.on_plaintext(DecryptedStream {
                 flow,
                 direction,
                 plaintext: bytes,
-                frames: &stream.frames[walk_from..],
+                frames: stream.frames.rows_from(walk_from),
                 record_origins: &[],
             });
-            for f in stream.frames[walk_from..].iter_mut() {
+            for f in stream.frames.iter_mut_from(walk_from) {
                 f.stream_offset += shift;
             }
         } else if added > 0 {
@@ -6515,7 +6514,7 @@ impl Dissection {
             direction,
             packet_index,
             payload: bytes,
-            frames: &dg.quic_datagrams[before..],
+            frames: dg.quic_datagrams.rows_from(before),
         });
         dg.residue.fed += bytes.len() as u64;
         let idx = self

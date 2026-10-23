@@ -1260,9 +1260,9 @@ impl PayloadCensus {
     /// R2457 (open-debt item 702) — `spaces` is the CAPTURE's and is handed in.
     /// See [`crate::agg::SpaceOwner`] for why one instance per flow was the
     /// wrong unit.
-    pub fn observe_flow_where(
+    pub fn observe_flow_where<'f>(
         &mut self,
-        frames: &[wz_session_core::passive::PassiveFrame],
+        frames: impl IntoIterator<Item = &'f wz_session_core::passive::PassiveFrame>,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
         spaces: &mut crate::agg::KeyexprSpaces,

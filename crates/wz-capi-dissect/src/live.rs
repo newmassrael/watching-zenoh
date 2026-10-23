@@ -631,9 +631,12 @@ impl LiveDissection {
                     id
                 });
 
-            while mark.drained < produced && written < out.len() {
-                let idx = (mark.drained - first_held) as usize;
-                out[written] = record_of(&list[idx], flow_id, list_id, origin);
+            // The rows not yet handed out, as many as the buffer has room for,
+            // read as one run rather than looked up one position at a time.
+            let start = (mark.drained - first_held) as usize;
+            let take = (produced.saturating_sub(mark.drained) as usize).min(out.len() - written);
+            for frame in list.rows_from(start).iter().take(take) {
+                out[written] = record_of(frame, flow_id, list_id, origin);
                 written += 1;
                 mark.drained += 1;
             }

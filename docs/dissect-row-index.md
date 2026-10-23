@@ -192,6 +192,16 @@ re-walk of 1.39M rows costs about 1.5 s more than it does now.
    gives them a byte source.
 2. Chunked row storage (D2's store) with the rows unchanged: removes the
    doubling slack and the large copies.
+   Landed: `MessageList` keeps its rows in a `ChunkLog` (1024-row chunks, each
+   one run) and hands readers rows (`len`, `get`, `iter`, `rows_from`,
+   indexing) instead of a slice, so no reader depends on how rows are stored
+   any more; `Dissection::frame_lists`, `message_lists`, `serial_frames` and
+   the two plaintext sink records changed type accordingly. Measured with the
+   section 2 instrument: heap after census 348 to 303 MiB (409,064 rows) and
+   1,355 to 1,075 MiB (1,386,564 rows); peak RSS unchanged, because the slack
+   removed was capacity no page of had been touched; time within noise of the
+   baseline (median of six alternating pairs). The resident cost is the row
+   itself, which steps 3 and 4 remove.
 3. Segment map and byte source (D1): the reassembled stream copy goes.
 4. Index rows, side tables, re-decoder in the read path, cache (D2, D3, D5, D6).
 5. The memory gate (D7) and the lent-buffer door.

@@ -518,7 +518,7 @@ impl NodeCensus {
     pub fn observe_flow(
         &mut self,
         flow: &FlowKey,
-        frames: &[PassiveFrame],
+        frames: &crate::messages::MessageList,
         // R2456 (open-debt item 701) — the list's index in
         // `Dissection::message_lists()`, which `crate::agg` and
         // `crate::interest` already take for the same reason: it is half the
@@ -542,7 +542,7 @@ impl NodeCensus {
     pub(crate) fn observe_flow_from(
         &mut self,
         flow: &FlowKey,
-        frames: &[PassiveFrame],
+        frames: &crate::messages::MessageList,
         list: usize,
         start: usize,
         ends: &mut [Option<usize>; 2],
@@ -562,7 +562,7 @@ impl NodeCensus {
         // flow that is genuinely reused by a different node names the new one —
         // taking the latest is what keeps the link current rather than
         // remembering a node that has gone.
-        for frame in &frames[start..] {
+        for frame in frames.rows_from(start) {
             let Some((zid, whatami, kind)) = named_zid(frame) else {
                 continue;
             };
@@ -606,7 +606,7 @@ impl NodeCensus {
         // owns a direction is settled by the handshake, and a fold that
         // attributed bytes as it walked would credit everything before the
         // INIT to nobody even on a flow whose INIT arrives one message later.
-        for frame in &frames[start..] {
+        for frame in frames.rows_from(start) {
             // Once per unit. See `ObservedNode::wire_bytes`.
             if frame.batch_index != 0 {
                 continue;
@@ -1093,7 +1093,7 @@ impl NodeMemory {
                 return false;
             }
             let start = (mark.produced.max(first) - first) as usize;
-            if frames[start..].iter().any(names_a_zid) {
+            if frames.rows_from(start).iter().any(names_a_zid) {
                 return false;
             }
         }
@@ -1504,7 +1504,7 @@ pub fn absorb_datagram_sublists(
     let _ = pairs.next();
     for ((_, messages), &list) in pairs {
         spaces.enter_flow(grouping.owners(list));
-        for frame in messages.as_slice() {
+        for frame in messages {
             spaces.absorb_frame(frame);
         }
     }

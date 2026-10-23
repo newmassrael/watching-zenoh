@@ -577,9 +577,9 @@ impl ExchangeTable {
     /// R2457 (open-debt item 702) — `spaces` is the CAPTURE's and is handed in.
     /// See [`crate::agg::SpaceOwner`] for why one instance per flow was the
     /// wrong unit.
-    pub fn observe_flow_where(
+    pub fn observe_flow_where<'f>(
         &mut self,
-        frames: &[PassiveFrame],
+        frames: impl IntoIterator<Item = &'f PassiveFrame>,
         filter: &Filter,
         ctx: crate::node::ListContext<'_>,
         spaces: &mut KeyexprSpaces,

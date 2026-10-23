@@ -44,18 +44,21 @@
 //!
 //! # Why the API is shaped the way it is
 //!
-//! [`Deref`] and [`DerefMut`] target a SLICE, never the `Vec`. That is the load
-//! -bearing choice and it is R311y713's, one obligation over:
+//! Readers get ROWS, not a slice: `len`, `get`, `first`, `last`, `iter`,
+//! `iter_mut`, indexing, and `&list` in a `for`. Two rules hold, R311y713's and
+//! open-debt item 924's:
 //!
-//! - Every READ keeps working — `len`, `iter`, `first`, indexing, `&list` where
-//!   `&[PassiveFrame]` is wanted, and `&mut list[..]` for an in-place rewrite
-//!   like `remap_decrypted_offsets`. Two hundred call sites did not have to
-//!   change, so this type could land without a rewrite that would itself be a
-//!   source of defects.
-//! - Nothing can GROW or SHRINK the list through the deref, because a slice has
-//!   no `push`, no `extend` and no `remove`. Every such call must name a method
-//!   here — which is the whole point: it makes the accounting obligation a
-//!   place in the type system rather than a paragraph a reader has to follow.
+//! - Nothing can GROW or SHRINK the list except through a method here: the row
+//!   API has no `push`, no `extend` and no `remove`. That makes the accounting
+//!   obligation a place in the type system rather than a paragraph a reader has
+//!   to follow.
+//! - Nothing outside this type learns how the rows are STORED. Until item 924
+//!   the list was a slice behind `Deref`, which promised every reader one
+//!   contiguous run; a list of hundreds of thousands of rows kept that promise
+//!   by doubling one buffer and copying every row into each new one, and held up
+//!   to half of it as capacity no row used. The rows now sit in chunks (see
+//!   `ChunkLog`), and the next steps of `docs/dissect-row-index.md` change what a
+//!   row is behind the same API.
 //!
 //! # The discard receipt
 //!
@@ -67,9 +70,8 @@
 //! a type. This is that ending, applied to the other list.
 
 use alloc::collections::VecDeque;
-#[cfg(feature = "reassembly")]
 use alloc::vec::Vec;
-use core::ops::{Deref, DerefMut};
+use core::ops::{Index, IndexMut};
 
 use crate::passive::PassiveFrame;
 #[cfg(feature = "reassembly")]
@@ -87,26 +89,18 @@ use crate::reassembly_dispatch::IngestOutcome;
 /// exactly one door can make.
 #[derive(Debug, Default)]
 pub struct MessageList {
-    /// R2109 (open-debt item 528) — a DEQUE, and the change is a cost rather
-    /// than a taste.
+    /// The rows, in chunks.
     ///
-    /// It was a `Vec`, and [`MessageList::discard_oldest`] took the front with
-    /// `remove(0)` — an O(n) memmove of the whole list per message discarded.
-    /// That is invisible until a bound bites, and then it is everything: a live
-    /// tap at its `frames_per_flow` ceiling pays list-length per incoming
-    /// message, so cost grows with the CEILING rather than with the traffic.
-    /// Measured at the ceiling before this change, one 1400-byte packet cost
-    /// 28.8 ms to decode against 67 us with no cap — 437x, and essentially all
-    /// of it here.
+    /// R2109 (open-debt item 528) — taking the oldest is O(1): it was a `Vec`
+    /// whose `remove(0)` moved the whole list per message discarded, and a live
+    /// tap at its `frames_per_flow` ceiling paid list-length per incoming
+    /// message (one 1400-byte packet cost 28.8 ms against 67 us uncapped).
     ///
-    /// The deque is kept CONTIGUOUS on purpose. Every consumer of this type
-    /// reads it as `&[PassiveFrame]` through [`Deref`], `as_slice` and
-    /// `IntoIterator`, and a slice is what a caller building an iterator chain
-    /// or indexing an anchor actually needs. `make_contiguous` after each
-    /// mutation costs a branch while the ring has not wrapped and one rotate
-    /// when it has, which is amortised O(1) — against an unconditional O(n)
-    /// before.
-    held: VecDeque<PassiveFrame>,
+    /// Open-debt item 924 — and growing is O(1) without copying what is held:
+    /// one buffer that doubles copies every row into each new buffer and holds
+    /// up to half of it unused, which on a replayed file of a million rows is
+    /// hundreds of megabytes. See [`ChunkLog`].
+    held: ChunkLog<PassiveFrame>,
     /// R2102 (open-debt item 524) — messages EVER appended to this list, which
     /// is a different number from `len` the moment a bound bites.
     ///
@@ -263,7 +257,7 @@ impl MessageList {
     /// An empty list.
     pub fn new() -> Self {
         Self {
-            held: VecDeque::new(),
+            held: ChunkLog::new(),
             produced: 0,
             #[cfg(feature = "reassembly")]
             chain_prefix: ChainFold::default(),
@@ -278,41 +272,26 @@ impl MessageList {
         &self.chain_prefix
     }
 
-    /// Restore the "one contiguous run" invariant every reader of this type
-    /// depends on.
-    ///
-    /// Called after each mutation rather than inside `as_slice`, because the
-    /// readers take `&self` and this needs `&mut`. It is a comparison while the
-    /// ring has not wrapped; the rotate it does on a wrap is paid once per
-    /// capacity's worth of removals.
-    fn keep_contiguous(&mut self) {
-        self.held.make_contiguous();
-    }
-
     /// Append one decoded message.
     pub fn push(&mut self, frame: PassiveFrame) {
         self.held.push_back(frame);
-        self.keep_contiguous();
         self.produced += 1;
     }
 
     /// Append a decoded batch, which is what a datagram unit yields.
     pub fn append(&mut self, frames: impl IntoIterator<Item = PassiveFrame>) {
-        let before = self.held.len();
-        self.held.extend(frames);
-        self.keep_contiguous();
-        // The DIFFERENCE rather than the iterator's own count: an
-        // `IntoIterator` may report a size hint it does not deliver, and the
-        // vector's growth is the one measurement that cannot disagree with what
-        // is now in the list.
-        self.produced += (self.held.len() - before) as u64;
+        // Counted as they go in rather than from the iterator's size hint, which
+        // an `IntoIterator` may report and not deliver.
+        for frame in frames {
+            self.push(frame);
+        }
     }
 
     /// R2102 (open-debt item 524) — messages ever appended here, never
     /// decremented.
     ///
-    /// See the field's own doc for why an index into [`MessageList::as_slice`]
-    /// cannot do this job.
+    /// See the field's own doc for why a position in the list cannot do this
+    /// job.
     pub fn produced(&self) -> u64 {
         self.produced
     }
@@ -333,7 +312,6 @@ impl MessageList {
             return None;
         }
         let frame = self.held.pop_front();
-        self.keep_contiguous();
         // The one moment the message is still in hand: fold what a chain's
         // identity needs of it, so the count does not depend on how much of the
         // front a ceiling has taken. See the field's doc.
@@ -349,27 +327,464 @@ impl MessageList {
         })
     }
 
-    /// The messages, as the slice every consumer wants.
-    ///
-    /// Named as well as reachable through [`Deref`], because `&list` at a
-    /// `&[PassiveFrame]` parameter relies on coercion and a caller building an
-    /// iterator chain often cannot.
-    pub fn as_slice(&self) -> &[PassiveFrame] {
-        // The mutators restore contiguity, so the ring's second run is empty
-        // and the first IS the list. Asserted rather than assumed: a reader
-        // handed a short slice would silently see fewer messages than the list
-        // holds, which is the shape this workspace calls a floor reported as a
-        // total.
-        let (front, back) = self.held.as_slices();
-        debug_assert!(
-            back.is_empty(),
-            "MessageList lost its contiguity invariant: {} message(s) are in \
-             the ring's second run and every slice reader would miss them",
-            back.len()
-        );
-        front
+    /// Messages held now: what was appended less what a bound discarded.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.held.len()
+    }
+
+    /// No message is held.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.held.len() == 0
+    }
+
+    /// The message at position `index` among those held, oldest first.
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<&PassiveFrame> {
+        self.held.get(index)
+    }
+
+    /// [`Self::get`], for an in-place rewrite of a held message (a remap of its
+    /// coordinates). There is no way to add or remove one through it.
+    #[inline]
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut PassiveFrame> {
+        self.held.get_mut(index)
+    }
+
+    /// The oldest message held.
+    #[inline]
+    pub fn first(&self) -> Option<&PassiveFrame> {
+        self.held.get(0)
+    }
+
+    /// The newest message held.
+    #[inline]
+    pub fn last(&self) -> Option<&PassiveFrame> {
+        self.held
+            .len()
+            .checked_sub(1)
+            .and_then(|i| self.held.get(i))
+    }
+
+    /// The messages held, oldest first.
+    #[inline]
+    pub fn iter(&self) -> Iter<'_, PassiveFrame> {
+        self.held.iter()
+    }
+
+    /// The messages held, oldest first, for an in-place rewrite.
+    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut PassiveFrame> {
+        self.held.iter_mut()
+    }
+
+    /// The messages from position `from` on, for an in-place rewrite of what
+    /// one call added.
+    pub fn iter_mut_from(
+        &mut self,
+        from: usize,
+    ) -> impl DoubleEndedIterator<Item = &mut PassiveFrame> {
+        self.held.iter_mut_from(from)
+    }
+
+    /// The messages from position `from` on, as a view a reader can count,
+    /// index and walk: what one call added, handed on without a copy.
+    #[inline]
+    pub fn rows_from(&self, from: usize) -> Rows<'_> {
+        Rows { list: self, from }
     }
 }
+
+/// The messages of a [`MessageList`] from one position on.
+///
+/// What a door hands a reader of "the messages this call added": the list
+/// itself, borrowed, and where they begin, so nothing is copied and nothing about
+/// how the list stores its rows leaks into the reader.
+#[derive(Debug, Clone, Copy)]
+pub struct Rows<'a> {
+    list: &'a MessageList,
+    from: usize,
+}
+
+impl<'a> Rows<'a> {
+    /// Messages in the view.
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.list.len().saturating_sub(self.from)
+    }
+
+    /// The view holds none.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The message at `index` within the view.
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<&'a PassiveFrame> {
+        self.list.get(self.from.checked_add(index)?)
+    }
+
+    /// The messages of the view, oldest first.
+    #[inline]
+    pub fn iter(&self) -> Iter<'a, PassiveFrame> {
+        self.list.held.iter_from(self.from)
+    }
+}
+
+impl<'a> IntoIterator for Rows<'a> {
+    type Item = &'a PassiveFrame;
+    type IntoIter = Iter<'a, PassiveFrame>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Rows per chunk of a [`ChunkLog`].
+///
+/// Large enough that the chunk list itself is negligible (one entry per this
+/// many rows), small enough that the unused tail of the last chunk is
+/// negligible against any list long enough to have one. A power of two, so the
+/// first chunk, which grows the way any buffer does, reaches exactly this
+/// capacity and stops.
+const CHUNK_ROWS: usize = 1024;
+
+/// An append-only list of rows, read by position and released from the front.
+///
+/// # Why chunks
+///
+/// One growable buffer doubles: each growth copies every row into a buffer
+/// twice the size, and up to half of what it holds is capacity no row uses.
+/// For a list of hundreds of thousands of decoded rows that is hundreds of
+/// megabytes of copying while the list grows and up to as much again held
+/// empty. Here rows go into chunks of `CHUNK_ROWS` (1024). The first chunk grows
+/// like any buffer, so a short list costs what a short list costs; every later
+/// chunk is allocated whole, so no row is ever copied again, and the most a
+/// long list holds unused is one chunk's tail.
+///
+/// # Every chunk is one run
+///
+/// A chunk is a ring, so it could hold its rows as two runs. Only a chunk that
+/// is both released from and appended to can wrap, which is the one-chunk list
+/// of a live tap at its ceiling, and such a chunk is straightened when it does
+/// (at most `CHUNK_ROWS` moves, once per `CHUNK_ROWS` appends). So every
+/// chunk reads as ONE slice, and [`Iter`] walks slices and skips whole chunks:
+/// `iter().skip(n)` costs the chunks it passes, as a slice's costs nothing,
+/// rather than one step per row.
+///
+/// # The shape that makes a position O(1)
+///
+/// Every chunk except the first and the last holds exactly `CHUNK_ROWS` rows.
+/// Appending fills the last chunk to `CHUNK_ROWS` before starting another, and
+/// releasing takes rows from the first chunk only, dropping it when it is empty,
+/// so neither can break that. The first chunk's length is the only variable
+/// before a position, and dividing the rest by `CHUNK_ROWS` finds the chunk.
+///
+/// No chunk is ever empty, which is what lets [`Self::len`] of zero mean "no
+/// chunks" and the first chunk always be the one rows are released from.
+#[derive(Debug)]
+pub struct ChunkLog<T> {
+    /// A `Vec` and not a deque: a position is found by indexing it, and the
+    /// front is dropped once per [`CHUNK_ROWS`] releases, which moves one
+    /// pointer per chunk held.
+    chunks: Vec<VecDeque<T>>,
+    len: usize,
+}
+
+impl<T> Default for ChunkLog<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> ChunkLog<T> {
+    /// An empty log.
+    pub const fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            len: 0,
+        }
+    }
+
+    /// Rows held.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// No row is held.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Append one row.
+    pub fn push_back(&mut self, row: T) {
+        let chunks = self.chunks.len();
+        match self.chunks.last_mut() {
+            Some(last) if last.len() < CHUNK_ROWS => {
+                last.push_back(row);
+                // Only a chunk that is also released from can wrap, and the
+                // last chunk is released from only when it is the first.
+                if chunks == 1 {
+                    straighten(last);
+                }
+            }
+            _ => {
+                // The first chunk grows; any later one is allocated whole.
+                let mut chunk = if chunks == 0 {
+                    VecDeque::new()
+                } else {
+                    VecDeque::with_capacity(CHUNK_ROWS)
+                };
+                chunk.push_back(row);
+                self.chunks.push(chunk);
+            }
+        }
+        self.len += 1;
+    }
+
+    /// Release the oldest row.
+    pub fn pop_front(&mut self) -> Option<T> {
+        let first = self.chunks.first_mut()?;
+        let row = first.pop_front();
+        if first.is_empty() {
+            self.chunks.remove(0);
+        } else {
+            straighten(first);
+        }
+        if row.is_some() {
+            self.len -= 1;
+        }
+        row
+    }
+
+    /// Where the row at `index` sits: its chunk and its place in it.
+    fn locate(&self, index: usize) -> Option<(usize, usize)> {
+        if index >= self.len {
+            return None;
+        }
+        let first = self.chunks.first()?.len();
+        if index < first {
+            return Some((0, index));
+        }
+        let rest = index - first;
+        Some((1 + rest / CHUNK_ROWS, rest % CHUNK_ROWS))
+    }
+
+    /// The row at `index`, oldest first.
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<&T> {
+        let (chunk, at) = self.locate(index)?;
+        run(self.chunks.get(chunk)?).get(at)
+    }
+
+    /// [`Self::get`], mutably.
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        let (chunk, at) = self.locate(index)?;
+        self.chunks.get_mut(chunk)?.as_mut_slices().0.get_mut(at)
+    }
+
+    /// The rows, oldest first.
+    pub fn iter(&self) -> Iter<'_, T> {
+        self.iter_from(0)
+    }
+
+    /// The rows from position `from` on, oldest first: what one call added to
+    /// the list, read without walking what was there before it.
+    pub fn iter_from(&self, from: usize) -> Iter<'_, T> {
+        let chunks = self.chunks.len();
+        let Some((chunk, at)) = self.locate(from) else {
+            return Iter {
+                front: <&[T]>::default().iter(),
+                middle: self.chunks[chunks..].iter(),
+                back: <&[T]>::default().iter(),
+            };
+        };
+        let last = chunks - 1;
+        let front = run(&self.chunks[chunk])[at..].iter();
+        if chunk == last {
+            Iter {
+                front,
+                middle: self.chunks[chunks..].iter(),
+                back: <&[T]>::default().iter(),
+            }
+        } else {
+            // Every chunk strictly between the first read and the last is
+            // full, which is what `Iter::left` counts on.
+            Iter {
+                front,
+                middle: self.chunks[chunk + 1..last].iter(),
+                back: run(&self.chunks[last]).iter(),
+            }
+        }
+    }
+
+    /// The rows, oldest first, mutably.
+    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut T> {
+        self.iter_mut_from(0)
+    }
+
+    /// The rows from position `from` on, mutably.
+    pub fn iter_mut_from(&mut self, from: usize) -> impl DoubleEndedIterator<Item = &mut T> {
+        let (chunk, at) = self.locate(from).unwrap_or((self.chunks.len(), 0));
+        self.chunks
+            .iter_mut()
+            .enumerate()
+            .skip(chunk)
+            .flat_map(move |(i, rows)| rows.range_mut(if i == chunk { at } else { 0 }..))
+    }
+}
+
+/// Keep a chunk one run: see [`ChunkLog`]. Free while the ring has not
+/// wrapped, which is every chunk but a one-chunk list's at a live ceiling.
+fn straighten<T>(chunk: &mut VecDeque<T>) {
+    if !chunk.as_slices().1.is_empty() {
+        chunk.make_contiguous();
+    }
+}
+
+/// A chunk's rows, as the one run [`straighten`] keeps them in.
+fn run<T>(chunk: &VecDeque<T>) -> &[T] {
+    let (rows, wrapped) = chunk.as_slices();
+    debug_assert!(wrapped.is_empty(), "a chunk holds its rows as one run");
+    rows
+}
+
+/// The rows of a [`ChunkLog`] (and so of a [`MessageList`]), oldest first.
+///
+/// Walks the chunks as slices: the run being read from the front, the run being
+/// read from the back, and the whole chunks between them. A skip passes whole
+/// chunks by their length rather than row by row.
+///
+/// Every chunk between the two runs is a FULL chunk (only a log's first and
+/// last chunk can be short, and those are where the runs begin), so what is
+/// left is known from the three without a count kept per row, and the step
+/// that reads a row is the slice's own.
+#[derive(Debug, Clone)]
+pub struct Iter<'a, T> {
+    front: core::slice::Iter<'a, T>,
+    middle: core::slice::Iter<'a, VecDeque<T>>,
+    back: core::slice::Iter<'a, T>,
+}
+
+impl<'a, T> Iter<'a, T> {
+    /// Rows not yet read.
+    fn left(&self) -> usize {
+        self.front.len() + self.middle.len() * CHUNK_ROWS + self.back.len()
+    }
+
+    /// The iterator, spent.
+    fn spend(&mut self) {
+        self.front = <&[T]>::default().iter();
+        self.middle.by_ref().for_each(drop);
+        self.back = <&[T]>::default().iter();
+    }
+
+    /// [`Iterator::next`] once the front run is spent.
+    #[cold]
+    fn next_past_front(&mut self) -> Option<&'a T> {
+        match self.middle.next() {
+            Some(chunk) => {
+                self.front = run(chunk).iter();
+                self.front.next()
+            }
+            None => self.back.next(),
+        }
+    }
+
+    /// [`DoubleEndedIterator::next_back`] once the back run is spent.
+    #[cold]
+    fn next_back_past_back(&mut self) -> Option<&'a T> {
+        match self.middle.next_back() {
+            Some(chunk) => {
+                self.back = run(chunk).iter();
+                self.back.next_back()
+            }
+            None => self.front.next_back(),
+        }
+    }
+}
+
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a T> {
+        match self.front.next() {
+            Some(row) => Some(row),
+            None => self.next_past_front(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.left();
+        (left, Some(left))
+    }
+
+    fn count(self) -> usize {
+        self.left()
+    }
+
+    fn last(mut self) -> Option<&'a T> {
+        self.next_back()
+    }
+
+    fn nth(&mut self, mut n: usize) -> Option<&'a T> {
+        if n >= self.left() {
+            // Past the end: the iterator is spent, as a slice's is.
+            self.spend();
+            return None;
+        }
+        loop {
+            let here = self.front.len();
+            if n < here {
+                return self.front.nth(n);
+            }
+            n -= here;
+            // The run is passed whole: spent here, so no later step reads it
+            // again.
+            self.front = <&[T]>::default().iter();
+            match self.middle.next() {
+                Some(chunk) => self.front = run(chunk).iter(),
+                None => return self.back.nth(n),
+            }
+        }
+    }
+}
+
+impl<T> DoubleEndedIterator for Iter<'_, T> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self.back.next_back() {
+            Some(row) => Some(row),
+            None => self.next_back_past_back(),
+        }
+    }
+
+    fn nth_back(&mut self, mut n: usize) -> Option<Self::Item> {
+        if n >= self.left() {
+            self.spend();
+            return None;
+        }
+        loop {
+            let here = self.back.len();
+            if n < here {
+                return self.back.nth_back(n);
+            }
+            n -= here;
+            self.back = <&[T]>::default().iter();
+            match self.middle.next_back() {
+                Some(chunk) => self.back = run(chunk).iter(),
+                None => return self.front.nth_back(n),
+            }
+        }
+    }
+}
+
+impl<T> ExactSizeIterator for Iter<'_, T> {}
+
+impl<T> core::iter::FusedIterator for Iter<'_, T> {}
 
 /// R311y723 — one message a bound removed, and the obligation to account for it.
 ///
@@ -591,32 +1006,45 @@ impl Drop for Discarded {
     }
 }
 
-impl Deref for MessageList {
-    type Target = [PassiveFrame];
+impl Index<usize> for MessageList {
+    type Output = PassiveFrame;
 
-    fn deref(&self) -> &Self::Target {
-        self.as_slice()
+    /// The message at `index`; panics past the end, as a slice does.
+    #[inline]
+    fn index(&self, index: usize) -> &PassiveFrame {
+        match self.get(index) {
+            Some(frame) => frame,
+            None => out_of_range(index, self.len()),
+        }
     }
 }
 
-impl DerefMut for MessageList {
-    /// A SLICE, so an in-place rewrite of a frame's coordinates works and a
-    /// growth or removal does not. See the module doc.
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        // `make_contiguous` returns the whole list as one mutable slice and is
-        // the deque's own way of saying what `&mut [_]` means here. It is the
-        // same call the mutators make, so this path cannot be the one that
-        // leaves the ring wrapped.
-        self.held.make_contiguous()
+impl IndexMut<usize> for MessageList {
+    /// An in-place rewrite of one message. See the module doc.
+    #[inline]
+    fn index_mut(&mut self, index: usize) -> &mut PassiveFrame {
+        let len = self.len();
+        match self.get_mut(index) {
+            Some(frame) => frame,
+            None => out_of_range(index, len),
+        }
     }
+}
+
+/// The panic of an index past the end, kept off the path that does not take it.
+#[cold]
+#[inline(never)]
+fn out_of_range(index: usize, len: usize) -> ! {
+    panic!("message {index} of a list holding {len}")
 }
 
 impl<'a> IntoIterator for &'a MessageList {
     type Item = &'a PassiveFrame;
-    type IntoIter = core::slice::Iter<'a, PassiveFrame>;
+    type IntoIter = Iter<'a, PassiveFrame>;
 
+    #[inline]
     fn into_iter(self) -> Self::IntoIter {
-        self.as_slice().iter()
+        self.iter()
     }
 }
 
@@ -775,18 +1203,18 @@ mod tests {
         assert!(list.discard_oldest().is_none());
     }
 
-    /// The deref target is a SLICE, which is what makes growth impossible
-    /// outside this type. Asserted through the operations a consumer actually
-    /// performs, since "a slice has no push" cannot be written as an assertion.
+    /// The row API reads and rewrites in place and has no way to grow or
+    /// shrink the list. Asserted through the operations a consumer actually
+    /// performs, since "the API has no push" cannot be written as an assertion.
     #[test]
-    fn the_list_reads_as_a_slice_and_can_be_rewritten_in_place() {
+    fn the_list_reads_by_row_and_can_be_rewritten_in_place() {
         let mut list = MessageList::new();
         list.push(frame());
         list.append([frame(), frame()]);
         assert_eq!(list.len(), 3);
         assert_eq!(list.first().expect("a frame").stream_offset, 7);
-        // In-place mutation through `DerefMut`, which is what
-        // `remap_decrypted_offsets` needs and which does not change the length.
+        // In-place mutation, which is what `remap_decrypted_offsets` needs and
+        // which does not change the length.
         for f in list.iter_mut() {
             f.stream_offset += 1;
         }
@@ -796,20 +1224,9 @@ mod tests {
 
     /// R2109 (open-debt item 528) — A TRIMMED LIST STILL READS WHOLE.
     ///
-    /// # Why this test had to be written to close that item
-    ///
-    /// R2109 made the store a `VecDeque` so a trim stops costing list-length,
-    /// and every reader of this type takes a contiguous `&[PassiveFrame]`. The
-    /// two facts are only compatible while the ring has not wrapped, which the
-    /// mutators maintain — and MUTATION SAID NOBODY WAS CHECKING: disabling
-    /// `keep_contiguous` left all 343 tests in this crate green, because none
-    /// of them pushes and discards enough to make a deque wrap. A slice reader
-    /// would then have seen a SHORT list with no error anywhere, which is this
-    /// workspace's "a floor reported as a total" one layer down.
-    ///
-    /// The interleaving is what does it: filling, then alternating a discard
-    /// with a push, walks the head around the buffer. `as_slice().len()` is the
-    /// assertion because that is the number every consumer actually gets.
+    /// Alternating a discard with a push walks the front of the store along;
+    /// with the rows in one ring that was what wrapped it. The count every
+    /// consumer reads must stay the list's.
     #[test]
     fn a_list_that_has_wrapped_its_ring_still_hands_back_every_message() {
         let mut list = MessageList::new();
@@ -827,17 +1244,149 @@ mod tests {
         }
         assert_eq!(census.total(), 64, "every discard was accounted for");
         assert_eq!(list.len(), 8, "a discard and a push leave the length alone");
-        assert_eq!(
-            list.as_slice().len(),
-            list.len(),
-            "the slice every consumer reads is shorter than the list, so the \
-             ring wrapped and nothing put it back together"
-        );
         assert_eq!(list.iter().count(), 8, "and the iterator agrees with it");
         assert_eq!(
             list.produced(),
             8 + 64,
             "a trim never moves `produced`, which is what a watermark reads"
         );
+    }
+
+    /// Open-debt item 924 — EVERY POSITION READS THE ROW THE ITERATOR READS,
+    /// across chunk boundaries and while the front is being released.
+    ///
+    /// A position is found by arithmetic over the first chunk's length and the
+    /// fixed size of the others ([`ChunkLog`]); an off-by-one there hands back a
+    /// neighbour of the row asked for, with no error. So each row carries its own
+    /// number, and the list is grown past several chunks, trimmed into the
+    /// middle of one, and grown again, with every position, the forward and the
+    /// backward iteration compared against the numbers that should be there.
+    #[test]
+    fn every_position_reads_the_row_the_iterator_reads_across_chunks() {
+        fn numbered(n: usize) -> PassiveFrame {
+            let mut f = frame();
+            f.stream_offset = n;
+            f
+        }
+        fn check(list: &MessageList, want: core::ops::Range<usize>) {
+            let want: Vec<usize> = want.collect();
+            assert_eq!(list.len(), want.len());
+            let by_position: Vec<usize> = (0..list.len())
+                .map(|i| list.get(i).expect("in range").stream_offset)
+                .collect();
+            assert_eq!(by_position, want, "by position");
+            let forward: Vec<usize> = list.iter().map(|f| f.stream_offset).collect();
+            assert_eq!(forward, want, "forward");
+            let mut backward: Vec<usize> = list.iter().rev().map(|f| f.stream_offset).collect();
+            backward.reverse();
+            assert_eq!(backward, want, "backward");
+            assert_eq!(list.iter().len(), want.len(), "the iterator's exact size");
+            assert!(list.get(list.len()).is_none(), "past the end is nothing");
+            assert_eq!(list.first().map(|f| f.stream_offset), want.first().copied());
+            assert_eq!(list.last().map(|f| f.stream_offset), want.last().copied());
+            // From a position: the chunk's first row, its last, a row in the
+            // middle, the end and past it.
+            // Skipping: what `iter().enumerate().skip(n)` relies on, which a
+            // slice answers without walking and so must this. Into the first
+            // run, across a chunk, into the middle, and into the LAST chunk,
+            // where the runs passed on the way must not be read again.
+            let ends = [want.len().saturating_sub(1), want.len().saturating_sub(5)];
+            for n in [
+                0,
+                1,
+                CHUNK_ROWS - 1,
+                CHUNK_ROWS,
+                CHUNK_ROWS + 1,
+                want.len() / 2,
+            ]
+            .into_iter()
+            .chain(ends)
+            {
+                assert_eq!(
+                    list.iter().nth(n).map(|f| f.stream_offset),
+                    want.get(n).copied(),
+                    "nth {n}"
+                );
+                assert_eq!(
+                    list.iter().nth_back(n).map(|f| f.stream_offset),
+                    want.len().checked_sub(n + 1).map(|i| want[i]),
+                    "nth_back {n}"
+                );
+                let mut it = list.iter();
+                let _ = it.nth(n);
+                assert_eq!(
+                    it.len(),
+                    want.len().saturating_sub(n + 1),
+                    "left after nth {n}"
+                );
+                let rest: Vec<usize> = it.map(|f| f.stream_offset).collect();
+                assert_eq!(rest, want.get(n + 1..).unwrap_or(&[]), "after nth {n}");
+                let mut it = list.iter();
+                let _ = it.nth_back(n);
+                let kept = want.len().saturating_sub(n + 1);
+                assert_eq!(it.len(), kept, "left after nth_back {n}");
+                let rest: Vec<usize> = it.map(|f| f.stream_offset).collect();
+                assert_eq!(rest, &want[..kept], "after nth_back {n}");
+            }
+            assert!(list.iter().nth(want.len()).is_none(), "nth past the end");
+            for from in [
+                0,
+                1,
+                CHUNK_ROWS - 1,
+                CHUNK_ROWS,
+                want.len() / 2,
+                want.len(),
+                want.len() + 3,
+            ] {
+                let tail = want.get(from..).unwrap_or(&[]);
+                let read: Vec<usize> = list
+                    .rows_from(from)
+                    .iter()
+                    .map(|f| f.stream_offset)
+                    .collect();
+                assert_eq!(read, tail, "from {from}");
+                let mut back: Vec<usize> = list
+                    .rows_from(from)
+                    .iter()
+                    .rev()
+                    .map(|f| f.stream_offset)
+                    .collect();
+                back.reverse();
+                assert_eq!(back, tail, "from {from}, backward");
+                assert_eq!(
+                    list.rows_from(from).len(),
+                    tail.len(),
+                    "from {from}, counted"
+                );
+                assert_eq!(
+                    list.rows_from(from).get(0).map(|f| f.stream_offset),
+                    tail.first().copied(),
+                    "from {from}, indexed"
+                );
+            }
+        }
+        let mut list = MessageList::new();
+        let mut census = DroppedFrameCensus::default();
+        let grown = 3 * CHUNK_ROWS + 17;
+        list.append((0..grown).map(numbered));
+        check(&list, 0..grown);
+        // Into the middle of the second chunk, so the first chunk is gone and the
+        // new first is a partial one.
+        let trimmed = CHUNK_ROWS + 300;
+        for _ in 0..trimmed {
+            census.absorb(list.discard_oldest().expect("held"));
+        }
+        check(&list, trimmed..grown);
+        let regrown = grown + 2 * CHUNK_ROWS;
+        list.append((grown..regrown).map(numbered));
+        check(&list, trimmed..regrown);
+        // And down to nothing, which must leave a list that grows again.
+        while let Some(gone) = list.discard_oldest() {
+            census.absorb(gone);
+        }
+        check(&list, 0..0);
+        list.push(numbered(5));
+        check(&list, 5..6);
+        assert_eq!(census.total(), regrown);
     }
 }

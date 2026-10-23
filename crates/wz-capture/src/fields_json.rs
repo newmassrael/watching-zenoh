@@ -5326,13 +5326,7 @@ mod tests {
         let inventory: Vec<(usize, String, usize)> = d
             .message_lists_with_origin()
             .enumerate()
-            .map(|(i, (_, origin, list))| {
-                (
-                    i,
-                    alloc::format!("{origin:?}"),
-                    wz_session_core::passive_messages::MessageList::as_slice(list).len(),
-                )
-            })
+            .map(|(i, (_, origin, list))| (i, alloc::format!("{origin:?}"), list.len()))
             .collect();
         assert_eq!(
             (grouping.sessions(), grouping.grouped_lists()),

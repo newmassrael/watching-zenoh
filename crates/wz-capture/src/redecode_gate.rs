@@ -31,6 +31,7 @@
 //! nothing checked.
 
 use crate::link::{self, Transport};
+use crate::messages::MessageList;
 use crate::{DatagramLink, Dissection};
 use alloc::format;
 use alloc::vec::Vec;
@@ -81,7 +82,7 @@ impl core::ops::AddAssign for Reach {
 /// between them, but no record of this direction can. A unit is read when its
 /// first record is produced, so the order of first records is the order the
 /// units were read in.
-fn units(frames: &[PassiveFrame]) -> Vec<Vec<&PassiveFrame>> {
+fn units(frames: &MessageList) -> Vec<Vec<&PassiveFrame>> {
     let mut units: Vec<Vec<&PassiveFrame>> = Vec::new();
     let mut open: [Option<usize>; 2] = [None, None];
     for frame in frames {
@@ -102,7 +103,7 @@ fn units(frames: &[PassiveFrame]) -> Vec<Vec<&PassiveFrame>> {
 /// unit's first record, or `None` when they cannot be re-gathered.
 fn reread(
     what: &str,
-    frames: &[PassiveFrame],
+    frames: &MessageList,
     mut bytes_of: impl FnMut(&PassiveFrame) -> Option<(Vec<u8>, LinkHandshake)>,
 ) -> Reach {
     let mut reach = Reach {
@@ -151,7 +152,7 @@ fn reread_capture(what: &str, d: &Dissection, file: &[u8]) -> Reach {
     let packets = crate::pcap::parse(file).ok();
     let mut reach = Reach::default();
     for flow in d.flows.iter() {
-        reach += reread(what, flow.frames.as_slice(), |frame| {
+        reach += reread(what, &flow.frames, |frame| {
             if frame.offset_space != OffsetSpace::StreamBytes {
                 return None;
             }
@@ -164,7 +165,7 @@ fn reread_capture(what: &str, d: &Dissection, file: &[u8]) -> Reach {
         });
     }
     for flow in d.datagram_flows.iter() {
-        reach += reread(what, flow.frames.as_slice(), |frame| {
+        reach += reread(what, &flow.frames, |frame| {
             let file = packets.as_ref()?;
             let packet = file.packets.get(frame.stream_offset)?;
             let (datagram, link) =
@@ -313,7 +314,7 @@ fn every_unit_of_a_stream_with_batches_gaps_and_garbage_reads_again_the_same() {
     let d = Dissection::from_capture(&file).expect("the capture reads");
     // The shapes this capture is FOR must be in what was read, or the
     // comparison below says nothing about them.
-    let held: Vec<&PassiveFrame> = d.flows.iter().flat_map(|f| f.frames.as_slice()).collect();
+    let held: Vec<&PassiveFrame> = d.flows.iter().flat_map(|f| &f.frames).collect();
     let verdicts: Vec<_> = held.iter().filter_map(|f| f.sn_verdict).collect();
     use wz_session_core::passive::SnVerdict;
     assert!(
@@ -370,7 +371,7 @@ fn every_unit_of_a_compressed_session_reads_again_the_same() {
         let last = d
             .datagram_flows
             .iter()
-            .flat_map(|f| f.frames.as_slice())
+            .flat_map(|f| &f.frames)
             .last()
             .map(|f| {
                 (
@@ -465,8 +466,8 @@ fn the_fragment_chain_captures_reach_every_fate_a_fragment_comes_to() {
         let rows = d
             .flows
             .iter()
-            .flat_map(|f| f.frames.as_slice())
-            .chain(d.datagram_flows.iter().flat_map(|f| f.frames.as_slice()));
+            .flat_map(|f| &f.frames)
+            .chain(d.datagram_flows.iter().flat_map(|f| &f.frames));
         for frame in rows {
             match frame.carried {
                 Carried::Reassembled { .. } => fates[0] = true,

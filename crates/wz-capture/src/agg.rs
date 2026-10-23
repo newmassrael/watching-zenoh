@@ -1447,9 +1447,9 @@ impl ThroughputTable {
     /// node census builds it with `ListContext::unattributed`, and every
     /// record it folds answers `None` for its node — which is what a walk with
     /// no handshake in front of it actually knows.
-    pub fn observe_flow_where(
+    pub fn observe_flow_where<'f>(
         &mut self,
-        frames: &[PassiveFrame],
+        frames: impl IntoIterator<Item = &'f PassiveFrame>,
         filter: &Filter,
         ctx: crate::node::ListContext<'_>,
         spaces: &mut KeyexprSpaces,

@@ -784,10 +784,10 @@ impl InterestCensus {
     /// while a session has one link and too tight when it has two. `spaces` is
     /// now the CAPTURE's, keyed by [`crate::agg::SpaceOwner`], and two sessions
     /// still get separate tokens.
-    pub fn observe_flow(
+    pub fn observe_flow<'f>(
         &mut self,
         flow: &FlowKey,
-        frames: &[PassiveFrame],
+        frames: impl IntoIterator<Item = &'f PassiveFrame>,
         // Round 2019 (item 270) — the list's index in
         // `Dissection::message_lists()`, which is what `crate::agg` already
         // takes for the same reason: it is half the space token, and without it
