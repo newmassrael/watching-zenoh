@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit kconfig-axes.
+# Do not edit: `wz_config.py --check` fails when this file is stale.
+#
+# The axes no one image owns. An option selects the capabilities it implies, so a
+# Kconfig tree that sources this file sources Kconfig.capabilities as well.
+
+choice WZ_ROLE
+	prompt "What the node is in a zenoh network"
+	default WZ_ROLE_PEER
+	help
+	  Upstream's `mode`. The default is the peer, which the zenoh and zenoh-c originals are built
+	  as; the original of zenoh-pico is a client, and what each original's own default is comes
+	  with the originals' defconfigs.
+
+config WZ_ROLE_CLIENT
+	bool "Client: dials a router, accepts no session"
+	help
+	  A node that dials a router and is dialled by none: no listener, no accepted session. It
+	  needs nothing the peer role pulls in.
+
+config WZ_ROLE_PEER
+	bool "Peer: accepts sessions as well as dialling"
+	select WZ_CAP_PEER
+	help
+	  Upstream's `mode = peer`. The capability `peer` is what a listener, a router and a peer have
+	  that a client does not, so the role pulls it in.
+
+config WZ_ROLE_ROUTER
+	bool "Router: routes between the sessions it holds"
+	select WZ_CAP_PEER
+	select WZ_CAP_TIMESTAMPING
+	help
+	  Upstream's `mode = router`. It is a peer that also stamps the messages it relays: the
+	  capability `timestamping` is the node clock that role holds, which upstream's router has on
+	  by default.
+
+endchoice

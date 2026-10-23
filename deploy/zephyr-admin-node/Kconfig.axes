@@ -19,38 +19,13 @@ config WZ_NET_BACKEND_ZEPHYR_SOCKETS
 
 config WZ_NET_BACKEND_LWIP_MAC
 	bool "lwIP over an Ethernet MAC the wz crates drive"
+	depends on !WZ_ROLE_CLIENT
 	help
 	  For a board whose Ethernet controller Zephyr has no driver for. Zephyr is the
 	  kernel only (threads, clock, heap, console): the network is lwIP, polled from
 	  the node's loop, over a wz `EthernetMac` crate for the chip. The interface
 	  address and the MAC address are the board's Kconfig, since no Zephyr
 	  interface exists to ask.
-
-endchoice
-
-choice WZ_NODE_ROLE
-	prompt "What the node is"
-	default WZ_NODE_ADMIN
-	help
-	  The admin node is the node a zenoh host reconfigures at runtime. The client node is a
-	  client of a router that answers queries and nothing else: it is what zenoh-pico is as a
-	  client with a queryable, and what a comparison with it is made against.
-
-config WZ_NODE_ADMIN
-	bool "Admin node: listens, hosts upstream's admin space, dials what it is told to"
-	help
-	  The role of upstream's `mode = peer`: it accepts sessions as well as dialling, which is what
-	  the capability `peer` is. This image's peer also hosts the admin space a zenoh host
-	  reconfigures it through. The Kconfig symbol keeps its name, so the overlays that name it keep
-	  working.
-
-config WZ_NODE_CLIENT
-	bool "Client node: dials a router and answers queries"
-	depends on WZ_NET_BACKEND_ZEPHYR_SOCKETS
-	help
-	  No listener, no admin space, no config write, no accepted session. The router it dials
-	  is WZ_CLIENT_ENDPOINT; the queries it answers are two documents under a fixed key, the
-	  same two zenoh-pico's comparison image (deploy/zephyr-pico-compare) answers.
 
 endchoice
 
@@ -67,7 +42,7 @@ config WZ_STORAGE_HEAP
 
 config WZ_FIXED_MEMORY
 	bool "Build the node on the fixed-memory profile (no allocator in the Rust image)"
-	depends on (WZ_NET_BACKEND_LWIP_MAC && WZ_MAC_CYT4BF) || (WZ_NET_BACKEND_ZEPHYR_SOCKETS && WZ_NODE_CLIENT)
+	depends on (WZ_NET_BACKEND_LWIP_MAC && WZ_MAC_CYT4BF) || (WZ_NET_BACKEND_ZEPHYR_SOCKETS && WZ_ROLE_CLIENT)
 	help
 	  Every table the node holds (sessions, sockets, the observer, the interfaces) is a
 	  static the image declares, the session tier is the slot profile's, and the Rust

@@ -70,7 +70,7 @@ admin-node = [
 # no config write (`wz-session-mcu`'s `ClientNode`). The router it dials is `CONFIG_WZ_CLIENT_
 # ENDPOINT`. It is what zenoh-pico is when `z_open` is given mode `client` and a queryable is
 # declared, so it is the wz side of a comparison of the two on one board. Built with the defaults
-# off (`CONFIG_WZ_NODE_CLIENT`).
+# off (`CONFIG_WZ_ROLE_CLIENT`).
 # Its tables are the fixed backing (`bounded-heapless`, a selector for a final binary): every limit
 # of `caps` a refusal, and the replies staged as rows of an arena and written from their parts, so a
 # reply builds no owned record. Its sessions encode each frame into the buffer their link lends
@@ -171,7 +171,7 @@ fixed-memory = [
     "wz-session-mcu/adminspace-fixed",
     "wz-session-core/session-slot",
 ]
-# The FIXED-MEMORY CLIENT: the client node (`CONFIG_WZ_NODE_CLIENT`) over Zephyr's sockets on the slot
+# The FIXED-MEMORY CLIENT: the client node (`CONFIG_WZ_ROLE_CLIENT`) over Zephyr's sockets on the slot
 # profile (`fixed_client.rs`), the memory profile `CONFIG_WZ_FIXED_MEMORY` selects for it. The same
 # client as `client-node` with its sessions, tables and texts in statics the image declares: the
 # session host and the dialler every stack shares (`wz-session-mcu`'s `slot_host`, `slot_dial`,

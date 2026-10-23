@@ -464,7 +464,7 @@ IMAGES: dict[str, Image] = {
         ci=False,
     ),
     # The client node of the same image on the fixed-memory profile, over Zephyr's sockets
-    # (`CONFIG_WZ_NODE_CLIENT` with `CONFIG_WZ_FIXED_MEMORY`, `overlays/t2g_client_fixed.conf`):
+    # (`CONFIG_WZ_ROLE_CLIENT` with `CONFIG_WZ_FIXED_MEMORY`, `overlays/t2g_client_fixed.conf`):
     # sessions, the driver's receive and send buffers, the observer and the runtime's tables are
     # statics the staticlib declares, so the Rust side has no allocator and the proof is that no
     # crate of its graph names `alloc`. The kernel's own heap is the C side's and is measured on the

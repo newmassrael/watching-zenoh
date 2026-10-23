@@ -6,5 +6,6 @@
 
 mainmenu "wz build configuration"
 
+rsource "Kconfig.axes"
 rsource "Kconfig.capabilities"
 rsource "Kconfig.limits"

@@ -26,7 +26,7 @@
 //! given for it, and what the kernel takes of it after start-up is measured, not assumed.
 //!
 //! The CMake build selects this profile with `CONFIG_WZ_FIXED_MEMORY` for the client node
-//! (`CONFIG_WZ_NODE_CLIENT`), the same switch the lwIP admin node has.
+//! (`CONFIG_WZ_ROLE_CLIENT`), the same switch the lwIP admin node has.
 
 use core::cell::RefCell;
 

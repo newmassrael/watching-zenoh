@@ -70,7 +70,7 @@
 # particular to a board or a driver stays in the image's own Kconfig and CMake.
 
 schema_version = 1
-catalog_version = 1
+catalog_version = 2
 
 [base]
 core = ["rx-busy-poll"]
@@ -612,6 +612,55 @@ The locators a node is told to connect to. A list longer than this stops
 at the limit; a fixed deployment names a few peers.
 '''
 
+# The role of a node in a zenoh network: upstream's `mode`. A global axis (it names no image),
+# so that every tree that sources the capabilities can state it, and each option selects the
+# capabilities it needs: the role pulls what it requires, and nothing else. What an image also
+# hosts is a capability of its own beside the role (the admin node is the `peer` role that hosts
+# the admin space, `admin-space`), and an image says which roles it can be.
+[[axis]]
+id = "role"
+kconfig = "WZ_ROLE"
+prompt = "What the node is in a zenoh network"
+default = "peer"
+help = '''
+Upstream's `mode`. The default is the peer, which the zenoh and zenoh-c originals are built
+as; the original of zenoh-pico is a client, and what each original's own default is comes
+with the originals' defconfigs.
+'''
+
+[[axis_option]]
+id = "client"
+axis = "role"
+kconfig = "WZ_ROLE_CLIENT"
+prompt = "Client: dials a router, accepts no session"
+help = '''
+A node that dials a router and is dialled by none: no listener, no accepted session. It
+needs nothing the peer role pulls in.
+'''
+
+[[axis_option]]
+id = "peer"
+axis = "role"
+kconfig = "WZ_ROLE_PEER"
+prompt = "Peer: accepts sessions as well as dialling"
+implies = ["peer"]
+help = '''
+Upstream's `mode = peer`. The capability `peer` is what a listener, a router and a peer have
+that a client does not, so the role pulls it in.
+'''
+
+[[axis_option]]
+id = "router"
+axis = "role"
+kconfig = "WZ_ROLE_ROUTER"
+prompt = "Router: routes between the sessions it holds"
+implies = ["peer", "timestamping"]
+help = '''
+Upstream's `mode = router`. It is a peer that also stamps the messages it relays: the
+capability `timestamping` is the node clock that role holds, which upstream's router has on
+by default.
+'''
+
 [[image]]
 id = "zephyr-admin-node"
 dir = "deploy/zephyr-admin-node"
@@ -642,48 +691,13 @@ id = "lwip-mac"
 axis = "net-backend"
 kconfig = "WZ_NET_BACKEND_LWIP_MAC"
 prompt = "lwIP over an Ethernet MAC the wz crates drive"
+requires = "!WZ_ROLE_CLIENT"
 help = '''
 For a board whose Ethernet controller Zephyr has no driver for. Zephyr is the
 kernel only (threads, clock, heap, console): the network is lwIP, polled from
 the node's loop, over a wz `EthernetMac` crate for the chip. The interface
 address and the MAC address are the board's Kconfig, since no Zephyr
 interface exists to ask.
-'''
-
-[[axis]]
-id = "role"
-image = "zephyr-admin-node"
-kconfig = "WZ_NODE_ROLE"
-prompt = "What the node is"
-default = "peer"
-help = '''
-The admin node is the node a zenoh host reconfigures at runtime. The client node is a
-client of a router that answers queries and nothing else: it is what zenoh-pico is as a
-client with a queryable, and what a comparison with it is made against.
-'''
-
-[[axis_option]]
-id = "peer"
-axis = "role"
-kconfig = "WZ_NODE_ADMIN"
-prompt = "Admin node: listens, hosts upstream's admin space, dials what it is told to"
-help = '''
-The role of upstream's `mode = peer`: it accepts sessions as well as dialling, which is what
-the capability `peer` is. This image's peer also hosts the admin space a zenoh host
-reconfigures it through. The Kconfig symbol keeps its name, so the overlays that name it keep
-working.
-'''
-
-[[axis_option]]
-id = "client"
-axis = "role"
-kconfig = "WZ_NODE_CLIENT"
-prompt = "Client node: dials a router and answers queries"
-requires = "WZ_NET_BACKEND_ZEPHYR_SOCKETS"
-help = '''
-No listener, no admin space, no config write, no accepted session. The router it dials
-is WZ_CLIENT_ENDPOINT; the queries it answers are two documents under a fixed key, the
-same two zenoh-pico's comparison image (deploy/zephyr-pico-compare) answers.
 '''
 
 [[axis]]
@@ -709,7 +723,7 @@ id = "fixed"
 axis = "storage"
 kconfig = "WZ_FIXED_MEMORY"
 prompt = "Build the node on the fixed-memory profile (no allocator in the Rust image)"
-requires = "(WZ_NET_BACKEND_LWIP_MAC && WZ_MAC_CYT4BF) || (WZ_NET_BACKEND_ZEPHYR_SOCKETS && WZ_NODE_CLIENT)"
+requires = "(WZ_NET_BACKEND_LWIP_MAC && WZ_MAC_CYT4BF) || (WZ_NET_BACKEND_ZEPHYR_SOCKETS && WZ_ROLE_CLIENT)"
 help = '''
 Every table the node holds (sessions, sockets, the observer, the interfaces) is a
 static the image declares, the session tier is the slot profile's, and the Rust
@@ -741,13 +755,13 @@ features = ["net-lwip-mac"]
 
 [[cargo_rule]]
 image = "zephyr-admin-node"
-when = ["WZ_NODE_CLIENT", "WZ_STORAGE_HEAP"]
+when = ["WZ_ROLE_CLIENT", "WZ_STORAGE_HEAP"]
 features = ["client-node"]
 defaults = "off"
 
 [[cargo_rule]]
 image = "zephyr-admin-node"
-when = ["WZ_NODE_CLIENT", "WZ_FIXED_MEMORY"]
+when = ["WZ_ROLE_CLIENT", "WZ_FIXED_MEMORY"]
 features = ["fixed-client"]
 defaults = "off"
 

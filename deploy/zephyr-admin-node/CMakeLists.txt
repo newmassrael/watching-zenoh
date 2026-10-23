@@ -47,7 +47,7 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
 
   # The client node (its features come with the axes): the router it dials is stated here, once,
   # as a constant the Rust side checks when it compiles.
-  if(CONFIG_WZ_NODE_CLIENT)
+  if(CONFIG_WZ_ROLE_CLIENT)
     list(APPEND backend_env WZ_CLIENT_ENDPOINT=${CONFIG_WZ_CLIENT_ENDPOINT})
     # How long the link may sleep when nothing is due (0: the tick), and whether one send window is
     # one datagram. Both only on the fixed-memory profile, the one that has the slot stack's link.

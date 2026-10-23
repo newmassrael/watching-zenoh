@@ -7,14 +7,27 @@ rsource "../zephyr-common/Kconfig.wz"
 rsource "../zephyr-eth-wzmac/Kconfig.zeth"
 rsource "../Kconfig.limits"
 
-# The node's axes (the network stack, the role, the memory profile) are declared in
-# deploy/wz-config.toml and generated into this file with what each requires.
+# The role is a global axis and an option of it selects the capabilities it needs, so the tree
+# holds the axes no image owns and the capabilities they select. The node's own axes (the network
+# stack, the memory profile) are declared in deploy/wz-config.toml and generated into
+# Kconfig.axes with what each requires.
+rsource "../Kconfig.axes"
+rsource "../Kconfig.capabilities"
 rsource "Kconfig.axes"
+
+# What this image is, along the role axis. It is a client or a peer: a router is not a node this
+# image makes. The peer is the admin node, which is a peer that hosts the admin space a zenoh host
+# reconfigures it through, so the peer role carries that capability here.
+config WZ_ROLE_PEER
+	select WZ_CAP_ADMIN_SPACE
+
+config WZ_ROLE_ROUTER
+	depends on n
 
 config WZ_CLIENT_ENDPOINT
 	string "The router the client node dials"
 	default "udp/192.168.100.1:7447"
-	depends on WZ_NODE_CLIENT
+	depends on WZ_ROLE_CLIENT
 	help
 	  `udp/<ipv4>:<port>`, the only scheme the node's dialer reads. It is read when the image is
 	  built: an endpoint longer than a locator row does not build.
@@ -23,7 +36,7 @@ config WZ_IDLE_WAIT_MS
 	int "Longest the client's link sleeps when its session has nothing due, in milliseconds"
 	default 0
 	range 0 60000
-	depends on WZ_NODE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	depends on WZ_ROLE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS
 	help
 	  0 keeps the loop waking every millisecond to look at its timers. A value above it lets the
 	  socket's receive timeout be armed up to the session's next deadline (the handshake, the
@@ -34,7 +47,7 @@ config WZ_IDLE_WAIT_MS
 
 config WZ_TX_BATCHING
 	bool "Send the messages of one send window as one datagram"
-	depends on WZ_NODE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	depends on WZ_ROLE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS
 	help
 	  The session coalesces what it sends in one window into one datagram (zenoh-pico's
 	  Z_FEATURE_BATCHING): a reply and the final that ends its query leave together, which
