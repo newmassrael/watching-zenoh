@@ -18,7 +18,7 @@
 //! of the public-key authentication extension is deliberately not one: that
 //! proof is not bound to the frames after the handshake. A peer whose zid is not
 //! derived this way still exchanges data as before; it is only never
-//! [`zid_is_bound`].
+//! [`zid_is_bound`](crate::credential_identity::zid_is_bound).
 //!
 //! No allocation and no feature gate: the MCU profile shares the rule, and the
 //! hash is the `sha2` the cookie path already links.
