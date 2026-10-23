@@ -723,6 +723,7 @@ transport-link-unixpipe,transport-link-ws|"
         codec-response-final,\
         liveliness-token,\
         pubsub-put,\
+        query-get,\
         query-queryable,\
         test-support,\
         transport-keepalive\
