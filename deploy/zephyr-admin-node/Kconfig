@@ -7,50 +7,9 @@ rsource "../zephyr-common/Kconfig.wz"
 rsource "../zephyr-eth-wzmac/Kconfig.zeth"
 rsource "../Kconfig.limits"
 
-choice WZ_NET_BACKEND
-	prompt "Network stack the admin node runs over"
-	default WZ_NET_BACKEND_ZEPHYR_SOCKETS
-	help
-	  The node is the same on every board; what differs is the stack under it,
-	  which the board's Ethernet driver decides.
-
-config WZ_NET_BACKEND_ZEPHYR_SOCKETS
-	bool "Zephyr's own network stack and BSD sockets"
-	help
-	  For a board whose Ethernet, Wi-Fi or modem Zephyr drives. The interface, its
-	  address (DHCP or Kconfig) and its link-layer identity are Zephyr's.
-
-config WZ_NET_BACKEND_LWIP_MAC
-	bool "lwIP over an Ethernet MAC the wz crates drive"
-	help
-	  For a board whose Ethernet controller Zephyr has no driver for. Zephyr is the
-	  kernel only (threads, clock, heap, console): the network is lwIP, polled from
-	  the node's loop, over a wz `EthernetMac` crate for the chip. The interface
-	  address and the MAC address are the board's Kconfig, since no Zephyr
-	  interface exists to ask.
-
-endchoice
-
-choice WZ_NODE_ROLE
-	prompt "What the node is"
-	default WZ_NODE_ADMIN
-	help
-	  The admin node is the node a zenoh host reconfigures at runtime. The client node is a
-	  client of a router that answers queries and nothing else: it is what zenoh-pico is as a
-	  client with a queryable, and what a comparison with it is made against.
-
-config WZ_NODE_ADMIN
-	bool "Admin node: listens, hosts upstream's admin space, dials what it is told to"
-
-config WZ_NODE_CLIENT
-	bool "Client node: dials a router and answers queries"
-	depends on WZ_NET_BACKEND_ZEPHYR_SOCKETS
-	help
-	  No listener, no admin space, no config write, no accepted session. The router it dials
-	  is WZ_CLIENT_ENDPOINT; the queries it answers are two documents under a fixed key, the
-	  same two zenoh-pico's comparison image (deploy/zephyr-pico-compare) answers.
-
-endchoice
+# The node's axes (the network stack, the role, the memory profile) are declared in
+# deploy/wz-config.toml and generated into this file with what each requires.
+rsource "Kconfig.axes"
 
 config WZ_CLIENT_ENDPOINT
 	string "The router the client node dials"
@@ -81,31 +40,6 @@ config WZ_TX_BATCHING
 	  Z_FEATURE_BATCHING): a reply and the final that ends its query leave together, which
 	  is one datagram for the router to read where there were two. Off, every message is a
 	  datagram of its own.
-
-# The memory profile is the node's and not a network backend's: whether the Rust image has an
-# allocator is a setting made beside the role and the stack, and what it is available to is
-# what has the slot profile's pieces (the stack's driver and how it opens a socket).
-config WZ_FIXED_MEMORY
-	bool "Build the node on the fixed-memory profile (no allocator in the Rust image)"
-	depends on (WZ_NET_BACKEND_LWIP_MAC && WZ_MAC_CYT4BF) || \
-		   (WZ_NET_BACKEND_ZEPHYR_SOCKETS && WZ_NODE_CLIENT)
-	help
-	  Every table the node holds (sessions, sockets, the observer, the interfaces) is a
-	  static the image declares, the session tier is the slot profile's, and the Rust
-	  staticlib is built with its default features off, so it links no allocator. The
-	  session host and the dialler are the ones every stack shares
-	  (wz_session_mcu::slot_host); a stack supplies its driver and how it opens a socket.
-
-	  Two nodes have the profile. The admin node over lwIP is fixed_node.rs: its listener
-	  reads only the datagrams of the peer each session was accepted from and drops and
-	  counts the rest, where the growable node's one accepting session takes the source of
-	  every datagram it reads as its peer. The client node over Zephyr's sockets is
-	  fixed_client.rs. Not the admin node over Zephyr's sockets: that node accepts, and the
-	  socket stack has no listener of the slot profile yet.
-
-	  Off by default. This kernel's own heap is a separate matter: what the Rust image does
-	  not allocate, Zephyr's network stack and POSIX layer still may, and
-	  CONFIG_HEAP_MEM_POOL_SIZE is what the kernel is given for it.
 
 # What the Zephyr-sockets backend needs of Zephyr is stated HERE, as defaults of
 # the symbols it needs, rather than as lines in prj.conf: the other backend then

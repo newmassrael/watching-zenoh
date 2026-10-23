@@ -24,11 +24,15 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../zephyr-common/wz_zephyr_board.cmake)
 
 target_sources(app PRIVATE src/main.c)
 
+# What the node's axes (the network stack, the role, the memory profile) build the crate with:
+# generated from deploy/wz-config.toml with the axes' Kconfig (Kconfig.axes). What the board and
+# its drivers add is stated below.
+include(${CMAKE_CURRENT_SOURCE_DIR}/wz_axes.cmake)
+set(backend_feature ${wz_axes_features})
+set(no_default_features ${wz_axes_no_default_features})
 set(backend_env "")
-set(no_default_features "")
 
 if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
-  set(backend_feature net-zephyr-sockets)
   # The POSIX socket layer the sockets seam calls (`zephyr_sys::socket`) and the
   # two board hooks that read the interface (wz_board_hooks.c).
   set(backend_undefined
@@ -41,18 +45,9 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
     list(APPEND backend_feature rx-in-place)
   endif()
 
-  # The client node is a build of its own: the crate's defaults (the admin node, with its
-  # accept path and its admin space) are off, and the router it dials is stated here, once, as
-  # a constant the Rust side checks when it compiles.
+  # The client node (its features come with the axes): the router it dials is stated here, once,
+  # as a constant the Rust side checks when it compiles.
   if(CONFIG_WZ_NODE_CLIENT)
-    # Whether the Rust image has an allocator is the memory profile's, not the node's: the same
-    # client, on the heap or over statics (CONFIG_WZ_FIXED_MEMORY).
-    if(CONFIG_WZ_FIXED_MEMORY)
-      list(APPEND backend_feature fixed-client)
-    else()
-      list(APPEND backend_feature client-node)
-    endif()
-    set(no_default_features NO_DEFAULT_FEATURES)
     list(APPEND backend_env WZ_CLIENT_ENDPOINT=${CONFIG_WZ_CLIENT_ENDPOINT})
     # How long the link may sleep when nothing is due (0: the tick), and whether one send window is
     # one datagram. Both only on the fixed-memory profile, the one that has the slot stack's link.
@@ -87,7 +82,6 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
   endif()
 
 elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
-  set(backend_feature net-lwip-mac)
   set(backend_undefined "")
 
   if(CONFIG_WZ_MAC_CYT4BF)
@@ -174,14 +168,6 @@ elseif(CONFIG_WZ_NET_BACKEND_LWIP_MAC)
     endif()
   else()
     message(FATAL_ERROR "wz: the lwIP backend needs a MAC (CONFIG_WZ_MAC_*).")
-  endif()
-
-  # The fixed-memory profile: the node of fixed_node.rs, with the crate's default
-  # features (the heap profile) off, so the Rust image links no allocator. It is a
-  # profile of the lwIP backend alone (the Kconfig symbol depends on it).
-  if(CONFIG_WZ_FIXED_MEMORY)
-    list(APPEND backend_feature fixed-memory)
-    set(no_default_features NO_DEFAULT_FEATURES)
   endif()
 
   # lwIP's C is built by the CARGO build (lwip-sys), against this image's port: its

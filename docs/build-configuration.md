@@ -42,10 +42,18 @@ original reproduced by naming it. Three things follow from it:
   `crates/wz-session-core/src/caps.rs`; the Zephyr build turns each `CONFIG_WZ_LIMIT_*`
   into the cargo environment (`deploy/zephyr-common/wz_zephyr_board.cmake`). `limit()`
   reads a decimal `usize` only.
-- **The MCU images' own Kconfig** (`deploy/zephyr-admin-node/Kconfig`): the role
-  choice, the network backend choice and `WZ_FIXED_MEMORY`, whose `depends on` is
-  written by hand; the mapping from `CONFIG_*` to cargo features is written by hand
-  in each image's `CMakeLists.txt`.
+- **The MCU images' axes**: the admin node's network stack, role and memory profile are
+  declared in `deploy/wz-config.toml` (`[[image]]`, `[[axis]]`, `[[axis_option]]`,
+  `[[cargo_rule]]`). The generator writes the image's `Kconfig.axes` (each axis a
+  `choice`, each option's `requires` its `depends on`) and `wz_axes.cmake` (the image
+  crate's features and whether its defaults are off), and the image's Kconfig and
+  CMake read them. Every image of the board table and every stack its overlays
+  document builds with the same cargo line as before the move
+  (`scripts/lib/zephyr_cargo_lines.py`). What a board or a driver adds (the MAC, the
+  pools, 10BASE-T1S, the SPI probe) and the client's parameters stay in the image's
+  own Kconfig and CMake. The crate's features are still per combination (the client on
+  the heap is `client-node`, on statics `fixed-client`), so a rule names two options;
+  one feature per axis option is step 4.
 - **Storage policy** (D1 step 6, landed): `trait Storage` with `Heap` and `Static`
   (`bounded.rs`), associated types for the sequence, the text, the arena offset,
   the id table and the change epoch; the registries are generic over it and one

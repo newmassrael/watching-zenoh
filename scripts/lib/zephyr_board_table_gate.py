@@ -239,13 +239,33 @@ def conf_text(root: Path, app: str, board: str) -> str | None:
     return path.read_text() if path.is_file() else None
 
 
+def kconfig_tree_text(path: Path) -> str:
+    """`path` and every file it `rsource`s, transitively, as one text.
+
+    An app's axes are generated into a file its Kconfig `rsource`s (`Kconfig.axes`, from
+    deploy/wz-config.toml), so the choices are where the tree puts them, not where the root
+    file is. `source` (Zephyr's own tree) is not followed: it defines no wz choice.
+    """
+    seen: set[Path] = set()
+    parts: list[str] = []
+    todo = [path]
+    while todo:
+        current = todo.pop()
+        if current in seen or not current.is_file():
+            continue
+        seen.add(current)
+        text = current.read_text()
+        parts.append(text)
+        for rel in re.findall(r'^rsource\s+"([^"]+)"', text, re.M):
+            todo.append((current.parent / rel).resolve())
+    return "\n".join(parts)
+
+
 def kconfig_backends(root: Path, app: str) -> set[str]:
-    """The `WZ_NET_BACKEND_*` choices the app's Kconfig defines, as
+    """The `WZ_NET_BACKEND_*` choices the app's Kconfig tree defines, as
     `zephyr-sockets`-style names. Empty when the app has no such choice."""
     path = root / "deploy" / app / "Kconfig"
-    if not path.is_file():
-        return set()
-    found = re.findall(r"^config\s+WZ_NET_BACKEND_([A-Z0-9_]+)", path.read_text(), re.M)
+    found = re.findall(r"^config\s+WZ_NET_BACKEND_([A-Z0-9_]+)", kconfig_tree_text(path), re.M)
     return {name.lower().replace("_", "-") for name in found}
 
 
@@ -568,8 +588,8 @@ def check(table: dict, root: Path = ROOT) -> list[str]:
                 )
             if not offered and row["network"] != "zephyr-sockets":
                 out.append(
-                    f"{label}: deploy/{row['app']}/Kconfig defines no network backend "
-                    f"choice, so the only network it can have is 'zephyr-sockets'"
+                    f"{label}: deploy/{row['app']}/Kconfig, with what it rsources, defines no "
+                    f"network backend choice, so the only network it can have is 'zephyr-sockets'"
                 )
 
         witness = row.get("witness")
@@ -806,6 +826,22 @@ def selftest() -> int:
     expect("a QEMU lane that boots another machine", t, "never starts QEMU")
     t = _good_table(); t["rows"][1]["network"] = "carrier-pigeon"
     expect("an unknown network", t, "is not one of")
+
+    def choice_in_rsourced_file(root: Path) -> None:
+        app = root / "deploy/adm"
+        (app / "Kconfig.axes").write_text(_FIX_KCONFIG)
+        (app / "Kconfig").write_text('rsource "Kconfig.axes"\n')
+
+    expect("a backend choice in a file the Kconfig rsources is the app's", _good_table(), None,
+           choice_in_rsourced_file)
+
+    def no_choice_anywhere(root: Path) -> None:
+        app = root / "deploy/adm"
+        (app / "Kconfig.axes").write_text("config WZ_OTHER\n\tbool\n")
+        (app / "Kconfig").write_text('rsource "Kconfig.axes"\n')
+
+    expect("an app whose Kconfig tree has no backend choice", _good_table(),
+           "defines no network backend", no_choice_anywhere)
 
     def drop_hosted(root: Path) -> None:
         (root / ".github/workflows/ci.yml").write_text("run: bash scripts/run-ci.sh --layer Qz\n")
