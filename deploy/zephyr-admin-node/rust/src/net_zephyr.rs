@@ -46,7 +46,7 @@ impl ZephyrNet {
         // lends, one batch long (`wz/transport-tx-lend`): two, because a session that batches holds
         // one open while it encodes the next message into the other. The admin node's build each
         // frame in a buffer of their own.
-        #[cfg(feature = "client-node")]
+        #[cfg(role_client)]
         let links = links.with_tx_buffers(2, BATCH_SIZE as usize);
         Ok(Self {
             links: Rc::new(links),

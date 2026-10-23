@@ -28,29 +28,29 @@
 //! `start` / `add_port` the board's bring-up calls, and a port the table has no cell for
 //! is refused by name.
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(storage_fixed))]
 use alloc::boxed::Box;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(storage_fixed))]
 use alloc::rc::Rc;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(storage_fixed))]
 use alloc::vec::Vec;
 use core::ffi::CStr;
 
-#[cfg(feature = "fixed-memory")]
+#[cfg(storage_fixed)]
 use wz::link_lwip::ethernet::EthernetPool;
 use wz::link_lwip::ethernet::{EthernetIf, Ipv4Config};
-#[cfg(feature = "fixed-memory")]
+#[cfg(storage_fixed)]
 use wz::link_lwip::rx_sockets::SessionRxPool;
 use wz::link_lwip::LwipLink;
 use wz::runtime_coop::ClockSource;
 use wz::runtime_core::EthernetMac;
 use wz::runtime_zephyr::ZephyrClock;
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(storage_fixed))]
 use wz::session_lwip::LwipLinks;
-#[cfg(feature = "fixed-memory")]
+#[cfg(storage_fixed)]
 use wz_session_core::bounded::BoundedVec;
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(storage_fixed))]
 use crate::NodeNet;
 use crate::TICK_HZ;
 
@@ -79,17 +79,17 @@ pub struct Addressing {
 
 /// One interface of the node, with the MAC's type erased: the node's loop does the
 /// same two things to each, whatever chip is under it.
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(storage_fixed))]
 trait Port {
     /// Frames in; how many frames lwIP took.
     fn poll(&mut self) -> usize;
     fn service(&mut self, now_ms: u64);
 }
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(storage_fixed))]
 struct MacPort<M: BoardMac>(EthernetIf<M>);
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(storage_fixed))]
 impl<M: BoardMac> Port for MacPort<M> {
     fn poll(&mut self) -> usize {
         self.0.poll()
@@ -100,7 +100,7 @@ impl<M: BoardMac> Port for MacPort<M> {
     }
 }
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(storage_fixed))]
 pub struct LwipMacNet {
     link: Rc<LwipLink>,
     ports: Vec<Box<dyn Port>>,
@@ -109,7 +109,7 @@ pub struct LwipMacNet {
     zid: Vec<u8>,
 }
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(storage_fixed))]
 impl LwipMacNet {
     /// Start lwIP with no interface yet: add the board's ports with
     /// [`add_port`](Self::add_port).
@@ -153,7 +153,7 @@ impl LwipMacNet {
     }
 }
 
-#[cfg(not(feature = "fixed-memory"))]
+#[cfg(not(storage_fixed))]
 impl NodeNet for LwipMacNet {
     type Links = LwipLinks;
 
@@ -190,20 +190,20 @@ impl NodeNet for LwipMacNet {
 
 /// Interfaces the node holds at most: the lwIP shim's interface table holds two (the
 /// on-board RMII and the 10BASE-T1S MAC-PHY).
-#[cfg(feature = "fixed-memory")]
+#[cfg(storage_fixed)]
 pub const MAX_PORTS: usize = 2;
 
 /// One interface of the node, per MAC type this build can carry. A closed set in place
 /// of a `Box<dyn Port>`: the node's loop does the same two things to each, and an enum
 /// holds the interface where it is, with no allocation to type-erase it.
-#[cfg(feature = "fixed-memory")]
+#[cfg(storage_fixed)]
 pub(crate) enum PortCell {
     Onboard(EthernetIf<crate::mac_cyt4bf::T2gMac>),
     #[cfg(feature = "t1s-lan865x")]
     T1s(EthernetIf<crate::mac_lan865x::T1sMac>),
 }
 
-#[cfg(feature = "fixed-memory")]
+#[cfg(storage_fixed)]
 impl PortCell {
     fn poll(&mut self) -> usize {
         match self {
@@ -224,7 +224,7 @@ impl PortCell {
 
 /// A MAC the fixed-memory node can bring up: where its interface lives, and the cell of
 /// [`PortCell`] it is carried in. Implemented here for the chips this build has.
-#[cfg(feature = "fixed-memory")]
+#[cfg(storage_fixed)]
 pub trait PortStorage: BoardMac + Sized {
     /// The static cell the MAC's interface is added in (see
     /// `wz::link_lwip::ethernet::EthernetPool`).
@@ -234,10 +234,10 @@ pub trait PortStorage: BoardMac + Sized {
     fn cell(interface: EthernetIf<Self>) -> PortCell;
 }
 
-#[cfg(feature = "fixed-memory")]
+#[cfg(storage_fixed)]
 static ONBOARD_POOL: EthernetPool<crate::mac_cyt4bf::T2gMac, 1> = EthernetPool::new();
 
-#[cfg(feature = "fixed-memory")]
+#[cfg(storage_fixed)]
 impl PortStorage for crate::mac_cyt4bf::T2gMac {
     fn pool() -> &'static EthernetPool<Self, 1> {
         &ONBOARD_POOL
@@ -248,10 +248,10 @@ impl PortStorage for crate::mac_cyt4bf::T2gMac {
     }
 }
 
-#[cfg(all(feature = "fixed-memory", feature = "t1s-lan865x"))]
+#[cfg(all(storage_fixed, feature = "t1s-lan865x"))]
 static T1S_POOL: EthernetPool<crate::mac_lan865x::T1sMac, 1> = EthernetPool::new();
 
-#[cfg(all(feature = "fixed-memory", feature = "t1s-lan865x"))]
+#[cfg(all(storage_fixed, feature = "t1s-lan865x"))]
 impl PortStorage for crate::mac_lan865x::T1sMac {
     fn pool() -> &'static EthernetPool<Self, 1> {
         &T1S_POOL
@@ -264,13 +264,13 @@ impl PortStorage for crate::mac_lan865x::T1sMac {
 
 /// The session sockets of the node: one for the listener and one per session it dials.
 /// The cell count is `fixed_node::SOCKETS`, which sizes it.
-#[cfg(feature = "fixed-memory")]
+#[cfg(storage_fixed)]
 pub static SOCKETS: SessionRxPool<{ crate::fixed_node::SOCKETS }> = SessionRxPool::new();
 
 /// The node's stack in storage declared here (`fixed-memory`): `start` and `add_port`
 /// are the heap form's, so the board's bring-up does not change, and the rest is what
 /// `fixed_node` reads.
-#[cfg(feature = "fixed-memory")]
+#[cfg(storage_fixed)]
 pub struct LwipMacNet {
     link: &'static LwipLink,
     ports: BoundedVec<PortCell, MAX_PORTS>,
@@ -278,7 +278,7 @@ pub struct LwipMacNet {
     zid: [u8; 6],
 }
 
-#[cfg(feature = "fixed-memory")]
+#[cfg(storage_fixed)]
 impl LwipMacNet {
     /// Start lwIP with no interface yet: add the board's ports with
     /// [`add_port`](Self::add_port).

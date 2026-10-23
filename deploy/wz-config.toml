@@ -655,7 +655,7 @@ id = "role"
 image = "zephyr-admin-node"
 kconfig = "WZ_NODE_ROLE"
 prompt = "What the node is"
-default = "admin"
+default = "peer"
 help = '''
 The admin node is the node a zenoh host reconfigures at runtime. The client node is a
 client of a router that answers queries and nothing else: it is what zenoh-pico is as a
@@ -663,10 +663,16 @@ client with a queryable, and what a comparison with it is made against.
 '''
 
 [[axis_option]]
-id = "admin"
+id = "peer"
 axis = "role"
 kconfig = "WZ_NODE_ADMIN"
 prompt = "Admin node: listens, hosts upstream's admin space, dials what it is told to"
+help = '''
+The role of upstream's `mode = peer`: it accepts sessions as well as dialling, which is what
+the capability `peer` is. This image's peer also hosts the admin space a zenoh host
+reconfigures it through. The Kconfig symbol keeps its name, so the overlays that name it keep
+working.
+'''
 
 [[axis_option]]
 id = "client"

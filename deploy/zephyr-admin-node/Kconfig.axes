@@ -38,6 +38,11 @@ choice WZ_NODE_ROLE
 
 config WZ_NODE_ADMIN
 	bool "Admin node: listens, hosts upstream's admin space, dials what it is told to"
+	help
+	  The role of upstream's `mode = peer`: it accepts sessions as well as dialling, which is what
+	  the capability `peer` is. This image's peer also hosts the admin space a zenoh host
+	  reconfigures it through. The Kconfig symbol keeps its name, so the overlays that name it keep
+	  working.
 
 config WZ_NODE_CLIENT
 	bool "Client node: dials a router and answers queries"
