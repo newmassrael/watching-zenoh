@@ -55,7 +55,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::e2e_profile::Profile;
-use crate::payload::formats::{PayloadField, PayloadFormat, PayloadFormatError, Protobuf};
+use crate::payload::formats::{
+    MessagePaths, PayloadField, PayloadFormat, PayloadFormatError, Protobuf,
+};
 
 /// The character that separates a profile name from a body schema in a rule's
 /// format token.
@@ -173,12 +175,22 @@ impl PayloadFormat for E2eFormat {
     /// CRC verdict is beside it under `e2e`. A payload shorter than the header
     /// has no body, and says so as a truncation at its end.
     fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError> {
+        self.decode_declared(payload, &MessagePaths::none())
+    }
+
+    /// [`Self::decode`] with the paths the declarations say hold a message,
+    /// which the body walk uses as the schema-less protobuf walk does.
+    fn decode_declared(
+        &self,
+        payload: &[u8],
+        messages: &MessagePaths<'_>,
+    ) -> Result<Vec<PayloadField>, PayloadFormatError> {
         let header = self.profile.header_bytes();
         let Some(body) = payload.get(header..) else {
             return Err(PayloadFormatError::Truncated(payload.len()));
         };
         let mut fields = Protobuf
-            .decode(body)
+            .decode_declared(body, messages)
             .map_err(|error| rebase_error(error, header))?;
         for field in &mut fields {
             field.start += header;

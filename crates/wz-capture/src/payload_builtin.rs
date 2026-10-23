@@ -33,7 +33,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::payload::formats::{PayloadField, PayloadFormat, PayloadFormatError};
+use crate::payload::formats::{MessagePaths, PayloadField, PayloadFormat, PayloadFormatError};
 
 /// The protobuf WIRE FORMAT, walked without a schema.
 ///
@@ -144,11 +144,17 @@ fn text_like(raw: &[u8]) -> Option<&str> {
 /// or a reader cannot line the two up, and its path must name the route to
 /// it (`2.1`) rather than restart at `1` — a listing with two fields called
 /// `1` says nothing about where either lives.
+///
+/// `messages` are the paths the declarations say hold a message. At one of
+/// them a length-delimited field is read as a nested message FIRST, whatever
+/// its bytes look like, and only a field that does not parse as one falls back
+/// to the text-or-bytes rule below.
 fn walk(
     payload: &[u8],
     base: usize,
     depth: usize,
     prefix: &str,
+    messages: &MessagePaths<'_>,
     out: &mut Vec<PayloadField>,
 ) -> Result<(), PayloadFormatError> {
     let mut at = 0usize;
@@ -215,35 +221,53 @@ fn walk(
                     .get(at..end)
                     .ok_or(PayloadFormatError::Truncated(base + at))?;
                 at = end;
-                // Rendered as text when it IS text, because a
-                // length-delimited field is a string as often as it is
-                // a nested message and a reader should not have to
-                // decode hex to find out.
-                match text_like(raw) {
-                    Some(text) => format!("{text:?}"),
+                // A TRY, and a failure falls back rather than rejecting the
+                // message: these bytes may simply be a blob, and a blob is not a
+                // malformed message. The whole sub-buffer must be consumed and
+                // yield at least one field, or "it parsed" would be a statement
+                // about a prefix.
+                let nested = |children: &mut Vec<PayloadField>| match walk(
+                    raw,
+                    base + body,
+                    depth + 1,
+                    &path,
+                    messages,
+                    children,
+                ) {
+                    Ok(()) if !children.is_empty() => Some(format!("{} field(s)", children.len())),
+                    _ => {
+                        children.clear();
+                        None
+                    }
+                };
+                // The declarations say this field holds a message, which the
+                // bytes cannot say: a message whose fields happen to encode as
+                // printable bytes is otherwise read as text below.
+                let declared = if messages.contains(&path) && depth < MAX_NESTING {
+                    nested(&mut children)
+                } else {
+                    None
+                };
+                match (declared, text_like(raw)) {
+                    (Some(fields), _) => fields,
+                    // Rendered as text when it IS text, because a
+                    // length-delimited field is a string as often as it is
+                    // a nested message and a reader should not have to
+                    // decode hex to find out.
+                    (None, Some(text)) => format!("{text:?}"),
                     // R311y701 (PF3) — otherwise it may be a NESTED
                     // MESSAGE, which nesting is common enough in real
                     // schemas that stopping here showed a reader one
                     // layer of their own data.
-                    None if depth >= MAX_NESTING => {
+                    (None, None) if depth >= MAX_NESTING => {
                         format!("{len} byte(s), nested deeper than this reader walks")
                     }
-                    None => {
-                        // A TRY, and a failure falls back rather than
-                        // rejecting the message: these bytes may simply be
-                        // a blob, and a blob is not a malformed message.
-                        // The whole sub-buffer must be consumed and yield
-                        // at least one field, or "it parsed" would be a
-                        // statement about a prefix.
-                        match walk(raw, base + body, depth + 1, &path, &mut children) {
-                            Ok(()) if !children.is_empty() => {
-                                format!("{} field(s)", children.len())
-                            }
-                            _ => {
-                                children.clear();
-                                format!("{len} byte(s)")
-                            }
-                        }
+                    (None, None) if messages.contains(&path) => {
+                        // Already tried as the message it is declared to be.
+                        format!("{len} byte(s)")
+                    }
+                    (None, None) => {
+                        nested(&mut children).unwrap_or_else(|| format!("{len} byte(s)"))
                     }
                 }
             }
@@ -298,6 +322,14 @@ impl PayloadFormat for Protobuf {
     }
 
     fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError> {
+        self.decode_declared(payload, &MessagePaths::none())
+    }
+
+    fn decode_declared(
+        &self,
+        payload: &[u8],
+        messages: &MessagePaths<'_>,
+    ) -> Result<Vec<PayloadField>, PayloadFormatError> {
         if payload.is_empty() {
             // An empty payload is not a protobuf message this reader can
             // vouch for; it is also not malformed. Saying NotThisFormat
@@ -306,7 +338,7 @@ impl PayloadFormat for Protobuf {
             return Err(PayloadFormatError::NotThisFormat);
         }
         let mut out = Vec::new();
-        walk(payload, 0, 0, "", &mut out)?;
+        walk(payload, 0, 0, "", messages, &mut out)?;
         Ok(out)
     }
 }
@@ -1334,6 +1366,108 @@ mod tests {
         // front are not text.
         assert!(text_like(b"Px").is_some());
         assert!(text_like(&[0x08, 0x07]).is_none());
+    }
+
+    /// The `demo.Pose` body of the consumer's claim: `position` (field 7) is a
+    /// message whose own bytes (`28 7d 30 32 3a 24 ...`, that is
+    /// `( } 0 2 : $ ...`) are all printable, so the text rule reads it as a
+    /// string. Only the declarations can say it is a message.
+    const POSE_BODY: &str = "2223726f626f742d3031202f2066726f6e742063616d65726120756e69742c206c616220412841305a3a2a287d30323a246d6170206672616d653a206c616220666c6f6f7220706c616e2c2076657273696f6e20324a276d6f76696e6720746f20646f636b20332c20626174746572792061742038312070657263656e74";
+
+    fn pose_body() -> Vec<u8> {
+        (0..POSE_BODY.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&POSE_BODY[at..at + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// Without a declaration the nested message of the claim is text, as the
+    /// rule on [`text_like`] says, and the same bytes with the declaration are
+    /// walked into their three fields at depth one, in the outer payload's
+    /// coordinates.
+    #[test]
+    fn a_declared_message_is_walked_even_when_its_bytes_are_printable() {
+        let body = pose_body();
+
+        let schema_less = Protobuf.decode(&body).expect("a protobuf message");
+        let position = schema_less.iter().find(|f| f.path == "7").expect("field 7");
+        assert!(
+            position.value.starts_with("len \"("),
+            "undeclared, the message reads as text: {}",
+            position.value
+        );
+        assert!(
+            !schema_less.iter().any(|f| f.path.starts_with("7.")),
+            "and nothing is walked into it"
+        );
+
+        let holds = |path: &str| path == "7";
+        let fields = Protobuf
+            .decode_declared(&body, &MessagePaths::new(&holds))
+            .expect("a protobuf message");
+        let paths: Vec<&str> = fields.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["4", "5", "6", "7", "7.5", "7.6", "7.7", "9"],
+            "field 7 is the parent row and its three fields follow it"
+        );
+        let position = &fields[3];
+        assert_eq!(position.value, "len 3 field(s)");
+        let inner: Vec<(&str, &str)> = fields[4..7]
+            .iter()
+            .map(|f| (f.path.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(
+            inner,
+            [
+                ("7.5", "varint 125"),
+                ("7.6", "varint 50"),
+                ("7.7", "len \"map frame: lab floor plan, version 2\""),
+            ]
+        );
+        // Spans are in the outer payload's coordinates: the children lie inside
+        // the parent's span, and the first starts after the parent's tag and
+        // length (two bytes).
+        for child in &fields[4..7] {
+            assert!(child.start >= position.start + 2 && child.end <= position.end);
+        }
+        // The first child is field 5 (tag 0x28), at the first byte inside the
+        // parent's length-delimited value.
+        assert_eq!(body[fields[4].start], 0x28);
+        // The fields after the message are still read.
+        assert_eq!(fields[7].path, "9");
+    }
+
+    /// A declared message that is NOT one (the bytes are a string after all)
+    /// falls back to text, and the walk does not refuse the payload: a
+    /// declaration can be wrong about a sample, and a blob is not malformed.
+    ///
+    /// The declaration WINS where the bytes do parse: `hi` is field 13 holding
+    /// the varint 105, so under a declaration it is walked as that message. That
+    /// is what the declaration asks for, and the ambiguity is the format's.
+    #[test]
+    fn a_declared_message_that_does_not_parse_falls_back_to_text() {
+        let holds = |path: &str| path == "1";
+        let declared = MessagePaths::new(&holds);
+
+        // `hello` is `68 65 6c 6c 6f`: field 13 = 101, then a tag of wire type 4
+        // (a group end), which has no length rule, so it is not a message.
+        let mut outer = vec![0x0Au8, 5];
+        outer.extend_from_slice(b"hello");
+        let fields = Protobuf
+            .decode_declared(&outer, &declared)
+            .expect("still a protobuf message");
+        assert_eq!(fields.len(), 1, "nothing was walked into it");
+        assert_eq!(fields[0].value, "len \"hello\"");
+
+        let mut outer = vec![0x0Au8, 2];
+        outer.extend_from_slice(b"hi");
+        let fields = Protobuf
+            .decode_declared(&outer, &declared)
+            .expect("a protobuf message");
+        assert_eq!(fields.len(), 2, "but bytes that parse are the message");
+        assert_eq!(fields[1].path, "1.13");
+        assert_eq!(fields[1].value, "varint 105");
     }
 
     /// R311y701 (PF3) — the depth bound is REPORTED rather than silently

@@ -14243,6 +14243,9 @@ layer_c1bn_passive_dissection_features() {
         payload_builtin::tests::a_span_two_layers_in_is_still_in_the_outer_payloads_coordinates \
         payload_builtin::tests::a_length_field_that_is_not_a_message_falls_back_to_its_byte_count \
         payload_builtin::tests::printable_bytes_are_text_even_when_they_would_parse_as_a_message \
+        payload_builtin::tests::a_declared_message_is_walked_even_when_its_bytes_are_printable \
+        payload_builtin::tests::a_declared_message_that_does_not_parse_falls_back_to_text \
+        payload_decode::tests::a_proto_declared_message_field_is_walked_into_its_fields \
         payload_builtin::tests::nesting_past_the_bound_says_so_rather_than_going_quiet
     do
         grep -qF "$name: test" <<<"$listing" || {

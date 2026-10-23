@@ -32,8 +32,8 @@ use wz_session_core::passive::Direction;
 
 use crate::agg::KeyexprSpaces;
 use crate::payload::formats::{
-    path_depth, path_parent, Declaration, DeclarationId, FormatMap, MatchedRule, PayloadField,
-    PayloadFormat,
+    path_depth, path_parent, Declaration, DeclarationId, FormatMap, MatchedRule, MessagePaths,
+    PayloadField, PayloadFormat,
 };
 use crate::payload::Encoding;
 
@@ -352,6 +352,15 @@ impl<'a> Declarations<'a> {
         let (id, name) = self.map.field_name(keyexpr, path)?;
         self.used.borrow_mut().insert(id);
         Some(name.to_string())
+    }
+
+    /// Whether a field is declared UNDER this path, so the field at the path holds
+    /// a message ([`FormatMap::declares_under`]).
+    ///
+    /// NOT recorded as applying: asking what a field is does not apply any
+    /// declaration, and one that names `7.5` is applied when `7.5` is named.
+    pub fn declares_under(&self, keyexpr: &str, path: &str) -> bool {
+        self.map.declares_under(keyexpr, path)
     }
 
     /// The declarations this run never applied.
@@ -2037,7 +2046,11 @@ pub fn decode_payload(field: &Field, map: &Declarations<'_>, at: KeyexprAt<'_>) 
             Some(declared)
         }
     };
-    match format.decode(bytes) {
+    // The paths the declarations say hold a message: asked of the map for THIS
+    // keyexpr, so a format that cannot tell a message from a string by its bytes
+    // is told by the declarations instead.
+    let holds_a_message = |path: &str| map.declares_under(&keyexpr, path);
+    match format.decode_declared(bytes, &MessagePaths::new(&holds_a_message)) {
         Ok(mut fields) => {
             // The spans arrive PAYLOAD-relative and every other span in this
             // listing is MESSAGE-relative (R311y677). Rebasing here is the only
@@ -2622,6 +2635,66 @@ mod tests {
             }
             other => panic!("a JSON rule over a JSON publisher must decode: {other:?}"),
         }
+    }
+
+    /// A message field the schema declares is walked into its own fields, even
+    /// when the bytes of that message are printable and would otherwise read as
+    /// a string.
+    ///
+    /// The declarations are the ones `declarations_from_proto` writes from the
+    /// consumer's `pose.proto`, so this is the path the consumer takes, not a
+    /// hand-written one. The body is the 126 bytes it captured.
+    #[test]
+    fn a_proto_declared_message_field_is_walked_into_its_fields() {
+        use crate::proto_schema::{declarations_from_proto, ProtoFile};
+
+        let schema = "syntax = \"proto3\";\npackage demo;\n\
+             message Point { uint32 x_cm = 5; uint32 y_cm = 6; string frame = 7; }\n\
+             message Pose { string robot = 4; uint32 seq = 5; uint32 heading_deg = 6; \
+             Point position = 7; string status = 9; }\n";
+        let files = [ProtoFile {
+            name: "pose.proto",
+            text: schema.as_bytes(),
+        }];
+        let declared = declarations_from_proto("demo/**", "demo.Pose", &files, 0)
+            .expect("the consumer's schema");
+
+        let mut map = FormatMap::new();
+        map.declare_all(&declared.text)
+            .expect("its own declarations");
+        let run = Declarations::new(&map);
+        let spaces = KeyexprSpaces::new();
+        let at = KeyexprAt::new(Direction::A, &spaces);
+
+        let hex = "2223726f626f742d3031202f2066726f6e742063616d65726120756e69742c206c616220412841305a3a2a287d30323a246d6170206672616d653a206c616220666c6f6f7220706c616e2c2076657273696f6e20324a276d6f76696e6720746f20646f636b20332c20626174746572792061742038312070657263656e74";
+        let body: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("hex"))
+            .collect();
+        assert_eq!(body.len(), 126);
+
+        let sample = put_declaring(ENC_ZENOH_BYTES, &body);
+        let PayloadDecoding::Decoded { fields, .. } = decode_payload(&sample, &run, at) else {
+            panic!("the rule covers the key and the body is a message");
+        };
+        let rows: Vec<(&str, Option<&str>, usize)> = fields
+            .iter()
+            .map(|f| (f.path.as_str(), f.name.as_deref(), path_depth(&f.path)))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("4", Some("robot"), 0),
+                ("5", Some("seq"), 0),
+                ("6", Some("heading_deg"), 0),
+                ("7", Some("position"), 0),
+                ("7.5", Some("x_cm"), 1),
+                ("7.6", Some("y_cm"), 1),
+                ("7.7", Some("frame"), 1),
+                ("9", Some("status"), 0),
+            ],
+            "position is a depth-0 row with its three fields under it, all named"
+        );
     }
 
     /// R311y909 — and the veto works in the OTHER direction now that there are

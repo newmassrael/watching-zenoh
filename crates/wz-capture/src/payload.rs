@@ -2132,6 +2132,38 @@ pub mod formats {
         }
     }
 
+    /// The field paths a deployment's declarations say hold a MESSAGE: those it
+    /// names a field under.
+    ///
+    /// A declaration `demo/**:7.5=x_cm` says that field 7 holds a field 5, which
+    /// only a message (or a map's entry) does, and the declarations
+    /// [`crate::proto_schema::declarations_from_proto`] writes for a message
+    /// field are exactly such lines. It is the one thing about a field's TYPE
+    /// the declaration text carries, and it is the thing a schema-less reader
+    /// cannot tell from the bytes: see [`PayloadFormat::decode_declared`].
+    pub struct MessagePaths<'m> {
+        holds_a_message: &'m dyn Fn(&str) -> bool,
+    }
+
+    impl<'m> MessagePaths<'m> {
+        /// The paths for which `holds_a_message` answers `true`.
+        pub fn new(holds_a_message: &'m dyn Fn(&str) -> bool) -> Self {
+            Self { holds_a_message }
+        }
+
+        /// No path is declared to hold a message.
+        pub fn none() -> MessagePaths<'static> {
+            MessagePaths {
+                holds_a_message: &|_| false,
+            }
+        }
+
+        /// Whether the declarations name a field under `path`.
+        pub fn contains(&self, path: &str) -> bool {
+            (self.holds_a_message)(path)
+        }
+    }
+
     /// A decoder for one payload format.
     ///
     /// R311y856 — the built-in ones are [`Protobuf`] and live here, beside the
@@ -2143,6 +2175,24 @@ pub mod formats {
         fn name(&self) -> &str;
         /// Decode `payload`, or say why not.
         fn decode(&self, payload: &[u8]) -> Result<Vec<PayloadField>, PayloadFormatError>;
+
+        /// Decode `payload` knowing which paths the declarations say hold a
+        /// message ([`MessagePaths`]).
+        ///
+        /// A format whose wire format already says what a value is has no use
+        /// for that, which is what the default states: it is [`Self::decode`].
+        /// [`Protobuf`] does: a string and a nested message are both wire type
+        /// 2, and a message whose bytes happen to be printable reads as text
+        /// unless something says it is a message. A default rather than a
+        /// required method for the reason [`Self::encodings`] gives.
+        fn decode_declared(
+            &self,
+            payload: &[u8],
+            messages: &MessagePaths<'_>,
+        ) -> Result<Vec<PayloadField>, PayloadFormatError> {
+            let _ = messages;
+            self.decode(payload)
+        }
 
         /// R311y873 — the ENCODINGS this format is for, by their table name in
         /// [`wz_codecs::encoding_ids::ENCODING_ID_TO_STR`], or `None` when this
@@ -3054,6 +3104,24 @@ pub mod formats {
             ))
         }
 
+        /// Whether a field is declared UNDER `path` for `keyexpr`: a name whose
+        /// path is `path`, a dot, and more. Such a declaration says the field at
+        /// `path` holds a message ([`MessagePaths`]).
+        ///
+        /// Matched the way [`Self::field_name`] matches, by the pattern covering
+        /// the keyexpr and by the text of the path, so the two cannot disagree
+        /// about which declarations apply to a field.
+        pub fn declares_under(&self, keyexpr: &str, path: &str) -> bool {
+            self.names.iter().any(|(pattern, p, _)| {
+                p.strip_prefix(path)
+                    .is_some_and(|rest| rest.starts_with('.'))
+                    && {
+                        let chunks: Vec<&str> = pattern.split('/').collect();
+                        wz_session_core::keyexpr_match::keyexpr_pattern_matches(&chunks, keyexpr)
+                    }
+            })
+        }
+
         /// Whether any field name was declared. A caller that renders the
         /// declaration inventory needs this separately from [`Self::is_empty`]:
         /// names can be declared for a format the built-ins already cover.
@@ -3066,6 +3134,7 @@ pub mod formats {
     // them so a caller reads one module. See `crate::payload_builtin` for why
     // they moved out of `wz-analyze`.
     pub use crate::payload_builtin::{builtin, Cbor, Json, Protobuf, BUILTIN_NAMES};
+    // `MessagePaths` is defined in this module, above `PayloadFormat`.
     // The end-to-end profile format a rule can bind a key to, re-exported for
     // the reason the others are: one module a caller reads.
     pub use crate::e2e_rule::E2eFormat;
