@@ -279584,6 +279584,46 @@
         "zenoh's interop of step 2 is step 12's compatibility crate; zenoh-c's needs its layout arm to become a value (C12)."
       ]
     },
+    "Round 3458": {
+      "decision_summary": "Record the owner's ruling of 2026-10-23 on the lifecycle credential (decision D9 of docs/session-lifecycle-intent.md, cost not counted): a lifecycle verb is taken only over a secure channel, and every profile uses one protocol for it, TLS 1.3 with mutual authentication. Each side signs the transcript, so the dialling side is proven too, and every frame is protected under keys that handshake derived. The key travels in a self-signed certificate and is trusted by pinning the zid derived from it. The fixed-memory profile gets a TLS 1.3 stack in static memory behind the same port, Mbed TLS 3.6 LTS being the candidate measured first. The ruling follows a measured defect in step 1a: a public-key proof over TCP is not bound to the frames after the handshake, so it stops counting for the verbs. REMAINING is unchanged.",
+      "changes_bullets": [
+        "docs/session-lifecycle-intent.md (51ea1292e): two measured facts in section 2 (upstream TLS takes certificates, not raw keys; a public-key proof is not bound to the channel); D1 and D2 amended so a credential is a key proven inside a protected channel and the guard is keyed on the secure-channel features; new decision D9 with its rejected alternatives; step 1 gains the 1a correction and a restated 1b; two open measurements replace the RSA cost question.",
+        "Inventory session-close-ingress (51ea1292e): a RULING paragraph appended to its reason, old body unchanged, naming no file of this tree.",
+        "docs/reason-review-pins.md (51ea1292e): four rows re-pinned to R3458 for files Round 3456 changed (the coop and lwIP session drives, the tokio session glue, the session-core drive); each claim the reason makes about them was re-read and holds."
+      ],
+      "verification_bullets": [
+        "Read directly: upstream zenoh 1.10.1's TLS configuration (root, per-side certificate and key, enable_mtls, verify_name_on_connect) and its public-key extension, whose acceptor decrypts with its own private key and whose initiator checks the OpenAck for presence; zenoh-pico 1.10.1's TLS stream is Mbed TLS over POSIX socket headers; this tree's peer_identity_verified accepts the public-key stage's zid. Not measured: whether upstream admits a pinned self-signed certificate with name verification off, and the TLS footprint on the fixed-memory profile.",
+        "Each rc 0 on the final tree: reason_review_pin_gate (rc 1 before the four re-pins, on files this round did not touch), store_reason_citation_gate, store_reasons_resolve, depth_axis_census, audit-catalog-status (REMAINING 2), grading_pin_ratchet, apfull_membership, upstream_citation_anchor_gate and the prose gates; the confidential-vocabulary scan finds nothing; validate-workspace reports no new T1 orphan."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "Next, in order: the 1a correction (a peer proven only by the public-key extension over TCP is refused, the same peer over TLS admitted); the D2 guard keyed on the secure-channel features, with the census rows, the E6 binary and the session domain bundle that build the lifecycle feature without one; then the fixed-memory secure channel, starting with measuring Mbed TLS 3.6 LTS against D9's criteria.",
+        "The four stale pins came from Round 3456 editing files this atom cites without re-pinning; whether its hosted run reported them is read at the next round's start.",
+        "Not a milestone round: REMAINING stays 2 (api-compat-rust, session-close-ingress)."
+      ],
+      "publishable_decision_summary": "Record the owner's ruling of 2026-10-23 on the lifecycle credential (decision D9 of docs/session-lifecycle-intent.md, cost not counted): a lifecycle verb is taken only over a secure channel, and every profile uses one protocol for it, TLS 1.3 with mutual authentication. Each side signs the transcript, so the dialling side is proven too, and every frame is protected under keys that handshake derived. The key travels in a self-signed certificate and is trusted by pinning the zid derived from it. The fixed-memory profile gets a TLS 1.3 stack in static memory behind the same port, Mbed TLS 3.6 LTS being the candidate measured first. The ruling follows a measured defect in step 1a: a public-key proof over TCP is not bound to the frames after the handshake, so it stops counting for the verbs. REMAINING is unchanged.",
+      "publishable_changes_bullets": [
+        "docs/session-lifecycle-intent.md (51ea1292e): two measured facts in section 2 (upstream TLS takes certificates, not raw keys; a public-key proof is not bound to the channel); D1 and D2 amended so a credential is a key proven inside a protected channel and the guard is keyed on the secure-channel features; new decision D9 with its rejected alternatives; step 1 gains the 1a correction and a restated 1b; two open measurements replace the RSA cost question.",
+        "Inventory session-close-ingress (51ea1292e): a RULING paragraph appended to its reason, old body unchanged, naming no file of this tree.",
+        "docs/reason-review-pins.md (51ea1292e): four rows re-pinned to R3458 for files Round 3456 changed (the coop and lwIP session drives, the tokio session glue, the session-core drive); each claim the reason makes about them was re-read and holds."
+      ],
+      "publishable_verification_bullets": [
+        "Read directly: upstream zenoh 1.10.1's TLS configuration (root, per-side certificate and key, enable_mtls, verify_name_on_connect) and its public-key extension, whose acceptor decrypts with its own private key and whose initiator checks the OpenAck for presence; zenoh-pico 1.10.1's TLS stream is Mbed TLS over POSIX socket headers; this tree's peer_identity_verified accepts the public-key stage's zid. Not measured: whether upstream admits a pinned self-signed certificate with name verification off, and the TLS footprint on the fixed-memory profile.",
+        "Each rc 0 on the final tree: reason_review_pin_gate (rc 1 before the four re-pins, on files this round did not touch), store_reason_citation_gate, store_reasons_resolve, depth_axis_census, audit-catalog-status (REMAINING 2), grading_pin_ratchet, apfull_membership, upstream_citation_anchor_gate and the prose gates; the confidential-vocabulary scan finds nothing; validate-workspace reports no new T1 orphan."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next, in order: the 1a correction (a peer proven only by the public-key extension over TCP is refused, the same peer over TLS admitted); the D2 guard keyed on the secure-channel features, with the census rows, the E6 binary and the session domain bundle that build the lifecycle feature without one; then the fixed-memory secure channel, starting with measuring Mbed TLS 3.6 LTS against D9's criteria.",
+        "The four stale pins came from Round 3456 editing files this atom cites without re-pinning; whether its hosted run reported them is read at the next round's start.",
+        "Not a milestone round: REMAINING stays 2 (api-compat-rust, session-close-ingress)."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
