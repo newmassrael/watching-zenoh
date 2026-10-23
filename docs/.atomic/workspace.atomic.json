@@ -280320,6 +280320,50 @@
         "The latency of one request and reply in the AP client, measured last on pc3 at 86 to 92 us, should be re-measured with the yield in the loop."
       ]
     },
+    "Round 3474": {
+      "decision_summary": "Make the size gate build its own denominator. For each pico case capability_cost_gate.py now builds zenoh-pico from the pinned submodule as the same build: every switch deploy/wz-config.toml answers is set from that answer for the case's features (always on, never off, maps as built, n/a at upstream's default), the header pico generated is read back to name any switch it built otherwise, and the ratio is printed with the toolchain. This corrects Round 3472, whose reference was chosen by hand and left interest, matching and the receive cache off although wz has them: against the same build the pico client is 4.49 times zenoh-pico, not 4.69, and the default build 6.95 times, not 8.35; the client with UDP is 4.59 and the peer 6.73. The ratio is printed, not graded: the text budgets hold wz's size.",
+      "changes_bullets": [
+        "scripts/lib/wz_config.py: enabled_features (a package's features as cargo resolves them) and pico_reference (the pico switches of the same build, from the upstream_switch rows); selftest arms for both, including that the reference reads back as the capabilities it was derived from.",
+        "scripts/lib/capability_cost_gate.py: each pico case is measured against zenoh-pico built from an export of the submodule (pico's CMake writes into its source tree), one build directory per pin, switches and toolchain; a switch pico built otherwise than asked is printed; the zenoh-c cases say their reference is not in this lane. The module doc gains \"The denominator\".",
+        ".github/workflows/ci.yml: the capability-cost job installs cmake; apt_package_census.py derives that need (it now reads a Python cmake argument list as an invocation) and states it, and round_fed_gate_reach.py lists the size gate as deferred, because it builds its subject."
+      ],
+      "verification_bullets": [
+        "wz_config.py --selftest 97 of 97; a mutant that turns every maps switch on fails the two new arms (the reference's switch classes, and the read-back to the capabilities it came from). capability_cost_gate.py --selftest 14 of 14. apt_package_census.py --selftest passes, and a mutant without the Python-list arm misses both list forms.",
+        "pc2, gcc 13.3.0, cmake 4.4.2: Layer C1cs passes, 8 cases within budget; references built from submodule e1ab223a28aa with no switch built otherwise than asked: pico-client 1,790,121 against 398,573 (4.49), pico-client-udp 1,850,617 against 403,014 (4.59), pico-peer 2,795,057 against 415,527 (6.73), pico-default 4,220,330 against 607,125 (6.95).",
+        "The 110 round-fed static gates of the pre-push hook exit 0 on the committed tree.",
+        "Hosted: the capability-cost job took about 6 minutes of its 20 on the last run that reached it; the four pico builds are new there and are not yet timed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "The zenoh-c cases have no same-build reference in this lane; the zenoh-c original is provisioned only where the oracle is installed.",
+        "The ratio is not graded, so a pin bump that moves pico's size shows only in the printed line.",
+        "The fixed-memory MCU images are not compared by this gate; their last comparison with pico is a kit measurement of 2026-10-21."
+      ],
+      "publishable_decision_summary": "Make the size gate build its own denominator. For each pico case capability_cost_gate.py now builds zenoh-pico from the pinned submodule as the same build: every switch deploy/wz-config.toml answers is set from that answer for the case's features (always on, never off, maps as built, n/a at upstream's default), the header pico generated is read back to name any switch it built otherwise, and the ratio is printed with the toolchain. This corrects Round 3472, whose reference was chosen by hand and left interest, matching and the receive cache off although wz has them: against the same build the pico client is 4.49 times zenoh-pico, not 4.69, and the default build 6.95 times, not 8.35; the client with UDP is 4.59 and the peer 6.73. The ratio is printed, not graded: the text budgets hold wz's size.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_config.py: enabled_features (a package's features as cargo resolves them) and pico_reference (the pico switches of the same build, from the upstream_switch rows); selftest arms for both, including that the reference reads back as the capabilities it was derived from.",
+        "scripts/lib/capability_cost_gate.py: each pico case is measured against zenoh-pico built from an export of the submodule (pico's CMake writes into its source tree), one build directory per pin, switches and toolchain; a switch pico built otherwise than asked is printed; the zenoh-c cases say their reference is not in this lane. The module doc gains \"The denominator\".",
+        ".github/workflows/ci.yml: the capability-cost job installs cmake; apt_package_census.py derives that need (it now reads a Python cmake argument list as an invocation) and states it, and round_fed_gate_reach.py lists the size gate as deferred, because it builds its subject."
+      ],
+      "publishable_verification_bullets": [
+        "wz_config.py --selftest 97 of 97; a mutant that turns every maps switch on fails the two new arms (the reference's switch classes, and the read-back to the capabilities it came from). capability_cost_gate.py --selftest 14 of 14. apt_package_census.py --selftest passes, and a mutant without the Python-list arm misses both list forms.",
+        "pc2, gcc 13.3.0, cmake 4.4.2: Layer C1cs passes, 8 cases within budget; references built from submodule e1ab223a28aa with no switch built otherwise than asked: pico-client 1,790,121 against 398,573 (4.49), pico-client-udp 1,850,617 against 403,014 (4.59), pico-peer 2,795,057 against 415,527 (6.73), pico-default 4,220,330 against 607,125 (6.95).",
+        "The 110 round-fed static gates of the pre-push hook exit 0 on the committed tree.",
+        "Hosted: the capability-cost job took about 6 minutes of its 20 on the last run that reached it; the four pico builds are new there and are not yet timed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The zenoh-c cases have no same-build reference in this lane; the zenoh-c original is provisioned only where the oracle is installed.",
+        "The ratio is not graded, so a pin bump that moves pico's size shows only in the printed line.",
+        "The fixed-memory MCU images are not compared by this gate; their last comparison with pico is a kit measurement of 2026-10-21."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
