@@ -2508,7 +2508,7 @@ fn field_lines(
                 // whole flow below rather than once per frame, since the sink
                 // walked the stream itself and its rows are not this loop's.
                 Some(_) => break,
-                None => walk_message(stream, origin, frame),
+                None => walk_message(stream, origin, &frame),
             };
             shown += 1;
             if format == Format::Json && emitted > 0 {
@@ -2519,7 +2519,7 @@ fn field_lines(
                 &mut rows,
                 format,
                 flow,
-                frame,
+                &frame,
                 &row,
                 &to_json,
                 PayloadLens {
@@ -3227,7 +3227,7 @@ impl wz_capture::PlaintextSink for FieldSink {
             // by which loop it happens to sit in.
             let (origin, space) = match stream.record_origin(at) {
                 Some(origin) => (origin, OffsetSpace::CiphertextRecord),
-                None => (at, MessageRow::stream_byte(frame)),
+                None => (at, MessageRow::stream_byte(&frame)),
             };
             // R311y683 — walked and CHECKED against the session that framed it,
             // the same way the cleartext path is. R311y682 closed that half and
@@ -3239,7 +3239,7 @@ impl wz_capture::PlaintextSink for FieldSink {
                 stream.direction,
                 origin,
                 space,
-                walk_plaintext(message, frame),
+                walk_plaintext(message, &frame),
             ));
         }
     }
@@ -3270,7 +3270,7 @@ impl wz_capture::PlaintextSink for FieldSink {
                 datagram.direction,
                 datagram.packet_index,
                 OffsetSpace::Packet,
-                walk_plaintext(message, frame),
+                walk_plaintext(message, &frame),
             ));
         }
     }
@@ -3934,7 +3934,7 @@ fn datagram_field_rows(
             // cleartext path -- a batched unit's second message walked as its
             // first -- and this path indexes its payload by the same kind of
             // inherited coordinate.
-            let row = walk_plaintext(message, frame);
+            let row = walk_plaintext(message, &frame);
             shown += 1;
             if format == Format::Json && *emitted > 0 {
                 out.push(',');
@@ -4437,7 +4437,7 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
                 .packet_for(frame.direction, frame.stream_offset)
                 .unwrap_or(last_packet);
             spaces.at_packet(last_packet);
-            collect_sample(flow, frame, &spaces, file.as_ref(), &mut out);
+            collect_sample(flow, &frame, &spaces, file.as_ref(), &mut out);
         }
     }
     collect_datagram_samples(
@@ -4543,7 +4543,7 @@ fn collect_datagram_samples(
                 out.unreachable += 1;
                 continue;
             };
-            let FieldRow::Walked(field) = walk_plaintext(message, frame) else {
+            let FieldRow::Walked(field) = walk_plaintext(message, &frame) else {
                 out.undecodable += 1;
                 continue;
             };
@@ -4983,9 +4983,9 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
                 let space = if encrypted.is_some() {
                     OffsetSpace::CiphertextRecord
                 } else {
-                    MessageRow::stream_byte(f)
+                    MessageRow::stream_byte(&f)
                 };
-                MessageRow::transport(f, space)
+                MessageRow::transport(&f, space)
             })
             .collect();
         push_flow(
@@ -5011,7 +5011,7 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
         let mut rows: Vec<MessageRow> = flow
             .frames
             .iter()
-            .map(|f| MessageRow::transport(f, OffsetSpace::Packet))
+            .map(|f| MessageRow::transport(&f, OffsetSpace::Packet))
             .collect();
         rows.extend(flow.scouting.iter().map(MessageRow::scouting));
         // R311y718 — and the zenoh recovered out of this flow's QUIC streams.
@@ -5027,7 +5027,7 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
                 stream
                     .frames
                     .iter()
-                    .map(|f| MessageRow::transport(f, MessageRow::stream_byte(f))),
+                    .map(|f| MessageRow::transport(&f, MessageRow::stream_byte(&f))),
             );
         }
         // R311y669 — a QUIC flow says so in the framing column and says NOT
@@ -5106,7 +5106,7 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
         let rows: Vec<MessageRow> = d
             .serial_frames()
             .iter()
-            .map(|frame| MessageRow::transport(frame, OffsetSpace::Packet))
+            .map(|frame| MessageRow::transport(&frame, OffsetSpace::Packet))
             .collect();
         // The FlowKey a serial line does not have. `port` carries the interface
         // count rather than a port, and the addresses are empty -- a serial

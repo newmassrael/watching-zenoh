@@ -784,10 +784,10 @@ impl InterestCensus {
     /// while a session has one link and too tight when it has two. `spaces` is
     /// now the CAPTURE's, keyed by [`crate::agg::SpaceOwner`], and two sessions
     /// still get separate tokens.
-    pub fn observe_flow<'f>(
+    pub fn observe_flow(
         &mut self,
         flow: &FlowKey,
-        frames: impl IntoIterator<Item = &'f PassiveFrame>,
+        frames: impl IntoIterator<Item = impl core::ops::Deref<Target = PassiveFrame>>,
         // Round 2019 (item 270) — the list's index in
         // `Dissection::message_lists()`, which is what `crate::agg` already
         // takes for the same reason: it is half the space token, and without it
@@ -806,7 +806,7 @@ impl InterestCensus {
         // what an interleaved walk needs.
         let mut correlation = InterestCorrelation::default();
         for frame in frames {
-            self.observe_frame(flow, frame, list, &mut correlation, spaces);
+            self.observe_frame(flow, &frame, list, &mut correlation, spaces);
         }
     }
 
@@ -1363,7 +1363,7 @@ pub fn interests_grouped(
     // the binding two packets earlier.
     let mut fold = InterestFold::begin();
     for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
-        fold.feed(&flow, list, packet, frame, grouping);
+        fold.feed(&flow, list, packet, &frame, grouping);
     }
     fold.census()
 }

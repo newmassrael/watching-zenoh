@@ -764,8 +764,8 @@ pub fn fields_json_since_remembering_progress(
     // stands, so the walk that follows does not make them again from the first
     // message (which is a sort of every message and would put the cost back).
     let (new_frames, advance_marks) = match advance {
-        Some((frames, marks)) => (if resume { frames } else { Vec::new() }, Some(marks)),
-        None => (Vec::new(), None),
+        Some((frames, marks)) => (resume.then_some(frames), Some(marks)),
+        None => (None, None),
     };
     let document = fields_json_selected(
         d,
@@ -1376,7 +1376,7 @@ pub(crate) struct WalkRun<'a> {
     plans: Vec<Option<CaptureOrderPlan>>,
     /// The messages that arrived since, in capture order, whose declarations are
     /// absorbed into the kept table.
-    new_frames: Vec<(crate::link::FlowKey, usize, usize, &'a PassiveFrame)>,
+    new_frames: Option<crate::CaptureOrder<'a>>,
 }
 
 /// The order in which a stream flow's new messages are written, the running
@@ -1457,7 +1457,7 @@ fn fields_json_selected(
     let tracking = walk.is_some();
     let (resume, mut plans, new_frames, kept) = match walk {
         Some(w) => (w.resume, w.plans, w.new_frames, Some(w.state)),
-        None => (false, Vec::new(), Vec::new(), None),
+        None => (false, Vec::new(), None, None),
     };
     let mut throwaway = WalkState::default();
     let state: &mut WalkState = match kept {
@@ -1487,10 +1487,10 @@ fn fields_json_selected(
     // arrived since, which is the same table because every one of them sorts after
     // what was absorbed (the caller holds that before it resumes).
     if resume {
-        for (_flow, list, packet, frame) in &new_frames {
-            spaces.enter_flow(grouping.owners(*list));
-            spaces.at_packet(*packet);
-            spaces.absorb_frame(frame);
+        for (_flow, list, packet, frame) in new_frames.iter().flatten() {
+            spaces.enter_flow(grouping.owners(list));
+            spaces.at_packet(packet);
+            spaces.absorb_frame(&frame);
         }
     } else {
         absorb_every_declaration(d, grouping, spaces);
@@ -1918,7 +1918,8 @@ fn push_stream_flow(
     // asks for those rows in its next window, and a walk that began again then will
     // fold them in their turn.
     let mut end = flow.frames.len();
-    for (position, frame) in flow.frames.iter().enumerate().skip(start) {
+    for (position, row) in flow.frames.iter().enumerate().skip(start) {
+        let frame: &PassiveFrame = &row;
         if tags.beyond_window(tags.frame_seq(first_produced + position as u64)) {
             end = position;
             break;
@@ -1974,7 +1975,8 @@ fn push_stream_flow(
         if !tags.keep_going() {
             break;
         }
-        let frame = &flow.frames[position];
+        let row = flow.frames.row(position);
+        let frame: &PassiveFrame = &row;
         let FoldedRow {
             packet,
             session: session_row,
@@ -1996,7 +1998,7 @@ fn push_stream_flow(
             // the cursor passes over still moves the slots it belongs to.
             if let Ok(bytes) = flow.message_bytes(frame) {
                 judge_unwritten_row(RowWalk {
-                    bytes,
+                    bytes: &bytes,
                     space: MidSpace::of_frame(frame),
                     direction: frame.direction,
                     framed: &message_name(frame),
@@ -2063,7 +2065,7 @@ fn push_stream_flow(
             }
             Ok(bytes) => push_walk(
                 RowWalk {
-                    bytes,
+                    bytes: &bytes,
                     space: MidSpace::of_frame(frame),
                     direction: frame.direction,
                     framed: &message_name(frame),
@@ -2178,7 +2180,8 @@ fn push_datagram_flow(
     // The walk's place is saved at it, so the next window goes on from there.
     let mut frames_end = flow.frames.len();
     let mut scouting_end = flow.scouting.len();
-    for (position, frame) in flow.frames.iter().enumerate().skip(start) {
+    for (position, row) in flow.frames.iter().enumerate().skip(start) {
+        let frame: &PassiveFrame = &row;
         if tags.beyond_window(tags.frame_seq(first_produced + position as u64)) {
             frames_end = position;
             if let Some(d) = declarations {
@@ -7801,7 +7804,7 @@ mod tests {
             "payload_offset",
             &["packet", "payload_offset", "frame_offset"],
         );
-        let frames: Vec<(&crate::FlowDissection, &PassiveFrame)> = d
+        let frames: Vec<(&crate::FlowDissection, crate::messages::Row<'_>)> = d
             .flows()
             .iter()
             .flat_map(|flow| flow.frames.iter().map(move |frame| (flow, frame)))
@@ -8130,7 +8133,7 @@ mod tests {
             "payload_offset",
             &["packet", "payload_offset", "frame_offset"],
         );
-        let frames: Vec<(&crate::FlowDissection, &PassiveFrame)> = d
+        let frames: Vec<(&crate::FlowDissection, crate::messages::Row<'_>)> = d
             .flows()
             .iter()
             .flat_map(|flow| flow.frames.iter().map(move |frame| (flow, frame)))

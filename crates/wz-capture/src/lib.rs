@@ -1206,7 +1206,112 @@ pub(crate) type OrderRun = (Vec<usize>, usize, Option<(usize, u64)>);
 
 /// The messages `Dissection::capture_order_since` returns, each with its flow,
 /// its list and the packet it resolves to.
-pub(crate) type OrderedFrames<'a> = alloc::vec::Vec<(FlowKey, usize, usize, &'a PassiveFrame)>;
+pub(crate) type OrderedFrames<'a> = CaptureOrder<'a>;
+
+/// Messages of a capture in capture order: the order is decided by sorting
+/// KEYS, and each message is resolved only when the walk reaches it.
+///
+/// Open-debt item 924, step 4a (`docs/dissect-row-index.md`). The walk used to
+/// sort a reference to every message of the capture, which a list that decodes
+/// a message on demand cannot hand out: resolving them all up front would decode
+/// the whole capture at once. A key is a packet, a list and a position; the
+/// flow is the list's, held once per list.
+///
+/// Iterated by value or by reference, it yields `(flow, list, packet, row)`,
+/// which is the tuple the walk always yielded with the message as a
+/// [`messages::Row`].
+#[derive(Debug, Clone)]
+pub struct CaptureOrder<'a> {
+    /// The lists, by their place in `Dissection::message_lists`, with the flow
+    /// each stands under.
+    lists: Vec<(FlowKey, &'a messages::MessageList)>,
+    /// `(packet, list, position)` in capture order.
+    keys: Vec<(usize, usize, usize)>,
+}
+
+impl<'a> CaptureOrder<'a> {
+    /// The walk, each message resolved as it is reached. Its length is the
+    /// iterator's own (`ExactSizeIterator`), which is the one place a reader
+    /// asks how many messages the walk holds.
+    pub fn iter(&self) -> CaptureOrderIter<'_, 'a> {
+        CaptureOrderIter {
+            lists: &self.lists,
+            keys: self.keys.iter(),
+        }
+    }
+}
+
+impl<'a> IntoIterator for CaptureOrder<'a> {
+    type Item = (FlowKey, usize, usize, messages::Row<'a>);
+    type IntoIter = CaptureOrderIntoIter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        CaptureOrderIntoIter {
+            lists: self.lists,
+            keys: self.keys.into_iter(),
+        }
+    }
+}
+
+impl<'b, 'a> IntoIterator for &'b CaptureOrder<'a> {
+    type Item = (FlowKey, usize, usize, messages::Row<'a>);
+    type IntoIter = CaptureOrderIter<'b, 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// The message a walk key names, with its flow and list.
+fn resolve_key<'a>(
+    lists: &[(FlowKey, &'a messages::MessageList)],
+    (packet, list, position): (usize, usize, usize),
+) -> (FlowKey, usize, usize, messages::Row<'a>) {
+    let (flow, frames) = lists[list];
+    (flow, list, packet, frames.row(position))
+}
+
+/// [`CaptureOrder`] walked by reference.
+#[derive(Debug, Clone)]
+pub struct CaptureOrderIter<'b, 'a> {
+    lists: &'b [(FlowKey, &'a messages::MessageList)],
+    keys: core::slice::Iter<'b, (usize, usize, usize)>,
+}
+
+impl<'a> Iterator for CaptureOrderIter<'_, 'a> {
+    type Item = (FlowKey, usize, usize, messages::Row<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(resolve_key(self.lists, *self.keys.next()?))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.keys.size_hint()
+    }
+}
+
+impl ExactSizeIterator for CaptureOrderIter<'_, '_> {}
+
+/// [`CaptureOrder`] walked by value.
+#[derive(Debug)]
+pub struct CaptureOrderIntoIter<'a> {
+    lists: Vec<(FlowKey, &'a messages::MessageList)>,
+    keys: alloc::vec::IntoIter<(usize, usize, usize)>,
+}
+
+impl<'a> Iterator for CaptureOrderIntoIter<'a> {
+    type Item = (FlowKey, usize, usize, messages::Row<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(resolve_key(&self.lists, self.keys.next()?))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.keys.size_hint()
+    }
+}
+
+impl ExactSizeIterator for CaptureOrderIntoIter<'_> {}
 
 /// Where a fold over a whole capture stopped, list by list, and the sort key of
 /// the last message it took. See [`Dissection::capture_order_since`].
@@ -1326,7 +1431,11 @@ pub enum MessageBytes<'a> {
     /// document — which is message-relative — indexes this slice directly. A
     /// unit carrying a BATCH runs on past this message, and the next message of
     /// that unit is the one whose `unit_offset` says where this one stops.
-    Retained(&'a [u8]),
+    ///
+    /// Borrowed from what the dissection retains, or owned where the bytes live
+    /// in the decoded message itself (a message decompressed out of an lz4
+    /// batch): see `FlowDissection::message_bytes`.
+    Retained(alloc::borrow::Cow<'a, [u8]>),
     /// The bytes are gone: a retention ceiling trimmed them, the list was
     /// evicted, or the framing unit outlived the stream that survived. The
     /// sentence says which.
@@ -2489,7 +2598,7 @@ impl FlowDissection {
             let first_byte = if frame.decompressed.is_some() {
                 frame.stream_offset + frame.prefix_width
             } else {
-                Self::message_at(frame)
+                Self::message_at(&frame)
             };
             last = self.packet_for(frame.direction, first_byte).unwrap_or(last);
             keyed.push((last, base + position as u64));
@@ -2546,14 +2655,19 @@ impl FlowDissection {
     /// this answers for it — the MESSAGE, exactly, where a wire slice runs on
     /// to the end of its unit — and slicing the stream at its coordinate would
     /// hand back lz4.
+    ///
+    /// Open-debt item 924 — the answer BORROWS the stream and OWNS a copy of a
+    /// decompressed message's bytes: those live in the frame, and a frame a list
+    /// decodes on demand is the reader's for as long as it reads it, so its bytes
+    /// cannot be lent out past that.
     pub fn message_bytes<'a>(
         &'a self,
-        frame: &'a PassiveFrame,
-    ) -> Result<&'a [u8], alloc::string::String> {
+        frame: &PassiveFrame,
+    ) -> Result<alloc::borrow::Cow<'a, [u8]>, alloc::string::String> {
         use core::fmt::Write as _;
 
         if let Some(own) = &frame.decompressed {
-            return Ok(own);
+            return Ok(alloc::borrow::Cow::Owned(own.clone()));
         }
         let assembler = self.assembler(frame.direction);
         let stream = assembler.stream();
@@ -2593,7 +2707,7 @@ impl FlowDissection {
             );
             return Err(why);
         }
-        Ok(&stream[start..end])
+        Ok(alloc::borrow::Cow::Borrowed(&stream[start..end]))
     }
 
     /// The zenoh context inferred for this flow.
@@ -3890,7 +4004,7 @@ mod live_tap_tests {
                 "{limits:?}: the retained stream follows the held messages, held {}",
                 flow.low_to_high.stream().len()
             );
-            for frame in [&flow.frames[0], &flow.frames[99]] {
+            for frame in [&flow.frames.row(0), &flow.frames.row(99)] {
                 assert_eq!(
                     flow.message_bytes(frame).as_deref().ok(),
                     Some(&keepalive[..]),
@@ -5564,7 +5678,9 @@ impl Dissection {
     /// `PassiveFrame` says what zenoh message it was and the `SerialFrame` says
     /// which wire and which capture packet carried it. A reader given only the
     /// first cannot point at the bytes.
-    pub fn serial_messages(&self) -> impl Iterator<Item = (&serial::SerialFrame, &PassiveFrame)> {
+    pub fn serial_messages(
+        &self,
+    ) -> impl Iterator<Item = (&serial::SerialFrame, messages::Row<'_>)> {
         self.serial_origins.iter().zip(self.serial_frames.iter())
     }
 
@@ -5707,12 +5823,11 @@ impl Dissection {
     /// it); the PACKET rides along because it is what
     /// [`crate::agg::KeyexprSpaces::at_packet`] takes, and a caller that had to
     /// recompute it would be deriving this walk's own key a second time.
-    pub fn message_frames_in_capture_order(
-        &self,
-    ) -> alloc::vec::Vec<(FlowKey, usize, usize, &PassiveFrame)> {
-        let mut walk: alloc::vec::Vec<(usize, usize, usize, FlowKey, &PassiveFrame)> =
-            alloc::vec::Vec::new();
+    pub fn message_frames_in_capture_order(&self) -> CaptureOrder<'_> {
+        let mut lists = alloc::vec::Vec::new();
+        let mut keys: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
         for (list, (flow, _origin, frames)) in self.message_lists_with_origin().enumerate() {
+            lists.push((flow, frames));
             // The stream lists occupy the first `self.flows.len()` positions of
             // the door above, by its own construction, so the run map is at the
             // same index. The key is compared rather than assumed — a door that
@@ -5733,13 +5848,11 @@ impl Dissection {
                     }
                 };
                 last = packet.unwrap_or(last);
-                walk.push((last, list, position, flow, frame));
+                keys.push((last, list, position));
             }
         }
-        walk.sort_by_key(|(packet, list, position, _, _)| (*packet, *list, *position));
-        walk.into_iter()
-            .map(|(packet, list, _, flow, frame)| (flow, list, packet, frame))
-            .collect()
+        keys.sort_unstable();
+        CaptureOrder { lists, keys }
     }
 
     /// THE MESSAGES A FOLD HAS NOT SEEN, in capture order, or `None` when the
@@ -5807,12 +5920,15 @@ impl Dissection {
             self.message_lists_with_origin().collect();
         let continues = list_continuations(&current, prev.map(|p| p.lists.as_slice()))?;
         let mut marks: alloc::vec::Vec<ListMark> = alloc::vec::Vec::new();
-        // Keyed `(packet, list, produced-index)`: the position is the tiebreak
-        // inside a list, and a position moves when a trim takes the front, where
-        // the produced-index does not and orders a list's messages the same way.
-        let mut walk: alloc::vec::Vec<(usize, usize, u64, FlowKey, &PassiveFrame)> =
-            alloc::vec::Vec::new();
+        // Keyed `(packet, list, position)`. The REMEMBERED key is
+        // `(packet, list, produced-index)`, because a position moves when a trim
+        // takes the front and the produced-index does not; inside one call the
+        // two order a list's messages the same way, as they differ by the list's
+        // first produced-index only.
+        let mut lists = alloc::vec::Vec::with_capacity(current.len());
+        let mut keys: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
         for (list, (flow, origin, frames)) in current.iter().copied().enumerate() {
+            lists.push((flow, frames));
             let first_produced = frames.produced() - frames.len() as u64;
             let (start, mut last) = match (prev, continues[list]) {
                 (Some(p), Some(at)) => {
@@ -5852,7 +5968,7 @@ impl Dissection {
                     }
                 };
                 last = packet.unwrap_or(last);
-                walk.push((last, list, first_produced + position as u64, flow, frame));
+                keys.push((last, list, position));
             }
             marks.push(ListMark {
                 flow,
@@ -5862,23 +5978,20 @@ impl Dissection {
                 last_packet: last,
             });
         }
-        walk.sort_by_key(|(packet, list, produced, _, _)| (*packet, *list, *produced));
+        keys.sort_unstable();
+        // The remembered form of a key: its position as a produced-index.
+        let remembered = |&(packet, list, position): &(usize, usize, usize)| {
+            (packet, list, marks[list].first_produced + position as u64)
+        };
         let prev_last = prev.and_then(|p| p.last_key);
-        if let (Some(before), Some((packet, list, produced, _, _))) = (prev_last, walk.first()) {
-            if (*packet, *list, *produced) <= before {
+        if let (Some(before), Some(first)) = (prev_last, keys.first()) {
+            if remembered(first) <= before {
                 return None;
             }
         }
-        let last_key = walk
-            .last()
-            .map(|(packet, list, produced, _, _)| (*packet, *list, *produced))
-            .or(prev_last);
-        let frames = walk
-            .into_iter()
-            .map(|(packet, list, _, flow, frame)| (flow, list, packet, frame))
-            .collect();
+        let last_key = keys.last().map(remembered).or(prev_last);
         Some((
-            frames,
+            CaptureOrder { lists, keys },
             OrderMarks {
                 lists: marks,
                 last_key,
@@ -5925,7 +6038,7 @@ impl Dissection {
                         "this message is no longer in its flow's list",
                     ));
                 };
-                match dissection.message_bytes(frame) {
+                match dissection.message_bytes(&frame) {
                     Ok(bytes) => MessageBytes::Retained(bytes),
                     Err(why) => MessageBytes::Retired(why),
                 }
@@ -5942,9 +6055,9 @@ impl Dissection {
                     .iter()
                     .find(|f| f.flow == flow)
                     .and_then(|f| f.frames.get(index))
-                    .and_then(|frame| frame.decompressed.as_deref());
+                    .and_then(|frame| frame.decompressed.clone());
                 match own {
-                    Some(bytes) => MessageBytes::Retained(bytes),
+                    Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Owned(bytes)),
                     None => MessageBytes::NoSource(NoByteSource::CallerHoldsThePacket),
                 }
             }
@@ -5977,7 +6090,7 @@ impl Dissection {
                 // path -- a serial frame has no length prefix inside it -- so
                 // the message begins at `unit_offset`.
                 match carrier.payload.get(frame.unit_offset..frame.unit_len) {
-                    Some(bytes) => MessageBytes::Retained(bytes),
+                    Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Borrowed(bytes)),
                     None => MessageBytes::Retired(alloc::format!(
                         "this message stands {} byte(s) into a unit of {} and the frame holds {}",
                         frame.unit_offset,
@@ -6405,8 +6518,8 @@ impl Dissection {
         // pushed on one direction — and costs one comparison.
         let mut walk_from = window_start;
         while walk_from < stream.frames.len()
-            && (stream.frames[walk_from].direction != direction
-                || (stream.frames[walk_from].stream_offset as u64) < base)
+            && (stream.frames.row(walk_from).direction != direction
+                || (stream.frames.row(walk_from).stream_offset as u64) < base)
         {
             walk_from += 1;
             feed.messages_straddling_offers += 1;
@@ -7099,7 +7212,7 @@ impl Dissection {
                 let first_byte = if frame.decompressed.is_some() {
                     frame.stream_offset + frame.prefix_width
                 } else {
-                    FlowDissection::message_at(frame)
+                    FlowDissection::message_at(&frame)
                 };
                 let packet = flow.packet_for(frame.direction, first_byte).unwrap_or(0);
                 offer(packet, TotalList::Stream, i);
@@ -10275,11 +10388,19 @@ mod datagram_tests {
         );
         assert!(
             matches!(
-                flow.frames.iter().next_back().map(|f| &f.carried),
+                flow.frames
+                    .iter()
+                    .next_back()
+                    .as_deref()
+                    .map(|f| &f.carried),
                 Some(wz_session_core::passive::Carried::Undecompressible)
             ),
             "the frame after it is a body this build cannot open: {:?}",
-            flow.frames.iter().next_back().map(|f| &f.carried)
+            flow.frames
+                .iter()
+                .next_back()
+                .as_deref()
+                .map(|f| &f.carried)
         );
         assert_eq!(
             d.health().packets_skipped,
@@ -10305,19 +10426,27 @@ mod datagram_tests {
         );
         assert!(
             matches!(
-                flow.frames.first().map(|f| &f.carried),
+                flow.frames.first().as_deref().map(|f| &f.carried),
                 Some(Carried::Fragment(IngestOutcome::Begun))
             ),
             "got {:?}",
-            flow.frames.first().map(|f| &f.carried)
+            flow.frames.first().as_deref().map(|f| &f.carried)
         );
         assert!(
             matches!(
-                flow.frames.iter().next_back().map(|f| &f.carried),
+                flow.frames
+                    .iter()
+                    .next_back()
+                    .as_deref()
+                    .map(|f| &f.carried),
                 Some(Carried::FragmentWithoutResolution)
             ),
             "got {:?}",
-            flow.frames.iter().next_back().map(|f| &f.carried)
+            flow.frames
+                .iter()
+                .next_back()
+                .as_deref()
+                .map(|f| &f.carried)
         );
         assert_eq!(d.health().packets_skipped, 0);
     }
@@ -11154,11 +11283,11 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1, "it stays on the transport side");
         assert!(
             matches!(
-                flow.frames[0].frame,
+                flow.frames.row(0).frame,
                 Ok(wz_session_core::inbound::InboundFrame::Open { .. })
             ),
             "an unsolicited 0x02 is an Open: {:?}",
-            flow.frames[0].frame
+            flow.frames.row(0).frame
         );
     }
 
@@ -11277,14 +11406,14 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1, "it must still be SHOWN");
         assert!(
             matches!(
-                flow.frames[0].frame,
+                flow.frames.row(0).frame,
                 Ok(wz_session_core::inbound::InboundFrame::Init { .. })
             ),
             "the bytes decode — that was never the problem: {:?}",
-            flow.frames[0].frame
+            flow.frames.row(0).frame
         );
         assert!(
-            flow.frames[0].inadmissible_on_link,
+            flow.frames.row(0).inadmissible_on_link,
             "and the report must say the link cannot carry it"
         );
         assert!(
@@ -11323,9 +11452,9 @@ mod datagram_tests {
         let flow = &d.datagram_flows()[0];
         assert_eq!(flow.frames.len(), 1);
         assert!(
-            !flow.frames[0].inadmissible_on_link,
+            !flow.frames.row(0).inadmissible_on_link,
             "a JOIN is exactly what this link exists to carry: {:?}",
-            flow.frames[0].frame
+            flow.frames.row(0).frame
         );
     }
 
@@ -11393,7 +11522,7 @@ mod datagram_tests {
         d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
 
         let flow = &d.datagram_flows()[0];
-        assert!(!flow.frames[0].inadmissible_on_link);
+        assert!(!flow.frames.row(0).inadmissible_on_link);
         assert!(
             !matches!(
                 flow.session.context().phase,
@@ -11422,11 +11551,11 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1);
         assert!(
             matches!(
-                flow.frames[0].frame,
+                flow.frames.row(0).frame,
                 Ok(wz_session_core::inbound::InboundFrame::Init { .. })
             ),
             "a unicast 0x01 is an Init: {:?}",
-            flow.frames[0].frame
+            flow.frames.row(0).frame
         );
     }
 
@@ -11466,11 +11595,11 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1);
         assert!(
             matches!(
-                flow.frames[0].frame,
+                flow.frames.row(0).frame,
                 Ok(wz_session_core::inbound::InboundFrame::Join { .. })
             ),
             "the multicast JOIN must still decode as a Join: {:?}",
-            flow.frames[0].frame
+            flow.frames.row(0).frame
         );
     }
 
@@ -11742,7 +11871,7 @@ mod datagram_tests {
             d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
             let flow = &d.datagram_flows()[0];
             assert_eq!(flow.frames.len(), 1, "{name} produced no frame at all");
-            match &flow.frames[0].frame {
+            match &flow.frames.row(0).frame {
                 Ok(InboundFrame::Unknown { mid }) => panic!(
                     "{name} (MID {mid:#04x}) is on zenoh's wire and this build \
                      cannot name it — a codec is missing from wz-capture's \
@@ -11810,7 +11939,7 @@ mod datagram_tests {
                  is one the decoder names and the credible-header gate refuses"
             );
             assert_eq!(flow.frames.len(), 1, "{name} produced no frame at all");
-            let f = &flow.frames[0];
+            let f = &flow.frames.row(0);
             assert_eq!(f.prefix_width, 2, "{name} read the wrong framing");
             assert_eq!(
                 f.reserved_header_bits, 0,
@@ -12178,7 +12307,7 @@ mod datagram_tests {
             d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
             let flow = &d.datagram_flows()[0];
             assert_eq!(flow.frames.len(), 1, "{name}: the frame never arrived");
-            match &flow.frames[0].carried {
+            match &flow.frames.row(0).carried {
                 Carried::Batch(batch) => {
                     assert_eq!(
                         batch.halt, None,
@@ -12228,7 +12357,7 @@ mod datagram_tests {
                 "{name} desynchronised a synchronised stream reader"
             );
             assert_eq!(flow.frames.len(), 1, "{name}: the frame never arrived");
-            match &flow.frames[0].carried {
+            match &flow.frames.row(0).carried {
                 Carried::Batch(batch) => {
                     assert_eq!(batch.halt, None, "{name}: the batch walk halted");
                     if let NetworkMessage::Unknown { mid, .. } = &batch.messages[0] {
@@ -12497,7 +12626,7 @@ mod datagram_tests {
         );
         // Positioned at the packet that COMPLETED it, not at the first piece.
         // `stream_offset` is where the datagram path records the packet index.
-        assert_eq!(d.datagram_flows()[0].frames[0].stream_offset, 1);
+        assert_eq!(d.datagram_flows()[0].frames.row(0).stream_offset, 1);
     }
 
     /// R311y924 (open-debt item 247) — THE TWO FRAGMENT SKIP COUNTERS STAY AT
@@ -12783,8 +12912,8 @@ mod datagram_tests {
         // and a rendered comparison is the right one anyway: it fails with both
         // frames printed, which is what a byte-for-byte claim wants to show.
         assert_eq!(
-            alloc::format!("{:?}", split.datagram_flows()[0].frames[0].frame),
-            alloc::format!("{:?}", whole.datagram_flows()[0].frames[0].frame),
+            alloc::format!("{:?}", split.datagram_flows()[0].frames.row(0).frame),
+            alloc::format!("{:?}", whole.datagram_flows()[0].frames.row(0).frame),
             "reassembly must reproduce the datagram byte for byte"
         );
         assert_eq!(
@@ -15167,7 +15296,7 @@ mod datagram_tests {
             1,
             "the message must decode, not merely the file parse"
         );
-        assert!(d.datagram_flows()[0].frames[0].frame.is_ok());
+        assert!(d.datagram_flows()[0].frames.row(0).frame.is_ok());
         #[cfg(feature = "reassembly")]
         assert_eq!(
             d.datagram_flows()[0].session.now_ms(),
@@ -15352,7 +15481,7 @@ mod datagram_tests {
         let mut stamped = Dissection::new();
         stamped.push_packet_at(LINKTYPE_ETHERNET, 0, Some(4_242), &pkt);
         assert_eq!(
-            stamped.datagram_flows()[0].frames[0].observed_at_ms,
+            stamped.datagram_flows()[0].frames.row(0).observed_at_ms,
             Some(4_242),
             "the instant handed to push_packet_at must reach the frame"
         );
@@ -15360,7 +15489,7 @@ mod datagram_tests {
         let mut unstamped = Dissection::new();
         unstamped.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
         assert_eq!(
-            unstamped.datagram_flows()[0].frames[0].observed_at_ms,
+            unstamped.datagram_flows()[0].frames.row(0).observed_at_ms,
             None,
             "a source with no clock must not produce a plausible one"
         );
@@ -15407,7 +15536,10 @@ mod datagram_tests {
             flow.frames.len(),
             2,
             "both messages of the batch are reported: {:?}",
-            flow.frames.iter().map(|f| &f.frame).collect::<Vec<_>>()
+            flow.frames
+                .iter()
+                .map(|f| alloc::format!("{:?}", f.frame))
+                .collect::<Vec<_>>()
         );
         for (i, f) in flow.frames.iter().enumerate() {
             assert!(
@@ -15470,14 +15602,14 @@ mod datagram_tests {
 
         let frames = &d.datagram_flows()[0].frames;
         assert_eq!(frames.len(), 3);
-        assert_eq!(frames[0].observed_at_ms, Some(1_000));
+        assert_eq!(frames.row(0).observed_at_ms, Some(1_000));
         assert_eq!(
-            frames[1].observed_at_ms,
+            frames.row(1).observed_at_ms,
             Some(1_000),
             "the unstamped packet reports a time it was never given"
         );
         assert_eq!(
-            frames[2].observed_at_ms,
+            frames.row(2).observed_at_ms,
             Some(3_000),
             "and a later stamp moves the clock on"
         );
@@ -15578,11 +15710,11 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1);
         // The packet index rides through as the frame's anchor — there is no
         // stream for an offset to point into.
-        assert_eq!(flow.frames[0].stream_offset, 11);
+        assert_eq!(flow.frames.row(0).stream_offset, 11);
         assert!(
-            flow.frames[0].frame.is_ok(),
+            flow.frames.row(0).frame.is_ok(),
             "decode failed: {:?}",
-            flow.frames[0].frame
+            flow.frames.row(0).frame
         );
     }
 
@@ -15629,7 +15761,7 @@ mod datagram_tests {
 
         assert!(d.skipped().is_empty(), "{:?}", d.skipped());
         assert_eq!(d.datagram_flows().len(), 1);
-        let frame = &d.datagram_flows()[0].frames[0].frame;
+        let frame = &d.datagram_flows()[0].frames.row(0).frame;
         match frame {
             Ok(InboundFrame::Join { body, has_ext, .. }) => {
                 assert!(!has_ext, "this JOIN carries no ext chain");
@@ -15777,7 +15909,7 @@ mod ws_flow_tests {
                  census would silently be measuring the stream path again"
             );
             assert_eq!(flow.frames.len(), 1, "{name} produced no frame at all");
-            let f = &flow.frames[0];
+            let f = &flow.frames.row(0);
             assert_eq!(
                 f.prefix_width, 0,
                 "{name}: a ws message carries no length prefix"
@@ -15940,7 +16072,7 @@ mod ws_flow_tests {
         let carried: Vec<Option<Vec<usize>>> = flow
             .frames
             .iter()
-            .map(|f| flow.packets_carrying(f))
+            .map(|f| flow.packets_carrying(&f))
             .collect();
         assert_eq!(
             carried,
@@ -15949,7 +16081,7 @@ mod ws_flow_tests {
         );
         let upgrade_len = upgrade.len();
         assert_eq!(
-            flow.frames[0].wire_end,
+            flow.frames.row(0).wire_end,
             Some(upgrade_len + first.len()),
             "the first message ends where its frame does"
         );
@@ -16013,7 +16145,7 @@ mod ws_flow_tests {
                  census would silently be measuring the stream path again"
             );
             assert_eq!(flow.frames.len(), 1, "{name}: the frame never arrived");
-            match &flow.frames[0].carried {
+            match &flow.frames.row(0).carried {
                 Carried::Batch(batch) => {
                     assert_eq!(batch.halt, None, "{name}: the batch walk halted over ws");
                     if let NetworkMessage::Unknown { mid, .. } = &batch.messages[0] {
@@ -16091,7 +16223,10 @@ mod ws_flow_tests {
             named >= 4,
             "the messages after the hole must decode; got {named} of 8 \
              ({:?})",
-            flow.frames.iter().map(|f| &f.frame).collect::<Vec<_>>()
+            flow.frames
+                .iter()
+                .map(|f| alloc::format!("{:?}", f.frame))
+                .collect::<Vec<_>>()
         );
         let acct = flow.ws_accounting();
         assert_eq!(
@@ -16278,7 +16413,8 @@ mod ws_flow_tests {
         assert!(!flow.framing().is_websocket());
         assert_eq!(flow.frames.len(), 1, "the stream path still decodes it");
         assert_eq!(
-            flow.frames[0].prefix_width, 2,
+            flow.frames.row(0).prefix_width,
+            2,
             "and still reports the 2-byte prefix it actually read"
         );
     }
@@ -18033,7 +18169,7 @@ mod tls_flow_tests {
         let carried: Vec<Option<Vec<usize>>> = d.flows()[0]
             .frames
             .iter()
-            .map(|f| d.flows()[0].packets_carrying(f))
+            .map(|f| d.flows()[0].packets_carrying(&f))
             .collect();
         assert_eq!(
             carried,
@@ -18970,7 +19106,7 @@ mod tls_flow_tests {
             }
             reached.push(origin_class(origin));
             for index in 0..list.len() {
-                let space = anchor_space_of(&list[index]);
+                let space = anchor_space_of(&list.row(index));
                 let answer = d.message_bytes_at(flow, origin, index);
                 let has_bytes = matches!(answer, MessageBytes::Retained(_));
                 grid[usize::from(space == AnchorSpace::StreamBytes) * 2
@@ -18996,7 +19132,7 @@ mod tls_flow_tests {
                 if let MessageBytes::Retained(bytes) = answer {
                     retained += 1;
                     let walked =
-                        wz_session_core::inbound::parse_inbound(bytes).unwrap_or_else(|e| {
+                        wz_session_core::inbound::parse_inbound(&bytes).unwrap_or_else(|e| {
                             panic!(
                                 "the bytes handed back for {} #{index} do not \
                                  decode as the message they were sliced for: \
@@ -19004,7 +19140,8 @@ mod tls_flow_tests {
                                 origin_class(origin)
                             )
                         });
-                    let expected = list[index]
+                    let expected = list
+                        .row(index)
                         .frame
                         .as_ref()
                         .expect("this corpus decodes every message it pushes")
@@ -19102,7 +19239,7 @@ mod tls_flow_tests {
             }
             lists += 1;
             let spaces: alloc::collections::BTreeSet<AnchorSpace> =
-                list.iter().map(anchor_space_of).collect();
+                list.iter().map(|frame| anchor_space_of(&frame)).collect();
             assert_eq!(
                 spaces.len(),
                 1,

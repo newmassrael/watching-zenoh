@@ -9822,10 +9822,10 @@ pub mod ext_bodies {
     pub fn bodies_of(flow: &wz_capture::FlowDissection, depth: Depth) -> Vec<Body> {
         let mut out = Vec::new();
         for frame in flow.frames.iter() {
-            let Ok(bytes) = flow.message_bytes(frame) else {
+            let Ok(bytes) = flow.message_bytes(&frame) else {
                 continue;
             };
-            let Ok(walked) = wz_session_core::dissect::dissect_transport_message(bytes, 0) else {
+            let Ok(walked) = wz_session_core::dissect::dissect_transport_message(&bytes, 0) else {
                 continue;
             };
             collect(&walked, frame.direction, "?", depth, &mut out);

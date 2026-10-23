@@ -31,7 +31,7 @@
 //! nothing checked.
 
 use crate::link::{self, Transport};
-use crate::messages::MessageList;
+use crate::messages::{MessageList, Row};
 use crate::{DatagramLink, Dissection};
 use alloc::format;
 use alloc::vec::Vec;
@@ -82,8 +82,8 @@ impl core::ops::AddAssign for Reach {
 /// between them, but no record of this direction can. A unit is read when its
 /// first record is produced, so the order of first records is the order the
 /// units were read in.
-fn units(frames: &MessageList) -> Vec<Vec<&PassiveFrame>> {
-    let mut units: Vec<Vec<&PassiveFrame>> = Vec::new();
+fn units(frames: &MessageList) -> Vec<Vec<Row<'_>>> {
+    let mut units: Vec<Vec<Row<'_>>> = Vec::new();
     let mut open: [Option<usize>; 2] = [None, None];
     for frame in frames {
         let seat = usize::from(frame.direction == Direction::B);
@@ -112,9 +112,9 @@ fn reread(
     };
     let mut start = FlowContext::default();
     for (n, unit) in units(frames).into_iter().enumerate() {
-        let first = unit[0];
+        let first: &PassiveFrame = &unit[0];
         if let Some((bytes, handshake)) = bytes_of(first) {
-            let facts = UnitFacts::of(start, unit.iter().copied());
+            let facts = UnitFacts::of(start, unit.iter().map(|row| &**row));
             let again = redecode_unit(
                 UnitInput {
                     direction: first.direction,
@@ -130,6 +130,8 @@ fn reread(
             )
             .unwrap_or_else(|e| panic!("{what}: unit {n} refused its own facts: {e:?}"));
             for (i, (was, now)) in unit.iter().zip(&again).enumerate() {
+                // The FRAME's own rendering, not the row's that holds it.
+                let was: &PassiveFrame = was;
                 let (was, now) = (format!("{was:?}"), format!("{now:?}"));
                 assert!(
                     was == now,
@@ -314,7 +316,7 @@ fn every_unit_of_a_stream_with_batches_gaps_and_garbage_reads_again_the_same() {
     let d = Dissection::from_capture(&file).expect("the capture reads");
     // The shapes this capture is FOR must be in what was read, or the
     // comparison below says nothing about them.
-    let held: Vec<&PassiveFrame> = d.flows.iter().flat_map(|f| &f.frames).collect();
+    let held: Vec<Row<'_>> = d.flows.iter().flat_map(|f| &f.frames).collect();
     let verdicts: Vec<_> = held.iter().filter_map(|f| f.sn_verdict).collect();
     use wz_session_core::passive::SnVerdict;
     assert!(

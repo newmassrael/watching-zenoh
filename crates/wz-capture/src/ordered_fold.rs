@@ -179,7 +179,7 @@ impl<F: OrderedFold> Resumable<F> {
         match resumed {
             Some((frames, marks)) => {
                 if let Some(p) = progress {
-                    p.expect(frames.len() as u64);
+                    p.expect(frames.iter().len() as u64);
                 }
                 let saved = self.saved.as_mut().expect("a resumed fold has a saved one");
                 let mut stopped = false;
@@ -188,7 +188,7 @@ impl<F: OrderedFold> Resumable<F> {
                         stopped = true;
                         break;
                     }
-                    saved.fold.feed(&flow, list, packet, frame, grouping);
+                    saved.fold.feed(&flow, list, packet, &frame, grouping);
                     stats.messages_folded += 1;
                 }
                 if stopped {
@@ -203,14 +203,14 @@ impl<F: OrderedFold> Resumable<F> {
                     .capture_order_since(None)
                     .expect("a walk with nothing remembered has nothing to disagree with");
                 if let Some(p) = progress {
-                    p.expect(frames.len() as u64);
+                    p.expect(frames.iter().len() as u64);
                 }
                 let mut fold = begin();
                 for (flow, list, packet, frame) in frames {
                     if !crate::progress::step(progress) {
                         return None;
                     }
-                    fold.feed(&flow, list, packet, frame, grouping);
+                    fold.feed(&flow, list, packet, &frame, grouping);
                     stats.messages_folded += 1;
                 }
                 self.saved = Some(Saved {

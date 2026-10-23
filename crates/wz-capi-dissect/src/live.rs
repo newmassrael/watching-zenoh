@@ -344,7 +344,7 @@ fn seq_in_runs(runs: &[SeqRun], produced: u64) -> Option<u64> {
 pub enum ReassembledBytes<'a> {
     /// The buffer the chain was joined in — the referent of the row's
     /// `above_transport.fields` and `above_transport.carried` spans.
-    Joined(&'a [u8]),
+    Joined(std::borrow::Cow<'a, [u8]>),
     /// The record names no message this handle still holds.
     Retired,
     /// The record's message did not complete a fragment chain, so there is no
@@ -636,7 +636,7 @@ impl LiveDissection {
             let start = (mark.drained - first_held) as usize;
             let take = (produced.saturating_sub(mark.drained) as usize).min(out.len() - written);
             for frame in list.rows_from(start).iter().take(take) {
-                out[written] = record_of(frame, flow_id, list_id, origin);
+                out[written] = record_of(&frame, flow_id, list_id, origin);
                 written += 1;
                 mark.drained += 1;
             }
@@ -763,8 +763,10 @@ impl LiveDissection {
             Err(_) => return ReassembledBytes::Retired,
         };
         match &frame.carried {
+            // Owned: the joined buffer lives in the decoded frame, which is the
+            // reader's only while it reads it (open-debt item 924).
             wz_session_core::passive::Carried::Reassembled { joined, .. } => {
-                ReassembledBytes::Joined(joined)
+                ReassembledBytes::Joined(std::borrow::Cow::Owned(joined.clone()))
             }
             _ => ReassembledBytes::NotReassembled,
         }
@@ -782,7 +784,7 @@ impl LiveDissection {
             wz_capture::link::FlowKey,
             wz_capture::MessageListOrigin,
             usize,
-            &wz_session_core::passive::PassiveFrame,
+            wz_capture::messages::Row<'_>,
         ),
         wz_capture::MessageBytes<'_>,
     > {

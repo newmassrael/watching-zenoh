@@ -2692,10 +2692,10 @@ fn puts_by_side(recording: &Recording) -> (Vec<bool>, Vec<bool>) {
     );
     let (mut from_listener, mut from_dialer) = (Vec::new(), Vec::new());
     for frame in flow.frames.iter() {
-        let Ok(bytes) = flow.message_bytes(frame) else {
+        let Ok(bytes) = flow.message_bytes(&frame) else {
             continue;
         };
-        let Ok(walked) = dissect_transport_message(bytes, 0) else {
+        let Ok(walked) = dissect_transport_message(&bytes, 0) else {
             continue;
         };
         let sink = if frame.direction == wz_session_core::passive::Direction::A {

@@ -186,10 +186,10 @@ fn entries_written_by_the_listener(recording: &Recording) -> Vec<Flooded> {
         if frame.direction != wz_session_core::passive::Direction::A {
             continue;
         }
-        let Ok(bytes) = flow.message_bytes(frame) else {
+        let Ok(bytes) = flow.message_bytes(&frame) else {
             continue;
         };
-        let Ok(walked) = dissect_transport_message(bytes, 0) else {
+        let Ok(walked) = dissect_transport_message(&bytes, 0) else {
             continue;
         };
         collect_entries(&walked, &mut out);

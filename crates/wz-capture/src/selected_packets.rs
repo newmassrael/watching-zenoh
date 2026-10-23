@@ -161,7 +161,7 @@ pub fn selected_packets_coordinated(
                 flow,
                 position,
             } => {
-                match flow.packets_carrying(&flow.frames[position]) {
+                match flow.packets_carrying(&flow.frames.row(position)) {
                     Some(packets) => picked.extend(packets),
                     None => summary.rows_unplaced += 1,
                 }
@@ -172,7 +172,7 @@ pub fn selected_packets_coordinated(
                 flow,
                 position,
             } => {
-                picked.insert(flow.frames[position].stream_offset);
+                picked.insert(flow.frames.row(position).stream_offset);
                 datagram_picks.entry(index).or_default().push(position);
             }
             // Scouting rows are unjudged by construction and never reach here;
@@ -200,7 +200,7 @@ pub fn selected_packets_coordinated(
         for (index, positions) in &datagram_picks {
             let frames = &d.datagram_flows()[*index].frames;
             for position in context_rows(frames, positions) {
-                needed.insert(frames[position].stream_offset);
+                needed.insert(frames.row(position).stream_offset);
             }
         }
         let added: Vec<usize> = needed.difference(&picked).copied().collect();
@@ -221,7 +221,7 @@ fn stream_context(
     unplaced: &mut u64,
 ) {
     for position in context_rows(&flow.frames, picked) {
-        match flow.packets_carrying(&flow.frames[position]) {
+        match flow.packets_carrying(&flow.frames.row(position)) {
             Some(packets) => into.extend(packets),
             None => *unplaced += 1,
         }
@@ -238,7 +238,7 @@ fn stream_context(
         let reach = if flow.framing().is_encrypted() {
             picked
                 .iter()
-                .map(|&position| &flow.frames[position])
+                .map(|&position| flow.frames.row(position))
                 .filter(|frame| frame.direction == direction)
                 .filter_map(|frame| frame.wire_end)
                 .max()
@@ -302,7 +302,7 @@ fn chain_members(list: &MessageList, picked: &[usize]) -> BTreeSet<usize> {
     let mut fold = list.chain_prefix().clone();
     let ids: Vec<Option<u64>> = list
         .iter()
-        .map(|frame| fold.observe(frame).and_then(|(_, id)| id))
+        .map(|frame| fold.observe(&frame).and_then(|(_, id)| id))
         .collect();
     let wanted: BTreeSet<u64> = picked.iter().filter_map(|&p| ids[p]).collect();
     ids.iter()

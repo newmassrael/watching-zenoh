@@ -546,7 +546,7 @@ fn the_walk_from_nothing_is_the_whole_walk_and_from_a_mark_is_its_tail() {
     let (tail, again) =
         g.d.capture_order_since(Some(&marks))
             .expect("still a prefix");
-    assert!(tail.is_empty());
+    assert_eq!(tail.iter().len(), 0);
     assert_eq!(again, marks);
 
     // Two datagram messages more: exactly those two, in order, and they are the

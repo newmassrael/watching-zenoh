@@ -208,6 +208,35 @@ re-walk of 1.39M rows costs about 1.5 s more than it does now.
 
 Each step lands on its own and keeps every live door's answer unchanged.
 
+Reordered after step 2 (2026-10-24), on what the code showed. The folds that
+walk a capture in packet order take one `Vec` of references to EVERY row and
+sort it (`Dissection::message_frames_in_capture_order`, `OrderedFrames`), and
+eight planes consume it. A row decoded on demand cannot be borrowed that way:
+the walk would decode every row at once, and the peak would be what is held
+today. And step 4 does not need step 3 first: a stream row's bytes are still
+in the reassembled stream, which is what the step 1 gate already reads them
+from. So the order is now:
+
+- 4a. A row is handed out as `Row` (a reference that either borrows a held
+  frame or owns one decoded for the reader), and the capture-order walk sorts
+  KEYS (packet, list, position) and resolves each row inside its loop. No
+  behaviour change; every plane stops keeping references to rows.
+  Landed: `passive_messages::Row` and `RowIter`; `MessageList::row` replaces
+  indexing; `Dissection::message_frames_in_capture_order` and
+  `capture_order_since` return `CaptureOrder` (sorted keys, the flow held per
+  list); `MessageBytes::Retained` and the live handle's
+  `ReassembledBytes::Joined` carry `Cow`, owned where the bytes live in the
+  decoded frame. Every fields document and the census of the consumer
+  generator's 40k and 409k captures hash the same before and after, with the
+  same walk work.
+- 4b. Stream rows become index entries with their sparse facts, decoded again
+  on demand under a bounded cache, their bytes read from the reassembled stream.
+  This is the step where resident memory falls.
+- 3. The byte source, and the reassembled stream copy goes.
+- 4c. Datagram, serial and QUIC rows become index entries too, their bytes read
+  from the source.
+- 5. The memory gate and the lent-buffer door.
+
 ## 7. Open
 
 - The lent-buffer door's exact shape (a flag on replay or a new function) is

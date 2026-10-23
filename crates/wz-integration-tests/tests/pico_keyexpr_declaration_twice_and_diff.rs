@@ -1375,7 +1375,8 @@ fn render(
         "one relayed connection is one flow; got {}",
         flows.len()
     );
-    let frames: Vec<&PassiveFrame> = flows[0].frames.iter().collect();
+    let rows: Vec<_> = flows[0].frames.iter().collect();
+    let frames: Vec<&PassiveFrame> = rows.iter().map(|row| &**row).collect();
     let dialer = dialer_direction(&frames);
     let mut names = Names::default();
     let mut lines = Vec::new();

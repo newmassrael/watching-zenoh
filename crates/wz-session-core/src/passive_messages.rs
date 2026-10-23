@@ -71,7 +71,6 @@
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use core::ops::{Index, IndexMut};
 
 use crate::passive::PassiveFrame;
 #[cfg(feature = "reassembly")]
@@ -341,8 +340,8 @@ impl MessageList {
 
     /// The message at position `index` among those held, oldest first.
     #[inline]
-    pub fn get(&self, index: usize) -> Option<&PassiveFrame> {
-        self.held.get(index)
+    pub fn get(&self, index: usize) -> Option<Row<'_>> {
+        self.held.get(index).map(Row::held)
     }
 
     /// [`Self::get`], for an in-place rewrite of a held message (a remap of its
@@ -354,14 +353,16 @@ impl MessageList {
 
     /// The oldest message held.
     #[inline]
-    pub fn first(&self) -> Option<&PassiveFrame> {
-        self.held.get(0)
+    pub fn first(&self) -> Option<Row<'_>> {
+        self.get(0)
     }
 
     /// The messages held, oldest first.
     #[inline]
-    pub fn iter(&self) -> Iter<'_, PassiveFrame> {
-        self.held.iter()
+    pub fn iter(&self) -> RowIter<'_> {
+        RowIter {
+            rows: self.held.iter(),
+        }
     }
 
     /// The messages held, oldest first, for an in-place rewrite.
@@ -386,6 +387,101 @@ impl MessageList {
     }
 }
 
+/// One message of a [`MessageList`], as a reader is handed it.
+///
+/// Reads as the decoded [`PassiveFrame`] through [`Deref`](core::ops::Deref).
+/// A reader holds a `Row` for as long as it reads the message and no longer:
+/// open-debt item 924 (`docs/dissect-row-index.md`, step 4) lets a list keep a
+/// message as a small index entry and decode it again when it is asked for, and
+/// then a `Row` owns the frame decoded for that reader. Code written against
+/// `Row` keeps working when that happens; code that kept a `&PassiveFrame` to
+/// every row of a capture would have decoded the whole capture at once.
+///
+/// `Clone` and not `Copy`, for the same reason: a row that owns its decoded
+/// frame is not a bitwise copy.
+#[derive(Debug, Clone)]
+pub struct Row<'a> {
+    frame: &'a PassiveFrame,
+}
+
+impl<'a> Row<'a> {
+    #[inline]
+    fn held(frame: &'a PassiveFrame) -> Self {
+        Self { frame }
+    }
+}
+
+impl core::ops::Deref for Row<'_> {
+    type Target = PassiveFrame;
+
+    #[inline]
+    fn deref(&self) -> &PassiveFrame {
+        self.frame
+    }
+}
+
+impl AsRef<PassiveFrame> for Row<'_> {
+    #[inline]
+    fn as_ref(&self) -> &PassiveFrame {
+        self.frame
+    }
+}
+
+/// The messages of a [`MessageList`] (or of a [`Rows`] view), oldest first, as
+/// [`Row`]s.
+#[derive(Debug)]
+pub struct RowIter<'a> {
+    rows: Iter<'a, PassiveFrame>,
+}
+
+impl Clone for RowIter<'_> {
+    fn clone(&self) -> Self {
+        Self {
+            rows: self.rows.clone(),
+        }
+    }
+}
+
+impl<'a> Iterator for RowIter<'a> {
+    type Item = Row<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Row<'a>> {
+        self.rows.next().map(Row::held)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.rows.size_hint()
+    }
+
+    fn count(self) -> usize {
+        self.rows.count()
+    }
+
+    fn last(self) -> Option<Row<'a>> {
+        self.rows.last().map(Row::held)
+    }
+
+    fn nth(&mut self, n: usize) -> Option<Row<'a>> {
+        self.rows.nth(n).map(Row::held)
+    }
+}
+
+impl DoubleEndedIterator for RowIter<'_> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.rows.next_back().map(Row::held)
+    }
+
+    fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
+        self.rows.nth_back(n).map(Row::held)
+    }
+}
+
+impl ExactSizeIterator for RowIter<'_> {}
+
+impl core::iter::FusedIterator for RowIter<'_> {}
+
 /// The messages of a [`MessageList`] from one position on.
 ///
 /// What a door hands a reader of "the messages this call added": the list
@@ -402,14 +498,16 @@ pub struct Rows<'a> {
 impl<'a> Rows<'a> {
     /// The messages of the view, oldest first.
     #[inline]
-    pub fn iter(&self) -> Iter<'a, PassiveFrame> {
-        self.list.held.iter_from(self.from)
+    pub fn iter(&self) -> RowIter<'a> {
+        RowIter {
+            rows: self.list.held.iter_from(self.from),
+        }
     }
 }
 
 impl<'a> IntoIterator for Rows<'a> {
-    type Item = &'a PassiveFrame;
-    type IntoIter = Iter<'a, PassiveFrame>;
+    type Item = Row<'a>;
+    type IntoIter = RowIter<'a>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
@@ -637,11 +735,23 @@ fn run<T>(chunk: &VecDeque<T>) -> &[T] {
 /// last chunk can be short, and those are where the runs begin), so what is
 /// left is known from the three without a count kept per row, and the step
 /// that reads a row is the slice's own.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Iter<'a, T> {
     front: core::slice::Iter<'a, T>,
     middle: core::slice::Iter<'a, VecDeque<T>>,
     back: core::slice::Iter<'a, T>,
+}
+
+/// Not derived: a derive would ask `T: Clone`, and cloning an iterator copies
+/// three positions, never a row.
+impl<T> Clone for Iter<'_, T> {
+    fn clone(&self) -> Self {
+        Self {
+            front: self.front.clone(),
+            middle: self.middle.clone(),
+            back: self.back.clone(),
+        }
+    }
 }
 
 impl<'a, T> Iter<'a, T> {
@@ -982,27 +1092,17 @@ impl Drop for Discarded {
     }
 }
 
-impl Index<usize> for MessageList {
-    type Output = PassiveFrame;
-
-    /// The message at `index`; panics past the end, as a slice does.
+impl MessageList {
+    /// The message at `index`; panics past the end, as indexing a slice does.
+    ///
+    /// A method and not `Index`: indexing hands out a reference into the list,
+    /// and a row the list decodes on demand has none to hand out (see [`Row`]).
     #[inline]
-    fn index(&self, index: usize) -> &PassiveFrame {
+    #[track_caller]
+    pub fn row(&self, index: usize) -> Row<'_> {
         match self.get(index) {
-            Some(frame) => frame,
+            Some(row) => row,
             None => out_of_range(index, self.len()),
-        }
-    }
-}
-
-impl IndexMut<usize> for MessageList {
-    /// An in-place rewrite of one message. See the module doc.
-    #[inline]
-    fn index_mut(&mut self, index: usize) -> &mut PassiveFrame {
-        let len = self.len();
-        match self.get_mut(index) {
-            Some(frame) => frame,
-            None => out_of_range(index, len),
         }
     }
 }
@@ -1010,13 +1110,14 @@ impl IndexMut<usize> for MessageList {
 /// The panic of an index past the end, kept off the path that does not take it.
 #[cold]
 #[inline(never)]
+#[track_caller]
 fn out_of_range(index: usize, len: usize) -> ! {
     panic!("message {index} of a list holding {len}")
 }
 
 impl<'a> IntoIterator for &'a MessageList {
-    type Item = &'a PassiveFrame;
-    type IntoIter = Iter<'a, PassiveFrame>;
+    type Item = Row<'a>;
+    type IntoIter = RowIter<'a>;
 
     #[inline]
     fn into_iter(self) -> Self::IntoIter {

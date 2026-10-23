@@ -280,12 +280,12 @@ fn the_tracked_midsession_capture_reaches_the_consumer_surface() {
     let mut flows_without_a_ring = 0;
     let mut flows_with_a_ring = 0;
     for flow in flows {
-        let carried: Vec<&Carried> = flow
+        let rows: Vec<_> = flow
             .frames
             .iter()
             .filter(|f| !matches!(f.carried, Carried::Nothing))
-            .map(|f| &f.carried)
             .collect();
+        let carried: Vec<&Carried> = rows.iter().map(|f| &f.carried).collect();
         match carried.as_slice() {
             [Carried::Fragment(IngestOutcome::Begun), Carried::Reassembled { batch, .. }] => {
                 if flow.session.context().sn_mask().is_some() {

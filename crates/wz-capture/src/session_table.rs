@@ -240,12 +240,12 @@ impl LinkIngest {
     }
 
     /// Every message of a batch the session produced.
-    pub(crate) fn observe_frames<'f>(
+    pub(crate) fn observe_frames(
         &mut self,
-        frames: impl IntoIterator<Item = &'f PassiveFrame>,
+        frames: impl IntoIterator<Item = impl core::ops::Deref<Target = PassiveFrame>>,
     ) {
         for frame in frames {
-            self.observe_frame(frame);
+            self.observe_frame(&frame);
         }
     }
 

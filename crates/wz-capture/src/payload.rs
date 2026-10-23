@@ -1260,15 +1260,17 @@ impl PayloadCensus {
     /// R2457 (open-debt item 702) — `spaces` is the CAPTURE's and is handed in.
     /// See [`crate::agg::SpaceOwner`] for why one instance per flow was the
     /// wrong unit.
-    pub fn observe_flow_where<'f>(
+    pub fn observe_flow_where(
         &mut self,
-        frames: impl IntoIterator<Item = &'f wz_session_core::passive::PassiveFrame>,
+        frames: impl IntoIterator<
+            Item = impl core::ops::Deref<Target = wz_session_core::passive::PassiveFrame>,
+        >,
         filter: &crate::filter::Filter,
         ctx: crate::node::ListContext<'_>,
         spaces: &mut crate::agg::KeyexprSpaces,
     ) {
         for frame in frames {
-            self.observe_frame_where(frame, filter, ctx, spaces);
+            self.observe_frame_where(&frame, filter, ctx, spaces);
         }
     }
 
@@ -1636,7 +1638,7 @@ pub fn payloads_grouped(
     // link; `crate::agg::aggregate_grouped` carries the whole argument.
     let mut fold = PayloadFold::begin(dissection, filter, grouping);
     for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
-        fold.feed(&flow, list, packet, frame, grouping);
+        fold.feed(&flow, list, packet, &frame, grouping);
     }
     fold.census()
 }
@@ -4344,7 +4346,7 @@ mod census_tests {
         let held: Vec<bool> = d
             .message_frames_in_capture_order()
             .into_iter()
-            .map(|(_, list, _, frame)| census.row_verdict(&RowKey::of(list, frame)).is_some())
+            .map(|(_, list, _, frame)| census.row_verdict(&RowKey::of(list, &frame)).is_some())
             .collect();
         assert_eq!(held, [true, true, false, false, true, false]);
         assert_eq!(

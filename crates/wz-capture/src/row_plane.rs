@@ -65,7 +65,8 @@ impl RowPlane {
     ) -> Self {
         let mut plane = Self::default();
         let origin = d.capture_origin_ms();
-        for (flow, list, packet, frame) in d.message_frames_in_capture_order() {
+        for (flow, list, packet, row) in d.message_frames_in_capture_order() {
+            let frame: &PassiveFrame = &row;
             let ctx = grouping.context(list).placed(flow, Some(packet));
             let key = RowKey::of(list, frame);
             let base = Base {
@@ -87,7 +88,7 @@ impl RowPlane {
                         .get(list)
                         .filter(|f| f.flow == flow)
                         .and_then(|f| f.message_bytes(frame).ok());
-                    plane.whole(&base, key, bytes);
+                    plane.whole(&base, key, bytes.as_deref());
                 }
             }
         }

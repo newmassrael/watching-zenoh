@@ -302,12 +302,12 @@ fn the_tracked_compressed_capture_reaches_the_consumer_surface() {
     let d = crate::Dissection::from_capture(TRACKED).expect("the tracked capture dissects");
     let flows = d.datagram_flows();
     assert_eq!(flows.len(), 1, "one sender and one receiver, so one flow");
-    let carried: Vec<&Carried> = flows[0]
+    let rows: Vec<_> = flows[0]
         .frames
         .iter()
         .filter(|f| !matches!(f.carried, Carried::Nothing))
-        .map(|f| &f.carried)
         .collect();
+    let carried: Vec<&Carried> = rows.iter().map(|f| &f.carried).collect();
     assert!(
         matches!(
             carried.as_slice(),

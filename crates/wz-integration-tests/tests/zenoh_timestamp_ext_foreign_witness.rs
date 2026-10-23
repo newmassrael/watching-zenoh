@@ -395,10 +395,10 @@ fn the_timestamp_walker_reads_what_a_stock_zenohd_stamped() {
         if frame.direction != router_side {
             continue;
         }
-        let Ok(bytes) = flow.message_bytes(frame) else {
+        let Ok(bytes) = flow.message_bytes(&frame) else {
             continue;
         };
-        let Ok(tree) = wz_session_core::dissect::dissect_transport_message(bytes, 0) else {
+        let Ok(tree) = wz_session_core::dissect::dissect_transport_message(&bytes, 0) else {
             continue;
         };
         walked_trees.push(tree);

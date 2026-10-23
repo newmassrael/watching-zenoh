@@ -503,7 +503,7 @@ mod tests {
         push_stream_keepalives(&mut d, &[Some(5_000), Some(4_000)]);
         let flow = &d.flows()[0];
         assert_eq!(
-            flow.frames[0].observed_at_ms,
+            flow.frames.row(0).observed_at_ms,
             Some(5_000),
             "the fixture must put the LATER instant at the head"
         );

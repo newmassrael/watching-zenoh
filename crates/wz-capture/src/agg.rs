@@ -1146,7 +1146,7 @@ pub fn absorb_every_declaration(
     for (_flow, list, packet, frame) in d.message_frames_in_capture_order() {
         spaces.enter_flow(grouping.owners(list));
         spaces.at_packet(packet);
-        spaces.absorb_frame(frame);
+        spaces.absorb_frame(&frame);
     }
 }
 
@@ -1447,15 +1447,15 @@ impl ThroughputTable {
     /// node census builds it with `ListContext::unattributed`, and every
     /// record it folds answers `None` for its node — which is what a walk with
     /// no handshake in front of it actually knows.
-    pub fn observe_flow_where<'f>(
+    pub fn observe_flow_where(
         &mut self,
-        frames: impl IntoIterator<Item = &'f PassiveFrame>,
+        frames: impl IntoIterator<Item = impl core::ops::Deref<Target = PassiveFrame>>,
         filter: &Filter,
         ctx: crate::node::ListContext<'_>,
         spaces: &mut KeyexprSpaces,
     ) {
         for frame in frames {
-            self.observe_frame_where(frame, filter, ctx, spaces);
+            self.observe_frame_where(&frame, filter, ctx, spaces);
         }
     }
 
@@ -2597,7 +2597,7 @@ pub fn aggregate_grouped(
     use crate::ordered_fold::OrderedFold;
     let mut fold = AggFold::begin(dissection, filter, grouping);
     for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
-        fold.feed(&flow, list, packet, frame, grouping);
+        fold.feed(&flow, list, packet, &frame, grouping);
     }
     fold.table
 }
@@ -3930,8 +3930,8 @@ pub(crate) mod tests {
             &udp_packet(HIGH, 7447, LOW, 43210, &wire),
         );
         let frames = &d.datagram_flows()[0].frames;
-        assert_eq!(frames[0].direction, Direction::A, "low -> high is A");
-        assert_eq!(frames[1].direction, Direction::B, "high -> low is B");
+        assert_eq!(frames.row(0).direction, Direction::A, "low -> high is A");
+        assert_eq!(frames.row(1).direction, Direction::B, "high -> low is B");
     }
 
     /// §1.1f, the plane itself: a capture answers WHICH keyexpr carried the

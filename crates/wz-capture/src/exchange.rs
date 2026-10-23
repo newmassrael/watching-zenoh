@@ -577,9 +577,9 @@ impl ExchangeTable {
     /// R2457 (open-debt item 702) — `spaces` is the CAPTURE's and is handed in.
     /// See [`crate::agg::SpaceOwner`] for why one instance per flow was the
     /// wrong unit.
-    pub fn observe_flow_where<'f>(
+    pub fn observe_flow_where(
         &mut self,
-        frames: impl IntoIterator<Item = &'f PassiveFrame>,
+        frames: impl IntoIterator<Item = impl core::ops::Deref<Target = PassiveFrame>>,
         filter: &Filter,
         ctx: crate::node::ListContext<'_>,
         spaces: &mut KeyexprSpaces,
@@ -591,7 +591,7 @@ impl ExchangeTable {
             // HAS a census say so. One with none passes
             // `ListContext::unattributed(0)` and gets the old behaviour
             // exactly, with the difference that the absence is now stated.
-            self.observe_frame_where(frame, filter, ctx, &mut open, spaces);
+            self.observe_frame_where(&frame, filter, ctx, &mut open, spaces);
         }
         // Whatever is still open when the flow's frames run out was never
         // closed on the wire this observer saw. It is judged here — an unclosed
@@ -1212,7 +1212,7 @@ pub fn exchanges_grouped(
     // whenever its `DeclKexpr` had gone out on the session's other link.
     let mut fold = ExchangeFold::begin(dissection, filter, grouping);
     for (flow, list, packet, frame) in dissection.message_frames_in_capture_order() {
-        fold.feed(&flow, list, packet, frame, grouping);
+        fold.feed(&flow, list, packet, &frame, grouping);
     }
     fold.table()
 }
