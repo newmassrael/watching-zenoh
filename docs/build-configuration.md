@@ -89,6 +89,19 @@ original reproduced by naming it. Three things follow from it:
   have to add for one it turns on (the advanced subscription with the unstable API
   off, since wz's advanced plane implies it) is refused by `--features` rather than
   built with other struct layouts.
+- **The zenoh-c drop-in's ABI arm from an installed zenoh-c** (step 2): zenoh-c's
+  `zenoh_configure.h` defines one `Z_FEATURE_*` per cargo feature it was built with (its
+  own table, `buildrs/cbindgen_generator.rs`), and two of them move the C types a program
+  allocates, the unstable API and shared memory. Their rows name the macro (and the
+  unstable one its inverse sense), and `wz_config.py --drop-in-features c <header>` is the
+  one rule that turns a header into the wz-capi-c build: the arm's features ADDED to the
+  default, which sits at the origin of both axes (open-debt item 616). Layer C1cc's
+  selector calls it, `zenoh_c_archive_arm.py` grades it on all four arms, and the switch
+  map holds the macros to zenoh-c's table. The two layout switches are axes, not
+  capabilities (C3: what changes the shape of the code is never a feature that adds it):
+  flipping the inverse one into an additive capability would put the no-unstable arm
+  behind `--no-default-features`, which a dependent enabling the default undoes. Their
+  end state is C12's, the layout a value of the generated ABI, not a cargo feature.
 - **Each original's own defaults** (step 2): every capability states, for the originals
   its ABIs reach, whether that original's default build has it (`upstream_on` /
   `upstream_off`); the switch map holds zenoh-pico's to its CMakeLists and zenoh-c's to

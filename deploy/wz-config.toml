@@ -384,6 +384,13 @@ help = "The traffic policy a node's config states: access_control, low_pass_filt
 # cites the open-debt item that owns the gap) or `n/a` (no meaning for wz; the note says why).
 # `upstream_switch_map.py` holds the rows to the pinned sources both ways.
 #
+# A zenoh-c row whose switch moves the C ABI's type layouts names the `macro` by which an installed
+# zenoh-c's `zenoh_configure.h` states it (zenoh-c's own table, `buildrs/cbindgen_generator.rs`),
+# and `sense = "inverse"` where the drop-in's feature is on when the switch is off. From those
+# rows `wz_config.py --drop-in-features c <zenoh_configure.h>` derives the wz-capi-c build a
+# program compiled against that header links. The other zenoh-c switches (the links, the
+# handshakes) move no type, and the drop-in keeps its own defaults for them.
+#
 # A zenoh-pico `maps` row to a capability is that capability's pico switch: a pico `config.h`
 # turns the capability on when one of its switches is on, or when all are where the capability
 # says `pico_combine = "all"`. A capability no row reaches but which pico has whenever several
@@ -656,6 +663,7 @@ original = "zenoh-c"
 switch = "shared-memory"
 class = "maps"
 anchor = "wz-capi-c/zenoh-c-shared-memory"
+macro = "Z_FEATURE_SHARED_MEMORY"
 note = "the SHM provider and buffer doors"
 
 [[upstream_switch]]
@@ -663,6 +671,8 @@ original = "zenoh-c"
 switch = "unstable"
 class = "maps"
 anchor = "wz-capi-c/zenoh-c-no-unstable-api"
+macro = "Z_FEATURE_UNSTABLE_API"
+sense = "inverse"
 note = "in the inverse sense: the unstable surface is built unless this feature removes it, where upstream's default is without it"
 
 [[upstream_switch]]

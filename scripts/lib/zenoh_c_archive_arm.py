@@ -607,8 +607,26 @@ def installer_pin() -> str:
 
 # ── the arm lattice (open-debt item 616) ─────────────────────────────────────
 
+def wz_config_module():
+    """The build configuration's tool, which holds the selector's rule (the zenoh-c rows of
+    deploy/wz-config.toml that name a macro)."""
+    lib = str(ROOT / "scripts" / "lib")
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
+    import wz_config  # noqa: PLC0415 - loaded where the rule is graded, not at import
+
+    return wz_config
+
+
+def arm_header(arm: str) -> str:
+    """A `zenoh_configure.h` of an installed zenoh-c built on `arm`: the macro of each axis it
+    carries, as zenoh-c writes it."""
+    return "".join(f"#define Z_FEATURE_{axis}\n" for axis, on in arm_axes(arm).items() if on)
+
+
 def check_lattice(manifest: pathlib.Path,
-                  runci: pathlib.Path) -> tuple[int, list[str], list[str]]:
+                  runci: pathlib.Path,
+                  decl: dict | None = None) -> tuple[int, list[str], list[str]]:
     """Where the DEFAULT sits, and what the divergence it accepts has to cost.
 
     Item 616 asked whether the default should move to the build upstream ships.
@@ -687,13 +705,27 @@ def check_lattice(manifest: pathlib.Path,
         rc = 1
         selector = None
     if selector is not None:
-        for feature in sorted(MANIFEST_FEATURES):
-            if not re.search(rf"--features\s+{re.escape(feature)}\b", selector):
-                fail.append(f"  archive-arm FAIL: `{ORACLE_FN}` never adds\n"
-                            f"    `--features {feature}`, so an oracle on that "
-                            f"axis is served the default\n    build -- a size "
-                            f"mismatch, which is a corrupted caller frame rather "
-                            f"than\n    a link error.")
+        # The rule the selector applies is the declaration's, so the selector has to call it, and
+        # the rule is graded on every arm here: for the header of each, it must add exactly that
+        # arm's features to the default. An axis the rule never adds serves that oracle the
+        # default build -- a size mismatch, which is a corrupted caller frame rather than a link
+        # error.
+        if "--drop-in-features c" not in selector:
+            fail.append(f"  archive-arm FAIL: `{ORACLE_FN}` does not call `wz_config.py\n"
+                        f"    --drop-in-features c`, so the arm it builds is not the one the\n"
+                        f"    declaration's rule selects.")
+            rc = 1
+        wz_config = wz_config_module()
+        decl = decl if decl is not None else wz_config.load_decl()
+        for arm in sorted(ARMS):
+            served = set(wz_config.drop_in_arm(decl, arm_header(arm)))
+            if served != arm_features(arm):
+                missing = sorted(arm_features(arm) - served)
+                fail.append(f"  archive-arm FAIL: the declaration's rule serves an oracle on "
+                            f"`{arm}` {sorted(served)},\n    and that arm is "
+                            f"{sorted(arm_features(arm))}"
+                            + (f": it never adds\n    `--features {missing[0]}`." if missing
+                               else "."))
                 rc = 1
         if "--no-default-features" in selector:
             fail.append(f"  archive-arm FAIL: `{ORACLE_FN}` uses "
@@ -1088,13 +1120,8 @@ def cmd_selftest() -> int:
         )
         good_runci = (
             "_runci_build_capi_c_for_oracle() {\n"
-            "    local capi_c_features=()\n"
-            '    if ! grep -q UNSTABLE "$h"; then\n'
-            "        capi_c_features+=(--features zenoh-c-no-unstable-api)\n"
-            "    fi\n"
-            '    if grep -q SHARED "$h"; then\n'
-            "        capi_c_features+=(--features zenoh-c-shared-memory)\n"
-            "    fi\n"
+            '    a="$(python3 scripts/lib/wz_config.py --drop-in-features c "$h")"\n'
+            "    cargo build -p wz-capi-c $a --quiet\n"
             "}\n"
             "layer_c1cc() {\n"
             "    cargo test -p wz-capi-c --quiet\n"
@@ -1102,11 +1129,21 @@ def cmd_selftest() -> int:
             "--quiet\n"
             "}\n"
         )
+        # The declaration's two arm rows, as deploy/wz-config.toml writes them.
+        good_decl = {"caps": {}, "switches": [
+            {"original": "zenoh-c", "switch": "unstable", "class": "maps",
+             "anchor": "wz-capi-c/zenoh-c-no-unstable-api", "macro": "Z_FEATURE_UNSTABLE_API",
+             "sense": "inverse", "note": "x"},
+            {"original": "zenoh-c", "switch": "shared-memory", "class": "maps",
+             "anchor": "wz-capi-c/zenoh-c-shared-memory", "macro": "Z_FEATURE_SHARED_MEMORY",
+             "note": "x"},
+        ]}
 
-        def lattice(manifest_text: str, runci_text: str) -> tuple[int, str]:
+        def lattice(manifest_text: str, runci_text: str,
+                    decl: dict = good_decl) -> tuple[int, str]:
             (d / "lat.toml").write_text(manifest_text)
             (d / "lat.sh").write_text(runci_text)
-            code, _, failures = check_lattice(d / "lat.toml", d / "lat.sh")
+            code, _, failures = check_lattice(d / "lat.toml", d / "lat.sh", decl)
             return code, "\n".join(failures)
 
         rc_ok, _ = lattice(good_manifest, good_runci)
@@ -1143,16 +1180,26 @@ def cmd_selftest() -> int:
         case("a COMMENTED-OUT leg does not pay the divergence",
              rc_bad == 1 and "no `cargo test -p wz-capi-c` leg" in why)
 
-        rc_bad, why = lattice(good_manifest, good_runci.replace(
-            "        capi_c_features+=(--features zenoh-c-shared-memory)\n", ""))
-        case("a selector blind to an axis is refused",
-             rc_bad == 1 and "never adds" in why)
+        rc_bad, why = lattice(good_manifest, good_runci,
+                              {**good_decl, "switches": good_decl["switches"][:1]})
+        case("a rule blind to an axis is refused",
+             rc_bad == 1 and "never adds" in why and "zenoh-c-shared-memory" in why)
+
+        inverted = [dict(good_decl["switches"][0]), good_decl["switches"][1]]
+        del inverted[0]["sense"]
+        rc_bad, why = lattice(good_manifest, good_runci, {**good_decl, "switches": inverted})
+        case("a rule reading an inverse axis the other way round is refused",
+             rc_bad == 1 and "serves an oracle on" in why)
 
         rc_bad, why = lattice(good_manifest, good_runci.replace(
-            "    local capi_c_features=()\n",
-            "    local capi_c_features=(--no-default-features)\n"))
+            "cargo build -p wz-capi-c $a", "cargo build -p wz-capi-c --no-default-features $a"))
         case("selecting an arm by subtraction is refused",
              rc_bad == 1 and "SUBTRACTION" in why)
+
+        rc_bad, why = lattice(good_manifest, good_runci.replace(
+            "--drop-in-features c", "--features pico"))
+        case("a selector that does not call the declaration's rule is refused",
+             rc_bad == 1 and "does not call" in why)
 
         rc_bad, why = lattice(good_manifest, good_runci.replace(
             "_runci_build_capi_c_for_oracle() {", "_some_other_name() {"))

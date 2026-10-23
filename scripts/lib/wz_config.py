@@ -30,6 +30,8 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --resolve-features ABI PRESET...
                                   merge presets onto the defaults (kconfiglib) and print the cargo
                                   arguments of ABI
+    --drop-in-features c HEADER   the cargo arguments of the wz-capi-c build a program compiled
+                                  against an installed zenoh-c's zenoh_configure.h links
     --original-features ORIGINAL  resolve configs/<ORIGINAL>_defconfig alone and print the cargo
                                   arguments of the ABI that original is built through
     --resolve-env PRESET...       the same merge; print WZ_LIMIT_<NAME>=<value> for each limit it
@@ -437,7 +439,7 @@ def validate_upstream_defaults(cap: dict) -> list[str]:
     return out
 
 
-SWITCH_KEYS = {"original", "switch", "class", "anchor", "note"}
+SWITCH_KEYS = {"original", "switch", "class", "anchor", "note", "macro", "sense"}
 # The originals whose build switches are rows here; the zenoh crate's cargo features are
 # `upstream_feature_census.py`'s.
 SWITCH_ORIGINALS = ("zenoh-pico", "zenoh-c")
@@ -481,6 +483,11 @@ def validate_switches(data: dict) -> list[str]:
             out.append(f"{where} carries no note -- a verdict with no reason is not one")
         if (row.get("class") in ("maps", "always")) != ("anchor" in row):
             out.append(f"{where}: a `maps` or `always` row names an anchor and no other does")
+        if "macro" in row and not (row.get("original") == "zenoh-c" and row.get("class") == "maps"
+                                   and str(row["macro"]).startswith("Z_FEATURE_")):
+            out.append(f"{where}: only a zenoh-c `maps` row names a macro, and it is Z_FEATURE_*")
+        if "sense" in row and (row["sense"] != "inverse" or "macro" not in row):
+            out.append(f"{where}: sense is only \"inverse\", on a row that names its macro")
         key = (row.get("original"), row.get("switch"))
         if key in seen:
             out.append(f"{where} has two rows -- two answers to one question")
@@ -571,6 +578,40 @@ def pico_flag_states(text: str) -> tuple[set[str], set[str]]:
         if u:
             off.add(u.group(1))
     return on, off
+
+
+ZENOH_C_DROP_IN = "wz-capi-c/"
+MACRO_DEFINE_RE = re.compile(r"^\s*#\s*define\s+(Z_FEATURE_[A-Z0-9_]+)\b")
+
+
+def drop_in_arm(decl: dict, text: str) -> list[str]:
+    """The wz-capi-c features that select the ABI arm a program compiled against this installed
+    zenoh-c's `zenoh_configure.h` needs, added to the drop-in's default build.
+
+    zenoh-c writes one `#define Z_FEATURE_*` per cargo feature it was built with, and two of
+    them move the C types a program allocates (the unstable API and shared memory). The rows that
+    name a macro are those; each turns its drop-in feature on when the header states the switch,
+    or when it does not where the row's sense is inverse. The arm is selected by ADDITION to the
+    default, which sits at the origin of both axes (open-debt item 616, held by
+    `zenoh_c_archive_arm.py`): a selection by subtraction would be handed the default back by any
+    dependent that enables it. A link or a handshake zenoh-c was built without moves no type, so
+    the drop-in keeps its own defaults for them.
+    """
+    defined = {m.group(1) for line in text.splitlines() if (m := MACRO_DEFINE_RE.match(line))}
+    out: list[str] = []
+    for row in decl["switches"]:
+        if row.get("original") != "zenoh-c" or "macro" not in row:
+            continue
+        if (row["macro"] in defined) != (row.get("sense") == "inverse"):
+            out.append(row["anchor"].removeprefix(ZENOH_C_DROP_IN))
+    return out
+
+
+def drop_in_features(decl: dict, text: str) -> str:
+    """`drop_in_arm` as cargo arguments, each feature qualified by its package so the same words
+    serve a build of wz-capi-c alone and one of several packages; empty for the default arm."""
+    arm = drop_in_arm(decl, text)
+    return f"--features {','.join(ZENOH_C_DROP_IN + f for f in arm)}" if arm else ""
 
 
 def pico_header_conflicts(decl: dict, abi: str, text: str) -> list[str]:
@@ -1424,6 +1465,13 @@ def cmd_selftest() -> int:
     expect("either advanced switch asks for the advanced plane",
            "advanced" in read_config(decl, "#define Z_FEATURE_ADVANCED_SUBSCRIPTION 1\n")
            and "advanced" in read_config(decl, "#define Z_FEATURE_ADVANCED_PUBLICATION 1\n"))
+    expect("an installed zenoh-c's arm is added to the drop-in's default, each axis by its macro",
+           drop_in_features(decl, "#define Z_FEATURE_UNSTABLE_API\n#define Z_FEATURE_SHARED_MEMORY\n")
+           == "--features wz-capi-c/zenoh-c-shared-memory"
+           and drop_in_features(decl, "#define Z_FEATURE_UNSTABLE_API\n") == ""
+           and drop_in_arm(decl, "#define Z_FEATURE_TRANSPORT_TCP\n") == ["zenoh-c-no-unstable-api"]
+           and drop_in_arm(decl, "// #define Z_FEATURE_UNSTABLE_API\n#define Z_FEATURE_SHARED_MEMORY\n")
+           == ["zenoh-c-shared-memory", "zenoh-c-no-unstable-api"])
     sub_only = "#define Z_FEATURE_ADVANCED_PUBLICATION 0\n#define Z_FEATURE_ADVANCED_SUBSCRIPTION 1\n"
     expect("a header that asks for the advanced plane with the unstable API stated off is refused",
            any("unstable-api" in c for c in pico_header_conflicts(
@@ -1571,6 +1619,9 @@ def cmd_selftest() -> int:
            row_refused(with_row.replace('class = "maps"', 'class = "maybe"'), "class")
            and row_refused(with_row.replace('anchor = "wz-capi-pico/a"\n', ""), "anchor"))
     expect("two rows for one switch are refused", row_refused(with_row + row, "two rows"))
+    expect("a macro on a zenoh-pico row, or a sense with no macro, is refused",
+           row_refused(with_row.replace('note = "a"', 'note = "a"\nmacro = "Z_FEATURE_A"'), "names a macro")
+           and row_refused(with_row.replace('note = "a"', 'note = "a"\nsense = "inverse"'), "sense"))
     expect("a pico row to a capability the pico ABI does not export is refused",
            row_refused(with_row.replace('abis = ["core", "pico"]', 'abis = ["core"]')
                        .replace('upstream_on = ["zenoh-pico"]\n', ""), "pico ABI does not export"))
@@ -1813,6 +1864,12 @@ def main(argv: list[str]) -> int:
             print(f"  wz-config FAIL: {exc}", file=sys.stderr)
             return 1
         print(cargo_args(decl, argv[2], resolved_caps(decl, kconf)))
+        return 0
+    if len(argv) == 4 and argv[1] == "--drop-in-features" and argv[2] == "c":
+        # The canonical rule a consumer that builds the zenoh-c drop-in for its installed
+        # zenoh-c calls, rather than keeping a copy of it.
+        decl = load_decl()
+        print(drop_in_features(decl, pathlib.Path(argv[3]).read_text(encoding="utf-8")))
         return 0
     if len(argv) == 3 and argv[1] == "--original-features" and argv[2] in BASE_ABI:
         # An upstream original's own default build: its defconfig alone, resolved strictly, as the

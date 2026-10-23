@@ -21780,7 +21780,6 @@ layer_e12_apfull_adminspace_pico() {
 # for the message only.
 _runci_build_capi_c_for_oracle() {
     local lane="$1"
-    local capi_c_features=()
     local zc_configure="${WZ_ZENOH_C_PREFIX:-$HOME/.local}/include/zenoh_configure.h"
     # TWO axes, not one (R311y540 measured the second). `Z_FEATURE_UNSTABLE_API`
     # moves 2 of the types wz declares and `Z_FEATURE_SHARED_MEMORY` moves 8, so
@@ -21788,23 +21787,27 @@ _runci_build_capi_c_for_oracle() {
     # pointed at an SHM oracle — and the failure would be a SIZE mismatch, which
     # is a corrupted caller frame rather than a link error.
     #
-    # Absent header => no features, i.e. the default arm. That is unchanged, and
-    # it is fine: the layout leg SKIPs when the oracle is absent, so nothing
-    # compares the build against anything.
+    # The rule is the declaration's (deploy/wz-config.toml, the zenoh-c rows that name a
+    # macro), read by `wz_config.py --drop-in-features c`, which a consumer that builds the
+    # drop-in for its own installed zenoh-c calls too rather than keeping a copy. It ADDS the
+    # arm's features to the default, which sits at the origin of both axes (open-debt item
+    # 616; `zenoh_c_archive_arm.py` holds the rule to every arm).
+    #
+    # Absent header => no features, i.e. the default arm. That is unchanged, and it is fine:
+    # the layout leg SKIPs when the oracle is absent, so nothing compares the build against
+    # anything.
+    local capi_c_args=""
     if [[ -f "$zc_configure" ]]; then
-        if ! grep -q '^#define Z_FEATURE_UNSTABLE_API' "$zc_configure"; then
-            capi_c_features+=(--features zenoh-c-no-unstable-api)
-        fi
-        if grep -q '^#define Z_FEATURE_SHARED_MEMORY' "$zc_configure"; then
-            capi_c_features+=(--features zenoh-c-shared-memory)
-        fi
+        capi_c_args="$(python3 scripts/lib/wz_config.py --drop-in-features c "$zc_configure")" \
+            || return 1
     fi
-    if [[ ${#capi_c_features[@]} -gt 0 ]]; then
-        echo "  Layer $lane: oracle selects wz-capi-c ${capi_c_features[*]}"
+    if [[ -n "$capi_c_args" ]]; then
+        echo "  Layer $lane: oracle selects wz-capi-c $capi_c_args"
     else
         echo "  Layer $lane: oracle selects wz-capi-c default features (unstable, no shm)"
     fi
-    (cd crates && cargo build -p wz-capi-c "${capi_c_features[@]}" --quiet)
+    # shellcheck disable=SC2086 # the cargo arguments are words on purpose
+    (cd crates && cargo build -p wz-capi-c $capi_c_args --quiet)
 }
 
 layer_c1cc_api_compat_c() {

@@ -350,6 +350,38 @@ def zenoh_c_switches(source: Path) -> tuple[str, set[str], dict[str, str], set[s
     return pkg.get("version", ""), set(features) - set(derived), derived, set(features.get("default", []))
 
 
+ZENOH_C_MACRO_TABLE = re.compile(r"RUST_TO_C_FEATURES[^{]*\{(?P<body>.*?)\};", re.DOTALL)
+ZENOH_C_MACRO_ROW = re.compile(r'"([^"]+)"\s*=>\s*"(Z_FEATURE_[A-Z0-9_]+)"')
+
+
+def zenoh_c_macros(source: Path) -> dict[str, str]:
+    """zenoh-c's own table of the macro it writes into `zenoh_configure.h` for each cargo
+    feature (`buildrs/cbindgen_generator.rs`, `RUST_TO_C_FEATURES`)."""
+    path = source / "buildrs" / "cbindgen_generator.rs"
+    if not path.is_file():
+        raise InputError(f"no {path}: the zenoh-c checkout carries no feature-to-macro table")
+    m = ZENOH_C_MACRO_TABLE.search(path.read_text(errors="replace"))
+    table = dict(ZENOH_C_MACRO_ROW.findall(m.group("body"))) if m else {}
+    if not table:
+        raise InputError(f"{path} has no RUST_TO_C_FEATURES table -- not zenoh-c's build script")
+    return table
+
+
+def macro_arm(decl: dict, table: dict[str, str]) -> list[str]:
+    """Does each zenoh-c row that names a macro name the one zenoh-c writes for its switch?"""
+    failures: list[str] = []
+    for row in decl["switches"]:
+        if row.get("original") != "zenoh-c" or "macro" not in row:
+            continue
+        want = table.get(row["switch"])
+        if want != row["macro"]:
+            failures.append(
+                f"zenoh-c: the row for `{row['switch']}` names the macro `{row['macro']}`, and "
+                f"zenoh-c writes {('`' + want + '`') if want else 'none'} for it"
+            )
+    return failures
+
+
 def upstream_arm(
     table: str,
     rows: tuple[tuple[str, str, str | None, str], ...],
@@ -499,6 +531,24 @@ def selftest() -> int:
     if upstream_default_arm("zenoh-c", decl, {"query": True}) == []:
         print("  selftest FAIL [an original a capability states nothing for]: ACCEPTED", file=sys.stderr)
         return 1
+    macro_decl = {"switches": [{"original": "zenoh-c", "switch": "unstable",
+                                "macro": "Z_FEATURE_UNSTABLE_API"}]}
+    if macro_arm(macro_decl, {"unstable": "Z_FEATURE_UNSTABLE_API"}) != [] \
+            or macro_arm(macro_decl, {"unstable": "Z_FEATURE_UNSTABLE"}) == [] \
+            or macro_arm(macro_decl, {}) == []:
+        print("  selftest FAIL [a row's macro held to zenoh-c's table]", file=sys.stderr)
+        return 1
+    with tempfile.TemporaryDirectory() as td:
+        build = Path(td) / "buildrs"
+        build.mkdir()
+        (build / "cbindgen_generator.rs").write_text(
+            'static RUST_TO_C_FEATURES: phf::Map<&str, &str> = phf_map! {\n'
+            '    "unstable" => "Z_FEATURE_UNSTABLE_API",\n'
+            '    "transport_vsock" => "Z_FEATURE_VSOCK",\n};\n')
+        if zenoh_c_macros(Path(td)) != {"unstable": "Z_FEATURE_UNSTABLE_API",
+                                        "transport_vsock": "Z_FEATURE_VSOCK"}:
+            print("  selftest FAIL [the zenoh-c macro table reader]", file=sys.stderr)
+            return 1
     mapped = zenoh_c_expected(
         {"caps": {"link-udp": {}, "query": {}}, "switches": []},
         (("transport_udp", "maps", "wz-capi-c/link-udp", "x"), ("stats", "maps", "wz-capi-c/stats", "x"),
@@ -625,6 +675,7 @@ def main() -> int:
             failures += upstream_arm("zenoh-c", tables["zenoh-c"], version, pinned["zenoh-c"], caps)
             expected = zenoh_c_expected(decl, tables["zenoh-c"], default_features)
             failures += upstream_default_arm("zenoh-c", decl, expected)
+            failures += macro_arm(decl, zenoh_c_macros(zenoh_c_source()))
             print(f"    zenoh-c defaults: {len(expected)} capability default(s) held to its "
                   f"`default` features")
             print(
