@@ -224,6 +224,15 @@ DEFERRED: dict[str, str] = {
         "immediately before calling this and also compiles a C consumer that "
         "compares the two."
     ),
+    "capability_cost_gate.py": (
+        "it JOINED this population when it began reading `deploy/wz-config.toml` "
+        "to derive zenoh-pico's same-build reference for each pico case. It "
+        "BUILDS its subject: eight release builds of two cdylibs and a CMake "
+        "build of zenoh-pico per pico case, 201s on the build host with the "
+        "pico builds cached. The hook builds no cdylib. Hosted Layer C1cs owns "
+        "the builds, and Layer C0 runs its --selftest, which holds the "
+        "derivation to the declaration without building anything."
+    ),
     "capi_c_abi_pin.py": (
         "its subject is the BUILT `libwz_capi_c.so`, one per cargo profile, "
         "and it refuses to grade without them (0.04s to say so). The hook "

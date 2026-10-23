@@ -471,6 +471,13 @@ _add(
 )
 _add(
     "cmake",
+    "capability_cost_gate.py builds zenoh-pico from the submodule as the same "
+    "build as each pico case, the denominator of the size ratio it prints. "
+    "DERIVED below (it invokes cmake), not believed.",
+    ["capability-cost"],
+)
+_add(
+    "cmake",
     "Zephyr's own west/CMake build, invoked BY west rather than by a command "
     "this tree writes, so the derivation cannot see it. Declared by name in "
     "DECLARED_OUTSIDE_CARGO.",
@@ -650,9 +657,12 @@ def ci_sites() -> dict[str, set[str]]:
 # `apt-install.sh` with the literal argument `cmake` five times, so a rule that
 # accepted the bare token would mark every job running C0g as needing cmake and
 # the derived arm would answer yes to everything — a check that cannot say no.
+# The last arm is a Python argument list (`["cmake", "-S", ...]`), the form
+# `capability_cost_gate.py` builds zenoh-pico's same-build reference with.
 CMAKE_INVOCATION = re.compile(
     r"command -v cmake|cmake\s+(?:-S|--build|\.\.)|for tool in [^\n]*\bcmake\b"
     r'|run\("cmake",\s*"(?:-S|--build)"'
+    r'|\[\s*"cmake",\s*"(?:-S|--build)"'
 )
 
 
@@ -1699,6 +1709,13 @@ def selftest() -> int:
                  "cargo fetch", "mycargo test"):
         if COMPILE_VERB.search(line):
             failures.append(f"COMPILE_VERB took {line!r} for a compile")
+    for line in ('cmake -S src -B build', 'run("cmake", "--build", d)',
+                 'run_quiet(["cmake", "-S", str(src)])', '[ "cmake", "--build", b ]'):
+        if not CMAKE_INVOCATION.search(line):
+            failures.append(f"CMAKE_INVOCATION missed {line!r}")
+    for line in ("apt-install.sh cmake clang", '["cmake", "ninja-build"]', "# cmake is needed"):
+        if CMAKE_INVOCATION.search(line):
+            failures.append(f"CMAKE_INVOCATION took {line!r} for an invocation")
 
     row = {"j": BindgenFree(frozenset({"A"}), {"ok.sh": "no consumer"}, "fixture")}
     steps = {"j": ["  j:", "    steps:", "      - run: bash scripts/run-ci.sh --layer A"]}
