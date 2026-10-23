@@ -279850,6 +279850,52 @@
         "Not a milestone round: REMAINING stays 2 (api-compat-rust, session-close-ingress)."
       ]
     },
+    "Round 3464": {
+      "decision_summary": "Round 3453 named the 3 s open bound and a slow RSA handshake as the cause of the Windows C ABI red in the pubkey client leg of the wz-capi-c listener test, and widened the bound to 30 s. That cause is withdrawn: the run of d1d4bb1a4 failed the same leg after 30.7 s. On a build host the leg fails 1 run in 100 unloaded and 18 of 60 with three busy loops on two cores, and in every failure the responder reached Established after 6 to 14 ms while z_open waited out its bound and returned the network error. The test's responder ended at Established, closing the link and its listener under a client that had not read the last frame; the client's retries met a closed port. The responder now holds its session until the client has opened, the 30 s bound is gone, and 100 runs under the same load at the 3 s bound fail none. The product is unchanged. The same push pays the A4 red of the default-arm leg and lands the signature half of the Rust API surface.",
+      "changes_bullets": [
+        "crates/wz-capi-c/tests/listener_auth.rs: the responder of the pubkey client leg keeps its Established session until the client's open has returned, both sides report their outcome with the time it took in the failure message, and the 30 s override of connect/timeout_ms from round 3453 is removed.",
+        "crates/wz-integration-tests/tests/pico_c_examples_on_wz_capi_dropin.rs: the default-arm leg carries its wz-proves line for api-compat-pico; scripts/lib/crossimpl_audit.py: FOREIGN_ADJUDICATOR_LINKS 1074 to 1075, with the note that names the leg.",
+        "scripts/lib/rust_api_surface.py and deploy/upstream-api/*.surface: a function's line carries its signature (generics and bounds, parameter and return types, qualifiers, the impl block of a method); the three upstream surfaces are re-emitted at 709, 965 and 1025 lines and a second emission is identical; docs/build-configuration.md says so.",
+        "docs/hosted-red-acks.md: one row for the CI run of fed150b13."
+      ],
+      "verification_bullets": [
+        "On a build host the leg failed 43 of 150 runs with three busy loops on two cores, 1 of 100 with none, and 18 of 60 once instrumented, each after 30 s; after the change it failed 0 of 100 under the three busy loops with the 3 s bound.",
+        "The crossimpl audit measures 1075 links and passes; the surface gate's selftest and default run pass and its upstream run reports no difference on the four arms.",
+        "The hook's round-fed gate array (110 members) passes in parallel on the tree of this push; validate-workspace keeps 14 T1 orphans, none new.",
+        "Not measured here: the Windows run itself, which the next Platform run of this push decides."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The Windows C ABI leg is graded by the next Platform run of this push. If it is red again, the failure message now says which side finished and when.",
+        "Layer Q (session-slot-bytes +8, multicast-e2e text), E7s and C1bn are red in the run of fed150b13, not paid and not attributed here; the macOS interop red of the d1d4bb1a4 run was a runner failing to resolve the crate index.",
+        "Round 3462 cites a multicast per-peer-states section as its impact; its subject is the count guards of run-ci.sh and the reason-review pins, and that citation is wrong.",
+        "Next for P12: the first API slice (config, open and close, zid) lowers the missing-line ratchet of the compatibility crate."
+      ],
+      "publishable_decision_summary": "Round 3453 named the 3 s open bound and a slow RSA handshake as the cause of the Windows C ABI red in the pubkey client leg of the wz-capi-c listener test, and widened the bound to 30 s. That cause is withdrawn: the run of d1d4bb1a4 failed the same leg after 30.7 s. On a build host the leg fails 1 run in 100 unloaded and 18 of 60 with three busy loops on two cores, and in every failure the responder reached Established after 6 to 14 ms while z_open waited out its bound and returned the network error. The test's responder ended at Established, closing the link and its listener under a client that had not read the last frame; the client's retries met a closed port. The responder now holds its session until the client has opened, the 30 s bound is gone, and 100 runs under the same load at the 3 s bound fail none. The product is unchanged. The same push pays the A4 red of the default-arm leg and lands the signature half of the Rust API surface.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-c/tests/listener_auth.rs: the responder of the pubkey client leg keeps its Established session until the client's open has returned, both sides report their outcome with the time it took in the failure message, and the 30 s override of connect/timeout_ms from round 3453 is removed.",
+        "crates/wz-integration-tests/tests/pico_c_examples_on_wz_capi_dropin.rs: the default-arm leg carries its wz-proves line for api-compat-pico; scripts/lib/crossimpl_audit.py: FOREIGN_ADJUDICATOR_LINKS 1074 to 1075, with the note that names the leg.",
+        "scripts/lib/rust_api_surface.py and deploy/upstream-api/*.surface: a function's line carries its signature (generics and bounds, parameter and return types, qualifiers, the impl block of a method); the three upstream surfaces are re-emitted at 709, 965 and 1025 lines and a second emission is identical; docs/build-configuration.md says so.",
+        "docs/hosted-red-acks.md: one row for the CI run of fed150b13."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host the leg failed 43 of 150 runs with three busy loops on two cores, 1 of 100 with none, and 18 of 60 once instrumented, each after 30 s; after the change it failed 0 of 100 under the three busy loops with the 3 s bound.",
+        "The crossimpl audit measures 1075 links and passes; the surface gate's selftest and default run pass and its upstream run reports no difference on the four arms.",
+        "The hook's round-fed gate array (110 members) passes in parallel on the tree of this push; validate-workspace keeps 14 T1 orphans, none new.",
+        "Not measured here: the Windows run itself, which the next Platform run of this push decides."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The Windows C ABI leg is graded by the next Platform run of this push. If it is red again, the failure message now says which side finished and when.",
+        "Layer Q (session-slot-bytes +8, multicast-e2e text), E7s and C1bn are red in the run of fed150b13, not paid and not attributed here; the macOS interop red of the d1d4bb1a4 run was a runner failing to resolve the crate index.",
+        "Round 3462 cites a multicast per-peer-states section as its impact; its subject is the count guards of run-ci.sh and the reason-review pins, and that citation is wrong.",
+        "Next for P12: the first API slice (config, open and close, zid) lowers the missing-line ratchet of the compatibility crate."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
