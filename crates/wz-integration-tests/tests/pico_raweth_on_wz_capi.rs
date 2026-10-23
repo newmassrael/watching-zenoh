@@ -147,17 +147,19 @@ fn on_wz(name: &str, dir: &Path) -> PathBuf {
         .unwrap_or_else(|diag| panic!("{name}.c does not build against wz's drop-in\n{diag}"))
 }
 
-/// Whether `child` ended with status 0 within `bound`.
-fn ended_well_within(child: &mut std::process::Child, bound: Duration) -> bool {
+/// Whether `child` ended with status 0 within `bound`; `Err` says how it did not: the status it
+/// ended with, or that it was still running.
+fn ended_well_within(child: &mut std::process::Child, bound: Duration) -> Result<(), String> {
     let deadline = std::time::Instant::now() + bound;
     while std::time::Instant::now() < deadline {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => return Err(format!("it ended with {status}")),
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-            Err(_) => return false,
+            Err(e) => return Err(format!("its status could not be read: {e}")),
         }
     }
-    false
+    Err(format!("it was still running after {bound:?}"))
 }
 
 /// Upstream's scenario with `sub` as the subscriber and `publisher` as the publisher: the
@@ -165,6 +167,16 @@ fn ended_well_within(child: &mut std::process::Child, bound: Duration) -> bool {
 /// have printed each of the ten puts. These are upstream's own two checks
 /// (`vendor/zenoh-pico/tests/raweth.py` @ `if z_sub_status == z_sub_expected_status:`), and the
 /// end of the program is what the leg waits on.
+///
+/// The publisher is given no `-n`, so it puts until the subscriber has ended, where upstream's
+/// scenario stops it after ten. A subscriber ends by closing its session, and the real
+/// library's close joins a read task blocked in `recvfrom` on the raw socket, which has no
+/// receive timeout (`vendor/zenoh-pico/src/link/transport/udp/raweth_unix.c` @
+/// `ssize_t bytesRead = recvfrom(sock->_fd, buff, buff_len, 0, NULL, NULL);`): with the
+/// publisher gone that join waits for a frame nobody sends. MEASURED on a hosted runner: the
+/// real `z_sub` printed all ten puts of the real `z_pub` and had not ended with status 0
+/// within 40 s; which of the two it was, the leg did not yet say. With the publisher still
+/// putting, the next put releases the read task.
 fn scenario(sub: (&str, &Path), publisher: (&str, &Path)) {
     let n = PUTS.to_string();
     let (mut sub_child, mut heard) =
@@ -176,7 +188,7 @@ fn scenario(sub: (&str, &Path), publisher: (&str, &Path)) {
     let (pub_child, mut said) = spawn_privileged(
         publisher.0,
         publisher.1,
-        &["-n", &n, "-m", "peer", "-l", PUB_ENDPOINT],
+        &["-m", "peer", "-l", PUB_ENDPOINT],
     );
     let ended = ended_well_within(sub_child.child_mut(), SCENARIO_BOUND);
     // The guards end whichever of the two is still running.
@@ -184,11 +196,12 @@ fn scenario(sub: (&str, &Path), publisher: (&str, &Path)) {
     drop(sub_child);
     let printed = read_captured(&mut heard);
     assert!(
-        ended,
-        "{} did not end well after ten puts of {} over raw Ethernet\n--- {} ---\n{printed}\n\
-         --- {} ---\n{}",
+        ended.is_ok(),
+        "{} did not end well after ten puts of {} over raw Ethernet: {}\n--- {} ---\n\
+         {printed}\n--- {} ---\n{}",
         sub.0,
         publisher.0,
+        ended.unwrap_err(),
         sub.0,
         publisher.0,
         read_captured(&mut said)
