@@ -237,7 +237,27 @@ def widen_population(texts: list[str]) -> tuple[list[str], list[str], list[str]]
     return patterns, sorted(aliases), sorted(dyn_traits)
 
 
+def holds_a_list(field_type: str, patterns: list[str]) -> bool:
+    """Whether a field of type `field_type` HOLDS a list of decoded messages.
+
+    Open-debt item 924 — a field that only BORROWS one (`&'a MessageList`, in any
+    container, any path) is a VIEW onto a list some owner holds, and that owner
+    is the field this gate has to find in the enumeration. A walk that keeps the
+    lists it is walking (`Dissection::message_frames_in_capture_order`) is the
+    case that made the difference matter. So every mention behind a reference is
+    taken out, and the field holds a list only if a mention is left; an alias, a
+    `Box`, an `Rc` or a bare name is still an owner.
+    """
+    names = "|".join(patterns)
+    owned = re.sub(
+        r"&\s*(?:'\w+\s+)?(?:mut\s+)?(?:\w+::)*(?:%s)\b" % names, "", field_type
+    )
+    return re.search(r"\b(?:%s)\b" % names, owned) is not None
+
+
 def main() -> int:
+    if sys.argv[1:] == ["--selftest"]:
+        return selftest()
     files = sorted(CRATES.rglob("*.rs"))
     # Vendored trees are somebody else's code and carry no planes of ours.
     files = [f for f in files if "/target/" not in f.as_posix()]
@@ -294,7 +314,7 @@ def main() -> int:
                 depth = 0
             if in_struct:
                 found = producer_type.match(line)
-                if found:
+                if found and holds_a_list(found.group(2), patterns):
                     producers.append(
                         (path.relative_to(REPO_ROOT).as_posix(), found.group(1))
                     )
@@ -354,6 +374,36 @@ def main() -> int:
         "%d exempt; %d alias(es) and %d trait object(s) in the population)"
         % (len(producers), ENUMERATION, len(EXEMPT), len(aliases), len(dyn_traits))
     )
+    return 0
+
+
+def selftest() -> int:
+    """The owner/borrower line, in both directions: a borrow is not a producer,
+    and nothing that owns one hides behind the same test."""
+    names = ["MessageList", "Frames"]
+    cases = [
+        ("MessageList", True),
+        ("messages::MessageList", True),
+        ("[MessageList; 2]", True),
+        ("Vec<(FlowKey, MessageList)>", True),
+        ("Box<MessageList>", True),
+        ("Frames", True),
+        ("&'a MessageList", False),
+        ("&MessageList", False),
+        ("Vec<(FlowKey, &'a messages::MessageList)>", False),
+        ("&'a mut wz_capture::messages::MessageList", False),
+        ("(&'a MessageList, MessageList)", True),
+        ("&'a [MessageList]", True),
+    ]
+    failed = 0
+    for field_type, want in cases:
+        got = holds_a_list(field_type, names)
+        if got != want:
+            failed += 1
+            print(f"message-producer selftest: FAIL {field_type!r}: holds={got}, want {want}")
+    if failed:
+        return 1
+    print(f"message-producer selftest: OK ({len(cases)} case(s))")
     return 0
 
 

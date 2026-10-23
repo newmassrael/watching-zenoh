@@ -1922,6 +1922,9 @@ layer_c0_test_discipline() {
     # sites with one door and left the convention ungated; this is the gate.
     # MEASURED: dropping the serial list from the enumeration reds it by name,
     # and the revert returns OK.
+    # Open-debt item 924 — a field that only BORROWS a list is a view and not a
+    # producer; the selftest holds that line in both directions first.
+    python3 scripts/lib/message_producer_lint.py --selftest || return 1
     python3 scripts/lib/message_producer_lint.py || return 1
     # R311y740 (carry N37) — the OWN-SPACE WITNESS gate, static half. A plane
     # that takes the `MappingSpaces` pair but carries no witness pair is
