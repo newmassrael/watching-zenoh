@@ -165,6 +165,16 @@ SUBPROCESS_CALLS = frozenset(
 #: row whose module has left the population is a finding, and so is a row the
 #: hook turns out to run.
 DEFERRED: dict[str, str] = {
+    "zephyr_cargo_lines.py": (
+        "R3439 -- configures every Zephyr image of the board table and the "
+        "stacks its overlays document with `west build --cmake-only`: "
+        "75.96s for fourteen images, and it needs the Zephyr SDK and "
+        "workspace, which the hook's machines are not given. It is the "
+        "instrument of step 1 of docs/build-configuration.md, run around a "
+        "change to the images' Kconfig or CMake with --capture before and "
+        "--compare after; the build that change is pushed with is Layer "
+        "Qzb's, which builds every row."
+    ),
     "rocksdb_engine.py": (
         "R2806 -- verifies a provisioned native Linux engine. Measured "
         "--verify at 2.79s warm; an absent cache fails, while provisioning "
