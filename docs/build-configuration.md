@@ -42,6 +42,14 @@ original reproduced by naming it. Three things follow from it:
   `crates/wz-session-core/src/caps.rs`; the Zephyr build turns each `CONFIG_WZ_LIMIT_*`
   into the cargo environment (`deploy/zephyr-common/wz_zephyr_board.cmake`). `limit()`
   reads a decimal `usize` only.
+- **Drop-in and extension (C10)**: `scripts/lib/drop_in_header_gate.py` holds the pico
+  drop-in header (`wz_capi_pico.h`) to the functions zenoh-pico's own header declares at the
+  pin, read through the preprocessor under its defaults, every switch on and every switch
+  on single-threaded (its `config.h` rendered from the pinned template, no build tree), and
+  `wz_ext.h` (`crates/wz-capi-core/include/`) to `wz_ext_*`; both are empty of doors yet, as
+  is the Rust `wz::ext`. zenoh-c has no drop-in header of wz's (programs include upstream's
+  `zenoh.h`); its wz-own doors are `wz_capi_c_*` in `wz_capi_c.h`, the prefix they were
+  published with, and move to `wz_ext_*` only with the consumer told first.
 - **The MCU images' axes**: the admin node's network stack, role and memory profile are
   declared in `deploy/wz-config.toml` (`[[image]]`, `[[axis]]`, `[[axis_option]]`,
   `[[cargo_rule]]`). The generator writes the image's `Kconfig.axes` (each axis a

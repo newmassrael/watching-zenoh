@@ -236,3 +236,11 @@ pub use wz_runtime_core as runtime_core;
 // AP builds. The framework is now fully Lua-free (the script engine is
 // neither used internally nor exposed); a consumer wanting a Lua engine
 // adds `sce-rust-lua` to its own manifest directly.
+
+/// What wz has and the zenoh crate does not (decision C10 of `docs/build-configuration.md`).
+///
+/// The Rust compatibility surface carries upstream's names only, as the drop-in C headers do,
+/// so a program that reaches for something here says by its path that it is not portable to
+/// zenoh. Empty until the first switch that exposes a Rust door of its own (a watch on a remote
+/// declaration, a pool's monitor); the C doors of the same switches are `wz_ext_*`.
+pub mod ext {}
