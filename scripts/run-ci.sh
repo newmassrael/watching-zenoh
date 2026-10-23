@@ -11263,17 +11263,22 @@ layer_c1m_session_lwip() {
     # which is why the multicast legs moved by one with it; its handshake test
     # runs a real session, so it exists only where the write surface compiles the
     # handshake in (`adminspace-write`).
-    _runci_guarded_test "C1m mcu default" 3 \
+    # The link's peer binding (`wz_session_core::datagram_peer`) moved EVERY shell
+    # leg by one: the in-memory network gained
+    # `a_bound_acceptor_lets_a_strangers_datagram_go_and_keeps_answering_its_peer`,
+    # unconditional like its other three. The lwIP legs below did not move: the
+    # session_drive test that pinned the old retarget was replaced, not added to.
+    _runci_guarded_test "C1m mcu default" 4 \
         cargo test -p wz-session-mcu --quiet || return 1
-    _runci_guarded_test "C1m mcu unicast app layer" 4 \
+    _runci_guarded_test "C1m mcu unicast app layer" 5 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 12 \
+    _runci_guarded_test "C1m mcu adminspace-write" 13 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-core" 7 \
+    _runci_guarded_test "C1m mcu adminspace-core" 8 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 22 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 23 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # R3167 moved EVERY wz-session-lwip leg below by FIVE, and the legs that turn
     # on `codec-push` by SIX: the driver's lend tests (the datagram equals the

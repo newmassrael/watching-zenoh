@@ -179,14 +179,20 @@ fn create(
     link: &Rc<LwipLink>,
     runtime: &Rt,
     socket: SessionRxSocket,
-    peer: ([u8; 4], u16),
+    peer: Option<([u8; 4], u16)>,
     zid: u8,
 ) -> (
     Handle,
     LwipSessionLink<Rc<LwipLink>>,
     SlotDriver<LwipUdpDriver>,
 ) {
-    let driver = LwipUdpDriver::new(share_socket(socket), ipv4_addr_from_octets(peer.0), peer.1);
+    // A link to `peer` when this end dials it; an accepting link, bound by the
+    // first InitSyn it takes, when `peer` is `None`.
+    let socket = share_socket(socket);
+    let driver = match peer {
+        Some((addr, port)) => LwipUdpDriver::new(socket, ipv4_addr_from_octets(addr), port),
+        None => LwipUdpDriver::accepting(socket),
+    };
     let Ok(claim) = SESSIONS.claim(driver, Counting(zid)) else {
         panic!("a slot is free");
     };
@@ -234,12 +240,12 @@ fn application(actions: &Handle) -> (OnEvent, Rc<RefCell<ApplicationLayerObserve
 fn establish(link: &Rc<LwipLink>, runtime: &Rt, port: u16) -> (End, End) {
     let acceptor_socket = bind_session_rx(link, port).expect("bind the acceptor");
     let initiator_socket = bind_session_rx(link, 0).expect("bind the initiator");
-    let (a_actions, a_link, a_sender) = create(link, runtime, acceptor_socket, ([0; 4], 0), 0xa1);
+    let (a_actions, a_link, a_sender) = create(link, runtime, acceptor_socket, None, 0xa1);
     let (i_actions, i_link, i_sender) = create(
         link,
         runtime,
         initiator_socket,
-        ([127, 0, 0, 1], port),
+        Some(([127, 0, 0, 1], port)),
         0xb1,
     );
     let (a_on_event, a_observer, a_told) = application(&a_actions);

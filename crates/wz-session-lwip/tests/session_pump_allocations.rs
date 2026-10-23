@@ -89,6 +89,16 @@ use wz_session_core::WhatAmI;
 use wz_session_lwip::driver::{share_socket, LwipUdpDriver};
 use wz_session_lwip::{app_layer, LwipSessionLink};
 
+/// The driver of one end over `socket`: a link to `peer` when the end dials it, an
+/// accepting link (bound by the first `InitSyn` it takes) when `peer` is `None`.
+fn driver_over(socket: SessionRxSocket, peer: Option<([u8; 4], u16)>) -> LwipUdpDriver {
+    let socket = share_socket(socket);
+    match peer {
+        Some((addr, port)) => LwipUdpDriver::new(socket, ipv4_addr_from_octets(addr), port),
+        None => LwipUdpDriver::accepting(socket),
+    }
+}
+
 /// Counts the allocations of the measurement the allocating thread works for.
 struct CountingAllocator;
 
@@ -378,11 +388,10 @@ mod placing_in_slot {
         link: LinkHandle,
         runtime: &Rt,
         socket: SessionRxSocket,
-        peer: ([u8; 4], u16),
+        peer: Option<([u8; 4], u16)>,
         zid: u8,
     ) -> (Handle, LwipSessionLink<LinkHandle>) {
-        let driver =
-            LwipUdpDriver::new(share_socket(socket), ipv4_addr_from_octets(peer.0), peer.1);
+        let driver = driver_over(socket, peer);
         let Ok(claim) = SESSIONS.claim(driver, Counting(zid)) else {
             panic!("a session slot is free");
         };
@@ -481,14 +490,10 @@ mod placing_on_the_heap {
         link: LinkHandle,
         runtime: &Rt,
         socket: SessionRxSocket,
-        peer: ([u8; 4], u16),
+        peer: Option<([u8; 4], u16)>,
         zid: u8,
     ) -> (Handle, LwipSessionLink<LinkHandle>) {
-        let driver = Rc::new(LwipUdpDriver::new(
-            share_socket(socket),
-            ipv4_addr_from_octets(peer.0),
-            peer.1,
-        ));
+        let driver = Rc::new(driver_over(socket, peer));
         let sink: Rc<dyn BoxedLinkDriver> = driver.clone();
         let actions = if zid == 0xa1 {
             new_session_actions(sink, params(zid), CoopTime::new(runtime), Counting(zid))
@@ -633,18 +638,12 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
     // The sessions' own state is step S5's, counted by its own witness; it is made
     // here, outside any window, because the pump is built over it.
     let ((acceptor_actions, acceptor_link), (initiator_actions, initiator_link)) = (
-        placing::session(
-            placing::share(&link),
-            &runtime,
-            acceptor_socket,
-            ([0; 4], 0),
-            0xa1,
-        ),
+        placing::session(placing::share(&link), &runtime, acceptor_socket, None, 0xa1),
         placing::session(
             placing::share(&link),
             &runtime,
             initiator_socket,
-            ([127, 0, 0, 1], port),
+            Some(([127, 0, 0, 1], port)),
             0xb1,
         ),
     );
@@ -656,7 +655,7 @@ fn a_pair_of_pumps_costs_the_heap_nothing_as_tasks_of_a_static_runtime() {
         placing::share(&link),
         &runtime,
         bind_session_rx(placing::raw(&link), 0).expect("bind the spare"),
-        ([127, 0, 0, 1], port),
+        Some(([127, 0, 0, 1], port)),
         0xc1,
     );
     #[cfg(feature = "session-slot")]

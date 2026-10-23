@@ -11,8 +11,9 @@
 //! pushes onto the queue of the end it names, and a receive pops from its own.
 //!
 //! It keeps the behaviour of a real UDP link that the shell depends on and
-//! nothing else: an acceptor has no peer until the first datagram names one and
-//! replies go to whoever spoke last; a datagram for an end nobody bound is
+//! nothing else: a link's peer is fixed once known
+//! (`wz_session_core::datagram_peer`), an acceptor's by the first `InitSyn` it
+//! takes, and the session reads that peer's datagrams only; a datagram for an end nobody bound is
 //! dropped without an error; a port is bound by one end at a time and is free
 //! again when that end is dropped (the admin node binds its listen port anew when
 //! an accepted session ends).
@@ -27,6 +28,7 @@ use core::cell::{Cell, OnceCell, RefCell};
 use wz_runtime_coop::session_drive::{
     LinkOpenError, OpenedLink, SessionDatagramLink, SessionLinks, UdpPeer,
 };
+use wz_session_core::datagram_peer::{DatagramVerdict, ForeignCounts, PeerBinding};
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, RxFrame,
 };
@@ -61,7 +63,7 @@ impl MemoryNetwork {
     }
 
     /// Bind an end at `local`, sending to `peer` (`None` for an acceptor, which
-    /// learns its peer from the first datagram). Refused when something is
+    /// learns its peer from the first `InitSyn` it takes). Refused when something is
     /// already bound there.
     pub fn bind(
         self: &Rc<Self>,
@@ -103,12 +105,13 @@ impl MemoryNetwork {
         let end = MemoryEnd {
             net: self.clone(),
             local,
-            peer: Cell::new(peer),
+            binding: match peer {
+                Some(peer) => PeerBinding::dialled(peer),
+                None => PeerBinding::accepting(),
+            },
             endpoints: OnceCell::new(),
         };
-        if let Some(peer) = peer {
-            end.note_endpoints(peer);
-        }
+        end.note_endpoints();
         Rc::new(end)
     }
 
@@ -151,23 +154,31 @@ fn udp_locator(at: UdpPeer) -> String {
 pub struct MemoryEnd {
     net: Rc<MemoryNetwork>,
     local: UdpPeer,
-    peer: Cell<Option<UdpPeer>>,
+    binding: PeerBinding<UdpPeer>,
     endpoints: OnceCell<LinkEndpoints>,
 }
 
 impl MemoryEnd {
-    /// Record the link's two ends the first time a peer is known, and never
-    /// rename it after: the link is what the first datagram made it.
-    fn note_endpoints(&self, peer: UdpPeer) {
+    /// Record the link's two ends once the peer is known. The peer never
+    /// changes after, so neither do they.
+    fn note_endpoints(&self) {
+        let Some(peer) = self.binding.peer() else {
+            return;
+        };
         let _ = self.endpoints.set(LinkEndpoints::new(
             udp_locator(self.local),
             udp_locator(peer),
         ));
     }
 
-    /// Where this end sends now, once it has a peer.
+    /// Where this end sends, once it has a peer.
     pub fn peer(&self) -> Option<UdpPeer> {
-        self.peer.get()
+        self.binding.peer()
+    }
+
+    /// The datagrams this end has discarded for not being its peer's.
+    pub fn foreign(&self) -> ForeignCounts {
+        self.binding.foreign()
     }
 
     /// This end's own address and port.
@@ -187,7 +198,7 @@ impl Drop for MemoryEnd {
 
 impl BoxedLinkDriver for MemoryEnd {
     fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
-        let Some(peer) = self.peer.get() else {
+        let Some(peer) = self.binding.peer() else {
             // No peer yet: an acceptor has nothing to answer.
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         };
@@ -219,16 +230,23 @@ impl SessionDatagramLink for MemoryEnd {
     fn service(&self) {}
 
     fn try_recv(&self) -> Option<RxFrame> {
-        let waiting = self
-            .net
-            .queues
-            .borrow_mut()
-            .get_mut(&(self.local.addr, self.local.port))?
-            .pop_front()?;
-        // Reply to whoever just spoke, which is how an acceptor learns its peer.
-        self.peer.set(Some(waiting.from));
-        self.note_endpoints(waiting.from);
-        Some(RxFrame::new(waiting.bytes))
+        loop {
+            let waiting = self
+                .net
+                .queues
+                .borrow_mut()
+                .get_mut(&(self.local.addr, self.local.port))?
+                .pop_front()?;
+            // The peer's datagrams only; the InitSyn that binds an acceptor is
+            // how it learns its peer, and anyone else's is let go.
+            let verdict = self.binding.admit(waiting.from, &waiting.bytes);
+            if verdict == DatagramVerdict::Bound {
+                self.note_endpoints();
+            }
+            if verdict.is_taken() {
+                return Some(RxFrame::new(waiting.bytes));
+            }
+        }
     }
 }
 
@@ -289,8 +307,11 @@ mod tests {
         frame.map(|f| f.bytes.to_vec())
     }
 
-    /// A datagram reaches the end it names, an acceptor answers whoever spoke
-    /// first, and the link's two ends are what the first datagram made them.
+    /// An `InitSyn` header and a byte of body: what binds an accepting end.
+    const SYN: &[u8] = &[0x01, 0x09];
+
+    /// A datagram reaches the end it names, an acceptor answers the source of
+    /// the InitSyn that bound it, and the link's two ends are that pair.
     #[test]
     fn a_datagram_reaches_its_end_and_an_acceptor_answers_who_spoke() {
         let net = MemoryNetwork::new();
@@ -313,18 +334,16 @@ mod tests {
             "an acceptor has no link until a peer speaks"
         );
 
+        std::assert!(wz_session_core::datagram_peer::is_init_syn(SYN));
         std::assert!(matches!(
-            dialling.sink.send_blocking(b"hello", Reliability::Reliable),
+            dialling.sink.send_blocking(SYN, Reliability::Reliable),
             LinkSendOutcome::Sent
         ));
-        std::assert_eq!(
-            frame_bytes(accepting.pump.try_recv()),
-            Some(b"hello".to_vec())
-        );
+        std::assert_eq!(frame_bytes(accepting.pump.try_recv()), Some(SYN.to_vec()));
         let link = accepting
             .sink
             .link_endpoints()
-            .expect("the first datagram made it");
+            .expect("the InitSyn bound it");
         std::assert_eq!(link.src, "udp/10.0.0.1:7447");
         std::assert!(link.dst.starts_with("udp/10.0.0.2:"), "{}", link.dst);
 
@@ -337,6 +356,52 @@ mod tests {
         std::assert_eq!(
             frame_bytes(dialling.pump.try_recv()),
             Some(b"world".to_vec())
+        );
+    }
+
+    /// The rule a real link keeps: once bound, the acceptor's session reads its
+    /// peer only, and a datagram from another end neither reaches it nor moves
+    /// where its replies go.
+    #[test]
+    fn a_bound_acceptor_lets_a_strangers_datagram_go_and_keeps_answering_its_peer() {
+        let net = MemoryNetwork::new();
+        let accepting = MemoryLinks::new(net.clone(), HOST_A)
+            .open_acceptor(7447)
+            .expect("bind");
+        let to_acceptor = UdpPeer {
+            addr: HOST_A,
+            port: 7447,
+        };
+        let peer = MemoryLinks::new(net.clone(), HOST_B)
+            .open_initiator(to_acceptor)
+            .expect("open");
+        let stranger = MemoryLinks::new(net.clone(), [10, 0, 0, 3])
+            .open_initiator(to_acceptor)
+            .expect("open");
+
+        let send = |from: &OpenedLink<Rc<MemoryEnd>>, bytes: &[u8]| {
+            std::assert!(matches!(
+                from.sink.send_blocking(bytes, Reliability::Reliable),
+                LinkSendOutcome::Sent
+            ));
+        };
+        send(&stranger, b"early");
+        send(&peer, SYN);
+        std::assert_eq!(frame_bytes(accepting.pump.try_recv()), Some(SYN.to_vec()));
+        std::assert_eq!(accepting.pump.peer(), Some(peer.pump.local()));
+
+        send(&stranger, b"stray");
+        send(&stranger, SYN);
+        std::assert!(frame_bytes(accepting.pump.try_recv()).is_none());
+        send(&accepting, b"reply");
+        std::assert_eq!(frame_bytes(peer.pump.try_recv()), Some(b"reply".to_vec()));
+        std::assert!(frame_bytes(stranger.pump.try_recv()).is_none());
+        std::assert_eq!(
+            accepting.pump.foreign(),
+            ForeignCounts {
+                strays: 2,
+                refused: 1
+            }
         );
     }
 

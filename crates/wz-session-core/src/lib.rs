@@ -517,6 +517,15 @@ pub mod ext_name;
 /// passive analyzer, the driving oracle — reaches one copy of it.
 pub mod ext_admit;
 
+/// The identity of a unicast datagram link: the one remote end it carries a
+/// session with, fixed once known, and the `InitSyn` header test that binds an
+/// accepting link. Every stack's datagram driver admits what it takes through
+/// it, so the rule is decided once.
+///
+/// UNCONDITIONAL for [`ext_admit`]'s reason: it reads one header byte and an
+/// address, so it needs neither a codec feature nor the `alloc` storage profile.
+pub mod datagram_peer;
+
 /// SSOT for the transport-message extension CHAIN codec (the Z-flag-gated
 /// `ExtEntry` list). Shared by `handshake_encode` (outbound), `inbound`
 /// (inbound), and `auth_dispatch` (the Z_EXT_AUTH inner method chain).

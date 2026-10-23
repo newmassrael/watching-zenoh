@@ -45,7 +45,7 @@ use wz_runtime_coop::session_drive::{
     LinkOpenError, PumpSlots, SessionDriveConfig, SessionRole, UdpPeer,
 };
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
-use wz_session_core::inbound::is_init_syn;
+use wz_session_core::datagram_peer::is_init_syn;
 use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;

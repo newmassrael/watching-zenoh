@@ -297,6 +297,20 @@ fn pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
     (acceptor, initiator)
 }
 
+/// [`pair`], with the acceptor's link bound to the initiator: the initiator's
+/// `InitSyn` has reached it, which is how an acceptor learns its peer. Until
+/// then nothing the initiator sends is the acceptor's session's, and nothing the
+/// acceptor sends has anywhere to go.
+fn bound_pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
+    let (acceptor, initiator) = pair(link, port);
+    initiator.fsm().send_init_syn();
+    assert!(
+        wz_session_core::datagram_peer::is_init_syn(&acceptor.one()),
+        "the InitSyn binds the acceptor"
+    );
+    (acceptor, initiator)
+}
+
 /// What every message of a test costs the heap, kept so a test reports ALL of
 /// them and not only the first that is wrong: what a message that goes through
 /// the heap costs, and what one that goes through a lent slot must, which is
@@ -436,12 +450,12 @@ fn every_handshake_message_is_encoded_without_the_heap() {
 fn a_close_and_a_keep_alive_are_sent_without_the_heap() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link = Rc::new(link);
-    let (acceptor, initiator) = pair(&link, 7612);
+    let (acceptor, initiator) = bound_pair(&link, 7612);
     let m = Measurement::new();
     let mut costs = Costs::default();
 
-    // The acceptor learns its peer from the first datagram, so it has one to
-    // answer: a KeepAlive from the initiator, which is the control.
+    // The acceptor's link is bound to the initiator, so it has a peer to
+    // answer. A KeepAlive from the initiator first, which is the control.
     let ((), n) = m.count(|| initiator.actions.send_keep_alive());
     println!("KeepAlive: {n} allocation(s)");
     assert_eq!(
@@ -514,7 +528,7 @@ fn put_of(datagram: &[u8]) -> (String, Vec<u8>, u64) {
 fn a_put_is_sent_without_the_heap_at_every_size() {
     let (_serial, link) = wz_link_lwip::lwip_test_link();
     let link = Rc::new(link);
-    let (acceptor, initiator) = pair(&link, 7613);
+    let (acceptor, initiator) = bound_pair(&link, 7613);
     let m = Measurement::new();
     let mut costs = Costs::default();
 
@@ -632,7 +646,7 @@ mod refusal {
     fn a_send_for_which_no_slot_is_lent_is_refused_counted_and_loses_no_slot() {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let link = Rc::new(link);
-        let (acceptor, initiator) = pair(&link, 7614);
+        let (acceptor, initiator) = bound_pair(&link, 7614);
         let m = Measurement::new();
         assert_eq!(initiator.actions.tx_refusals(), TxRefusalCounts::default());
 
@@ -693,7 +707,7 @@ mod refusal {
     fn a_put_past_the_budget_is_refused_as_oversize_and_gives_its_slot_back() {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
         let link = Rc::new(link);
-        let (acceptor, initiator) = pair(&link, 7615);
+        let (acceptor, initiator) = bound_pair(&link, 7615);
         let m = Measurement::new();
 
         // The batch the pair negotiates is 1024 bytes, so a payload past it is

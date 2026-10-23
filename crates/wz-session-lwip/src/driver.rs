@@ -6,12 +6,13 @@
 
 #[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
-use core::cell::{Cell, OnceCell, RefCell};
+use core::cell::{OnceCell, RefCell};
 use core::fmt::Write as _;
 
 use wz_link_lwip::rx_sockets::{SessionRxSocket, SESSION_RX_SLOT_SIZE};
 use wz_link_lwip::{Datagram, TxPayload};
 use wz_session_core::caps::MAX_LOCATOR_LEN;
+use wz_session_core::datagram_peer::{DatagramVerdict, ForeignCounts, PeerBinding};
 use wz_session_core::link::{
     BoxedLinkDriver, LinkDropCause, LinkEndpoints, LinkSendOutcome, TxSlot, TxSlotGrant,
 };
@@ -102,25 +103,26 @@ pub type SessionDatagram = Datagram<SESSION_RX_SLOT_SIZE>;
 
 /// MCU [`BoxedLinkDriver`] over one shared [`SessionRxSocket`].
 ///
-/// Outbound sends target a peer captured from the most recent inbound
-/// datagram: the acceptor learns its peer from the InitSyn source, and
-/// [`Self::set_peer`] retargets each tick so the InitAck / OpenAck /
-/// data-plane replies route back to whoever just spoke. UDP is
-/// connectionless, so `open_blocking` / `close_blocking` are no-ops (the
-/// zenoh session handshake + Close frame are the session-layer open/close,
-/// emitted by the FSM action methods, not transport events).
+/// The link has one peer, fixed once known
+/// (`wz_session_core::datagram_peer::PeerBinding`): an initiator's from its
+/// dial ([`Self::new`]), an acceptor's from the first `InitSyn` it takes
+/// ([`Self::accepting`]). Every send goes to it and the session reads its
+/// datagrams only. On a socket the driver owns, what anyone else sends is
+/// discarded and counted ([`Self::foreign`]); on a listener's, which other
+/// sessions read too, it is left where it is for them. UDP is connectionless,
+/// so `open_blocking` / `close_blocking` are no-ops (the zenoh session
+/// handshake + Close frame are the session-layer open/close, emitted by the
+/// FSM action methods, not transport events).
 pub struct LwipUdpDriver {
     socket: SharedSessionSocket,
-    /// `(addr, port)` the next send targets. `addr` is lwIP-native
-    /// network-byte-order. `Cell` (interior-mutable) so the `&self` send
-    /// seam and the loop's per-tick [`Self::set_peer`] share it without a
-    /// `&mut` driver.
-    peer: Cell<(u32, u16)>,
+    /// The peer every send targets, `addr` lwIP-native network-byte-order.
+    /// Interior-mutable, so an acceptor is bound by its receive seam while the
+    /// send seam reads it, both through `&self`.
+    binding: PeerBinding<(u32, u16)>,
     /// R2841 — the link's two ends as upstream's admin space reports them,
-    /// `udp/<ip>:<port>` each. Written ONCE, when the peer is first known: at
-    /// construction for an initiator, at the first datagram for an acceptor.
-    /// Once written it is the link; a later datagram from elsewhere does not
-    /// rename it.
+    /// `udp/<ip>:<port>` each. Written ONCE, when the peer is known: at
+    /// construction for an initiator, at the binding `InitSyn` for an
+    /// acceptor. The peer never changes after, so neither do they.
     endpoints: OnceCell<LinkEndpoints>,
     /// ARCHITECTURE section 9.1 — the payload buffers lent to the session and not
     /// yet sent or given back, by slot number. Single-task, so a `RefCell`.
@@ -148,36 +150,41 @@ fn udp_locator(addr: u32, port: u16) -> heapless::String<MAX_LOCATOR_LEN> {
 }
 
 impl LwipUdpDriver {
-    /// Wrap `socket` with an initial send target. An acceptor passes a
-    /// placeholder that the first inbound datagram overwrites (via
-    /// [`Self::set_peer`]); an initiator passes its configured peer.
+    /// The link of a session with `peer_addr:peer_port` over `socket`: an
+    /// initiator's, which dialled it, or one a listener admitted for that
+    /// peer's `InitSyn`.
     ///
     /// Under `rx-in-place` the socket is asked to hold the frames its MAC lends
     /// in place ([`recv_with`](Self::recv_with) reads them where they lie).
     pub fn new(socket: SharedSessionSocket, peer_addr: u32, peer_port: u16) -> Self {
+        Self::with_binding(socket, PeerBinding::dialled((peer_addr, peer_port)))
+    }
+
+    /// The link of an acceptor that owns `socket`: no peer until the first
+    /// `InitSyn` it takes names one.
+    pub fn accepting(socket: SharedSessionSocket) -> Self {
+        Self::with_binding(socket, PeerBinding::accepting())
+    }
+
+    fn with_binding(socket: SharedSessionSocket, binding: PeerBinding<(u32, u16)>) -> Self {
         #[cfg(feature = "rx-in-place")]
         socket.borrow_mut().hold_lent_rx(true);
         let driver = Self {
             socket,
-            peer: Cell::new((peer_addr, peer_port)),
+            binding,
             endpoints: OnceCell::new(),
             lent: RefCell::new([const { None }; LENT_MAX]),
         };
-        driver.note_endpoints(peer_addr, peer_port);
+        driver.note_endpoints();
         driver
     }
 
-    /// Retarget subsequent sends. The drive loop calls this with each
-    /// inbound datagram's `(src_addr, src_port)` so replies go back to the
-    /// peer that just spoke — the acceptor reply path.
-    pub fn set_peer(&self, addr: u32, port: u16) {
-        self.peer.set((addr, port));
-        self.note_endpoints(addr, port);
-    }
-
-    /// Record the link's ends the first time a real peer is known. The source
-    /// is the address lwIP routes to that peer from, with this socket's port.
-    fn note_endpoints(&self, addr: u32, port: u16) {
+    /// Record the link's ends once the peer is known. The source is the
+    /// address lwIP routes to that peer from, with this socket's port.
+    fn note_endpoints(&self) {
+        let Some((addr, port)) = self.binding.peer() else {
+            return;
+        };
         if addr == 0 || port == 0 || self.endpoints.get().is_some() {
             return;
         }
@@ -191,35 +198,69 @@ impl LwipUdpDriver {
         ));
     }
 
-    /// The currently-configured send target `(addr, port)`.
-    pub fn peer(&self) -> (u32, u16) {
-        self.peer.get()
+    /// The peer every send targets `(addr, port)`, once one is known.
+    pub fn peer(&self) -> Option<(u32, u16)> {
+        self.binding.peer()
     }
 
-    /// Where the datagram at the head of the socket's queue came from, `None` for
-    /// an empty queue. Not a receive: nothing is taken or retargeted. What a session
-    /// that shares a listener's socket asks before it reads, since the head may be
-    /// another session's.
-    #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
-    pub(crate) fn head_source(&self) -> Option<(u32, u16)> {
-        self.socket
-            .borrow()
-            .peek_recv()
-            .map(|datagram| (datagram.src_addr, datagram.src_port))
+    /// The datagrams this link has discarded for not being its peer's. A link on
+    /// a listener's socket discards none: what is not its peer's is another
+    /// session's, and the listener counts what is no session's.
+    pub fn foreign(&self) -> ForeignCounts {
+        self.binding.foreign()
     }
 
-    /// Non-blocking inbound dequeue from the shared socket. The `RefCell`
+    /// Whether the socket is a listener's, read by every session it accepted.
+    fn shares_socket(&self) -> bool {
+        #[cfg(feature = "session-slot")]
+        {
+            matches!(self.socket, SessionSocket::Listened(_))
+        }
+        #[cfg(not(feature = "session-slot"))]
+        {
+            false
+        }
+    }
+
+    /// Decide the datagram at the head of the socket's queue: `Some(true)` when
+    /// the session reads it (it is the peer's, or the `InitSyn` that has just
+    /// bound an acceptor), `Some(false)` when it was not admitted and has been
+    /// discarded, so the next head is to be decided, and `None` when the queue is
+    /// empty or the head is another session's on a shared socket, which is left
+    /// where it is.
+    fn admit_head(&self) -> Option<bool> {
+        let verdict = {
+            let socket = self.socket.borrow();
+            let head = socket.peek_recv()?;
+            let source = (head.src_addr, head.src_port);
+            if self.shares_socket() && !self.binding.is_peer(source) {
+                return None;
+            }
+            self.binding.admit(source, head.data)
+        };
+        if verdict == DatagramVerdict::Bound {
+            self.note_endpoints();
+        }
+        if verdict.is_taken() {
+            return Some(true);
+        }
+        self.socket.borrow_mut().consume_recv();
+        Some(false)
+    }
+
+    /// Non-blocking inbound dequeue of the peer's next datagram. The `RefCell`
     /// borrow is scoped to this call (the returned [`SessionDatagram`] is
     /// owned), so a `send_blocking` re-borrow inside the subsequent
-    /// dispatch cannot collide. Returns `None` when the per-socket rx queue
-    /// is empty (the caller must drive the lwIP input path first).
+    /// dispatch cannot collide. Returns `None` when nothing of the peer's is
+    /// queued (the caller must drive the lwIP input path first).
     pub fn try_recv(&self) -> Option<SessionDatagram> {
+        while !self.admit_head()? {}
         self.socket.borrow_mut().try_recv()
     }
 
-    /// Lend the oldest queued datagram to `f` where the socket's receive
-    /// queue holds it, retarget replies to its source first, and remove it
-    /// once `f` returns. `false` when nothing is queued.
+    /// Lend the peer's oldest queued datagram to `f` where the socket's receive
+    /// queue holds it, and remove it once `f` returns. `false` when nothing of
+    /// the peer's is queued.
     ///
     /// [`Self::try_recv`] moves the datagram out of the queue, a
     /// `SESSION_RX_SLOT_SIZE` value that a caller then copies onto the heap
@@ -234,12 +275,18 @@ impl LwipUdpDriver {
     /// frame the bytes `f` reads are the frame's own, where the controller wrote
     /// them, and removing it gives the MAC its buffer back.
     pub fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
+        loop {
+            match self.admit_head() {
+                None => return false,
+                Some(false) => continue,
+                Some(true) => break,
+            }
+        }
         {
             let socket = self.socket.borrow();
             let Some(datagram) = socket.peek_recv() else {
                 return false;
             };
-            self.set_peer(datagram.src_addr, datagram.src_port);
             f(datagram.data);
         }
         self.socket.borrow_mut().consume_recv()
@@ -258,8 +305,11 @@ impl BoxedLinkDriver for LwipUdpDriver {
         // `send_to` failing is pbuf exhaustion or a dead netif, both of which
         // mean the writer cannot take the bytes, so the cause is `WriterGone`;
         // the MCU profile has no `transport-stats` build, but the seam must
-        // still tell the truth for the lanes that assert on it.
-        let (addr, port) = self.peer.get();
+        // still tell the truth for the lanes that assert on it. An acceptor
+        // with no peer yet has no one to send to, which is the same report.
+        let Some((addr, port)) = self.binding.peer() else {
+            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+        };
         // A shared borrow: a send happens while `recv_with` lends a received
         // datagram out of the same socket.
         match self.socket.borrow().send_to(addr, port, bytes) {
@@ -310,7 +360,11 @@ impl BoxedLinkDriver for LwipUdpDriver {
             .expect("a slot the session names is a slot this driver lent");
         // No headroom was asked for, so the frame starts at the payload.
         debug_assert_eq!(start, 0, "this driver lends with no headroom");
-        let (addr, port) = self.peer.get();
+        // The payload is taken back above whatever happens, so a send with no
+        // peer gives the pbuf back as an abort does.
+        let Some((addr, port)) = self.binding.peer() else {
+            return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
+        };
         match self
             .socket
             .borrow()
@@ -618,7 +672,10 @@ mod tests {
         let socket: SharedSessionSocket = Rc::new(RefCell::new(
             bind_session_rx(&link, 7485).expect("bind session rx"),
         ));
-        let driver = LwipUdpDriver::new(socket, 0, 0);
+        // The link of a session with the frame's sender: only the peer's
+        // datagrams are handed over.
+        let peer = (wz_link_lwip::ipv4_addr_from_octets([10, 9, 2, 2]), 7601);
+        let driver = LwipUdpDriver::new(socket, peer.0, peer.1);
 
         let payload = b"dispatched where the MAC wrote it";
         inbox.borrow_mut().push_back(udp_frame(7485, payload));
@@ -643,9 +700,6 @@ mod tests {
         std::assert!(at + bytes.len() <= buffer.0 + buffer.1);
         std::assert_eq!(*returned.borrow(), std::vec![0u32], "given back once read");
         std::assert!(lent.borrow().is_empty());
-        std::assert_eq!(
-            driver.peer(),
-            (wz_link_lwip::ipv4_addr_from_octets([10, 9, 2, 2]), 7601)
-        );
+        std::assert_eq!(driver.peer(), Some(peer));
     }
 }

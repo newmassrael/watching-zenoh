@@ -40,6 +40,7 @@ use wz_session_core::byte_cells::ByteBuf;
 #[cfg(feature = "session-slot")]
 use wz_session_core::byte_cells::ByteSource;
 use wz_session_core::caps::MAX_LOCATOR_LEN;
+use wz_session_core::datagram_peer::{DatagramVerdict, ForeignCounts, PeerBinding};
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
 use wz_session_core::link::{
@@ -227,17 +228,16 @@ impl TxStore for HeapTx {
 /// built in `T`: a `Vec<u8>` and `HeapTx` on the heap profile, claims on the image's byte
 /// tables on the fixed one ([`FixedUdpDriver`]).
 ///
-/// Outbound sends target the peer captured from the most recent inbound
-/// datagram: an acceptor is built with no peer and learns it from the
-/// InitSyn, and [`SessionDatagramLink::recv_with`] retargets on every datagram
-/// so replies go to whoever just spoke. UDP is connectionless, so
-/// `open_blocking` / `close_blocking` are no-ops: the zenoh handshake and
-/// Close frame are the session's open and close.
+/// The link has one peer, fixed once known ([`PeerBinding`]): an initiator's from its dial, an
+/// acceptor's from the first `InitSyn` it takes. Every send goes to it, and the session reads its
+/// datagrams only; what anyone else sends is discarded and counted ([`Self::foreign`]). UDP is
+/// connectionless, so `open_blocking` / `close_blocking` are no-ops: the zenoh handshake and Close
+/// frame are the session's open and close.
 pub struct UdpDriver<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> {
     socket: S,
-    peer: Cell<Option<([u8; 4], u16)>>,
+    binding: PeerBinding<([u8; 4], u16)>,
     /// The link's two ends, `udp/<ip>:<port>` each, written once: when the
-    /// peer is first known.
+    /// peer is known.
     endpoints: OnceCell<LinkEndpoints>,
     rx_buf: RefCell<B>,
     /// The length of `rx_buf`, the largest datagram the link receives whole.
@@ -273,7 +273,7 @@ pub type FixedUdpDriver<S> = UdpDriver<S, ByteBuf, ByteBuf>;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl<S: DatagramSocket> UdpDriver<S, Vec<u8>, HeapTx> {
-    /// An acceptor's link: no peer until the first datagram names one.
+    /// An acceptor's link: no peer until the first `InitSyn` it takes names one.
     pub fn acceptor(socket: S) -> Self {
         Self::acceptor_with_capacity(socket, UDP_RX_CAPACITY)
     }
@@ -317,7 +317,7 @@ impl<S: DatagramSocket> UdpDriver<S, Vec<u8>, HeapTx> {
 
 impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
     /// An acceptor's link over the receive buffer `rx_buf`, building its frames in `tx`: no peer
-    /// until the first datagram names one.
+    /// until the first `InitSyn` it takes names one.
     pub fn acceptor_in(socket: S, rx_buf: B, tx: T) -> Self {
         Self::with_peer(socket, None, rx_buf, tx)
     }
@@ -332,7 +332,10 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
         let rx_len = rx_buf.as_mut().len();
         let driver = Self {
             socket,
-            peer: Cell::new(None),
+            binding: match peer {
+                Some(peer) => PeerBinding::dialled(peer),
+                None => PeerBinding::accepting(),
+            },
             endpoints: OnceCell::new(),
             rx_buf: RefCell::new(rx_buf),
             rx_len,
@@ -343,9 +346,7 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
             idle_wait_ms: SERVICE_WAIT_MS as u32,
             armed_wait_ms: Cell::new(SERVICE_WAIT_MS),
         };
-        if let Some(peer) = peer {
-            driver.set_peer(peer);
-        }
+        driver.note_endpoints();
         driver
     }
 
@@ -382,8 +383,33 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
         }
     }
 
-    fn set_peer(&self, peer: ([u8; 4], u16)) {
-        self.peer.set(Some(peer));
+    /// The next datagram the session reads, taken into `buf`: its length, or `Ok(None)` when
+    /// nothing the session reads is queued. What the binding does not admit (a stranger's
+    /// datagram, another source's `InitSyn`, anything before an accepting link's first `InitSyn`)
+    /// is discarded and counted on the way ([`Self::foreign`]); the socket is this link's alone,
+    /// so nothing it discards is anyone else's.
+    fn next_admitted(&self, buf: &mut [u8]) -> Result<Option<usize>, S::Error> {
+        loop {
+            let Some((len, addr, port)) = self.next_datagram(buf)? else {
+                return Ok(None);
+            };
+            let verdict = self.binding.admit((addr, port), &buf[..len]);
+            if verdict == DatagramVerdict::Bound {
+                self.note_endpoints();
+            }
+            if verdict.is_taken() {
+                return Ok(Some(len));
+            }
+        }
+    }
+
+    /// Write the link's two ends once the peer is known: at construction for a dialled link, at
+    /// the `InitSyn` that binds an accepting one. The peer never changes after, so neither do
+    /// they.
+    fn note_endpoints(&self) {
+        let Some(peer) = self.binding.peer() else {
+            return;
+        };
         if self.endpoints.get().is_none() {
             let (addr, port) = self.socket.local();
             let _ = self.endpoints.set(LinkEndpoints::new(
@@ -393,9 +419,14 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
         }
     }
 
-    /// The peer the next send goes to, once one is known.
+    /// The peer every send goes to, once one is known.
     pub fn peer(&self) -> Option<([u8; 4], u16)> {
-        self.peer.get()
+        self.binding.peer()
+    }
+
+    /// The datagrams this link has discarded for not being its peer's.
+    pub fn foreign(&self) -> ForeignCounts {
+        self.binding.foreign()
     }
 
     /// The most recent receive failure, if the socket has failed.
@@ -437,7 +468,7 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     /// peer yet, or one the stack refuses, is REPORTED (R2371's rule for the lwIP driver), not
     /// swallowed.
     fn send_datagram(&self, bytes: &[u8]) -> LinkSendOutcome {
-        let Some((addr, port)) = self.peer.get() else {
+        let Some((addr, port)) = self.binding.peer() else {
             return LinkSendOutcome::Dropped(LinkDropCause::WriterGone);
         };
         match self.socket.send_to(addr, port, bytes) {
@@ -588,11 +619,8 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     fn try_recv(&self) -> Option<RxFrame> {
         let mut buf = self.rx_buf.borrow_mut();
         let bytes: &mut [u8] = buf.as_mut();
-        match self.next_datagram(bytes) {
-            Ok(Some((len, addr, port))) => {
-                self.set_peer((addr, port));
-                Some(RxFrame::new(bytes[..len].to_vec()))
-            }
+        match self.next_admitted(bytes) {
+            Ok(Some(len)) => Some(RxFrame::new(bytes[..len].to_vec())),
             Ok(None) => None,
             Err(e) => {
                 self.rx_error.set(Some(e));
@@ -608,9 +636,8 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
         let mut buf = self.rx_buf.borrow_mut();
         let bytes: &mut [u8] = buf.as_mut();
-        match self.next_datagram(bytes) {
-            Ok(Some((len, addr, port))) => {
-                self.set_peer((addr, port));
+        match self.next_admitted(bytes) {
+            Ok(Some(len)) => {
                 f(&bytes[..len]);
                 true
             }
@@ -806,37 +833,88 @@ mod tests {
 
     const PEER: ([u8; 4], u16) = ([10, 0, 0, 1], 7447);
 
+    /// Another end than [`PEER`], on the peer's port.
+    const STRANGER: ([u8; 4], u16) = ([10, 0, 0, 9], 7447);
+
+    /// An `InitSyn` header and a byte of body: what binds an accepting link. Only its first byte
+    /// is read, by the binding.
+    const SYN: &[u8] = &[0x01, 0x09];
+
     fn queued(socket: &Loop, bytes: &[u8]) {
+        queued_from(socket, bytes, Sender::Peer);
+    }
+
+    /// Who a datagram the test queues comes from.
+    enum Sender {
+        Peer,
+        Stranger,
+    }
+
+    fn queued_from(socket: &Loop, bytes: &[u8], from: Sender) {
+        let (addr, port) = match from {
+            Sender::Peer => PEER,
+            Sender::Stranger => STRANGER,
+        };
         socket
             .inbound
             .borrow_mut()
-            .push_back((bytes.to_vec(), PEER.0, PEER.1));
+            .push_back((bytes.to_vec(), addr, port));
     }
 
-    /// The driver the tests of the wait and of the link's behaviour are made over: the heap
-    /// profile's, with two outbound slots...
+    /// The driver the tests of the wait and of the link's behaviour are made over, a link that
+    /// dialled [`PEER`]: the heap profile's, with two outbound slots...
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     fn driver(socket: Loop) -> UdpDriver<Loop, Vec<u8>, HeapTx> {
-        UdpDriver::acceptor_with_buffers(socket, 64, HeapTx::new(2, 32))
+        UdpDriver::initiator_with_buffers(socket, PEER, 64, HeapTx::new(2, 32))
     }
 
     /// ...or the slot profile's, whose two buffers are claimed from tables the test declares
     /// (more cells than tests run at once) and go back when the driver is dropped.
     #[cfg(feature = "session-slot")]
     fn driver(socket: Loop) -> UdpDriver<Loop, ByteBuf, ByteBuf> {
+        let (rx, tx) = slot_buffers();
+        UdpDriver::initiator_in(socket, PEER, rx, tx)
+    }
+
+    /// An accepting link, of the heap profile...
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn acceptor(socket: Loop) -> UdpDriver<Loop, Vec<u8>, HeapTx> {
+        UdpDriver::acceptor_with_buffers(socket, 64, HeapTx::new(2, 32))
+    }
+
+    /// ...or of the slot profile.
+    #[cfg(feature = "session-slot")]
+    fn acceptor(socket: Loop) -> UdpDriver<Loop, ByteBuf, ByteBuf> {
+        let (rx, tx) = slot_buffers();
+        UdpDriver::acceptor_in(socket, rx, tx)
+    }
+
+    #[cfg(feature = "session-slot")]
+    fn slot_buffers() -> (ByteBuf, ByteBuf) {
         use wz_session_core::byte_cells::ByteCells;
         static RX: ByteCells<64, 64> = ByteCells::new();
         static TX: ByteCells<32, 64> = ByteCells::new();
-        UdpDriver::acceptor_in(
-            socket,
+        (
             RX.claim().expect("a receive buffer"),
             TX.claim().expect("a frame buffer"),
         )
     }
 
+    /// What `recv_with` hands the session, or `None` when it hands nothing.
+    fn received<L: SessionDatagramLink>(link: &L) -> Option<Vec<u8>> {
+        let mut got = None;
+        link.recv_with(&mut |bytes| got = Some(bytes.to_vec()));
+        got
+    }
+
     #[test]
-    fn an_acceptor_learns_its_peer_from_the_first_datagram_and_answers_it() {
-        let link = driver(Loop::default());
+    fn the_test_syn_is_an_init_syn() {
+        assert!(wz_session_core::datagram_peer::is_init_syn(SYN));
+    }
+
+    #[test]
+    fn an_acceptor_is_bound_by_the_first_init_syn_and_answers_its_source() {
+        let link = acceptor(Loop::default());
         assert_eq!(link.peer(), None);
         assert!(link.link_endpoints().is_none());
         assert_eq!(
@@ -845,10 +923,14 @@ mod tests {
             "a send with no peer is reported, not swallowed"
         );
 
-        queued(&link.socket, b"hello");
-        let mut got = Vec::new();
-        assert!(link.recv_with(&mut |bytes| got.extend_from_slice(bytes)));
-        assert_eq!(got, b"hello");
+        // Before a session opens, what opens none is not the session's and binds nothing.
+        queued_from(&link.socket, b"hello", Sender::Stranger);
+        assert_eq!(received(&link), None);
+        assert_eq!(link.peer(), None);
+        assert!(link.link_endpoints().is_none());
+
+        queued(&link.socket, SYN);
+        assert_eq!(received(&link).as_deref(), Some(SYN));
         assert_eq!(link.peer(), Some(PEER));
         let ends = link
             .link_endpoints()
@@ -864,6 +946,78 @@ mod tests {
             link.socket.sent.borrow().as_slice(),
             &[(PEER.0, PEER.1, b"reply".to_vec())]
         );
+        assert_eq!(
+            link.foreign(),
+            ForeignCounts {
+                strays: 1,
+                refused: 0
+            }
+        );
+    }
+
+    /// The defect this rule exists for: one datagram from another address used to point the
+    /// session's replies and keep-alives at that address until the peer next spoke. Now the
+    /// session never sees it, on either receive, and every send still goes to the peer.
+    #[test]
+    fn a_strangers_datagram_reaches_no_session_and_moves_no_reply() {
+        for accepted in [false, true] {
+            let link = if accepted {
+                let link = acceptor(Loop::default());
+                queued(&link.socket, SYN);
+                assert_eq!(received(&link).as_deref(), Some(SYN));
+                link
+            } else {
+                driver(Loop::default())
+            };
+            queued_from(&link.socket, b"stray", Sender::Stranger);
+            queued_from(&link.socket, SYN, Sender::Stranger);
+            queued(&link.socket, b"peer");
+            assert_eq!(
+                received(&link).as_deref(),
+                Some(&b"peer"[..]),
+                "what the stranger sent is passed over, not handed to the session"
+            );
+            #[cfg(feature = "alloc")]
+            {
+                queued_from(&link.socket, b"stray", Sender::Stranger);
+                assert!(link.try_recv().is_none(), "the copying receive too");
+            }
+            assert_eq!(link.peer(), Some(PEER));
+            assert_eq!(
+                link.send_blocking(b"keep-alive", Reliability::Reliable),
+                LinkSendOutcome::Sent
+            );
+            assert_eq!(
+                link.socket
+                    .sent
+                    .borrow()
+                    .last()
+                    .map(|sent| (sent.0, sent.1)),
+                Some(PEER),
+                "the reply goes to the peer, accepted={accepted}"
+            );
+            let strays = if cfg!(feature = "alloc") { 2 } else { 1 };
+            assert_eq!(
+                link.foreign(),
+                ForeignCounts { strays, refused: 1 },
+                "accepted={accepted}"
+            );
+        }
+    }
+
+    /// A datagram the wait already took into the buffer is judged as one the receive takes.
+    #[test]
+    fn a_strangers_datagram_the_wait_took_is_passed_over_too() {
+        let socket = Loop {
+            timeouts: true,
+            ..Loop::default()
+        };
+        let link = driver(socket);
+        queued_from(&link.socket, b"stray", Sender::Stranger);
+        link.service();
+        assert_eq!(link.socket.waiting_reads.get(), 1, "the wait read it");
+        assert_eq!(received(&link), None);
+        assert_eq!(link.foreign().strays, 1);
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]

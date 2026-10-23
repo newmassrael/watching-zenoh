@@ -41,8 +41,9 @@
 //! ## The shared queue
 //!
 //! The sessions of one listener read from one receive queue, each taking only the
-//! datagrams its own peer sent ([`LaneGuard`], used by
-//! [`LwipSessionLink`](crate::session_drive::LwipSessionLink)). That keeps the
+//! datagrams its own peer sent: its driver is bound to the peer of its
+//! [`LaneGuard`], which [`LwipSessionLink`](crate::session_drive::LwipSessionLink)
+//! holds, and leaves the others' where they are. That keeps the
 //! in-place receive (a datagram is read where the socket's queue holds it, and a
 //! frame a MAC lent is read where the controller wrote it) for accepted sessions
 //! too, at one cost the image should know: the queue is one session's size, not N
@@ -59,7 +60,7 @@ use core::cell::{Cell, OnceCell, RefCell};
 
 use wz_link_lwip::rx_sockets::SessionRxSocket;
 use wz_link_lwip::LwipLink;
-use wz_session_core::inbound::is_init_syn;
+use wz_session_core::datagram_peer::is_init_syn;
 
 use crate::driver::{LwipUdpDriver, SessionSocket};
 use crate::session_host::OpenRefused;
@@ -134,8 +135,9 @@ trait LaneTable {
 }
 
 /// One accepted session's claim on a lane of its listener: the peer the session
-/// belongs to, which is how a session picks its datagrams out of the one queue
-/// (`LwipSessionLink` reads only a datagram whose source is [`peer`](Self::peer)).
+/// belongs to, to which the session's driver is bound, and which is how the
+/// session picks its datagrams out of the one queue (the driver reads only a
+/// datagram whose source is [`peer`](Self::peer) and leaves the others').
 /// Dropping it frees the lane, so the table is free again exactly when the
 /// session's link is.
 pub struct LaneGuard {

@@ -122,20 +122,22 @@ pub trait SessionDatagramLink {
         false
     }
 
-    /// The next inbound datagram as a frame, or `None` when nothing is
-    /// queued. Taking a datagram also RETARGETS the link's replies to that
-    /// datagram's source — the acceptor learns its peer from the InitSyn,
-    /// and every reply after it goes back to whoever just spoke. The copying
-    /// receive is the heap profile's (the frame is an owned [`RxFrame`]), so a
-    /// build with no allocator has no such method and a link answers
-    /// [`Self::recv_with`] alone.
+    /// The next inbound datagram from the link's peer as a frame, or `None`
+    /// when none is queued. A link has one peer, fixed once known
+    /// (`wz_session_core::datagram_peer`): an initiator's from its dial, an
+    /// acceptor's from the first `InitSyn` it takes. A datagram from anyone
+    /// else never reaches the session and moves none of its replies. The
+    /// copying receive is the heap profile's (the frame is an owned
+    /// [`RxFrame`]), so a build with no allocator has no such method and a
+    /// link answers [`Self::recv_with`] alone.
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame>;
 
     /// Lend the next inbound datagram's bytes to `f` WHERE THE LINK HOLDS
     /// THEM, and let it go once `f` returns; `false` when nothing is queued.
-    /// Retargets replies to the datagram's source before `f` runs, as
-    /// [`Self::try_recv`] does, so what `f` sends goes back to whoever spoke.
+    /// Only the peer's, as [`Self::try_recv`] takes, and the `InitSyn` that
+    /// binds an acceptor is bound before `f` runs, so what `f` sends goes to
+    /// the peer.
     ///
     /// The receive the `rx-in-place` loop makes. The bytes are valid for the
     /// call only, which is what lets a link hand over its own buffer instead
@@ -829,10 +831,10 @@ impl<C: ClockSource, L: SessionDatagramLink> SessionPump<C, L> {
             }
         }
 
-        // Inbound datagram? Dispatch it and loop promptly for the next. The
-        // link has already retargeted its replies to the datagram's source.
-        // Unicast MCU session shell — one peer per link, so no source
-        // attribution is needed.
+        // Inbound datagram? Dispatch it and loop promptly for the next. It is
+        // the link's peer's: the link hands over nothing else. Unicast MCU
+        // session shell — one peer per link, so no source attribution is
+        // needed.
         #[cfg(all(not(feature = "rx-in-place"), feature = "alloc"))]
         if let Some(frame) = self.link.try_recv() {
             let outcome =

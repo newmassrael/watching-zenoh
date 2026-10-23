@@ -86,9 +86,8 @@ impl<L: Deref<Target = LwipLink> + Clone> LwipLinks<L> {
     /// `wz_session_core::session_slot::SessionSlots` by the caller; on the other
     /// profiles `SessionLinks` wraps it in an `Rc`.
     ///
-    /// `peer` is where the first sends go: an acceptor passes the unspecified
-    /// address, which its first inbound datagram overwrites; an initiator its
-    /// configured peer.
+    /// `peer` is the link's peer, which the initiator dialled; an acceptor's link
+    /// has none until its first `InitSyn` ([`Self::bind_accepting_driver`]).
     pub fn bind_driver(&self, port: u16, peer: UdpPeer) -> Result<LwipUdpDriver, LinkOpenError> {
         let socket = self.bind_socket(port)?;
         Ok(LwipUdpDriver::new(
@@ -96,6 +95,13 @@ impl<L: Deref<Target = LwipLink> + Clone> LwipLinks<L> {
             ipv4_addr_from_octets(peer.addr),
             peer.port,
         ))
+    }
+
+    /// [`Self::bind_driver`] for an acceptor that owns its socket: the link is
+    /// bound to the source of the first `InitSyn` it takes.
+    pub fn bind_accepting_driver(&self, port: u16) -> Result<LwipUdpDriver, LinkOpenError> {
+        let socket = self.bind_socket(port)?;
+        Ok(LwipUdpDriver::accepting(share_socket(socket)))
     }
 
     /// Bind a session socket on `port` (0 asks lwIP for a free one) and hand it over
@@ -118,17 +124,16 @@ impl<L: Deref<Target = LwipLink> + Clone> LwipLinks<L> {
         LwipSessionLink::new(self.link.clone(), driver)
     }
 
+    /// The two halves of a link over `driver`.
     #[cfg(not(feature = "session-slot"))]
     fn opened(
         &self,
-        port: u16,
-        peer: UdpPeer,
+        driver: LwipUdpDriver,
     ) -> Result<OpenedLink<<Self as SessionLinks>::Pump>, LinkOpenError>
     where
         L: 'static,
     {
-        // Port 0 asks lwIP for a free one, one per initiator session.
-        let driver = Rc::new(self.bind_driver(port, peer)?);
+        let driver = Rc::new(driver);
         Ok(OpenedLink {
             sink: driver.clone(),
             pump: self.pump_over(driver),
@@ -159,18 +164,14 @@ impl<L: Deref<Target = LwipLink> + Clone + 'static> SessionLinks for LwipLinks<L
     type Pump = LwipSessionLink<L>;
 
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
-        // The peer is whoever speaks first; the driver learns it on receive.
-        self.opened(
-            port,
-            UdpPeer {
-                addr: [0; 4],
-                port: 0,
-            },
-        )
+        // The peer is whoever opens a session first; the driver is bound by its
+        // InitSyn.
+        self.opened(self.bind_accepting_driver(port)?)
     }
 
     fn open_initiator(&self, peer: UdpPeer) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
-        self.opened(0, peer)
+        // Port 0 asks lwIP for a free one, one per initiator session.
+        self.opened(self.bind_driver(0, peer)?)
     }
 }
 

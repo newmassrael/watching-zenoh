@@ -6,8 +6,8 @@
 //! R2915 — the loop itself is `wz_runtime_coop::session_drive`, generic over
 //! the network stack. This module is lwIP's side of that seam:
 //! [`LwipSessionLink`] implements `SessionDatagramLink` (pump lwIP's input
-//! path; take a datagram from the [`LwipUdpDriver`](crate::driver::LwipUdpDriver) and retarget replies to
-//! its source), and `run_session` / `session_task` / `spawn_session`
+//! path; take the peer's next datagram from the [`LwipUdpDriver`](crate::driver::LwipUdpDriver)),
+//! and `run_session` / `session_task` / `spawn_session`
 //! keep the lwIP-typed signatures every existing caller writes, building the
 //! link and handing it to the shared loop.
 
@@ -50,11 +50,12 @@ pub struct LwipSessionLink<L: Deref<Target = LwipLink>> {
     driver: DriverHandle,
     /// `session-slot`: the lane of the listener this session was accepted by. A
     /// session accepted on a listener reads from the one socket every such
-    /// session shares, and takes only the datagrams its own peer sent; the lane
-    /// names that peer, and is given back when this link drops, which is when the
-    /// session's pump does.
+    /// session shares, and its driver takes only the datagrams its own peer
+    /// sent, leaving the others' for them; the lane holds that peer for the
+    /// listener, and is given back when this link drops, which is when the
+    /// session's pump does. Held for that drop and never read.
     #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
-    lane: Option<crate::listener::LaneGuard>,
+    _lane: Option<crate::listener::LaneGuard>,
 }
 
 impl<L: Deref<Target = LwipLink>> LwipSessionLink<L> {
@@ -65,33 +66,25 @@ impl<L: Deref<Target = LwipLink>> LwipSessionLink<L> {
             link,
             driver,
             #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
-            lane: None,
+            _lane: None,
         }
     }
 
     /// [`Self::new`] for a session a listener accepted: `driver` reads and sends
-    /// through the listener's socket, and `lane` is the lane the listener
-    /// reserved for the session's peer, through which the link reads only that
-    /// peer's datagrams.
+    /// through the listener's socket, bound to the peer the listener reserved
+    /// `lane` for, and the link keeps the lane for as long as the session runs.
     #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
     pub fn with_lane(link: L, driver: DriverHandle, lane: crate::listener::LaneGuard) -> Self {
+        debug_assert_eq!(
+            driver.peer(),
+            Some(lane.peer()),
+            "a listener binds the driver of an admitted session to its lane's peer"
+        );
         Self {
             link,
             driver,
-            lane: Some(lane),
+            _lane: Some(lane),
         }
-    }
-
-    /// Whether the datagram at the head of the socket's queue is for this session
-    /// to read: always, for a session that owns its socket, and for one that
-    /// shares a listener's, when it came from the session's peer. `false` too for
-    /// an empty queue, so the caller's own "nothing queued" answer is the same.
-    fn head_is_mine(&self) -> bool {
-        #[cfg(all(feature = "session-slot", feature = "session-unicast-accept"))]
-        if let Some(lane) = &self.lane {
-            return self.driver.head_source() == Some(lane.peer());
-        }
-        true
     }
 }
 
@@ -105,23 +98,17 @@ impl<L: Deref<Target = LwipLink>> SessionDatagramLink for LwipSessionLink<L> {
     }
 
     // The copying receive is the heap profile's: its frame is an owned `RxFrame`.
+    // The driver hands over its peer's datagrams only (and binds an acceptor at
+    // its first `InitSyn`), so every reply goes to the peer.
     #[cfg(feature = "alloc")]
     fn try_recv(&self) -> Option<RxFrame> {
-        if !self.head_is_mine() {
-            return None;
-        }
         let dg = self.driver.try_recv()?;
-        // Reply to whoever just spoke (the acceptor reply path).
-        self.driver.set_peer(dg.src_addr, dg.src_port);
         Some(RxFrame::new(dg.data.as_slice().to_vec()))
     }
 
     // The datagram is lent where the session socket's receive queue holds it:
     // no heap copy, and no slot-sized value on the stack under the dispatch.
     fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
-        if !self.head_is_mine() {
-            return false;
-        }
         self.driver.recv_with(f)
     }
 }
@@ -143,7 +130,7 @@ pub type PumpSlots<C, L, const N: usize> = coop_drive::PumpSlots<C, LwipSessionL
 ///   lwIP input path each tick. This is the loopback / QEMU shape — a real
 ///   multi-NIC deploy drives netif input from the RX ISR instead (carry tail).
 /// - `driver` — the concrete [`LwipUdpDriver`](crate::driver::LwipUdpDriver) (for
-///   `try_recv` + `set_peer`); the same object lives inside `actions` as the
+///   its peer's datagrams); the same object lives inside `actions` as the
 ///   session's link sink (`Rc<dyn BoxedLinkDriver>`, or under `session-slot` a
 ///   reference into the slot that holds both) for the outbound send seam.
 ///
@@ -365,38 +352,64 @@ mod tests {
         }
     }
 
-    /// R2915 — the lwIP link's half of the loop seam retargets replies to the
-    /// datagram it hands over. The acceptor learns its peer from the InitSyn
-    /// this way, so a link that dequeued without retargeting would answer the
-    /// placeholder it was built with and no handshake would complete.
+    /// R2915 — the acceptor learns its peer from the InitSyn its link hands
+    /// over, or no handshake would complete. And from then on that peer is the
+    /// link's: a datagram from another address, which used to point the
+    /// session's replies at that address until the peer next spoke, is let go
+    /// on lwIP's real input path, before and after the binding.
     #[test]
-    fn the_lwip_session_link_retargets_replies_to_the_datagram_it_hands_over() {
+    fn an_accepting_lwip_link_is_bound_by_the_init_syn_and_lets_a_stranger_go() {
         let (_serial, link) = wz_link_lwip::lwip_test_link();
 
-        let (session_port, speaker_port): (u16, u16) = (7454, 7455);
+        let (session_port, speaker_port, stranger_port): (u16, u16, u16) = (7454, 7455, 7466);
         let socket: SharedSessionSocket = Rc::new(RefCell::new(
             bind_session_rx(&link, session_port).expect("bind session rx"),
         ));
-        // Built pointing at a placeholder, as an acceptor is.
-        let driver = Rc::new(LwipUdpDriver::new(socket, ipv4_addr_loopback(), 1));
+        let driver = Rc::new(LwipUdpDriver::accepting(socket));
         let session_link = LwipSessionLink::new(&link, driver.clone());
+        std::assert_eq!(driver.peer(), None);
 
         let speaker: SharedSessionSocket = Rc::new(RefCell::new(
             bind_session_rx(&link, speaker_port).expect("bind speaker"),
         ));
-        let payload: &[u8] = b"InitSyn stand-in";
-        speaker
-            .borrow_mut()
-            .send_to(ipv4_addr_loopback(), session_port, payload)
-            .expect("speaker sends");
+        let stranger: SharedSessionSocket = Rc::new(RefCell::new(
+            bind_session_rx(&link, stranger_port).expect("bind stranger"),
+        ));
+        // An InitSyn header and a byte of body: only the header is read.
+        let syn: &[u8] = &[0x01, 0x09];
+        std::assert!(wz_session_core::datagram_peer::is_init_syn(syn));
+        let send = |from: &SharedSessionSocket, bytes: &[u8]| {
+            from.borrow_mut()
+                .send_to(ipv4_addr_loopback(), session_port, bytes)
+                .expect("a loopback send");
+        };
+        send(&stranger, b"stray");
+        send(&speaker, syn);
+        send(&stranger, syn);
+        send(&speaker, b"peer");
 
         session_link.service();
-        let frame = session_link
-            .try_recv()
-            .expect("the datagram is handed over");
-        std::assert_eq!(&frame.bytes[..], payload);
-        std::assert_eq!(driver.peer(), (ipv4_addr_loopback(), speaker_port));
-        std::assert!(session_link.try_recv().is_none(), "one datagram, one frame");
+        let frame = session_link.try_recv().expect("the InitSyn is handed over");
+        std::assert_eq!(&frame.bytes[..], syn, "the stray before it was let go");
+        std::assert_eq!(driver.peer(), Some((ipv4_addr_loopback(), speaker_port)));
+        let frame = session_link.try_recv().expect("the peer's next datagram");
+        std::assert_eq!(
+            &frame.bytes[..],
+            b"peer",
+            "the stranger's InitSyn was refused"
+        );
+        std::assert!(
+            session_link.try_recv().is_none(),
+            "nothing else is the peer's"
+        );
+        std::assert_eq!(driver.peer(), Some((ipv4_addr_loopback(), speaker_port)));
+        std::assert_eq!(
+            driver.foreign(),
+            wz_session_core::datagram_peer::ForeignCounts {
+                strays: 1,
+                refused: 1
+            }
+        );
     }
 
     /// R2364 — the MCU session runs AS A TASK on the cooperative executor.

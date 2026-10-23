@@ -45,21 +45,18 @@ impl LwipTopology {
         let link = Rc::new(LwipLink::init());
 
         // ── The acceptor: a session rx socket wrapped in the MCU
-        //    BoxedLinkDriver. The initial peer target is a placeholder the
-        //    first inbound datagram overwrites via set_peer (the
-        //    acceptor-reply path).
+        //    BoxedLinkDriver, with no peer until the crafted peer's InitSyn
+        //    binds it (the acceptor-reply path).
         //
-        //    R2915 — port 0, not PEER_PORT. It used to be PEER_PORT, so the
-        //    "placeholder" was already the right answer and the reply path was
+        //    R2915 — it once named PEER_PORT up front, so the reply path was
         //    never exercised: with the retarget removed from the drive loop's
         //    lwIP link, this whole e2e still reached Established. An acceptor
-        //    cannot know its peer before the InitSyn, and now this one does not
-        //    either; port 0 also leaves the link's endpoints unrecorded until
-        //    then.
+        //    cannot know its peer before the InitSyn, and this one does not;
+        //    its link's endpoints are unrecorded until then.
         let acceptor_sock: SharedSessionSocket = Rc::new(RefCell::new(
             bind_session_rx(&link, SESSION_PORT).expect("bind acceptor session rx"),
         ));
-        let driver = Rc::new(LwipUdpDriver::new(acceptor_sock, ipv4_addr_loopback(), 0));
+        let driver = Rc::new(LwipUdpDriver::accepting(acceptor_sock));
 
         // ── The reactive crafted peer: a second real loopback endpoint. Sized
         //    off the ACTIVE session-rx slot size (SESSION_RX_SLOT_SIZE: 1536

@@ -658,8 +658,11 @@ pub mod wire_const {
     #[cfg(feature = "codec-join")]
     pub const FLAG_T_JOIN_T: u8 = 0x20;
 
-    /// InitAck discriminator (0 = InitSyn, 1 = InitAck).
-    #[cfg(feature = "codec-init-body")]
+    /// InitAck discriminator (0 = InitSyn, 1 = InitAck). UNGATED, on
+    /// `T_MID_INIT`'s reasoning above: a link's peer binding
+    /// (`wz_session_core::datagram_peer`) asks whether a datagram is an
+    /// `InitSyn` of every build that carries a unicast link, whether or not
+    /// that build decodes the INIT body.
     pub const FLAG_T_INIT_A: u8 = 0x20;
     /// Size parameters carrier (sn_res + batch_size present).
     #[cfg(feature = "codec-init-body")]
