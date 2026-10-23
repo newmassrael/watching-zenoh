@@ -660,6 +660,31 @@ def upstream_arm(rows: list[tuple]) -> list[str]:
     return failures
 
 
+def zenoh_defaults_arm(default_features: set[str], decl: dict | None = None) -> list[str]:
+    """Does each capability's declared default for the `zenoh` original (deploy/wz-config.toml,
+    `upstream_on` / `upstream_off`) equal what zenoh's own default features have?
+
+    The capabilities a zenoh feature reaches are those the declaration's zenoh-c `maps` rows
+    reach: every zenoh-c capability feature passes through to zenoh's of the same name
+    (zenoh-c's `transport_tls = ["zenoh/transport_tls"]`), so the row that judges zenoh-c's
+    switch judges zenoh's. A capability no zenoh feature reaches is judged in the declaration
+    alone, as it is for zenoh-c.
+    """
+    lib = str(ROOT / "scripts" / "lib")
+    if lib not in sys.path:
+        sys.path.insert(0, lib)
+    import upstream_switch_map as switch_map  # noqa: PLC0415 - the rows' reader, loaded here
+    import wz_config  # noqa: PLC0415
+
+    decl = decl if decl is not None else wz_config.load_decl()
+    expected = switch_map.zenoh_c_expected(
+        decl, switch_map.rows_of(decl, "zenoh-c"), default_features)
+    failures = switch_map.upstream_default_arm("zenoh", decl, expected)
+    print(f"    zenoh defaults: {len(expected)} capability default(s) held to zenoh's `default` "
+          f"features")
+    return failures
+
+
 def selftest() -> int:
     """Drive BOTH directions of the upstream arm against injected metadata.
 
@@ -810,6 +835,16 @@ def selftest() -> int:
             return 1
     os.environ.pop("WZ_UPSTREAM_FEATURE_METADATA", None)
 
+    # The zenoh defaults arm, on a declaration of one zenoh-c row: transport_tls judged on in
+    # zenoh's own default build.
+    decl = {"caps": {"transport_tls": {"id": "transport_tls", "upstream_on": ["zenoh"]}},
+            "switches": [{"original": "zenoh-c", "switch": "transport_tls", "class": "maps",
+                          "anchor": "wz-capi-c/transport_tls", "note": "x"}]}
+    if zenoh_defaults_arm({"transport_tls"}, decl) != [] \
+            or zenoh_defaults_arm(set(), decl) == []:
+        print("  selftest FAIL [zenoh's defaults held to the declaration]", file=sys.stderr)
+        return 1
+
     # The BREAKDOWN, not the total: the two arms answer different questions, and
     # one number lets a collapsed population hide behind the other's.
     print(
@@ -849,6 +884,8 @@ def main() -> int:
     if args.upstream:
         try:
             failures += upstream_arm(rows)
+            failures += zenoh_defaults_arm(
+                set(upstream_package().get("features", {}).get("default", [])))
         except InputError as e:
             print(f"  upstream-feature-census: INPUT -- {e}", file=sys.stderr)
             return 2
