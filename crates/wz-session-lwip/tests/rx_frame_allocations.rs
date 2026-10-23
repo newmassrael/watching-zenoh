@@ -61,7 +61,7 @@ use wz_codecs::push::PushOwnedVariant;
 use wz_codecs::wire_const;
 use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::{
-    SessionDriveConfig, SessionLinks, SessionPump, SessionRole, UdpPeer,
+    IpEndpoint, Locator, SessionDriveConfig, SessionLinks, SessionPump, SessionRole,
 };
 use wz_runtime_coop::session_runtime::new_session_actions;
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
@@ -363,10 +363,10 @@ impl Pair {
         );
 
         let opened = links
-            .open_initiator(UdpPeer {
+            .open_initiator(Locator::udp(IpEndpoint {
                 addr: [127, 0, 0, 1],
                 port,
-            })
+            }))
             .expect("open the initiator");
         let initiator_sink = opened.sink.clone();
         let initiator_actions =

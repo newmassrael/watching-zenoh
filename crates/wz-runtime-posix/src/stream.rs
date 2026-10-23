@@ -4,8 +4,8 @@
 //! The host profile's stream seam: TCP over the kernel's own sockets.
 //!
 //! [`PosixTcpSocket`] is the socket `wz_runtime_coop::stream_link` is written against
-//! ([`StreamSocket`]); the session's link over it is that module's `StreamDriver`. Nothing here
-//! allocates: the socket is a file descriptor and its two ends.
+//! ([`StreamSocket`]); the session's link over it is that module's `StreamDriver`. Nothing here allocates: the socket is a
+//! file descriptor and its two ends.
 //!
 //! The socket blocks on a write and never on a read: a write returns once the kernel has taken
 //! every byte (a length and its batch go out in one `sendmsg`), and a read is `MSG_DONTWAIT`, the
@@ -235,15 +235,48 @@ mod tests {
         assert_ne!(near.local().1, 0);
     }
 
+    /// A loopback port that refuses every connect for as long as the value lives: a TCP socket
+    /// bound and never listening, which holds the number so no other `bind(:0)` is handed it.
+    /// The guard `wz_runtime_tokio_test_support::refusing_port` is, over this crate's own libc:
+    /// that crate pulls the tokio runtime, and with it `wz-session-core/alloc`, which feature
+    /// unification would put into this crate's no-allocator test build.
+    struct RefusingPort {
+        fd: c_int,
+        port: u16,
+    }
+
+    impl RefusingPort {
+        fn hold() -> Self {
+            // SAFETY: plain system call with value arguments.
+            let fd =
+                unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+            assert!(fd >= 0, "a TCP socket");
+            let at = sockaddr(LOOPBACK, 0);
+            // SAFETY: `at` is a live `sockaddr_in` of the length passed.
+            let rc = unsafe {
+                libc::bind(
+                    fd,
+                    (&at as *const libc::sockaddr_in).cast(),
+                    size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                )
+            };
+            assert_eq!(rc, 0, "bind without listen");
+            let (_, port) = name_of(fd, libc::getsockname).expect("the bound number");
+            Self { fd, port }
+        }
+    }
+
+    impl Drop for RefusingPort {
+        fn drop(&mut self) {
+            // SAFETY: `fd` is this guard's own descriptor, closed exactly once.
+            unsafe { libc::close(self.fd) };
+        }
+    }
+
     #[test]
     fn a_connection_to_a_closed_port_is_refused() {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .expect("a listener")
-            .local_addr()
-            .unwrap()
-            .port();
-        // The listener is gone, so the port refuses.
-        match PosixTcpSocket::connect(LOOPBACK, port) {
+        let held = RefusingPort::hold();
+        match PosixTcpSocket::connect(LOOPBACK, held.port) {
             Err(PosixNetError::Connect(e)) => assert_eq!(e, libc::ECONNREFUSED),
             Err(other) => panic!("a different error: {other:?}"),
             Ok(_) => panic!("nothing listens there"),

@@ -11268,17 +11268,20 @@ layer_c1m_session_lwip() {
     # `a_bound_acceptor_lets_a_strangers_datagram_go_and_keeps_answering_its_peer`,
     # unconditional like its other three. The lwIP legs below did not move: the
     # session_drive test that pinned the old retarget was replaced, not added to.
+    # A dial naming its protocol (`Locator`, `udp/` or `tcp/`) moved the two legs
+    # that compile the dialler (`adminspace-write`) by one more:
+    # `a_stacks_refusal_is_permanent_only_for_a_protocol_it_lacks`.
     _runci_guarded_test "C1m mcu default" 4 \
         cargo test -p wz-session-mcu --quiet || return 1
     _runci_guarded_test "C1m mcu unicast app layer" 5 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 13 \
+    _runci_guarded_test "C1m mcu adminspace-write" 14 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     _runci_guarded_test "C1m mcu adminspace-core" 8 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 23 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 24 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # R3167 moved EVERY wz-session-lwip leg below by FIVE, and the legs that turn
     # on `codec-push` by SIX: the driver's lend tests (the datagram equals the

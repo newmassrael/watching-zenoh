@@ -55,7 +55,9 @@ use crate::link_storage::HeapTx;
 use crate::link_storage::{TxLender, TxStore};
 use crate::session_drive::SessionDatagramLink;
 #[cfg(feature = "session-slot")]
-use crate::session_drive::{Bind, DriverPump, LinkOpenError, SlotStack, UdpPeer};
+use crate::session_drive::{
+    Bind, DriverPump, IpEndpoint, LinkOpenError, LinkProto, Locator, SlotStack,
+};
 
 /// The largest UDP payload the session receives in one datagram: the transport's own ceiling, so a
 /// whole batch always fits.
@@ -608,7 +610,7 @@ impl<S: DatagramSocket + 'static> UdpStack<S> {
     /// sends going to `peer`. What the session host's `dial` is given to open its socket. A table
     /// with no buffer free, like a platform with no descriptor, is [`LinkOpenError::Exhausted`],
     /// and whatever was claimed before the refusal goes back with it.
-    pub fn bind_initiator(&self, peer: UdpPeer) -> Result<FixedUdpDriver<S>, LinkOpenError> {
+    pub fn bind_initiator(&self, peer: IpEndpoint) -> Result<FixedUdpDriver<S>, LinkOpenError> {
         let rx = self.rx.claim().ok_or(LinkOpenError::Exhausted)?;
         let tx = self.tx.claim().ok_or(LinkOpenError::Exhausted)?;
         let socket = S::bind(self.local, 0).map_err(|_| LinkOpenError::Exhausted)?;
@@ -621,8 +623,13 @@ impl<S: DatagramSocket + 'static> UdpStack<S> {
 
 #[cfg(feature = "session-slot")]
 impl<S: DatagramSocket + 'static> Bind<FixedUdpDriver<S>> for UdpStack<S> {
-    fn bind(&mut self, peer: UdpPeer) -> Result<FixedUdpDriver<S>, LinkOpenError> {
-        self.bind_initiator(peer)
+    fn bind(&mut self, to: Locator) -> Result<FixedUdpDriver<S>, LinkOpenError> {
+        match to.proto {
+            LinkProto::Udp => self.bind_initiator(to.at),
+            // A stack of datagram sockets has no stream to give; one that has both is
+            // `stream_link`'s `IpStack`.
+            LinkProto::Tcp => Err(LinkOpenError::Unsupported),
+        }
     }
 }
 
@@ -1175,34 +1182,42 @@ mod tests {
         static RX: ByteCells<64, 1> = ByteCells::new();
         static TX: ByteCells<32, 1> = ByteCells::new();
 
+        const TO_PEER: IpEndpoint = IpEndpoint {
+            addr: PEER.0,
+            port: PEER.1,
+        };
+
         #[test]
         fn a_dial_claims_both_buffers_and_a_table_with_none_free_refuses() {
             let mut stack = UdpStack::<Loop>::new([10, 0, 0, 2], &RX, &TX);
-            let link = stack
-                .bind(UdpPeer {
-                    addr: PEER.0,
-                    port: PEER.1,
-                })
-                .expect("the first dial");
+            let link = stack.bind(Locator::udp(TO_PEER)).expect("the first dial");
             assert_eq!(link.peer(), Some(PEER));
             assert_eq!(link.link_mtu(), 32);
             assert_eq!(link.link_rx_capacity(), 64);
             assert!(matches!(
-                stack.bind(UdpPeer {
-                    addr: PEER.0,
-                    port: PEER.1,
-                }),
+                stack.bind(Locator::udp(TO_PEER)),
                 Err(LinkOpenError::Exhausted)
             ));
             drop(link);
             assert!(
-                stack
-                    .bind(UdpPeer {
-                        addr: PEER.0,
-                        port: PEER.1,
-                    })
-                    .is_ok(),
+                stack.bind(Locator::udp(TO_PEER)).is_ok(),
                 "the buffers go back with the driver"
+            );
+        }
+
+        static TCP_RX: ByteCells<64, 1> = ByteCells::new();
+        static TCP_TX: ByteCells<32, 1> = ByteCells::new();
+
+        #[test]
+        fn a_stack_of_datagram_sockets_refuses_a_stream_and_claims_nothing() {
+            let mut stack = UdpStack::<Loop>::new([10, 0, 0, 2], &TCP_RX, &TCP_TX);
+            assert!(matches!(
+                stack.bind(Locator::tcp(TO_PEER)),
+                Err(LinkOpenError::Unsupported)
+            ));
+            assert!(
+                stack.bind(Locator::udp(TO_PEER)).is_ok(),
+                "both buffers still free"
             );
         }
 
@@ -1212,12 +1227,7 @@ mod tests {
         #[test]
         fn the_fixed_driver_lends_its_one_slot_and_takes_it_back_at_the_send() {
             let mut stack = UdpStack::<Loop>::new([10, 0, 0, 2], &LEND_RX, &LEND_TX);
-            let link = stack
-                .bind(UdpPeer {
-                    addr: PEER.0,
-                    port: PEER.1,
-                })
-                .expect("a dial");
+            let link = stack.bind(Locator::udp(TO_PEER)).expect("a dial");
             let grant = link
                 .tx_slot_acquire(10, Priority::Data)
                 .expect("the one slot");

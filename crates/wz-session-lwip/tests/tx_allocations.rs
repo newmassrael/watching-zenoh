@@ -60,7 +60,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use wz_link_lwip::LwipLink;
-use wz_runtime_coop::session_drive::{SessionDatagramLink, SessionLinks, UdpPeer};
+use wz_runtime_coop::session_drive::{IpEndpoint, Locator, SessionDatagramLink, SessionLinks};
 use wz_runtime_coop::session_runtime::new_session_actions;
 use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
 use wz_session_core::close_reason::CloseReason;
@@ -283,10 +283,10 @@ fn pair(link: &Rc<LwipLink>, port: u16) -> (Side, Side) {
     };
 
     let opened = links
-        .open_initiator(UdpPeer {
+        .open_initiator(Locator::udp(IpEndpoint {
             addr: [127, 0, 0, 1],
             port,
-        })
+        }))
         .expect("open the initiator");
     let initiator = Side {
         actions: Actions::new_generic(opened.sink.clone(), params(0xb1), CoopTime::new(&runtime)),

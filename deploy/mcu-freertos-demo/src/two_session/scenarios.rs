@@ -34,7 +34,7 @@ use wz::link_lwip::rx_sockets::{
 };
 use wz::link_lwip::LwipLink;
 use wz::runtime_coop::session_drive::{
-    spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole, UdpPeer,
+    spawn_session, IpEndpoint, Locator, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
 use wz::runtime_coop::session_runtime::new_session_actions;
 use wz::runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
@@ -253,10 +253,10 @@ impl TwoSessions {
 
         let before = heap_free_bytes();
         let OpenedLink { sink, pump } = links
-            .open_initiator(UdpPeer {
+            .open_initiator(Locator::udp(IpEndpoint {
                 addr: [127, 0, 0, 1],
                 port: router_port,
-            })
+            }))
             .map_err(|e| format!("open client: {:?}", e))?;
         let client_cost = before.saturating_sub(heap_free_bytes());
         let client = SessionLinkActions::<CoopRuntime<Clock>, CoopTime<Clock>>::new_generic(

@@ -551,7 +551,7 @@ mod tests {
             },
         )
         .expect("a fresh node takes its admin keys");
-        let listen_at = wz_runtime_coop::session_drive::UdpPeer {
+        let listen_at = wz_runtime_coop::session_drive::IpEndpoint {
             addr: [10, 0, 0, 2],
             port: 7531,
         };
@@ -640,10 +640,12 @@ mod tests {
 
         // A host reaches the node and the handshake completes.
         let OpenedLink { sink, pump } = host_links
-            .open_initiator(wz_runtime_coop::session_drive::UdpPeer {
-                addr: [10, 0, 0, 2],
-                port: 7541,
-            })
+            .open_initiator(wz_runtime_coop::session_drive::Locator::udp(
+                wz_runtime_coop::session_drive::IpEndpoint {
+                    addr: [10, 0, 0, 2],
+                    port: 7541,
+                },
+            ))
             .expect("host link");
         let host_actions =
             McuActions::<FrozenClock>::new_generic(sink, params(0xc1), CoopTime::new(&runtime));

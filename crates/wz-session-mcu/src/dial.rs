@@ -20,12 +20,15 @@
 //!
 //! ## What this build can dial
 //!
-//! UDP over IPv4, by address. An endpoint with another scheme, or one that
-//! carries upstream's `?metadata` / `#config` parts, is refused as
-//! `Unsupported`: this link honours neither, and dialling it anyway would
-//! quietly drop what the writer asked for. A host name is refused as
-//! `BadAddress`, since the node has no resolver. Both are permanent for the
-//! text, which is why the manager does not retry them.
+//! UDP and TCP over IPv4, by address, as far as the node's stack has the link:
+//! an endpoint is read into a [`Locator`] here, and a stack with no link of its
+//! protocol (an lwIP image asked for `tcp/`) refuses it as `Unsupported`. An
+//! endpoint with another scheme, or one that carries upstream's `?metadata` /
+//! `#config` parts, is refused as `Unsupported` too: this link honours
+//! neither, and dialling it anyway would quietly drop what the writer asked
+//! for. A host name is refused as `BadAddress`, since the node has no resolver.
+//! All three are permanent for the text, which is why the manager does not
+//! retry them; a TCP connection the other end refused is retried.
 //!
 //! ## How an ended session is read
 //!
@@ -37,11 +40,11 @@
 //! re-dial continues the old outage's period instead of starting a fresh one.
 //! It errs towards waiting longer, never towards dialling harder.
 
-use wz_runtime_coop::session_drive::UdpPeer;
+use wz_runtime_coop::session_drive::{IpEndpoint, LinkOpenError, LinkProto, Locator};
 use wz_runtime_coop::{CoopRuntime, CoopTime};
 use wz_session_core::session_actions::SessionLinkActions;
 
-use crate::connect_manager::DialRefused;
+use crate::connect_manager::{DialFailed, DialRefused};
 
 // What reads an endpoint, and the type of a session's action bundle, is written once
 // for every profile. The dialler that OPENS a link and spawns a session is the
@@ -54,11 +57,16 @@ pub use heap::*;
 /// The action bundle of one MCU session.
 pub type McuActions<C> = SessionLinkActions<CoopRuntime<C>, CoopTime<C>>;
 
-/// Read `udp/<a.b.c.d>:<port>` into the peer it names.
-pub fn parse_udp_endpoint(endpoint: &str) -> Result<UdpPeer, DialRefused> {
-    let rest = endpoint
-        .strip_prefix("udp/")
-        .ok_or(DialRefused::Unsupported)?;
+/// Read `udp/<a.b.c.d>:<port>` or `tcp/<a.b.c.d>:<port>` into the locator it
+/// names.
+pub fn parse_locator(endpoint: &str) -> Result<Locator, DialRefused> {
+    let (proto, rest) = if let Some(rest) = endpoint.strip_prefix("udp/") {
+        (LinkProto::Udp, rest)
+    } else if let Some(rest) = endpoint.strip_prefix("tcp/") {
+        (LinkProto::Tcp, rest)
+    } else {
+        return Err(DialRefused::Unsupported);
+    };
     if rest.contains(['?', '#']) {
         return Err(DialRefused::Unsupported);
     }
@@ -78,7 +86,21 @@ pub fn parse_udp_endpoint(endpoint: &str) -> Result<UdpPeer, DialRefused> {
     if parts.next().is_some() {
         return Err(DialRefused::BadAddress);
     }
-    Ok(UdpPeer { addr, port })
+    Ok(Locator {
+        proto,
+        at: IpEndpoint { addr, port },
+    })
+}
+
+/// What a stack's refusal to open a link means for the dial: a protocol it has
+/// no link for is permanent for the endpoint, and an end that did not take the
+/// link or a stack with nothing left to give is a failed attempt of the outage.
+pub fn dial_failed(refused: LinkOpenError) -> DialFailed {
+    match refused {
+        LinkOpenError::Unsupported => DialFailed::Refused(DialRefused::Unsupported),
+        LinkOpenError::Refused => DialFailed::Unreachable,
+        LinkOpenError::Exhausted => DialFailed::Exhausted,
+    }
 }
 
 /// Decimal digits only: `str::parse` would also take a leading `+`.
@@ -95,7 +117,7 @@ mod heap {
     use alloc::rc::Rc;
 
     use wz_runtime_coop::session_drive::{
-        spawn_session, LinkOpenError, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
+        spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
     };
     use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopTime};
     use wz_session_core::close_reason::CloseReason;
@@ -103,7 +125,7 @@ mod heap {
     use wz_session_core::session_init_params::SessionInitParams;
     use wz_session_core::session_timeouts::SessionTimeouts;
 
-    use super::{parse_udp_endpoint, McuActions};
+    use super::{dial_failed, parse_locator, McuActions};
     use crate::connect_manager::{DialFailed, Dialer, Ended};
 
     /// What a dialled session reports its iterations to — typically
@@ -241,13 +263,10 @@ mod heap {
         type Session = UdpSession<C>;
 
         fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed> {
-            let peer = parse_udp_endpoint(endpoint).map_err(DialFailed::Refused)?;
+            let to = parse_locator(endpoint).map_err(DialFailed::Refused)?;
             // The stack picks the local port, one per session, and may have none
             // left to give: that is a failed attempt of this outage, not a refusal.
-            let OpenedLink { sink, pump } = self
-                .links
-                .open_initiator(peer)
-                .map_err(|LinkOpenError::Exhausted| DialFailed::Exhausted)?;
+            let OpenedLink { sink, pump } = self.links.open_initiator(to).map_err(dial_failed)?;
             let runtime = self.local.runtime();
             let actions =
                 McuActions::<C>::new_generic(sink, (self.params)(), CoopTime::new(runtime));
@@ -299,16 +318,17 @@ mod parse_tests {
     use super::*;
 
     #[test]
-    fn only_udp_to_an_ipv4_address_is_dialable() {
-        std::assert_eq!(
-            parse_udp_endpoint("udp/127.0.0.1:7447"),
-            Ok(UdpPeer {
-                addr: [127, 0, 0, 1],
-                port: 7447
-            })
-        );
+    fn udp_or_tcp_to_an_ipv4_address_is_dialable() {
+        let at = IpEndpoint {
+            addr: [127, 0, 0, 1],
+            port: 7447,
+        };
+        std::assert_eq!(parse_locator("udp/127.0.0.1:7447"), Ok(Locator::udp(at)));
+        std::assert_eq!(parse_locator("tcp/127.0.0.1:7447"), Ok(Locator::tcp(at)));
         for (text, why) in [
-            ("tcp/127.0.0.1:7447", DialRefused::Unsupported),
+            ("tls/127.0.0.1:7447", DialRefused::Unsupported),
+            ("tcp/127.0.0.1:7447?prio=1", DialRefused::Unsupported),
+            ("tcp/router.local:7447", DialRefused::BadAddress),
             ("udp/127.0.0.1:7447#iface=eth0", DialRefused::Unsupported),
             ("udp/127.0.0.1:7447?prio=1", DialRefused::Unsupported),
             ("udp/router.local:7447", DialRefused::BadAddress),
@@ -319,8 +339,18 @@ mod parse_tests {
             ("udp/127.0.0.1.5:7447", DialRefused::BadAddress),
             ("udp/[::1]:7447", DialRefused::BadAddress),
         ] {
-            std::assert_eq!(parse_udp_endpoint(text), Err(why), "{text}");
+            std::assert_eq!(parse_locator(text), Err(why), "{text}");
         }
+    }
+
+    #[test]
+    fn a_stacks_refusal_is_permanent_only_for_a_protocol_it_lacks() {
+        std::assert_eq!(
+            dial_failed(LinkOpenError::Unsupported),
+            DialFailed::Refused(DialRefused::Unsupported)
+        );
+        std::assert_eq!(dial_failed(LinkOpenError::Refused), DialFailed::Unreachable);
+        std::assert_eq!(dial_failed(LinkOpenError::Exhausted), DialFailed::Exhausted);
     }
 }
 
@@ -517,7 +547,7 @@ mod tests {
             fn open_acceptor(&self, _: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
                 Err(LinkOpenError::Exhausted)
             }
-            fn open_initiator(&self, _: UdpPeer) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+            fn open_initiator(&self, _: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
                 Err(LinkOpenError::Exhausted)
             }
         }
@@ -536,7 +566,7 @@ mod tests {
         ));
         // And what is refused is refused before the stack is asked.
         std::assert!(matches!(
-            dialer.dial("tcp/10.0.0.1:7494"),
+            dialer.dial("tls/10.0.0.1:7494"),
             Err(DialFailed::Refused(DialRefused::Unsupported))
         ));
     }

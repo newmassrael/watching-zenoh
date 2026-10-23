@@ -457,7 +457,7 @@ mod tests {
     use wz_codecs::request::{Request, RequestVariant};
     use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
-    use wz_runtime_coop::session_drive::{SessionDatagramLink, UdpPeer};
+    use wz_runtime_coop::session_drive::{IpEndpoint, SessionDatagramLink};
     use wz_session_core::driver_loop::DriverLoopOutcome;
     use wz_session_core::link::BoxedLinkDriver;
     use wz_session_core::network_message::NetworkMessage;
@@ -522,11 +522,11 @@ mod tests {
     #[test]
     fn a_push_reaches_its_subscriber_and_a_reply_leaves_on_the_session() {
         let net = MemoryNetwork::new();
-        let node_at = UdpPeer {
+        let node_at = IpEndpoint {
             addr: [10, 0, 0, 1],
             port: 7471,
         };
-        let peer_at = UdpPeer {
+        let peer_at = IpEndpoint {
             addr: [10, 0, 0, 2],
             port: 7472,
         };

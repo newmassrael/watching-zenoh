@@ -6,7 +6,8 @@
 //! The node of `deploy/zephyr-admin-node/rust/src/fixed_client.rs`: a client of a router that
 //! answers queries, with every table it holds in a `static` this file declares, over the session
 //! host and the dialler every stack shares (`wz_session_mcu::slot_host`, `slot_dial`,
-//! `slot_client`), and the host's sockets as the stack (`wz_runtime_posix::net::PosixStack`).
+//! `slot_client`), and the host's sockets as the stack (`wz_runtime_posix::slot::PosixStack`),
+//! which dials UDP or TCP as the router's locator names.
 //! The node's storage, its factory and its loop are `wz_session_mcu::slot_node`'s, written once
 //! for every platform; this file is the host's part of it: the command line, the console and the
 //! sleep ([`Port`]), and the getter.
@@ -31,11 +32,12 @@
 //! date, the socket and the entry point (`wz-runtime-posix`).
 //!
 //! ```text
-//! host-slot-node <router a.b.c.d:port> [--local a.b.c.d] [--doc KEY:BYTES]...
+//! host-slot-node <router [udp/|tcp/]a.b.c.d:port> [--local a.b.c.d] [--doc KEY:BYTES]...
 //! ```
 //!
-//! It dials `udp/<router>`, declares a queryable under each `--doc` key (at most two), and answers
-//! every query with a document of BYTES bytes under the key the query asked.
+//! It dials the router (over UDP when the address names no scheme), declares a queryable under
+//! each `--doc` key (at most two), and answers every query with a document of BYTES bytes under the
+//! key the query asked.
 #![no_std]
 #![no_main]
 
@@ -43,6 +45,7 @@ use core::cell::OnceCell;
 use core::ffi::{c_char, c_int, CStr};
 use core::fmt::{self, Write};
 
+use wz_runtime_coop::session_drive::{IpEndpoint, Locator};
 use wz_runtime_posix::glue::{log, log_args, yield_us};
 use wz_runtime_posix::slot::PosixStack;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
@@ -50,6 +53,7 @@ use wz_session_core::caps::MAX_QUERYABLES;
 use wz_session_core::connect_endpoints::{ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::entropy::EntropySource;
 use wz_session_mcu::connect_manager::EndpointSource;
+use wz_session_mcu::dial::parse_locator;
 #[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_node::Answering;
 use wz_session_mcu::slot_node::{
@@ -175,7 +179,7 @@ impl NodePort for Port {
 
 /// What the command line asked for.
 struct Args {
-    router: ([u8; 4], u16),
+    router: Locator,
     local: [u8; 4],
     docs: [Option<(&'static str, usize)>; DOCS],
     /// The key to ask, how many times, and how long a query may stay pending (zero is the
@@ -202,18 +206,26 @@ fn parse_ipv4(text: &str) -> Option<[u8; 4]> {
     parts.next().is_none().then_some(out)
 }
 
-/// `a.b.c.d:port`.
-fn parse_peer(text: &str) -> Option<([u8; 4], u16)> {
-    let (ip, port) = text.rsplit_once(':')?;
-    Some((parse_ipv4(ip)?, port.parse().ok()?))
+/// `udp/a.b.c.d:port`, `tcp/a.b.c.d:port`, or `a.b.c.d:port`, which is UDP: the locator the
+/// connect manager dials, read by the dialler's own reader.
+fn parse_router(text: &str) -> Option<Locator> {
+    if text.contains('/') {
+        parse_locator(text).ok()
+    } else {
+        let (ip, port) = text.rsplit_once(':')?;
+        Some(Locator::udp(IpEndpoint {
+            addr: parse_ipv4(ip)?,
+            port: port.parse().ok()?,
+        }))
+    }
 }
 
 fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static str> {
     #[cfg(not(feature = "get"))]
-    const USAGE: &str =
-        "usage: host-slot-node <router a.b.c.d:port> [--local a.b.c.d] [--doc KEY:BYTES]...";
+    const USAGE: &str = "usage: host-slot-node <router [udp/|tcp/]a.b.c.d:port> \
+                         [--local a.b.c.d] [--doc KEY:BYTES]...";
     #[cfg(feature = "get")]
-    const USAGE: &str = "usage: host-slot-node <router a.b.c.d:port> [--local a.b.c.d] \
+    const USAGE: &str = "usage: host-slot-node <router [udp/|tcp/]a.b.c.d:port> [--local a.b.c.d] \
                          [--doc KEY:BYTES]... [--get KEY --count N [--warmup N] [--timeout-ms MS] \
                          [--inflight K] [--mailbox]]";
     let mut router = None;
@@ -279,7 +291,7 @@ fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static 
                 docs[taken] = Some((key, bytes));
                 taken += 1;
             }
-            other => router = Some(parse_peer(other).ok_or(USAGE)?),
+            other => router = Some(parse_router(other).ok_or(USAGE)?),
         }
         at += 1;
     }
@@ -336,8 +348,7 @@ fn run(args: Args) -> i32 {
     }
 
     let mut endpoint = EndpointText::new();
-    let [a, b, c, d] = args.router.0;
-    if write!(endpoint, "udp/{a}.{b}.{c}.{d}:{}", args.router.1).is_err() {
+    if write!(endpoint, "{}", args.router).is_err() {
         log("wz: FAIL - the router endpoint is longer than a locator row");
         return 2;
     }
@@ -386,8 +397,8 @@ fn run(args: Args) -> i32 {
     // to be and the router it dials.
     node.run(&mut Port, &mut app, |port, zid_hex| {
         port.log(format_args!(
-            "HOST-WZ-CLIENT READY {zid_hex} udp/{a}.{b}.{c}.{d}:{}",
-            args.router.1
+            "HOST-WZ-CLIENT READY {zid_hex} {}",
+            args.router
         ));
     })
 }

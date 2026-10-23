@@ -210,14 +210,63 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
     }
 }
 
-/// An IPv4 UDP peer as its four octets and a port: what a dial names, written
-/// in no network stack's address word.
+/// An IPv4 end as its four octets and a port, written in no network stack's
+/// address word. Which protocol reaches it is a [`Locator`]'s to say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UdpPeer {
+pub struct IpEndpoint {
     /// The address, most significant octet first.
     pub addr: [u8; 4],
-    /// The UDP port.
+    /// The port.
     pub port: u16,
+}
+
+/// The protocol of a link, as a locator's scheme names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkProto {
+    /// `udp/`: datagrams.
+    Udp,
+    /// `tcp/`: a byte stream.
+    Tcp,
+}
+
+/// What a dial names: a protocol and the end it reaches, `udp/a.b.c.d:port` or
+/// `tcp/a.b.c.d:port`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Locator {
+    /// The protocol the link speaks.
+    pub proto: LinkProto,
+    /// The end the link reaches.
+    pub at: IpEndpoint,
+}
+
+impl Locator {
+    /// A UDP locator.
+    pub const fn udp(at: IpEndpoint) -> Self {
+        Self {
+            proto: LinkProto::Udp,
+            at,
+        }
+    }
+
+    /// A TCP locator.
+    pub const fn tcp(at: IpEndpoint) -> Self {
+        Self {
+            proto: LinkProto::Tcp,
+            at,
+        }
+    }
+}
+
+/// zenoh's text of the locator, `udp/a.b.c.d:port` or `tcp/a.b.c.d:port`.
+impl core::fmt::Display for Locator {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let scheme = match self.proto {
+            LinkProto::Udp => "udp",
+            LinkProto::Tcp => "tcp",
+        };
+        let [a, b, c, d] = self.at.addr;
+        write!(f, "{scheme}/{a}.{b}.{c}.{d}:{}", self.at.port)
+    }
 }
 
 /// Why a stack could not open a link.
@@ -226,6 +275,13 @@ pub enum LinkOpenError {
     /// The stack has no socket, port or buffer left to give. Worth trying
     /// again later, which is why a dial that meets it is retried.
     Exhausted,
+    /// The stack cannot open a link of the locator's protocol at all (an lwIP
+    /// image asked for `tcp/`). Permanent for the locator: a retry would meet
+    /// the same answer.
+    Unsupported,
+    /// The stack tried and the other end did not take the link (a TCP
+    /// connection refused or unreachable). Worth trying again later.
+    Refused,
 }
 
 /// The two halves of one session link, as a stack opens them: the outbound half
@@ -259,13 +315,14 @@ pub trait SessionLinks {
     /// What the drive loop pumps for a link this stack opened.
     type Pump: SessionDatagramLink + 'static;
 
-    /// A link that accepts: bound on `port`, with no peer until the first
-    /// datagram names one.
+    /// A UDP link that accepts: bound on `port`, with no peer until the first
+    /// `InitSyn` it takes names one.
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError>;
 
-    /// A link that dials `peer`: bound on a port the stack picks, with replies
-    /// and first sends going to `peer`.
-    fn open_initiator(&self, peer: UdpPeer) -> Result<OpenedLink<Self::Pump>, LinkOpenError>;
+    /// A link that dials `to`: on a port the stack picks, with every send going
+    /// to the end it names. A protocol the stack has no link for is
+    /// [`LinkOpenError::Unsupported`].
+    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError>;
 }
 
 /// The handshake role to activate the FSM with before the loop starts.
@@ -1076,14 +1133,15 @@ pub trait SlotStack: 'static {
     ) -> Self::Pump;
 }
 
-/// How a stack opens the driver of a dial: a socket on a port it picks, with replies and first
-/// sends going to `peer`. The socket comes out of whatever the stack keeps for it (lwIP's pool the
-/// image declared; Zephyr's descriptors), and a stack with none left answers
+/// How a stack opens the driver of a dial: a socket on a port it picks, with every send going to
+/// the end the locator names. The socket comes out of whatever the stack keeps for it (lwIP's pool
+/// the image declared; Zephyr's descriptors), and a stack with none left answers
 /// [`LinkOpenError::Exhausted`]. Written beside [`SlotStack`] for the reason that one is.
 #[cfg(feature = "session-slot")]
 pub trait Bind<D> {
-    /// The driver of a link that dials `peer`.
-    fn bind(&mut self, peer: UdpPeer) -> Result<D, LinkOpenError>;
+    /// The driver of a link that dials `to`; a protocol the stack has no link for
+    /// is [`LinkOpenError::Unsupported`].
+    fn bind(&mut self, to: Locator) -> Result<D, LinkOpenError>;
 }
 
 /// The pump of a stack whose driver is itself the datagram link: the drive loop's calls go to

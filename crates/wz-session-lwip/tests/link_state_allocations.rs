@@ -49,7 +49,7 @@ use wz_link_lwip::rx_sockets::SessionRxPool;
 use wz_link_lwip::rx_sockets::{SESSION_RX_SLOTS, SESSION_RX_SLOT_SIZE};
 use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::{
-    spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole, UdpPeer,
+    spawn_session, IpEndpoint, Locator, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
 use wz_runtime_coop::session_runtime::new_session_actions;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
@@ -259,10 +259,10 @@ fn a_session_pair_from_open_to_teardown(link: Rc<LwipLink>, port: u16) -> bool {
         sink: initiator_sink,
         pump: initiator_pump,
     } = links
-        .open_initiator(UdpPeer {
+        .open_initiator(Locator::udp(IpEndpoint {
             addr: [127, 0, 0, 1],
             port,
-        })
+        }))
         .expect("open the initiator");
     let initiator_actions =
         Actions::new_generic(initiator_sink, params(0xb1), CoopTime::new(&runtime));

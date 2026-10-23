@@ -29,7 +29,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 
 use crate::app_layer::SessionEvents;
 use crate::connect_manager::{DialFailed, Dialer, Ended};
-use crate::dial::parse_udp_endpoint;
+use crate::dial::{dial_failed, parse_locator};
 use crate::slot_host::{DialRefused, OpenedSession, SessionHost};
 
 /// What the node needs from the image to make a session: the entropy source the session's
@@ -176,7 +176,7 @@ where
     // path's frames are not beneath.
     #[inline(never)]
     fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed> {
-        let peer = parse_udp_endpoint(endpoint).map_err(DialFailed::Refused)?;
+        let to = parse_locator(endpoint).map_err(DialFailed::Refused)?;
         let entropy = self.factory.borrow_mut().entropy();
         let params = self.factory.borrow_mut().params();
         let factory = self.factory;
@@ -184,7 +184,7 @@ where
         let opened = self
             .host
             .dial(
-                || bind.bind(peer),
+                || bind.bind(to),
                 entropy,
                 params,
                 SessionDriveConfig {
@@ -195,9 +195,11 @@ where
                 |handle| events_of(factory, handle),
             )
             // Whichever table is full, the node cannot afford a session right now: each table
-            // counted its own refusal, and the endpoint waits its period.
+            // counted its own refusal, and the endpoint waits its period. What the stack said of
+            // the link is the stack's to say.
             .map_err(|refused| match refused {
-                DialRefused::Link(_) | DialRefused::Open(_) => DialFailed::Exhausted,
+                DialRefused::Link(link) => dial_failed(link),
+                DialRefused::Open(_) => DialFailed::Exhausted,
             })?;
         Ok(SlotSession::new(opened))
     }

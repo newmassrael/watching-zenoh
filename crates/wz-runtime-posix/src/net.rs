@@ -5,8 +5,9 @@
 //!
 //! [`PosixUdpSocket`] is the socket `wz_runtime_coop::udp_link` is written against
 //! ([`DatagramSocket`]); the session's link over it is that module's `UdpDriver`, and
-//! `slot::PosixStack` is its `UdpStack` at this socket, the stack the slot profile's session host
-//! is given. Nothing here allocates: the socket is a file descriptor and four words.
+//! `slot::PosixStack` opens it, beside the stream socket of `stream`, as the stack the slot
+//! profile's session host is given. Nothing here allocates: the socket is a file descriptor and
+//! four words.
 //!
 //! Where Zephyr's socket cannot read `errno` (the FFI has no portable reach for it), this one can,
 //! so a non-blocking receive is one `recvfrom` with `MSG_DONTWAIT` and "nothing yet" is the

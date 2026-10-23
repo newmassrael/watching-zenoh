@@ -40,7 +40,9 @@
 
 use core::cell::RefCell;
 
-use wz_runtime_coop::session_drive::{LinkOpenError, SessionDriveConfig, SessionRole, UdpPeer};
+use wz_runtime_coop::session_drive::{
+    LinkOpenError, LinkProto, Locator, SessionDriveConfig, SessionRole,
+};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::adminspace::{write_admin_queryable_key, AdminSessionRef};
@@ -77,8 +79,12 @@ impl<L> Bind<LwipUdpDriver> for LwipBinder<'_, L>
 where
     L: Deref<Target = LwipLink> + Clone + 'static,
 {
-    fn bind(&mut self, peer: UdpPeer) -> Result<LwipUdpDriver, LinkOpenError> {
-        self.links.bind_driver(0, peer)
+    fn bind(&mut self, to: Locator) -> Result<LwipUdpDriver, LinkOpenError> {
+        // lwIP's links here are UDP sockets; a `tcp/` endpoint is not this stack's to dial.
+        match to.proto {
+            LinkProto::Udp => self.links.bind_driver(0, to.at),
+            LinkProto::Tcp => Err(LinkOpenError::Unsupported),
+        }
     }
 }
 

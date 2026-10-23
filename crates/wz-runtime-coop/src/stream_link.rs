@@ -5,15 +5,14 @@
 //! sockets under a cooperative loop, as `udp_link` is for datagrams.
 //!
 //! A platform supplies a [`StreamSocket`]: connect, write, wait, read what is queued. Everything
-//! above the socket is here: [`StreamDriver`] is the session's outbound [`BoxedLinkDriver`] and the
-//! drive loop's [`SessionDatagramLink`] over one connection.
+//! above the socket is here: [`StreamDriver`] is the session's outbound [`BoxedLinkDriver`] and
+//! the drive loop's [`SessionDatagramLink`] over one connection.
 //!
 //! ## The framing
 //!
 //! A stream keeps no message boundaries, so zenoh writes every batch behind its length, a
-//! little-endian `u16` counted inside the batch size
-//! ([`STREAM_BATCH_LENGTH_BYTES`]). The receive gathers what the socket has into the driver's
-//! buffer and hands the session one whole batch at a time, where the buffer holds it; the bytes of
+//! little-endian `u16` counted inside the batch size ([`STREAM_BATCH_LENGTH_BYTES`]). The receive
+//! gathers what the socket has into the driver's buffer and hands the session one whole batch at a time, where the buffer holds it; the bytes of
 //! the next batch, however the stream cut them, stay in front of the buffer for the next receive.
 //! The send writes the length into the headroom the driver asked the session to leave in front of
 //! the frame, so length and batch leave in one write from the slot the session encoded into.
@@ -329,11 +328,13 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
     }
 
     // A driver whose frame storage is declared is bounded by it: the batch it sends is at most a
-    // slot behind the length's room. One that lends nothing builds no frame in its storage and
-    // takes any batch the session hands it.
+    // slot. A batch is counted with its length, as the session's budget counts it (it takes the
+    // length's room out of the batch itself, `batch_envelope_bytes`), so the bound is the whole
+    // slot. One that lends nothing builds no frame in its storage and takes any batch the session
+    // hands it.
     fn link_mtu(&self) -> usize {
         if self.tx.lends() {
-            self.tx.slot_len() - STREAM_BATCH_LENGTH_BYTES
+            self.tx.slot_len()
         } else {
             DEFAULT_LINK_MTU
         }
@@ -655,7 +656,11 @@ mod tests {
         assert_eq!(ends.dst.as_str(), "tcp/10.0.0.1:7447");
         assert!(link.batch_length_prefixed());
         assert_eq!(link.link_rx_capacity(), 34);
-        assert_eq!(link.link_mtu(), 30, "a slot less the length's room");
+        assert_eq!(
+            link.link_mtu(),
+            32,
+            "a whole slot: the length is counted in the batch"
+        );
     }
 
     #[test]

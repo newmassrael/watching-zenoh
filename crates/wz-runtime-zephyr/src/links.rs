@@ -17,7 +17,7 @@
 
 use alloc::rc::Rc;
 
-use wz_runtime_coop::session_drive::{LinkOpenError, OpenedLink, SessionLinks, UdpPeer};
+use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto, Locator, OpenedLink, SessionLinks};
 
 use crate::net::{HeapTx, ZephyrUdpDriver, ZephyrUdpSocket, UDP_RX_CAPACITY};
 
@@ -72,7 +72,7 @@ impl SessionLinks for ZephyrLinks {
     type Pump = Rc<ZephyrUdpDriver>;
 
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
-        // The peer is whoever speaks first; the driver learns it on receive.
+        // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket =
             ZephyrUdpSocket::bind(self.local, port).map_err(|_| LinkOpenError::Exhausted)?;
         let driver = Rc::new(ZephyrUdpDriver::acceptor_with_buffers(
@@ -86,12 +86,17 @@ impl SessionLinks for ZephyrLinks {
         })
     }
 
-    fn open_initiator(&self, peer: UdpPeer) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+        // These links are Zephyr's datagram sockets; no stream socket of Zephyr's is written
+        // over `wz_runtime_coop::stream_link` yet, so a `tcp/` dial is not this stack's.
+        if to.proto != LinkProto::Udp {
+            return Err(LinkOpenError::Unsupported);
+        }
         // Port 0 has the stack choose a free one, one per initiator session.
         let socket = ZephyrUdpSocket::bind(self.local, 0).map_err(|_| LinkOpenError::Exhausted)?;
         let driver = Rc::new(ZephyrUdpDriver::initiator_with_buffers(
             socket,
-            (peer.addr, peer.port),
+            (to.at.addr, to.at.port),
             self.rx_capacity,
             HeapTx::new(self.tx_slots, self.tx_capacity),
         ));

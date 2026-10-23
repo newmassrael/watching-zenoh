@@ -5,7 +5,8 @@
 //! slots of it are out: written once for every link of this crate, the datagram link
 //! (`udp_link`) and the stream link (`stream_link`), because which slot may be lent and when it
 //! comes back is the same decision whatever carries the frame. A link differs only in the bytes it
-//! asks to have left free in front of a frame ([`TxSlotGrant::headroom`]): none for a datagram,
+//! asks to have left free in front of a frame
+//! ([`TxSlotGrant::headroom`](wz_session_core::link::TxSlotGrant::headroom)): none for a datagram,
 //! whose socket writes its own headers, and the length a streamed batch carries for a stream.
 
 use core::cell::Cell;

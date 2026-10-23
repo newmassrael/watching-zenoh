@@ -128,6 +128,10 @@ pub enum DialFailed {
     /// buffer). Counted as a failed attempt of the same outage, so the
     /// endpoint waits its next period, as a dial that never answered would.
     Exhausted,
+    /// The other end did not take the link (a TCP connection refused or
+    /// unreachable). A failed attempt of the same outage, as `Exhausted` is:
+    /// the endpoint waits its next period.
+    Unreachable,
 }
 
 /// How a session that was dialled has ended.
@@ -290,7 +294,7 @@ impl<D: Dialer> ConnectManager<D> {
                             period: *period,
                         },
                         Err(DialFailed::Refused(why)) => State::Refused(why),
-                        Err(DialFailed::Exhausted) => {
+                        Err(DialFailed::Exhausted | DialFailed::Unreachable) => {
                             let mut period = *period;
                             let wait = period.next_ms();
                             State::Waiting {

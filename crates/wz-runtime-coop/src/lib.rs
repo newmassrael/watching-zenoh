@@ -289,6 +289,11 @@ pub mod link_storage;
 #[cfg(feature = "session-unicast")]
 pub mod stream_link;
 
+// The two links above as one stack of the slot profile's session host: a dial names its protocol,
+// and the stack opens that link into the same session slots.
+#[cfg(all(feature = "session-unicast", feature = "session-slot"))]
+pub mod ip_stack;
+
 // The multicast group session's seam to the network stack, the twin of
 // `session_drive::SessionDatagramLink`. The trait carries no dependency and no
 // allocator, so it is not feature-gated: a stack's crate names it to supply a

@@ -18,7 +18,7 @@
 use core::ops::Deref;
 
 use wz_link_lwip::LwipLink;
-use wz_runtime_coop::session_drive::{PumpSlots, SessionDriveConfig, UdpPeer};
+use wz_runtime_coop::session_drive::{IpEndpoint, PumpSlots, SessionDriveConfig};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::driver_loop::IterationEvent;
@@ -119,14 +119,14 @@ where
             .open(driver, Some(lane), entropy, params, config, on_event)
     }
 
-    /// Dial `peer`: bind a socket on a port the stack picks (out of the pool the image
+    /// Dial `peer` over UDP: bind a socket on a port the stack picks (out of the pool the image
     /// declared, so a full pool is [`DialRefused::Link`]), then open the session over it. The
     /// socket is bound before any table is claimed and is given back when one refuses; the
     /// `InitSyn` leaves only once the session's task first runs.
     pub fn dial<F>(
         &self,
         links: &LwipLinks<L>,
-        peer: UdpPeer,
+        peer: IpEndpoint,
         entropy: E,
         params: SessionInitParams,
         config: SessionDriveConfig,

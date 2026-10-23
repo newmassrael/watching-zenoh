@@ -409,7 +409,7 @@ mod tests {
     use wz_codecs::request::{Request, RequestVariant};
     use wz_codecs::wireexpr::{Wireexpr, WireexprVariant};
     use wz_codecs::wireexpr_nonlocal::WireexprNonlocal;
-    use wz_runtime_coop::session_drive::{SessionDatagramLink, UdpPeer};
+    use wz_runtime_coop::session_drive::{IpEndpoint, SessionDatagramLink};
     use wz_runtime_coop::{ClockSource, CoopRuntime, CoopTime};
     use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
     use wz_session_core::link::BoxedLinkDriver;
@@ -521,11 +521,11 @@ mod tests {
         static WRITES_OFF: WritesOff = WritesOff;
 
         let net = MemoryNetwork::new();
-        let node_at = UdpPeer {
+        let node_at = IpEndpoint {
             addr: [10, 0, 0, 1],
             port: 7481,
         };
-        let peer_at = UdpPeer {
+        let peer_at = IpEndpoint {
             addr: [10, 0, 0, 2],
             port: 7482,
         };
@@ -635,11 +635,11 @@ mod tests {
         static CONFIG: FixedConfig = FixedConfig;
         static WRITES_OFF: WritesOff = WritesOff;
         let net = MemoryNetwork::new();
-        let node_at = UdpPeer {
+        let node_at = IpEndpoint {
             addr: [10, 0, 0, 1],
             port: 7491,
         };
-        let peer_at = UdpPeer {
+        let peer_at = IpEndpoint {
             addr: [10, 0, 0, 2],
             port: 7492,
         };

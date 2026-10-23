@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, OnceCell, RefCell};
 
 use wz_runtime_coop::session_drive::{
-    LinkOpenError, OpenedLink, SessionDatagramLink, SessionLinks, UdpPeer,
+    IpEndpoint, LinkOpenError, LinkProto, Locator, OpenedLink, SessionDatagramLink, SessionLinks,
 };
 use wz_session_core::datagram_peer::{DatagramVerdict, ForeignCounts, PeerBinding};
 use wz_session_core::link::{
@@ -36,7 +36,7 @@ use wz_session_core::reliability::Reliability;
 
 /// One datagram waiting at an end: who sent it and what it carries.
 struct Waiting {
-    from: UdpPeer,
+    from: IpEndpoint,
     bytes: Vec<u8>,
 }
 
@@ -67,8 +67,8 @@ impl MemoryNetwork {
     /// already bound there.
     pub fn bind(
         self: &Rc<Self>,
-        local: UdpPeer,
-        peer: Option<UdpPeer>,
+        local: IpEndpoint,
+        peer: Option<IpEndpoint>,
     ) -> Result<Rc<MemoryEnd>, LinkOpenError> {
         let mut queues = self.queues.borrow_mut();
         if queues.contains_key(&(local.addr, local.port)) {
@@ -84,13 +84,13 @@ impl MemoryNetwork {
     pub fn bind_ephemeral(
         self: &Rc<Self>,
         addr: [u8; 4],
-        peer: Option<UdpPeer>,
+        peer: Option<IpEndpoint>,
     ) -> Result<Rc<MemoryEnd>, LinkOpenError> {
         let mut queues = self.queues.borrow_mut();
         let port = self
             .next_unclaimed_port(&queues, addr)
             .ok_or(LinkOpenError::Exhausted)?;
-        Ok(self.claim(&mut queues, UdpPeer { addr, port }, peer))
+        Ok(self.claim(&mut queues, IpEndpoint { addr, port }, peer))
     }
 
     /// Register `local`'s queue and build the end that owns it. The caller has
@@ -98,8 +98,8 @@ impl MemoryNetwork {
     fn claim(
         self: &Rc<Self>,
         queues: &mut Queues,
-        local: UdpPeer,
-        peer: Option<UdpPeer>,
+        local: IpEndpoint,
+        peer: Option<IpEndpoint>,
     ) -> Rc<MemoryEnd> {
         queues.insert((local.addr, local.port), VecDeque::new());
         let end = MemoryEnd {
@@ -144,7 +144,7 @@ impl MemoryNetwork {
 }
 
 /// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator.
-fn udp_locator(at: UdpPeer) -> String {
+fn udp_locator(at: IpEndpoint) -> String {
     let [a, b, c, d] = at.addr;
     format!("udp/{a}.{b}.{c}.{d}:{}", at.port)
 }
@@ -153,8 +153,8 @@ fn udp_locator(at: UdpPeer) -> String {
 /// drive loop's inbound pump in one object, as Zephyr's socket driver is.
 pub struct MemoryEnd {
     net: Rc<MemoryNetwork>,
-    local: UdpPeer,
-    binding: PeerBinding<UdpPeer>,
+    local: IpEndpoint,
+    binding: PeerBinding<IpEndpoint>,
     endpoints: OnceCell<LinkEndpoints>,
 }
 
@@ -172,7 +172,7 @@ impl MemoryEnd {
     }
 
     /// Where this end sends, once it has a peer.
-    pub fn peer(&self) -> Option<UdpPeer> {
+    pub fn peer(&self) -> Option<IpEndpoint> {
         self.binding.peer()
     }
 
@@ -182,7 +182,7 @@ impl MemoryEnd {
     }
 
     /// This end's own address and port.
-    pub fn local(&self) -> UdpPeer {
+    pub fn local(&self) -> IpEndpoint {
         self.local
     }
 }
@@ -281,7 +281,7 @@ impl SessionLinks for MemoryLinks {
 
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         let end = self.net.bind(
-            UdpPeer {
+            IpEndpoint {
                 addr: self.host,
                 port,
             },
@@ -290,8 +290,12 @@ impl SessionLinks for MemoryLinks {
         Ok(Self::opened(end))
     }
 
-    fn open_initiator(&self, peer: UdpPeer) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
-        let end = self.net.bind_ephemeral(self.host, Some(peer))?;
+    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+        // The network carries datagrams, as the UDP link it stands in for does.
+        if to.proto != LinkProto::Udp {
+            return Err(LinkOpenError::Unsupported);
+        }
+        let end = self.net.bind_ephemeral(self.host, Some(to.at))?;
         Ok(Self::opened(end))
     }
 }
@@ -319,10 +323,10 @@ mod tests {
             .open_acceptor(7447)
             .expect("bind");
         let dialling = MemoryLinks::new(net.clone(), HOST_B)
-            .open_initiator(UdpPeer {
+            .open_initiator(Locator::udp(IpEndpoint {
                 addr: HOST_A,
                 port: 7447,
-            })
+            }))
             .expect("open");
 
         std::assert!(
@@ -368,10 +372,10 @@ mod tests {
         let accepting = MemoryLinks::new(net.clone(), HOST_A)
             .open_acceptor(7447)
             .expect("bind");
-        let to_acceptor = UdpPeer {
+        let to_acceptor = Locator::udp(IpEndpoint {
             addr: HOST_A,
             port: 7447,
-        };
+        });
         let peer = MemoryLinks::new(net.clone(), HOST_B)
             .open_initiator(to_acceptor)
             .expect("open");
@@ -417,10 +421,10 @@ mod tests {
         std::assert!(links.open_acceptor(7447).is_ok(), "free once it is dropped");
 
         let out = links
-            .open_initiator(UdpPeer {
+            .open_initiator(Locator::udp(IpEndpoint {
                 addr: HOST_B,
                 port: 9,
-            })
+            }))
             .expect("open");
         std::assert!(matches!(
             out.sink.send_blocking(b"x", Reliability::Reliable),
@@ -429,11 +433,21 @@ mod tests {
         std::assert_eq!(net.waiting_at(HOST_B, 9), 0, "nobody bound there");
 
         let second = links
-            .open_initiator(UdpPeer {
+            .open_initiator(Locator::udp(IpEndpoint {
                 addr: HOST_B,
                 port: 9,
-            })
+            }))
             .expect("open");
+        std::assert!(
+            matches!(
+                links.open_initiator(Locator::tcp(IpEndpoint {
+                    addr: HOST_B,
+                    port: 9,
+                })),
+                Err(LinkOpenError::Unsupported)
+            ),
+            "a network of datagrams has no stream to give"
+        );
         std::assert_ne!(out.pump.local().port, second.pump.local().port);
     }
 
@@ -444,10 +458,10 @@ mod tests {
     fn an_initiator_gets_a_free_port_stepping_over_taken_ones_and_wrapping() {
         let net = MemoryNetwork::new();
         let links = MemoryLinks::new(net.clone(), HOST_A);
-        let peer = UdpPeer {
+        let peer = Locator::udp(IpEndpoint {
             addr: HOST_B,
             port: 9,
-        };
+        });
 
         let _taken = links
             .open_acceptor(FIRST_EPHEMERAL_PORT)

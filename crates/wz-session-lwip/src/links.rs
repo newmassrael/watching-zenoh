@@ -23,9 +23,9 @@ use wz_link_lwip::rx_sockets::SessionRxSocket;
 #[cfg(feature = "static-link-storage")]
 use wz_link_lwip::rx_sockets::SessionSocketSource;
 use wz_link_lwip::{ipv4_addr_from_octets, LwipLink};
-use wz_runtime_coop::session_drive::{LinkOpenError, UdpPeer};
+use wz_runtime_coop::session_drive::{IpEndpoint, LinkOpenError};
 #[cfg(not(feature = "session-slot"))]
-use wz_runtime_coop::session_drive::{OpenedLink, SessionLinks};
+use wz_runtime_coop::session_drive::{LinkProto, Locator, OpenedLink, SessionLinks};
 
 use crate::driver::{share_socket, DriverHandle, LwipUdpDriver};
 use crate::session_drive::LwipSessionLink;
@@ -88,7 +88,7 @@ impl<L: Deref<Target = LwipLink> + Clone> LwipLinks<L> {
     ///
     /// `peer` is the link's peer, which the initiator dialled; an acceptor's link
     /// has none until its first `InitSyn` ([`Self::bind_accepting_driver`]).
-    pub fn bind_driver(&self, port: u16, peer: UdpPeer) -> Result<LwipUdpDriver, LinkOpenError> {
+    pub fn bind_driver(&self, port: u16, peer: IpEndpoint) -> Result<LwipUdpDriver, LinkOpenError> {
         let socket = self.bind_socket(port)?;
         Ok(LwipUdpDriver::new(
             share_socket(socket),
@@ -169,9 +169,14 @@ impl<L: Deref<Target = LwipLink> + Clone + 'static> SessionLinks for LwipLinks<L
         self.opened(self.bind_accepting_driver(port)?)
     }
 
-    fn open_initiator(&self, peer: UdpPeer) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+        // lwIP's links here are UDP sockets: a stream would be its raw TCP API, which no link
+        // of this crate is written over.
+        if to.proto != LinkProto::Udp {
+            return Err(LinkOpenError::Unsupported);
+        }
         // Port 0 asks lwIP for a free one, one per initiator session.
-        self.opened(self.bind_driver(0, peer)?)
+        self.opened(self.bind_driver(0, to.at)?)
     }
 }
 
@@ -297,10 +302,10 @@ mod tests {
                 sink: initiator_sink,
                 pump: initiator_pump,
             } = links
-                .open_initiator(UdpPeer {
+                .open_initiator(Locator::udp(IpEndpoint {
                     addr: [127, 0, 0, 1],
                     port: 7541,
-                })
+                }))
                 .expect("open initiator");
             let initiator_link: Rc<dyn BoxedLinkDriver> = initiator_sink.clone();
             let initiator_actions = SessionLinkActions::<

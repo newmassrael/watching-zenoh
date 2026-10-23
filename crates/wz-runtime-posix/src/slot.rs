@@ -3,21 +3,23 @@
 
 //! The host's sockets as a stack of the slot profile's session host.
 //!
-//! [`PosixStack`] is `wz_runtime_coop::udp_link`'s `UdpStack` at
-//! [`PosixUdpSocket`], and [`PosixUdpDriver`] is the driver it opens
-//! in the session's slot. The driver claims its receive buffer and the buffer its frames are
-//! encoded into from two tables the image declares, so a dial moves a few words and no bytes.
+//! [`PosixStack`] is `wz_runtime_coop::ip_stack`'s `IpStack` at [`PosixUdpSocket`] and
+//! [`PosixTcpSocket`]: a dial to `udp/...` opens the datagram link, a dial to `tcp/...` the stream
+//! link, and [`PosixDriver`] is either, in the session's slot. Each claims its receive buffer and
+//! the buffer its frames are encoded into from two tables the image declares, so a dial moves a
+//! few words and no bytes.
 //!
 //! Present only under `session-slot`: a build with a heap has the heap forms of the cooperative
 //! runtime, and the session host this stack is given is the slot profile's.
 
 use crate::net::PosixUdpSocket;
+use crate::stream::PosixTcpSocket;
 
 /// The host's sockets as a stack of the slot profile's session host. The image states how long
-/// its link may sleep when the session has nothing due ([`PosixStack::with_idle_wait_ms`]) when
-/// the session is the only thing its loop waits on.
-pub type PosixStack = wz_runtime_coop::udp_link::UdpStack<PosixUdpSocket>;
+/// its datagram links may sleep when the session has nothing due
+/// ([`PosixStack::with_idle_wait_ms`]) when the session is the only thing its loop waits on.
+pub type PosixStack = wz_runtime_coop::ip_stack::IpStack<PosixUdpSocket, PosixTcpSocket>;
 
-/// The driver a [`PosixStack`] opens: the session's link in its slot, with both buffers claimed
-/// from the image's tables.
-pub type PosixUdpDriver = wz_runtime_coop::udp_link::FixedUdpDriver<PosixUdpSocket>;
+/// The driver a [`PosixStack`] opens: the session's link in its slot, a datagram or a stream
+/// link as the dial named, with both buffers claimed from the image's tables.
+pub type PosixDriver = wz_runtime_coop::ip_stack::IpDriver<PosixUdpSocket, PosixTcpSocket>;
