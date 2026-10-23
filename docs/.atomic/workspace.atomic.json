@@ -279950,6 +279950,50 @@
         "What saturates above two queries in flight (about 4,000 to 4,700 a second) is not found: the kit's loop, the link, or the router and responder on a loaded host."
       ]
     },
+    "Round 3466": {
+      "decision_summary": "A consumer claim from the analyzer session: an open dissect handle over a replayed file holds several times the file, growing with the row count. Measured through the C ABI on the consumer's own generator (payload 64, 16 flows): 328 MiB for a 60.9 MiB file of 409,064 rows and 1,287 MiB for 206 MiB of 1,386,564 rows, reached during replay. Every row keeps its decoded PassiveFrame (424 B inline) in a doubling VecDeque, and each stream is kept a second time reassembled. No ceiling helps a viewer of a whole file. The owner chose the long-term structure: two-pass dissection as in Wireshark's epan, with a fixed-size row index, the bytes read from one source, the results of stateful analysis stored sparsely, and rows decoded again on demand under a bounded cache, held equal to the first pass by a differential gate and bounded by a memory gate. This round records the decision, the design note and open-debt item 924; no code moves.",
+      "changes_bullets": [
+        "docs/dissect-row-index.md: new design note. Section 2 holds the measurement and the massif breakdown, section 3 why the present shape holds it, section 4 decisions D1 to D7, section 6 the five steps in order",
+        "Open-debt item 924 filed (analyzer plane, rank critical, on the priority queue); the roster's swept_through moves to 924"
+      ],
+      "verification_bullets": [
+        "C probe against the release cdylib of f6d908d44, built and run on this host: replay then drain then fields_since_window of 8192 until the cursor stops then census, LIMITS_NONE; heap from mallinfo2, RSS from the process status",
+        "409,064 rows, 60.9 MiB file: heap 328 MiB after replay, +20 MiB after the field windows, +0.1 MiB after census, peak RSS 405 MB",
+        "1,386,564 rows, 206 MiB file: heap 1,287 MiB after replay, +67 MiB after the field windows, +0.1 MiB after census, peak RSS 1.36 GB, 8.3 s wall",
+        "massif on 40,000 packets: VecDeque of PassiveFrame buffers 62 percent, reassembled stream 8, per-segment map 7, heap owned by decoded frames 7",
+        "size_of PassiveFrame 424, InboundFrame 104, Carried 96, Option of StreamResync 48, read from a build of the same tree",
+        "debt_plane_census exit 3 naming item 924 as the priority head and the critical head"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Step 1 of docs/dissect-row-index.md: split walk_framing_unit into the pure parse and the stateful judgments, and build the differential gate that decodes every fixture row both ways",
+        "The expected memory after step 4 (about 0.5x the file with a lent buffer, 1.5x with an owned copy) and the re-walk CPU are estimates until step 4 measures them"
+      ],
+      "publishable_decision_summary": "A consumer claim from the analyzer session: an open dissect handle over a replayed file holds several times the file, growing with the row count. Measured through the C ABI on the consumer's own generator (payload 64, 16 flows): 328 MiB for a 60.9 MiB file of 409,064 rows and 1,287 MiB for 206 MiB of 1,386,564 rows, reached during replay. Every row keeps its decoded PassiveFrame (424 B inline) in a doubling VecDeque, and each stream is kept a second time reassembled. No ceiling helps a viewer of a whole file. The owner chose the long-term structure: two-pass dissection as in Wireshark's epan, with a fixed-size row index, the bytes read from one source, the results of stateful analysis stored sparsely, and rows decoded again on demand under a bounded cache, held equal to the first pass by a differential gate and bounded by a memory gate. This round records the decision, the design note and open-debt item 924; no code moves.",
+      "publishable_changes_bullets": [
+        "docs/dissect-row-index.md: new design note. Section 2 holds the measurement and the massif breakdown, section 3 why the present shape holds it, section 4 decisions D1 to D7, section 6 the five steps in order",
+        "Open-debt item 924 filed (analyzer plane, rank critical, on the priority queue); the roster's swept_through moves to 924"
+      ],
+      "publishable_verification_bullets": [
+        "C probe against the release cdylib of f6d908d44, built and run on this host: replay then drain then fields_since_window of 8192 until the cursor stops then census, LIMITS_NONE; heap from mallinfo2, RSS from the process status",
+        "409,064 rows, 60.9 MiB file: heap 328 MiB after replay, +20 MiB after the field windows, +0.1 MiB after census, peak RSS 405 MB",
+        "1,386,564 rows, 206 MiB file: heap 1,287 MiB after replay, +67 MiB after the field windows, +0.1 MiB after census, peak RSS 1.36 GB, 8.3 s wall",
+        "massif on 40,000 packets: VecDeque of PassiveFrame buffers 62 percent, reassembled stream 8, per-segment map 7, heap owned by decoded frames 7",
+        "size_of PassiveFrame 424, InboundFrame 104, Carried 96, Option of StreamResync 48, read from a build of the same tree",
+        "debt_plane_census exit 3 naming item 924 as the priority head and the critical head"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 1 of docs/dissect-row-index.md: split walk_framing_unit into the pure parse and the stateful judgments, and build the differential gate that decodes every fixture row both ways",
+        "The expected memory after step 4 (about 0.5x the file with a lent buffer, 1.5x with an owned copy) and the re-walk CPU are estimates until step 4 measures them"
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
