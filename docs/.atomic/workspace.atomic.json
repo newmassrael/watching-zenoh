@@ -279624,6 +279624,48 @@
         "Not a milestone round: REMAINING stays 2 (api-compat-rust, session-close-ingress)."
       ]
     },
+    "Round 3459": {
+      "decision_summary": "Step 12 of docs/build-configuration.md starts with the ground the Rust API will stand on. The compatibility crate wz-zenoh exists: its library is named zenoh and its version is the pinned zenoh's, so a Rust user's one changed line is a package rename, and it carries no public item yet. The surface gate gains its second half: the normaliser of round 3406 runs over the crate's rustdoc JSON, its surface is committed beside upstream's, and it is held to every upstream arm with no line upstream lacks and the missing count as a ratchet, today all 709 default lines, 965 unstable and 1025 unstable with shared memory. The inventory atom stays reserved with an UNBUILT reason that now names the crate and the gate: a PARTIAL grade was set and withdrawn in this round, because nothing of the API works and the AP-full membership gate's exclusion of an unbuilt atom expires only by its being built.",
+      "changes_bullets": [
+        "crates/wz-zenoh: a workspace member, package wz-zenoh 1.10.1, library zenoh, no public item; Cargo.lock gains its entry.",
+        "scripts/lib/rust_api_surface.py: emit_wz, the committed deploy/upstream-api/wz-zenoh-1.10.1.surface, compatibility_check against every arm with the WZ_MISSING ratchet, all three modes; four selftest cases.",
+        "The inventory reason of api-compat-rust: UNBUILT, naming the crate and the gate.",
+        "scripts/lib/apfull_membership.py: the exclusion's reason and comment say what exists and what does not.",
+        "docs/build-configuration.md: section 2 states the crate, the gate and the grade."
+      ],
+      "verification_bullets": [
+        "Re-emitting the three upstream surfaces from the pinned source changes no byte; the crate's surface is emitted empty; the default and the --upstream runs pass.",
+        "A public function upstream lacks, added to the crate, fails the --upstream run as newly emitted and, once the committed surface is re-emitted, fails the default run as an extra line on all three arms; removed, both pass.",
+        "The crate checks on a build host; the surface gate's selftest, the depth census, the AP-full membership, store reason, review pin, citation and grading gates pass, and validate-workspace shows no new orphan."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Signatures join the normaliser's lines before a slice claims a function complete.",
+        "The first slice (config, open and close, the zid) turns the atom active and PARTIAL and lowers the ratchet, with upstream's examples for it run against zenohd."
+      ],
+      "publishable_decision_summary": "Step 12 of docs/build-configuration.md starts with the ground the Rust API will stand on. The compatibility crate wz-zenoh exists: its library is named zenoh and its version is the pinned zenoh's, so a Rust user's one changed line is a package rename, and it carries no public item yet. The surface gate gains its second half: the normaliser of round 3406 runs over the crate's rustdoc JSON, its surface is committed beside upstream's, and it is held to every upstream arm with no line upstream lacks and the missing count as a ratchet, today all 709 default lines, 965 unstable and 1025 unstable with shared memory. The inventory atom stays reserved with an UNBUILT reason that now names the crate and the gate: a PARTIAL grade was set and withdrawn in this round, because nothing of the API works and the AP-full membership gate's exclusion of an unbuilt atom expires only by its being built.",
+      "publishable_changes_bullets": [
+        "crates/wz-zenoh: a workspace member, package wz-zenoh 1.10.1, library zenoh, no public item; Cargo.lock gains its entry.",
+        "scripts/lib/rust_api_surface.py: emit_wz, the committed deploy/upstream-api/wz-zenoh-1.10.1.surface, compatibility_check against every arm with the WZ_MISSING ratchet, all three modes; four selftest cases.",
+        "The inventory reason of api-compat-rust: UNBUILT, naming the crate and the gate.",
+        "scripts/lib/apfull_membership.py: the exclusion's reason and comment say what exists and what does not.",
+        "docs/build-configuration.md: section 2 states the crate, the gate and the grade."
+      ],
+      "publishable_verification_bullets": [
+        "Re-emitting the three upstream surfaces from the pinned source changes no byte; the crate's surface is emitted empty; the default and the --upstream runs pass.",
+        "A public function upstream lacks, added to the crate, fails the --upstream run as newly emitted and, once the committed surface is re-emitted, fails the default run as an extra line on all three arms; removed, both pass.",
+        "The crate checks on a build host; the surface gate's selftest, the depth census, the AP-full membership, store reason, review pin, citation and grading gates pass, and validate-workspace shows no new orphan."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Signatures join the normaliser's lines before a slice claims a function complete.",
+        "The first slice (config, open and close, the zid) turns the atom active and PARTIAL and lowers the ratchet, with upstream's examples for it run against zenohd."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
