@@ -10,358 +10,358 @@ enum zenoh::sample::Locality
 enum zenoh::sample::SampleKind
 enum zenoh::timestamp_stack::InstrumentationTimestamp
 enum zenoh::timestamp_stack::InterceptionPoint
-fn zenoh::bytes::Encoding::default
-fn zenoh::bytes::Encoding::with_schema
-fn zenoh::bytes::ZBytes::from_reader
-fn zenoh::bytes::ZBytes::is_empty
-fn zenoh::bytes::ZBytes::len
-fn zenoh::bytes::ZBytes::new
-fn zenoh::bytes::ZBytes::reader
-fn zenoh::bytes::ZBytes::slices
-fn zenoh::bytes::ZBytes::to_bytes
-fn zenoh::bytes::ZBytes::try_to_string
-fn zenoh::bytes::ZBytes::writer
-fn zenoh::bytes::ZBytesReader::is_empty
-fn zenoh::bytes::ZBytesReader::remaining
-fn zenoh::bytes::ZBytesWriter::append
-fn zenoh::bytes::ZBytesWriter::finish
-fn zenoh::cancellation::CancellationToken::cancel
-fn zenoh::cancellation::CancellationToken::is_cancelled
-fn zenoh::config::Config::from_deserializer
-fn zenoh::config::Config::from_env
-fn zenoh::config::Config::from_file
-fn zenoh::config::Config::from_json5
-fn zenoh::config::Config::get_json
-fn zenoh::config::Config::insert_json5
-fn zenoh::config::Config::remove
-fn zenoh::config::Config::try_insert_json5_array_item
-fn zenoh::config::Config::try_remove_json5_array_item
-fn zenoh::config::Notifier::insert_json5
-fn zenoh::config::Notifier::lock
-fn zenoh::config::Notifier::new
-fn zenoh::config::Notifier::notify
-fn zenoh::config::Notifier::remove
-fn zenoh::config::Notifier::try_insert_json5_array_item
-fn zenoh::config::Notifier::try_remove_json5_array_item
-fn zenoh::handlers::Callback::call
-fn zenoh::handlers::Callback::new
-fn zenoh::handlers::RingChannel::new
-fn zenoh::handlers::RingChannelHandler::recv
-fn zenoh::handlers::RingChannelHandler::recv_async
-fn zenoh::handlers::RingChannelHandler::recv_deadline
-fn zenoh::handlers::RingChannelHandler::recv_timeout
-fn zenoh::handlers::RingChannelHandler::try_recv
-fn zenoh::handlers::fifo::FifoChannel::new
-fn zenoh::handlers::fifo::FifoChannelHandler::capacity
-fn zenoh::handlers::fifo::FifoChannelHandler::drain
-fn zenoh::handlers::fifo::FifoChannelHandler::into_recv_async
-fn zenoh::handlers::fifo::FifoChannelHandler::into_stream
-fn zenoh::handlers::fifo::FifoChannelHandler::is_disconnected
-fn zenoh::handlers::fifo::FifoChannelHandler::is_empty
-fn zenoh::handlers::fifo::FifoChannelHandler::is_full
-fn zenoh::handlers::fifo::FifoChannelHandler::iter
-fn zenoh::handlers::fifo::FifoChannelHandler::len
-fn zenoh::handlers::fifo::FifoChannelHandler::receiver_count
-fn zenoh::handlers::fifo::FifoChannelHandler::recv
-fn zenoh::handlers::fifo::FifoChannelHandler::recv_async
-fn zenoh::handlers::fifo::FifoChannelHandler::recv_deadline
-fn zenoh::handlers::fifo::FifoChannelHandler::recv_timeout
-fn zenoh::handlers::fifo::FifoChannelHandler::same_channel
-fn zenoh::handlers::fifo::FifoChannelHandler::sender_count
-fn zenoh::handlers::fifo::FifoChannelHandler::stream
-fn zenoh::handlers::fifo::FifoChannelHandler::try_iter
-fn zenoh::handlers::fifo::FifoChannelHandler::try_recv
-fn zenoh::handlers::fifo::RecvStream::capacity
-fn zenoh::handlers::fifo::RecvStream::is_disconnected
-fn zenoh::handlers::fifo::RecvStream::is_empty
-fn zenoh::handlers::fifo::RecvStream::is_full
-fn zenoh::handlers::fifo::RecvStream::len
-fn zenoh::handlers::fifo::RecvStream::same_channel
-fn zenoh::key_expr::KeyExpr::as_keyexpr
-fn zenoh::key_expr::KeyExpr::autocanonize
-fn zenoh::key_expr::KeyExpr::borrowing_clone
-fn zenoh::key_expr::KeyExpr::concat
-fn zenoh::key_expr::KeyExpr::from_boxed_str_unchecked
-fn zenoh::key_expr::KeyExpr::from_str_unchecked
-fn zenoh::key_expr::KeyExpr::from_string_unchecked
-fn zenoh::key_expr::KeyExpr::into_owned
-fn zenoh::key_expr::KeyExpr::join
-fn zenoh::key_expr::KeyExpr::new
-fn zenoh::liveliness::Liveliness::declare_subscriber
-fn zenoh::liveliness::Liveliness::declare_token
-fn zenoh::liveliness::Liveliness::get
-fn zenoh::liveliness::LivelinessGetBuilder::callback
-fn zenoh::liveliness::LivelinessGetBuilder::callback_mut
-fn zenoh::liveliness::LivelinessGetBuilder::cancellation_token
-fn zenoh::liveliness::LivelinessGetBuilder::timeout
-fn zenoh::liveliness::LivelinessGetBuilder::with
-fn zenoh::liveliness::LivelinessSubscriberBuilder::background
-fn zenoh::liveliness::LivelinessSubscriberBuilder::callback
-fn zenoh::liveliness::LivelinessSubscriberBuilder::callback_mut
-fn zenoh::liveliness::LivelinessSubscriberBuilder::history
-fn zenoh::liveliness::LivelinessSubscriberBuilder::with
-fn zenoh::liveliness::LivelinessToken::undeclare
-fn zenoh::matching::MatchingListener::handler
-fn zenoh::matching::MatchingListener::handler_mut
-fn zenoh::matching::MatchingListener::undeclare
-fn zenoh::matching::MatchingListenerBuilder::background
-fn zenoh::matching::MatchingListenerBuilder::callback
-fn zenoh::matching::MatchingListenerBuilder::callback_mut
-fn zenoh::matching::MatchingListenerBuilder::with
-fn zenoh::matching::MatchingListenerUndeclaration::wait_callbacks
-fn zenoh::matching::MatchingStatus::matching
-fn zenoh::open
-fn zenoh::pubsub::PublicationBuilder::allowed_destination
-fn zenoh::pubsub::PublicationBuilder::attachment
-fn zenoh::pubsub::PublicationBuilder::congestion_control
-fn zenoh::pubsub::PublicationBuilder::encoding
-fn zenoh::pubsub::PublicationBuilder::express
-fn zenoh::pubsub::PublicationBuilder::priority
-fn zenoh::pubsub::PublicationBuilder::reliability
-fn zenoh::pubsub::PublicationBuilder::source_info
-fn zenoh::pubsub::PublicationBuilder::timestamp
-fn zenoh::pubsub::PublicationBuilder::timestamp_instrumentation
-fn zenoh::pubsub::Publisher::congestion_control
-fn zenoh::pubsub::Publisher::delete
-fn zenoh::pubsub::Publisher::encoding
-fn zenoh::pubsub::Publisher::id
-fn zenoh::pubsub::Publisher::key_expr
-fn zenoh::pubsub::Publisher::matching_listener
-fn zenoh::pubsub::Publisher::matching_status
-fn zenoh::pubsub::Publisher::priority
-fn zenoh::pubsub::Publisher::put
-fn zenoh::pubsub::Publisher::reliability
-fn zenoh::pubsub::Publisher::undeclare
-fn zenoh::pubsub::PublisherBuilder::allowed_destination
-fn zenoh::pubsub::PublisherBuilder::congestion_control
-fn zenoh::pubsub::PublisherBuilder::encoding
-fn zenoh::pubsub::PublisherBuilder::express
-fn zenoh::pubsub::PublisherBuilder::priority
-fn zenoh::pubsub::PublisherBuilder::reliability
-fn zenoh::pubsub::PublisherUndeclaration::wait_callbacks
-fn zenoh::pubsub::Subscriber::handler
-fn zenoh::pubsub::Subscriber::handler_mut
-fn zenoh::pubsub::Subscriber::id
-fn zenoh::pubsub::Subscriber::key_expr
-fn zenoh::pubsub::Subscriber::undeclare
-fn zenoh::pubsub::SubscriberBuilder::allowed_origin
-fn zenoh::pubsub::SubscriberBuilder::background
-fn zenoh::pubsub::SubscriberBuilder::callback
-fn zenoh::pubsub::SubscriberBuilder::callback_mut
-fn zenoh::pubsub::SubscriberBuilder::with
-fn zenoh::pubsub::SubscriberUndeclaration::wait_callbacks
-fn zenoh::query::Querier::accept_replies
-fn zenoh::query::Querier::congestion_control
-fn zenoh::query::Querier::get
-fn zenoh::query::Querier::id
-fn zenoh::query::Querier::key_expr
-fn zenoh::query::Querier::matching_listener
-fn zenoh::query::Querier::matching_status
-fn zenoh::query::Querier::priority
-fn zenoh::query::Querier::undeclare
-fn zenoh::query::QuerierBuilder::accept_replies
-fn zenoh::query::QuerierBuilder::allowed_destination
-fn zenoh::query::QuerierBuilder::congestion_control
-fn zenoh::query::QuerierBuilder::consolidation
-fn zenoh::query::QuerierBuilder::express
-fn zenoh::query::QuerierBuilder::priority
-fn zenoh::query::QuerierBuilder::target
-fn zenoh::query::QuerierBuilder::timeout
-fn zenoh::query::QuerierGetBuilder::attachment
-fn zenoh::query::QuerierGetBuilder::callback
-fn zenoh::query::QuerierGetBuilder::callback_mut
-fn zenoh::query::QuerierGetBuilder::cancellation_token
-fn zenoh::query::QuerierGetBuilder::encoding
-fn zenoh::query::QuerierGetBuilder::parameters
-fn zenoh::query::QuerierGetBuilder::payload
-fn zenoh::query::QuerierGetBuilder::source_info
-fn zenoh::query::QuerierGetBuilder::timestamp_instrumentation
-fn zenoh::query::QuerierGetBuilder::with
-fn zenoh::query::QuerierUndeclaration::wait_callbacks
-fn zenoh::query::Query::accepts_replies
-fn zenoh::query::Query::attachment
-fn zenoh::query::Query::attachment_mut
-fn zenoh::query::Query::congestion_control
-fn zenoh::query::Query::encoding
-fn zenoh::query::Query::express
-fn zenoh::query::Query::key_expr
-fn zenoh::query::Query::parameters
-fn zenoh::query::Query::payload
-fn zenoh::query::Query::payload_mut
-fn zenoh::query::Query::priority
-fn zenoh::query::Query::reply
-fn zenoh::query::Query::reply_del
-fn zenoh::query::Query::reply_err
-fn zenoh::query::Query::selector
-fn zenoh::query::Query::source_info
-fn zenoh::query::Query::timestamp_stack
-fn zenoh::query::QueryConsolidation::mode
-fn zenoh::query::Queryable::handler
-fn zenoh::query::Queryable::handler_mut
-fn zenoh::query::Queryable::id
-fn zenoh::query::Queryable::key_expr
-fn zenoh::query::Queryable::undeclare
-fn zenoh::query::QueryableBuilder::allowed_origin
-fn zenoh::query::QueryableBuilder::background
-fn zenoh::query::QueryableBuilder::callback
-fn zenoh::query::QueryableBuilder::callback_mut
-fn zenoh::query::QueryableBuilder::complete
-fn zenoh::query::QueryableBuilder::with
-fn zenoh::query::QueryableUndeclaration::wait_callbacks
-fn zenoh::query::Reply::into_result
-fn zenoh::query::Reply::replier_id
-fn zenoh::query::Reply::result
-fn zenoh::query::Reply::result_mut
-fn zenoh::query::ReplyBuilder::attachment
-fn zenoh::query::ReplyBuilder::congestion_control
-fn zenoh::query::ReplyBuilder::encoding
-fn zenoh::query::ReplyBuilder::express
-fn zenoh::query::ReplyBuilder::priority
-fn zenoh::query::ReplyBuilder::source_info
-fn zenoh::query::ReplyBuilder::timestamp
-fn zenoh::query::ReplyErrBuilder::encoding
-fn zenoh::query::ReplyError::encoding
-fn zenoh::query::ReplyError::payload
-fn zenoh::query::ReplyError::payload_mut
-fn zenoh::query::ReplyError::timestamp_stack
-fn zenoh::query::Selector::borrowed
-fn zenoh::query::Selector::into_owned
-fn zenoh::query::Selector::key_expr
-fn zenoh::query::Selector::owned
-fn zenoh::query::Selector::parameters
-fn zenoh::query::Selector::split
-fn zenoh::sample::Sample::attachment
-fn zenoh::sample::Sample::attachment_mut
-fn zenoh::sample::Sample::congestion_control
-fn zenoh::sample::Sample::encoding
-fn zenoh::sample::Sample::express
-fn zenoh::sample::Sample::key_expr
-fn zenoh::sample::Sample::kind
-fn zenoh::sample::Sample::payload
-fn zenoh::sample::Sample::payload_mut
-fn zenoh::sample::Sample::priority
-fn zenoh::sample::Sample::reliability
-fn zenoh::sample::Sample::source_info
-fn zenoh::sample::Sample::timestamp
-fn zenoh::sample::Sample::timestamp_stack
-fn zenoh::sample::SampleBuilder::attachment
-fn zenoh::sample::SampleBuilder::congestion_control
-fn zenoh::sample::SampleBuilder::delete
-fn zenoh::sample::SampleBuilder::encoding
-fn zenoh::sample::SampleBuilder::express
-fn zenoh::sample::SampleBuilder::keyexpr
-fn zenoh::sample::SampleBuilder::payload
-fn zenoh::sample::SampleBuilder::priority
-fn zenoh::sample::SampleBuilder::put
-fn zenoh::sample::SampleBuilder::reliability
-fn zenoh::sample::SampleBuilder::source_info
-fn zenoh::sample::SampleBuilder::timestamp
-fn zenoh::sample::SampleBuilder::timestamp_instrumentation
-fn zenoh::sample::SourceInfo::new
-fn zenoh::sample::SourceInfo::source_id
-fn zenoh::sample::SourceInfo::source_sn
-fn zenoh::scout
-fn zenoh::scouting::Scout::stop
-fn zenoh::scouting::ScoutBuilder::callback
-fn zenoh::scouting::ScoutBuilder::callback_mut
-fn zenoh::scouting::ScoutBuilder::with
-fn zenoh::scouting::scout
-fn zenoh::session::CloseBuilder::wait_callbacks
-fn zenoh::session::Link::auth_identifier
-fn zenoh::session::Link::dst
-fn zenoh::session::Link::group
-fn zenoh::session::Link::interfaces
-fn zenoh::session::Link::is_streamed
-fn zenoh::session::Link::mtu
-fn zenoh::session::Link::priorities
-fn zenoh::session::Link::reliability
-fn zenoh::session::Link::src
-fn zenoh::session::Link::zid
-fn zenoh::session::LinkEvent::kind
-fn zenoh::session::LinkEvent::link
-fn zenoh::session::LinkEvent::link_mut
-fn zenoh::session::LinkEventsListener::handler
-fn zenoh::session::LinkEventsListener::handler_mut
-fn zenoh::session::LinkEventsListener::undeclare
-fn zenoh::session::LinkEventsListenerBuilder::background
-fn zenoh::session::LinkEventsListenerBuilder::callback
-fn zenoh::session::LinkEventsListenerBuilder::callback_mut
-fn zenoh::session::LinkEventsListenerBuilder::history
-fn zenoh::session::LinkEventsListenerBuilder::transport
-fn zenoh::session::LinkEventsListenerBuilder::with
-fn zenoh::session::LinkEventsListenerUndeclaration::wait_callbacks
-fn zenoh::session::LinksBuilder::transport
-fn zenoh::session::OpenBuilder::with_timestamp_callback
-fn zenoh::session::Session::close
-fn zenoh::session::Session::config
-fn zenoh::session::Session::declare_keyexpr
-fn zenoh::session::Session::declare_publisher
-fn zenoh::session::Session::declare_querier
-fn zenoh::session::Session::declare_queryable
-fn zenoh::session::Session::declare_subscriber
-fn zenoh::session::Session::delete
-fn zenoh::session::Session::get
-fn zenoh::session::Session::id
-fn zenoh::session::Session::info
-fn zenoh::session::Session::is_closed
-fn zenoh::session::Session::liveliness
-fn zenoh::session::Session::new_timestamp
-fn zenoh::session::Session::put
-fn zenoh::session::Session::undeclare
-fn zenoh::session::Session::zid
-fn zenoh::session::SessionGetBuilder::accept_replies
-fn zenoh::session::SessionGetBuilder::allowed_destination
-fn zenoh::session::SessionGetBuilder::attachment
-fn zenoh::session::SessionGetBuilder::callback
-fn zenoh::session::SessionGetBuilder::callback_mut
-fn zenoh::session::SessionGetBuilder::cancellation_token
-fn zenoh::session::SessionGetBuilder::congestion_control
-fn zenoh::session::SessionGetBuilder::consolidation
-fn zenoh::session::SessionGetBuilder::encoding
-fn zenoh::session::SessionGetBuilder::express
-fn zenoh::session::SessionGetBuilder::payload
-fn zenoh::session::SessionGetBuilder::priority
-fn zenoh::session::SessionGetBuilder::source_info
-fn zenoh::session::SessionGetBuilder::target
-fn zenoh::session::SessionGetBuilder::timeout
-fn zenoh::session::SessionGetBuilder::timestamp_instrumentation
-fn zenoh::session::SessionGetBuilder::with
-fn zenoh::session::SessionInfo::link_events_listener
-fn zenoh::session::SessionInfo::links
-fn zenoh::session::SessionInfo::locators
-fn zenoh::session::SessionInfo::peers_zid
-fn zenoh::session::SessionInfo::routers_zid
-fn zenoh::session::SessionInfo::transport_events_listener
-fn zenoh::session::SessionInfo::transports
-fn zenoh::session::SessionInfo::zid
-fn zenoh::session::Transport::is_multicast
-fn zenoh::session::Transport::is_qos
-fn zenoh::session::Transport::whatami
-fn zenoh::session::Transport::zid
-fn zenoh::session::TransportEvent::kind
-fn zenoh::session::TransportEvent::transport
-fn zenoh::session::TransportEvent::transport_mut
-fn zenoh::session::TransportEventsListener::handler
-fn zenoh::session::TransportEventsListener::handler_mut
-fn zenoh::session::TransportEventsListener::undeclare
-fn zenoh::session::TransportEventsListenerBuilder::background
-fn zenoh::session::TransportEventsListenerBuilder::callback
-fn zenoh::session::TransportEventsListenerBuilder::callback_mut
-fn zenoh::session::TransportEventsListenerBuilder::history
-fn zenoh::session::TransportEventsListenerBuilder::with
-fn zenoh::session::TransportEventsListenerUndeclaration::wait_callbacks
-fn zenoh::session::open
-fn zenoh::timestamp_stack::TimestampInstrumentation::is_instrumented
-fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::build
-fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::new
-fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::set_receive
-fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::set_route
-fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::set_send
-fn zenoh::timestamp_stack::TimestampStack::instrumentation
-fn zenoh::timestamp_stack::TimestampStack::records
-fn zenoh::timestamp_stack::TimestampStackRecord::is_custom
-fn zenoh::timestamp_stack::TimestampStackRecord::point
-fn zenoh::timestamp_stack::TimestampStackRecord::timestamp
+fn zenoh::bytes::Encoding::default() -> Self ; const ; in impl zenoh::bytes::Encoding
+fn zenoh::bytes::Encoding::with_schema<S>(Self, S) -> Self where S: core::convert::Into<alloc::string::String> ; in impl zenoh::bytes::Encoding
+fn zenoh::bytes::ZBytes::from_reader<R>(R) -> core::result::Result<Self, std::io::error::Error> where R: std::io::Read ; in impl zenoh::bytes::ZBytes
+fn zenoh::bytes::ZBytes::is_empty(&Self) -> bool ; in impl zenoh::bytes::ZBytes
+fn zenoh::bytes::ZBytes::len(&Self) -> usize ; in impl zenoh::bytes::ZBytes
+fn zenoh::bytes::ZBytes::new() -> Self ; const ; in impl zenoh::bytes::ZBytes
+fn zenoh::bytes::ZBytes::reader(&Self) -> zenoh::bytes::ZBytesReader<'_> ; in impl zenoh::bytes::ZBytes
+fn zenoh::bytes::ZBytes::slices(&Self) -> zenoh::bytes::ZBytesSliceIterator<'_> ; in impl zenoh::bytes::ZBytes
+fn zenoh::bytes::ZBytes::to_bytes(&Self) -> alloc::borrow::Cow<'_, [u8]> ; in impl zenoh::bytes::ZBytes
+fn zenoh::bytes::ZBytes::try_to_string(&Self) -> core::result::Result<alloc::borrow::Cow<'_, str>, core::str::error::Utf8Error> ; in impl zenoh::bytes::ZBytes
+fn zenoh::bytes::ZBytes::writer() -> zenoh::bytes::ZBytesWriter ; in impl zenoh::bytes::ZBytes
+fn zenoh::bytes::ZBytesReader::is_empty(&Self) -> bool ; in impl zenoh::bytes::ZBytesReader<'_>
+fn zenoh::bytes::ZBytesReader::remaining(&Self) -> usize ; in impl zenoh::bytes::ZBytesReader<'_>
+fn zenoh::bytes::ZBytesWriter::append(&mut Self, zenoh::bytes::ZBytes) ; in impl zenoh::bytes::ZBytesWriter
+fn zenoh::bytes::ZBytesWriter::finish(Self) -> zenoh::bytes::ZBytes ; in impl zenoh::bytes::ZBytesWriter
+fn zenoh::cancellation::CancellationToken::cancel(&Self) -> zenoh::api::cancellation::CancelResult ; in impl zenoh::cancellation::CancellationToken
+fn zenoh::cancellation::CancellationToken::is_cancelled(&Self) -> bool ; in impl zenoh::cancellation::CancellationToken
+fn zenoh::config::Config::from_deserializer<'0, D: serde_core::de::Deserializer<'0>>(D) -> core::result::Result<Self, core::result::Result<Self, <D as serde_core::de::Deserializer>::Error>> where Self: serde_core::de::Deserialize<'0> ; in impl zenoh::config::Config
+fn zenoh::config::Config::from_env() -> zenoh::Result<Self> ; in impl zenoh::config::Config
+fn zenoh::config::Config::from_file<P: core::convert::AsRef<std::path::Path>>(P) -> zenoh::Result<Self> ; in impl zenoh::config::Config
+fn zenoh::config::Config::from_json5(&str) -> zenoh::Result<zenoh::config::Config> ; in impl zenoh::config::Config
+fn zenoh::config::Config::get_json(&Self, &str) -> zenoh::Result<alloc::string::String> ; in impl zenoh::config::Config
+fn zenoh::config::Config::insert_json5(&mut Self, &str, &str) -> zenoh::Result<()> ; in impl zenoh::config::Config
+fn zenoh::config::Config::remove<K: core::convert::AsRef<str>>(&mut Self, K) -> zenoh::Result<()> ; in impl zenoh::config::Config
+fn zenoh::config::Config::try_insert_json5_array_item(&mut Self, &str, &str) -> zenoh::Result<bool> ; in impl zenoh::config::Config
+fn zenoh::config::Config::try_remove_json5_array_item<K: core::convert::AsRef<str>>(&mut Self, K) -> zenoh::Result<bool> ; in impl zenoh::config::Config
+fn zenoh::config::Notifier::insert_json5(&Self, &str, &str) -> zenoh::Result<()> ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::config::Notifier::lock(&Self) -> std::sync::poison::mutex::MutexGuard<'_, zenoh_config::ExpandedConfig> ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::config::Notifier::new(zenoh_config::ExpandedConfig) -> Self ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::config::Notifier::notify<K: core::convert::AsRef<str>>(&Self, K) ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::config::Notifier::remove<K: core::convert::AsRef<str>>(&Self, K) -> zenoh::Result<()> ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::config::Notifier::try_insert_json5_array_item(&Self, &str, &str) -> zenoh::Result<bool> ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::config::Notifier::try_remove_json5_array_item<K: core::convert::AsRef<str>>(&Self, K) -> zenoh::Result<bool> ; in impl zenoh::config::Notifier<zenoh_config::ExpandedConfig>
+fn zenoh::handlers::Callback::call(&Self, T) ; in impl<T> zenoh::handlers::Callback<T>
+fn zenoh::handlers::Callback::new(alloc::sync::Arc<dyn core::marker::Send + core::marker::Sync + core::ops::function::Fn(T)>) -> Self where T: 'static ; in impl<T> zenoh::handlers::Callback<T>
+fn zenoh::handlers::RingChannel::new(usize) -> Self ; in impl zenoh::handlers::RingChannel
+fn zenoh::handlers::RingChannelHandler::recv(&Self) -> zenoh::Result<T> ; in impl<T> zenoh::handlers::RingChannelHandler<T>
+fn zenoh::handlers::RingChannelHandler::recv_async(&Self) -> zenoh::Result<T> ; async ; in impl<T> zenoh::handlers::RingChannelHandler<T>
+fn zenoh::handlers::RingChannelHandler::recv_deadline(&Self, std::time::Instant) -> zenoh::Result<core::option::Option<T>> ; in impl<T> zenoh::handlers::RingChannelHandler<T>
+fn zenoh::handlers::RingChannelHandler::recv_timeout(&Self, core::time::Duration) -> zenoh::Result<core::option::Option<T>> ; in impl<T> zenoh::handlers::RingChannelHandler<T>
+fn zenoh::handlers::RingChannelHandler::try_recv(&Self) -> zenoh::Result<core::option::Option<T>> ; in impl<T> zenoh::handlers::RingChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannel::new(usize) -> Self ; in impl zenoh::handlers::fifo::FifoChannel
+fn zenoh::handlers::fifo::FifoChannelHandler::capacity(&Self) -> core::option::Option<usize> ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::drain(&Self) -> zenoh::handlers::fifo::Drain<'_, T> ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::into_recv_async<'0>(Self) -> zenoh::handlers::fifo::RecvFut<'0, T> ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::into_stream<'0>(Self) -> zenoh::handlers::fifo::RecvStream<'0, T> ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::is_disconnected(&Self) -> bool ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::is_empty(&Self) -> bool ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::is_full(&Self) -> bool ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::iter(&Self) -> zenoh::handlers::fifo::Iter<'_, T> ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::len(&Self) -> usize ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::receiver_count(&Self) -> usize ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::recv(&Self) -> zenoh::Result<T> ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::recv_async(&Self) -> zenoh::handlers::fifo::RecvFut<'_, T> ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::recv_deadline(&Self, std::time::Instant) -> zenoh::Result<core::option::Option<T>> ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::recv_timeout(&Self, core::time::Duration) -> zenoh::Result<core::option::Option<T>> ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::same_channel(&Self, &Self) -> bool ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::sender_count(&Self) -> usize ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::stream(&Self) -> zenoh::handlers::fifo::RecvStream<'_, T> ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::try_iter(&Self) -> zenoh::handlers::fifo::TryIter<'_, T> ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::FifoChannelHandler::try_recv(&Self) -> zenoh::Result<core::option::Option<T>> ; in impl<T> zenoh::handlers::fifo::FifoChannelHandler<T>
+fn zenoh::handlers::fifo::RecvStream::capacity(&Self) -> core::option::Option<usize> ; in impl<T> zenoh::handlers::fifo::RecvStream<'_, T>
+fn zenoh::handlers::fifo::RecvStream::is_disconnected(&Self) -> bool ; in impl<T> zenoh::handlers::fifo::RecvStream<'_, T>
+fn zenoh::handlers::fifo::RecvStream::is_empty(&Self) -> bool ; in impl<T> zenoh::handlers::fifo::RecvStream<'_, T>
+fn zenoh::handlers::fifo::RecvStream::is_full(&Self) -> bool ; in impl<T> zenoh::handlers::fifo::RecvStream<'_, T>
+fn zenoh::handlers::fifo::RecvStream::len(&Self) -> usize ; in impl<T> zenoh::handlers::fifo::RecvStream<'_, T>
+fn zenoh::handlers::fifo::RecvStream::same_channel(&Self, &Self) -> bool ; in impl<T> zenoh::handlers::fifo::RecvStream<'_, T>
+fn zenoh::key_expr::KeyExpr::as_keyexpr(&Self) -> &zenoh::key_expr::keyexpr ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
+fn zenoh::key_expr::KeyExpr::autocanonize<T, E>(T) -> core::result::Result<Self, E> where Self: core::convert::TryFrom<T, Error = E>, T: zenoh::key_expr::Canonize ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
+fn zenoh::key_expr::KeyExpr::borrowing_clone(&'0 Self) -> Self ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
+fn zenoh::key_expr::KeyExpr::concat<S: ?core::marker::Sized + core::convert::AsRef<str>>(&Self, &S) -> zenoh::Result<zenoh::key_expr::KeyExpr<'static>> ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
+fn zenoh::key_expr::KeyExpr::from_boxed_str_unchecked(alloc::boxed::Box<str>) -> Self ; unsafe ; in impl zenoh::key_expr::KeyExpr<'static>
+fn zenoh::key_expr::KeyExpr::from_str_unchecked(&'0 str) -> Self ; unsafe ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
+fn zenoh::key_expr::KeyExpr::from_string_unchecked(alloc::string::String) -> Self ; unsafe ; in impl zenoh::key_expr::KeyExpr<'static>
+fn zenoh::key_expr::KeyExpr::into_owned(Self) -> zenoh::key_expr::KeyExpr<'static> ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
+fn zenoh::key_expr::KeyExpr::join<S: ?core::marker::Sized + core::convert::AsRef<str>>(&Self, &S) -> zenoh::Result<zenoh::key_expr::KeyExpr<'static>> ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
+fn zenoh::key_expr::KeyExpr::new<T, E>(T) -> core::result::Result<Self, E> where Self: core::convert::TryFrom<T, Error = E> ; in impl<'0> zenoh::key_expr::KeyExpr<'0>
+fn zenoh::liveliness::Liveliness::declare_subscriber<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::liveliness::LivelinessSubscriberBuilder<'1, '0, zenoh::handlers::DefaultHandler> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl<'1> zenoh::liveliness::Liveliness<'1>
+fn zenoh::liveliness::Liveliness::declare_token<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::liveliness::LivelinessTokenBuilder<'1, '0> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl<'1> zenoh::liveliness::Liveliness<'1>
+fn zenoh::liveliness::Liveliness::get<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::liveliness::LivelinessGetBuilder<'1, '0, zenoh::handlers::DefaultHandler> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl<'1> zenoh::liveliness::Liveliness<'1>
+fn zenoh::liveliness::LivelinessGetBuilder::callback<F>(Self, F) -> zenoh::liveliness::LivelinessGetBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Reply>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::query::Reply) ; in impl<'0, '1> zenoh::liveliness::LivelinessGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::liveliness::LivelinessGetBuilder::callback_mut<F>(Self, F) -> zenoh::liveliness::LivelinessGetBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Reply>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::query::Reply) ; in impl<'0, '1> zenoh::liveliness::LivelinessGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::liveliness::LivelinessGetBuilder::cancellation_token(Self, zenoh::cancellation::CancellationToken) -> Self ; in impl<Handler> zenoh::liveliness::LivelinessGetBuilder<'_, '_, Handler>
+fn zenoh::liveliness::LivelinessGetBuilder::timeout(Self, core::time::Duration) -> Self ; in impl<Handler> zenoh::liveliness::LivelinessGetBuilder<'_, '_, Handler>
+fn zenoh::liveliness::LivelinessGetBuilder::with<Handler>(Self, Handler) -> zenoh::liveliness::LivelinessGetBuilder<'0, '1, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::query::Reply> ; in impl<'0, '1> zenoh::liveliness::LivelinessGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::liveliness::LivelinessSubscriberBuilder::background(Self) -> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>, true> ; in impl<'0, '1> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>>
+fn zenoh::liveliness::LivelinessSubscriberBuilder::callback<F>(Self, F) -> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::sample::Sample) ; in impl<'0, '1> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::liveliness::LivelinessSubscriberBuilder::callback_mut<F>(Self, F) -> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::sample::Sample) ; in impl<'0, '1> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::liveliness::LivelinessSubscriberBuilder::history(Self, bool) -> Self ; in impl<Handler, const BACKGROUND: bool> zenoh::liveliness::LivelinessSubscriberBuilder<'_, '_, Handler, BACKGROUND>
+fn zenoh::liveliness::LivelinessSubscriberBuilder::with<Handler>(Self, Handler) -> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::sample::Sample> ; in impl<'0, '1> zenoh::liveliness::LivelinessSubscriberBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::liveliness::LivelinessToken::undeclare(Self) -> impl zenoh::Resolve<zenoh::Result<()>> ; in impl zenoh::liveliness::LivelinessToken
+fn zenoh::matching::MatchingListener::handler(&Self) -> &Handler ; in impl<Handler> zenoh::matching::MatchingListener<Handler>
+fn zenoh::matching::MatchingListener::handler_mut(&mut Self) -> &mut Handler ; in impl<Handler> zenoh::matching::MatchingListener<Handler>
+fn zenoh::matching::MatchingListener::undeclare(Self) -> zenoh::matching::MatchingListenerUndeclaration<Handler> where Handler: core::marker::Send ; in impl<Handler> zenoh::matching::MatchingListener<Handler>
+fn zenoh::matching::MatchingListenerBuilder::background(Self) -> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::Callback<zenoh::matching::MatchingStatus>, true> ; in impl<'0> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::Callback<zenoh::matching::MatchingStatus>>
+fn zenoh::matching::MatchingListenerBuilder::callback<F>(Self, F) -> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::Callback<zenoh::matching::MatchingStatus>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::matching::MatchingStatus) ; in impl<'0> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::DefaultHandler>
+fn zenoh::matching::MatchingListenerBuilder::callback_mut<F>(Self, F) -> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::Callback<zenoh::matching::MatchingStatus>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::matching::MatchingStatus) ; in impl<'0> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::DefaultHandler>
+fn zenoh::matching::MatchingListenerBuilder::with<Handler>(Self, Handler) -> zenoh::matching::MatchingListenerBuilder<'0, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::matching::MatchingStatus> ; in impl<'0> zenoh::matching::MatchingListenerBuilder<'0, zenoh::handlers::DefaultHandler>
+fn zenoh::matching::MatchingListenerUndeclaration::wait_callbacks(Self) -> Self ; in impl<Handler> zenoh::matching::MatchingListenerUndeclaration<Handler>
+fn zenoh::matching::MatchingStatus::matching(&Self) -> bool ; in impl zenoh::matching::MatchingStatus
+fn zenoh::open<TryIntoConfig>(TryIntoConfig) -> zenoh::session::OpenBuilder<TryIntoConfig> where <TryIntoConfig as core::convert::TryInto<zenoh::config::Config>>::Error: core::fmt::Debug, TryIntoConfig: 'static + core::convert::TryInto<zenoh::config::Config> + core::marker::Send
+fn zenoh::pubsub::PublicationBuilder::allowed_destination(Self, zenoh::sample::Locality) -> Self ; in impl<T> zenoh::pubsub::PublicationBuilder<zenoh::pubsub::PublisherBuilder<'_, '_>, T>
+fn zenoh::pubsub::PublicationBuilder::attachment<TA: core::convert::Into<zenoh::bytes::OptionZBytes>>(Self, TA) -> Self ; in impl<P, T> zenoh::pubsub::PublicationBuilder<P, T>
+fn zenoh::pubsub::PublicationBuilder::congestion_control(Self, zenoh::qos::CongestionControl) -> Self ; in impl<T> zenoh::pubsub::PublicationBuilder<zenoh::pubsub::PublisherBuilder<'_, '_>, T>
+fn zenoh::pubsub::PublicationBuilder::encoding<T: core::convert::Into<zenoh::bytes::Encoding>>(Self, T) -> Self ; in impl<P> zenoh::pubsub::PublicationBuilder<P, zenoh::pubsub::PublicationBuilderPut>
+fn zenoh::pubsub::PublicationBuilder::express(Self, bool) -> Self ; in impl<T> zenoh::pubsub::PublicationBuilder<zenoh::pubsub::PublisherBuilder<'_, '_>, T>
+fn zenoh::pubsub::PublicationBuilder::priority(Self, zenoh::qos::Priority) -> Self ; in impl<T> zenoh::pubsub::PublicationBuilder<zenoh::pubsub::PublisherBuilder<'_, '_>, T>
+fn zenoh::pubsub::PublicationBuilder::reliability(Self, zenoh::qos::Reliability) -> Self ; in impl<T> zenoh::pubsub::PublicationBuilder<zenoh::pubsub::PublisherBuilder<'_, '_>, T>
+fn zenoh::pubsub::PublicationBuilder::source_info<TS: core::convert::Into<core::option::Option<zenoh::sample::SourceInfo>>>(Self, TS) -> Self ; in impl<P, T> zenoh::pubsub::PublicationBuilder<P, T>
+fn zenoh::pubsub::PublicationBuilder::timestamp<TS: core::convert::Into<core::option::Option<zenoh::time::Timestamp>>>(Self, TS) -> Self ; in impl<P, T> zenoh::pubsub::PublicationBuilder<P, T>
+fn zenoh::pubsub::PublicationBuilder::timestamp_instrumentation<TS: core::convert::Into<core::option::Option<zenoh::timestamp_stack::TimestampInstrumentation>>>(Self, TS) -> Self ; in impl<P, T> zenoh::pubsub::PublicationBuilder<P, T>
+fn zenoh::pubsub::Publisher::congestion_control(&Self) -> zenoh::qos::CongestionControl ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::Publisher::delete(&Self) -> zenoh::pubsub::PublisherDeleteBuilder<'_> ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::Publisher::encoding(&Self) -> &zenoh::bytes::Encoding ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::Publisher::id(&Self) -> zenoh::session::EntityGlobalId ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::Publisher::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'0> ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::Publisher::matching_listener(&Self) -> zenoh::matching::MatchingListenerBuilder<'_, zenoh::handlers::DefaultHandler> ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::Publisher::matching_status(&Self) -> impl '_ + zenoh::Resolve<zenoh::Result<zenoh::matching::MatchingStatus>> ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::Publisher::priority(&Self) -> zenoh::qos::Priority ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::Publisher::put<IntoZBytes>(&Self, IntoZBytes) -> zenoh::pubsub::PublisherPutBuilder<'_> where IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::Publisher::reliability(&Self) -> zenoh::qos::Reliability ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::Publisher::undeclare(Self) -> zenoh::pubsub::PublisherUndeclaration<'0> ; in impl<'0> zenoh::pubsub::Publisher<'0>
+fn zenoh::pubsub::PublisherBuilder::allowed_destination(Self, zenoh::sample::Locality) -> Self ; in impl zenoh::pubsub::PublisherBuilder<'_, '_>
+fn zenoh::pubsub::PublisherBuilder::congestion_control(Self, zenoh::qos::CongestionControl) -> Self ; in impl zenoh::pubsub::PublisherBuilder<'_, '_>
+fn zenoh::pubsub::PublisherBuilder::encoding<T: core::convert::Into<zenoh::bytes::Encoding>>(Self, T) -> Self ; in impl zenoh::pubsub::PublisherBuilder<'_, '_>
+fn zenoh::pubsub::PublisherBuilder::express(Self, bool) -> Self ; in impl zenoh::pubsub::PublisherBuilder<'_, '_>
+fn zenoh::pubsub::PublisherBuilder::priority(Self, zenoh::qos::Priority) -> Self ; in impl zenoh::pubsub::PublisherBuilder<'_, '_>
+fn zenoh::pubsub::PublisherBuilder::reliability(Self, zenoh::qos::Reliability) -> Self ; in impl zenoh::pubsub::PublisherBuilder<'_, '_>
+fn zenoh::pubsub::PublisherUndeclaration::wait_callbacks(Self) -> Self ; in impl<'0> zenoh::pubsub::PublisherUndeclaration<'0>
+fn zenoh::pubsub::Subscriber::handler(&Self) -> &Handler ; in impl<Handler> zenoh::pubsub::Subscriber<Handler>
+fn zenoh::pubsub::Subscriber::handler_mut(&mut Self) -> &mut Handler ; in impl<Handler> zenoh::pubsub::Subscriber<Handler>
+fn zenoh::pubsub::Subscriber::id(&Self) -> zenoh::session::EntityGlobalId ; in impl<Handler> zenoh::pubsub::Subscriber<Handler>
+fn zenoh::pubsub::Subscriber::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'static> ; in impl<Handler> zenoh::pubsub::Subscriber<Handler>
+fn zenoh::pubsub::Subscriber::undeclare(Self) -> zenoh::pubsub::SubscriberUndeclaration<Handler> where Handler: core::marker::Send ; in impl<Handler> zenoh::pubsub::Subscriber<Handler>
+fn zenoh::pubsub::SubscriberBuilder::allowed_origin(Self, zenoh::sample::Locality) -> Self ; in impl<Handler, const BACKGROUND: bool> zenoh::pubsub::SubscriberBuilder<'_, '_, Handler, BACKGROUND>
+fn zenoh::pubsub::SubscriberBuilder::background(Self) -> zenoh::pubsub::SubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>, true> ; in impl<'0, '1> zenoh::pubsub::SubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>>
+fn zenoh::pubsub::SubscriberBuilder::callback<F>(Self, F) -> zenoh::pubsub::SubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::sample::Sample) ; in impl<'0, '1> zenoh::pubsub::SubscriberBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::pubsub::SubscriberBuilder::callback_mut<F>(Self, F) -> zenoh::pubsub::SubscriberBuilder<'0, '1, zenoh::handlers::Callback<zenoh::sample::Sample>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::sample::Sample) ; in impl<'0, '1> zenoh::pubsub::SubscriberBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::pubsub::SubscriberBuilder::with<Handler>(Self, Handler) -> zenoh::pubsub::SubscriberBuilder<'0, '1, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::sample::Sample> ; in impl<'0, '1> zenoh::pubsub::SubscriberBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::pubsub::SubscriberUndeclaration::wait_callbacks(Self) -> Self ; in impl<Handler> zenoh::pubsub::SubscriberUndeclaration<Handler>
+fn zenoh::query::Querier::accept_replies(&Self) -> zenoh::query::ReplyKeyExpr ; in impl<'0> zenoh::query::Querier<'0>
+fn zenoh::query::Querier::congestion_control(&Self) -> zenoh::qos::CongestionControl ; in impl<'0> zenoh::query::Querier<'0>
+fn zenoh::query::Querier::get(&Self) -> zenoh::query::QuerierGetBuilder<'_, '_, zenoh::handlers::DefaultHandler> ; in impl<'0> zenoh::query::Querier<'0>
+fn zenoh::query::Querier::id(&Self) -> zenoh::session::EntityGlobalId ; in impl<'0> zenoh::query::Querier<'0>
+fn zenoh::query::Querier::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'0> ; in impl<'0> zenoh::query::Querier<'0>
+fn zenoh::query::Querier::matching_listener(&Self) -> zenoh::matching::MatchingListenerBuilder<'_, zenoh::handlers::DefaultHandler> ; in impl<'0> zenoh::query::Querier<'0>
+fn zenoh::query::Querier::matching_status(&Self) -> impl '_ + zenoh::Resolve<zenoh::Result<zenoh::matching::MatchingStatus>> ; in impl<'0> zenoh::query::Querier<'0>
+fn zenoh::query::Querier::priority(&Self) -> zenoh::qos::Priority ; in impl<'0> zenoh::query::Querier<'0>
+fn zenoh::query::Querier::undeclare(Self) -> zenoh::query::QuerierUndeclaration<'0> ; in impl<'0> zenoh::query::Querier<'0>
+fn zenoh::query::QuerierBuilder::accept_replies(Self, zenoh::query::ReplyKeyExpr) -> Self ; in impl zenoh::query::QuerierBuilder<'_, '_>
+fn zenoh::query::QuerierBuilder::allowed_destination(Self, zenoh::sample::Locality) -> Self ; in impl zenoh::query::QuerierBuilder<'_, '_>
+fn zenoh::query::QuerierBuilder::congestion_control(Self, zenoh::qos::CongestionControl) -> Self ; in impl zenoh::query::QuerierBuilder<'_, '_>
+fn zenoh::query::QuerierBuilder::consolidation<QC: core::convert::Into<zenoh::query::QueryConsolidation>>(Self, QC) -> Self ; in impl zenoh::query::QuerierBuilder<'_, '_>
+fn zenoh::query::QuerierBuilder::express(Self, bool) -> Self ; in impl zenoh::query::QuerierBuilder<'_, '_>
+fn zenoh::query::QuerierBuilder::priority(Self, zenoh::qos::Priority) -> Self ; in impl zenoh::query::QuerierBuilder<'_, '_>
+fn zenoh::query::QuerierBuilder::target(Self, zenoh::query::QueryTarget) -> Self ; in impl zenoh::query::QuerierBuilder<'_, '_>
+fn zenoh::query::QuerierBuilder::timeout(Self, core::time::Duration) -> Self ; in impl zenoh::query::QuerierBuilder<'_, '_>
+fn zenoh::query::QuerierGetBuilder::attachment<T: core::convert::Into<zenoh::bytes::OptionZBytes>>(Self, T) -> Self ; in impl<Handler> zenoh::query::QuerierGetBuilder<'_, '_, Handler>
+fn zenoh::query::QuerierGetBuilder::callback<F>(Self, F) -> zenoh::query::QuerierGetBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Reply>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::query::Reply) ; in impl<'0, '1> zenoh::query::QuerierGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::query::QuerierGetBuilder::callback_mut<F>(Self, F) -> zenoh::query::QuerierGetBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Reply>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::query::Reply) ; in impl<'0, '1> zenoh::query::QuerierGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::query::QuerierGetBuilder::cancellation_token(Self, zenoh::cancellation::CancellationToken) -> Self ; in impl<Handler> zenoh::query::QuerierGetBuilder<'_, '_, Handler>
+fn zenoh::query::QuerierGetBuilder::encoding<T: core::convert::Into<zenoh::bytes::Encoding>>(Self, T) -> Self ; in impl<Handler> zenoh::query::QuerierGetBuilder<'_, '_, Handler>
+fn zenoh::query::QuerierGetBuilder::parameters<P>(Self, P) -> Self where P: core::convert::Into<zenoh::query::Parameters<'0>> ; in impl<'0, Handler> zenoh::query::QuerierGetBuilder<'_, '0, Handler>
+fn zenoh::query::QuerierGetBuilder::payload<IntoZBytes>(Self, IntoZBytes) -> Self where IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl<'0, Handler> zenoh::query::QuerierGetBuilder<'_, '0, Handler>
+fn zenoh::query::QuerierGetBuilder::source_info<T: core::convert::Into<core::option::Option<zenoh::sample::SourceInfo>>>(Self, T) -> Self ; in impl<Handler> zenoh::query::QuerierGetBuilder<'_, '_, Handler>
+fn zenoh::query::QuerierGetBuilder::timestamp_instrumentation<TS: core::convert::Into<core::option::Option<zenoh::timestamp_stack::TimestampInstrumentation>>>(Self, TS) -> Self ; in impl<Handler> zenoh::query::QuerierGetBuilder<'_, '_, Handler>
+fn zenoh::query::QuerierGetBuilder::with<Handler>(Self, Handler) -> zenoh::query::QuerierGetBuilder<'0, '1, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::query::Reply> ; in impl<'0, '1> zenoh::query::QuerierGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::query::QuerierUndeclaration::wait_callbacks(Self) -> Self ; in impl<'0> zenoh::query::QuerierUndeclaration<'0>
+fn zenoh::query::Query::accepts_replies(&Self) -> zenoh::query::ReplyKeyExpr ; in impl zenoh::query::Query
+fn zenoh::query::Query::attachment(&Self) -> core::option::Option<&zenoh::bytes::ZBytes> ; in impl zenoh::query::Query
+fn zenoh::query::Query::attachment_mut(&mut Self) -> core::option::Option<&mut zenoh::bytes::ZBytes> ; in impl zenoh::query::Query
+fn zenoh::query::Query::congestion_control(&Self) -> zenoh::qos::CongestionControl ; in impl zenoh::query::Query
+fn zenoh::query::Query::encoding(&Self) -> core::option::Option<&zenoh::bytes::Encoding> ; in impl zenoh::query::Query
+fn zenoh::query::Query::express(&Self) -> bool ; in impl zenoh::query::Query
+fn zenoh::query::Query::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'static> ; in impl zenoh::query::Query
+fn zenoh::query::Query::parameters(&Self) -> &zenoh::query::Parameters<'static> ; in impl zenoh::query::Query
+fn zenoh::query::Query::payload(&Self) -> core::option::Option<&zenoh::bytes::ZBytes> ; in impl zenoh::query::Query
+fn zenoh::query::Query::payload_mut(&mut Self) -> core::option::Option<&mut zenoh::bytes::ZBytes> ; in impl zenoh::query::Query
+fn zenoh::query::Query::priority(&Self) -> zenoh::qos::Priority ; in impl zenoh::query::Query
+fn zenoh::query::Query::reply<'0, TryIntoKeyExpr, IntoZBytes>(&Self, TryIntoKeyExpr, IntoZBytes) -> zenoh::query::ReplyBuilder<'_, '0, zenoh::query::ReplyBuilderPut> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::query::Query
+fn zenoh::query::Query::reply_del<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::query::ReplyBuilder<'_, '0, zenoh::query::ReplyBuilderDelete> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::query::Query
+fn zenoh::query::Query::reply_err<IntoZBytes>(&Self, IntoZBytes) -> zenoh::query::ReplyErrBuilder<'_> where IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl zenoh::query::Query
+fn zenoh::query::Query::selector(&Self) -> zenoh::query::Selector<'_> ; in impl zenoh::query::Query
+fn zenoh::query::Query::source_info(&Self) -> core::option::Option<&zenoh::sample::SourceInfo> ; in impl zenoh::query::Query
+fn zenoh::query::Query::timestamp_stack(&Self) -> core::option::Option<&zenoh::timestamp_stack::TimestampStack> ; in impl zenoh::query::Query
+fn zenoh::query::QueryConsolidation::mode(&Self) -> zenoh::query::ConsolidationMode ; in impl zenoh::query::QueryConsolidation
+fn zenoh::query::Queryable::handler(&Self) -> &Handler ; in impl<Handler> zenoh::query::Queryable<Handler>
+fn zenoh::query::Queryable::handler_mut(&mut Self) -> &mut Handler ; in impl<Handler> zenoh::query::Queryable<Handler>
+fn zenoh::query::Queryable::id(&Self) -> zenoh::session::EntityGlobalId ; in impl<Handler> zenoh::query::Queryable<Handler>
+fn zenoh::query::Queryable::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'static> ; in impl<Handler> zenoh::query::Queryable<Handler>
+fn zenoh::query::Queryable::undeclare(Self) -> zenoh::query::QueryableUndeclaration<Handler> where Handler: core::marker::Send ; in impl<Handler> zenoh::query::Queryable<Handler>
+fn zenoh::query::QueryableBuilder::allowed_origin(Self, zenoh::sample::Locality) -> Self ; in impl<Handler, const BACKGROUND: bool> zenoh::query::QueryableBuilder<'_, '_, Handler, BACKGROUND>
+fn zenoh::query::QueryableBuilder::background(Self) -> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Query>, true> ; in impl<'0, '1> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Query>>
+fn zenoh::query::QueryableBuilder::callback<F>(Self, F) -> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Query>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::query::Query) ; in impl<'0, '1> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::query::QueryableBuilder::callback_mut<F>(Self, F) -> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Query>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::query::Query) ; in impl<'0, '1> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::query::QueryableBuilder::complete(Self, bool) -> Self ; in impl<Handler, const BACKGROUND: bool> zenoh::query::QueryableBuilder<'_, '_, Handler, BACKGROUND>
+fn zenoh::query::QueryableBuilder::with<Handler>(Self, Handler) -> zenoh::query::QueryableBuilder<'0, '1, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::query::Query> ; in impl<'0, '1> zenoh::query::QueryableBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::query::QueryableUndeclaration::wait_callbacks(Self) -> Self ; in impl<Handler> zenoh::query::QueryableUndeclaration<Handler>
+fn zenoh::query::Reply::into_result(Self) -> core::result::Result<zenoh::sample::Sample, zenoh::query::ReplyError> ; in impl zenoh::query::Reply
+fn zenoh::query::Reply::replier_id(&Self) -> core::option::Option<zenoh::session::EntityGlobalId> ; in impl zenoh::query::Reply
+fn zenoh::query::Reply::result(&Self) -> core::result::Result<&zenoh::sample::Sample, &zenoh::query::ReplyError> ; in impl zenoh::query::Reply
+fn zenoh::query::Reply::result_mut(&mut Self) -> core::result::Result<&mut zenoh::sample::Sample, &mut zenoh::query::ReplyError> ; in impl zenoh::query::Reply
+fn zenoh::query::ReplyBuilder::attachment<U: core::convert::Into<zenoh::bytes::OptionZBytes>>(Self, U) -> Self ; in impl<T> zenoh::query::ReplyBuilder<'_, '_, T>
+fn zenoh::query::ReplyBuilder::congestion_control(Self, zenoh::qos::CongestionControl) -> Self ; in impl<T> zenoh::query::ReplyBuilder<'_, '_, T>
+fn zenoh::query::ReplyBuilder::encoding<T: core::convert::Into<zenoh::bytes::Encoding>>(Self, T) -> Self ; in impl zenoh::query::ReplyBuilder<'_, '_, zenoh::query::ReplyBuilderPut>
+fn zenoh::query::ReplyBuilder::express(Self, bool) -> Self ; in impl<T> zenoh::query::ReplyBuilder<'_, '_, T>
+fn zenoh::query::ReplyBuilder::priority(Self, zenoh::qos::Priority) -> Self ; in impl<T> zenoh::query::ReplyBuilder<'_, '_, T>
+fn zenoh::query::ReplyBuilder::source_info<TS: core::convert::Into<core::option::Option<zenoh::sample::SourceInfo>>>(Self, TS) -> Self ; in impl<T> zenoh::query::ReplyBuilder<'_, '_, T>
+fn zenoh::query::ReplyBuilder::timestamp<U: core::convert::Into<core::option::Option<zenoh::time::Timestamp>>>(Self, U) -> Self ; in impl<T> zenoh::query::ReplyBuilder<'_, '_, T>
+fn zenoh::query::ReplyErrBuilder::encoding<T: core::convert::Into<zenoh::bytes::Encoding>>(Self, T) -> Self ; in impl zenoh::query::ReplyErrBuilder<'_>
+fn zenoh::query::ReplyError::encoding(&Self) -> &zenoh::bytes::Encoding ; in impl zenoh::query::ReplyError
+fn zenoh::query::ReplyError::payload(&Self) -> &zenoh::bytes::ZBytes ; in impl zenoh::query::ReplyError
+fn zenoh::query::ReplyError::payload_mut(&mut Self) -> &mut zenoh::bytes::ZBytes ; in impl zenoh::query::ReplyError
+fn zenoh::query::ReplyError::timestamp_stack(&Self) -> core::option::Option<&zenoh::timestamp_stack::TimestampStack> ; in impl zenoh::query::ReplyError
+fn zenoh::query::Selector::borrowed(&'0 zenoh::key_expr::KeyExpr<'0>, &'0 zenoh::query::Parameters<'0>) -> Self ; in impl<'0> zenoh::query::Selector<'0>
+fn zenoh::query::Selector::into_owned(Self) -> zenoh::query::Selector<'static> ; in impl<'0> zenoh::query::Selector<'0>
+fn zenoh::query::Selector::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'0> ; in impl<'0> zenoh::query::Selector<'0>
+fn zenoh::query::Selector::owned<K, P>(K, P) -> Self where K: core::convert::Into<zenoh::key_expr::KeyExpr<'0>>, P: core::convert::Into<zenoh::query::Parameters<'0>> ; in impl<'0> zenoh::query::Selector<'0>
+fn zenoh::query::Selector::parameters(&Self) -> &zenoh::query::Parameters<'0> ; in impl<'0> zenoh::query::Selector<'0>
+fn zenoh::query::Selector::split(Self) -> (zenoh::key_expr::KeyExpr<'0>, zenoh::query::Parameters<'0>) ; in impl<'0> zenoh::query::Selector<'0>
+fn zenoh::sample::Sample::attachment(&Self) -> core::option::Option<&zenoh::bytes::ZBytes> ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::attachment_mut(&mut Self) -> core::option::Option<&mut zenoh::bytes::ZBytes> ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::congestion_control(&Self) -> zenoh::qos::CongestionControl ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::encoding(&Self) -> &zenoh::bytes::Encoding ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::express(&Self) -> bool ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::key_expr(&Self) -> &zenoh::key_expr::KeyExpr<'static> ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::kind(&Self) -> zenoh::sample::SampleKind ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::payload(&Self) -> &zenoh::bytes::ZBytes ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::payload_mut(&mut Self) -> &mut zenoh::bytes::ZBytes ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::priority(&Self) -> zenoh::qos::Priority ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::reliability(&Self) -> zenoh::qos::Reliability ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::source_info(&Self) -> core::option::Option<&zenoh::sample::SourceInfo> ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::timestamp(&Self) -> core::option::Option<&zenoh::time::Timestamp> ; in impl zenoh::sample::Sample
+fn zenoh::sample::Sample::timestamp_stack(&Self) -> core::option::Option<&zenoh::timestamp_stack::TimestampStack> ; in impl zenoh::sample::Sample
+fn zenoh::sample::SampleBuilder::attachment<U: core::convert::Into<zenoh::bytes::OptionZBytes>>(Self, U) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::congestion_control(Self, zenoh::qos::CongestionControl) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::delete<IntoKeyExpr>(IntoKeyExpr) -> zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderDelete> where IntoKeyExpr: core::convert::Into<zenoh::key_expr::KeyExpr<'static>> ; in impl zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderDelete>
+fn zenoh::sample::SampleBuilder::encoding<T: core::convert::Into<zenoh::bytes::Encoding>>(Self, T) -> Self ; in impl zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderPut>
+fn zenoh::sample::SampleBuilder::express(Self, bool) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::keyexpr<IntoKeyExpr>(Self, IntoKeyExpr) -> Self where IntoKeyExpr: core::convert::Into<zenoh::key_expr::KeyExpr<'static>> ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::payload<IntoZBytes>(Self, IntoZBytes) -> Self where IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderPut>
+fn zenoh::sample::SampleBuilder::priority(Self, zenoh::qos::Priority) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::put<IntoKeyExpr, IntoZBytes>(IntoKeyExpr, IntoZBytes) -> zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderPut> where IntoKeyExpr: core::convert::Into<zenoh::key_expr::KeyExpr<'static>>, IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl zenoh::sample::SampleBuilder<zenoh::sample::SampleBuilderPut>
+fn zenoh::sample::SampleBuilder::reliability(Self, zenoh::qos::Reliability) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::source_info<S: core::convert::Into<core::option::Option<zenoh::sample::SourceInfo>>>(Self, S) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::timestamp<U: core::convert::Into<core::option::Option<zenoh::time::Timestamp>>>(Self, U) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SampleBuilder::timestamp_instrumentation<TS: core::convert::Into<core::option::Option<zenoh::timestamp_stack::TimestampInstrumentation>>>(Self, TS) -> Self ; in impl<T> zenoh::sample::SampleBuilder<T>
+fn zenoh::sample::SourceInfo::new(zenoh::session::EntityGlobalId, zenoh::sample::SourceSn) -> Self ; in impl zenoh::sample::SourceInfo
+fn zenoh::sample::SourceInfo::source_id(&Self) -> &zenoh::session::EntityGlobalId ; in impl zenoh::sample::SourceInfo
+fn zenoh::sample::SourceInfo::source_sn(&Self) -> zenoh::sample::SourceSn ; in impl zenoh::sample::SourceInfo
+fn zenoh::scout<I: core::convert::Into<zenoh::config::WhatAmIMatcher>, TryIntoConfig>(I, TryIntoConfig) -> zenoh::scouting::ScoutBuilder<zenoh::handlers::DefaultHandler> where <TryIntoConfig as core::convert::TryInto<zenoh::config::Config>>::Error: core::convert::Into<zenoh::Error>, TryIntoConfig: 'static + core::convert::TryInto<zenoh::config::Config> + core::marker::Send
+fn zenoh::scouting::Scout::stop(Self) ; in impl<Receiver> zenoh::scouting::Scout<Receiver>
+fn zenoh::scouting::ScoutBuilder::callback<F>(Self, F) -> zenoh::scouting::ScoutBuilder<zenoh::handlers::Callback<zenoh::scouting::Hello>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::scouting::Hello) ; in impl zenoh::scouting::ScoutBuilder<zenoh::handlers::DefaultHandler>
+fn zenoh::scouting::ScoutBuilder::callback_mut<F>(Self, F) -> zenoh::scouting::ScoutBuilder<zenoh::handlers::Callback<zenoh::scouting::Hello>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::scouting::Hello) ; in impl zenoh::scouting::ScoutBuilder<zenoh::handlers::DefaultHandler>
+fn zenoh::scouting::ScoutBuilder::with<Handler>(Self, Handler) -> zenoh::scouting::ScoutBuilder<Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::scouting::Hello> ; in impl zenoh::scouting::ScoutBuilder<zenoh::handlers::DefaultHandler>
+fn zenoh::scouting::scout<I: core::convert::Into<zenoh::config::WhatAmIMatcher>, TryIntoConfig>(I, TryIntoConfig) -> zenoh::scouting::ScoutBuilder<zenoh::handlers::DefaultHandler> where <TryIntoConfig as core::convert::TryInto<zenoh::config::Config>>::Error: core::convert::Into<zenoh::Error>, TryIntoConfig: 'static + core::convert::TryInto<zenoh::config::Config> + core::marker::Send
+fn zenoh::session::CloseBuilder::wait_callbacks(Self) -> Self ; in impl zenoh::session::CloseBuilder<zenoh::session::Session>
+fn zenoh::session::Link::auth_identifier(&Self) -> core::option::Option<&str> ; in impl zenoh::session::Link
+fn zenoh::session::Link::dst(&Self) -> &zenoh::config::Locator ; in impl zenoh::session::Link
+fn zenoh::session::Link::group(&Self) -> core::option::Option<&zenoh::config::Locator> ; in impl zenoh::session::Link
+fn zenoh::session::Link::interfaces(&Self) -> &[alloc::string::String] ; in impl zenoh::session::Link
+fn zenoh::session::Link::is_streamed(&Self) -> bool ; in impl zenoh::session::Link
+fn zenoh::session::Link::mtu(&Self) -> u16 ; in impl zenoh::session::Link
+fn zenoh::session::Link::priorities(&Self) -> core::option::Option<(u8, u8)> ; in impl zenoh::session::Link
+fn zenoh::session::Link::reliability(&Self) -> core::option::Option<zenoh::qos::Reliability> ; in impl zenoh::session::Link
+fn zenoh::session::Link::src(&Self) -> &zenoh::config::Locator ; in impl zenoh::session::Link
+fn zenoh::session::Link::zid(&Self) -> &zenoh::session::ZenohId ; in impl zenoh::session::Link
+fn zenoh::session::LinkEvent::kind(&Self) -> zenoh::sample::SampleKind ; in impl zenoh::session::LinkEvent
+fn zenoh::session::LinkEvent::link(&Self) -> &zenoh::session::Link ; in impl zenoh::session::LinkEvent
+fn zenoh::session::LinkEvent::link_mut(&mut Self) -> &mut zenoh::session::Link ; in impl zenoh::session::LinkEvent
+fn zenoh::session::LinkEventsListener::handler(&Self) -> &Handler ; in impl<Handler> zenoh::session::LinkEventsListener<Handler>
+fn zenoh::session::LinkEventsListener::handler_mut(&mut Self) -> &mut Handler ; in impl<Handler> zenoh::session::LinkEventsListener<Handler>
+fn zenoh::session::LinkEventsListener::undeclare(Self) -> zenoh::session::LinkEventsListenerUndeclaration<Handler> where Handler: core::marker::Send ; in impl<Handler> zenoh::session::LinkEventsListener<Handler>
+fn zenoh::session::LinkEventsListenerBuilder::background(Self) -> zenoh::session::LinkEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::LinkEvent>, true> ; in impl<'0> zenoh::session::LinkEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::LinkEvent>>
+fn zenoh::session::LinkEventsListenerBuilder::callback<F>(Self, F) -> zenoh::session::LinkEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::LinkEvent>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::session::LinkEvent) ; in impl<'0, Handler> zenoh::session::LinkEventsListenerBuilder<'0, Handler>
+fn zenoh::session::LinkEventsListenerBuilder::callback_mut<F>(Self, F) -> zenoh::session::LinkEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::LinkEvent>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::session::LinkEvent) ; in impl<'0, Handler> zenoh::session::LinkEventsListenerBuilder<'0, Handler>
+fn zenoh::session::LinkEventsListenerBuilder::history(Self, bool) -> Self ; in impl<'0, Handler> zenoh::session::LinkEventsListenerBuilder<'0, Handler>
+fn zenoh::session::LinkEventsListenerBuilder::transport(Self, zenoh::session::Transport) -> Self ; in impl<'0, Handler> zenoh::session::LinkEventsListenerBuilder<'0, Handler>
+fn zenoh::session::LinkEventsListenerBuilder::with<H>(Self, H) -> zenoh::session::LinkEventsListenerBuilder<'0, H> where H: zenoh::handlers::IntoHandler<zenoh::session::LinkEvent> ; in impl<'0, Handler> zenoh::session::LinkEventsListenerBuilder<'0, Handler>
+fn zenoh::session::LinkEventsListenerUndeclaration::wait_callbacks(Self) -> Self ; in impl<Handler> zenoh::session::LinkEventsListenerUndeclaration<Handler>
+fn zenoh::session::LinksBuilder::transport(Self, zenoh::session::Transport) -> Self ; in impl<'0> zenoh::session::LinksBuilder<'0>
+fn zenoh::session::OpenBuilder::with_timestamp_callback<F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::timestamp_stack::TimestampContext) -> alloc::vec::Vec<u8>>(Self, F) -> Self ; in impl<TryIntoConfig> zenoh::session::OpenBuilder<TryIntoConfig> where <TryIntoConfig as core::convert::TryInto<zenoh::config::Config>>::Error: core::fmt::Debug, TryIntoConfig: 'static + core::convert::TryInto<zenoh::config::Config> + core::marker::Send
+fn zenoh::session::Session::close(&Self) -> zenoh::session::CloseBuilder<Self> ; in impl zenoh::session::Session
+fn zenoh::session::Session::config(&Self) -> zenoh_config::GenericConfig ; in impl zenoh::session::Session
+fn zenoh::session::Session::declare_keyexpr<'0, '1: '0, TryIntoKeyExpr>(&'0 Self, TryIntoKeyExpr) -> impl '0 + zenoh::Resolve<zenoh::Result<zenoh::key_expr::KeyExpr<'1>>> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>> ; in impl zenoh::session::Session
+fn zenoh::session::Session::declare_publisher<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::pubsub::PublisherBuilder<'_, '0> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::session::Session
+fn zenoh::session::Session::declare_querier<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::query::QuerierBuilder<'_, '0> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::session::Session
+fn zenoh::session::Session::declare_queryable<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::query::QueryableBuilder<'_, '0, zenoh::handlers::DefaultHandler> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::session::Session
+fn zenoh::session::Session::declare_subscriber<'0, TryIntoKeyExpr>(&Self, TryIntoKeyExpr) -> zenoh::pubsub::SubscriberBuilder<'_, '0, zenoh::handlers::DefaultHandler> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'0>> ; in impl zenoh::session::Session
+fn zenoh::session::Session::delete<'0, '1: '0, TryIntoKeyExpr>(&'0 Self, TryIntoKeyExpr) -> zenoh::session::SessionDeleteBuilder<'0, '1> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>>>::Error: core::convert::Into<zenoh::Error>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>> ; in impl zenoh::session::Session
+fn zenoh::session::Session::get<'0, '1: '0, TryIntoSelector>(&'0 Self, TryIntoSelector) -> zenoh::session::SessionGetBuilder<'0, '1, zenoh::handlers::DefaultHandler> where <TryIntoSelector as core::convert::TryInto<zenoh::query::Selector<'1>>>::Error: core::convert::Into<zenoh::Error>, TryIntoSelector: core::convert::TryInto<zenoh::query::Selector<'1>> ; in impl zenoh::session::Session
+fn zenoh::session::Session::id(&Self) -> zenoh::session::EntityGlobalId ; in impl zenoh::session::Session
+fn zenoh::session::Session::info(&Self) -> zenoh::session::SessionInfo ; in impl zenoh::session::Session
+fn zenoh::session::Session::is_closed(&Self) -> bool ; in impl zenoh::session::Session
+fn zenoh::session::Session::liveliness(&Self) -> zenoh::liveliness::Liveliness<'_> ; in impl zenoh::session::Session
+fn zenoh::session::Session::new_timestamp(&Self) -> zenoh::time::Timestamp ; in impl zenoh::session::Session
+fn zenoh::session::Session::put<'0, '1: '0, TryIntoKeyExpr, IntoZBytes>(&'0 Self, TryIntoKeyExpr, IntoZBytes) -> zenoh::session::SessionPutBuilder<'0, '1> where <TryIntoKeyExpr as core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>>>::Error: core::convert::Into<zenoh::Error>, IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes>, TryIntoKeyExpr: core::convert::TryInto<zenoh::key_expr::KeyExpr<'1>> ; in impl zenoh::session::Session
+fn zenoh::session::Session::undeclare<'0, T>(&'0 Self, T) -> impl '0 + zenoh::Resolve<zenoh::Result<()>> where T: '0 + zenoh::session::Undeclarable<&'0 zenoh::session::Session> ; in impl zenoh::session::Session
+fn zenoh::session::Session::zid(&Self) -> zenoh::session::ZenohId ; in impl zenoh::session::Session
+fn zenoh::session::SessionGetBuilder::accept_replies(Self, zenoh::query::ReplyKeyExpr) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::allowed_destination(Self, zenoh::sample::Locality) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::attachment<T: core::convert::Into<zenoh::bytes::OptionZBytes>>(Self, T) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::callback<F>(Self, F) -> zenoh::session::SessionGetBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Reply>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::query::Reply) ; in impl<'0, '1> zenoh::session::SessionGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::session::SessionGetBuilder::callback_mut<F>(Self, F) -> zenoh::session::SessionGetBuilder<'0, '1, zenoh::handlers::Callback<zenoh::query::Reply>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::query::Reply) ; in impl<'0, '1> zenoh::session::SessionGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::session::SessionGetBuilder::cancellation_token(Self, zenoh::cancellation::CancellationToken) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::congestion_control(Self, zenoh::qos::CongestionControl) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::consolidation<QC: core::convert::Into<zenoh::query::QueryConsolidation>>(Self, QC) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::encoding<T: core::convert::Into<zenoh::bytes::Encoding>>(Self, T) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::express(Self, bool) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::payload<IntoZBytes>(Self, IntoZBytes) -> Self where IntoZBytes: core::convert::Into<zenoh::bytes::ZBytes> ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::priority(Self, zenoh::qos::Priority) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::source_info<T: core::convert::Into<core::option::Option<zenoh::sample::SourceInfo>>>(Self, T) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::target(Self, zenoh::query::QueryTarget) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::timeout(Self, core::time::Duration) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::timestamp_instrumentation<TS: core::convert::Into<core::option::Option<zenoh::timestamp_stack::TimestampInstrumentation>>>(Self, TS) -> Self ; in impl<Handler> zenoh::session::SessionGetBuilder<'_, '_, Handler>
+fn zenoh::session::SessionGetBuilder::with<Handler>(Self, Handler) -> zenoh::session::SessionGetBuilder<'0, '1, Handler> where Handler: zenoh::handlers::IntoHandler<zenoh::query::Reply> ; in impl<'0, '1> zenoh::session::SessionGetBuilder<'0, '1, zenoh::handlers::DefaultHandler>
+fn zenoh::session::SessionInfo::link_events_listener(&Self) -> zenoh::session::LinkEventsListenerBuilder<'_, zenoh::handlers::DefaultHandler> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::links(&Self) -> zenoh::session::LinksBuilder<'_> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::locators(&Self) -> impl '_ + zenoh::Resolve<alloc::vec::Vec<zenoh::config::Locator>> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::peers_zid(&Self) -> zenoh::session::PeersZenohIdBuilder<'_> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::routers_zid(&Self) -> zenoh::session::RoutersZenohIdBuilder<'_> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::transport_events_listener(&Self) -> zenoh::session::TransportEventsListenerBuilder<'_, zenoh::handlers::DefaultHandler> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::transports(&Self) -> zenoh::session::TransportsBuilder<'_> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::SessionInfo::zid(&Self) -> zenoh::session::ZenohIdBuilder<'_> ; in impl zenoh::session::SessionInfo
+fn zenoh::session::Transport::is_multicast(&Self) -> bool ; in impl zenoh::session::Transport
+fn zenoh::session::Transport::is_qos(&Self) -> bool ; in impl zenoh::session::Transport
+fn zenoh::session::Transport::whatami(&Self) -> zenoh::config::WhatAmI ; in impl zenoh::session::Transport
+fn zenoh::session::Transport::zid(&Self) -> &zenoh::session::ZenohId ; in impl zenoh::session::Transport
+fn zenoh::session::TransportEvent::kind(&Self) -> zenoh::sample::SampleKind ; in impl zenoh::session::TransportEvent
+fn zenoh::session::TransportEvent::transport(&Self) -> &zenoh::session::Transport ; in impl zenoh::session::TransportEvent
+fn zenoh::session::TransportEvent::transport_mut(&mut Self) -> &mut zenoh::session::Transport ; in impl zenoh::session::TransportEvent
+fn zenoh::session::TransportEventsListener::handler(&Self) -> &Handler ; in impl<Handler> zenoh::session::TransportEventsListener<Handler>
+fn zenoh::session::TransportEventsListener::handler_mut(&mut Self) -> &mut Handler ; in impl<Handler> zenoh::session::TransportEventsListener<Handler>
+fn zenoh::session::TransportEventsListener::undeclare(Self) -> zenoh::session::TransportEventsListenerUndeclaration<Handler> where Handler: core::marker::Send ; in impl<Handler> zenoh::session::TransportEventsListener<Handler>
+fn zenoh::session::TransportEventsListenerBuilder::background(Self) -> zenoh::session::TransportEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::TransportEvent>, true> ; in impl<'0> zenoh::session::TransportEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::TransportEvent>>
+fn zenoh::session::TransportEventsListenerBuilder::callback<F>(Self, F) -> zenoh::session::TransportEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::TransportEvent>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh::session::TransportEvent) ; in impl<'0, Handler> zenoh::session::TransportEventsListenerBuilder<'0, Handler>
+fn zenoh::session::TransportEventsListenerBuilder::callback_mut<F>(Self, F) -> zenoh::session::TransportEventsListenerBuilder<'0, zenoh::handlers::Callback<zenoh::session::TransportEvent>> where F: 'static + core::marker::Send + core::marker::Sync + core::ops::function::FnMut(zenoh::session::TransportEvent) ; in impl<'0, Handler> zenoh::session::TransportEventsListenerBuilder<'0, Handler>
+fn zenoh::session::TransportEventsListenerBuilder::history(Self, bool) -> Self ; in impl<'0, Handler> zenoh::session::TransportEventsListenerBuilder<'0, Handler>
+fn zenoh::session::TransportEventsListenerBuilder::with<H>(Self, H) -> zenoh::session::TransportEventsListenerBuilder<'0, H> where H: zenoh::handlers::IntoHandler<zenoh::session::TransportEvent> ; in impl<'0, Handler> zenoh::session::TransportEventsListenerBuilder<'0, Handler>
+fn zenoh::session::TransportEventsListenerUndeclaration::wait_callbacks(Self) -> Self ; in impl<Handler> zenoh::session::TransportEventsListenerUndeclaration<Handler>
+fn zenoh::session::open<TryIntoConfig>(TryIntoConfig) -> zenoh::session::OpenBuilder<TryIntoConfig> where <TryIntoConfig as core::convert::TryInto<zenoh::config::Config>>::Error: core::fmt::Debug, TryIntoConfig: 'static + core::convert::TryInto<zenoh::config::Config> + core::marker::Send
+fn zenoh::timestamp_stack::TimestampInstrumentation::is_instrumented(&Self, zenoh::timestamp_stack::InterceptionPoint) -> bool ; in impl zenoh::timestamp_stack::TimestampInstrumentation
+fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::build(Self) -> zenoh::Result<zenoh::timestamp_stack::TimestampInstrumentation> ; in impl zenoh::timestamp_stack::TimestampInstrumentationBuilder
+fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::new() -> Self ; in impl zenoh::timestamp_stack::TimestampInstrumentationBuilder
+fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::set_receive(Self, bool) -> Self ; in impl zenoh::timestamp_stack::TimestampInstrumentationBuilder
+fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::set_route(Self, bool) -> Self ; in impl zenoh::timestamp_stack::TimestampInstrumentationBuilder
+fn zenoh::timestamp_stack::TimestampInstrumentationBuilder::set_send(Self, bool) -> Self ; in impl zenoh::timestamp_stack::TimestampInstrumentationBuilder
+fn zenoh::timestamp_stack::TimestampStack::instrumentation(&Self) -> zenoh::timestamp_stack::TimestampInstrumentation ; in impl zenoh::timestamp_stack::TimestampStack
+fn zenoh::timestamp_stack::TimestampStack::records(&Self) -> &[zenoh::timestamp_stack::TimestampStackRecord] ; in impl zenoh::timestamp_stack::TimestampStack
+fn zenoh::timestamp_stack::TimestampStackRecord::is_custom(&Self) -> bool ; in impl zenoh::timestamp_stack::TimestampStackRecord
+fn zenoh::timestamp_stack::TimestampStackRecord::point(&Self) -> zenoh::timestamp_stack::InterceptionPoint ; in impl zenoh::timestamp_stack::TimestampStackRecord
+fn zenoh::timestamp_stack::TimestampStackRecord::timestamp(&Self) -> &zenoh::timestamp_stack::InstrumentationTimestamp ; in impl zenoh::timestamp_stack::TimestampStackRecord
 glob zenoh::key_expr::format::* = zenoh_keyexpr::key_expr::format
 glob zenoh::key_expr::format::macro_support::* = zenoh_keyexpr::key_expr::format::macro_support
 impl core::clone::Clone for zenoh::bytes::Encoding

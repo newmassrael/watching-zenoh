@@ -24,8 +24,10 @@ with a layout it was not written for. No list here is typed by hand.
 
     mod <path>                          a public module reached from the crate root
     <kind> <path>                       a public item defined in `zenoh` (struct, enum,
-                                        trait, fn, type, const, static, macro, union)
-    fn <path>::<Type>::<method>         a public inherent method of such a type
+                                        trait, type, const, static, macro, union)
+    fn <path><generics>(<types>) -> <type> where <bounds> ; <qualifiers> ; in impl<..> <type>
+                                        a public function, a free one or an inherent method
+                                        (`; in impl` names the block a method sits in)
     impl <trait path> for <type path>   a trait implementation of such a type (not the
                                         auto traits the compiler synthesises, not
                                         blanket implementations)
@@ -36,11 +38,20 @@ A type or trait in an `impl` line is named by its PUBLIC path when the crate exp
 it, and by its defining path otherwise (a standard trait such as
 `core::future::into_future::IntoFuture`).
 
+## What a function's line holds
+
+What a caller or an implementer can depend on: its generics and their bounds, the TYPES of
+its parameters (a receiver included) and its return type, its qualifiers (`async`, `const`,
+`unsafe`) and, for a method, the `impl` block it sits in. Left out, because they are not part
+of the contract: parameter names, the names of lifetimes (renamed by order of first
+appearance; `'static` and `'_` stay), the order of bounds and of `where` predicates, and the
+parameter rustc invents for an `impl Trait` argument. The order of generic parameters IS
+kept: a turbofish is positional. A shape of rustdoc JSON this reader does not know is
+refused rather than skipped, because a line that silently dropped part of a signature would
+call two different functions one.
+
 ## What this does NOT measure yet
 
-* Signatures. A function is its path and kind; its parameters, return type and
-  generics are the next increment, and until then two functions of one name with
-  different signatures are the same line.
 * What a foreign GLOB brings in. Expanding `glob` lines needs the JSON of the crate
   it points at; the line names it, so a change of origin still shows.
 * Behaviour. Equal surfaces are where the drop-in claim starts, not where it ends:
@@ -69,6 +80,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -176,6 +188,214 @@ def _type_name(doc: dict, ty, public: dict[str, str]) -> str:
     return next(iter(ty), "?")
 
 
+# ── signatures ──────────────────────────────────────────────────────────────
+#
+# A function's line carries what a caller or an implementer can depend on: its generics and
+# their bounds, the TYPES of its parameters (a receiver included) and its return type, its
+# qualifiers, and, for an inherent method, the `impl` block it sits in. What it leaves out is
+# what is not part of the contract: parameter names, lifetime names (renamed by order of first
+# appearance, `'static` and `'_` kept), and the order of bounds and of `where` predicates. The
+# order of generic parameters IS part of the contract (a turbofish is positional) and is kept.
+#
+# A type or trait is named by its PUBLIC path when the crate exposes it and by its defining path
+# otherwise, as in an `impl` line. Every shape of rustdoc JSON a signature can hold is read; one
+# this reader does not know is refused rather than skipped, because a line that silently omitted
+# a part of a signature would say two different functions are the same.
+
+
+class _Names:
+    """Resolves the ids of a document to the paths a surface line spells."""
+
+    def __init__(self, doc: dict, public: dict[str, str]) -> None:
+        self.doc = doc
+        self.public = public
+
+    def path(self, ident, fallback: str = "?") -> str:
+        ident = _id(ident)
+        return self.public.get(ident) or _path_of(self.doc, ident) or fallback
+
+
+def _unknown(what: str, value) -> InputError:
+    return InputError(f"rustdoc JSON holds a {what} this reader does not know: {str(value)[:160]}")
+
+
+def _render_args(names: _Names, args) -> str:
+    if not args:
+        return ""
+    if "angle_bracketed" in args:
+        body = args["angle_bracketed"]
+        parts: list[str] = []
+        for arg in body.get("args", []):
+            if arg == "infer":
+                parts.append("_")
+            elif "lifetime" in arg:
+                parts.append(arg["lifetime"])
+            elif "type" in arg:
+                parts.append(_render_type(names, arg["type"]))
+            elif "const" in arg:
+                parts.append(str(arg["const"].get("expr")))
+            else:
+                raise _unknown("generic argument", arg)
+        for con in body.get("constraints", []):
+            binding = con.get("binding", {})
+            if "equality" in binding:
+                term = binding["equality"]
+                rhs = _render_type(names, term["type"]) if "type" in term else str(term["constant"].get("expr"))
+                parts.append(f"{con['name']}{_render_args(names, con.get('args'))} = {rhs}")
+            elif "constraint" in binding:
+                parts.append(f"{con['name']}: {_render_bounds(names, binding['constraint'])}")
+            else:
+                raise _unknown("associated item constraint", con)
+        return f"<{', '.join(parts)}>" if parts else ""
+    if "parenthesized" in args:
+        body = args["parenthesized"]
+        inputs = ", ".join(_render_type(names, t) for t in body.get("inputs", []))
+        out = body.get("output")
+        return f"({inputs})" + (f" -> {_render_type(names, out)}" if out else "")
+    raise _unknown("generic arguments", args)
+
+
+def _render_path(names: _Names, path: dict) -> str:
+    return names.path(path.get("id"), path.get("path") or path.get("name") or "?") + _render_args(
+        names, path.get("args"))
+
+
+def _render_bounds(names: _Names, bounds: list) -> str:
+    out: list[str] = []
+    for bound in bounds:
+        if "trait_bound" in bound:
+            tb = bound["trait_bound"]
+            mod = {"none": "", "maybe": "?", "maybe_const": "~const "}.get(tb.get("modifier", "none"))
+            if mod is None:
+                raise _unknown("trait bound modifier", tb)
+            hrtb = ""
+            if tb.get("generic_params"):
+                hrtb = "for<" + ", ".join(p["name"] for p in tb["generic_params"]) + "> "
+            out.append(f"{hrtb}{mod}{_render_path(names, tb['trait'])}")
+        elif "outlives" in bound:
+            out.append(bound["outlives"])
+        else:
+            raise _unknown("generic bound", bound)
+    return " + ".join(sorted(out))
+
+
+def _render_type(names: _Names, ty) -> str:
+    if not isinstance(ty, dict) or len(ty) != 1:
+        raise _unknown("type", ty)
+    kind, body = next(iter(ty.items()))
+    if kind == "primitive" or kind == "generic":
+        return body
+    if kind == "resolved_path":
+        return _render_path(names, body)
+    if kind == "borrowed_ref":
+        life = f"{body['lifetime']} " if body.get("lifetime") else ""
+        return f"&{life}{'mut ' if body.get('is_mutable') else ''}{_render_type(names, body['type'])}"
+    if kind == "raw_pointer":
+        return f"*{'mut' if body.get('is_mutable') else 'const'} {_render_type(names, body['type'])}"
+    if kind == "slice":
+        return f"[{_render_type(names, body)}]"
+    if kind == "array":
+        return f"[{_render_type(names, body['type'])}; {body['len']}]"
+    if kind == "tuple":
+        return "(" + ", ".join(_render_type(names, t) for t in body) + ")"
+    if kind == "impl_trait":
+        return "impl " + _render_bounds(names, body)
+    if kind == "dyn_trait":
+        traits = sorted(_render_path(names, t["trait"]) for t in body.get("traits", []))
+        if body.get("lifetime"):
+            traits.append(body["lifetime"])
+        return "dyn " + " + ".join(traits)
+    if kind == "qualified_path":
+        trait = f" as {_render_path(names, body['trait'])}" if body.get("trait") else ""
+        return f"<{_render_type(names, body['self_type'])}{trait}>::{body['name']}{_render_args(names, body.get('args'))}"
+    if kind == "function_pointer":
+        sig = body["sig"]
+        ins = ", ".join(_render_type(names, t) for _n, t in sig.get("inputs", []))
+        out = f" -> {_render_type(names, sig['output'])}" if sig.get("output") else ""
+        quals = [q for q in ("is_unsafe", "is_const", "is_async") if body.get("header", {}).get(q)]
+        return f"{'unsafe ' if 'is_unsafe' in quals else ''}fn({ins}){out}"
+    raise _unknown("type", ty)
+
+
+def _render_generics(names: _Names, generics: dict) -> tuple[str, str]:
+    """(`<params>`, ` where predicates`) of a generics block, either possibly empty. A parameter
+    rustc made up for an `impl Trait` argument is not a parameter a caller can name, so it is not
+    listed; its bounds are in the argument's own type."""
+    params: list[str] = []
+    for p in generics.get("params", []):
+        kind, body = next(iter(p["kind"].items()))
+        if kind == "lifetime":
+            outl = f": {' + '.join(sorted(body.get('outlives', [])))}" if body.get("outlives") else ""
+            params.append(f"{p['name']}{outl}")
+        elif kind == "type":
+            if body.get("is_synthetic"):
+                continue
+            bounds = f": {_render_bounds(names, body['bounds'])}" if body.get("bounds") else ""
+            default = f" = {_render_type(names, body['default'])}" if body.get("default") else ""
+            params.append(f"{p['name']}{bounds}{default}")
+        elif kind == "const":
+            default = f" = {body['default']}" if body.get("default") else ""
+            params.append(f"const {p['name']}: {_render_type(names, body['type'])}{default}")
+        else:
+            raise _unknown("generic parameter", p)
+    synthetic = {p["name"] for p in generics.get("params", [])
+                 if p["kind"].get("type", {}).get("is_synthetic")}
+    preds: list[str] = []
+    for w in generics.get("where_predicates", []):
+        kind, body = next(iter(w.items()))
+        if kind == "bound_predicate":
+            if isinstance(body.get("type"), dict) and body["type"].get("generic") in synthetic:
+                continue
+            hr = ""
+            if body.get("generic_params"):
+                hr = "for<" + ", ".join(g["name"] for g in body["generic_params"]) + "> "
+            preds.append(f"{hr}{_render_type(names, body['type'])}: {_render_bounds(names, body['bounds'])}")
+        elif kind == "lifetime_predicate":
+            preds.append(f"{body['lifetime']}: {' + '.join(sorted(body.get('outlives', [])))}")
+        elif kind == "eq_predicate":
+            rhs = body["rhs"]
+            preds.append(f"{_render_type(names, body['lhs'])} == "
+                         + (_render_type(names, rhs["type"]) if "type" in rhs else str(rhs["constant"].get("expr"))))
+        else:
+            raise _unknown("where predicate", w)
+    return (f"<{', '.join(params)}>" if params else ""), (f" where {', '.join(sorted(preds))}" if preds else "")
+
+
+_LIFETIME = re.compile(r"'[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _canonical_lifetimes(text: str) -> str:
+    """Lifetime names by order of first appearance; `'static` and `'_` are not names."""
+    seen: dict[str, str] = {}
+
+    def rename(m: re.Match) -> str:
+        name = m.group(0)
+        if name in ("'static", "'_"):
+            return name
+        return seen.setdefault(name, f"'{len(seen)}")
+
+    return _LIFETIME.sub(rename, text)
+
+
+def render_function(names: _Names, path: str, item: dict, impl: dict | None = None) -> str:
+    """The surface line of one function item, in the `impl` block `impl` if it is a method."""
+    fn = item.get("inner", {}).get("function")
+    sig = fn.get("sig") if fn else None
+    if not sig or "inputs" not in sig:
+        raise InputError(f"rustdoc JSON function `{path}` has no signature to read")
+    params, where = _render_generics(names, fn.get("generics", {}))
+    ins = ", ".join(_render_type(names, t) for _n, t in sig["inputs"])
+    out = f" -> {_render_type(names, sig['output'])}" if sig.get("output") else ""
+    quals = [q[3:] for q in ("is_const", "is_async", "is_unsafe") if fn.get("header", {}).get(q)]
+    line = f"fn {path}{params}({ins}){out}{where}"
+    if quals:
+        line += f" ; {' '.join(quals)}"
+    if impl is not None:
+        iparams, iwhere = _render_generics(names, impl.get("generics", {}))
+        line += f" ; in impl{iparams} {_render_type(names, impl.get('for'))}{iwhere}"
+    return _canonical_lifetimes(line)
+
+
 def normalise(doc: dict, fmt: int) -> list[str]:
     """The surface lines of one rustdoc JSON document, sorted and unique."""
     got = doc.get("format_version")
@@ -192,6 +412,9 @@ def normalise(doc: dict, fmt: int) -> list[str]:
     lines: set[str] = set()
     public: dict[str, str] = {}  # item id -> the first public path it was reached by
     types: list[tuple[str, dict]] = []  # (public path, item) of local types, for their impls
+    # Functions are rendered once every public path is known, so a type a signature names is
+    # spelled by the path the crate exposes it at wherever in the walk that path was found.
+    functions: list[tuple[str, dict, dict | None]] = []  # (path, item, the impl it is in)
     seen: set[tuple[str, str]] = set()
 
     def visit_module(mod_id: str, prefix: str) -> None:
@@ -235,7 +458,10 @@ def normalise(doc: dict, fmt: int) -> list[str]:
             public.setdefault(ident, path)
             visit_module(ident, path)
         elif kind in ITEM_KINDS:
-            lines.add(f"{ITEM_KINDS[kind]} {path}")
+            if kind == "function":
+                functions.append((path, item, None))
+            else:
+                lines.add(f"{ITEM_KINDS[kind]} {path}")
             if ident not in public:
                 public[ident] = path
                 if kind in ("struct", "enum", "union"):
@@ -257,11 +483,15 @@ def normalise(doc: dict, fmt: int) -> list[str]:
                 for member in impl.get("items", []):
                     fn = index.get(_id(member))
                     if fn and _is_public(fn) and "function" in fn.get("inner", {}):
-                        lines.add(f"fn {path}::{fn.get('name')}")
+                        functions.append((f"{path}::{fn.get('name')}", fn, impl))
             else:
                 tid = _id(trait.get("id"))
                 tname = public.get(tid) or _path_of(doc, tid) or trait.get("path") or trait.get("name")
                 lines.add(f"impl {tname} for {_type_name(doc, impl.get('for'), public) if impl.get('for') else path}")
+
+    names = _Names(doc, public)
+    for path, item, impl in functions:
+        lines.add(render_function(names, path, item, impl))
     return sorted(lines)
 
 
@@ -445,6 +675,12 @@ def compare(old: list[str], new: list[str]) -> list[str]:
 
 def selftest() -> int:
     """Drive the normaliser over a small document with every shape it reads."""
+
+    def _fn(inputs, output, params=(), where=(), header=None):
+        return {"sig": {"inputs": [list(i) for i in inputs], "output": output, "is_c_variadic": False},
+                "generics": {"params": list(params), "where_predicates": list(where)},
+                "header": header or {}, "has_body": True}
+
     doc = {
         "format_version": 57,
         "root": 0,
@@ -465,13 +701,15 @@ def selftest() -> int:
             "4": {"name": "hidden", "visibility": "crate", "inner": {"module": {"items": []}}},
             "5": {"name": None, "visibility": "public",
                   "inner": {"use": {"source": "zenoh_keyexpr::key_expr", "name": "key_expr", "id": 93, "is_glob": True}}},
-            "6": {"name": "open", "visibility": "public", "inner": {"function": {}}},
+            "6": {"name": "open", "visibility": "public", "inner": {"function": _fn([], None)}},
             "7": {"name": None, "visibility": "public",
                   "inner": {"use": {"source": "zenoh_core::Resolvable", "name": "Resolvable", "id": 91, "is_glob": False}}},
             "10": {"name": "Session", "visibility": "public",
                    "inner": {"struct": {"impls": [20, 21, 22, 23, 24]}}},
             "11": {"name": "private_fn", "visibility": "default", "inner": {"function": {}}},
-            "20": {"visibility": "default", "inner": {"impl": {"trait": None, "items": [30, 31], "for": {}}}},
+            "20": {"visibility": "default", "inner": {"impl": {
+                "trait": None, "items": [30, 31], "generics": {"params": [], "where_predicates": []},
+                "for": {"resolved_path": {"path": "Session", "id": 10}}}}},
             "21": {"visibility": "default", "inner": {"impl": {
                 "trait": {"path": "Wait", "id": 90}, "items": [],
                 "for": {"resolved_path": {"path": "Session", "id": 10}}}}},
@@ -482,13 +720,16 @@ def selftest() -> int:
                 "trait": {"path": "Send", "id": 99}, "is_synthetic": True, "items": [], "for": {}}}},
             "24": {"visibility": "default", "inner": {"impl": {
                 "trait": {"path": "Resolvable", "id": 91}, "blanket_impl": {"generic": "T"}, "items": [], "for": {}}}},
-            "30": {"name": "put", "visibility": "public", "inner": {"function": {}}},
+            "30": {"name": "put", "visibility": "public", "inner": {"function": _fn(
+                [("self", {"borrowed_ref": {"lifetime": None, "is_mutable": False,
+                                             "type": {"generic": "Self"}}}),
+                 ("value", {"primitive": "u8"})], {"primitive": "bool"})}},
             "31": {"name": "internal", "visibility": "default", "inner": {"function": {}}},
         },
     }
     want = [
-        "fn zenoh::open",
-        "fn zenoh::session::Session::put",
+        "fn zenoh::open()",
+        "fn zenoh::session::Session::put(&Self, u8) -> bool ; in impl zenoh::session::Session",
         "glob zenoh::* = zenoh_keyexpr::key_expr",
         "impl core::future::into_future::IntoFuture for zenoh::session::Session",
         "impl zenoh::Wait for zenoh::session::Session",
@@ -523,6 +764,91 @@ def selftest() -> int:
     if compare(["a", "b"], ["b", "c"]) != ["no longer emitted: a", "newly emitted: c"]:
         print("  selftest FAIL [the comparison]", file=sys.stderr)
         return 1
+    # Signatures: every shape a type and a bound can take, and the normalisations.
+    names = _Names({"paths": {"1": {"path": ["core", "convert", "Into"]},
+                              "2": {"path": ["core", "ops", "Fn"]},
+                              "3": {"path": ["alloc", "string", "String"]}}}, {"9": "zenoh::KeyExpr"})
+    ref = lambda inner, life=None, mut=False: {"borrowed_ref": {"lifetime": life, "is_mutable": mut, "type": inner}}
+    path = lambda i, args=None: {"resolved_path": {"path": "X", "id": i, "args": args}}
+    angle = lambda *a, cons=(): {"angle_bracketed": {"args": list(a), "constraints": list(cons)}}
+    type_cases = [
+        ("a public path wins over the defining one", path(9), "zenoh::KeyExpr"),
+        ("a foreign type is its defining path", path(3), "alloc::string::String"),
+        ("generic arguments, a lifetime first", path(9, angle({"lifetime": "'a"}, {"type": {"primitive": "u8"}})),
+         "zenoh::KeyExpr<'a, u8>"),
+        ("a reference with a lifetime and mut", ref({"generic": "T"}, "'a", True), "&'a mut T"),
+        ("a slice, an array and a tuple",
+         {"tuple": [{"slice": {"primitive": "u8"}}, {"array": {"type": {"primitive": "u8"}, "len": "4"}}]},
+         "([u8], [u8; 4])"),
+        ("the unit tuple", {"tuple": []}, "()"),
+        ("a raw pointer", {"raw_pointer": {"is_mutable": False, "type": {"primitive": "u8"}}}, "*const u8"),
+        ("dyn, its traits sorted", {"dyn_trait": {"traits": [{"trait": {"path": "X", "id": 2, "args": None}},
+                                                              {"trait": {"path": "X", "id": 1, "args": None}}],
+                                                   "lifetime": "'static"}},
+         "dyn core::convert::Into + core::ops::Fn + 'static"),
+        ("a qualified path", {"qualified_path": {"name": "Error", "args": None, "self_type": {"generic": "D"},
+                                                 "trait": {"path": "", "id": 1, "args": None}}},
+         "<D as core::convert::Into>::Error"),
+        ("a parenthesized Fn bound's arguments", path(2, {"parenthesized": {"inputs": [{"primitive": "u8"}],
+                                                                           "output": {"primitive": "bool"}}}),
+         "core::ops::Fn(u8) -> bool"),
+        ("an associated type binding", path(1, angle(cons=[{"name": "Output", "args": None,
+                                                              "binding": {"equality": {"type": {"primitive": "u8"}}}}])),
+         "core::convert::Into<Output = u8>"),
+    ]
+    for label, ty, expected in type_cases:
+        got = _render_type(names, ty)
+        if got != expected:
+            print(f"  selftest FAIL [{label}]: {got!r}, not {expected!r}", file=sys.stderr)
+            return 1
+    try:
+        _render_type(names, {"pattern": {}})
+    except InputError:
+        pass
+    else:
+        print("  selftest FAIL [a type kind this reader does not know]: ACCEPTED", file=sys.stderr)
+        return 1
+    if _canonical_lifetimes("fn f<'z, 'a>(&'a T, &'z U, &'static V, &'_ W) -> &'a X") \
+            != "fn f<'0, '1>(&'1 T, &'0 U, &'static V, &'_ W) -> &'1 X":
+        print("  selftest FAIL [lifetimes renamed by first appearance]", file=sys.stderr)
+        return 1
+    bound = lambda i: {"trait_bound": {"trait": {"path": "X", "id": i, "args": None}, "generic_params": [],
+                                       "modifier": "none"}}
+    generics = {"params": [{"name": "T", "kind": {"type": {"bounds": [bound(2), bound(1)], "default": None,
+                                                           "is_synthetic": False}}},
+                           {"name": "impl Into", "kind": {"type": {"bounds": [], "default": None,
+                                                                   "is_synthetic": True}}}],
+                "where_predicates": [{"bound_predicate": {"type": {"generic": "U"}, "bounds": [bound(1)],
+                                                          "generic_params": []}},
+                                     {"bound_predicate": {"type": {"generic": "T"}, "bounds": [bound(2)],
+                                                          "generic_params": []}},
+                                     {"bound_predicate": {"type": {"generic": "impl Into"},
+                                                          "bounds": [bound(1)], "generic_params": []}}]}
+    if _render_generics(names, generics) != (
+            "<T: core::convert::Into + core::ops::Fn>", " where T: core::ops::Fn, U: core::convert::Into"):
+        print(f"  selftest FAIL [generics: bounds and predicates sorted, a synthetic parameter left out]: "
+              f"{_render_generics(names, generics)}", file=sys.stderr)
+        return 1
+    one = {"inner": {"function": _fn([("a", {"primitive": "u8"})], None,
+                                     header={"is_unsafe": True, "is_async": True})}}
+    two = {"inner": {"function": _fn([("b", {"primitive": "u8"})], None,
+                                     header={"is_unsafe": True, "is_async": True})}}
+    if render_function(names, "p", one) != render_function(names, "p", two) \
+            or not render_function(names, "p", one).endswith(" ; async unsafe"):
+        print(f"  selftest FAIL [a parameter name is not surface; qualifiers are]: "
+              f"{render_function(names, 'p', one)!r}", file=sys.stderr)
+        return 1
+    if render_function(names, "p", {"inner": {"function": _fn([("a", {"primitive": "u8"})], None)}}) \
+            == render_function(names, "p", {"inner": {"function": _fn([("a", {"primitive": "u16"})], None)}}):
+        print("  selftest FAIL [two parameter types are two signatures]", file=sys.stderr)
+        return 1
+    try:
+        render_function(names, "p", {"inner": {"function": {}}})
+    except InputError:
+        pass
+    else:
+        print("  selftest FAIL [a function with no signature]: ACCEPTED", file=sys.stderr)
+        return 1
     # The compatibility crate's ratchet: upstream has three lines, the crate one of them.
     up = {"default": ["fn zenoh::open", "struct zenoh::Session", "fn zenoh::scout"]}
     cases = [
@@ -538,7 +864,8 @@ def selftest() -> int:
         if (words is None) != (got == []) or (words is not None and not any(words in f for f in got)):
             print(f"  selftest FAIL [{label}]: {got}", file=sys.stderr)
             return 1
-    print(f"  rust-api-surface: selftest -- the normaliser over {len(want)} shapes, two refusals and the comparison pass")
+    print(f"  rust-api-surface: selftest -- the normaliser over {len(want)} lines, {len(type_cases)} "
+          f"type shapes, the generics, qualifiers and refusals, and the comparison pass")
     return 0
 
 
