@@ -2819,7 +2819,7 @@ layer_c0_test_discipline() {
     # extern, while a declaration with no door LINKS and fails at load.
     python3 scripts/lib/capi_c_wz_door_header.py || return 1
     python3 scripts/lib/capi_c_wz_door_header.py --selftest >/dev/null || return 1
-    # R3439 (decision C10 of docs/build-configuration.md) -- the pico drop-in
+    # R3440 (decision C10 of docs/build-configuration.md) -- the pico drop-in
     # header declares only what zenoh-pico's own header declares at the pin, read
     # through the preprocessor under three configurations, and wz_ext.h only
     # wz_ext_* doors.
@@ -23291,7 +23291,7 @@ layer_qz_zephyr_boot() {
     [[ "$rc" -eq 10 ]] && return 0
     [[ "$rc" -ne 0 ]] && return 1
 
-    # R3440 (decision C11 of docs/build-configuration.md) -- the Kconfig interpreter the host
+    # R3441 (decision C11 of docs/build-configuration.md) -- the Kconfig interpreter the host
     # tools pin and the one this Zephyr tree runs give the same configuration from the same
     # tree and inputs (the defaults and every registered profile). This lane is where a Zephyr
     # tree is: it provisions the pinned one, and a job that arms the lane arms both.

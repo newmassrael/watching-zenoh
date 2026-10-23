@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3439 (no register item) -- a drop-in header carries upstream's symbols only; wz's own are wz_ext_.
+"""R3440 (no register item) -- a drop-in header carries upstream's symbols only; wz's own are wz_ext_.
 
 Decision C10 of docs/build-configuration.md: a drop-in header declares only what its upstream
 header declares, and a door wz has and upstream does not is `wz_ext_*`, declared in `wz_ext.h`.

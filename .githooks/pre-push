@@ -912,7 +912,7 @@ round_fed_gates=(
     # build. --check-presets SKIPs, printing why, where kconfiglib is not provisioned.
     "wz_config.py --check"
     "wz_config.py --check-presets"
-    # R3439 -- the pico drop-in header against zenoh-pico's own, and wz_ext.h. Round-fed by
+    # R3440 -- the pico drop-in header against zenoh-pico's own, and wz_ext.h. Round-fed by
     # the two headers and the pico submodule. MEASURED: 0.66s, three `cc -E` runs, no build.
     "drop_in_header_gate.py"
     # R3406 -- the committed public-API surfaces of the pinned zenoh crate. Round-fed by
