@@ -130,9 +130,11 @@ EXCLUSIONS = {
     # that expiry looks like.
     # R3416 — `api-compat-rust` (open-debt item 910): the zenoh crate's public Rust
     # API as a drop-in over wz, declared as a reserved feature in R3410 with an
-    # UNBUILT reason and nothing behind it. Out of the preset until the
-    # compatibility crate exists; it comes in the way the two above did.
-    "api-compat-rust": ("unbuilt", "the Rust API compatibility crate is not built yet"),
+    # UNBUILT reason and nothing behind it. R3459 made the crate (`wz-zenoh`, empty)
+    # and both halves of its surface gate, and the API is still not built, so the
+    # atom stays UNBUILT and out of the preset until its first slice; it comes in the
+    # way the two above did.
+    "api-compat-rust": ("unbuilt", "none of the Rust API is built yet"),
 }
 
 

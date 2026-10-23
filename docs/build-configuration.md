@@ -106,8 +106,13 @@ original reproduced by naming it. Three things follow from it:
   its ABIs reach, whether that original's default build has it (`upstream_on` /
   `upstream_off`); the switch map holds zenoh-pico's to its CMakeLists and zenoh-c's to
   its default features. The capability's `default` stays the drop-in's own.
-- **No Rust API compatibility atom.** `api-compat-c` and `api-compat-pico` exist;
-  nothing makes wz a drop-in for the `zenoh` crate's public API.
+- **The Rust API compatibility crate, empty and held** (step 12): `api-compat-rust` stays
+  reserved and UNBUILT until its first slice. `crates/wz-zenoh` names its library `zenoh` and carries the pinned
+  version, so a Rust user's one changed line is `zenoh = { package = "wz-zenoh", version
+  = "1.10.1" }`. `rust_api_surface.py` emits its rustdoc surface with the same normaliser
+  as upstream's and holds it to every upstream arm: no line upstream lacks (C10), and the
+  missing count as a ratchet that a slice lowers in its own round (709 of 709 default
+  lines today). The crate carries none of upstream's API yet.
 - **One pinned Kconfig interpreter on the host** (step 1, C11): `kconfiglib` 14.1.0, the
   version Zephyr bundles, pinned by hash (`scripts/requirements-kconfig.txt`) and provisioned
   into `target/kconfig-venv` by `scripts/provision-kconfiglib.sh`. `wz_config.py
