@@ -29,6 +29,19 @@ looked the same as one that did not.
   a tolerance of its own, and both directions are held: a run that is much faster than the row says
   the row is stale as much as a slower one says the image regressed.
 
+Two optional keys say where an image differs from that shape, and each is held to being true:
+
+* `chain_misses` (a reason): the firmware's own reading is OVER the static chain. The rule above
+  calls that a chain that misses a path the image takes, which is the right reading of a chain the
+  reader should have followed. For an image that asks, the reply sink and the reply view are called
+  through a register, which the reader does not follow, so the chain is a figure a change moves and
+  not a bound. The row then says so, and what holds the stack is the measurement: it must leave a
+  quarter of the declared stack free (HW.7). A row that names this and whose reading is not over
+  its chain is a red, so the key cannot outlive the reason for it;
+* `latency_source`: `rest-probe` (the default) is the host's view of a GET through a router, read
+  from the harness's result files; `getter-line` is the image's own round trip as the asker, read
+  from the `ZEPHYR-WZ-GET done` line of its console, at the resolution of the kernel tick.
+
 ## Modes
 
     --check      no hardware: the table covers the stack gate's population, copies its figure, and a
@@ -69,8 +82,18 @@ ROW_KEYS = {
     "evidence": str,
 }
 
+OPTIONAL_KEYS = {
+    "chain_misses": str,
+    "latency_source": str,
+}
+
+LATENCY_SOURCES = ("rest-probe", "getter-line")
+
 #: The line the firmware prints when its stack high-water mark moves (`StackWatch`).
 STACK_LINE = re.compile(r"stack: peak (\d+) of (\d+) bytes")
+
+#: The line an image that asks prints when every query has ended (`fixed_get.rs`).
+GETTER_LINE = re.compile(r"ZEPHYR-WZ-GET done clean=(true|false) .*?\bmedian_us=(\d+)")
 
 
 def read_table(path: Path = TABLE) -> dict:
@@ -109,8 +132,13 @@ def problems(table: dict, images: dict[str, "stack.Image"], declared: dict[str, 
                 out.append(f"{key}: `{field}` is empty")
             elif kind is int and row[field] <= 0:
                 out.append(f"{key}: `{field}` is not positive")
-        for field in sorted(set(row) - set(ROW_KEYS)):
+        for field in sorted(set(row) - set(ROW_KEYS) - set(OPTIONAL_KEYS)):
             out.append(f"{key}: `{field}` is a key nothing reads")
+        for field, kind in OPTIONAL_KEYS.items():
+            if field in row and (not isinstance(row[field], kind) or not row[field].strip()):
+                out.append(f"{key}: `{field}` is not a non-empty {kind.__name__}")
+        if row.get("latency_source", LATENCY_SOURCES[0]) not in LATENCY_SOURCES:
+            out.append(f"{key}: `latency_source` is {row['latency_source']!r}, one of {LATENCY_SOURCES}")
         if any(f not in row or not isinstance(row[f], ROW_KEYS[f]) for f in ROW_KEYS):
             continue
         if row["static_chain_bytes"] != images[key].peak:
@@ -118,13 +146,27 @@ def problems(table: dict, images: dict[str, "stack.Image"], declared: dict[str, 
                 f"{key}: static_chain_bytes is {row['static_chain_bytes']} and the stack gate commits "
                 f"{images[key].peak}: they move together or not at all"
             )
-        if row["peak_stack_bytes"] > row["static_chain_bytes"]:
+        peak, chain = row["peak_stack_bytes"], row["static_chain_bytes"]
+        if "chain_misses" in row:
+            # The key says the chain is not a bound: it is true only while the reading is over it, and
+            # what holds the stack is then the reading, which must leave a quarter of the stack free.
+            if peak <= chain:
+                out.append(
+                    f"{key}: `chain_misses` says the firmware's reading is over the static chain, and the "
+                    f"reading is {peak} against a chain of {chain}: remove the key"
+                )
+            if key in declared and peak * 4 > declared[key] * 3:
+                out.append(
+                    f"{key}: the chain is not a bound for this image, so the reading {peak} must leave a "
+                    f"quarter of the declared stack {declared[key]} free"
+                )
+        elif peak > chain:
             out.append(
-                f"{key}: the firmware reached {row['peak_stack_bytes']} bytes of stack and the static chain "
-                f"is {row['static_chain_bytes']}: the chain misses a path the image takes"
+                f"{key}: the firmware reached {peak} bytes of stack and the static chain "
+                f"is {chain}: the chain misses a path the image takes"
             )
-        if key in declared and row["peak_stack_bytes"] > declared[key]:
-            out.append(f"{key}: the measured peak {row['peak_stack_bytes']} is over the declared stack {declared[key]}")
+        if key in declared and peak > declared[key]:
+            out.append(f"{key}: the measured peak {peak} is over the declared stack {declared[key]}")
         if not 0 < row["get_median_tolerance_pct"] < 100:
             out.append(f"{key}: get_median_tolerance_pct is not between 0 and 100")
     return out
@@ -160,7 +202,25 @@ def measure_problems(row: dict, declared: int | None, log: str, results: list[di
             out.append(f"the stack peak is {used} bytes, the row holds {row['peak_stack_bytes']} +/- {row['peak_stack_tolerance_bytes']}")
         if declared is not None and size != declared:
             out.append(f"the firmware says its stack is {size} bytes and the image declares {declared}")
-    if results:
+    if row.get("latency_source") == "getter-line":
+        # The image is the asker: its own line carries the round trip, and a run that was not clean has
+        # no latency worth holding.
+        if results:
+            out.append("this row's latency is the image's own getter line: result files of the REST probe are not its instrument")
+        hits = GETTER_LINE.findall(log)
+        if not hits:
+            out.append("the log has no `ZEPHYR-WZ-GET done` line: the image did not say how its queries went")
+        else:
+            clean, text = hits[-1]
+            value = int(text)
+            if clean != "true":
+                out.append("the getter says its run was not clean: a latency of unanswered queries is not one")
+            low = row["get_median_us"] * (100 - row["get_median_tolerance_pct"]) / 100
+            high = row["get_median_us"] * (100 + row["get_median_tolerance_pct"]) / 100
+            if not low <= value <= high:
+                out.append(f"the getter's median is {value} us, the row holds {row['get_median_us']} us "
+                           f"+/- {row['get_median_tolerance_pct']} percent ({low:.0f} to {high:.0f})")
+    elif results:
         median = get_medians_us(results)
         if median is None:
             out.append("the result files hold no GET round trip")
@@ -190,9 +250,11 @@ def check() -> int:
         rows = read_table()["images"]
         for key in sorted(rows):
             margin = declared[key] - rows[key]["peak_stack_bytes"]
-            print(f"  resource-budget: {key}: static chain {rows[key]['static_chain_bytes']}, "
+            not_a_bound = " (the chain is not a bound here)" if "chain_misses" in rows[key] else ""
+            print(f"  resource-budget: {key}: static chain {rows[key]['static_chain_bytes']}{not_a_bound}, "
                   f"measured peak {rows[key]['peak_stack_bytes']} of {declared[key]} "
-                  f"({margin} bytes of margin), GET {rows[key]['get_median_us']} us")
+                  f"({margin} bytes of margin), GET {rows[key]['get_median_us']} us "
+                  f"({rows[key].get('latency_source', LATENCY_SOURCES[0])})")
         print(f"  resource-budget: {len(rows)} image(s) held")
     return 1 if found else 0
 
@@ -245,6 +307,17 @@ def selftest() -> int:
     case("a static figure that moved alone", {"schema": 1, "images": {"k": dict(row, static_chain_bytes=7000)}}, want="move together")
     case("a measured peak over the static chain", {"schema": 1, "images": {"k": dict(row, peak_stack_bytes=6900)}}, want="misses a path")
     case("a measured peak over the declared stack", {"schema": 1, "images": {"k": dict(row, static_chain_bytes=6808, peak_stack_bytes=9300)}}, want="over the declared stack")
+    # A chain that is not a bound: the reading is over it, named, and a quarter of the stack stays free
+    # (3/4 of the 9,216-byte stack is 6,912).
+    asker = dict(row, static_chain_bytes=6808, peak_stack_bytes=6900, chain_misses="a call through a register",
+                 latency_source="getter-line")
+    case("a named chain that misses a path, with room left", {"schema": 1, "images": {"k": asker}})
+    case("a named chain that misses nothing: the key outlived its reason",
+         {"schema": 1, "images": {"k": dict(asker, peak_stack_bytes=5936)}}, want="remove the key")
+    case("a named chain whose reading leaves less than a quarter of the stack",
+         {"schema": 1, "images": {"k": dict(asker, peak_stack_bytes=7000)}}, want="quarter")
+    case("an empty reason", {"schema": 1, "images": {"k": dict(asker, chain_misses=" ")}}, want="non-empty")
+    case("a latency source nothing reads", {"schema": 1, "images": {"k": dict(row, latency_source="guess")}}, want="latency_source")
     case("a key nothing reads", {"schema": 1, "images": {"k": dict(row, extra=1)}}, want="nothing reads")
     case("a missing figure", {"schema": 1, "images": {"k": {f: v for f, v in row.items() if f != "get_median_us"}}}, want="no `get_median_us`")
     case("a tolerance of nothing", {"schema": 1, "images": {"k": dict(row, get_median_tolerance_pct=0)}}, want="between 0 and 100")
@@ -264,6 +337,17 @@ def selftest() -> int:
     expect("a run much faster than the row says the row is stale", measure_problems(row, 9216, log, [fast]) != [], True)
     expect("a wrong answer", measure_problems(row, 9216, log, [dict(inside, get_status_bad=1)]) != [], True)
     expect("no stack line", measure_problems(row, 9216, "boot", [inside]) != [], True)
+
+    # A row whose latency is the image's own getter line.
+    getter_row = dict(row, get_median_us=300, get_median_tolerance_pct=50, peak_stack_bytes=5944,
+                      latency_source="getter-line")
+    ran = log + "ZEPHYR-WZ-GET done clean=true issued=2050 finished=2050 replies=2050 errors=0 timeouts=0 refused=0 bytes=1 timed=2000 min_us=200 median_us=300 p99_us=1300 max_us=4000 elapsed_us=7 resolution_us=100\n"
+    expect("a getter run inside the row", measure_problems(getter_row, 9216, ran, []), [])
+    expect("a getter run that was not clean", measure_problems(getter_row, 9216, ran.replace("clean=true", "clean=false"), []) != [], True)
+    expect("a getter run too slow", measure_problems(getter_row, 9216, ran.replace("median_us=300", "median_us=600"), []) != [], True)
+    expect("a getter run too fast: the row is stale", measure_problems(getter_row, 9216, ran.replace("median_us=300", "median_us=100"), []) != [], True)
+    expect("a getter row with no getter line", measure_problems(getter_row, 9216, log, []) != [], True)
+    expect("a getter row given the REST probe's files", measure_problems(getter_row, 9216, ran, [inside]) != [], True)
 
     for line in failures:
         print(f"  resource-budget selftest FAIL: {line}", file=sys.stderr)
