@@ -278770,6 +278770,130 @@
         "Not measured: other payload sizes (8, 256, 4096 bytes) and a real network between two hosts for the asking node."
       ]
     },
+    "Round 3439": {
+      "decision_summary": "Step 1 of docs/build-configuration.md moves the admin node's hand-written choices into the one declaration. deploy/wz-config.toml gains images, axes, axis options and cargo rules: the network backend, the role and the memory profile of the admin node are declared choices, an option's requires becomes its depends on, and a cargo rule maps the selected options to cargo features and environment. The generator writes the image's Kconfig.axes and wz_axes.cmake, and the image's Kconfig and CMake read them in place of the removed hand choices and hand mapping; the fixed memory profile is a member of the storage choice with the heap the default. A new tool configures every Zephyr image of the board table and every overlay stack the images document, reads each one's cargo line from its own build, and captures or compares them, so a move like this one is shown to change no image. The board table gate follows the backend choice through rsource.",
+      "changes_bullets": [
+        "scripts/lib/zephyr_cargo_lines.py: west build --cmake-only of the nine board table rows and five documented overlay stacks; the cargo features and environment read from each build.ninja; --capture and --compare. It needs the Zephyr SDK and takes about 76 seconds, so round_fed_gate_reach lists it as deferred with that measurement.",
+        "deploy/wz-config.toml declares the admin node image, its three axes (network backend, role, storage) and five cargo rules; scripts/lib/wz_config.py generates and checks deploy/zephyr-admin-node/Kconfig.axes and wz_axes.cmake.",
+        "deploy/zephyr-admin-node/Kconfig sources Kconfig.axes and CMakeLists.txt includes wz_axes.cmake; the hand-written choices and their cargo mapping are removed.",
+        "scripts/lib/zephyr_board_table_gate.py reads the backend choice through rsource.",
+        "docs/build-configuration.md records the axes and the comparison."
+      ],
+      "verification_bullets": [
+        "zephyr_cargo_lines --capture before the move and --compare after it: the cargo lines of all fourteen images are identical.",
+        "A damaged cargo rule makes three of the fourteen cargo lines differ, so the comparison discriminates.",
+        "wz_config --check holds the generated Kconfig.axes and wz_axes.cmake current; the board table gate passes reading the backends through rsource.",
+        "The preflight derived from the pre-push hook body passes after rebasing onto the tip; each commit passed the pre-commit and commit-msg hooks."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "The image crate's features are still one per combination; one feature per axis option belongs to the session that owns the image files, after this round.",
+        "The runtime axis joins the declaration once the shared fixed client application exists.",
+        "The images zephyr-app and zephyr-pico-compare have no axes and stay as they are."
+      ],
+      "publishable_decision_summary": "Step 1 of docs/build-configuration.md moves the admin node's hand-written choices into the one declaration. deploy/wz-config.toml gains images, axes, axis options and cargo rules: the network backend, the role and the memory profile of the admin node are declared choices, an option's requires becomes its depends on, and a cargo rule maps the selected options to cargo features and environment. The generator writes the image's Kconfig.axes and wz_axes.cmake, and the image's Kconfig and CMake read them in place of the removed hand choices and hand mapping; the fixed memory profile is a member of the storage choice with the heap the default. A new tool configures every Zephyr image of the board table and every overlay stack the images document, reads each one's cargo line from its own build, and captures or compares them, so a move like this one is shown to change no image. The board table gate follows the backend choice through rsource.",
+      "publishable_changes_bullets": [
+        "scripts/lib/zephyr_cargo_lines.py: west build --cmake-only of the nine board table rows and five documented overlay stacks; the cargo features and environment read from each build.ninja; --capture and --compare. It needs the Zephyr SDK and takes about 76 seconds, so round_fed_gate_reach lists it as deferred with that measurement.",
+        "deploy/wz-config.toml declares the admin node image, its three axes (network backend, role, storage) and five cargo rules; scripts/lib/wz_config.py generates and checks deploy/zephyr-admin-node/Kconfig.axes and wz_axes.cmake.",
+        "deploy/zephyr-admin-node/Kconfig sources Kconfig.axes and CMakeLists.txt includes wz_axes.cmake; the hand-written choices and their cargo mapping are removed.",
+        "scripts/lib/zephyr_board_table_gate.py reads the backend choice through rsource.",
+        "docs/build-configuration.md records the axes and the comparison."
+      ],
+      "publishable_verification_bullets": [
+        "zephyr_cargo_lines --capture before the move and --compare after it: the cargo lines of all fourteen images are identical.",
+        "A damaged cargo rule makes three of the fourteen cargo lines differ, so the comparison discriminates.",
+        "wz_config --check holds the generated Kconfig.axes and wz_axes.cmake current; the board table gate passes reading the backends through rsource.",
+        "The preflight derived from the pre-push hook body passes after rebasing onto the tip; each commit passed the pre-commit and commit-msg hooks."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The image crate's features are still one per combination; one feature per axis option belongs to the session that owns the image files, after this round.",
+        "The runtime axis joins the declaration once the shared fixed client application exists.",
+        "The images zephyr-app and zephyr-pico-compare have no axes and stay as they are."
+      ]
+    },
+    "Round 3440": {
+      "decision_summary": "Decision C10 of docs/build-configuration.md: a drop-in header declares only what its upstream's header declares, and wz's own doors live in wz_ext.h and wz::ext. A new gate preprocesses zenoh-pico's own header at the pin under three configurations (the defaults, every option on, every option on single-threaded) and refuses any function the wz pico drop-in header declares outside their union. The TLS options are excluded because zenoh-pico needs Mbed TLS to compile them, and the gate holds that exclusion to the TLS names so it cannot widen silently. wz_ext.h and the wz::ext module exist, empty, as the place for wz-only functions. The gate runs in the pre-push hook and Layer C0.",
+      "changes_bullets": [
+        "scripts/lib/drop_in_header_gate.py: wz_capi_pico.h checked as a subset of zenoh-pico's preprocessed header under three configurations; the TLS exclusion is itself checked.",
+        "crates/wz-capi-core/include/wz_ext.h and the wz::ext module in crates/wz/src/lib.rs, both empty.",
+        ".githooks/pre-push runs the gate in the round-fed array; scripts/run-ci.sh Layer C0 runs it.",
+        "docs/build-configuration.md records decision C10."
+      ],
+      "verification_bullets": [
+        "drop_in_header_gate passes in 0.66 seconds with three preprocessor runs and no build.",
+        "A fake declaration added to the drop-in header is refused; the TLS exclusion is itself checked by the gate.",
+        "The preflight derived from the pre-push hook body passes after rebasing onto the tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The wz_capi_c doors keep their published prefix; moving them to wz_ext needs their consumer told first."
+      ],
+      "publishable_decision_summary": "Decision C10 of docs/build-configuration.md: a drop-in header declares only what its upstream's header declares, and wz's own doors live in wz_ext.h and wz::ext. A new gate preprocesses zenoh-pico's own header at the pin under three configurations (the defaults, every option on, every option on single-threaded) and refuses any function the wz pico drop-in header declares outside their union. The TLS options are excluded because zenoh-pico needs Mbed TLS to compile them, and the gate holds that exclusion to the TLS names so it cannot widen silently. wz_ext.h and the wz::ext module exist, empty, as the place for wz-only functions. The gate runs in the pre-push hook and Layer C0.",
+      "publishable_changes_bullets": [
+        "scripts/lib/drop_in_header_gate.py: wz_capi_pico.h checked as a subset of zenoh-pico's preprocessed header under three configurations; the TLS exclusion is itself checked.",
+        "crates/wz-capi-core/include/wz_ext.h and the wz::ext module in crates/wz/src/lib.rs, both empty.",
+        ".githooks/pre-push runs the gate in the round-fed array; scripts/run-ci.sh Layer C0 runs it.",
+        "docs/build-configuration.md records decision C10."
+      ],
+      "publishable_verification_bullets": [
+        "drop_in_header_gate passes in 0.66 seconds with three preprocessor runs and no build.",
+        "A fake declaration added to the drop-in header is refused; the TLS exclusion is itself checked by the gate.",
+        "The preflight derived from the pre-push hook body passes after rebasing onto the tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The wz_capi_c doors keep their published prefix; moving them to wz_ext needs their consumer told first."
+      ]
+    },
+    "Round 3441": {
+      "decision_summary": "Decision C11 of docs/build-configuration.md closes step 1: the Kconfig interpreter the host tools pin and the one the Zephyr tree runs must give the same configuration from the same input. wz_config.py --check-equivalence resolves the defaults and every registered profile with the pinned kconfiglib and with the copy Zephyr bundles, both 14.1.0, and compares the value of every symbol. Layer Qz, which has the Zephyr tree, provisions the pinned copy and arms the check, so a missing interpreter there fails rather than skips. With this round the images read the generated Kconfig and bridge with their cargo lines compared, the drop-in header has its subset gate, and the interpreter is pinned and held equal to Zephyr's.",
+      "changes_bullets": [
+        "scripts/lib/wz_config.py --check-equivalence: the defaults and every profile under configs/profiles resolved by both interpreters, every symbol's value compared.",
+        "scripts/run-ci.sh Layer Qz provisions the pinned kconfiglib and arms the check under WZ_QZ_REQUIRE.",
+        "docs/build-configuration.md records decision C11.",
+        "The drop-in and kconfiglib gates' headers name rounds 3440 and 3441, since round 3438 went to another push."
+      ],
+      "verification_bullets": [
+        "wz_config --check-equivalence passes: the defaults and every registered profile give the same value for every symbol under both interpreters.",
+        "A patched copy of Zephyr's interpreter is caught on both inputs, the defaults and a profile.",
+        "wz_config --check and --check-presets pass in the preflight derived from the pre-push hook body, which passes after rebasing onto the tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "After step 1: the runtime axis, then the upstream switch table with defconfigs and the Rust API compatibility steps once the owner confirms which session takes them, then the switches Kconfig does not have yet.",
+        "The hosted run that carries item 913 and this step is to be read job by job."
+      ],
+      "publishable_decision_summary": "Decision C11 of docs/build-configuration.md closes step 1: the Kconfig interpreter the host tools pin and the one the Zephyr tree runs must give the same configuration from the same input. wz_config.py --check-equivalence resolves the defaults and every registered profile with the pinned kconfiglib and with the copy Zephyr bundles, both 14.1.0, and compares the value of every symbol. Layer Qz, which has the Zephyr tree, provisions the pinned copy and arms the check, so a missing interpreter there fails rather than skips. With this round the images read the generated Kconfig and bridge with their cargo lines compared, the drop-in header has its subset gate, and the interpreter is pinned and held equal to Zephyr's.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_config.py --check-equivalence: the defaults and every profile under configs/profiles resolved by both interpreters, every symbol's value compared.",
+        "scripts/run-ci.sh Layer Qz provisions the pinned kconfiglib and arms the check under WZ_QZ_REQUIRE.",
+        "docs/build-configuration.md records decision C11.",
+        "The drop-in and kconfiglib gates' headers name rounds 3440 and 3441, since round 3438 went to another push."
+      ],
+      "publishable_verification_bullets": [
+        "wz_config --check-equivalence passes: the defaults and every registered profile give the same value for every symbol under both interpreters.",
+        "A patched copy of Zephyr's interpreter is caught on both inputs, the defaults and a profile.",
+        "wz_config --check and --check-presets pass in the preflight derived from the pre-push hook body, which passes after rebasing onto the tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "After step 1: the runtime axis, then the upstream switch table with defconfigs and the Rust API compatibility steps once the owner confirms which session takes them, then the switches Kconfig does not have yet.",
+        "The hosted run that carries item 913 and this step is to be read job by job."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
