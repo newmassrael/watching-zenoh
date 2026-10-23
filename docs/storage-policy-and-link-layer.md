@@ -445,7 +445,7 @@ The mailbox costs nothing that this measures. The latency rises with the number
 in flight because the router and the responder serialise them; the rate rises
 because the round trips overlap.
 
-Two things the runs showed, neither settled:
+Two things the runs showed:
 
 - Against zenohd 1.10.1 a run with four or more queries in flight sometimes
   never finishes: the router stops writing responses to the node for good
@@ -454,15 +454,24 @@ Two things the runs showed, neither settled:
   node's socket queue is empty and its sequence numbers are contiguous. The
   repository's own router did not stop in 60 such runs. That is the router's
   behaviour under this load; whether this node's request pattern provokes it is
-  not known, and nothing here has been reported upstream.
-- Against the repository's own router, 4 of those 60 runs lost one to four
-  queries of 6,200 (a timeout at the getter), always the fourth of four requests
-  sent back to back. The router had received every response; some did not leave
-  on the UDP face. The likely cause is the congestion rule it takes from the
-  reference (a droppable message meets a queue past its slot budget and is
-  dropped at once), but no counter sits at that point, so it is a hypothesis. It
-  is a defect candidate and is registered as a debt, not accepted as the
-  reference's behaviour.
+  not known, and nothing here has been reported upstream. Not settled.
+- Against the repository's own router the same load lost replies: one to four
+  queries of 6,200 timed out in many runs, always the fourth of four requests
+  sent back to back. The router had received every response. A temporary
+  print where the outbound queue answers "congested" (in a copy of the source on
+  the measuring host only) showed the cause every time: a droppable Response
+  that waited `wait_before_drop` (1 ms) against a lane holding 3,214 bytes with
+  a bound of 2,900 bytes, and the slot pool had room. The bound was `queue size
+  (2) x the link's batch (1,450 bytes on UDP)`. The reference counts a lane in
+  negotiated batches too, so its router has the same small lane; wz copied the
+  rule (R2925). A lane's bound is the sender's memory policy, so it now counts
+  in the session's configured batch (`TxQueueShape::queue_unit_bytes`, 65,535
+  bytes by default and never below the link's batch) while the batch the link
+  sends still packs and fragments. This departs from the reference on purpose.
+  The same router binary with the lane size raised to 8, or `wait_before_drop` to
+  50 ms, lost nothing in 40 runs each; at 4 queries in flight the old router lost
+  queries in 28 of 40 runs and the fixed one in 0 of 40, at 8 in flight 23 of 40
+  against 0 of 40, run in alternation in the same hour.
 
 The two routers were also compared with one query and two in flight, shuffled,
 15 runs each, router, responder and getter pinned: zenohd 394 us and 2,328
