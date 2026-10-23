@@ -17,7 +17,11 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --emit kconfig-capabilities   print deploy/Kconfig.capabilities
     --emit kconfig-limits         print deploy/Kconfig.limits
     --emit rust-limits            print crates/wz-session-core/src/caps_generated.rs
-    --write                       write all four
+    --emit image-kconfig:IMAGE    print the axes of a declared image as Kconfig choices
+                                  (<dir>/Kconfig.axes)
+    --emit image-cmake:IMAGE      print the CMake that maps those choices to the image crate's
+                                  features (<dir>/wz_axes.cmake)
+    --write                       write every one of them
     --features ABI CONFIG         turn a Kconfig result (or a pico config.h) into the cargo arguments
     --resolve-features ABI PRESET...
                                   merge presets onto the defaults (kconfiglib) and print the cargo
@@ -204,6 +208,11 @@ def load_decl(path: pathlib.Path = DECL) -> dict:
         "caps": caps,
         "order": [c["id"] for c in data["capability"]],
         "limits": list(data["limit"]),
+        "images": [i["id"] for i in data.get("image", [])],
+        "image_dirs": {i["id"]: i["dir"] for i in data.get("image", [])},
+        "axes": list(data.get("axis", [])),
+        "options": list(data.get("axis_option", [])),
+        "rules": list(data.get("cargo_rule", [])),
     }
 
 
@@ -220,9 +229,76 @@ def validate_decl(data: dict) -> list[str]:
         return out
     out += validate_caps(data)
     out += validate_limits(data["limit"])
+    out += validate_images(data)
     symbols = [c["kconfig"] for c in data["capability"]] + [l["kconfig"] for l in data["limit"]]
+    symbols += [a["kconfig"] for a in data.get("axis", [])]
+    symbols += [o["kconfig"] for o in data.get("axis_option", [])]
     if len(symbols) != len(set(symbols)):
         out.append("a Kconfig symbol is declared twice")
+    return out
+
+
+IMAGE_KEYS = {"id", "dir"}
+AXIS_KEYS = {"id", "image", "kconfig", "prompt", "default", "help"}
+OPTION_KEYS = {"id", "axis", "kconfig", "prompt", "requires", "help"}
+RULE_KEYS = {"image", "when", "features", "defaults"}
+
+
+def validate_images(data: dict) -> list[str]:
+    """The images, their axes, the axes' options and the cargo rules hold together.
+
+    A rule may only name the options of its own image's axes: what it adds to a crate's build is
+    then decided by choices this file declares, never by a symbol of the image's own Kconfig.
+    """
+    out: list[str] = []
+    sections = (("image", IMAGE_KEYS), ("axis", AXIS_KEYS), ("axis_option", OPTION_KEYS),
+                ("cargo_rule", RULE_KEYS))
+    for kind, keys in sections:
+        for entry in data.get(kind, []):
+            unknown = set(entry) - keys
+            if unknown:
+                out.append(f"a {kind} has keys this reader does not know: {sorted(unknown)}")
+    images = [i.get("id") for i in data.get("image", [])]
+    if len(images) != len(set(images)):
+        out.append("an image id is declared twice")
+    axes = {}
+    for axis in data.get("axis", []):
+        if axis.get("image") not in images:
+            out.append(f"axis {axis.get('id')!r} names image {axis.get('image')!r}, which is not declared")
+        if axis.get("id") in axes:
+            out.append(f"axis {axis.get('id')!r} is declared twice")
+        axes[axis.get("id")] = axis
+    options: dict[str, list[dict]] = {a: [] for a in axes}
+    for option in data.get("axis_option", []):
+        if option.get("axis") not in axes:
+            out.append(f"option {option.get('id')!r} names axis {option.get('axis')!r}, which is not declared")
+            continue
+        options[option["axis"]].append(option)
+    for aid, axis in axes.items():
+        ids = [o["id"] for o in options[aid]]
+        if len(ids) < 2:
+            out.append(f"axis {aid!r} has {len(ids)} option(s); a choice needs two")
+        if len(ids) != len(set(ids)):
+            out.append(f"axis {aid!r} declares an option twice")
+        if axis.get("default") not in ids:
+            out.append(f"axis {aid!r} defaults to {axis.get('default')!r}, which is not one of its options")
+    for rule in data.get("cargo_rule", []):
+        image = rule.get("image")
+        if image not in images:
+            out.append(f"a cargo rule names image {image!r}, which is not declared")
+            continue
+        own = {o["kconfig"] for aid, axis in axes.items() if axis.get("image") == image
+               for o in options[aid]}
+        when = rule.get("when") or []
+        if not when:
+            out.append(f"a cargo rule of {image!r} names no option in `when`")
+        for symbol in when:
+            if symbol not in own:
+                out.append(f"a cargo rule of {image!r} names {symbol}, which is no option of its axes")
+        if not rule.get("features") and rule.get("defaults") != "off":
+            out.append(f"a cargo rule of {image!r} when {when} adds nothing")
+        if rule.get("defaults", "off") != "off":
+            out.append(f"a cargo rule of {image!r} says defaults = {rule.get('defaults')!r}; only \"off\" is a value")
     return out
 
 
@@ -459,12 +535,65 @@ def emit_kconfig_root(decl: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def help_lines(text: str) -> list[str]:
+    return [f"\t  {line}" if line else "\t" for line in text.strip().splitlines()]
+
+
+def emit_image_kconfig(decl: dict, image: str) -> str:
+    """The axes of `image` as Kconfig choices, each option `depends on` what it requires."""
+    out = generated_header("#", f"image-kconfig:{image}")
+    for axis in (a for a in decl["axes"] if a["image"] == image):
+        members = [o for o in decl["options"] if o["axis"] == axis["id"]]
+        default = next(o["kconfig"] for o in members if o["id"] == axis["default"])
+        out += ["", f"choice {axis['kconfig']}", f'\tprompt "{axis["prompt"]}"', f"\tdefault {default}"]
+        if axis.get("help"):
+            out += ["\thelp"] + help_lines(axis["help"])
+        for option in members:
+            out += ["", f"config {option['kconfig']}", f'\tbool "{option["prompt"]}"']
+            if option.get("requires"):
+                out.append(f"\tdepends on {option['requires']}")
+            if option.get("help"):
+                out += ["\thelp"] + help_lines(option["help"])
+        out += ["", "endchoice"]
+    return "\n".join(out) + "\n"
+
+
+def emit_image_cmake(decl: dict, image: str) -> str:
+    """What the crate of `image` is built with for the selected options: `wz_axes_features` and
+    `wz_axes_no_default_features`, for the image's CMake to hand to `wz_zephyr_rust_app`."""
+    out = generated_header("#", f"image-cmake:{image}") + [
+        "",
+        "set(wz_axes_features \"\")",
+        "set(wz_axes_no_default_features \"\")",
+    ]
+    for rule in (r for r in decl["rules"] if r["image"] == image):
+        condition = " AND ".join(f"CONFIG_{symbol}" for symbol in rule["when"])
+        out.append(f"if({condition})")
+        if rule.get("features"):
+            out.append(f"  list(APPEND wz_axes_features {' '.join(rule['features'])})")
+        if rule.get("defaults") == "off":
+            out.append("  set(wz_axes_no_default_features NO_DEFAULT_FEATURES)")
+        out.append("endif()")
+    return "\n".join(out) + "\n"
+
+
 GENERATED = {
     "kconfig-root": (KCONFIG_ROOT, emit_kconfig_root),
     "kconfig-capabilities": (KCONFIG_CAPS, emit_kconfig_capabilities),
     "kconfig-limits": (KCONFIG_LIMITS, emit_kconfig_limits),
     "rust-limits": (RUST_LIMITS, emit_rust_limits),
 }
+
+
+def generated_files(decl: dict) -> dict[str, tuple[pathlib.Path, str]]:
+    """Every derived file, by the `--emit` kind that prints it: the host files and, for each
+    declared image, its axes' Kconfig and the CMake that maps them to cargo."""
+    out = {kind: (path, emit(decl)) for kind, (path, emit) in GENERATED.items()}
+    for image in decl["images"]:
+        base = ROOT / decl["image_dirs"][image]
+        out[f"image-kconfig:{image}"] = (base / "Kconfig.axes", emit_image_kconfig(decl, image))
+        out[f"image-cmake:{image}"] = (base / "wz_axes.cmake", emit_image_cmake(decl, image))
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -718,11 +847,12 @@ def cmd_check() -> int:
         print(f"  wz-config FAIL: {DECL.name}: {exc}", file=sys.stderr)
         return 1
     findings: list[str] = []
-    for kind, (path, emit) in GENERATED.items():
+    files = generated_files(decl)
+    for kind, (path, text) in files.items():
         rel = path.relative_to(ROOT)
         if not path.is_file():
             findings.append(f"{rel} is missing (--emit {kind} prints it)")
-        elif path.read_text(encoding="utf-8") != emit(decl):
+        elif path.read_text(encoding="utf-8") != text:
             findings.append(f"{rel} is stale: regenerate it with --write")
     findings += check_caps_rs(decl, CAPS_RS.read_text(encoding="utf-8"))
     for abi, path in MANIFESTS.items():
@@ -737,14 +867,15 @@ def cmd_check() -> int:
     if findings:
         return 1
     print(f"  wz-config: {len(decl['order'])} capabilities, {len(decl['limits'])} limits, "
-          f"{len(GENERATED)} generated files current, caps.rs bound, {len(MANIFESTS)} manifests agree")
+          f"{len(decl['axes'])} image axes, {len(files)} generated files current, caps.rs bound, "
+          f"{len(MANIFESTS)} manifests agree")
     return 0
 
 
 def cmd_write() -> int:
     decl = load_decl()
-    for path, emit in GENERATED.values():
-        path.write_text(emit(decl), encoding="utf-8")
+    for path, text in generated_files(decl).values():
+        path.write_text(text, encoding="utf-8")
         print(f"  wz-config: wrote {path.relative_to(ROOT)}")
     return 0
 
@@ -772,6 +903,40 @@ default = 4
 help = '''
 A table.
 '''
+"""
+
+
+IMAGE_SAMPLE = """\
+
+[[image]]
+id = "img"
+dir = "deploy/img"
+
+[[axis]]
+id = "side"
+image = "img"
+kconfig = "WZ_SIDE"
+prompt = "Side"
+default = "l"
+
+[[axis_option]]
+id = "l"
+axis = "side"
+kconfig = "WZ_SIDE_L"
+prompt = "Left"
+
+[[axis_option]]
+id = "r"
+axis = "side"
+kconfig = "WZ_SIDE_R"
+prompt = "Right"
+requires = "WZ_SOMETHING"
+
+[[cargo_rule]]
+image = "img"
+when = ["WZ_SIDE_R"]
+features = ["right"]
+defaults = "off"
 """
 
 
@@ -909,6 +1074,37 @@ def cmd_selftest() -> int:
            any("schema_version" in p for p in validate_decl(read_decl_toml(
                SAMPLE.replace("schema_version = 1", "schema_version = 2")))))
 
+    # Images: the axes as choices, and the cargo rules over their options.
+    with_image = SAMPLE + IMAGE_SAMPLE
+    image_data = read_decl_toml(with_image)
+    expect("a sample image validates", validate_decl(image_data) == [])
+    idecl = {"axes": image_data["axis"], "options": image_data["axis_option"],
+             "rules": image_data["cargo_rule"]}
+    kconfig = emit_image_kconfig(idecl, "img")
+    expect("an axis is a choice with its default, and an option depends on what it requires",
+           "choice WZ_SIDE\n\tprompt \"Side\"\n\tdefault WZ_SIDE_L\n" in kconfig
+           and "config WZ_SIDE_R\n\tbool \"Right\"\n\tdepends on WZ_SOMETHING\n" in kconfig
+           and kconfig.rstrip().endswith("endchoice"))
+    cmake = emit_image_cmake(idecl, "img")
+    expect("a rule is a conjunction of its options that adds its features and turns the defaults off",
+           "if(CONFIG_WZ_SIDE_R)\n  list(APPEND wz_axes_features right)\n"
+           "  set(wz_axes_no_default_features NO_DEFAULT_FEATURES)\nendif()" in cmake)
+
+    def image_refused(old: str, new: str, words: str) -> bool:
+        return any(words in p for p in validate_decl(read_decl_toml(with_image.replace(old, new))))
+
+    expect("a rule naming a symbol that is no option of its image's axes is refused",
+           image_refused('when = ["WZ_SIDE_R"]', 'when = ["WZ_MAC_X"]', "no option of its axes"))
+    expect("an axis defaulting to no option of its own is refused",
+           image_refused('default = "l"', 'default = "x"', "not one of its options"))
+    expect("an option of an undeclared axis is refused",
+           image_refused('axis = "side"\nkconfig = "WZ_SIDE_R"', 'axis = "top"\nkconfig = "WZ_SIDE_R"',
+                         "not declared"))
+    expect("a key the reader does not know is refused",
+           image_refused('dir = "deploy/img"', 'dir = "deploy/img"\nboard = "b"', "does not know"))
+    expect("an option symbol declared twice is refused",
+           image_refused('kconfig = "WZ_SIDE_R"', 'kconfig = "WZ_SIDE_L"', "declared twice"))
+
     # The reader must refuse what it does not read, and must agree with `tomllib` on the
     # shipped file wherever the interpreter has one (3.11+; the hosted floor does not, which is
     # why the import is by name and not a statement the floor lint reads).
@@ -1004,9 +1200,11 @@ def main(argv: list[str]) -> int:
         return cmd_selftest()
     if len(argv) == 2 and argv[1] == "--write":
         return cmd_write()
-    if len(argv) == 3 and argv[1] == "--emit" and argv[2] in GENERATED:
-        sys.stdout.write(GENERATED[argv[2]][1](load_decl()))
-        return 0
+    if len(argv) == 3 and argv[1] == "--emit":
+        files = generated_files(load_decl())
+        if argv[2] in files:
+            sys.stdout.write(files[argv[2]][1])
+            return 0
     if len(argv) == 4 and argv[1] == "--features" and argv[2] in ABIS:
         decl = load_decl()
         on = read_config(decl, pathlib.Path(argv[3]).read_text(encoding="utf-8"))

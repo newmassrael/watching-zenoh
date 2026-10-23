@@ -11,6 +11,9 @@
 #   * `deploy/Kconfig.limits`         the limits an image states for itself (generated);
 #   * `crates/wz-session-core/src/caps_generated.rs`
 #                                     the value of each limit as the code reads it (generated);
+#   * `<image dir>/Kconfig.axes` and `<image dir>/wz_axes.cmake`
+#                                     each image's axes as Kconfig choices, and what they build
+#                                     its crate with (generated);
 #   * the Cargo features               `--features <abi> <.config>` turns a Kconfig result into
 #                                     the `cargo build` arguments of an ABI crate;
 #   * the three manifests              wz-capi-core, wz-capi-pico and wz-capi-c each spell the
@@ -44,6 +47,18 @@
 # build hands to cargo as the environment variable of the same name without `CONFIG_`
 # (deploy/zephyr-common/wz_zephyr_board.cmake). The code reads each limit from the generated
 # module, and `crates/wz-session-core/src/caps.rs` binds the name the code uses to it.
+#
+# ## Images and their axes
+#
+# An `image` is a Zephyr application whose node is chosen along axes. An `axis` is a Kconfig
+# `choice` of that image, with a `default` option; each `axis_option` is one member of it, and its
+# `requires` (a Kconfig expression) becomes the member's `depends on`, so a combination the node
+# cannot be built as cannot be selected. A `cargo_rule` says what the image's crate is built with
+# when every option named in its `when` is selected: the `features` it adds, and `defaults = "off"`
+# where the crate's default features (its heap profile) must be off. Generated for each image:
+# `<dir>/Kconfig.axes`, which the image's Kconfig sources, and `<dir>/wz_axes.cmake`, which its
+# CMake includes and which sets `wz_axes_features` and `wz_axes_no_default_features`. What is
+# particular to a board or a driver stays in the image's own Kconfig and CMake.
 
 schema_version = 1
 catalog_version = 1
@@ -555,3 +570,142 @@ help = '''
 The locators a node is told to connect to. A list longer than this stops
 at the limit; a fixed deployment names a few peers.
 '''
+
+[[image]]
+id = "zephyr-admin-node"
+dir = "deploy/zephyr-admin-node"
+
+[[axis]]
+id = "net-backend"
+image = "zephyr-admin-node"
+kconfig = "WZ_NET_BACKEND"
+prompt = "Network stack the admin node runs over"
+default = "zephyr-sockets"
+help = '''
+The node is the same on every board; what differs is the stack under it,
+which the board's Ethernet driver decides.
+'''
+
+[[axis_option]]
+id = "zephyr-sockets"
+axis = "net-backend"
+kconfig = "WZ_NET_BACKEND_ZEPHYR_SOCKETS"
+prompt = "Zephyr's own network stack and BSD sockets"
+help = '''
+For a board whose Ethernet, Wi-Fi or modem Zephyr drives. The interface, its
+address (DHCP or Kconfig) and its link-layer identity are Zephyr's.
+'''
+
+[[axis_option]]
+id = "lwip-mac"
+axis = "net-backend"
+kconfig = "WZ_NET_BACKEND_LWIP_MAC"
+prompt = "lwIP over an Ethernet MAC the wz crates drive"
+help = '''
+For a board whose Ethernet controller Zephyr has no driver for. Zephyr is the
+kernel only (threads, clock, heap, console): the network is lwIP, polled from
+the node's loop, over a wz `EthernetMac` crate for the chip. The interface
+address and the MAC address are the board's Kconfig, since no Zephyr
+interface exists to ask.
+'''
+
+[[axis]]
+id = "role"
+image = "zephyr-admin-node"
+kconfig = "WZ_NODE_ROLE"
+prompt = "What the node is"
+default = "admin"
+help = '''
+The admin node is the node a zenoh host reconfigures at runtime. The client node is a
+client of a router that answers queries and nothing else: it is what zenoh-pico is as a
+client with a queryable, and what a comparison with it is made against.
+'''
+
+[[axis_option]]
+id = "admin"
+axis = "role"
+kconfig = "WZ_NODE_ADMIN"
+prompt = "Admin node: listens, hosts upstream's admin space, dials what it is told to"
+
+[[axis_option]]
+id = "client"
+axis = "role"
+kconfig = "WZ_NODE_CLIENT"
+prompt = "Client node: dials a router and answers queries"
+requires = "WZ_NET_BACKEND_ZEPHYR_SOCKETS"
+help = '''
+No listener, no admin space, no config write, no accepted session. The router it dials
+is WZ_CLIENT_ENDPOINT; the queries it answers are two documents under a fixed key, the
+same two zenoh-pico's comparison image (deploy/zephyr-pico-compare) answers.
+'''
+
+[[axis]]
+id = "storage"
+image = "zephyr-admin-node"
+kconfig = "WZ_NODE_STORAGE"
+prompt = "Where the node's tables live"
+default = "heap"
+help = '''
+The memory profile is the node's and not a network backend's: whether the Rust image has an
+allocator is a setting made beside the role and the stack, and what it is available to is
+what has the slot profile's pieces (the stack's driver and how it opens a socket).
+'''
+
+[[axis_option]]
+id = "heap"
+axis = "storage"
+kconfig = "WZ_STORAGE_HEAP"
+prompt = "The heap profile: the growable node, over an allocator in the Rust image"
+
+[[axis_option]]
+id = "fixed"
+axis = "storage"
+kconfig = "WZ_FIXED_MEMORY"
+prompt = "Build the node on the fixed-memory profile (no allocator in the Rust image)"
+requires = "(WZ_NET_BACKEND_LWIP_MAC && WZ_MAC_CYT4BF) || (WZ_NET_BACKEND_ZEPHYR_SOCKETS && WZ_NODE_CLIENT)"
+help = '''
+Every table the node holds (sessions, sockets, the observer, the interfaces) is a
+static the image declares, the session tier is the slot profile's, and the Rust
+staticlib is built with its default features off, so it links no allocator. The
+session host and the dialler are the ones every stack shares
+(wz_session_mcu::slot_host); a stack supplies its driver and how it opens a socket.
+
+Two nodes have the profile. The admin node over lwIP is fixed_node.rs: its listener
+reads only the datagrams of the peer each session was accepted from and drops and
+counts the rest, where the growable node's one accepting session takes the source of
+every datagram it reads as its peer. The client node over Zephyr's sockets is
+fixed_client.rs. Not the admin node over Zephyr's sockets: that node accepts, and the
+socket stack has no listener of the slot profile yet.
+
+This kernel's own heap is a separate matter: what the Rust image does not allocate,
+Zephyr's network stack and POSIX layer still may, and CONFIG_HEAP_MEM_POOL_SIZE is what
+the kernel is given for it.
+'''
+
+[[cargo_rule]]
+image = "zephyr-admin-node"
+when = ["WZ_NET_BACKEND_ZEPHYR_SOCKETS"]
+features = ["net-zephyr-sockets"]
+
+[[cargo_rule]]
+image = "zephyr-admin-node"
+when = ["WZ_NET_BACKEND_LWIP_MAC"]
+features = ["net-lwip-mac"]
+
+[[cargo_rule]]
+image = "zephyr-admin-node"
+when = ["WZ_NODE_CLIENT", "WZ_STORAGE_HEAP"]
+features = ["client-node"]
+defaults = "off"
+
+[[cargo_rule]]
+image = "zephyr-admin-node"
+when = ["WZ_NODE_CLIENT", "WZ_FIXED_MEMORY"]
+features = ["fixed-client"]
+defaults = "off"
+
+[[cargo_rule]]
+image = "zephyr-admin-node"
+when = ["WZ_NET_BACKEND_LWIP_MAC", "WZ_FIXED_MEMORY"]
+features = ["fixed-memory"]
+defaults = "off"
