@@ -9209,7 +9209,12 @@ layer_c1y_cargo_test_routing_peer() {
     # ⚠ The pre-push count-guard gate did NOT select this guard on the push that
     # moved it: the filter `auth_dispatch` is the MODULE PATH of the changed file,
     # which that file's text never spells. The gate now derives that path too.
-    _runci_guarded_test "C1y auth_dispatch" 9 \
+    # R3462 — 9 -> 10: `the_credential_zid_rides_the_pubkey_slot_and_is_reported_only_once_proved`,
+    # which `864d052a1` added with the dispatch's verified credential zid and did not
+    # count here. No hosted run graded it (each was cancelled by the next push); the
+    # count-guard gate found it on a range that selected the crate's guards. READ off the
+    # command, which printed 10.
+    _runci_guarded_test "C1y auth_dispatch" 10 \
         cargo test -p wz-session-core --features access-extauth-usrpwd --lib auth_dispatch --quiet || return 1
     _runci_guarded_test "C1y usrpwd e2e" 6 \
         cargo test -p wz-runtime-tokio --features access-extauth-usrpwd \
@@ -9228,11 +9233,19 @@ layer_c1y_cargo_test_routing_peer() {
     # and both numbers were read off `--list` under this feature set: 12 method
     # tests (the 11 above plus the runtime-add handshake witness) and 12 store
     # tests, which sum to the 24 the widened filter printed.
-    _runci_guarded_test "C1y extauth_pubkey" 12 \
+    # R3462 — 12 -> 15, and the two e2e legs below 1 -> 2 and 2 -> 3: `864d052a1` added
+    # the verified credential zid and three method tests
+    # (`the_credential_zid_is_taken_over_the_subject_public_key_info`,
+    # `the_responder_proves_the_initiators_key_and_the_initiator_proves_nothing`,
+    # `a_failed_open_syn_leaves_no_proved_credential`) and one handshake witness
+    # (`a_zid_derived_from_the_proved_key_is_verified_by_the_responder_only`, ungated, so
+    # it lands in both e2e legs), and counted none of them here. READ off the three
+    # commands, which printed 15, 2 and 3; the store guard is untouched.
+    _runci_guarded_test "C1y extauth_pubkey" 15 \
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey:: --quiet || return 1
     _runci_guarded_test "C1y extauth_pubkey_store" 12 \
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey_store:: --quiet || return 1
-    _runci_guarded_test "C1y pubkey e2e" 1 \
+    _runci_guarded_test "C1y pubkey e2e" 2 \
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey \
         --test pubkey_handshake_e2e --quiet || return 1
     # R2779 (open-debt item 803) — the witness that each auth method draws its
@@ -9241,7 +9254,7 @@ layer_c1y_cargo_test_routing_peer() {
     # counts 1. It was red on the tree before the fix (the two challenges
     # byte-identical), so this is the leg that keeps the fan-out from coming
     # back. 2 = that witness + the pubkey-only test the file already had.
-    _runci_guarded_test "C1y pubkey+usrpwd e2e" 2 \
+    _runci_guarded_test "C1y pubkey+usrpwd e2e" 3 \
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey,access-extauth-usrpwd \
         --test pubkey_handshake_e2e --quiet || return 1
     (cd crates \
