@@ -1463,12 +1463,13 @@ pub async fn establish_capability_pair(
 
 #[cfg(test)]
 mod port_tests {
-    use super::{
-        autoselect_range, free_port, hand_out, record_in_process, refusing_port,
-        unbound_unautoselected,
-    };
+    use super::{autoselect_range, free_port, hand_out, record_in_process, unbound_unautoselected};
     #[cfg(unix)]
     use super::{claim_across_processes, claim_in};
+    // The two tests of it are Linux's (the refusal is a Linux property of a bound, non-listening
+    // socket), so on any other host the import would be unused.
+    #[cfg(target_os = "linux")]
+    use super::refusing_port;
     use std::collections::BTreeSet;
 
     /// Held by a test that drops a listener and expects the number to refuse, for

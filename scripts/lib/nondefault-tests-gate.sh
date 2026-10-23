@@ -297,6 +297,12 @@ transport-link-unixpipe,transport-link-ws|"
     # `reth/` locator of its MAC. `raweth-transport` is off by default, so that test was
     # compiled by no leg. The filter is the module path, so a test added there is covered.
     "wz-capi-core|hook|raweth-transport|faces::multicast::"
+    # Open-debt item 913 -- the in-memory group every group test of the workspace runs over
+    # (`multicast_bus`) holds a member's place while a send half of its link lives, as a socket
+    # does, which the departure test of the group face depends on. The module exists only with
+    # `multicast`, so its own tests were compiled by no leg until this row. The filter is empty:
+    # every test of the build runs.
+    "wz-runtime-tokio-test-support|hook|multicast|"
     # R2524 — `dissect` -> `dissect,fixtures`, and the route here is the point.
     # R2520 added the `fixtures` feature (the shared item-713 captures, which a
     # `#[cfg(test)]` fixture cannot carry across a crate boundary) and did NOT
