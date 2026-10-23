@@ -23291,6 +23291,14 @@ layer_qz_zephyr_boot() {
     [[ "$rc" -eq 10 ]] && return 0
     [[ "$rc" -ne 0 ]] && return 1
 
+    # R3440 (decision C11 of docs/build-configuration.md) -- the Kconfig interpreter the host
+    # tools pin and the one this Zephyr tree runs give the same configuration from the same
+    # tree and inputs (the defaults and every registered profile). This lane is where a Zephyr
+    # tree is: it provisions the pinned one, and a job that arms the lane arms both.
+    bash scripts/provision-kconfiglib.sh || return 1
+    WZ_KCONFIG_REQUIRE="${WZ_QZ_REQUIRE:-}" WZ_ZEPHYR_KCONFIG_REQUIRE="${WZ_QZ_REQUIRE:-}" \
+        WZ_ZEPHYR_BASE="$_QZ_BASE" python3 scripts/lib/wz_config.py --check-equivalence || return 1
+
     local build_dir elf qlog qpid fail=0
     build_dir="$(mktemp -d)/zbuild"
     elf="$build_dir/zephyr/zephyr.elf"

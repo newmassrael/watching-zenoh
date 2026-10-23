@@ -29,6 +29,8 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --resolve-env PRESET...       the same merge; print WZ_LIMIT_<NAME>=<value> for each limit it
                                   sets off its default
     --check-presets               every registered profile (configs/profiles) resolves strictly
+    --check-equivalence           the pinned kconfiglib and the copy Zephyr runs give the same
+                                  configuration from the defaults and every registered profile
     --check                       hold every derived file, caps.rs and the three manifests to it
     --selftest                    drive the reader, the derivations and the check on what can be wrong
 
@@ -89,6 +91,7 @@ from __future__ import annotations
 
 import functools
 import importlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -742,15 +745,32 @@ def check_preset_header(decl: dict, name: str, text: str) -> list[str]:
     return out
 
 
-def resolve(fragments: list[pathlib.Path]):
+def zephyr_kconfiglib_module():
+    """The kconfiglib Zephyr's build runs (`$ZEPHYR_BASE/scripts/kconfig/kconfiglib.py`), loaded
+    by its path under a name of its own so it never stands in for the pinned one; None if there
+    is no Zephyr tree. The tree is `WZ_ZEPHYR_BASE`, then `ZEPHYR_BASE`, then the workspace the
+    Zephyr lanes use (`~/zephyrproject/zephyr`)."""
+    base = os.environ.get("WZ_ZEPHYR_BASE") or os.environ.get("ZEPHYR_BASE")
+    path = (pathlib.Path(base) if base else pathlib.Path.home() / "zephyrproject" / "zephyr")
+    path = path / "scripts" / "kconfig" / "kconfiglib.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("zephyr_kconfiglib", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def resolve(fragments: list[pathlib.Path], kconfiglib=None):
     """The configuration the generated Kconfig gives when `fragments` are merged in order onto
-    its defaults, a later fragment overriding an earlier one.
+    its defaults, a later fragment overriding an earlier one, read by `kconfiglib` (the pinned
+    interpreter when not given).
 
     Strict (C9): a symbol the tree does not have, a value outside a symbol's type or range and an
     assignment its dependencies do not allow are each refused with kconfiglib's own words,
     never dropped; so is a fragment whose header names another catalogue.
     """
-    kconfiglib = kconfiglib_module()
+    kconfiglib = kconfiglib or kconfiglib_module()
     if kconfiglib is None:
         raise PresetError("kconfiglib is not installed: run scripts/provision-kconfiglib.sh")
     decl = load_decl()
@@ -833,6 +853,60 @@ def cmd_check_presets() -> int:
         print(f"  wz-config presets: {profile.name} -> {abi}: "
               f"{cargo_args(decl, abi, resolved_caps(decl, kconf))}")
     return 1 if bad else 0
+
+
+def configuration(kconf) -> dict[str, str]:
+    """Every symbol of a resolved tree and the value it got, the whole of what a `.config` says."""
+    return {sym.name: sym.str_value for sym in kconf.unique_defined_syms}
+
+
+def configuration_diff(pinned: dict[str, str], zephyr: dict[str, str]) -> list[str]:
+    out = []
+    for name in sorted(set(pinned) | set(zephyr)):
+        if pinned.get(name) != zephyr.get(name):
+            out.append(f"{name} is {pinned.get(name)!r} by the pinned kconfiglib and "
+                       f"{zephyr.get(name)!r} by Zephyr's")
+    return out
+
+
+def cmd_check_equivalence() -> int:
+    """The pinned kconfiglib and the copy Zephyr's build runs give the same configuration from
+    the same tree and inputs (decision C11): the defaults alone, and every registered profile.
+
+    Each interpreter that is absent is a SKIP said out loud, unless the job arms it
+    (WZ_KCONFIG_REQUIRE=1 for the pinned one, WZ_ZEPHYR_KCONFIG_REQUIRE=1 for Zephyr's), where
+    it is a FAIL.
+    """
+    pinned, zephyr = kconfiglib_module(), zephyr_kconfiglib_module()
+    zephyr_required = os.environ.get("WZ_ZEPHYR_KCONFIG_REQUIRE") == "1"
+    if pinned is None or zephyr is None:
+        missing = "the pinned kconfiglib" if pinned is None else "Zephyr's kconfiglib"
+        if (pinned is None and KCONFIG_REQUIRED) or (zephyr is None and zephyr_required):
+            print(f"  wz-config equivalence FAIL: {missing} is absent and this job is armed to "
+                  f"provide it", file=sys.stderr)
+            return 1
+        print(f"  wz-config equivalence SKIP: {missing} is absent")
+        return 0
+    inputs: list[tuple[str, list[pathlib.Path]]] = [("the defaults", [])]
+    inputs += [(p.name, [p]) for p in sorted(PROFILES.glob("*.conf"))]
+    bad = 0
+    for label, fragments in inputs:
+        try:
+            a = configuration(resolve(fragments, pinned))
+            b = configuration(resolve(fragments, zephyr))
+        except PresetError as exc:
+            print(f"  wz-config equivalence FAIL: {label}: {exc}", file=sys.stderr)
+            bad += 1
+            continue
+        for difference in configuration_diff(a, b):
+            print(f"  wz-config equivalence FAIL: {label}: {difference}", file=sys.stderr)
+            bad += 1
+    if bad:
+        return 1
+    print(f"  wz-config equivalence: {len(inputs)} input(s), the pinned kconfiglib "
+          f"{'.'.join(map(str, pinned.VERSION))} and Zephyr's {'.'.join(map(str, zephyr.VERSION))} "
+          f"give the same configuration")
+    return 0
 
 
 # ---------------------------------------------------------------------------------------------
@@ -1133,6 +1207,13 @@ def cmd_selftest() -> int:
         text = DECL.read_text(encoding="utf-8")
         expect("the declaration reads the same as tomllib reads it",
                read_decl_toml(text) == stdlib_toml.loads(text))
+    expect("two interpreters agreeing give no difference",
+           configuration_diff({"A": "y", "B": "3"}, {"A": "y", "B": "3"}) == [])
+    expect("a value the two interpreters give differently is a difference",
+           configuration_diff({"A": "y"}, {"A": "n"})
+           == ["A is 'y' by the pinned kconfiglib and 'n' by Zephyr's"])
+    expect("a symbol only one interpreter has is a difference",
+           configuration_diff({"A": "y"}, {}) == ["A is 'y' by the pinned kconfiglib and None by Zephyr's"])
     cyc = {"capability": [
         {"id": "a", "kconfig": "WZ_CAP_A", "abis": ["core"], "implies": ["b"]},
         {"id": "b", "kconfig": "WZ_CAP_B", "abis": ["core"], "implies": ["a"]}]}
@@ -1212,6 +1293,8 @@ def main(argv: list[str]) -> int:
         return 0
     if len(argv) == 2 and argv[1] == "--check-presets":
         return cmd_check_presets()
+    if len(argv) == 2 and argv[1] == "--check-equivalence":
+        return cmd_check_equivalence()
     if len(argv) >= 4 and argv[1] == "--resolve-features" and argv[2] in ABIS:
         decl = load_decl()
         try:

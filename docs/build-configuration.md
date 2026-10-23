@@ -83,8 +83,10 @@ original reproduced by naming it. Three things follow from it:
   into `target/kconfig-venv` by `scripts/provision-kconfiglib.sh`. `wz_config.py
   --resolve-features` / `--resolve-env` merge presets onto the generated tree's defaults,
   strictly (C9, with Zephyr's merge settings and its two value checks as errors), and Layer C0
-  resolves every registered profile. The equivalence gate against Zephyr's own copy is still
-  to come.
+  resolves every registered profile. `wz_config.py --check-equivalence` resolves the defaults
+  and every registered profile with both the pinned copy and the one Zephyr's build runs and
+  compares every symbol's value; Layer Qz runs it where the Zephyr tree is, armed. The
+  upstream defconfigs join its inputs when step 2 writes them.
 
 ## 3. The model
 
