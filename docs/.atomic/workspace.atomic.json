@@ -279292,6 +279292,50 @@
         "This round is not a milestone round: REMAINING rose by one because the scope widened, and nothing built was withdrawn."
       ]
     },
+    "Round 3451": {
+      "decision_summary": "Step 2 of docs/build-configuration.md is done when each upstream defconfig's host build passes an interop lane, and this round does it for zenoh-pico. Layer E already builds wz for pico's default header arm, the arm pico configures when no switch is passed, from that arm's own config.h, and the build is byte for byte the one configs/zenoh-pico_defconfig resolves to. The lane now refuses to go on if the two ever part, and a new leg links upstream's z_sub.c, compiled against the default arm's headers, to that build and receives a sample from the real zenoh-pico z_put: the first leg that runs a program with upstream's default struct layout over wz. The job provisions the pinned Kconfig interpreter for it. zenoh-c is not done: its default build lacks the unstable API, which wz spells as an inverse cargo feature of the drop-in and not as a capability, so its defconfig cannot state it yet.",
+      "changes_bullets": [
+        "scripts/lib/wz_config.py: --original-features ORIGINAL resolves an original's defconfig alone and prints the cargo arguments of its ABI; it never skips.",
+        "scripts/run-ci.sh Layer E: after building pico's default arm, its cargo arguments are held equal to --original-features zenoh-pico.",
+        ".github/workflows/ci.yml: the e2e-demo-pico job provisions kconfiglib before Layer E.",
+        "crates/wz-integration-tests/tests/pico_c_examples_on_wz_capi_dropin.rs: LEG 1d, z_sub.c on the default arm receiving from the real pico z_put, run by Layer E's sweep."
+      ],
+      "verification_bullets": [
+        "--original-features zenoh-pico and --features pico of the default arm's config.h print the same cargo arguments, byte for byte.",
+        "On a build host: the pico CLI and header arms configured, wz built for the default arm from its config.h, and LEG 1d run with 1 passed.",
+        "shellcheck of run-ci.sh reports nothing; cargo fmt --check of wz-integration-tests passes.",
+        "The preflight derived from the pre-push hook body passes, the test discipline, silent skip, barrier needle, workflow and Layer E scope gates among it, and the count guard gate over the range."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "zenoh-c: its defconfig must state the drop-in's no-unstable arm, which is an inverse cargo feature today; either the declaration carries the drop-in's non-capability features per original, or C12 makes it a value. Then the zenoh-c examples run on that build.",
+        "zenoh: its host build is the core ABI, which no program links; its interop is step 12's compatibility crate. Its capability values are not yet held to zenoh's default features."
+      ],
+      "publishable_decision_summary": "Step 2 of docs/build-configuration.md is done when each upstream defconfig's host build passes an interop lane, and this round does it for zenoh-pico. Layer E already builds wz for pico's default header arm, the arm pico configures when no switch is passed, from that arm's own config.h, and the build is byte for byte the one configs/zenoh-pico_defconfig resolves to. The lane now refuses to go on if the two ever part, and a new leg links upstream's z_sub.c, compiled against the default arm's headers, to that build and receives a sample from the real zenoh-pico z_put: the first leg that runs a program with upstream's default struct layout over wz. The job provisions the pinned Kconfig interpreter for it. zenoh-c is not done: its default build lacks the unstable API, which wz spells as an inverse cargo feature of the drop-in and not as a capability, so its defconfig cannot state it yet.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_config.py: --original-features ORIGINAL resolves an original's defconfig alone and prints the cargo arguments of its ABI; it never skips.",
+        "scripts/run-ci.sh Layer E: after building pico's default arm, its cargo arguments are held equal to --original-features zenoh-pico.",
+        ".github/workflows/ci.yml: the e2e-demo-pico job provisions kconfiglib before Layer E.",
+        "crates/wz-integration-tests/tests/pico_c_examples_on_wz_capi_dropin.rs: LEG 1d, z_sub.c on the default arm receiving from the real pico z_put, run by Layer E's sweep."
+      ],
+      "publishable_verification_bullets": [
+        "--original-features zenoh-pico and --features pico of the default arm's config.h print the same cargo arguments, byte for byte.",
+        "On a build host: the pico CLI and header arms configured, wz built for the default arm from its config.h, and LEG 1d run with 1 passed.",
+        "shellcheck of run-ci.sh reports nothing; cargo fmt --check of wz-integration-tests passes.",
+        "The preflight derived from the pre-push hook body passes, the test discipline, silent skip, barrier needle, workflow and Layer E scope gates among it, and the count guard gate over the range."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "zenoh-c: its defconfig must state the drop-in's no-unstable arm, which is an inverse cargo feature today; either the declaration carries the drop-in's non-capability features per original, or C12 makes it a value. Then the zenoh-c examples run on that build.",
+        "zenoh: its host build is the core ABI, which no program links; its interop is step 12's compatibility crate. Its capability values are not yet held to zenoh's default features."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
