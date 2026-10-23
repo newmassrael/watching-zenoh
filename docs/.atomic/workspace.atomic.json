@@ -279076,6 +279076,84 @@
         "Open debt items 921 (closed) and 922 (a terminated chain of nine extensions is refused) are in the register."
       ]
     },
+    "Round 3446": {
+      "decision_summary": "The CI run of 57b030403, the push that carried the item 913 repairs of round 3436, still had two red jobs when read job by job. Layer C1y is this item's: round 3436 typed the group announce so it builds with none of the three declaration kinds, but in that build the entity id and the key are never read, and the clippy leg of access-acl-multicast refuses unused variables under -D warnings. Both functions now allow them only in that build, and say why. Layer C1cn was not this item's: the getter mailbox tests are compiled only with the query-get feature, and no leg of wz-session-mcu built it. That module came with another session's round 3434, so the gate's own words, the four unclaimed tests and the attribution were sent to that session, which repaid it in round 3445.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs: announce and retract allow unused variables when none of declare-subscriber, declare-queryable and liveliness-token is on."
+      ],
+      "verification_bullets": [
+        "On a build host, the eight no-default clippy legs of wz-runtime-tokio in Layer C1y pass with the change.",
+        "With the change reverted, the access-acl-multicast leg fails with the same six unused-variable errors the hosted log shows, and the other seven pass, so the legs tell the two apart.",
+        "cargo fmt --check of wz-runtime-tokio passes."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "carry_forward_bullets": [
+        "The run of 57b030403 was still in the queue with most jobs unrun; its remaining jobs and the run of this push are to be read job by job."
+      ],
+      "publishable_decision_summary": "The CI run of 57b030403, the push that carried the item 913 repairs of round 3436, still had two red jobs when read job by job. Layer C1y is this item's: round 3436 typed the group announce so it builds with none of the three declaration kinds, but in that build the entity id and the key are never read, and the clippy leg of access-acl-multicast refuses unused variables under -D warnings. Both functions now allow them only in that build, and say why. Layer C1cn was not this item's: the getter mailbox tests are compiled only with the query-get feature, and no leg of wz-session-mcu built it. That module came with another session's round 3434, so the gate's own words, the four unclaimed tests and the attribution were sent to that session, which repaid it in round 3445.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs: announce and retract allow unused variables when none of declare-subscriber, declare-queryable and liveliness-token is on."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host, the eight no-default clippy legs of wz-runtime-tokio in Layer C1y pass with the change.",
+        "With the change reverted, the access-acl-multicast leg fails with the same six unused-variable errors the hosted log shows, and the other seven pass, so the legs tell the two apart.",
+        "cargo fmt --check of wz-runtime-tokio passes."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The run of 57b030403 was still in the queue with most jobs unrun; its remaining jobs and the run of this push are to be read job by job."
+      ]
+    },
+    "Round 3447": {
+      "decision_summary": "The upstream switch map moves into the declaration, as step 2 of docs/build-configuration.md says: the 38 zenoh-pico rows and 17 zenoh-c rows are now its upstream_switch tables, read by the gate from there. A zenoh-pico maps row to a capability is that capability's pico switch, so the separate pico_flag is gone and the fact is written once. Where two rows reach one capability it is on when either switch is, which is what a deployer asking for pico's advanced subscription means, except the multicast transport, which pico has only with both of its switches and says so. That reading has a hazard the old one avoided by accident: pico can leave its advanced subscription on with the unstable API off, and wz's advanced plane implies the unstable API, so a build would take other struct layouts than the program's header. The pico header reader now refuses a header that states off a capability wz would have to add.",
+      "changes_bullets": [
+        "deploy/wz-config.toml: the 55 upstream_switch rows, each as the gate held it; pico_flag removed from 15 capabilities; the multicast transport combines its two switches with pico_combine = \"all\"; the liveliness get keeps pico_flags_all.",
+        "scripts/lib/wz_config.py: the rows validated (keys, original, class, anchor, duplicates, the pico ABI); one derivation of a capability's pico switches for the header reader and the Kconfig help; pico_flag refused; the header reader refuses what it states off and wz must add.",
+        "scripts/lib/upstream_switch_map.py: rows from the declaration; the declaration arm reduced to what can still disagree, a pico_flags_all switch without a maps row.",
+        "deploy/Kconfig.capabilities: the advanced help names both switches.",
+        "docs/build-configuration.md: the rows, the any or all reading, and each original's defaults."
+      ],
+      "verification_bullets": [
+        "Before the tuples were deleted, the declared rows equalled them row for row and in order, 38 and 17.",
+        "The switch map gives the same verdicts as before the move: zenoh-pico 21 maps, 13 always, 2 never, 2 n/a; zenoh-c 16 maps, 1 always; 17 zenoh-pico and 10 zenoh-c defaults held; its selftest passes.",
+        "The five pico headers the lanes feed to the reader set both advanced switches alike, and each still gives cargo arguments with no refusal.",
+        "wz_config selftest 96 of 96, one arm of which fails with the refusal disabled; --check, --check-presets and --check-equivalence pass; the prose, board table, floor, pin and reach gates pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next in step 2: the family and target choices and the generated defconfig of each original, the zenoh-pico one stating the client role of the global role axis round 3445 declared.",
+        "No run holds the zenoh values yet to zenoh's own default features."
+      ],
+      "publishable_decision_summary": "The upstream switch map moves into the declaration, as step 2 of docs/build-configuration.md says: the 38 zenoh-pico rows and 17 zenoh-c rows are now its upstream_switch tables, read by the gate from there. A zenoh-pico maps row to a capability is that capability's pico switch, so the separate pico_flag is gone and the fact is written once. Where two rows reach one capability it is on when either switch is, which is what a deployer asking for pico's advanced subscription means, except the multicast transport, which pico has only with both of its switches and says so. That reading has a hazard the old one avoided by accident: pico can leave its advanced subscription on with the unstable API off, and wz's advanced plane implies the unstable API, so a build would take other struct layouts than the program's header. The pico header reader now refuses a header that states off a capability wz would have to add.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml: the 55 upstream_switch rows, each as the gate held it; pico_flag removed from 15 capabilities; the multicast transport combines its two switches with pico_combine = \"all\"; the liveliness get keeps pico_flags_all.",
+        "scripts/lib/wz_config.py: the rows validated (keys, original, class, anchor, duplicates, the pico ABI); one derivation of a capability's pico switches for the header reader and the Kconfig help; pico_flag refused; the header reader refuses what it states off and wz must add.",
+        "scripts/lib/upstream_switch_map.py: rows from the declaration; the declaration arm reduced to what can still disagree, a pico_flags_all switch without a maps row.",
+        "deploy/Kconfig.capabilities: the advanced help names both switches.",
+        "docs/build-configuration.md: the rows, the any or all reading, and each original's defaults."
+      ],
+      "publishable_verification_bullets": [
+        "Before the tuples were deleted, the declared rows equalled them row for row and in order, 38 and 17.",
+        "The switch map gives the same verdicts as before the move: zenoh-pico 21 maps, 13 always, 2 never, 2 n/a; zenoh-c 16 maps, 1 always; 17 zenoh-pico and 10 zenoh-c defaults held; its selftest passes.",
+        "The five pico headers the lanes feed to the reader set both advanced switches alike, and each still gives cargo arguments with no refusal.",
+        "wz_config selftest 96 of 96, one arm of which fails with the refusal disabled; --check, --check-presets and --check-equivalence pass; the prose, board table, floor, pin and reach gates pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next in step 2: the family and target choices and the generated defconfig of each original, the zenoh-pico one stating the client role of the global role axis round 3445 declared.",
+        "No run holds the zenoh values yet to zenoh's own default features."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
