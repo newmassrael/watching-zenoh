@@ -64,33 +64,52 @@ node stays interoperable with zenoh 1.10.1 and zenoh-pico 1.10.1 peers.
     (`io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @
     `lookup: Option<HashSet<ZPublicKey>>,`).
   - zenoh-pico 1.10.1 has no authentication extension; TLS with mutual
-    authentication is its only credential.
+    authentication is its only credential. Its TLS stream is Mbed TLS written
+    against POSIX socket headers (`src/link/transport/upper/tls_stream.c` in
+    the zenoh-pico tree).
+  - The TLS configuration takes certificates, not raw public keys: a root,
+    a certificate and key per side, a switch for mutual authentication and
+    one for name verification (`commons/zenoh-config/src/lib.rs` @
+    `enable_mtls: Option<bool>,`).
+- **A public-key proof is not bound to the channel it was made on.**
+  `peer_identity_verified` accepts the zid the acceptor's public-key stage
+  proved (`crates/wz-session-core/src/session_actions.rs` @
+  `pub fn peer_identity_verified(`), and on a TCP link the frames after the
+  handshake carry no integrity protection. A party on the path can let the
+  handshake complete and then insert a Push carrying a verb, and the session
+  it arrives on still reports a verified peer.
 
 ## 3. Decisions
 
 **D1. A zid that takes part in lifecycle verbs is derived from the public key
 of the credential it authenticates with.** The zid is the first 16 bytes of
-SHA-256 over the DER `SubjectPublicKeyInfo` of that key. The key may come from
-the public-key authentication extension or from a TLS certificate, so the rule
-also covers peers whose only credential is TLS. A node can then claim a zid only
-by holding the private key, and no certificate authority is needed. This is the
+SHA-256 over the DER `SubjectPublicKeyInfo` of that key, and the key is the
+one the peer's certificate carries on a secure channel (D9), so the rule
+covers peers whose only credential is TLS, zenoh-pico among them. A node can
+then claim a zid only by holding the private key, and no certificate authority
+is needed. This is the
 self-certifying identifier of HIP (RFC 7401, the Host Identity Tag) and of SFS
 (Mazières et al., 1999). A peer whose zid is not derived this way still
 exchanges data as before; it cannot command a lifecycle verb or be the
-verified target of one. A credential counts only on the side where the peer
-used its private key: the acceptor of a public-key handshake verifies the
-initiator, while either end of a TLS link verifies the other through the
-certificate the other signed with; the initiator of a public-key handshake
-verifies nobody. Rejected: the upstream rule, a known key with any zid,
+verified target of one. A key counts as a credential only when it is proven
+inside a channel whose every frame is integrity-protected under keys the
+same handshake derived (D9). An authenticated handshake followed by
+unprotected frames proves who started the session, not who sent a later
+message (Canetti and Krawczyk, 2001; channel binding, RFC 5056). The
+public-key extension is therefore an admission check, not a credential for
+the verbs. Rejected: the upstream rule, a known key with any zid,
 because the ACL decides on the zid and the zid would then be unauthenticated.
 Rejected: binding the zid to a name in the certificate, because that needs a
 public-key infrastructure the self-certifying form does not.
 
 **D2. Lifecycle verbs are accepted only from an authenticated peer, and a
-profile with no credential does not compile them.** The authority judges the
-zid verified under D1. Authorization is meaningful only over authentication
-(Lampson, Abadi, Burrows and Wobber, 1992). A build without a credential
-path fails closed rather than exposing a destructive verb that cannot be
+profile with no secure channel does not compile them.** The authority judges
+the zid verified under D1, so a verb is taken only from a link of D9's kind,
+and the build-time guard is keyed on the secure-channel features (TLS and QUIC
+on AP, D9's channel on the fixed-memory profile), not on the authentication
+extension. Authorization is meaningful only over authentication
+(Lampson, Abadi, Burrows and Wobber, 1992). A build without a secure
+channel fails closed rather than exposing a destructive verb that cannot be
 recalled, which is the reason item 761 put the ACL first.
 
 **D3. Identity and location are separate.** A `LocatorDirectory` maps a zid to
@@ -173,6 +192,43 @@ interoperate as peers and as targets. A zenohd that should accept the verbs
 needs either an upstream change or a plugin calling `Runtime::connect_peer` and
 closing the transport. Proposing either upstream is the owner's decision.
 
+**D9. The credential is a secure channel, and every profile uses one
+protocol for it: TLS 1.3 with mutual authentication (RFC 8446).** Each side
+signs the handshake transcript with its key, so each proves possession to the
+other, including the side that dialled; this is the SIGMA design (Krawczyk,
+2003), and TLS 1.3's handshake has been verified formally (Cremers et al.,
+2016 and 2017). The record layer then protects every frame under keys that
+handshake derived, which is the binding D1 requires.
+
+- **The key and the identity.** A certificate is only the container of the
+  key. It is self-signed, and a peer is trusted by pinning the zid D1 derives
+  from its key, never through a certificate authority. The semantic ideal is
+  a raw public key (RFC 7250); the container is X.509 because upstream's TLS
+  configuration takes certificates. The same construction is the libp2p TLS
+  handshake, where a peer's identifier is the hash of the key in a
+  self-signed certificate. The baseline algorithms are ECDSA over P-256 and
+  ECDHE, which every stack this tree meets supports; the algorithm is named
+  inside the SubjectPublicKeyInfo, so a later algorithm changes no identity
+  rule.
+- **One port, one implementation per profile.** The session tier owns a
+  secure-channel port whose handshake yields the peer's
+  SubjectPublicKeyInfo and a protected stream. AP implements it with the
+  existing TLS and QUIC links. The fixed-memory profile implements it with a
+  TLS 1.3 stack that plays both roles, authenticates both sides and runs in
+  static memory, placed under the session as an upper transport over its
+  link, where zenoh-pico places its own TLS stream. The stack is chosen on
+  those properties, on constant-time arithmetic, on active maintenance and on
+  a permissive licence compatible with this tree's licence; Mbed TLS 3.6 LTS
+  is the candidate, and its fit is measured first. Writing a TLS stack here is
+  rejected (cryptography is not re-implemented), and the port lets a mature
+  Rust stack with no heap replace the choice later.
+- **Rejected.** EDHOC (RFC 9528), the constrained-device design, because no
+  zenoh or zenoh-pico peer speaks it and it needs OSCORE to protect messages,
+  which would make a wz-only channel. Noise (XX or IK), for the same
+  interoperation reason. Porting the public-key extension to fixed memory,
+  because it is not bound to the channel (section 2), it proves only the
+  initiator, and both of its roles need an RSA private-key operation.
+
 ## 4. Steps
 
 Each step lands with its own done-when; sizes are not estimated here.
@@ -188,10 +244,14 @@ Each step lands with its own done-when; sizes are not estimated here.
      injector. An earlier draft of this step also listed the initiator's check
      of the responder key; that check was built by R311y576, and it admits a
      key without proving it, which is why it is not a credential here.
-   - **1b.** The verbs do not compile in a build with no credential path, and
-     the fixed-memory profile gets one. Done when a build with the lifecycle
-     feature and no credential feature fails to compile, and a fixed-memory
-     image verifies a peer.
+   - **1a correction.** Under D9 the public-key proof recorded in 1a stops
+     counting as verification for the verbs; only a key proven by a TLS or
+     QUIC link does. Done when a peer proven by the public-key extension over
+     TCP is refused and the same peer over TLS is admitted.
+   - **1b.** The verbs do not compile in a build with no secure channel (D2),
+     and the fixed-memory profile gets D9's channel. Done when a build with
+     the lifecycle feature and no secure-channel feature fails to compile, and
+     a fixed-memory image and a router each verify the other over it.
 2. **D4.** The expected zid on every dial path. Done when a dial to a locator
    that answers with another zid closes at InitAck on AP, the C ABI and the MCU
    host.
@@ -210,5 +270,8 @@ Each step lands with its own done-when; sizes are not estimated here.
   item 761 widened it; this is the owner's ruling either way.
 - Whether a Push on an `@/` key reaches a zenohd plugin's subscriber. The
   router routes `@/` keys as admin space; not measured.
-- The cost of public-key authentication on the fixed-memory profile (an RSA
-  private-key operation with fixed-size integers). Not measured.
+- Whether upstream zenoh admits a pinned self-signed certificate with name
+  verification off as D9 uses it. Not measured.
+- The memory and handshake time of D9's channel on the fixed-memory profile,
+  including how far the record size limit (RFC 8449) shrinks the 16 KiB
+  record buffers. Not measured.
