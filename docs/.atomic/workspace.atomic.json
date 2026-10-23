@@ -279200,6 +279200,56 @@
         "The target axis and the MCU defconfig wait for the image trees to resolve the host declaration's symbols."
       ]
     },
+    "Round 3449": {
+      "decision_summary": "Make an image's measured stack and latency a committed row (build-configuration step 13, storage-policy D5). deploy/resource_budget.json has a row for each image whose static worst chain stack_frame_gate.py commits (zephyr-client-fixed, zephyr-client-fixed-batching): static_chain_bytes, the firmware's own stack peak (tolerance 16 bytes), the host's GET median (tolerance 30 percent, both directions) and where they were measured. resource_budget_gate.py holds it. --check (no hardware; in Layer C0 and the pre-push gates) requires a row for every image of that population, makes static_chain_bytes equal the stack gate's figure so a change that moves one moves the other in the same commit, and requires the measured peak under the static chain and the declared stack. --measure KEY --log LOG --result JSON is the kit lane's and fails outside the row. The peak is a count of words written, the same in every run of an image (5,936 B base, 5,952 batching); the latency varies, so it has a band.",
+      "changes_bullets": [
+        "scripts/lib/resource_budget_gate.py (new): reads deploy/resource_budget.json against stack_frame_gate.IMAGES (the images with a committed `peak`, whose declared stack it reads through stack_frame_gate.declared_stack); modes --check, --measure KEY --log LOG [--result JSON...], --selftest (rules driven over tables wrong in each way: a missing row, a row with no image, a static figure moved alone, a measured peak over the chain or over the stack, an unread key, a missing figure, a tolerance of nothing, a wrong schema, an empty population; and the measure arm over a good run, a peak outside its band, a wrong stack size, a slow run, a run faster than the row, a wrong answer, no stack line) and --list.",
+        "deploy/resource_budget.json (new): the rows of zephyr-client-fixed (static chain 6,808, stack peak 5,936 +/- 16, GET 399 us +/- 30 percent) and zephyr-client-fixed-batching (7,140, 5,952 +/- 16, 351 us +/- 30 percent), from the T2G kit runs of 2026-10-23.",
+        "scripts/run-ci.sh: Layer C0 runs the gate's --selftest and --check beside the stack gate's; .githooks/pre-push lists --check among the gates a round's changes feed.",
+        "docs/storage-policy-and-link-layer.md section 5.4: what is held, what is not."
+      ],
+      "verification_bullets": [
+        "resource_budget_gate.py --selftest and --check exit 0; the check prints, for each image, the static chain, the measured peak, the margin to the declared stack (3,280 and 4,288 bytes) and the GET figure. Mutation: the stack gate's peak for zephyr-client-fixed moved from 6,808 to 6,900 alone makes --check exit 1 with \"static_chain_bytes is 6808 and the stack gate commits 6900: they move together or not at all\"; it was put back.",
+        "--measure over the real kit runs of 2026-10-23, copied from the bench host: the base image's log and three result files, and the batching image's, are each inside their row (exit 0). The base row given the log of the image with the idle wait and batching both on exits 1, naming a stack peak of 5,960 against 5,936 +/- 16 and a firmware stack of 10,240 bytes against the declared 9,216.",
+        "The stack peaks come from the logs of 3 runs of each of four images (5,936, 5,944, 5,952 and 5,960 bytes), the same in every run of an image, which is why the band is 16 bytes; the GET figures are the medians of 6 medians over 2000 queries for each of the node's two documents.",
+        "Layer C0 whole passes on the commit.",
+        "Not held, and said in the document: the images with the idle wait on (they share a key with the base), the heap images, and a latency on a network other than the kit's own Ethernet to the bench host. The latency band of 30 percent was chosen to hold the spread of the six medians of each image (0.310 to 0.478 ms and 0.275 to 0.363 ms), not derived from a model."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted runs for this push per job at the start of the next round; the CI runs of the pushes before it were replaced by newer pushes and never graded them.",
+        "The --measure arm has no lane: the kit harness (outside this repository) writes the serial log and the result JSON, and someone runs the gate on them. A kit lane that does it after a flash, and a row for the idle-wait image, are the next steps if the measured figures are to be held without a person.",
+        "The shared fixed-client application of the kit and the host node is this session's and not started; build-configuration step 7 (the storage policy completed) is the P1 session's to place.",
+        "Open-debt item 922 (a terminated chain of nine extensions is refused) is in the register."
+      ],
+      "publishable_decision_summary": "Make an image's measured stack and latency a committed row (build-configuration step 13, storage-policy D5). deploy/resource_budget.json has a row for each image whose static worst chain stack_frame_gate.py commits (zephyr-client-fixed, zephyr-client-fixed-batching): static_chain_bytes, the firmware's own stack peak (tolerance 16 bytes), the host's GET median (tolerance 30 percent, both directions) and where they were measured. resource_budget_gate.py holds it. --check (no hardware; in Layer C0 and the pre-push gates) requires a row for every image of that population, makes static_chain_bytes equal the stack gate's figure so a change that moves one moves the other in the same commit, and requires the measured peak under the static chain and the declared stack. --measure KEY --log LOG --result JSON is the kit lane's and fails outside the row. The peak is a count of words written, the same in every run of an image (5,936 B base, 5,952 batching); the latency varies, so it has a band.",
+      "publishable_changes_bullets": [
+        "scripts/lib/resource_budget_gate.py (new): reads deploy/resource_budget.json against stack_frame_gate.IMAGES (the images with a committed `peak`, whose declared stack it reads through stack_frame_gate.declared_stack); modes --check, --measure KEY --log LOG [--result JSON...], --selftest (rules driven over tables wrong in each way: a missing row, a row with no image, a static figure moved alone, a measured peak over the chain or over the stack, an unread key, a missing figure, a tolerance of nothing, a wrong schema, an empty population; and the measure arm over a good run, a peak outside its band, a wrong stack size, a slow run, a run faster than the row, a wrong answer, no stack line) and --list.",
+        "deploy/resource_budget.json (new): the rows of zephyr-client-fixed (static chain 6,808, stack peak 5,936 +/- 16, GET 399 us +/- 30 percent) and zephyr-client-fixed-batching (7,140, 5,952 +/- 16, 351 us +/- 30 percent), from the T2G kit runs of 2026-10-23.",
+        "scripts/run-ci.sh: Layer C0 runs the gate's --selftest and --check beside the stack gate's; .githooks/pre-push lists --check among the gates a round's changes feed.",
+        "docs/storage-policy-and-link-layer.md section 5.4: what is held, what is not."
+      ],
+      "publishable_verification_bullets": [
+        "resource_budget_gate.py --selftest and --check exit 0; the check prints, for each image, the static chain, the measured peak, the margin to the declared stack (3,280 and 4,288 bytes) and the GET figure. Mutation: the stack gate's peak for zephyr-client-fixed moved from 6,808 to 6,900 alone makes --check exit 1 with \"static_chain_bytes is 6808 and the stack gate commits 6900: they move together or not at all\"; it was put back.",
+        "--measure over the real kit runs of 2026-10-23, copied from the bench host: the base image's log and three result files, and the batching image's, are each inside their row (exit 0). The base row given the log of the image with the idle wait and batching both on exits 1, naming a stack peak of 5,960 against 5,936 +/- 16 and a firmware stack of 10,240 bytes against the declared 9,216.",
+        "The stack peaks come from the logs of 3 runs of each of four images (5,936, 5,944, 5,952 and 5,960 bytes), the same in every run of an image, which is why the band is 16 bytes; the GET figures are the medians of 6 medians over 2000 queries for each of the node's two documents.",
+        "Layer C0 whole passes on the commit.",
+        "Not held, and said in the document: the images with the idle wait on (they share a key with the base), the heap images, and a latency on a network other than the kit's own Ethernet to the bench host. The latency band of 30 percent was chosen to hold the spread of the six medians of each image (0.310 to 0.478 ms and 0.275 to 0.363 ms), not derived from a model."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted runs for this push per job at the start of the next round; the CI runs of the pushes before it were replaced by newer pushes and never graded them.",
+        "The --measure arm has no lane: the kit harness (outside this repository) writes the serial log and the result JSON, and someone runs the gate on them. A kit lane that does it after a flash, and a row for the idle-wait image, are the next steps if the measured figures are to be held without a person.",
+        "The shared fixed-client application of the kit and the host node is this session's and not started; build-configuration step 7 (the storage policy completed) is the P1 session's to place.",
+        "Open-debt item 922 (a terminated chain of nine extensions is refused) is in the register."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
