@@ -25,16 +25,20 @@
 //!
 //! - A dialled link knows its peer from the dial: it is bound from the start.
 //! - An accepting link is bound by the first `InitSyn` it takes, to that datagram's source. What
-//!   arrives before it from anyone is not part of a session ([`DatagramVerdict::Stray`]).
+//!   arrives before it from anyone is not part of a session
+//!   ([`DatagramVerdict::Stray`](crate::datagram_peer::DatagramVerdict::Stray)).
 //! - A bound link takes its peer's datagrams only. Another source's `InitSyn` is
-//!   [`DatagramVerdict::Refused`]: the link carries one session, and a node that accepts several
-//!   keeps a listener that gives each peer a link of its own. Anything else is a stray.
+//!   [`DatagramVerdict::Refused`](crate::datagram_peer::DatagramVerdict::Refused): the link
+//!   carries one session, and a node that accepts several keeps a listener that gives each peer a
+//!   link of its own. Anything else is a stray.
 //!
 //! The decision is made here once, for every stack's driver: the link on BSD-style sockets
-//! (`wz-runtime-coop`) and the lwIP one (`wz-session-lwip`) each call [`PeerBinding::admit`] on
-//! every datagram they take and discard what it does not admit. A driver that reads a socket
-//! another session shares (a listener's) does not discard: what is not its peer's is the other
-//! session's, so it asks [`PeerBinding::is_peer`] and leaves the datagram where it is.
+//! (`wz-runtime-coop`) and the lwIP one (`wz-session-lwip`) each call
+//! [`PeerBinding::admit`](crate::datagram_peer::PeerBinding::admit) on every datagram they take
+//! and discard what it does not admit. A driver that reads a socket another session shares (a
+//! listener's) does not discard: what is not its peer's is the other session's, so it asks
+//! [`PeerBinding::is_peer`](crate::datagram_peer::PeerBinding::is_peer) and leaves the datagram
+//! where it is.
 //!
 //! Unconditional, as [`crate::ext_admit`] is: it reads one header byte and an address, so it needs
 //! neither a codec feature nor the `alloc` storage profile.
