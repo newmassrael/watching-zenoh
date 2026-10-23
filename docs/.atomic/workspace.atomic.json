@@ -278640,6 +278640,42 @@
         "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
       ]
     },
+    "Round 3436": {
+      "decision_summary": "The CI run that carried item 913 went red in one more job, Layer C1y, and the cause is item 913's. A group session announces and retracts what it declared through one match per direction over the three kinds it can declare, each arm behind its feature, and a last arm that returned FeatureDisabled. A build with routing-peer and none of the three kinds keeps that arm alone, so nothing names the type the match makes, and the compiler refuses it. Both matches now state the type they make, and the last arm is an Err value rather than a return, so the build with no kind compiles and still refuses at run time, and the builds with kinds are unchanged.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs: the group announce and retract matches are typed as a Result of DeclareOwned, each arm maps its codec error, and the fallback arm is an Err value.",
+        "docs/hosted-red-acks.md: the row for the C1y red of run 39860923670."
+      ],
+      "verification_bullets": [
+        "On a build host: the accept_loop tests with routing-peer, the build the red was in, pass; clippy of wz-runtime-tokio with routing-peer and with its defaults, all targets, is clean; the multicast lib tests with transport-multicast pass.",
+        "rustfmt accepts the crate.",
+        "The red was read from its job's log to its end and attributed by the compiler's own message to the item 913 code it names."
+      ],
+      "impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "carry_forward_bullets": [
+        "Read the CI and Platform runs of this push job by job, and the cross-impl job of run 39860923670 still running.",
+        "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
+      ],
+      "publishable_decision_summary": "The CI run that carried item 913 went red in one more job, Layer C1y, and the cause is item 913's. A group session announces and retracts what it declared through one match per direction over the three kinds it can declare, each arm behind its feature, and a last arm that returned FeatureDisabled. A build with routing-peer and none of the three kinds keeps that arm alone, so nothing names the type the match makes, and the compiler refuses it. Both matches now state the type they make, and the last arm is an Err value rather than a return, so the build with no kind compiles and still refuses at run time, and the builds with kinds are unchanged.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/session/mod.rs: the group announce and retract matches are typed as a Result of DeclareOwned, each arm maps its codec error, and the fallback arm is an Err value.",
+        "docs/hosted-red-acks.md: the row for the C1y red of run 39860923670."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host: the accept_loop tests with routing-peer, the build the red was in, pass; clippy of wz-runtime-tokio with routing-peer and with its defaults, all targets, is clean; the multicast lib tests with transport-multicast pass.",
+        "rustfmt accepts the crate.",
+        "The red was read from its job's log to its end and attributed by the compiler's own message to the item 913 code it names."
+      ],
+      "publishable_impact_refs": [
+        "session-fsm--prose-level-sketch/3-2-multicast-per-peer-states"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the CI and Platform runs of this push job by job, and the cross-impl job of run 39860923670 still running.",
+        "Step 1 of docs/build-configuration.md continues as Round 3431 carries."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
