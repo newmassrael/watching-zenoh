@@ -6139,7 +6139,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The claim is copied out before a credential is read, so no two of this
     /// session's locks are ever held together here.
     pub fn peer_identity_verified(&self) -> bool {
-        use crate::credential_identity::{zid_is_bound, CREDENTIAL_ZID_BYTES};
+        use crate::credential_identity::CREDENTIAL_ZID_BYTES;
+        // Only the two credential arms below compare: a build with neither (the slot profile)
+        // has nothing to bind a claim to.
+        #[cfg(any(feature = "session-extauth", feature = "alloc"))]
+        use crate::credential_identity::zid_is_bound;
         let claimed = R::with_mutex_mut(&self.remote_peer_zid, |slot| {
             slot.as_deref()
                 .filter(|zid| zid.len() <= CREDENTIAL_ZID_BYTES)
