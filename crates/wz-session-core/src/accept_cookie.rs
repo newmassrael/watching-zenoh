@@ -488,7 +488,6 @@ mod tests {
                 auth: AuthAcceptState {
                     pubkey: Some(0x1111_2222_3333_4444),
                     usrpwd: Some(0x5555_6666_7777_8888),
-                    pubkey_credential: Some([0x99; 16]),
                 },
                 lowlatency: LowlatencyAcceptState(true),
                 compression: CompressionAcceptState(false),

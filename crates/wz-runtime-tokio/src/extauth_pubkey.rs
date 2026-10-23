@@ -58,9 +58,7 @@ use rsa::traits::PublicKeyParts;
 use rsa::{BigUint, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use sce_forge_runtime::codec::SceCursor;
 
-use rsa::pkcs8::EncodePublicKey;
 use wz_session_core::auth_dispatch::{id, AuthError, AuthIdentity, AuthMethod, AuthSubExt};
-use wz_session_core::credential_identity::{zid_from_spki_der, CREDENTIAL_ZID_BYTES};
 use wz_session_core::vle::{read_zbuf, write_zbuf};
 
 use crate::extauth_pubkey_store::PubKeyLookup;
@@ -96,20 +94,6 @@ fn read_pubkey(cursor: &mut SceCursor<'_>) -> Result<RsaPublicKey, AuthError> {
     let e = read_zbuf(cursor).ok_or(AuthError::Decode)?;
     RsaPublicKey::new(BigUint::from_bytes_le(&n), BigUint::from_bytes_le(&e))
         .map_err(|_| AuthError::Rejected("pubkey: invalid RSA public key"))
-}
-
-/// The zid `key` names: [`zid_from_spki_der`] over its DER
-/// `SubjectPublicKeyInfo` (RFC 5280, the `rsaEncryption` algorithm), which is
-/// the encoding a TLS certificate carries the same key in, so one key names one
-/// zid whichever credential it travels in.
-///
-/// A node that wants its own zid to be one a peer can verify derives it here
-/// from its own public key.
-pub fn credential_zid(key: &RsaPublicKey) -> Result<[u8; CREDENTIAL_ZID_BYTES], AuthError> {
-    let spki = key
-        .to_public_key_der()
-        .map_err(|_| AuthError::Rejected("pubkey: the key has no DER encoding"))?;
-    Ok(zid_from_spki_der(spki.as_bytes()))
 }
 
 /// Encode the InitSyn body `{ my_pubkey }`.
@@ -220,24 +204,6 @@ pub struct PubKeyMethod {
     /// Initiator side: the DECRYPTED challenge bytes (opaque) to re-encrypt on
     /// OpenSyn. Never interpreted — relayed verbatim.
     decrypted_challenge: Option<Vec<u8>>,
-    /// Responder side: the zid the initiator's key names
-    /// ([`zid_from_spki_der`] over its `SubjectPublicKeyInfo`), captured with
-    /// the key on InitSyn and carried by the cookie with the challenge, because
-    /// the key itself is released at InitAck (R2779) and the proof comes later.
-    credential_zid: Option<[u8; CREDENTIAL_ZID_BYTES]>,
-    /// Responder side: [`Self::credential_zid`] once OpenSyn has proved the
-    /// initiator holds that key, and `None` until then.
-    ///
-    /// ⛔ NEVER SET ON THE INITIATOR SIDE, and that is the protocol's property,
-    /// not a gap here. Upstream's initiator ends at an OpenAck it checks only
-    /// for presence
-    /// (`io/zenoh-transport/src/unicast/establishment/ext/auth/pubkey.rs` @
-    /// `async fn recv_open_ack(`): the responder never uses its private key
-    /// where the initiator can see it, so a responder presenting someone
-    /// else's public key completes the handshake. The responder's key is
-    /// admitted by the lookup, never proved, and a credential only a lookup
-    /// admitted would let a peer claim a zid it cannot hold.
-    proven_credential_zid: Option<[u8; CREDENTIAL_ZID_BYTES]>,
 }
 
 impl PubKeyMethod {
@@ -312,8 +278,6 @@ impl PubKeyMethod {
             peer_pubkey: None,
             resp_pubkey: None,
             decrypted_challenge: None,
-            credential_zid: None,
-            proven_credential_zid: None,
         }
     }
 
@@ -377,23 +341,6 @@ impl AuthMethod for PubKeyMethod {
         if challenge.is_none() {
             self.peer_pubkey = None;
         }
-    }
-
-    /// The zid the initiator's key names, for the cookie to carry beside the
-    /// challenge. Issued on the condition the challenge is: an admitted key.
-    fn accept_credential_zid(&self) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
-        self.peer_pubkey.as_ref().and(self.credential_zid)
-    }
-
-    /// The release drops the zid with the key it was derived from; the restore
-    /// puts back only the zid, which is all the OpenSyn stage needs to name
-    /// what it proves.
-    fn restore_accept_credential_zid(&mut self, zid: Option<[u8; CREDENTIAL_ZID_BYTES]>) {
-        self.credential_zid = zid;
-    }
-
-    fn proven_peer_credential_zid(&self) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
-        self.proven_credential_zid
     }
 
     // ── Open (initiator) side ────────────────────────────────────────────
@@ -461,12 +408,6 @@ impl AuthMethod for PubKeyMethod {
         if !self.admits_initiator(&peer) {
             return Err(AuthError::Rejected("pubkey: unauthorized public key"));
         }
-        // A new handshake proves nothing yet. The zid is derived now, while
-        // the key is in hand; a key with no DER form names no zid and is
-        // still authenticated, because binding is optional (D1) and must not
-        // decide whether a session opens.
-        self.credential_zid = credential_zid(&peer).ok();
-        self.proven_credential_zid = None;
         self.peer_pubkey = Some(peer);
         Ok(())
     }
@@ -507,15 +448,10 @@ impl AuthMethod for PubKeyMethod {
         let reenc = decode_single_zbuf(&body)?;
         // Decrypt the re-encrypted challenge with OUR private key; it must equal
         // the challenge we issued (zenoh-exact `u64.to_le_bytes()` compare).
-        self.proven_credential_zid = None;
         let recovered = decrypt_blinded(&self.private_key, &reenc)?;
         if recovered != challenge.to_le_bytes() {
             return Err(AuthError::Rejected("pubkey: invalid nonce"));
         }
-        // The initiator recovered a challenge only the holder of its private
-        // key could read, so the key captured at InitSyn is now PROVED, and the
-        // zid it names with it.
-        self.proven_credential_zid = self.credential_zid;
         // R2566 — `None`, and it is a statement rather than a placeholder:
         // pubkey proves the peer HOLDS a private key, which is not the same as
         // naming a principal. zenoh agrees by construction — its `RecvOpenSynOut`
@@ -860,106 +796,5 @@ mod tests {
             responder.accept_recv_init_syn(None),
             Err(AuthError::Rejected("pubkey: missing InitSyn offer"))
         );
-    }
-
-    /// The zid is derived over the key's `SubjectPublicKeyInfo`, the form a
-    /// certificate carries it in. The oracle is RFC 3279's encoding of the
-    /// `rsaEncryption` AlgorithmIdentifier, which every RSA SPKI begins with
-    /// after its outer SEQUENCE header, not the library that wrote it.
-    #[test]
-    fn the_credential_zid_is_taken_over_the_subject_public_key_info() {
-        const RSA_ENCRYPTION_ALGORITHM: [u8; 15] = [
-            0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05,
-            0x00,
-        ];
-        let key = RsaPublicKey::from(&keypair());
-        let spki = key.to_public_key_der().unwrap();
-        let der = spki.as_bytes();
-        // The outer SEQUENCE header: `30 LL` for a short length, `30 8N` and N
-        // length bytes otherwise (X.690 definite form).
-        assert_eq!(der[0], 0x30);
-        let header = if der[1] < 0x80 {
-            2
-        } else {
-            2 + usize::from(der[1] & 0x7f)
-        };
-        assert_eq!(&der[header..header + 15], &RSA_ENCRYPTION_ALGORITHM);
-        assert_eq!(credential_zid(&key).unwrap(), zid_from_spki_der(der));
-    }
-
-    /// D1's proof, both directions, through the cookie's release and rebuild.
-    ///
-    /// The RESPONDER proves the initiator's key: the initiator read a challenge
-    /// sealed under it. Nothing is proved before that OpenSyn, and the zid
-    /// survives the release at InitAck only because the cookie carries it. The
-    /// INITIATOR proves nothing about the responder, on a handshake that
-    /// succeeded, because upstream's OpenAck carries no use of the responder's
-    /// private key.
-    #[test]
-    fn the_responder_proves_the_initiators_key_and_the_initiator_proves_nothing() {
-        let init = keypair();
-        let init_pub = RsaPublicKey::from(&init);
-        let expected = credential_zid(&init_pub).unwrap();
-        let mut open = AuthDispatch::new(vec![Box::new(PubKeyMethod::initiator(init)) as _]);
-        let mut accept = AuthDispatch::new(vec![Box::new(PubKeyMethod::responder(
-            keypair(),
-            Some(vec![init_pub]),
-        )) as _]);
-        accept.set_drawn_challenges(&[Some(0x5151)]);
-
-        let init_syn = open.open_init_syn().unwrap();
-        accept.accept_recv_init_syn(&into_exts(init_syn)).unwrap();
-        let init_ack = accept.accept_init_ack().unwrap();
-        let carried = accept.accept_state();
-        assert_eq!(carried.pubkey_credential, Some(expected));
-        accept.restore_accept_state(Default::default());
-        assert_eq!(
-            accept.proven_peer_credential_zid(),
-            None,
-            "presented is not proved"
-        );
-
-        open.open_recv_init_ack(&into_exts(init_ack)).unwrap();
-        let open_syn = open.open_open_syn().unwrap();
-        accept.restore_accept_state(carried);
-        accept.accept_recv_open_syn(&into_exts(open_syn)).unwrap();
-        assert_eq!(accept.proven_peer_credential_zid(), Some(expected));
-
-        let open_ack = accept.accept_open_ack().unwrap();
-        open.open_recv_open_ack(&into_exts(open_ack)).unwrap();
-        assert_eq!(
-            open.proven_peer_credential_zid(),
-            None,
-            "the responder's key is admitted by the lookup, never proved"
-        );
-    }
-
-    /// A wrong answer to the challenge proves nothing, even after a right one
-    /// was given earlier on the same method.
-    #[test]
-    fn a_failed_open_syn_leaves_no_proved_credential() {
-        let resp_priv = keypair();
-        let resp_pub = RsaPublicKey::from(&resp_priv);
-        let init_pub = RsaPublicKey::from(&keypair());
-        let mut responder = PubKeyMethod::responder(resp_priv, Some(vec![init_pub.clone()]));
-        responder.set_challenge_nonce(0xAAAA);
-        responder
-            .accept_recv_init_syn(Some(AuthSubExt::Zbuf(encode_init_syn(&init_pub))))
-            .unwrap();
-        let _challenge = responder.accept_init_ack().unwrap();
-        let right = encrypt(&resp_pub, &0xAAAA_u64.to_le_bytes()).unwrap();
-        responder
-            .accept_recv_open_syn(Some(AuthSubExt::Zbuf(encode_open_syn(&right))))
-            .unwrap();
-        assert!(
-            responder.proven_peer_credential_zid().is_some(),
-            "CONTROL: a right answer proves"
-        );
-
-        let wrong = encrypt(&resp_pub, &0xBBBB_u64.to_le_bytes()).unwrap();
-        assert!(responder
-            .accept_recv_open_syn(Some(AuthSubExt::Zbuf(encode_open_syn(&wrong))))
-            .is_err());
-        assert_eq!(responder.proven_peer_credential_zid(), None);
     }
 }

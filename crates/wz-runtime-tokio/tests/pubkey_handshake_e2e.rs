@@ -308,32 +308,31 @@ async fn verified_after_handshake(
     )
 }
 
-/// D1 of `docs/session-lifecycle-intent.md`, end to end: an initiator whose zid
-/// is the one its key names is VERIFIED by the responder that watched it prove
-/// the key, through the production accept seam (which, in a build with
-/// `session-unicast-accept`, releases the auth state at InitAck and rebuilds it
-/// from the cookie at OpenSyn). The initiator verifies nobody: upstream's pubkey handshake never makes
-/// the responder use its private key where the initiator can see it.
+/// Decisions D1 and D9 of `docs/session-lifecycle-intent.md`, end to end: a
+/// public-key proof over plain TCP is not a credential for the lifecycle verbs.
 ///
-/// CONTROL, same keys and same seams: a zid the key does not name leaves the
-/// responder unverified, so the first arm is the binding and not merely a
-/// completed handshake.
+/// The initiator claims exactly the zid the key it proves names, and the
+/// responder watched it prove that key through the production accept seam; both
+/// sessions reach Established, and neither holds a verified peer. The frames
+/// after this handshake travel on a link with no integrity protection, so the
+/// proof binds nothing that follows it: a party on the path could let the
+/// handshake complete and then insert a frame, and the session would answer
+/// for the wrong peer. The same zid over mutual TLS IS verified
+/// (`tls_pem_mtls_e2e`), which is what makes the pair the decision rather than
+/// a missing feature.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_zid_derived_from_the_proved_key_is_verified_by_the_responder_only() {
-    use wz_runtime_tokio::extauth_pubkey::credential_zid;
+async fn a_proved_key_over_plain_tcp_verifies_nobody() {
+    use wz_runtime_tokio::rsa::pkcs8::EncodePublicKey;
+    use wz_session_core::credential_identity::zid_from_spki_der;
 
     let init_priv = generate_keypair(KEY_BITS).expect("initiator keypair");
-    let derived = credential_zid(&RsaPublicKey::from(&init_priv)).expect("a DER key");
+    let spki = RsaPublicKey::from(&init_priv)
+        .to_public_key_der()
+        .expect("a DER key");
+    let derived = zid_from_spki_der(spki.as_bytes());
     assert_eq!(
         verified_after_handshake(init_priv, derived.to_vec()).await,
-        (true, false),
-        "the responder proved the initiator's key and its zid; the initiator proved nothing"
-    );
-
-    let init_priv = generate_keypair(KEY_BITS).expect("initiator keypair");
-    assert_eq!(
-        verified_after_handshake(init_priv, vec![0x01; 4]).await,
         (false, false),
-        "CONTROL: a claimed zid the key does not name is not verified"
+        "a zid the proved key names is still only a claim on a link nothing protects"
     );
 }

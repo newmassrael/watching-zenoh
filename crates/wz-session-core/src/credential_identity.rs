@@ -13,10 +13,12 @@
 //! authority: whoever proved possession of the key also proved the zid.
 //!
 //! The input is the `SubjectPublicKeyInfo` and not a key type, so one rule
-//! covers every credential that carries a public key: the key of the
-//! public-key authentication extension and the key of a TLS certificate. A
-//! peer whose zid is not derived this way still exchanges data as before; it
-//! is only never [`zid_is_bound`].
+//! covers every secure channel that carries a public key, whatever its
+//! algorithm (decision D9): today the key of a TLS or QUIC certificate. The key
+//! of the public-key authentication extension is deliberately not one: that
+//! proof is not bound to the frames after the handshake. A peer whose zid is not
+//! derived this way still exchanges data as before; it is only never
+//! [`zid_is_bound`].
 //!
 //! No allocation and no feature gate: the MCU profile shares the rule, and the
 //! hash is the `sha2` the cookie path already links.

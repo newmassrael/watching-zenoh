@@ -234,20 +234,22 @@ handshake derived, which is the binding D1 requires.
 Each step lands with its own done-when; sizes are not estimated here.
 
 1. **D1 and D2.** In two parts.
-   - **1a, landed (Round 3455).** The derivation
-     (`wz_session_core::credential_identity`), the proof on both credential
-     paths (the acceptor's public-key stage carries the initiator's zid
-     through the accept cookie and records it at OpenSyn; a TLS or QUIC link
-     records its peer certificate's), `peer_identity_verified` on the session,
-     and the lifecycle injector refusing an unverified commander before its
-     authority is asked. Witnessed end to end over TCP and through the
-     injector. An earlier draft of this step also listed the initiator's check
-     of the responder key; that check was built by R311y576, and it admits a
-     key without proving it, which is why it is not a credential here.
-   - **1a correction.** Under D9 the public-key proof recorded in 1a stops
-     counting as verification for the verbs; only a key proven by a TLS or
-     QUIC link does. Done when a peer proven by the public-key extension over
-     TCP is refused and the same peer over TLS is admitted.
+   - **1a, landed (Round 3455), corrected (Round 3463).** The derivation
+     (`wz_session_core::credential_identity`), the proof on the TLS and QUIC
+     path (a link records the zid of its peer certificate's key),
+     `peer_identity_verified` on the session, and the lifecycle injector
+     refusing an unverified commander before its authority is asked. Round 3455
+     also took the public-key stage's proof as a credential and carried it
+     through the accept cookie; D9 rules that out, and Round 3463 removed it
+     with the cookie member and the session field that held it. An earlier
+     draft of this step also listed the initiator's check of the responder key;
+     that check was built by R311y576, and it admits a key without proving it,
+     which is why it is not a credential here.
+   - **1a correction, landed (Round 3463).** A peer proven only by the
+     public-key extension over plain TCP is refused; the same zid over mutual
+     TLS is admitted, on both sides; over one-way TLS the client verifies the
+     server and the server verifies nobody. Witnessed end to end over loopback
+     in each case, and through the injector.
    - **1b.** The verbs do not compile in a build with no secure channel (D2),
      and the fixed-memory profile gets D9's channel. Done when a build with
      the lifecycle feature and no secure-channel feature fails to compile, and

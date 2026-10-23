@@ -73,7 +73,7 @@ use wz_runtime_tokio_test_support::loopback_mtls_pems;
 // the per-binary `tests/tls_harness/` module (R311oi SSOT — see its docs for
 // why this is a subdir module, not the test-support crate).
 mod tls_harness;
-use tls_harness::open_both_to_established;
+use tls_harness::{open_both_to_established, open_both_to_established_with_zids};
 
 /// Run JUST the TLS handshake for both ends over a fresh loopback TCP pair and
 /// return each side's result — the acceptor's `accept_tls` and the dialer's
@@ -137,6 +137,112 @@ async fn mtls_mutual_auth_reaches_established() {
     assert!(
         opened_acc.actions.trace_snapshot().record_established_at >= 1,
         "acceptor established over mTLS"
+    );
+}
+
+/// The zid the key in `key_pem` names, over the `SubjectPublicKeyInfo` that
+/// `rcgen` serialises from the PRIVATE key itself. That is the oracle: it is
+/// not read back out of the certificate the session under test parsed.
+fn zid_named_by(key_pem: &str) -> Vec<u8> {
+    let key = rcgen::KeyPair::from_pem(key_pem).expect("key PEM");
+    wz_session_core::credential_identity::zid_from_spki_der(&key.public_key_der()).to_vec()
+}
+
+/// Decision D9 of `docs/session-lifecycle-intent.md`, end to end: over mutual
+/// TLS a peer that claims the zid its certificate's key names is VERIFIED, on
+/// both sides, because each proved its key in the handshake that also protects
+/// every frame after it. The same session over the same links, claiming a zid
+/// the key does not name, verifies nobody, so the first arm is the binding and
+/// not merely a completed handshake.
+///
+/// Paired with `pubkey_handshake_e2e`, where a zid the proved key DOES name is
+/// still not verified over plain TCP: the two together are the decision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zid_the_certificate_key_names_is_verified_over_mutual_tls() {
+    let pems = loopback_mtls_pems();
+    let mtls_pair = || {
+        let server_config = server_config_from_pem(
+            pems.server_cert_pem.as_bytes(),
+            pems.server_key_pem.as_bytes(),
+            Some(pems.ca_pem.as_bytes()),
+        )
+        .expect("build mTLS server config from PEM");
+        let client_config = client_config_from_pem(
+            Some(pems.ca_pem.as_bytes()),
+            Some(ClientAuthPem {
+                cert_chain_pem: pems.client_cert_pem.as_bytes(),
+                private_key_pem: pems.client_key_pem.as_bytes(),
+            }),
+            ServerNameVerification::Verify,
+        )
+        .expect("build mTLS client config from PEM");
+        (server_config, client_config)
+    };
+
+    let (server_config, client_config) = mtls_pair();
+    let (acceptor, initiator) = open_both_to_established_with_zids(
+        server_config,
+        client_config,
+        zid_named_by(&pems.server_key_pem),
+        zid_named_by(&pems.client_key_pem),
+    )
+    .await;
+    assert!(
+        acceptor.actions.peer_identity_verified(),
+        "the acceptor verifies an initiator whose zid its client certificate's key names"
+    );
+    assert!(
+        initiator.actions.peer_identity_verified(),
+        "the initiator verifies an acceptor whose zid its server certificate's key names"
+    );
+
+    let (server_config, client_config) = mtls_pair();
+    let (acceptor, initiator) = open_both_to_established(server_config, client_config).await;
+    assert!(
+        !acceptor.actions.peer_identity_verified(),
+        "CONTROL: a claimed zid the client key does not name is not verified"
+    );
+    assert!(
+        !initiator.actions.peer_identity_verified(),
+        "CONTROL: a claimed zid the server key does not name is not verified"
+    );
+}
+
+/// The one-way case pins who verifies whom. A server that asks for no client
+/// certificate sees no key from its client, so it verifies nobody however the
+/// client names itself; the client still verifies the server through the
+/// certificate the server signed with. A lifecycle verb arrives AT the
+/// acceptor, so it needs the mutual form (D9).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_way_tls_verifies_the_server_and_not_the_client() {
+    let pems = loopback_mtls_pems();
+    let server_config = server_config_from_pem(
+        pems.server_cert_pem.as_bytes(),
+        pems.server_key_pem.as_bytes(),
+        None,
+    )
+    .expect("build one-way server config from PEM");
+    let client_config = client_config_from_pem(
+        Some(pems.ca_pem.as_bytes()),
+        None,
+        ServerNameVerification::Verify,
+    )
+    .expect("build one-way client config from PEM");
+
+    let (acceptor, initiator) = open_both_to_established_with_zids(
+        server_config,
+        client_config,
+        zid_named_by(&pems.server_key_pem),
+        zid_named_by(&pems.client_key_pem),
+    )
+    .await;
+    assert!(
+        !acceptor.actions.peer_identity_verified(),
+        "the server saw no client certificate, so the client's claim proves nothing"
+    );
+    assert!(
+        initiator.actions.peer_identity_verified(),
+        "the client verifies the server through the certificate the server signed with"
     );
 }
 

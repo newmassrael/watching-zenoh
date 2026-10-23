@@ -57,6 +57,20 @@ pub async fn open_both_to_established(
     server_config: Arc<ServerConfig>,
     client_config: Arc<ClientConfig>,
 ) -> (OpenedSession, OpenedSession) {
+    open_both_to_established_with_zids(server_config, client_config, vec![0x02; 4], vec![0x01; 4])
+        .await
+}
+
+/// [`open_both_to_established`] with the zid each side CLAIMS chosen by the
+/// caller: the witnesses of decision D9 of `docs/session-lifecycle-intent.md`
+/// need a peer that claims the zid its certificate's key names, and one that
+/// claims another.
+pub async fn open_both_to_established_with_zids(
+    server_config: Arc<ServerConfig>,
+    client_config: Arc<ClientConfig>,
+    acceptor_zid: Vec<u8>,
+    initiator_zid: Vec<u8>,
+) -> (OpenedSession, OpenedSession) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local_addr");
 
@@ -68,7 +82,7 @@ pub async fn open_both_to_established(
             .await
             .expect("server tls handshake");
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x02; 4];
+        params.zid = acceptor_zid;
         accept_and_open_session(
             // R2608 — `false`: this harness drives the plain open path, whose
             // subject is the handshake and not `close_link_on_expiration`.
@@ -92,7 +106,7 @@ pub async fn open_both_to_established(
             server_name,
         });
         let mut params = fixture_session_init_params();
-        params.zid = vec![0x01; 4];
+        params.zid = initiator_zid;
         connect_and_open_session(
             locator,
             params,

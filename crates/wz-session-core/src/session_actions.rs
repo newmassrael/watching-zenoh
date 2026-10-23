@@ -1516,17 +1516,6 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// authenticates a different principal cannot be read through a stale value.
     #[cfg(feature = "session-extauth")]
     pub peer_auth_id: R::Mutex<Option<crate::auth_dispatch::AuthIdentity>>,
-    /// The zid named by a peer key the handshake's auth stage PROVED the peer
-    /// holds ([`crate::auth_dispatch::AuthDispatch::proven_peer_credential_zid`]),
-    /// or `None`. One of the credentials [`SessionLinkActions::peer_identity_verified`]
-    /// reads; the other is the link's certificate.
-    ///
-    /// Beside [`Self::peer_auth_id`] and for its reason: it is handshake-scoped,
-    /// so it is cleared with it in `reset_for_reopen`. Sixteen bytes and no
-    /// allocation, so the fixed-memory profile can carry it.
-    #[cfg(feature = "session-extauth")]
-    pub peer_auth_credential_zid:
-        R::Mutex<Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]>>,
     /// session-extshm (R311y507) — the SHM establishment CHALLENGE-RESPONSE
     /// state (`crate::extshm::ShmAuthDispatch`): this node's published auth
     /// segment plus the challenge read out of the peer's. Behind its own mutex
@@ -3156,9 +3145,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // says so. `None` is the pre-handshake truth, not a placeholder.
                 #[cfg(feature = "session-extauth")]
                 peer_auth_id: R::new_mutex(None),
-                // No key is proved before the auth stage says so.
-                #[cfg(feature = "session-extauth")]
-                peer_auth_credential_zid: R::new_mutex(None),
                 // R2774 — nothing offered until the AP layer stages it; the
                 // slots below start equal to this, which is what makes it
                 // their starting point rather than a second copy.
@@ -6111,38 +6097,29 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         R::with_mutex_mut(&self.peer_auth_id, |slot| slot.clone())
     }
 
-    /// Record the zid of the peer key the auth stage just PROVED, or clear it.
+    /// Whether the zid this session's peer CLAIMED is the zid the key it PROVED
+    /// INSIDE A SECURE CHANNEL names (decisions D1 and D9 of
+    /// `docs/session-lifecycle-intent.md`).
     ///
-    /// Called with the dispatch's
-    /// [`proven_peer_credential_zid`](crate::auth_dispatch::AuthDispatch::proven_peer_credential_zid)
-    /// at the stage that ran the proof, including its `None`, for the reason
-    /// [`Self::set_peer_auth_id`] assigns: a stage that proved nothing must not
-    /// leave an earlier handshake's key standing.
-    #[cfg(feature = "session-extauth")]
-    pub fn set_peer_auth_credential_zid(
-        &self,
-        zid: Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]>,
-    ) {
-        R::with_mutex_mut(&self.peer_auth_credential_zid, |slot| *slot = zid);
-    }
-
-    /// Whether the zid this session's peer CLAIMED is the zid a credential it
-    /// PROVED names (decision D1 of `docs/session-lifecycle-intent.md`).
+    /// The one credential is the key of the link's peer certificate
+    /// ([`crate::link::LinkSubject::cert_credential_zid`]): the TLS or QUIC
+    /// handshake made the peer sign its transcript with it, and the same
+    /// handshake derived the keys that protect every later frame, so the peer
+    /// that proved the key is the peer that sent what follows. The key the
+    /// public-key authentication stage proves is NOT read. It proves possession
+    /// during the handshake and binds nothing after it; on a plain TCP link an
+    /// on-path party can let the handshake complete and then insert a frame, and
+    /// the session would still report a verified peer. With no secure channel the
+    /// answer is `false`: a zid nothing proved is only a claim.
     ///
-    /// Two credentials can prove one: a key the auth stage proved
-    /// ([`Self::set_peer_auth_credential_zid`]) and the key of the link's peer
-    /// certificate ([`crate::link::LinkSubject::cert_credential_zid`]), which
-    /// the TLS handshake made the peer sign with. Either suffices, because each
-    /// is a proof of the private key on its own. With neither, the answer is
-    /// `false`: a zid nothing proved is only a claim.
-    ///
-    /// The claim is copied out before a credential is read, so no two of this
+    /// The claim is copied out before the link is read, so no two of this
     /// session's locks are ever held together here.
     pub fn peer_identity_verified(&self) -> bool {
         use crate::credential_identity::CREDENTIAL_ZID_BYTES;
-        // Only the two credential arms below compare: a build with neither (the slot profile)
-        // has nothing to bind a claim to.
-        #[cfg(any(feature = "session-extauth", feature = "alloc"))]
+        // Only the certificate arm below compares: a build without `alloc` (the
+        // slot profile) has no link subject to read, and so nothing to bind a
+        // claim to until it gets a secure channel of its own.
+        #[cfg(feature = "alloc")]
         use crate::credential_identity::zid_is_bound;
         let claimed = R::with_mutex_mut(&self.remote_peer_zid, |slot| {
             slot.as_deref()
@@ -6157,12 +6134,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return false;
         };
         let claimed = &bytes[..len];
-        #[cfg(feature = "session-extauth")]
-        if let Some(zid) = R::with_mutex_mut(&self.peer_auth_credential_zid, |slot| *slot) {
-            if zid_is_bound(claimed, &zid) {
-                return true;
-            }
-        }
         #[cfg(feature = "alloc")]
         if let Some(zid) = self
             .link_subject()
@@ -13452,9 +13423,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // per-handshake state, which is the reason it lives out here.
             #[cfg(feature = "session-extauth")]
             R::with_mutex_mut(&self.peer_auth_id, |slot| *slot = None);
-            // The proved credential is the same handshake's, and goes with it.
-            #[cfg(feature = "session-extauth")]
-            R::with_mutex_mut(&self.peer_auth_credential_zid, |slot| *slot = None);
             self.set_peer_init_caps(None);
             // R2774 — the negotiated capabilities are handshake-scoped too,
             // and they were the ones left standing: every merge on them moves

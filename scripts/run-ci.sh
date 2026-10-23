@@ -5356,7 +5356,12 @@ layer_c1u_cargo_test_tls() {
     # trapped behind either link feature: both sets compile and run it.
     _runci_guarded_test C1u 7 cargo test -p wz-runtime-tokio --features transport-link-tls --test session_reconnect_e2e --quiet \
         || return 1
-    _runci_guarded_test C1u 6 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_pem_mtls_e2e --quiet \
+    # R3463 — 6 -> 8. The two witnesses of decision D9 of
+    # docs/session-lifecycle-intent.md: over mutual TLS a peer that claims the zid its
+    # certificate's key names is verified on both sides (and one that claims another is
+    # not), and over one-way TLS only the client verifies. The number is what the
+    # command PRINTED.
+    _runci_guarded_test C1u 8 cargo test -p wz-runtime-tokio --features transport-link-tls --test tls_pem_mtls_e2e --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-tls --quiet -- -D warnings \
@@ -9209,12 +9214,12 @@ layer_c1y_cargo_test_routing_peer() {
     # ⚠ The pre-push count-guard gate did NOT select this guard on the push that
     # moved it: the filter `auth_dispatch` is the MODULE PATH of the changed file,
     # which that file's text never spells. The gate now derives that path too.
-    # R3462 — 9 -> 10: `the_credential_zid_rides_the_pubkey_slot_and_is_reported_only_once_proved`,
-    # which `864d052a1` added with the dispatch's verified credential zid and did not
-    # count here. No hosted run graded it (each was cancelled by the next push); the
-    # count-guard gate found it on a range that selected the crate's guards. READ off the
-    # command, which printed 10.
-    _runci_guarded_test "C1y auth_dispatch" 10 \
+    # R3463 — 9, as before step 1a of docs/session-lifecycle-intent.md. That step
+    # added one test here for the dispatch's proved credential zid, and Round 3462
+    # raised this guard to 10 for it. Round 3463 removed the public-key arm that test
+    # witnessed (decision D9: a proof over a link nothing protects is not a lifecycle
+    # credential), so the count is back. READ off the command, which printed 9.
+    _runci_guarded_test "C1y auth_dispatch" 9 \
         cargo test -p wz-session-core --features access-extauth-usrpwd --lib auth_dispatch --quiet || return 1
     _runci_guarded_test "C1y usrpwd e2e" 6 \
         cargo test -p wz-runtime-tokio --features access-extauth-usrpwd \
@@ -9233,15 +9238,15 @@ layer_c1y_cargo_test_routing_peer() {
     # and both numbers were read off `--list` under this feature set: 12 method
     # tests (the 11 above plus the runtime-add handshake witness) and 12 store
     # tests, which sum to the 24 the widened filter printed.
-    # R3462 — 12 -> 15, and the two e2e legs below 1 -> 2 and 2 -> 3: `864d052a1` added
-    # the verified credential zid and three method tests
-    # (`the_credential_zid_is_taken_over_the_subject_public_key_info`,
-    # `the_responder_proves_the_initiators_key_and_the_initiator_proves_nothing`,
-    # `a_failed_open_syn_leaves_no_proved_credential`) and one handshake witness
-    # (`a_zid_derived_from_the_proved_key_is_verified_by_the_responder_only`, ungated, so
-    # it lands in both e2e legs), and counted none of them here. READ off the three
-    # commands, which printed 15, 2 and 3; the store guard is untouched.
-    _runci_guarded_test "C1y extauth_pubkey" 15 \
+    # R3463 — 12 again, and the two e2e legs below stay at 2 and 3. Step 1a of
+    # docs/session-lifecycle-intent.md added three method tests for a proved
+    # credential zid and one handshake witness, and Round 3462 raised these guards
+    # to 15, 2 and 3 for them. Round 3463 removed the public-key arm those three
+    # tests witnessed (decision D9), so this leg is back at 12; the handshake
+    # witness is replaced by `a_proved_key_over_plain_tcp_verifies_nobody`, which is
+    # ungated like its predecessor and so still lands in both e2e legs. READ off the
+    # three commands, which printed 12, 2 and 3; the store guard is untouched.
+    _runci_guarded_test "C1y extauth_pubkey" 12 \
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey:: --quiet || return 1
     _runci_guarded_test "C1y extauth_pubkey_store" 12 \
         cargo test -p wz-runtime-tokio --features access-extauth-pubkey --lib extauth_pubkey_store:: --quiet || return 1
