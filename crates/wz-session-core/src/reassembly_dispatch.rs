@@ -192,6 +192,19 @@ pub struct ReassemblyConfig {
     /// against a patch-0 peer, which emits no markers: enforcing the rules
     /// against one would refuse every chain it sends.
     pub fragmentation_markers: bool,
+    /// The largest message a chain may reach, in bytes: the deploy's
+    /// `transport/link/rx/max_message_size`
+    /// ([`crate::session_init_params::LinkRxConf`]). A fragment whose bytes
+    /// would take its chain past it ends the chain as
+    /// [`AbortReason::CapacityOverflow`], as upstream's defragmentation buffer
+    /// ends one past its capacity
+    /// (`io/zenoh-transport/src/common/defragmentation.rs` @
+    /// `if new_len > self.capacity {`).
+    ///
+    /// A bound beside the slot's `CAP`, not instead of it: the smaller of the
+    /// two holds, so a value above `CAP` is read as `CAP`. `usize::MAX`, what
+    /// [`Self::new`] sets, leaves `CAP` the only bound.
+    pub max_message_bytes: usize,
 }
 
 impl ReassemblyConfig {
@@ -206,7 +219,14 @@ impl ReassemblyConfig {
             per_peer_quota,
             reassembly_timeout_ms,
             fragmentation_markers: false,
+            max_message_bytes: usize::MAX,
         }
+    }
+
+    /// Builder form of [`Self::max_message_bytes`].
+    pub const fn with_max_message_bytes(mut self, bytes: usize) -> Self {
+        self.max_message_bytes = bytes;
+        self
     }
 
     /// Builder form of [`Self::fragmentation_markers`], for a caller that
@@ -616,6 +636,9 @@ where
     /// `ReassemblyDispatcher<SLOTS, CAP>` in the tree keeps its exact semantics
     /// without naming it.
     staging: S,
+    /// Chains ended because a fragment would have taken them past the bound
+    /// ([`AbortReason::CapacityOverflow`]); see [`Self::capacity_refusals`].
+    capacity_refusals: u64,
 }
 
 impl<const SLOTS: usize, const CAP: usize, S> ReassemblyDispatcher<SLOTS, CAP, S>
@@ -641,7 +664,54 @@ where
             slots: core::array::from_fn(|_| Slot::new()),
             config,
             staging,
+            capacity_refusals: 0,
         }
+    }
+
+    /// The largest message a chain may reach here: the smaller of the
+    /// configured [`ReassemblyConfig::max_message_bytes`] and the slot's `CAP`.
+    pub fn max_message_bytes(&self) -> usize {
+        self.config.max_message_bytes.min(CAP)
+    }
+
+    /// How many chains this Router has ended because a fragment would have
+    /// taken them past [`Self::max_message_bytes`].
+    ///
+    /// The count is what makes such a refusal visible to a host that does not
+    /// watch the per-chain [`AbortReason::CapacityOverflow`] outcome: upstream
+    /// only traces it (`io/zenoh-transport/src/unicast/universal/rx.rs` @
+    /// `tracing::trace!("{}", e);`), so a too-small bound on a receiver reads,
+    /// from the sender's side, as messages that never arrive.
+    pub fn capacity_refusals(&self) -> u64 {
+        self.capacity_refusals
+    }
+
+    /// Whether `len` more bytes may join `chain`: the arena has room for them
+    /// and the chain stays within the configured bound.
+    fn chain_admits(staging: &S, chain: &S::Chain, len: usize, max_message_bytes: usize) -> bool {
+        staging.fits(chain, len)
+            && staging
+                .bytes(chain)
+                .len()
+                .checked_add(len)
+                .is_some_and(|total| total <= max_message_bytes)
+    }
+
+    /// Count a chain ended for its size, and say so the first time: the
+    /// first refusal is the one that tells an operator the bound is too small,
+    /// and a peer that keeps sending such chains must not turn the log into
+    /// its echo.
+    fn note_capacity_overflow(&mut self, attempted: usize) {
+        if self.capacity_refusals == 0 {
+            log::warn!(
+                "reassembly: a fragmented message reached {attempted} bytes, past this \
+                 node's bound of {} (transport/link/rx/max_message_size, capped by the \
+                 reassembly slot of {CAP}); the message is dropped, and later ones past \
+                 the bound are counted without a log",
+                self.max_message_bytes()
+            );
+        }
+        self.capacity_refusals = self.capacity_refusals.saturating_add(1);
     }
 
     /// The staging arena itself, read-only.
@@ -904,6 +974,16 @@ where
         self.config.fragmentation_markers
     }
 
+    /// Push the session's [`ReassemblyConfig::max_message_bytes`] into the
+    /// Router. The unicast drive writes it from the session's own
+    /// configuration on every fragment, beside the marker verdict above, so
+    /// a host that builds the Router before it holds a session still applies
+    /// the session's bound; a chain already open is judged by it from its next
+    /// fragment.
+    pub fn set_max_message_bytes(&mut self, bytes: usize) {
+        self.config.max_message_bytes = bytes;
+    }
+
     /// Abort and reclaim every chain whose deadline has elapsed at
     /// `now_ms`, raising `reassembly.timeout` into only the live slots
     /// (a reused slot's stale deadline cannot fire — released slots are
@@ -995,18 +1075,20 @@ where
         // `PoolExhausted` is already the Router's word for it. The reservation
         // waits on the slot, whose key stays clear until `begin_chain` binds it.
         let deadline_ms = now_ms.saturating_add(self.config.reassembly_timeout_ms);
+        let max_message_bytes = self.config.max_message_bytes;
         let Self { slots, staging, .. } = self;
         let slot = &mut slots[idx];
         slot.chain = staging.acquire();
         let Some(chain) = slot.chain.as_ref() else {
             return IngestOutcome::Refused(RefuseReason::PoolExhausted);
         };
-        // A first fragment wider than the slot never reaches the machine: no
+        // A first fragment wider than the bound never reaches the machine: no
         // transition of `Empty` refuses a chunk, so the chain ends here.
-        if !staging.fits(chain, frag.payload.len()) {
+        if !Self::chain_admits(staging, chain, frag.payload.len(), max_message_bytes) {
             if let Some(chain) = slot.chain.take() {
                 staging.release(chain);
             }
+            self.note_capacity_overflow(frag.payload.len());
             return IngestOutcome::Aborted(AbortReason::CapacityOverflow);
         }
 
@@ -1081,14 +1163,23 @@ where
         // A payload the chain cannot hold is a codec error for the machine,
         // decided before the chunk is sent: once a final chunk has driven the
         // slot to `Complete` no abort arm is left to take.
-        let fits = {
+        let (fits, staged) = {
             let chain = self.slots[idx]
                 .chain
                 .as_ref()
                 .expect("an open chain has staging");
-            self.staging.fits(chain, frag.payload.len())
+            (
+                Self::chain_admits(
+                    &self.staging,
+                    chain,
+                    frag.payload.len(),
+                    self.config.max_message_bytes,
+                ),
+                self.staging.bytes(chain).len(),
+            )
         };
         if !fits {
+            self.note_capacity_overflow(staged.saturating_add(frag.payload.len()));
             return self.abort(
                 idx,
                 ReassemblySlotEvent::CodecError,
@@ -1421,6 +1512,69 @@ mod tests {
         });
         assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
         assert_eq!(d.active_chains(), 0);
+        assert_eq!(d.capacity_refusals(), 1);
+    }
+
+    /// A Router whose configured bound is `bytes`, below its slot's `CAP`.
+    fn bounded<const S: usize, const C: usize>(bytes: usize) -> ReassemblyDispatcher<S, C> {
+        ReassemblyDispatcher::new(ReassemblyConfig::new(2, 5_000).with_max_message_bytes(bytes))
+    }
+
+    /// The configured bound ends a chain the slot could hold, and is
+    /// inclusive as upstream's `new_len > capacity` is: a chain of exactly the
+    /// bound reassembles, one byte more does not.
+    #[test]
+    fn the_configured_bound_ends_a_chain_the_slot_could_hold() {
+        let mut d = bounded::<4, 64>(10);
+        assert_eq!(d.max_message_bytes(), 10);
+        d.ingest(frag(PEER_A, true, 1, 1, b"aaaaa"), MASK, 0, |_| {});
+        let mut out = None;
+        let r = d.ingest(frag(PEER_A, true, 2, 0, b"bbbbb"), MASK, 0, |m| {
+            out = Some(m.to_vec())
+        });
+        assert_eq!(r, IngestOutcome::Reassembled);
+        assert_eq!(out.as_deref(), Some(&b"aaaaabbbbb"[..]));
+
+        d.ingest(frag(PEER_A, true, 3, 1, b"aaaaa"), MASK, 0, |_| {});
+        let r = d.ingest(frag(PEER_A, true, 4, 0, b"bbbbbb"), MASK, 0, |_| {
+            panic!("past the bound, no deliver")
+        });
+        assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
+        assert_eq!(d.active_chains(), 0);
+        assert_eq!(d.capacity_refusals(), 1);
+    }
+
+    /// A first fragment already past the bound never opens a chain.
+    #[test]
+    fn a_first_fragment_past_the_bound_opens_no_chain() {
+        let mut d = bounded::<4, 64>(4);
+        let r = d.ingest(frag(PEER_A, true, 1, 1, b"aaaaa"), MASK, 0, |_| {});
+        assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
+        assert_eq!(d.active_chains(), 0);
+        assert_eq!(d.staging_available(), 4);
+        assert_eq!(d.capacity_refusals(), 1);
+    }
+
+    /// `0` rejoins no chain, as upstream's zero-capacity buffer refuses every
+    /// non-empty fragment.
+    #[test]
+    fn a_zero_bound_rejoins_no_chain() {
+        let mut d = bounded::<4, 64>(0);
+        for sn in 0..3 {
+            let r = d.ingest(frag(PEER_A, true, sn, 1, b"a"), MASK, 0, |_| {});
+            assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
+        }
+        assert_eq!(d.capacity_refusals(), 3);
+    }
+
+    /// A bound above the slot is read as the slot.
+    #[test]
+    fn a_bound_above_the_slot_is_read_as_the_slot() {
+        let mut d = bounded::<4, 8>(1 << 30);
+        assert_eq!(d.max_message_bytes(), 8);
+        d.ingest(frag(PEER_A, true, 1, 1, b"aaaaaa"), MASK, 0, |_| {});
+        let r = d.ingest(frag(PEER_A, true, 2, 0, b"bbb"), MASK, 0, |_| {});
+        assert_eq!(r, IngestOutcome::Aborted(AbortReason::CapacityOverflow));
     }
 
     /// The deadline sweep aborts a chain past its deadline and reclaims

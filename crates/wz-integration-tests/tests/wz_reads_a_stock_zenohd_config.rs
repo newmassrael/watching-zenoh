@@ -864,6 +864,10 @@ fn the_defaults_each_implementation_falls_back_to_are_pinned_against_a_real_zeno
             wz.tx_queue.wait_before_close_us.to_string(),
         ),
         (
+            "transport/link/rx/max_message_size",
+            wz.link_rx.max_message_size.to_string(),
+        ),
+        (
             "transport/multicast/qos/enabled",
             wz.multicast_qos.to_string(),
         ),
@@ -3605,6 +3609,9 @@ fn a_wz_node_configured_only_by_a_stock_zenoh_config_reaches_a_real_zenohd() {
           }},
         }},
       }},
+      // The largest message a session rejoins from fragments, off its 1 GiB
+      // default and still far above anything this leg sends.
+      rx: {{ max_message_size: 65536 }},
     }},
   }},
   // R311y844 — this file now names EVERY honoured key, which turns this leg

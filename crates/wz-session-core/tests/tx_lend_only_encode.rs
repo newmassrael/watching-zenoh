@@ -43,7 +43,7 @@ use wz_session_core::handshake_encode::{
     InitCaps,
 };
 use wz_session_core::session_init_params::{
-    cookie_bytes, zid_bytes, SessionInitParams, TxQueueConf,
+    cookie_bytes, zid_bytes, LinkRxConf, SessionInitParams, TxQueueConf,
 };
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::tx_buf::{SliceTxBuf, TxBuf};
@@ -59,6 +59,7 @@ fn params(zid: &[u8], cookie: &[u8]) -> SessionInitParams {
         initial_sn: 77,
         cookie: cookie_bytes(cookie),
         tx_queue: TxQueueConf::default(),
+        link_rx: LinkRxConf::default(),
         cookie_signing_key: SigningKey::new(vec![7u8; 32]).expect("key"),
     }
 }

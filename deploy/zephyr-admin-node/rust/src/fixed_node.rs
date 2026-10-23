@@ -228,6 +228,7 @@ impl SessionFactory<Clock> for Factory {
             initial_sn: 0,
             cookie: cookie_bytes(&[]),
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
         }
     }

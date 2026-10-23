@@ -210,6 +210,7 @@ fn init_params(zid: [u8; 16]) -> SessionInitParams {
         initial_sn: 0,
         cookie: Vec::new(),
         tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
+        link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
         cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32-byte key"),
     }
 }

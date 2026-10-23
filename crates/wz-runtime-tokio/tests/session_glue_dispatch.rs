@@ -68,6 +68,7 @@ fn fixture_params() -> SessionInitParams {
         initial_sn: 0x42,
         cookie: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x77],
         tx_queue: wz_runtime_tokio::session_glue::TxQueueConf::default(),
+        link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
         cookie_signing_key: SigningKey::new(vec![0xAB; 32]).expect("32-byte test key valid"),
     }
 }

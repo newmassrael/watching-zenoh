@@ -33,7 +33,7 @@
 //! chunked drive would reset it between fragments.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::net::TcpListener;
@@ -46,7 +46,7 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session, connect_and_open_session, DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
 use wz_runtime_tokio_test_support::fixture_session_init_params;
-use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
+use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent, ReassemblyDropReason};
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::qos::Priority;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -61,6 +61,12 @@ const BATCH_SIZE: u16 = 64;
 /// starts with. Its only requirement is `0 < n < chain_len`, which that test
 /// asserts against the encoder's own walk rather than trusting this number.
 const MID_CHAIN_BUDGET: usize = 2;
+/// The receive bounds of
+/// [`two_nodes_with_different_rx_bounds_answer_one_message_apart`]: the
+/// 200-byte Put's chain lies between them, and both lie below the build's
+/// reassembly slot so the slot decides neither answer.
+const SMALL_RX_BOUND: usize = 100;
+const LARGE_RX_BOUND: usize = 4096;
 
 /// An oversize unicast `Session::publish` fragments on TX and the peer's
 /// drive loop reassembles it into exactly one delivered Sample carrying the
@@ -636,5 +642,187 @@ async fn a_publish_refused_before_it_left_gives_its_sequence_number_back() {
     assert!(
         next() > before + 2,
         "a sent chain of several fragments must advance the counter by more than one"
+    );
+}
+
+/// `transport/link/rx/max_message_size` is the RECEIVER's bound, and two nodes
+/// configured apart answer the same message apart.
+///
+/// The small node takes at most [`SMALL_RX_BOUND`] bytes, the large one
+/// [`LARGE_RX_BOUND`]; the 200-byte Put fragments at the 64-byte MTU into a
+/// chain between the two. Each node sends it to the other:
+///
+/// - small to large: delivered. The sender does not refuse by its own receive
+///   bound, as upstream's key is receive-only;
+/// - large to small: the small node ends the chain, delivers nothing from it,
+///   and reports it as a capacity drop, so the refusal is not silent.
+///
+/// Both bounds sit below the build's reassembly slot, so the slot decides
+/// neither answer: with the key unread both nodes would deliver, and the test
+/// fails. An unfragmented Put sent after the refused chain is the barrier the
+/// small node's counts are read behind (one reliable channel, in order), and
+/// it shows the bound leaves an unfragmented message alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_nodes_with_different_rx_bounds_answer_one_message_apart() {
+    let oversize: Vec<u8> = (0..200u32).map(|i| (i * 7) as u8).collect();
+    let barrier: Vec<u8> = vec![0x5A; 4];
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    // The acceptor is the SMALL node, the initiator the LARGE one.
+    let acc_open = async {
+        let (stream, _peer) = listener.accept().await.expect("accept");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x02; 4];
+        params.batch_size = BATCH_SIZE;
+        params.link_rx.max_message_size = SMALL_RX_BOUND;
+        accept_and_open_session(
+            DialedLink::Tcp(stream),
+            params,
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("acceptor reaches Established")
+    };
+    let init_open = async {
+        let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+        let mut params = fixture_session_init_params();
+        params.zid = vec![0x01; 4];
+        params.batch_size = BATCH_SIZE;
+        params.link_rx.max_message_size = LARGE_RX_BOUND;
+        connect_and_open_session(
+            locator,
+            params,
+            &DialConfig::default(),
+            TokioTime::new(),
+            Some(ITER_CAP),
+            DEFAULT_OPEN_TICK_MS,
+        )
+        .await
+        .expect("initiator reaches Established")
+    };
+    let (mut small, mut large) = tokio::join!(acc_open, init_open);
+    assert_eq!(small.actions.negotiated_batch_mtu(), BATCH_SIZE as usize);
+    assert_eq!(large.actions.negotiated_batch_mtu(), BATCH_SIZE as usize);
+
+    // What each node delivered, by payload length, and the small node's drops.
+    let small_got = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let large_got = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let small_capacity_drops = Arc::new(AtomicUsize::new(0));
+    let small_chunks = Arc::new(AtomicUsize::new(0));
+    let observer_into = |got: &Arc<Mutex<Vec<usize>>>| {
+        let got = got.clone();
+        let mut observer = ApplicationLayerObserver::new();
+        observer.subscribers.register(KEYEXPR, move |sample| {
+            got.lock().unwrap().push(sample.payload().len());
+        });
+        observer
+    };
+    let mut small_observer = observer_into(&small_got);
+    let mut large_observer = observer_into(&large_got);
+
+    let small_session = TokioSession::new(
+        small.actions.clone(),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
+        Arc::new(small.clock),
+    );
+    let large_session = TokioSession::new(
+        large.actions.clone(),
+        Arc::new(wz_runtime_tokio::sync::PlainMutex::new(
+            ApplicationLayerObserver::new(),
+        )),
+        Arc::new(large.clock),
+    );
+
+    let timeouts = SessionTimeouts::spec_defaults();
+    let drive_small = {
+        let drops = small_capacity_drops.clone();
+        let chunks = small_chunks.clone();
+        drive_session_until_terminal(
+            &mut small.inbound,
+            &small.actions,
+            &mut small.engine,
+            None,
+            &small.clock,
+            &timeouts,
+            move |event| {
+                match &event {
+                    IterationEvent::ReassemblyDropped(ReassemblyDropReason::CapacityOverflow) => {
+                        drops.fetch_add(1, Ordering::SeqCst);
+                    }
+                    IterationEvent::Poll(DriverLoopOutcome::Fragment { .. }) => {
+                        chunks.fetch_add(1, Ordering::SeqCst);
+                    }
+                    _ => {}
+                }
+                small_observer.dispatch_event(event)
+            },
+        )
+    };
+    let drive_large = drive_session_until_terminal(
+        &mut large.inbound,
+        &large.actions,
+        &mut large.engine,
+        None,
+        &large.clock,
+        &timeouts,
+        move |event| large_observer.dispatch_event(event),
+    );
+
+    let (small_probe, large_probe) = (small_got.clone(), large_got.clone());
+    let (oversize_len, barrier_len) = (oversize.len(), barrier.len());
+    let scenario = async move {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Small to large: within the large node's bound.
+        small_session
+            .publish(KEYEXPR, &oversize, PublishOptions::put())
+            .expect("the small node sends a chain its own receive bound would refuse");
+        // Large to small: past the small node's bound, then the barrier.
+        large_session
+            .publish(KEYEXPR, &oversize, PublishOptions::put())
+            .expect("the large node sends the same chain");
+        large_session
+            .publish(KEYEXPR, &barrier, PublishOptions::put())
+            .expect("the large node sends the unfragmented barrier");
+        for _ in 0..100 {
+            if !large_probe.lock().unwrap().is_empty() && !small_probe.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        panic!("a delivery did not arrive within the ~3s budget");
+    };
+
+    tokio::select! {
+        _ = drive_small => panic!("small node's drive loop ended unexpectedly"),
+        _ = drive_large => panic!("large node's drive loop ended unexpectedly"),
+        _ = scenario => {}
+    }
+
+    assert_eq!(
+        *large_got.lock().unwrap(),
+        vec![oversize_len],
+        "the large node rejoins the chain the small node sent"
+    );
+    assert_eq!(
+        *small_got.lock().unwrap(),
+        vec![barrier_len],
+        "the small node delivers the unfragmented barrier and nothing of the chain"
+    );
+    assert!(
+        small_chunks.load(Ordering::SeqCst) >= 2,
+        "the refused message reached the small node as a fragment chain"
+    );
+    // At least one: once the chain is ended, how its remaining fragments are
+    // answered depends on whether the session negotiated the chain-boundary
+    // markers, and without them a remainder can open and overflow a chain of
+    // its own.
+    assert!(
+        small_capacity_drops.load(Ordering::SeqCst) >= 1,
+        "the small node reports the chain it ended for its size"
     );
 }

@@ -792,6 +792,7 @@ pub(crate) fn acceptor_params(
         // fixture demonstrates the production shape rather than the literal a
         // board would otherwise copy.
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         cookie_signing_key: SigningKey::from_entropy(entropy)
             .expect("the entropy source produced no signing key"),
     }

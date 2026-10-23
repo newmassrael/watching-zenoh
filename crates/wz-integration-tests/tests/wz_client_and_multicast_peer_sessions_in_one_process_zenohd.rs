@@ -99,6 +99,7 @@ fn group_params(zid_byte: u8) -> MulticastParams {
         batch_size: 2_048,
         is_qos: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
     }
 }
 

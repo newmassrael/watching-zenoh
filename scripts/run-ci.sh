@@ -10881,22 +10881,29 @@ layer_c1l_reassembly() {
     #
     # 42 -> 43: the duplicate-first eviction test joined the marker tests, and the
     # one-seam test became the one-producer-per-arm test (+2 -1).
-    _runci_guarded_test C1l 43 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
+    #
+    # 43 -> 47: the four tests of the configured bound
+    # (`transport/link/rx/max_message_size`) joined `reassembly_dispatch`.
+    # MEASURED under this feature set: `47 passed`.
+    _runci_guarded_test C1l 47 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
         || return 1
     _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features reassembly --test layer3_reassembly_rx --quiet \
         || return 1
     # R311y580 — the same eleven, on the sibling feature arm; 27 -> 37 with the
     # ten above, derived by `--list` under THIS feature set as well; 37 -> 42 with
     # the five `duty_tests`, none of them feature-gated; 42 -> 43 with the
-    # duplicate-first test, also ungated.
-    _runci_guarded_test C1l 43 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
+    # duplicate-first test, also ungated; 43 -> 47 with the four bound tests,
+    # ungated as well (MEASURED: `47 passed`).
+    _runci_guarded_test C1l 47 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
         || return 1
     # R2238 (open-debt item 580) — 1 -> 2: the finite-fragment-budget abandon
     # e2e joined this file. MEASURED under THIS feature set (which is not the
     # one Layer Z builds the same file with): `running 2 tests`.
     # 2 -> 3: a publish refused before it left gives its sequence number back (a
     # device closed the session at the hole the refusal left).
-    _runci_guarded_test C1l 3 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_tx --quiet \
+    # 3 -> 4: two nodes configured with different rx bounds answer one message
+    # apart (MEASURED: `4 passed`).
+    _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_tx --quiet \
         || return 1
     _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features transport-fragmentation --test layer3_reassembly_rx --quiet \
         || return 1

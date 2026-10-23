@@ -1986,8 +1986,10 @@ where
             unit, payload_at, reliable, sn, more, has_ext, priority, markers,
         ),
     ));
-    // Armed from the negotiated patch level, as the copying hand-off arms it.
+    // Armed from the negotiated patch level, as the copying hand-off arms it,
+    // and bounded by the session's configuration the same way.
     reasm.set_fragmentation_markers(actions.fragmentation_markers_negotiated());
+    reasm.set_max_message_bytes(actions.params.link_rx.max_message_size);
     let sn_mask = actions.negotiated_sn_mask();
     // The chain key's peer half, copied out of the session's slot first: the
     // Router delivers a completed chain from inside the ingest, and what the
@@ -2920,6 +2922,10 @@ fn report_fragment_outcome<R, T, const SLOTS: usize, const CAP: usize, S, F, H>(
     // (`unicast/universal/rx.rs:155`); wz reads the settled session value,
     // which is why this is a bool write and not a negotiation.
     reasm.set_fragmentation_markers(actions.fragmentation_markers_negotiated());
+    // The session's `transport/link/rx/max_message_size`, from its own
+    // configuration rather than the host's Router construction, so every host
+    // that drives a unicast session applies it.
+    reasm.set_max_message_bytes(actions.params.link_rx.max_message_size);
     // The negotiated SN ring mask resolves BEFORE the peer-ZID guard:
     // `negotiated_sn_mask` takes the `inbound_peer_init_caps` mutex, and the
     // guard below documents that nothing inside it re-enters a session mutex

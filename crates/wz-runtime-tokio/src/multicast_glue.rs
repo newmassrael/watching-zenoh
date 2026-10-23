@@ -1067,9 +1067,14 @@ where
     // fragment chains keyed by the peer's pool-slot index (zenoh-pico's
     // per-entry dbuf pair, generalised to the bounded §5.M slot pool).
     // Same SCE-sourced AP pool dims/knobs as the unicast loop — one
-    // buffer-pool policy SSOT, two transports.
+    // buffer-pool policy SSOT, two transports. The group's
+    // `transport/link/rx/max_message_size` bounds its chains, as one
+    // `defrag_buff_size` bounds every upstream multicast peer's.
     #[cfg(feature = "reassembly")]
-    let mut reasm = crate::reassembly::TokioReassembly::new(crate::reassembly::reassembly_config());
+    let mut reasm = crate::reassembly::TokioReassembly::new(
+        crate::reassembly::reassembly_config()
+            .with_max_message_bytes(params.link_rx.max_message_size),
+    );
 
     // §5.21 router-multicast-faces (I3b) — last relayed on-group ROUTER member
     // set, for the snapshot-diff at the loop tail (relay to the forwarder only
@@ -1473,7 +1478,12 @@ pub fn spawn_router_mcast_egress(
 fn router_group_params(
     profile: RouterGroupProfile,
 ) -> wz_session_core::multicast_params::MulticastParams {
-    let RouterGroupProfile { zid, qos, tx_queue } = profile;
+    let RouterGroupProfile {
+        zid,
+        qos,
+        tx_queue,
+        link_rx,
+    } = profile;
     wz_session_core::multicast_params::MulticastParams {
         whatami: wz_session_core::WhatAmI::Router,
         zid,
@@ -1484,6 +1494,7 @@ fn router_group_params(
         batch_size: 2_048,
         is_qos: qos,
         tx_queue,
+        link_rx,
     }
 }
 
@@ -1506,6 +1517,9 @@ pub struct RouterGroupProfile {
     pub qos: bool,
     /// The node's transmission queue: lane sizes and congestion waits.
     pub tx_queue: wz_session_core::session_init_params::TxQueueConf,
+    /// The node's `transport/link/rx`: the largest message the group rejoins
+    /// from fragments, the bound its unicast sessions take too.
+    pub link_rx: wz_session_core::session_init_params::LinkRxConf,
 }
 
 /// The future a group face's bind returns, borrowing the face's options.
@@ -2547,6 +2561,7 @@ mod tests {
             batch_size: 2_048,
             is_qos: false,
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         }
     }
 
@@ -2740,6 +2755,7 @@ mod tests {
             zid: vec![0x0A],
             qos: true,
             tx_queue: operator,
+            link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         });
         assert_eq!(group.tx_queue, operator);
         assert!(group.is_qos);

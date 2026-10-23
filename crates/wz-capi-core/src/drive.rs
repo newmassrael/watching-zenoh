@@ -1227,6 +1227,7 @@ pub(crate) fn init_params(
         initial_sn: 0,
         cookie: Vec::new(),
         tx_queue: link_tx.queue,
+        link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy)?,
     })
 }
@@ -3513,6 +3514,7 @@ impl ResolvedGroup {
                 batch_size,
                 is_qos,
                 tx_queue,
+                link_rx: wz_runtime_tokio::session_glue::LinkRxConf::default(),
             },
         })
     }
@@ -5214,6 +5216,7 @@ mod multicast_face_tests {
             batch_size: 2_048,
             is_qos: false,
             tx_queue: Default::default(),
+            link_rx: Default::default(),
         }
     }
 

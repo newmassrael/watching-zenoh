@@ -1387,6 +1387,7 @@ mod qos_emit_tests {
             batch_size: 2_048,
             is_qos,
             tx_queue: TxQueueConf::default(),
+            link_rx: crate::session_init_params::LinkRxConf::default(),
         }
     }
 
@@ -1479,6 +1480,7 @@ mod push_tests {
             batch_size,
             is_qos: false,
             tx_queue: TxQueueConf::default(),
+            link_rx: crate::session_init_params::LinkRxConf::default(),
         }
     }
 
@@ -1740,6 +1742,7 @@ mod lend_tests {
             batch_size,
             is_qos,
             tx_queue: TxQueueConf::default(),
+            link_rx: crate::session_init_params::LinkRxConf::default(),
         }
     }
 
@@ -1944,6 +1947,7 @@ mod lent_emit_tests {
             batch_size,
             is_qos,
             tx_queue: TxQueueConf::default(),
+            link_rx: crate::session_init_params::LinkRxConf::default(),
         }
     }
 

@@ -517,6 +517,7 @@ mod tests {
             initial_sn: 0,
             cookie: crate::session_init_params::cookie_bytes(&[]),
             tx_queue: crate::session_init_params::TxQueueConf::default(),
+            link_rx: crate::session_init_params::LinkRxConf::default(),
             cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
                 .expect("32-byte test key"),
         }

@@ -915,7 +915,13 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             iter: 0,
             lost_at_open,
             #[cfg(feature = "reassembly")]
-            reasm: mcu_reassembly(),
+            reasm: {
+                // The group's `transport/link/rx/max_message_size`, as the AP
+                // group loop applies it.
+                let mut reasm = mcu_reassembly();
+                reasm.set_max_message_bytes(params.link_rx.max_message_size);
+                reasm
+            },
         }
     }
 

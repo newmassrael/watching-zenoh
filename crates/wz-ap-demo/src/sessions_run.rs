@@ -635,6 +635,7 @@ fn group_params(
         batch_size: 2_048,
         is_qos: false,
         tx_queue: Default::default(),
+        link_rx: Default::default(),
     }
 }
 

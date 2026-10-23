@@ -192,6 +192,7 @@ fn layer3_join_qos_sn_ext_byte_equals_pico() {
         batch_size: 8192,
         is_qos: true,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
     };
     assert!(
         !params.join_advertises_caps(),

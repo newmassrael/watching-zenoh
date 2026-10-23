@@ -4,7 +4,7 @@
 use super::*;
 use crate::frame_encode::{begin_frame, frame_flags};
 use crate::handshake_encode::{encode_close, encode_init, encode_open};
-use crate::session_init_params::{SessionInitParams, TxQueueConf};
+use crate::session_init_params::{LinkRxConf, SessionInitParams, TxQueueConf};
 use alloc::vec;
 use wz_codecs::whatami::WhatAmI;
 
@@ -19,6 +19,7 @@ fn params(zid: &[u8], batch_size: u16, lease_ms: u64) -> SessionInitParams {
         initial_sn: 0x1234,
         cookie: crate::session_init_params::cookie_bytes(&[0xC0, 0xC1, 0xC2]),
         tx_queue: TxQueueConf::default(),
+        link_rx: LinkRxConf::default(),
         cookie_signing_key: crate::signing_key::SigningKey::new(vec![0xAB; 32])
             .expect("32-byte test key"),
     }

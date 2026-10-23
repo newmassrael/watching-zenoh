@@ -1086,6 +1086,11 @@ pub struct ZenohNodeConfig {
     /// senders spend the waits, and its links' writer queues take the sizes at
     /// Established.
     pub tx_queue: wz_session_core::session_init_params::TxQueueConf,
+    /// `transport/link/rx/max_message_size`, the largest message a session
+    /// rejoins from fragments (bytes). The session takes it through
+    /// `SessionInitParams`, and its reassembly ends a chain that would pass it;
+    /// the build's reassembly slot bounds it from above.
+    pub link_rx: wz_session_core::session_init_params::LinkRxConf,
     /// `transport/unicast/max_links`.
     pub max_links: usize,
     /// `transport/unicast/max_sessions` — how many unicast sessions a node
@@ -1448,6 +1453,7 @@ impl Default for ZenohNodeConfig {
             batch_size: 65_535,
             lease_ms: 10_000,
             tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+            link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
             max_links: 1,
             max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
             qos: true,
@@ -1930,6 +1936,11 @@ impl ZenohNodeConfig {
             self.tx_queue.wait_before_close_us
         );
         out.push_str("      }");
+        let _ = write!(
+            out,
+            ",\n      \"rx\": {{ \"max_message_size\": {} }}",
+            self.link_rx.max_message_size
+        );
         // R2593 — the tcp block, only for the buffers the caller set: an absent
         // key is zenoh's own "kernel default", so emitting nothing is exact.
         let buffers = self.link_socket_buffers;
@@ -2105,6 +2116,13 @@ pub const HONOURED_CONFIG_KEYS: &[&str] = &[
     // R2926 — the last queue key: the per-fragment deadline it bounds is built.
     "transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments",
     "transport/link/tx/queue/congestion_control/block/wait_before_close",
+    // The largest message a session rejoins from fragments. It left
+    // `UNHONOURED_BEYOND_WZ` and the `LinkTxConf` group because a session now
+    // carries it (`LinkRxConf`) and its reassembly ends a chain past it, as
+    // upstream's defragmentation buffer ends one past its capacity
+    // (`io/zenoh-transport/src/common/defragmentation.rs` @
+    // `if new_len > self.capacity {`).
+    "transport/link/rx/max_message_size",
     "adminspace/enabled",
     "adminspace/permissions/read",
     "adminspace/permissions/write",
@@ -2536,7 +2554,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
     // [`HONOURED_CONFIG_KEYS`].
     "transport/link/protocols",
     "transport/link/rx/buffer_size",
-    "transport/link/rx/max_message_size",
+    // `transport/link/rx/max_message_size` LEFT this list for
+    // `HONOURED_CONFIG_KEYS`: a session's reassembly now ends a chain past it.
     // R2593 — `transport/link/{tcp,tls}/so_{rcvbuf,sndbuf}` LEFT this list for
     // `HONOURED_CONFIG_KEYS`: `LinkDefaults` now carries them to every link.
     "transport/link/tls/close_link_on_expiration",
@@ -2603,7 +2622,8 @@ pub const UNHONOURED_UPSTREAM_CONFIG_KEYS: &[&str] = &[
 ///   upstream's queue allocation, batching and the remaining link knobs, none
 ///   of which wz exposes as configuration. (R2925 — the priority-queue sizes
 ///   and the two congestion waits left for `HONOURED_CONFIG_KEYS`; R2926 — the
-///   per-fragment drop cap followed them.)
+///   per-fragment drop cap followed them, and `rx/max_message_size` followed
+///   once a session's reassembly took its bound from it.)
 /// * `transport/{unicast,multicast}/*`, `transport/shared_memory/mode` — a
 ///   configurable session table (`TransportUnicastConf`): accept backlog,
 ///   session caps, open/accept timeouts.
@@ -2741,7 +2761,7 @@ pub const UNHONOURED_BEYOND_WZ: &[&str] = &[
     // `password` once the C ABI presented them when it dials.
     "transport/link/protocols",
     "transport/link/rx/buffer_size",
-    "transport/link/rx/max_message_size",
+    // `transport/link/rx/max_message_size` left this half too: wz acts on it.
     // R2593 — the four socket-buffer keys left this half with the surface's
     // other half: wz acts on them now.
     "transport/link/tls/close_link_on_expiration",
@@ -2951,7 +2971,8 @@ pub const UNHONOURED_BEYOND_GROUPS: &[(&str, &str, &[&str])] = &[
         &[
             "transport/link/protocols",
             "transport/link/rx/buffer_size",
-            "transport/link/rx/max_message_size",
+            // `transport/link/rx/max_message_size` LEFT this group: wz now has
+            // the bound it configures, a session's reassembly cap.
             "transport/link/tls/close_link_on_expiration",
             "transport/link/tx/keep_alive",
             "transport/link/tx/queue/allocation/mode",
@@ -6724,6 +6745,17 @@ impl ZenohNodeConfig {
             out.tx_queue.wait_before_close_us = v;
             named.push("transport/link/tx/queue/congestion_control/block/wait_before_close");
         }
+        // The largest message a session rejoins from fragments. Any `usize` is
+        // accepted, as upstream's `usize` field accepts it; the build's
+        // reassembly slot bounds what a session applies.
+        if let Some(v) = want_u64(&doc, "transport/link/rx/max_message_size")? {
+            out.link_rx.max_message_size =
+                usize::try_from(v).map_err(|_| ConfigIngestError::OutOfRange {
+                    path: "transport/link/rx/max_message_size",
+                    value: v.to_string(),
+                })?;
+            named.push("transport/link/rx/max_message_size");
+        }
         // R311y844 — the ten keys wz already acts on. Read in
         // HONOURED_CONFIG_KEYS order so `named` reports them the way the table
         // lists them.
@@ -8091,6 +8123,10 @@ mod tests {
             (
                 "transport/link/tx/queue/congestion_control/block/wait_before_close",
                 r#"{ "transport": { "link": { "tx": { "queue": { "congestion_control": { "block": { "wait_before_close": 6000000 } } } } } } }"#,
+            ),
+            (
+                "transport/link/rx/max_message_size",
+                r#"{ "transport": { "link": { "rx": { "max_message_size": 65536 } } } }"#,
             ),
             (
                 "adminspace/enabled",

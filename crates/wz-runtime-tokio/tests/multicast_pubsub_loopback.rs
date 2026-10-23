@@ -67,6 +67,7 @@ fn router_profile(zid: Vec<u8>) -> wz_runtime_tokio::multicast_glue::RouterGroup
         zid,
         qos: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
     }
 }
 
@@ -91,6 +92,7 @@ fn mc_params(zid_byte: u8) -> MulticastParams {
         batch_size: 2_048,
         is_qos: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
     }
 }
 

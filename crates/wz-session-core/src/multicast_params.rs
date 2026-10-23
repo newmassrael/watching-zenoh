@@ -177,6 +177,12 @@ pub struct MulticastParams {
     /// is. A loop with no queue ignores it, as the MCU loop does: zenoh-pico's
     /// multicast TX writes straight to the socket.
     pub tx_queue: crate::session_init_params::TxQueueConf,
+    /// The group link's inbound configuration, the same type the unicast
+    /// [`SessionInitParams::link_rx`](crate::session_init_params::SessionInitParams::link_rx)
+    /// is: upstream builds a multicast transport's defragmentation buffers from
+    /// the manager's one `defrag_buff_size`
+    /// (`io/zenoh-transport/src/multicast/transport.rs` @ `self.manager.config.defrag_buff_size,`).
+    pub link_rx: crate::session_init_params::LinkRxConf,
 }
 
 impl MulticastParams {

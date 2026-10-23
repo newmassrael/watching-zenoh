@@ -6579,11 +6579,13 @@ async fn run_router_hat_until(
             mcast_group,
             mcast_port,
             // R2938 — the group's pipeline takes the node's own
-            // `transport/link/tx/queue`, as the unicast sessions do.
+            // `transport/link/tx/queue`, as the unicast sessions do, and its
+            // `transport/link/rx/max_message_size`.
             wz::runtime_tokio::multicast_glue::RouterGroupProfile {
                 zid: params.zid.clone(),
                 qos: multicast_qos,
                 tx_queue: params.tx_queue,
+                link_rx: params.link_rx,
             },
             mcast_opts.clone(),
             node_stats.clone(),

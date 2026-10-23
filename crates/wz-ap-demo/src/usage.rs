@@ -178,6 +178,11 @@ pub(crate) fn print_usage() {
     eprintln!("                             how long a blocking message waits before the session");
     eprintln!("                             closes (default 5000000).");
     eprintln!("                             zenoh transport/link/tx/queue/congestion_control/block/wait_before_close");
+    eprintln!("    --rx-max-message-size <bytes>");
+    eprintln!("                             the largest message a session rejoins from fragments");
+    eprintln!("                             (default 1073741824, read as at most the build's");
+    eprintln!("                             reassembly slot).");
+    eprintln!("                             zenoh transport/link/rx/max_message_size");
     eprintln!("    --link-config <kind>#<k=v;...>");
     eprintln!("                             socket options every <kind> link takes unless its");
     eprintln!("                             locator names the same key (repeatable). tcp and tls");

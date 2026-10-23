@@ -107,6 +107,7 @@ fn unicast_params(zid: u8) -> SessionInitParams {
         initial_sn: 0,
         cookie: vec![],
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         cookie_signing_key: wz_session_core::signing_key::SigningKey::new(vec![7u8; 32])
             .expect("key"),
     }
@@ -124,6 +125,7 @@ fn group_params(zid: &[u8], lease_ms: u64) -> MulticastParams {
         batch_size: 2_048,
         is_qos: false,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::default(),
+        link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
     }
 }
 

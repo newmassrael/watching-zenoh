@@ -25,7 +25,7 @@ use sce_forge_runtime::codec::SliceSink;
 use wz_codecs::whatami::WhatAmI;
 use wz_session_core::multicast_join::{encode_join, encode_join_into, JOIN_MAX_BYTES};
 use wz_session_core::multicast_params::{zid_vec, MulticastParams};
-use wz_session_core::session_init_params::TxQueueConf;
+use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
 use wz_session_core::sn::{mask_from_res, MulticastTxConduits};
 
 /// Counts the allocations made BY THE CURRENT THREAD.
@@ -82,6 +82,7 @@ fn params(batch_size: u16, is_qos: bool) -> MulticastParams {
         batch_size,
         is_qos,
         tx_queue: TxQueueConf::default(),
+        link_rx: LinkRxConf::default(),
     }
 }
 

@@ -310,6 +310,7 @@ fn session_params() -> Result<SessionInitParams, ClientError> {
         batch_size: BATCH_SIZE,
         lease_ms: LEASE_MS,
         tx_queue: Default::default(),
+        link_rx: Default::default(),
         initial_sn: 0,
         cookie: Vec::new(),
         cookie_signing_key: SigningKey::from_entropy(&mut OsEntropy).map_err(|e| {

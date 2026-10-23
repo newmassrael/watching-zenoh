@@ -148,6 +148,42 @@ pub struct SessionInitParams {
     /// the one per-session carrier every open path — dial, accept, reconnect,
     /// the C ABI and the MCU acceptor — already hands to the session.
     pub tx_queue: TxQueueConf,
+    /// The session's inbound link configuration: upstream's
+    /// `transport/link/rx` block as far as a session acts on it. It rides here
+    /// for the reason [`Self::tx_queue`] does.
+    pub link_rx: LinkRxConf,
+}
+
+/// Upstream's default `transport/link/rx/max_message_size`, 1 GiB
+/// (`commons/zenoh-config/src/defaults.rs` @ `max_message_size: 2_usize.pow(30),`).
+pub const RX_MAX_MESSAGE_SIZE: usize = 1 << 30;
+
+/// A session's inbound link configuration: upstream's `transport/link/rx`
+/// section as far as a session acts on it.
+///
+/// `max_message_size` is the largest message the session rejoins from
+/// fragments, in bytes. The rule is upstream's: a fragment whose bytes would
+/// take the chain past it ends the chain
+/// (`io/zenoh-transport/src/common/defragmentation.rs` @
+/// `if new_len > self.capacity {`). A message that arrives whole in one frame
+/// is never measured against it, so `0` rejoins no chain and still delivers
+/// every unfragmented message.
+///
+/// The reassembly pool a host is built with is a second bound beside this one,
+/// and the smaller of the two is what holds: a value above the pool's slot can
+/// only be read as the slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkRxConf {
+    /// `transport/link/rx/max_message_size`, in bytes.
+    pub max_message_size: usize,
+}
+
+impl Default for LinkRxConf {
+    fn default() -> Self {
+        Self {
+            max_message_size: RX_MAX_MESSAGE_SIZE,
+        }
+    }
 }
 
 /// R2923 — how long a DROPPABLE message waits for room on its conduit's link

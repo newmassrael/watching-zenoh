@@ -48,7 +48,18 @@ const REASSEMBLY_SLOTS: usize = crate::reassembly_pool_ap::SLOT_COUNT;
 /// [`crate::session_glue::new_session_actions`]), and that refusal is only
 /// exact while the bound it tests and the bound [`TokioReassembly`] enforces
 /// are one value rather than two that agree today.
+///
+/// That bound is the BUILD's, not a session's configured
+/// `transport/link/rx/max_message_size`: the configured value says what this
+/// node accepts, and a sender refusing by it would refuse a message to a peer
+/// configured to take more. Upstream's key is receive-only.
 pub(crate) const REASSEMBLY_SLOT_SIZE: usize = crate::reassembly_pool_ap::SLOT_SIZE;
+
+/// The largest `transport/link/rx/max_message_size` this build applies: its
+/// reassembly slot. A configured value above it is read as it, because a chain
+/// cannot outgrow the slot it stages in; one at or below it holds as written
+/// ([`wz_session_core::reassembly_dispatch::ReassemblyDispatcher::max_message_bytes`]).
+pub const RX_MAX_MESSAGE_SIZE_CEILING: usize = REASSEMBLY_SLOT_SIZE;
 
 /// The AP tokio host's reassembly Router type. The std `alloc` backing
 /// keeps each chain's staging buffer on the heap; `REASSEMBLY_SLOT_SIZE`

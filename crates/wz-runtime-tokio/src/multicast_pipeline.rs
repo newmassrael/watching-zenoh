@@ -915,7 +915,7 @@ mod tests {
     use std::time::{Duration, Instant};
     use wz_session_core::qos::CongestionControl;
     use wz_session_core::sample::QosLevel;
-    use wz_session_core::session_init_params::TxQueueConf;
+    use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
     use wz_session_core::tx_deadline::PushOutcome;
 
     const CLOSE_WAIT: Duration = Duration::from_millis(300);
@@ -937,6 +937,7 @@ mod tests {
                 wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
                 ..TxQueueConf::default()
             },
+            link_rx: LinkRxConf::default(),
         }
     }
 

@@ -1130,6 +1130,16 @@ pub(crate) fn expand_stock_zenoh_config_for_build(
             None,
         );
     }
+    // The largest message a session rejoins from fragments, honoured at any
+    // value for the reason the sizes above are.
+    if named("transport/link/rx/max_message_size") {
+        exp.pair(
+            "transport/link/rx/max_message_size",
+            "--rx-max-message-size",
+            cfg.link_rx.max_message_size.to_string(),
+            None,
+        );
+    }
     // R311y844 — the ten keys wz already acted on. Each row is a flag that has
     // been in this binary for rounds, so what changed is not the capability but
     // the ability to ask for it from the file an operator already has. The
@@ -3062,6 +3072,13 @@ pub(crate) const ARGV_ONLY_KIND_LEDGER: &[(&str, &str, &str)] = &[
          for room before the session is closed as unresponsive: a local \
          deadline, visible only as the Close it ends in.",
     ),
+    (
+        "transport/link/rx/max_message_size",
+        KIND_OFF_WIRE,
+        "expands to `--rx-max-message-size`. The largest message a session \
+         rejoins from fragments: a local bound no frame carries, visible only as \
+         a fragmented message that is not delivered.",
+    ),
     // R2758 — OFF-WIRE and not leg-judged, and the distinction is the point.
     // The bound IS judged by a leg, but that leg lives in the runtime crate
     // (`accept_loop.rs`, `max_sessions_refuses_the_peer_past_the_bound`), while
@@ -4827,6 +4844,12 @@ mod stock_config_tests {
                 r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
                      transport: { link: { tx: { queue: {
                        congestion_control: { block: { wait_before_close: 7000000 } } } } } } }"#,
+            ),
+            (
+                "transport/link/rx/max_message_size",
+                LISTEN_ONLY,
+                r#"{ listen: { endpoints: ["tcp/0.0.0.0:7447"] },
+                     transport: { link: { rx: { max_message_size: 65536 } } } }"#,
             ),
             (
                 "adminspace/enabled",
@@ -6905,7 +6928,8 @@ mod stock_config_tests {
                    queue: { size: { real_time: 5, data: 7 },
                             congestion_control: { drop: { wait_before_drop: 2500,
                                                           max_wait_before_drop_fragments: 40000 },
-                                                  block: { wait_before_close: 7000000 } } } } } } }"#,
+                                                  block: { wait_before_close: 7000000 } } } },
+                                   rx: { max_message_size: 65536 } } } }"#,
         )
         .unwrap();
         assert!(
@@ -6933,6 +6957,10 @@ mod stock_config_tests {
             },
             "the file's queue section reaches the session the node opens"
         );
+        assert_eq!(
+            params.link_rx.max_message_size, 65_536,
+            "the file's rx bound reaches the session the node opens"
+        );
 
         // CONTROL, in the same test: a node started WITHOUT the file announces
         // the demo's own pair, so the two assertions above cannot be passing on
@@ -6948,6 +6976,10 @@ mod stock_config_tests {
         assert_eq!(
             bare.tx_queue,
             wz::runtime_tokio::session_glue::TxQueueConf::default()
+        );
+        assert_eq!(
+            bare.link_rx,
+            wz::runtime_tokio::session_glue::LinkRxConf::default()
         );
     }
 
@@ -8590,6 +8622,9 @@ pub(crate) struct TransportTuning {
     /// `--tx-queue-size-<priority> <n>`, `--wait-before-drop-us <us>` and
     /// `--wait-before-close-us <us>`. Upstream's defaults unless given.
     pub(crate) tx_queue: wz::runtime_tokio::session_glue::TxQueueConf,
+    /// `--rx-max-message-size <bytes>`: the largest message a session rejoins
+    /// from fragments. Upstream's default unless given.
+    pub(crate) link_rx: wz::runtime_tokio::session_glue::LinkRxConf,
 }
 
 /// R2925 — the demo's flag for each priority's queue size, indexed by the
@@ -8613,6 +8648,7 @@ impl Default for TransportTuning {
             lease_ms: 10_000,
             link_defaults: Default::default(),
             tx_queue: Default::default(),
+            link_rx: Default::default(),
         }
     }
 }
@@ -8675,6 +8711,11 @@ impl TransportTuning {
             out.tx_queue.wait_before_close_us = v
                 .parse::<u64>()
                 .map_err(|_| format!("--wait-before-close-us expects microseconds, got '{v}'"))?;
+        }
+        if let Some(v) = parse_pair(rest, "--rx-max-message-size") {
+            out.link_rx.max_message_size = v
+                .parse::<usize>()
+                .map_err(|_| format!("--rx-max-message-size expects bytes, got '{v}'"))?;
         }
         // R2592 — `<kind>#<span>`, the shape upstream gives each link kind's
         // configuration: a parameter span keyed by the kind. A refusal names the
@@ -8890,6 +8931,8 @@ pub(crate) fn session_init_params_for(
         lease_ms: tuning.lease_ms,
         // R2925 — the queue sizes and congestion waits the operator gave.
         tx_queue: tuning.tx_queue,
+        // And the largest message its sessions rejoin from fragments.
+        link_rx: tuning.link_rx,
         initial_sn: 0,
         cookie: Vec::new(),
         // R311y820 — DRAWN, not a literal. This site carried a 32-byte `0xAB`

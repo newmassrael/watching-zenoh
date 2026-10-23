@@ -248,7 +248,7 @@ impl wz_session_core::entropy::EntropySource for OsEntropy {
 // unchanged. DP3 leaf.
 pub use wz_session_core::session_init_params::SessionInitParams;
 /// R2924 — the outbound queue configuration a [`SessionInitParams`] carries.
-pub use wz_session_core::session_init_params::TxQueueConf;
+pub use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
 // Re-exported alongside `SessionInitParams` so a caller naming the param
 // bundle also names its `whatami` field type from one place.
 pub use wz_session_core::WhatAmI;
