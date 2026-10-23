@@ -279418,6 +279418,60 @@
         "The next Platform run grades the leg on Windows; if it fails again with more than the bound to spend, the handshake itself is to be measured there."
       ]
     },
+    "Round 3454": {
+      "decision_summary": "Write the client node of the slot profile once for every platform (storage-policy step \"shared fixed-client node\", step 1 of 3). wz_session_mcu::slot_node holds what the kit's fixed client and deploy/host-slot-node wrote twice: NodeStorage (every big table in one all-zero static, sizes as const generics, not a macro, because the no-allocator gate cannot read inside macro_rules!), install_documents and Declared, NodeIdentity and its client handshake, ClientFactory over a SessionLayer (Answering asks nothing), RoundWatch (session edges, refusal counters, rounds per interval, a pure value type) and ClientNode::run. A platform is a NodePort (NAME, log, idle, observe) and a NodeApp (after_tick, which may end the run). The host node now runs on it; the kit (step 2) and the getter on the kit (step 3) follow. A module and not a crate: the crate's charter is written once for every stack, and no manifest changes.",
+      "changes_bullets": [
+        "crates/wz-session-mcu/src/slot_node.rs (new, behind session-slot and client-core like slot_client): NodeStorage, Document, Declared, install_documents and InstallRefused, NodeIdentity, SessionLayer and Answering, ClientFactory, RoundWatch with Observed and LoopReport, NodePort, NodeHandle (wake under query-get), NodeApp, ClientNode::run; 13 unit tests. lib.rs declares it.",
+        "deploy/host-slot-node: main.rs (618 to 420 lines) states its storage, documents, identity and Port and calls ClientNode::run; its Statics, Declared, Factory, install_observer and loop are gone. getter.rs gains GetterLayer (the session layer that asks, over the mailbox) and GetterApp (the round's turn, which ends the run with the getter's exit code).",
+        "scripts/lib/nondefault-tests-gate.sh: a wz-session-mcu hook leg client-slot,query-get, since no row named client-core beside session-slot.",
+        "crates/wz-session-mcu/src/lib.rs and connect_manager.rs: three intra-doc links to modules that only some feature sets compile (admin_host, admin_status) are code spans, as their neighbours in the same list already were; rustdoc -D warnings failed on them under client-slot.",
+        "docs/storage-policy-and-link-layer.md: section 5.5 (what the module holds and what a platform supplies, step 1's evidence, what is not done); two paragraphs of 5.3 that sat at the end of 5.4 are moved back to 5.3."
+      ],
+      "verification_bullets": [
+        "slot_node::tests, 13, pass with query-get off and on; two mutations (removing the guard that makes the first loop report only start the interval, and removing the refusal report) each fail a test, and were put back.",
+        "nondefault-tests-gate.sh (hook legs) exits 0; the new wz-session-mcu leg (client-slot,query-get) runs 18 tests, the 13 of slot_node, 4 of get_mailbox and 1 of app_layer. nondefault-tests-gate.sh --census exits 0 on the rebased tree: wz-session-mcu has 28 tests only a feature build reaches, all 28 run by a leg.",
+        "cargo doc -p wz-session-mcu --no-deps --no-default-features with client-slot,session-slot,transport-keepalive, with and without query-get, under RUSTDOCFLAGS=-D warnings: exit 101 with three unresolved links (lib.rs admin_host and admin_status, connect_manager.rs admin_host::ConnectControl) before this change, exit 0 after.",
+        "Layer C1bz pass (905 s) and Layer C1cf pass (291 s) on the build machine; feature_public_surface_census.py --check exits 0; cargo fmt --check clean for wz-session-mcu and deploy/host-slot-node; clippy -D warnings exits 0 for both feature sets (taken before the doc-link and format edits, which change comments and line breaks only).",
+        "no_allocator_link_gate.py --image host-slot-node is CLEAN for both builds (getter off and on).",
+        "The old and the new host-slot-node binary, on one host against one router: the same connection line, ready line and refusal message, 1,000 GETs completed with no error, the same exit code. Latency figures differ and were not taken under controlled conditions: no claim of faster or equal."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted runs for this push per job at the start of the next round (the CI of 2b360e763 was cancelled by a later push and never graded it).",
+        "Step 2: deploy/zephyr-admin-node/rust/src/fixed_client.rs on slot_node (a ZephyrPort with the stack watch as observe; the refusal counters are then read every round). Its proof is new code, not an identical image: the stack gate rows zephyr-client-fixed and -batching, resource_budget_gate.py --check and --measure, the flash text and .bss before and after, the no-allocator gate's Zephyr rows, and a flashed kit answering every GET.",
+        "Step 3: the getter on the kit, through the module; nothing is claimed for the kit until it is measured there.",
+        "The socket-bound ClientNode::run is exercised by a host run only; a hosted lane that runs host-slot-node against a router would hold it."
+      ],
+      "publishable_decision_summary": "Write the client node of the slot profile once for every platform (storage-policy step \"shared fixed-client node\", step 1 of 3). wz_session_mcu::slot_node holds what the kit's fixed client and deploy/host-slot-node wrote twice: NodeStorage (every big table in one all-zero static, sizes as const generics, not a macro, because the no-allocator gate cannot read inside macro_rules!), install_documents and Declared, NodeIdentity and its client handshake, ClientFactory over a SessionLayer (Answering asks nothing), RoundWatch (session edges, refusal counters, rounds per interval, a pure value type) and ClientNode::run. A platform is a NodePort (NAME, log, idle, observe) and a NodeApp (after_tick, which may end the run). The host node now runs on it; the kit (step 2) and the getter on the kit (step 3) follow. A module and not a crate: the crate's charter is written once for every stack, and no manifest changes.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu/src/slot_node.rs (new, behind session-slot and client-core like slot_client): NodeStorage, Document, Declared, install_documents and InstallRefused, NodeIdentity, SessionLayer and Answering, ClientFactory, RoundWatch with Observed and LoopReport, NodePort, NodeHandle (wake under query-get), NodeApp, ClientNode::run; 13 unit tests. lib.rs declares it.",
+        "deploy/host-slot-node: main.rs (618 to 420 lines) states its storage, documents, identity and Port and calls ClientNode::run; its Statics, Declared, Factory, install_observer and loop are gone. getter.rs gains GetterLayer (the session layer that asks, over the mailbox) and GetterApp (the round's turn, which ends the run with the getter's exit code).",
+        "scripts/lib/nondefault-tests-gate.sh: a wz-session-mcu hook leg client-slot,query-get, since no row named client-core beside session-slot.",
+        "crates/wz-session-mcu/src/lib.rs and connect_manager.rs: three intra-doc links to modules that only some feature sets compile (admin_host, admin_status) are code spans, as their neighbours in the same list already were; rustdoc -D warnings failed on them under client-slot.",
+        "docs/storage-policy-and-link-layer.md: section 5.5 (what the module holds and what a platform supplies, step 1's evidence, what is not done); two paragraphs of 5.3 that sat at the end of 5.4 are moved back to 5.3."
+      ],
+      "publishable_verification_bullets": [
+        "slot_node::tests, 13, pass with query-get off and on; two mutations (removing the guard that makes the first loop report only start the interval, and removing the refusal report) each fail a test, and were put back.",
+        "nondefault-tests-gate.sh (hook legs) exits 0; the new wz-session-mcu leg (client-slot,query-get) runs 18 tests, the 13 of slot_node, 4 of get_mailbox and 1 of app_layer. nondefault-tests-gate.sh --census exits 0 on the rebased tree: wz-session-mcu has 28 tests only a feature build reaches, all 28 run by a leg.",
+        "cargo doc -p wz-session-mcu --no-deps --no-default-features with client-slot,session-slot,transport-keepalive, with and without query-get, under RUSTDOCFLAGS=-D warnings: exit 101 with three unresolved links (lib.rs admin_host and admin_status, connect_manager.rs admin_host::ConnectControl) before this change, exit 0 after.",
+        "Layer C1bz pass (905 s) and Layer C1cf pass (291 s) on the build machine; feature_public_surface_census.py --check exits 0; cargo fmt --check clean for wz-session-mcu and deploy/host-slot-node; clippy -D warnings exits 0 for both feature sets (taken before the doc-link and format edits, which change comments and line breaks only).",
+        "no_allocator_link_gate.py --image host-slot-node is CLEAN for both builds (getter off and on).",
+        "The old and the new host-slot-node binary, on one host against one router: the same connection line, ready line and refusal message, 1,000 GETs completed with no error, the same exit code. Latency figures differ and were not taken under controlled conditions: no claim of faster or equal."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted runs for this push per job at the start of the next round (the CI of 2b360e763 was cancelled by a later push and never graded it).",
+        "Step 2: deploy/zephyr-admin-node/rust/src/fixed_client.rs on slot_node (a ZephyrPort with the stack watch as observe; the refusal counters are then read every round). Its proof is new code, not an identical image: the stack gate rows zephyr-client-fixed and -batching, resource_budget_gate.py --check and --measure, the flash text and .bss before and after, the no-allocator gate's Zephyr rows, and a flashed kit answering every GET.",
+        "Step 3: the getter on the kit, through the module; nothing is claimed for the kit until it is measured there.",
+        "The socket-bound ClientNode::run is exercised by a host run only; a hosted lane that runs host-slot-node against a router would hold it."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
