@@ -358,15 +358,6 @@ impl MessageList {
         self.held.get(0)
     }
 
-    /// The newest message held.
-    #[inline]
-    pub fn last(&self) -> Option<&PassiveFrame> {
-        self.held
-            .len()
-            .checked_sub(1)
-            .and_then(|i| self.held.get(i))
-    }
-
     /// The messages held, oldest first.
     #[inline]
     pub fn iter(&self) -> Iter<'_, PassiveFrame> {
@@ -387,8 +378,8 @@ impl MessageList {
         self.held.iter_mut_from(from)
     }
 
-    /// The messages from position `from` on, as a view a reader can count,
-    /// index and walk: what one call added, handed on without a copy.
+    /// The messages from position `from` on, as a view a reader walks: what one
+    /// call added, handed on without a copy.
     #[inline]
     pub fn rows_from(&self, from: usize) -> Rows<'_> {
         Rows { list: self, from }
@@ -399,7 +390,9 @@ impl MessageList {
 ///
 /// What a door hands a reader of "the messages this call added": the list
 /// itself, borrowed, and where they begin, so nothing is copied and nothing about
-/// how the list stores its rows leaks into the reader.
+/// how the list stores its rows leaks into the reader. Walked, and nothing else:
+/// that is all a reader of these records does, and an accessor no shipped
+/// surface asks is one `accessor_reach_census.py` would have to carry.
 #[derive(Debug, Clone, Copy)]
 pub struct Rows<'a> {
     list: &'a MessageList,
@@ -407,24 +400,6 @@ pub struct Rows<'a> {
 }
 
 impl<'a> Rows<'a> {
-    /// Messages in the view.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.list.len().saturating_sub(self.from)
-    }
-
-    /// The view holds none.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// The message at `index` within the view.
-    #[inline]
-    pub fn get(&self, index: usize) -> Option<&'a PassiveFrame> {
-        self.list.get(self.from.checked_add(index)?)
-    }
-
     /// The messages of the view, oldest first.
     #[inline]
     pub fn iter(&self) -> Iter<'a, PassiveFrame> {
@@ -485,7 +460,7 @@ const CHUNK_ROWS: usize = 1024;
 /// No chunk is ever empty, which is what lets [`Self::len`] of zero mean "no
 /// chunks" and the first chunk always be the one rows are released from.
 #[derive(Debug)]
-pub struct ChunkLog<T> {
+pub(crate) struct ChunkLog<T> {
     /// A `Vec` and not a deque: a position is found by indexing it, and the
     /// front is dropped once per [`CHUNK_ROWS`] releases, which moves one
     /// pointer per chunk held.
@@ -651,7 +626,8 @@ fn run<T>(chunk: &VecDeque<T>) -> &[T] {
     rows
 }
 
-/// The rows of a [`ChunkLog`] (and so of a [`MessageList`]), oldest first.
+/// The rows of a [`MessageList`] (held in chunks, see the list's own doc),
+/// oldest first.
 ///
 /// Walks the chunks as slices: the run being read from the front, the run being
 /// read from the back, and the whole chunks between them. A skip passes whole
@@ -1283,7 +1259,10 @@ mod tests {
             assert_eq!(list.iter().len(), want.len(), "the iterator's exact size");
             assert!(list.get(list.len()).is_none(), "past the end is nothing");
             assert_eq!(list.first().map(|f| f.stream_offset), want.first().copied());
-            assert_eq!(list.last().map(|f| f.stream_offset), want.last().copied());
+            assert_eq!(
+                list.iter().next_back().map(|f| f.stream_offset),
+                want.last().copied()
+            );
             // From a position: the chunk's first row, its last, a row in the
             // middle, the end and past it.
             // Skipping: what `iter().enumerate().skip(n)` relies on, which a
@@ -1354,14 +1333,9 @@ mod tests {
                 back.reverse();
                 assert_eq!(back, tail, "from {from}, backward");
                 assert_eq!(
-                    list.rows_from(from).len(),
+                    list.rows_from(from).iter().len(),
                     tail.len(),
                     "from {from}, counted"
-                );
-                assert_eq!(
-                    list.rows_from(from).get(0).map(|f| f.stream_offset),
-                    tail.first().copied(),
-                    "from {from}, indexed"
                 );
             }
         }

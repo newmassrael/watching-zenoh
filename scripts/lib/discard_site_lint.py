@@ -152,6 +152,22 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
+        "let row = first.pop_front();",
+        "Open-debt item 924 — the STORAGE under the door above. `ChunkLog` "
+        "holds `MessageList`'s rows in chunks; this is where the oldest row "
+        "leaves the oldest chunk, and its one caller is `discard_oldest`, which "
+        "hands the row back inside the `#[must_use] Discarded` receipt. "
+        "`ChunkLog` is `pub(crate)` so no other door can reach this removal",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "self.chunks.remove(0);",
+        "Open-debt item 924 — drops an EMPTY chunk: the branch is taken only "
+        "when the row taken above left the first chunk with nothing in it, so "
+        "no row goes with it (one pointer per held chunk moves)",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
         "out.remove(0)",
         "R311y723 — a TEST fixture taking the single decoded frame out of the "
         "observer's return value. Nothing captured is discarded: the vector is "

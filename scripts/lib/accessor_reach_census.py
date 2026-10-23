@@ -148,6 +148,15 @@ ROSTER: frozenset[tuple[str, str]] = frozenset(
         # they were the map's own reason for existing, waiting for a caller.
         ("FlowDissection", "ws_resyncs"),
         ("FragmentStats", "any"),
+        # Open-debt item 924 (step 2, R3475) — `MessageList` stopped being a slice
+        # behind `Deref`, so `is_empty` became an inherent method beside `len`,
+        # which both shipped surfaces ask. Clippy's `len_without_is_empty`
+        # requires it next to a public `len`, the same reason
+        # `StreamAssembler::is_empty` stands below; no surface asks it. The
+        # list's other unasked accessors (`last`, and `Rows`' `len`, `get` and
+        # `is_empty`) were REMOVED rather than filed, because nothing required
+        # them.
+        ("MessageList", "is_empty"),
         # R3055 -- `StreamAssembler::fin_seen` and `StreamAssembler::rst_seen`
         # LEFT this roster by being asked: a flow's `halves` in the field document
         # reports, per direction, whether a FIN and an RST were observed, and both

@@ -257,7 +257,7 @@ fn records_behind_a_hole_are_stamped_by_their_own_packets_when_the_capture_ends(
     );
     assert_ne!(
         sixth_after.observed_at_ns,
-        flow.frames.last().unwrap().observed_at_ns
+        flow.frames.iter().next_back().unwrap().observed_at_ns
     );
 }
 

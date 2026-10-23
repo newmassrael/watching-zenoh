@@ -10275,11 +10275,11 @@ mod datagram_tests {
         );
         assert!(
             matches!(
-                flow.frames.last().map(|f| &f.carried),
+                flow.frames.iter().next_back().map(|f| &f.carried),
                 Some(wz_session_core::passive::Carried::Undecompressible)
             ),
             "the frame after it is a body this build cannot open: {:?}",
-            flow.frames.last().map(|f| &f.carried)
+            flow.frames.iter().next_back().map(|f| &f.carried)
         );
         assert_eq!(
             d.health().packets_skipped,
@@ -10313,11 +10313,11 @@ mod datagram_tests {
         );
         assert!(
             matches!(
-                flow.frames.last().map(|f| &f.carried),
+                flow.frames.iter().next_back().map(|f| &f.carried),
                 Some(Carried::FragmentWithoutResolution)
             ),
             "got {:?}",
-            flow.frames.last().map(|f| &f.carried)
+            flow.frames.iter().next_back().map(|f| &f.carried)
         );
         assert_eq!(d.health().packets_skipped, 0);
     }
