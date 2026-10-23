@@ -280088,6 +280088,50 @@
         "The kit lane (flash, run, --measure) still has no lane; pc2's Zephyr workspace was put back by hand and nothing keeps it there."
       ]
     },
+    "Round 3469": {
+      "decision_summary": "Step 1 of open-debt item 924 (docs/dissect-row-index.md): a framing unit can now be read a second time from its bytes and the facts its first reading kept, and the second reading is held equal to the first by a gate. walk_framing_unit and decode_framing_unit became one walk_unit; what one unit's bytes and the flow's context cannot decide (the instant of a byte, the SN verdict, a fragment's fate, the counters) is asked through a UnitJudge, which the session answers on the first reading and recorded UnitFacts answer on a second (redecode_unit). The context fold moved to FlowContext::fold_frame so both readings run it. No row is dropped yet and no door changes; this is the equality every later step relies on.",
+      "changes_bullets": [
+        "wz-session-core passive.rs: walk_unit, UnitJudge with LiveJudge and Recorded, UnitInput, UnitFacts and MessageFacts, FragmentFate, redecode_unit returning RedecodeError when facts are not the unit's, FlowContext::fold_frame, ingest_fragment",
+        "wz-capture redecode_gate.rs: five tests reading every stream and datagram unit of the tracked captures and of built captures (batches, gaps, duplicates, resync, lz4, fragment chains) again, with each capture's shapes asserted present",
+        "docs/dissect-row-index.md: step 1 marked landed, with what the gate does not reach (WebSocket units, QUIC payloads)"
+      ],
+      "verification_bullets": [
+        "redecode_gate 5 of 5 pass with dissect, fixtures and compression; 2 of 2 run and pass at no-default-features",
+        "Mutation: the second reading not folding the context fails 4 of the 4 comparing tests; the second reading dropping SN verdicts fails 4 of 4; both reverted",
+        "cargo test: wz-session-core 1217 passed, wz-capture 1559 passed, wz-capi-dissect 225 passed, 0 failed",
+        "clippy -D warnings: wz-session-core, wz-capture, wz-capture at no-default-features, and wz-session-mcu client-slot query-get",
+        "guarded_count_gate --range: 8 of 8 reached guards OK; C1bz for wz-session-core and wz-capture passes"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Step 2 of docs/dissect-row-index.md: chunked row storage in MessageList, rows unchanged, removing the doubling slack and the whole-list reallocation copies; measure with the consumer generator's 409k and 1.39M captures",
+        "WebSocket units and QUIC payloads are outside the gate's reach until step 3 gives them a byte source"
+      ],
+      "publishable_decision_summary": "Step 1 of open-debt item 924 (docs/dissect-row-index.md): a framing unit can now be read a second time from its bytes and the facts its first reading kept, and the second reading is held equal to the first by a gate. walk_framing_unit and decode_framing_unit became one walk_unit; what one unit's bytes and the flow's context cannot decide (the instant of a byte, the SN verdict, a fragment's fate, the counters) is asked through a UnitJudge, which the session answers on the first reading and recorded UnitFacts answer on a second (redecode_unit). The context fold moved to FlowContext::fold_frame so both readings run it. No row is dropped yet and no door changes; this is the equality every later step relies on.",
+      "publishable_changes_bullets": [
+        "wz-session-core passive.rs: walk_unit, UnitJudge with LiveJudge and Recorded, UnitInput, UnitFacts and MessageFacts, FragmentFate, redecode_unit returning RedecodeError when facts are not the unit's, FlowContext::fold_frame, ingest_fragment",
+        "wz-capture redecode_gate.rs: five tests reading every stream and datagram unit of the tracked captures and of built captures (batches, gaps, duplicates, resync, lz4, fragment chains) again, with each capture's shapes asserted present",
+        "docs/dissect-row-index.md: step 1 marked landed, with what the gate does not reach (WebSocket units, QUIC payloads)"
+      ],
+      "publishable_verification_bullets": [
+        "redecode_gate 5 of 5 pass with dissect, fixtures and compression; 2 of 2 run and pass at no-default-features",
+        "Mutation: the second reading not folding the context fails 4 of the 4 comparing tests; the second reading dropping SN verdicts fails 4 of 4; both reverted",
+        "cargo test: wz-session-core 1217 passed, wz-capture 1559 passed, wz-capi-dissect 225 passed, 0 failed",
+        "clippy -D warnings: wz-session-core, wz-capture, wz-capture at no-default-features, and wz-session-mcu client-slot query-get",
+        "guarded_count_gate --range: 8 of 8 reached guards OK; C1bz for wz-session-core and wz-capture passes"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 2 of docs/dissect-row-index.md: chunked row storage in MessageList, rows unchanged, removing the doubling slack and the whole-list reallocation copies; measure with the consumer generator's 409k and 1.39M captures",
+        "WebSocket units and QUIC payloads are outside the gate's reach until step 3 gives them a byte source"
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
