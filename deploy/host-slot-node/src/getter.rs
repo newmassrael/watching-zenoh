@@ -20,13 +20,18 @@
 //! the sink, and the state a reply changes lives in the `static`. Nothing here allocates.
 
 use core::cell::Cell;
+use core::ops::ControlFlow;
 
+use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
+use wz_runtime_posix::glue::log_args;
 use wz_session_core::reply_sink::{ReplyKind, ReplySink, ReplyView};
 use wz_session_core::sample::QosLevel;
-use wz_session_core::slot_observer::{ObserverSinks, Requesters};
+use wz_session_core::slot_observer::{ObserverCell, ObserverSinks, Requesters};
 use wz_session_mcu::app_layer::{GetError, GetRequest, NoReplies, SessionEvents, SlotDispatch};
 use wz_session_mcu::get_mailbox::GetMailbox;
+use wz_session_mcu::slot_client::DocumentSinks;
+use wz_session_mcu::slot_node::{NodeApp, NodeHandle, SessionLayer};
 
 use crate::Clock;
 
@@ -324,6 +329,65 @@ pub struct GetterEvents<K: ObserverSinks + 'static> {
 impl<K: ObserverSinks + 'static> GetterEvents<K> {
     pub fn new(inner: SlotDispatch<Clock, PlanSink, NoReplies, K>) -> Self {
         Self { inner }
+    }
+}
+
+/// What a getter's sessions report to: the node's dispatch with the pending queries it asks.
+pub struct GetterLayer;
+
+impl SessionLayer<Clock> for GetterLayer {
+    type Events = GetterEvents<DocumentSinks>;
+
+    fn events(
+        &mut self,
+        observer: &'static ObserverCell<DocumentSinks>,
+        handle: &SessionHandle<Clock>,
+    ) -> Self::Events {
+        GetterEvents::new(SlotDispatch::new(observer, handle.clone(), Requests::new()))
+    }
+}
+
+/// What the getter does each round of the node's loop: says where it is once a second, ends the run
+/// when every query it was asked to make has ended, and, for `--mailbox`, leaves what is due in the
+/// mailbox and wakes the session's loop to take it.
+pub struct GetterApp {
+    progress_at_ms: u64,
+}
+
+impl GetterApp {
+    pub const fn new() -> Self {
+        Self { progress_at_ms: 0 }
+    }
+}
+
+impl NodeApp for GetterApp {
+    fn after_tick(&mut self, now_ms: u64, node: &dyn NodeHandle) -> ControlFlow<i32> {
+        // A getter says where it is once a second, so a run that does not end can be told from
+        // one that is slow.
+        if PLAN.is_set() && now_ms >= self.progress_at_ms {
+            self.progress_at_ms = now_ms + 1_000;
+            let s = PLAN.progress();
+            log_args(format_args!(
+                "HOST-WZ-GET progress issued={} finished={} replies={} errors={} refused={} \
+                 last_refusal={:?}",
+                s.0,
+                s.1,
+                s.2,
+                s.3,
+                s.4,
+                PLAN.last_refusal()
+            ));
+        }
+        // A getter ends when every query it was asked to make has ended, and says how they went.
+        if PLAN.is_done() {
+            return ControlFlow::Break(crate::report_gets());
+        }
+        // `--mailbox`: this loop is not the session's event, so what it asks it leaves, and wakes
+        // the session's loop to take it.
+        if PLAN.uses_mailbox() && node.is_established() && PLAN.top_up() > 0 {
+            node.wake();
+        }
+        ControlFlow::Continue(())
     }
 }
 

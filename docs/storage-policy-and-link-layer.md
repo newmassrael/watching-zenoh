@@ -520,6 +520,12 @@ GETs in all, none wrong); the router is a zenohd on the host, the kit its UDP cl
   differ among themselves by more than the images differ (0.31 to 0.48 ms for the
   base). The batching images were lower in the medians, by about 0.04 ms, and the
   ranges overlap: a small effect in the direction the host showed, not a margin.
+- **The base image file is 1,244 B larger** than the one of 5.1 (174,740 B against
+  173,496 B), from this change and from every commit that came to the tree since; the
+  idle wait adds 24 B to the file.
+
+What this does not show: the board's current draw, a second session (the idle wait
+is for an image that waits on one socket and no other), and the images over lwIP.
 
 ## 5.4 The resource budget is a committed row (2026-10-23)
 
@@ -546,12 +552,52 @@ against 9,216).
 Not held: the images with the idle wait on (their rows share a key with the base, and the
 stack peak moves by 8 bytes), the heap images, and a latency measured on a network other than
 the kit's own Ethernet to the bench host.
-- **The base image file is 1,244 B larger** than the one of 5.1 (174,740 B against
-  173,496 B), from this change and from every commit that came to the tree since; the
-  idle wait adds 24 B to the file.
 
-What this does not show: the board's current draw, a second session (the idle wait
-is for an image that waits on one socket and no other), and the images over lwIP.
+## 5.5 One client node for every platform (2026-10-23)
+
+The kit's fixed client (`deploy/zephyr-admin-node/rust/src/fixed_client.rs`) and the
+Linux process of 5.1 (`deploy/host-slot-node`) were the same application written twice:
+the same set-up (the runtime, the observer, the session host, the dialler), the same
+handshake parameters, and a loop that does the same steps in the same order. A change to
+the loop (the mailbox wake of 5.2, a counted refusal) had to be made in both, and no gate
+could see that one of them was missed. `wz_session_mcu::slot_node` is that application
+written once; a platform supplies only what the loop cannot know.
+
+| `slot_node` holds | the platform supplies |
+|---|---|
+| `NodeStorage`, every big table in one all-zero `static` (so `.bss`), its sizes as const generics | the sizes, and the `const` assertion that holds them to the deploy file |
+| `install_documents`: a queryable per document, and its declaration in `Declared` | the documents (`Document`: a key and a JSON body) |
+| `NodeIdentity::params`, zenoh 1.x's handshake as a client | the zenoh id and the signing secret (the board's, or the command line's) |
+| `ClientFactory` over a `SessionLayer`; `Answering` asks nothing | a layer that asks (the host's `GetterLayer`, over the mailbox of 5.2) |
+| the loop: ready tasks, the tick, the application's turn, `RoundWatch` (a session coming or going, a refusal counter moving, rounds per interval), the platform's check, the sleep between dials | `NodePort` (`NAME`, `log`, `idle`, `observe`: the kit's stack watch) and `NodeApp::after_tick` (the host's getter, which ends the run with an exit code) |
+
+A module of `wz-session-mcu` and not a crate of its own: that crate's charter is "written
+once for every stack", and no manifest or catalogue changes. The storage is a const generic
+type and not a macro, because `no_allocator_link_gate.py` reads the source and cannot see
+inside a `macro_rules!` body. `RoundWatch` is a value-in, value-out type with no console in
+it, so the loop's rules are tested without a socket.
+
+**Step 1, the host node on it.** `deploy/host-slot-node/src/main.rs` goes from 618 to 420
+lines (its statics, factory, observer set-up and loop are gone); `getter.rs` gains the
+layer and the application that ask. What holds it:
+
+- the module's 13 tests, run by a `nondefault-tests-gate.sh` leg of its own
+  (`client-slot,query-get`; no leg named `client-core` beside `session-slot` before), and
+  two mutations (the guard that makes the first report only start the interval, and the
+  refusal line) each fail a test;
+- `no_allocator_link_gate.py --image host-slot-node` is clean on both builds (the getter
+  off and on);
+- the old and the new binary, run on the same host against the same router, print the same
+  connection line, the same ready line and the same refusal message, complete 1,000 GETs
+  with no error and exit with the same code. Their latency figures differ; they were not
+  measured under controlled conditions, so neither is claimed faster or equal.
+
+Not yet: the kit on the module (step 2; the one behaviour that changes is that the refusal
+counters are read every round rather than at the stack check's interval, and its proof is
+the stack gate's rows, the rows of 5.4, the flash text, the allocator gate's Zephyr rows
+and a flashed kit answering every GET), and the getter on the kit (step 3). The loop's
+`run` is bound to a socket, so what exercises it is the host run above; hosted CI has no
+lane that runs a node.
 
 ## 6. Open
 

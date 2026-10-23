@@ -37,7 +37,7 @@ use wz_session_core::retry_period::{RetryPeriod, RetryPolicy};
 
 /// Where a [`ConnectManager`] reads the endpoints it should hold sessions with.
 ///
-/// The manager used to read [`crate::admin_host::ConnectControl`] only, the list a host writes at
+/// The manager used to read `admin_host::ConnectControl` only, the list a host writes at
 /// runtime, which made every node that dials an admin node. A firmware that dials a router it was
 /// built to know has no list to write: it names the endpoints once. Both are sources.
 pub trait EndpointSource {

@@ -738,6 +738,15 @@ transport-link-unixpipe,transport-link-ws|"
         adminspace-write,\
         session-slot\
         |"
+    # The client node on the slot profile written once for every platform
+    # (`slot_node`): its round watch, its identity and handshake, and the
+    # registration of its documents. The module needs `client-core` beside
+    # `session-slot`, which no row above names; `query-get` compiles the wake an
+    # application that asks gives the node, so the tests run over that build too.
+    "wz-session-mcu|hook|\
+        client-slot,\
+        query-get\
+        |"
     # S9d: the receive path of the slot profile lends the control records (a
     # Declare, an Interest, a ResponseFinal) where their frame lies, and every
     # registry that consumes one reads the lent form and the owned form through one

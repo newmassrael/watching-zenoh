@@ -7,6 +7,9 @@
 //! answers queries, with every table it holds in a `static` this file declares, over the session
 //! host and the dialler every stack shares (`wz_session_mcu::slot_host`, `slot_dial`,
 //! `slot_client`), and the host's sockets as the stack (`wz_runtime_posix::net::PosixStack`).
+//! The node's storage, its factory and its loop are `wz_session_mcu::slot_node`'s, written once
+//! for every platform; this file is the host's part of it: the command line, the console and the
+//! sleep ([`Port`]), and the getter.
 //!
 //! | what | where | bound |
 //! | --- | --- | --- |
@@ -36,40 +39,22 @@
 #![no_std]
 #![no_main]
 
-use core::cell::{Cell, OnceCell, RefCell, UnsafeCell};
+use core::cell::OnceCell;
 use core::ffi::{c_char, c_int, CStr};
-use core::fmt::Write;
+use core::fmt::{self, Write};
 
-use wz_runtime_coop::session_drive::{DriverPump, PumpSlots};
-use wz_runtime_coop::session_runtime::SessionHandle;
-use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_runtime_posix::glue::{log, log_args, yield_us};
-use wz_runtime_posix::slot::{PosixStack, PosixUdpDriver};
+use wz_runtime_posix::slot::PosixStack;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
-use wz_session_core::byte_cells::ByteCells;
+use wz_session_core::caps::MAX_QUERYABLES;
 use wz_session_core::connect_endpoints::{ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::entropy::EntropySource;
-use wz_session_core::session_init_params::{
-    cookie_bytes, zid_bytes, SessionInitParams, TxQueueConf,
-};
-use wz_session_core::session_slot::SessionSlots;
-use wz_session_core::session_timeouts::SessionTimeouts;
-use wz_session_core::signing_key::SigningKey;
-use wz_session_core::slot_observer::ObserverCell;
-#[cfg(not(feature = "get"))]
-use wz_session_core::slot_observer::Requesters;
-use wz_session_core::text_out::FixedText;
-use wz_session_core::zid_hex::write_zenoh_hex;
-use wz_session_core::WhatAmI;
-#[cfg(not(feature = "get"))]
-use wz_session_mcu::app_layer::NoReplies;
-use wz_session_mcu::app_layer::{SlotApp, SlotDispatch};
 use wz_session_mcu::connect_manager::EndpointSource;
-use wz_session_mcu::slot_client::{
-    register_document, Declaration, DeclarationKind, DocumentSinks, SlotClientNode,
+#[cfg(not(feature = "get"))]
+use wz_session_mcu::slot_node::Answering;
+use wz_session_mcu::slot_node::{
+    ClientNode, Declared, Document, NodeIdentity, NodePort, NodeStorage,
 };
-use wz_session_mcu::slot_dial::SessionFactory;
-use wz_session_mcu::slot_host::SessionHost;
 
 wz_runtime_posix::posix_image_no_heap!();
 
@@ -116,55 +101,20 @@ const DOCS: usize = 2;
 const ZID_LEN: usize = 16;
 
 type Clock = PosixClock;
-/// The requests a session of this node holds: none, as the kit's client asks nothing; with `get`,
-/// the pending queries it asks itself.
-#[cfg(not(feature = "get"))]
-type Requests = Requesters<NoReplies, NoReplies>;
-#[cfg(feature = "get")]
-type Requests = getter::Requests;
-/// The application layer of a session: the dispatch to the observer, and with `get` the node's
-/// next query as well.
-#[cfg(not(feature = "get"))]
-type Events = SlotDispatch<Clock, NoReplies, NoReplies, DocumentSinks>;
-#[cfg(feature = "get")]
-type Events = getter::GetterEvents<DocumentSinks>;
-type Driver = PosixUdpDriver;
 type Stack = PosixStack;
-type Slots = SessionSlots<CoopRuntime<Clock>, CoopTime<Clock>, Driver, PosixEntropy, SESSIONS>;
-type Host = SessionHost<Clock, Stack, PosixEntropy, SESSIONS, SESSIONS>;
 
 /// The node's big tables, in one `static` whose initial value is ALL ZERO BYTES, so the linker
-/// places it in `.bss` and not in `.data`.
-struct Statics {
-    runtime: RuntimeCell<Clock, TASKS, TASK_BYTES, TIMERS>,
-    sessions: Slots,
-    pumps: PumpSlots<Clock, DriverPump<Driver>, SESSIONS>,
-    app: SlotApp<DocumentSinks>,
-    /// The receive buffers the links claim, one batch long each.
-    rx: ByteCells<RX, SESSIONS>,
-    /// The buffers the links' frames are encoded into, one batch long each.
-    tx: ByteCells<TX, SESSIONS>,
-}
+/// places it in `.bss` and not in `.data` (`wz_session_mcu::slot_node`, shared with the kit).
+type Storage = NodeStorage<Clock, Stack, PosixEntropy, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX>;
 
-// SAFETY: the profile's rule, stated on the type: the node is driven by one cooperative loop on
-// one thread, which is the only thing that reaches these tables; each member is `Sync` by the
-// same rule.
-unsafe impl Sync for Statics {}
+static NODE: Storage = Storage::new();
 
-impl Statics {
-    const fn new() -> Self {
-        Self {
-            runtime: RuntimeCell::new(),
-            sessions: SessionSlots::new(),
-            pumps: PumpSlots::new(),
-            app: SlotApp::new(),
-            rx: ByteCells::new(),
-            tx: ByteCells::new(),
-        }
-    }
-}
-
-static NODE: Statics = Statics::new();
+/// The command line may not ask for more documents than the registry holds queryables
+/// (`.cargo/config.toml` states the limit the image is built with).
+const _: () = assert!(
+    DOCS <= MAX_QUERYABLES,
+    "DOCS exceeds the registry's queryable limit"
+);
 
 /// The bytes every document is made of. A document is a prefix of this, so the body a queryable
 /// holds (`&'static str`) is a slice of one `static` and costs no allocation.
@@ -200,86 +150,20 @@ impl EndpointSource for Router {
 /// The queryables the node declares on each session, in the order of their registrations: a
 /// `&'static [Declaration]` whose length the command line chose, held in storage this file
 /// declares.
-struct Declared {
-    items: UnsafeCell<[Declaration; DOCS]>,
-    len: Cell<usize>,
-}
+static DECLARED: Declared = Declared::new();
 
-// SAFETY: the profile's rule: one thread runs the program, and the list is written only by
-// `install_observer`, before the node that reads it exists.
-unsafe impl Sync for Declared {}
+/// The host's console and its sleep: what the node's loop cannot know (`wz_session_mcu::slot_node`).
+struct Port;
 
-const NO_DECLARATION: Declaration = Declaration {
-    kind: DeclarationKind::Queryable,
-    key: "",
-};
+impl NodePort for Port {
+    const NAME: &'static str = "host-slot-node";
 
-static DECLARED: Declared = Declared {
-    items: UnsafeCell::new([NO_DECLARATION; DOCS]),
-    len: Cell::new(0),
-};
-
-impl Declared {
-    /// Add a declaration. `false` when the list is full.
-    fn push(&self, declaration: Declaration) -> bool {
-        let at = self.len.get();
-        if at == DOCS {
-            return false;
-        }
-        // SAFETY: nothing holds a reference into the list yet (`all` is called after the last
-        // push), and one thread runs the program.
-        unsafe { (*self.items.get())[at] = declaration };
-        self.len.set(at + 1);
-        true
+    fn log(&mut self, line: fmt::Arguments<'_>) {
+        log_args(line);
     }
 
-    /// The declarations made so far, as the node holds them for the life of the process.
-    fn all(&'static self) -> &'static [Declaration] {
-        // SAFETY: called once, after the last `push`; nothing writes the list afterwards. The
-        // pointer is to the first of `DOCS` declarations and `len` is at most `DOCS`.
-        unsafe {
-            core::slice::from_raw_parts(self.items.get().cast::<Declaration>(), self.len.get())
-        }
-    }
-}
-
-/// What the node makes its sessions from: the entropy, the parameters and the application layer
-/// (the process-wide observer, with the queryables registered on it).
-struct Factory {
-    zid: [u8; ZID_LEN],
-    key: [u8; 32],
-    observer: &'static ObserverCell<DocumentSinks>,
-}
-
-impl SessionFactory<Clock> for Factory {
-    type Entropy = PosixEntropy;
-    type Events = Events;
-
-    fn entropy(&mut self) -> PosixEntropy {
-        PosixEntropy
-    }
-
-    /// zenoh 1.x's handshake shape, with a batch the receive slot holds whole.
-    fn params(&mut self) -> SessionInitParams {
-        SessionInitParams {
-            whatami: WhatAmI::Client,
-            zid: zid_bytes(&self.zid),
-            seq_num_res: 2,
-            req_id_res: 2,
-            batch_size: BATCH_SIZE,
-            lease_ms: 10_000,
-            initial_sn: 0,
-            cookie: cookie_bytes(&[]),
-            tx_queue: TxQueueConf::default(),
-            cookie_signing_key: SigningKey::from_slice(&self.key).expect("32-byte key"),
-        }
-    }
-
-    fn events(&mut self, handle: &SessionHandle<Clock>) -> Self::Events {
-        let dispatch = SlotDispatch::new(self.observer, handle.clone(), Requests::new());
-        #[cfg(feature = "get")]
-        let dispatch = getter::GetterEvents::new(dispatch);
-        dispatch
+    fn idle(&mut self, us: u32) {
+        yield_us(us);
     }
 }
 
@@ -415,37 +299,21 @@ fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static 
     })
 }
 
-/// Build the observer in `NODE.app`, where it stays, and register the node's queryables on it. The
-/// reason, as the console line, when one is refused.
-///
-/// Its own function, not inlined into [`run`], for the stack: the observer itself is large and is
-/// never a value.
-#[inline(never)]
-fn install_observer(
+/// The documents the command line asked for, as the node registers them, and how many. A document
+/// is a prefix of [`BODY`], so its text is a slice of one `static` and costs no allocation. The
+/// reason, as the console line, when one is not text.
+fn documents(
     docs: &[Option<(&'static str, usize)>; DOCS],
-) -> Result<&'static ObserverCell<DocumentSinks>, &'static str> {
-    let installed = NODE.app.install_with(|observer| {
-        for doc in docs {
-            let Some((key, bytes)) = doc else { continue };
-            // `BODY` is `x` throughout, so any prefix of it is text.
-            let body =
-                core::str::from_utf8(&BODY[..*bytes]).map_err(|_| "a document is not text")?;
-            register_document(&mut observer.queryables, key, body)
-                .map_err(|_| "wz: FAIL - the node's observer refused a queryable")?;
-            if !DECLARED.push(Declaration {
-                kind: DeclarationKind::Queryable,
-                key,
-            }) {
-                return Err("wz: FAIL - more documents than declarations");
-            }
-        }
-        Ok(())
-    });
-    match installed {
-        Ok((observer, Ok(()))) => Ok(observer),
-        Ok((_, Err(why))) => Err(why),
-        Err(_) => Err("wz: FAIL - the observer was installed twice"),
+) -> Result<([Document; DOCS], usize), &'static str> {
+    let mut out = [Document { key: "", body: "" }; DOCS];
+    let mut taken = 0;
+    for (key, bytes) in docs.iter().flatten() {
+        // `BODY` is `x` throughout, so any prefix of it is text.
+        let body = core::str::from_utf8(&BODY[..*bytes]).map_err(|_| "a document is not text")?;
+        out[taken] = Document { key, body };
+        taken += 1;
     }
+    Ok((out, taken))
 }
 
 /// The line a lab reads after a getter's run, and the exit code: 0 when every query was answered
@@ -494,23 +362,12 @@ fn run(args: Args) -> i32 {
     }
     let _ = ROUTER.endpoint.set(endpoint);
 
-    let clock = Clock::default();
-    let Some(runtime) = NODE.runtime.start(clock) else {
-        log("wz: FAIL - the runtime was started twice");
-        return 3;
+    let Some(identity) = NodeIdentity::new(&zid, key) else {
+        log("wz: FAIL - the zenoh id does not fit");
+        return 2;
     };
-    let local = CoopLocalSet::new(&runtime);
-
-    // The zid in the zenoh hex form, in fixed text.
-    let mut zid_text: FixedText<33> = FixedText::new();
-    let _ = write_zenoh_hex(&zid, &mut zid_text);
-    let zid_hex = zid_text.prefix();
-
-    // The application's registrations, on the observer the session dispatches to. A node whose
-    // registrations were refused would declare what nothing answers: stop instead, with the
-    // reason.
-    let observer = match install_observer(&args.docs) {
-        Ok(observer) => observer,
+    let (documents, taken) = match documents(&args.docs) {
+        Ok(found) => found,
         Err(why) => {
             log(why);
             return 3;
@@ -520,90 +377,38 @@ fn run(args: Args) -> i32 {
     if let Some(ask) = &args.get {
         getter::PLAN.set(ask);
     }
-    let stack = Stack::new(args.local, &NODE.rx, &NODE.tx).with_idle_wait_ms(IDLE_WAIT_MS);
-    let host: Host = SessionHost::new(
-        CoopLocalSet::new(&runtime),
-        &NODE.sessions,
-        &NODE.pumps,
-        stack,
-    );
-    let factory = RefCell::new(Factory { zid, key, observer });
-    let mut node = SlotClientNode::new(
-        &host,
-        stack,
-        &factory,
-        &ROUTER,
-        SessionTimeouts::spec_defaults(),
-        DECLARED.all(),
-    );
-    // The line a lab (or a person at the console) waits for: who the node claims to be and the
-    // router it dials.
-    log_args(format_args!(
-        "HOST-WZ-CLIENT READY {zid_hex} udp/{a}.{b}.{c}.{d}:{}",
-        args.router.1
-    ));
 
-    let mut established = false;
-    let mut refused = (runtime.task_refusals(), runtime.timer_refusals());
+    let node = ClientNode {
+        storage: &NODE,
+        declared: &DECLARED,
+        clock: Clock::default(),
+        stack: Stack::new(args.local, &NODE.rx, &NODE.tx).with_idle_wait_ms(IDLE_WAIT_MS),
+        identity,
+        batch_size: BATCH_SIZE,
+        entropy: || PosixEntropy,
+        endpoints: &ROUTER,
+        documents: &documents[..taken],
+        #[cfg(not(feature = "get"))]
+        layer: Answering,
+        #[cfg(feature = "get")]
+        layer: getter::GetterLayer,
+        idle_sleep_us: IDLE_SLEEP_US,
+        // The kit says how many times its loop went round to tell a node that sleeps from one
+        // that polls; the host's lab reads the getter's own lines instead.
+        report_every_ms: 0,
+    };
+    #[cfg(not(feature = "get"))]
+    let mut app = ();
     #[cfg(feature = "get")]
-    let mut progress_at_ms = 0u64;
-    loop {
-        local.run_until_idle();
-        let now_ms = clock.now_us() / 1000;
-        node.tick(now_ms);
-        // A getter says where it is once a second, so a run that does not end can be told from
-        // one that is slow.
-        #[cfg(feature = "get")]
-        if getter::PLAN.is_set() && now_ms >= progress_at_ms {
-            progress_at_ms = now_ms + 1_000;
-            let s = getter::PLAN.progress();
-            log_args(format_args!(
-                "HOST-WZ-GET progress issued={} finished={} replies={} errors={} refused={} \
-                 last_refusal={:?}",
-                s.0,
-                s.1,
-                s.2,
-                s.3,
-                s.4,
-                getter::PLAN.last_refusal()
-            ));
-        }
-        // A getter ends when every query it was asked to make has ended, and says how they went.
-        #[cfg(feature = "get")]
-        if getter::PLAN.is_done() {
-            return report_gets();
-        }
-        // `--mailbox`: this loop is not the session's event, so what it asks it leaves, and wakes
-        // the session's loop to take it.
-        #[cfg(feature = "get")]
-        if getter::PLAN.uses_mailbox() && node.is_established() && getter::PLAN.top_up() > 0 {
-            node.wake();
-        }
-        // A table the image sized too small refuses what it cannot hold and counts it; the
-        // count moving is a node that is not doing what it was built to, so it is said.
-        let now = (runtime.task_refusals(), runtime.timer_refusals());
-        if now != refused {
-            refused = now;
-            log_args(format_args!(
-                "wz: FAIL - the runtime refused a task or a timer: no cell {}, too large {}, timers {}",
-                now.0.no_task_cell, now.0.too_large, now.1
-            ));
-        }
-        // A line when the session comes and goes, which is all a lab waits for.
-        if node.is_established() != established {
-            established = !established;
-            log_args(format_args!(
-                "host-slot-node: session {}",
-                if established { "established" } else { "lost" }
-            ));
-        }
-        // The socket's own wait is what gives the CPU away while a session is held (its read waits
-        // for a datagram). Between two dials of a router that is not up the node holds no socket:
-        // it sleeps the tick itself then, or it spins.
-        if !node.holds_session() {
-            yield_us(IDLE_SLEEP_US);
-        }
-    }
+    let mut app = getter::GetterApp::new();
+    // The line a lab (or a person at the console) waits for, once the node is built: who it claims
+    // to be and the router it dials.
+    node.run(&mut Port, &mut app, |port, zid_hex| {
+        port.log(format_args!(
+            "HOST-WZ-CLIENT READY {zid_hex} udp/{a}.{b}.{c}.{d}:{}",
+            args.router.1
+        ));
+    })
 }
 
 #[no_mangle]

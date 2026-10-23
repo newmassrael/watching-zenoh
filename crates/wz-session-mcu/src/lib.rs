@@ -13,9 +13,9 @@
 //! - [`app_layer`] — the application layer a session is driven with: the
 //!   `on_event` that dispatches to an `ApplicationLayerObserver` and drains its
 //!   staged output through the session's own send path.
-//! - [`admin_host`] (`adminspace-write`) — the node hosts upstream's
+//! - `admin_host` (`adminspace-write`) — the node hosts upstream's
 //!   `connect/endpoints` config write.
-//! - [`admin_status`] (`adminspace-core`) — the node answers upstream's admin GET.
+//! - `admin_status` (`adminspace-core`) — the node answers upstream's admin GET.
 //! - `admin_fixed` (`adminspace-core` and `session-slot`) — the same admin GET with
 //!   no allocator: the node's state in fixed rows, its reply built in a bounded
 //!   arena.
@@ -84,6 +84,10 @@ pub mod slot_dial;
 // endpoints, and the declarations sent on every session as it establishes.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_client;
+// The application of that client, written once for every platform: its storage, its factory and
+// the loop that drives it. A platform is a `NodePort` and nothing of the loop.
+#[cfg(all(feature = "session-slot", feature = "client-core"))]
+pub mod slot_node;
 // R2830 — the node keeps a session with every endpoint the control names and
 // re-dials on upstream's retry schedule; the dialling is behind a trait.
 #[cfg(feature = "dial")]
