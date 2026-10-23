@@ -278894,6 +278894,46 @@
         "The hosted run that carries item 913 and this step is to be read job by job."
       ]
     },
+    "Round 3442": {
+      "decision_summary": "The declaration can now hold an axis that no one image owns, which steps 2 and 4 of docs/build-configuration.md need: the family and target axes of the upstream defconfigs, and the role axis that pulls in capabilities. An axis with no image is generated into deploy/Kconfig.axes, which the root Kconfig sources before the capabilities; it is written only while such an axis exists, and a leftover file is a finding. An option of a global axis may imply capabilities, emitted as selects; an option of an image axis may not, because an image's tree carries no capability symbols. A cargo rule of an image may name a global axis's options beside its own. An image Kconfig that sources the global axes must source the capabilities too, since Zephyr refuses a select of an undefined symbol; the check holds that. The declaration declares no global axis yet, so every generated file is unchanged. The design note no longer says one crate feature per axis option: a conjunction is a cargo rule.",
+      "changes_bullets": [
+        "scripts/lib/wz_config.py: an axis without `image` is global; --emit kconfig-axes writes deploy/Kconfig.axes and the root sources it; an option's `implies` becomes selects and is refused on an image axis or for an undeclared capability; cargo rules may name global options; --check refuses a leftover Kconfig.axes and an image Kconfig that sources the global axes without the capabilities.",
+        "Ten selftest arms for the global axes, one of which reads the emitted sample tree with kconfiglib.",
+        "docs/build-configuration.md: the global axes, and the per-option feature sentence replaced by the cargo rule."
+      ],
+      "verification_bullets": [
+        "wz_config selftest 78 of 78 with kconfiglib present; the interpreter reads the emitted global sample and the option that implies a capability turns it on.",
+        "With the select emission damaged, the text arm and the interpreter arm both fail (76 of 78); restored, 78 of 78.",
+        "wz_config --check passes with every generated file unchanged; --check-presets and --check-equivalence pass.",
+        "python_floor_lint, prose_feature_gate, prose_build_closure_gate, gate_test_pin_lint, armed_skip_guard, round_fed_gate_reach, gate_provenance_lint and upstream_switch_map pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Step 2 declares the family and target axes and generates the upstream defconfigs from the upstream map.",
+        "The role axis and the image's sourcing of the global axes are step 4, by the session that owns the image files."
+      ],
+      "publishable_decision_summary": "The declaration can now hold an axis that no one image owns, which steps 2 and 4 of docs/build-configuration.md need: the family and target axes of the upstream defconfigs, and the role axis that pulls in capabilities. An axis with no image is generated into deploy/Kconfig.axes, which the root Kconfig sources before the capabilities; it is written only while such an axis exists, and a leftover file is a finding. An option of a global axis may imply capabilities, emitted as selects; an option of an image axis may not, because an image's tree carries no capability symbols. A cargo rule of an image may name a global axis's options beside its own. An image Kconfig that sources the global axes must source the capabilities too, since Zephyr refuses a select of an undefined symbol; the check holds that. The declaration declares no global axis yet, so every generated file is unchanged. The design note no longer says one crate feature per axis option: a conjunction is a cargo rule.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_config.py: an axis without `image` is global; --emit kconfig-axes writes deploy/Kconfig.axes and the root sources it; an option's `implies` becomes selects and is refused on an image axis or for an undeclared capability; cargo rules may name global options; --check refuses a leftover Kconfig.axes and an image Kconfig that sources the global axes without the capabilities.",
+        "Ten selftest arms for the global axes, one of which reads the emitted sample tree with kconfiglib.",
+        "docs/build-configuration.md: the global axes, and the per-option feature sentence replaced by the cargo rule."
+      ],
+      "publishable_verification_bullets": [
+        "wz_config selftest 78 of 78 with kconfiglib present; the interpreter reads the emitted global sample and the option that implies a capability turns it on.",
+        "With the select emission damaged, the text arm and the interpreter arm both fail (76 of 78); restored, 78 of 78.",
+        "wz_config --check passes with every generated file unchanged; --check-presets and --check-equivalence pass.",
+        "python_floor_lint, prose_feature_gate, prose_build_closure_gate, gate_test_pin_lint, armed_skip_guard, round_fed_gate_reach, gate_provenance_lint and upstream_switch_map pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 2 declares the family and target axes and generates the upstream defconfigs from the upstream map.",
+        "The role axis and the image's sourcing of the global axes are step 4, by the session that owns the image files."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
