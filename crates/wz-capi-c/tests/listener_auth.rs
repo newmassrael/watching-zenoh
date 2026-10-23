@@ -378,18 +378,29 @@ fn a_client_presents_the_pubkey_identity_its_own_config_states() {
         .set_nonblocking(true)
         .expect("a listener tokio can adopt");
 
+    // The responder holds its Established session until the client's open has returned. A session
+    // dropped at the instant the responder reached Established closes the link, and the listener
+    // with it, while the client may still be reading the last handshake frame: the client's first
+    // attempt then ends in a lost link, its retries meet a closed port, and `z_open` spends all of
+    // `connect/timeout_ms` before it reports `Z_ENETWORK`. That is what hosted Windows showed at 3 s
+    // and again at 30 s, and what a loopback run of this leg showed in one run of a hundred (18 of 60
+    // with three busy loops on two cores), with the responder `Ok` after 6 to 14 ms in every one.
+    let (client_done, responder_may_close) = std::sync::mpsc::channel::<()>();
+    // The responder reports how long its accept-to-outcome took beside the outcome, so a red names
+    // whether it gave up before the client did or never answered.
     let responder = std::thread::spawn(move || {
         let runtime = tokio::runtime::Runtime::new().expect("a runtime");
-        runtime.block_on(async move {
+        let held = runtime.block_on(async move {
             let listener = tokio::net::TcpListener::from_std(listener).expect("adopt the listener");
             let (stream, _) = listener.accept().await.expect("the client dials");
+            let accepted_at = std::time::Instant::now();
             let mut params = fixture_session_init_params();
             params.zid = vec![0x09; 4];
             let auth = AuthDispatch::new(vec![Box::new(PubKeyMethod::responder(
                 responder_key,
                 Some(vec![client_public]),
             )) as _]);
-            accept_and_open_session_with_auth(
+            let outcome = accept_and_open_session_with_auth(
                 DialedLink::Tcp(stream),
                 params,
                 auth,
@@ -397,36 +408,35 @@ fn a_client_presents_the_pubkey_identity_its_own_config_states() {
                 Some(OPEN_ITERATIONS),
                 DEFAULT_OPEN_TICK_MS,
             )
-            .await
-            .map(|_| ())
-        })
+            .await;
+            (outcome, accepted_at.elapsed())
+        });
+        // A sender dropped by a panicking client ends the wait as well as a sent unit.
+        let _ = responder_may_close.recv();
+        let (outcome, elapsed) = held;
+        (outcome.map(|_| ()), elapsed)
     });
 
     let mut entries = client_entries(port, None);
     entries.extend(pubkey_entries(&public, &private));
-    // The open bound is this leg's fixture, not its subject: the handshake signs and verifies
-    // with RSA, which a debug build does slowly, and `cargo test` runs the other legs' key
-    // searches beside it. Hosted Windows spent the 3 s of `client_entries` twice (Platform runs
-    // 39789668210 and 39900618976, `Z_ENETWORK` near 3 s), the second time after the
-    // responder's key had moved before the dial, so the bound here is one the handshake does
-    // not approach.
-    for entry in entries.iter_mut() {
-        if entry.0 == "connect/timeout_ms" {
-            entry.1 = "30000".to_owned();
-        }
-    }
+    let dialled_at = std::time::Instant::now();
     // SAFETY: a fresh config and session.
     let (rc, client) = unsafe { open_with(&entries) };
+    let client_elapsed = dialled_at.elapsed();
     // SAFETY: a gravestone drops as a no-op, a live session closes.
     unsafe { close_session(client) };
-    let accepted = responder.join().expect("the responder thread");
+    let _ = client_done.send(());
+    let (accepted, responder_elapsed) = responder.join().expect("the responder thread");
     assert_eq!(
         rc, Z_OK,
-        "a client stating a pubkey identity was refused by a responder admitting that key"
+        "a client stating a pubkey identity was refused by a responder admitting that key: the \
+         client's open returned {rc} after {client_elapsed:?}, the responder's came to \
+         {accepted:?} after {responder_elapsed:?}"
     );
     assert!(
         accepted.is_ok(),
-        "the responder did not reach Established with the client's key: {accepted:?}"
+        "the responder did not reach Established with the client's key: {accepted:?} after \
+         {responder_elapsed:?}, the client's open returned {rc} after {client_elapsed:?}"
     );
 }
 
