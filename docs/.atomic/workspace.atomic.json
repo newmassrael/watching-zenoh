@@ -280498,6 +280498,50 @@
         "Two gates are red on origin/main from commit 125217f45 of another session (discard_site_lint on passive_messages.rs, accessor_reach_census on MessageList and Rows); that session is told, and neither is changed here."
       ]
     },
+    "Round 3478": {
+      "decision_summary": "The cooperative profile gets a TCP link, written once in wz-runtime-coop over a StreamSocket seam, as the datagram link already is. Step 2 of the owner's size-gap structure (one engine, one stream link, a thin C ABI). zenoh's stream framing is a u16 little-endian length inside the batch; the driver asks the session for two bytes of headroom and writes the length there, so length and batch leave in one write from the slot. A stream that ends (peer close, read error, a length over the buffer) ends the link: the receive stops, the pump asks the link whether it is lost, and the session is told through dispatch_link_lost. A dial now names its protocol: a Locator carries udp or tcp, and a stack without the link refuses with Unsupported, which the connect manager reads as permanent; a refused connect is Unreachable and retried. The host stack (IpStack) holds either link in one slot type. lwIP, Zephyr and the memory stack stay datagram-only and refuse tcp/ by name.",
+      "changes_bullets": [
+        "wz-runtime-coop: stream_link (StreamSocket, StreamDriver, deframing), link_storage (TxLender shared by both links), ip_stack (IpStack/IpDriver over UDP and TCP), SessionDatagramLink::lost and the pump's lost check, Locator/LinkProto/IpEndpoint, LinkOpenError::Unsupported and Refused.",
+        "wz-session-core: drive::dispatch_link_lost, used by dispatch_link_event's Lost arm too.",
+        "wz-runtime-posix: stream::PosixTcpSocket (TCP_NODELAY, sendmsg with MSG_NOSIGNAL, MSG_DONTWAIT reads); PosixStack is IpStack over the UDP and TCP sockets.",
+        "wz-session-mcu: parse_locator reads udp/ and tcp/; dial_failed maps a stack's refusal (Unsupported permanent, Refused as DialFailed::Unreachable, retried).",
+        "wz-session-lwip, wz-runtime-zephyr, memory stack: take a Locator and refuse tcp/ by name.",
+        "host-slot-node: --router accepts [udp/|tcp/]a.b.c.d:port.",
+        "C1m guarded counts moved for the new mcu tests; reason-review pins of session-close-ingress moved after re-reading its reason against session_drive.rs and drive.rs (claims hold).",
+        "Earlier the same day, 8eece7dc5 fixed the C1bz overrun of datagram_peer's module doc."
+      ],
+      "verification_bullets": [
+        "On the build host, at the rebased tree: wz-session-core, wz-runtime-coop (heap, slot, no-allocator) and wz-runtime-posix (default and slot) unit tests and clippy -D warnings pass; C1m and C1n pass; C1bz passes for the six crates touched; wz-runtime-zephyr 29 tests, clippy and the thumbv7em cross build pass; the FreeRTOS images build, both stack-frame gates pass (frt chain 9252 of 16384, frt2 17492 of 32768) and the two-session QEMU run passes all four scenarios. The hook's 110 round-fed static gates pass. End to end against a pinned zenohd 1.10.1 router listening on tcp and udp, with host-slot-node: tcp answer with tcp getter, udp getter with tcp answer, and udp with udp each got 220 of 220 replies, exit 0 (tcp median about 53 us). The posix refusal test holds its port bound and not listening instead of releasing it."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction"
+      ],
+      "carry_forward_bullets": [
+        "Step 3 of the size-gap structure, the pico C ABI as a thin facade over the cooperative engine (no_std, panic=abort), is not started: it needs the owner's ruling on the threading model of the C facade and coordination with the session that owns the runtime axis. lwIP and Zephyr have no stream socket yet; each refuses tcp/ by name until one is written against StreamSocket. Read the hosted run of this push at the start of the next round."
+      ],
+      "publishable_decision_summary": "The cooperative profile gets a TCP link, written once in wz-runtime-coop over a StreamSocket seam, as the datagram link already is. Step 2 of the owner's size-gap structure (one engine, one stream link, a thin C ABI). zenoh's stream framing is a u16 little-endian length inside the batch; the driver asks the session for two bytes of headroom and writes the length there, so length and batch leave in one write from the slot. A stream that ends (peer close, read error, a length over the buffer) ends the link: the receive stops, the pump asks the link whether it is lost, and the session is told through dispatch_link_lost. A dial now names its protocol: a Locator carries udp or tcp, and a stack without the link refuses with Unsupported, which the connect manager reads as permanent; a refused connect is Unreachable and retried. The host stack (IpStack) holds either link in one slot type. lwIP, Zephyr and the memory stack stay datagram-only and refuse tcp/ by name.",
+      "publishable_changes_bullets": [
+        "wz-runtime-coop: stream_link (StreamSocket, StreamDriver, deframing), link_storage (TxLender shared by both links), ip_stack (IpStack/IpDriver over UDP and TCP), SessionDatagramLink::lost and the pump's lost check, Locator/LinkProto/IpEndpoint, LinkOpenError::Unsupported and Refused.",
+        "wz-session-core: drive::dispatch_link_lost, used by dispatch_link_event's Lost arm too.",
+        "wz-runtime-posix: stream::PosixTcpSocket (TCP_NODELAY, sendmsg with MSG_NOSIGNAL, MSG_DONTWAIT reads); PosixStack is IpStack over the UDP and TCP sockets.",
+        "wz-session-mcu: parse_locator reads udp/ and tcp/; dial_failed maps a stack's refusal (Unsupported permanent, Refused as DialFailed::Unreachable, retried).",
+        "wz-session-lwip, wz-runtime-zephyr, memory stack: take a Locator and refuse tcp/ by name.",
+        "host-slot-node: --router accepts [udp/|tcp/]a.b.c.d:port.",
+        "C1m guarded counts moved for the new mcu tests; reason-review pins of session-close-ingress moved after re-reading its reason against session_drive.rs and drive.rs (claims hold).",
+        "Earlier the same day, 8eece7dc5 fixed the C1bz overrun of datagram_peer's module doc."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, at the rebased tree: wz-session-core, wz-runtime-coop (heap, slot, no-allocator) and wz-runtime-posix (default and slot) unit tests and clippy -D warnings pass; C1m and C1n pass; C1bz passes for the six crates touched; wz-runtime-zephyr 29 tests, clippy and the thumbv7em cross build pass; the FreeRTOS images build, both stack-frame gates pass (frt chain 9252 of 16384, frt2 17492 of 32768) and the two-session QEMU run passes all four scenarios. The hook's 110 round-fed static gates pass. End to end against a pinned zenohd 1.10.1 router listening on tcp and udp, with host-slot-node: tcp answer with tcp getter, udp getter with tcp answer, and udp with udp each got 220 of 220 replies, exit 0 (tcp median about 53 us). The posix refusal test holds its port bound and not listening instead of releasing it."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link",
+        "session-fsm--prose-level-sketch/6-link-layer-interaction"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 3 of the size-gap structure, the pico C ABI as a thin facade over the cooperative engine (no_std, panic=abort), is not started: it needs the owner's ruling on the threading model of the C facade and coordination with the session that owns the runtime axis. lwIP and Zephyr have no stream socket yet; each refuses tcp/ by name until one is written against StreamSocket. Read the hosted run of this push at the start of the next round."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
