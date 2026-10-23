@@ -279512,6 +279512,46 @@
         "This round is not a milestone round: REMAINING stays 2 (api-compat-rust, session-close-ingress)."
       ]
     },
+    "Round 3456": {
+      "decision_summary": "Honour transport/link/rx/max_message_size, a consumer claim from the analyzer session: its node form offers only keys wz honours, and the key sat in UNHONOURED_BEYOND_WZ. The key is the largest message a session rejoins from fragments, with upstream's rule (a fragment that takes the chain past it ends the chain). It rides SessionInitParams and MulticastParams as LinkRxConf; the unicast drive pushes it into the reassembly router per fragment, as it pushes the marker verdict, and the group loops build their router with it. The build's reassembly slot stays a ceiling the value can only lower (RX_MAX_MESSAGE_SIZE_CEILING). The TX refusal stays on the slot: the key says what this node accepts, not what its peer accepts. The router counts chains it ended for size and logs the first one per session.",
+      "changes_bullets": [
+        "wz-session-core (a256cf133): LinkRxConf with upstream's 1 GiB default on SessionInitParams and MulticastParams; ReassemblyConfig gains max_message_bytes and the router checks it beside the slot's CAP, counts capacity refusals and warns once; drive.rs sets it from the session's params at both fragment ingest sites.",
+        "wz-runtime-tokio and wz-ap-demo (a256cf133): the key moves from UNHONOURED_UPSTREAM_CONFIG_KEYS, UNHONOURED_BEYOND_WZ and the LinkTxConf group to HONOURED_CONFIG_KEYS; the ingest reads it, to_json5 writes it, the demo expands it to --rx-max-message-size, and the router group profile carries it; RX_MAX_MESSAGE_SIZE_CEILING is exported.",
+        "Every other params struct literal (crates and deploy images) gains link_rx at its default; run-ci C1l guards move 43 to 47 (both arms) and 3 to 4 (layer3_reassembly_tx)."
+      ],
+      "verification_bullets": [
+        "On a build machine, on the tree rebased on Round 3455: cargo check of the crates workspace with all targets rc 0; wz-session-core --lib reassembly 47 passed on both the reassembly and transport-fragmentation arms; layer3_reassembly_tx 4 passed, including two nodes with bounds 100 and 4096 bytes answering one 200-byte fragmented Put apart; zenoh_config lib tests 77 and stock_config_tests 42 passed; clippy -D warnings rc 0 for wz-session-core, wz-runtime-tokio, wz-ap-demo and wz-session-mcu; host-slot-node checks.",
+        "A mutant that ignores the configured bound fails the two-node test where expected (the small node delivered [200, 4], not [4]); reverted. config_key_fixture_gate, unhonoured_kind_evidence_gate, upstream_citation_anchor_gate, apfull_membership, flag_precondition_gate, runtime_mutable_surface_gate --check, upstream_carries_the_surface and deepenable_audit (surface 113) each rc 0. C1bz and the MCU deploy images are left to hosted CI."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config"
+      ],
+      "carry_forward_bullets": [
+        "The analyzer session moves its pin to this round's commit; its verdict tool then answers honoured for the key. Its four questions are answered in a reply file in its session.",
+        "The C ABI sessions keep the default bound: no C ABI config path reads the key, and C_ABI_SESSION_HONOURED_KEYS does not list it.",
+        "This round is not a milestone round: REMAINING is unchanged."
+      ],
+      "publishable_decision_summary": "Honour transport/link/rx/max_message_size, a consumer claim from the analyzer session: its node form offers only keys wz honours, and the key sat in UNHONOURED_BEYOND_WZ. The key is the largest message a session rejoins from fragments, with upstream's rule (a fragment that takes the chain past it ends the chain). It rides SessionInitParams and MulticastParams as LinkRxConf; the unicast drive pushes it into the reassembly router per fragment, as it pushes the marker verdict, and the group loops build their router with it. The build's reassembly slot stays a ceiling the value can only lower (RX_MAX_MESSAGE_SIZE_CEILING). The TX refusal stays on the slot: the key says what this node accepts, not what its peer accepts. The router counts chains it ended for size and logs the first one per session.",
+      "publishable_changes_bullets": [
+        "wz-session-core (a256cf133): LinkRxConf with upstream's 1 GiB default on SessionInitParams and MulticastParams; ReassemblyConfig gains max_message_bytes and the router checks it beside the slot's CAP, counts capacity refusals and warns once; drive.rs sets it from the session's params at both fragment ingest sites.",
+        "wz-runtime-tokio and wz-ap-demo (a256cf133): the key moves from UNHONOURED_UPSTREAM_CONFIG_KEYS, UNHONOURED_BEYOND_WZ and the LinkTxConf group to HONOURED_CONFIG_KEYS; the ingest reads it, to_json5 writes it, the demo expands it to --rx-max-message-size, and the router group profile carries it; RX_MAX_MESSAGE_SIZE_CEILING is exported.",
+        "Every other params struct literal (crates and deploy images) gains link_rx at its default; run-ci C1l guards move 43 to 47 (both arms) and 3 to 4 (layer3_reassembly_tx)."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine, on the tree rebased on Round 3455: cargo check of the crates workspace with all targets rc 0; wz-session-core --lib reassembly 47 passed on both the reassembly and transport-fragmentation arms; layer3_reassembly_tx 4 passed, including two nodes with bounds 100 and 4096 bytes answering one 200-byte fragmented Put apart; zenoh_config lib tests 77 and stock_config_tests 42 passed; clippy -D warnings rc 0 for wz-session-core, wz-runtime-tokio, wz-ap-demo and wz-session-mcu; host-slot-node checks.",
+        "A mutant that ignores the configured bound fails the two-node test where expected (the small node delivered [200, 4], not [4]); reverted. config_key_fixture_gate, unhonoured_kind_evidence_gate, upstream_citation_anchor_gate, apfull_membership, flag_precondition_gate, runtime_mutable_surface_gate --check, upstream_carries_the_surface and deepenable_audit (surface 113) each rc 0. C1bz and the MCU deploy images are left to hosted CI."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "reassembly-fsm--prose-sketch/4-timer-quota-pool-config"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The analyzer session moves its pin to this round's commit; its verdict tool then answers honoured for the key. Its four questions are answered in a reply file in its session.",
+        "The C ABI sessions keep the default bound: no C ABI config path reads the key, and C_ABI_SESSION_HONOURED_KEYS does not list it.",
+        "This round is not a milestone round: REMAINING is unchanged."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
