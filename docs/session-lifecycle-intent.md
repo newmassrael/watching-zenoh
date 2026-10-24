@@ -518,6 +518,24 @@ Each step lands with its own done-when; sizes are not estimated here.
      made for a node closes at an InitAck from another zid, before any
      OpenSyn and with INVALID.
 3. **D3.** The directory and its three sources, with expiry.
+   - **3a, the directory (Round 3544).** `wz_session_core::locator_directory`
+     holds a zid's candidate locators in a fixed number of rows, with no
+     allocator, so every profile holds the same table. A row is one hint (a
+     zid and a locator). Each of the three sources (`Declared`, `Hello`,
+     `Linkstate`) confirms it with its own end, and a lookup never returns a
+     hint whose every confirmation has ended. The directory is the mechanism
+     only: each confirmation carries its `Lifetime`, because only the source
+     knows how often it refreshes. A declared hint is `Permanent` and leaves
+     only when it is withdrawn; a soft-state one must have a lifetime. A
+     withdrawal takes one source's confirmations of a zid away and keeps the
+     others. Candidates come declared first, as the operator's intent, then
+     the most recently confirmed first. A full table displaces the soft-state
+     hint whose last confirmation ends first, never a declared one, and a
+     table of declared hints refuses and counts the refusal. Witness: its
+     seven unit tests.
+   - Left of D3: the sources confirm into it (the link-state ingest and a
+     Hello on AP, the build-time declaration on every profile), each with
+     its lifetime, and the openers read their candidates from it.
 4. **D5.** The peer machine in SCXML and the bounded peer table; the AP
    `ConnectReconcile` desired set is replaced by it.
 5. **D6.** Intent and status, `reset` with a generation, and the status GET.

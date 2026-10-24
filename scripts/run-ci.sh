@@ -10476,8 +10476,12 @@ layer_c1ca_cargo_test_derived_initial_sn() {
 # priority control; the fourth R2927 case (a QoS session admitting the frame)
 # is `transport-qos`-gated and this lane builds without it. READ off the count
 # gate's own line, "declares 26 passed, the run printed 29".
+# Round 3537 — 29 -> 31. Decision D4: an InitAck from another node than the dial
+# named closes INVALID before the OpenSyn, and the same InitAck is admitted for a
+# dial made for its node. READ off the hosted count gate's own line, "expected
+# exactly 29 passed", over a local run that printed 31.
 layer_c1cb_cargo_test_init_ack_admission() {
-    _runci_guarded_test C1cb 29 \
+    _runci_guarded_test C1cb 31 \
         cargo test -p wz-runtime-tokio --test session_fsm_driver_loop --quiet || return 1
 }
 

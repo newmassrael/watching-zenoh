@@ -471,6 +471,12 @@ pub mod accept_state;
 /// and the `sha2` it hashes with is already a dependency of every build.
 pub mod credential_identity;
 
+/// A zid's candidate locators as soft state, each confirmed by a source and
+/// expiring unless confirmed again (decision D3 of
+/// `docs/session-lifecycle-intent.md`). Ungated: a fixed number of rows and no
+/// allocator, so the fixed-memory profile holds the same table.
+pub mod locator_directory;
+
 /// R311ej — per-deploy session handshake parameters (`SessionInitParams`:
 /// version / whatami / zid / resolutions / lease / cookie + signing
 /// key). Pure owned value type; alloc-gated (Vec zid/cookie + SigningKey).
