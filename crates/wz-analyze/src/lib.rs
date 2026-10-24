@@ -2505,7 +2505,10 @@ fn field_lines(
                 // whole flow below rather than once per frame, since the sink
                 // walked the stream itself and its rows are not this loop's.
                 Some(_) => break,
-                None => walk_message(flow_message_bytes(flow, &frame), &frame),
+                // Open-debt item 924, step 4c — the flow's own answer, which
+                // reads a WebSocket message from its payload where a slice of
+                // the stream at its anchor would begin at the ws frame header.
+                None => walk_message(flow.message_bytes(&frame), &frame),
             };
             shown += 1;
             if format == Format::Json && emitted > 0 {
@@ -3281,7 +3284,7 @@ impl wz_capture::PlaintextSink for FieldSink {
 /// # The defect this closes, measured
 ///
 /// `Dissection::decrypt_with` opens the records into a plaintext `Vec`, feeds it
-/// to the session, and then `remap_decrypted_offsets` puts every resulting
+/// to the session, and then `record_coordinates` puts every resulting
 /// frame's `stream_offset` BACK to the ciphertext record it came out of -- so a
 /// reader can point at the packet. The plaintext is a local that the pass drops,
 /// deliberately: it is already the unbounded third copy of the flow's bytes that
@@ -3331,68 +3334,15 @@ fn decrypted_coordinates(flow: &wz_capture::FlowDissection) -> Option<String> {
 /// stream.
 ///
 /// One place, because two of them were the R311y688 shape waiting to happen:
-/// [`message_bytes`] sliced at `stream_offset + prefix_width + unit_offset` and
-/// the row rendered `message_at` from the same three fields written out again.
-/// They agreed by CONSTRUCTION rather than by comparison, which is exactly the
-/// property R311y689's carry recorded as still open -- a wrong slice reported a
-/// matching wrong offset, and the reader could not tell.
+/// the message's bytes were sliced at `stream_offset + prefix_width +
+/// unit_offset` and the row rendered `message_at` from the same three fields
+/// written out again. They agreed by CONSTRUCTION rather than by comparison,
+/// which is exactly the property R311y689's carry recorded as still open -- a
+/// wrong slice reported a matching wrong offset, and the reader could not tell.
+/// The bytes are `FlowDissection::message_bytes`'s now, which slices a stream
+/// row at `FlowDissection::message_at`, the same sum.
 fn message_at(frame: &wz_session_core::passive::PassiveFrame) -> usize {
     frame.stream_offset + frame.prefix_width + frame.unit_offset
-}
-
-/// Open-debt item 924, step 3 — the retained stream is read through `fetch`,
-/// which answers the bytes between two absolute offsets: a flow does not hold
-/// its stream as one slice once it reads its bytes from a capture container it
-/// is lent, so this asks for the message's bytes alone.
-fn message_bytes<'a>(
-    retained: core::ops::Range<usize>,
-    fetch: impl FnOnce(usize, usize) -> Option<std::borrow::Cow<'a, [u8]>>,
-    frame: &wz_session_core::passive::PassiveFrame,
-) -> Result<std::borrow::Cow<'a, [u8]>, String> {
-    let origin = retained.start;
-    if frame.stream_offset < origin {
-        return Err(format!(
-            "bytes discarded to stay inside stream_bytes_per_direction (retained from {origin}, this message begins at {})",
-            frame.stream_offset
-        ));
-    }
-    let body = frame.stream_offset + frame.prefix_width;
-    let end = body + frame.unit_len;
-    if end > retained.end {
-        return Err(format!(
-            "the framing unit declares {} byte(s) and the retained stream holds {}",
-            frame.unit_len,
-            retained.end.saturating_sub(body)
-        ));
-    }
-    // R311y690 — the SAME function the row's `message_at` is rendered from, so
-    // the offset a reader is given is the offset these bytes were taken at. It
-    // was two sums of the same three fields, agreeing by construction; a sum
-    // written twice is a sum that can be edited once.
-    let start = message_at(frame);
-    if start > end {
-        return Err(format!(
-            "this message stands {} byte(s) into a unit of {}",
-            frame.unit_offset, frame.unit_len
-        ));
-    }
-    fetch(start, end).ok_or_else(|| {
-        String::from("the bytes are retained in a capture container this flow is no longer lent")
-    })
-}
-
-/// [`message_bytes`] of a frame of `flow`, read from the flow's stream.
-fn flow_message_bytes<'a>(
-    flow: &'a wz_capture::FlowDissection,
-    frame: &wz_session_core::passive::PassiveFrame,
-) -> Result<std::borrow::Cow<'a, [u8]>, String> {
-    use wz_capture::messages::UnitBytes as _;
-    let assembler = flow.assembler(frame.direction);
-    message_bytes(
-        assembler.retained_from()..assembler.len(),
-        |from, to| flow.stream_bytes(frame.direction, from, to),
-        frame,
-    )
 }
 
 /// R311y682 (§1.1n) — the stream row, walked and then CHECKED against the
@@ -4643,12 +4593,12 @@ pub struct Samples {
 /// Pull one frame's sample, if it has one.
 fn collect_sample(
     flow: &wz_capture::FlowDissection,
-    frame: &wz_session_core::passive::PassiveFrame,
+    frame: &wz_capture::messages::Row<'_>,
     spaces: &wz_capture::agg::KeyexprSpaces,
     file: Option<&Reread>,
     out: &mut Samples,
 ) {
-    let row = walk_message(flow_message_bytes(flow, frame), frame);
+    let row = walk_message(flow.message_bytes(frame), frame);
     let FieldRow::Walked(field) = row else {
         out.undecodable += 1;
         return;
@@ -5259,7 +5209,7 @@ struct MessageRow {
     /// Decided by the CALLER, because only the loop knows which transport it is
     /// walking: `MessageRow::transport` is called from both, and an encrypted
     /// stream flow's offsets are remapped to the ciphertext record they came
-    /// out of (`remap_decrypted_offsets`), which is a third space again.
+    /// out of (`record_coordinates`), which is a third space again.
     offset_space: OffsetSpace,
     /// Which framing unit inside the record it came out of, or `None` for a
     /// scouting datagram, which is not inside one.
@@ -6452,6 +6402,103 @@ mod tests {
             payload.len() as u16,
         );
         frame(&h, payload).expect("raweth frame")
+    }
+
+    /// Open-debt item 924, step 4c — SAMPLES COME OFF A WEBSOCKET FLOW'S
+    /// PAYLOADS. A ws message's payload is unmasked and joined out of its
+    /// frames and stands nowhere in the TCP stream; this reader sliced the
+    /// stream at the message's anchor, which is the ws frame header, so a ws
+    /// capture's messages walked as other bytes and gave no sample. Both
+    /// directions, the client's masked as a client's are.
+    #[test]
+    fn a_websocket_capture_yields_samples_from_its_payloads() {
+        // One TCP segment of the connection, client 10.0.0.1:1111 to server
+        // 10.0.0.2:7447 or back.
+        fn segment(from_client: bool, seq: u32, payload: &[u8]) -> Vec<u8> {
+            let (src, sport, dst, dport) = if from_client {
+                ([10, 0, 0, 1], 1111u16, [10, 0, 0, 2], 7447u16)
+            } else {
+                ([10, 0, 0, 2], 7447, [10, 0, 0, 1], 1111)
+            };
+            let mut tcp = Vec::new();
+            tcp.extend_from_slice(&sport.to_be_bytes());
+            tcp.extend_from_slice(&dport.to_be_bytes());
+            tcp.extend_from_slice(&seq.to_be_bytes());
+            tcp.extend_from_slice(&0u32.to_be_bytes());
+            tcp.extend_from_slice(&[5 << 4, 0x10]);
+            tcp.extend_from_slice(&64u16.to_be_bytes());
+            tcp.extend_from_slice(&[0, 0, 0, 0]);
+            tcp.extend_from_slice(payload);
+            wz_packet_fixtures::fill_tcp_checksum(src, dst, &mut tcp);
+            let mut ip = vec![0x45u8, 0];
+            ip.extend_from_slice(&((20 + tcp.len()) as u16).to_be_bytes());
+            ip.extend_from_slice(&[0, 0, 0, 0, 64, 6, 0, 0]);
+            ip.extend_from_slice(&src);
+            ip.extend_from_slice(&dst);
+            wz_packet_fixtures::fill_ipv4_checksum(&mut ip);
+            ip.extend_from_slice(&tcp);
+            let mut eth = vec![0u8; 12];
+            eth.extend_from_slice(&[0x08, 0x00]);
+            eth.extend_from_slice(&ip);
+            while eth.len() < 60 {
+                eth.push(0);
+            }
+            eth
+        }
+        // One final binary ws frame around `payload`, masked by `mask`.
+        fn ws_frame(payload: &[u8], mask: Option<[u8; 4]>) -> Vec<u8> {
+            assert!(payload.len() < 126, "the one-byte length arm");
+            let mut out = vec![
+                0x82u8,
+                payload.len() as u8 | if mask.is_some() { 0x80 } else { 0 },
+            ];
+            match mask {
+                Some(key) => {
+                    out.extend_from_slice(&key);
+                    out.extend(payload.iter().enumerate().map(|(i, b)| b ^ key[i & 3]));
+                }
+                None => out.extend_from_slice(payload),
+            }
+            out
+        }
+        let upgrade = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n";
+        let switching = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n";
+        let to_server = ws_frame(
+            &frame_carrying(&put_declaring("demo/ws/up", 0, b"payload")),
+            Some([0x37, 0xFA, 0x21, 0x3D]),
+        );
+        let to_client = ws_frame(
+            &frame_carrying(&put_declaring("demo/ws/down", 0, b"payload")),
+            None,
+        );
+        let packets = [
+            segment(true, 1_000, upgrade),
+            segment(false, 9_000, switching),
+            segment(true, 1_000 + upgrade.len() as u32, &to_server),
+            segment(false, 9_000 + switching.len() as u32, &to_client),
+        ];
+        let rows: Vec<(u32, u32, &[u8])> = packets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (i as u32, 0, p.as_slice()))
+            .collect();
+        let file = wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &rows);
+        let dissection = wz_capture::Dissection::from_capture(&file).expect("the capture reads");
+        assert!(
+            dissection.flows()[0].framing().is_websocket(),
+            "the fixture must be a ws flow"
+        );
+
+        let got = samples(&file, None).expect("the fixture is a readable capture");
+        let mut keys: Vec<&str> = got.items.iter().map(|s| s.keyexpr.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["demo/ws/down", "demo/ws/up"],
+            "every ws message's Put is replayable (undecodable={})",
+            got.undecodable
+        );
+        assert_eq!(got.undecodable, 0, "no ws message walked as other bytes");
     }
 
     /// Round 2443 (open-debt item 694) — SAMPLES COME OFF A RAWETH CAPTURE,
@@ -8874,16 +8921,17 @@ mod message_name_tests {
         out
     }
 
-    /// [`message_bytes`] over `stream` held whole from offset 0.
+    /// The bytes of `frame`'s message in `stream`, held whole from offset 0:
+    /// from [`message_at`] to the end of its unit.
     fn sliced<'a>(
         stream: &'a [u8],
         frame: &wz_session_core::passive::PassiveFrame,
     ) -> Result<std::borrow::Cow<'a, [u8]>, String> {
-        message_bytes(
-            0..stream.len(),
-            |from, to| stream.get(from..to).map(std::borrow::Cow::Borrowed),
-            frame,
-        )
+        let end = frame.stream_offset + frame.prefix_width + frame.unit_len;
+        stream
+            .get(message_at(frame)..end)
+            .map(std::borrow::Cow::Borrowed)
+            .ok_or_else(|| String::from("outside the stream"))
     }
 
     /// R311y682 (§1.1n) — A ROW WHOSE TWO READERS DISAGREE IS DECLINED, and
