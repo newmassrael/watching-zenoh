@@ -45,6 +45,13 @@ macro zenoh_codec::impl_zextz64
 mod zenoh_codec::common
 mod zenoh_codec::common::extension
 mod zenoh_codec::core
+mod zenoh_codec::scouting
+mod zenoh_codec::zenoh
+mod zenoh_codec::zenoh::del
+mod zenoh_codec::zenoh::err
+mod zenoh_codec::zenoh::put
+mod zenoh_codec::zenoh::query
+mod zenoh_codec::zenoh::reply
 struct zenoh_codec::Zenoh080
 struct zenoh_codec::Zenoh080Bounded
 struct zenoh_codec::Zenoh080Condition

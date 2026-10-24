@@ -28,6 +28,8 @@ extern crate alloc;
 
 pub mod common;
 pub mod core;
+pub mod scouting;
+pub mod zenoh;
 
 use ::core::marker::PhantomData;
 use zenoh_protocol::core::Reliability;
@@ -139,10 +141,7 @@ impl<T> Zenoh080Bounded<T> {
     }
 }
 
-// The codecs of a sliced buffer read both fields and arrive with `zenoh-shm`, the member whose
-// buffers they carry; until then the fields are written and not read.
 #[cfg(feature = "shared-memory")]
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub struct Zenoh080Sliced<T> {
     is_sliced: bool,

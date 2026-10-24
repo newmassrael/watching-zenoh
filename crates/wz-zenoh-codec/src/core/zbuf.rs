@@ -100,3 +100,98 @@ impl LCodec<&ZBuf> for Zenoh080 {
         zodec.w_len(message)
     }
 }
+
+// ZBuf sliced
+//
+// A buffer of slices that are each tagged with what they hold. The kind of a slice that points into
+// shared memory is carried by a buffer of `zenoh-shm`, the member of the family that follows the
+// codec (debt-910): until it lands, a slice of that kind cannot be made by a program of this
+// graph, and the codec refuses it in both directions where upstream writes the descriptor it finds
+// in it and reads one back. The raw kind is complete.
+#[cfg(feature = "shared-memory")]
+mod shm {
+    use zenoh_buffers::ZSliceKind;
+
+    use super::*;
+    use crate::Zenoh080Sliced;
+
+    const RAW: u8 = 0;
+    const SHM_PTR: u8 = 1;
+
+    macro_rules! zbuf_sliced_impl {
+        ($bound:ty) => {
+            impl LCodec<&ZBuf> for Zenoh080Sliced<$bound> {
+                fn w_len(self, message: &ZBuf) -> usize {
+                    if self.is_sliced {
+                        message.zslices().fold(0, |acc, x| acc + 1 + x.len())
+                    } else {
+                        self.codec.w_len(message)
+                    }
+                }
+            }
+
+            impl<W> WCodec<&ZBuf, &mut W> for Zenoh080Sliced<$bound>
+            where
+                W: Writer,
+            {
+                type Output = Result<(), DidntWrite>;
+
+                #[inline(always)]
+                fn write(self, writer: &mut W, x: &ZBuf) -> Self::Output {
+                    if self.is_sliced {
+                        self.codec.write(&mut *writer, x.zslices().count())?;
+
+                        for zs in x.zslices() {
+                            match zs.kind {
+                                ZSliceKind::Raw => {
+                                    self.codec.write(&mut *writer, RAW)?;
+                                    self.codec.write(&mut *writer, zs)?;
+                                }
+                                ZSliceKind::ShmPtr => return Err(DidntWrite),
+                            }
+                        }
+                    } else {
+                        self.codec.write(&mut *writer, x)?;
+                    }
+
+                    Ok(())
+                }
+            }
+
+            impl<R> RCodec<ZBuf, &mut R> for Zenoh080Sliced<$bound>
+            where
+                R: Reader,
+            {
+                type Error = DidntRead;
+
+                #[inline(always)]
+                fn read(self, reader: &mut R) -> Result<ZBuf, Self::Error> {
+                    if self.is_sliced {
+                        let num: usize = self.codec.read(&mut *reader)?;
+                        let mut zbuf = ZBuf::empty();
+                        for _ in 0..num {
+                            let kind: u8 = self.codec.read(&mut *reader)?;
+                            match kind {
+                                RAW => {
+                                    let len: usize = self.codec.read(&mut *reader)?;
+                                    reader.read_zslices(len, |s| zbuf.push_zslice(s))?;
+                                }
+                                SHM_PTR => return Err(DidntRead),
+                                _ => return Err(DidntRead),
+                            }
+                        }
+                        Ok(zbuf)
+                    } else {
+                        self.codec.read(reader)
+                    }
+                }
+            }
+        };
+    }
+
+    zbuf_sliced_impl!(u8);
+    zbuf_sliced_impl!(u16);
+    zbuf_sliced_impl!(u32);
+    zbuf_sliced_impl!(u64);
+    zbuf_sliced_impl!(usize);
+}

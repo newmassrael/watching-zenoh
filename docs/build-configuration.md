@@ -137,9 +137,9 @@ original reproduced by naming it. Three things follow from it:
   message may carry and the zenoh, network and transport messages, 1,567 of 1,567 default
   lines and 1,581 with `shared-memory`, held to upstream's by differential tests of each module),
   `zenoh-codec` (in progress: the codec traits, the integer, byte string, array and buffer codecs,
-  the codecs of the core types and the extensions, 52 of 95 default lines; the scouting, zenoh,
-  network and transport messages and the shared-memory arm missing; this crate's surface is
-  small, so the bytes are held by differential tests of the wire format)
+  the codecs of the core types and the extensions, and the scouting and zenoh messages, 59 of 95
+  default lines; the network and transport messages and the shared-memory descriptors missing;
+  this crate's surface is small, so the bytes are held by differential tests of the wire format)
   and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each

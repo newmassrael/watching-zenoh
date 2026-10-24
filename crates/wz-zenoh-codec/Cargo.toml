@@ -40,7 +40,8 @@ path = "src/lib.rs"
 # Upstream's features by their names and by what they turn on in the crates below. `tracing` is what
 # a skipped extension is logged through, and only with `std`, as upstream's. `shared-memory` is
 # upstream's plus `zenoh-shm`, which joins it with the member of that name: until then the feature
-# carries the codec of a slice (`Zenoh080Sliced`) and not the one of a shared-memory buffer.
+# carries the codecs of a buffer of slices and the extension that marks one (`Zenoh080Sliced`), for
+# the raw slices, and refuses a slice that points into shared memory in both directions.
 [features]
 default = ["std"]
 shared-memory = [

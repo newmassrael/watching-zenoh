@@ -170,7 +170,7 @@ MEMBERS: tuple[Member, ...] = (
            split_wz=True),
     Member("zenoh-codec", "zenoh_codec", "zenoh-codec",
            (("default", ""), ("shared-memory", "shared-memory")),
-           {"default": 43, "shared-memory": 46}, split_wz=True),
+           {"default": 36, "shared-memory": 36}, split_wz=True),
 )
 
 

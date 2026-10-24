@@ -125,7 +125,9 @@ MIN_REASONS = 40
 #: carried out by the R2408..R2415 re-gradings, and this gate could not say so
 #: because the leg ahead of it in Layer Z was red the whole time. Ratchets only
 #: move down here; the direction is the gate's own instruction.
-LINE_BUDGET = 24
+#: 24 -> 23 (R3569). The one bare line-form pair of `attachment-bytes` that named upstream's reply
+#: and delete messages left with the repair that rooted both (see FINDINGS_BUDGET).
+LINE_BUDGET = 23
 #: 9 -> 7 (R2371). The `transport-stats` re-tag rewrote that atom's whole reason
 #: against the pin. Its two bare citations both named the 1.5.0-era
 #: transport-side stats module, which does not exist at 1.10.0 at all, so they
@@ -192,7 +194,11 @@ BARE_BUDGET = 6
 #: 9 -> 8 (R2416). Followed DOWN, like LINE_BUDGET above and for the same
 #: reason: a re-grading between R2408 and R2415 retired one unresolved claim
 #: while this gate sat behind a red leg and could not report it.
-FINDINGS_BUDGET = 8
+#: 8 -> 7 (R3569). The second slice of the codec family crate gave `reply.rs` and `del.rs` a
+#: tracked meaning in this tree, and the one citation of `attachment-bytes` they made ambiguous
+#: was rooted at upstream's `commons/zenoh-protocol/src/zenoh/` with a line of its text, which
+#: also resolves an unresolved claim the pair carried.
+FINDINGS_BUDGET = 7
 
 #: ROOT-LESS AXIS (open debt 754). The classifier this gate borrows sorts every
 #: citation into EIGHT buckets; until debt 754 was paid this gate held three and
