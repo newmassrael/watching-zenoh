@@ -158,8 +158,16 @@ network_stack = "io-sock"
 std = "build-std"
 toolchain_env_extra = ["QNX_HOST", "QNX_TARGET"]
 lane = "none"
-support = "untried"
-help = "QNX 7.1 on aarch64le with the io-sock network stack; no wz build of it has been tried."
+support = "blocked"
+sdk_kind = "qnx-sdp"
+# What the QNX 7.1 SDP headers declare for the io-sock stack, read from them and NOT run on a board:
+# pthread_create, TCP and UDP sockets, AF_UNIX, IP_ADD_MEMBERSHIP, getifaddrs, the wall clock, files.
+# `entropy` is the board's random device, which no header declares (there is no getrandom or
+# getentropy), so it rests on that service running. `raw-ethernet` is left out: SOCK_RAW is an IP raw
+# socket, and the link level on QNX is BPF.
+os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
+system_assumed = ["libsocket.so.4", "libgcc_s.so.1", "libc.so.5", "libm.so.3"]
+help = "QNX 7.1 on aarch64le with the io-sock network stack. The session node and driver (`ap-demo`) compile and link with the SDP's GCC 8.3 and measure the NEEDED set above; the two C libraries do not build yet (see the docs of wz-capi-pico and wz-capi-c on QNX), so the row is blocked. The IPv6 group join, the keep-alive idle time and the peer credential answer Unsupported until libc declares them for io-sock (the headers have ipv6_mreq, TCP_KEEPIDLE and LOCAL_PEERCRED). Nothing was run on a board."
 
 [[platform]]
 id = "qnx710-iopkt-aarch64"
@@ -170,8 +178,13 @@ network_stack = "io-pkt"
 std = "build-std"
 toolchain_env_extra = ["QNX_HOST", "QNX_TARGET"]
 lane = "none"
-support = "untried"
-help = "QNX 7.1 on aarch64le with the io-pkt network stack; no wz build of it has been tried."
+support = "blocked"
+sdk_kind = "qnx-sdp"
+# What the QNX 7.1 SDP headers declare for the io-pkt stack, read from them and NOT run on a board;
+# the same set as the io-sock row (IP_ADD_MEMBERSHIP and getifaddrs are declared in usr/include).
+os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
+system_assumed = ["libsocket.so.3", "libgcc_s.so.1", "libc.so.5", "libm.so.3"]
+help = "QNX 7.1 on aarch64le with the io-pkt stack. The session node and driver (`ap-demo`) compile and link with the SDP's GCC 8.3 and measure the NEEDED set above, which differs from the io-sock row in libsocket only; the two C libraries do not build yet, so the row is blocked. The IPv6 group join answers Unsupported. Nothing was run on a board."
 
 # The one platform the entry has run on: the x86_64 Linux host the workspace is built and tested
 # on. `os_provides` is what the lanes exercise there (every facility, `raw-ethernet` with the

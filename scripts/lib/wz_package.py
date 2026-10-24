@@ -41,6 +41,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -399,7 +400,8 @@ def verify_dir(out: pathlib.Path, decl: dict, resolver=None) -> list[str]:
     if (sdk or {}).get("kind") != row.get("sdk_kind") and sdk is not None:
         findings.append(f"toolchain.sdk is a `{sdk.get('kind')}` and the platform row names "
                         f"`{row.get('sdk_kind')}`")
-    sdk_keys = {"android-ndk": {"kind", "revision"}, "yocto": {"kind", "revision", "target_arch", "target_os"}}
+    sdk_keys = {"android-ndk": {"kind", "revision"}, "qnx-sdp": {"kind", "revision"},
+                "yocto": {"kind", "revision", "target_arch", "target_os"}}
     if sdk is not None and set(sdk) != sdk_keys.get(sdk.get("kind"), set()):
         findings.append(f"toolchain.sdk has the keys {sorted(sdk)}, the entry writes "
                         f"{sorted(sdk_keys.get(sdk.get('kind'), set())) or 'a kind it knows'} for that kind")
@@ -503,6 +505,23 @@ def read_ndk_revision(cc: str) -> str | None:
     return None
 
 
+def read_qnx_sdp_release(target: str) -> str | None:
+    """The SDP release a `QNX_TARGET` belongs to: the one directory under the SDP's
+    `.packages/metadata/com.qnx.qnx<NNN>` (the release package, not one of its parts), two levels
+    above the target directory. None when there is not exactly one, so a tree that holds two
+    releases is refused rather than guessed. Only the directory's name is returned, never a path."""
+    if not target.strip():
+        return None
+    root = pathlib.Path(target).resolve().parent.parent
+    metadata = root / ".packages" / "metadata"
+    if not metadata.is_dir():
+        return None
+    releases = sorted(entry.name for package in metadata.iterdir()
+                      if re.fullmatch(r"com\.qnx\.qnx\d+", package.name) and package.is_dir()
+                      for entry in package.iterdir() if entry.is_dir())
+    return releases[0] if len(releases) == 1 else None
+
+
 def sdk_identity(platform: dict, cross: bool) -> dict | None:
     """What identifies the SDK a cross build used; None for a native build (T2).
 
@@ -525,8 +544,15 @@ def sdk_identity(platform: dict, cross: bool) -> dict | None:
             raise Refusal(f"platform {platform['id']} names a yocto SDK and {', '.join(missing)} is not set: "
                           "source the SDK's environment script (scripts/yocto-toolchain-env.sh does)")
         return {"kind": kind, **values}
+    if kind == "qnx-sdp":
+        release = read_qnx_sdp_release(os.environ.get("QNX_TARGET", ""))
+        if release is None:
+            raise Refusal(f"platform {platform['id']} names a qnx-sdp SDK and QNX_TARGET does not lead to exactly "
+                          "one release under .packages/metadata: source the SDP's environment script "
+                          "(scripts/qnx-toolchain-env.sh does)")
+        return {"kind": kind, "revision": release}
     if kind != "android-ndk":
-        raise Refusal(f"platform {platform['id']}: the entry cannot read a `{kind}` SDK yet")
+        raise Refusal(f"platform {platform['id']}: the entry cannot read a `{kind}` SDK")
     cc = os.environ.get(f"CC_{platform['triple'].replace('-', '_')}", "")
     revision = read_ndk_revision(cc)
     if revision is None:
@@ -559,6 +585,21 @@ def package_name(package_id: str) -> str:
     return package_id.split(" ", 1)[0]
 
 
+def cargo_argv(platform: dict, cross: bool, row: dict, cargo_profile: str,
+               extra_args: list[str] | None = None) -> list[str]:
+    """The cargo command that builds one artifact. A platform whose `std` is `build-std` has no
+    prebuilt standard library, so the command builds it (`-Z` needs a nightly cargo, which is the
+    caller's to put first, as it is the caller's to provide the SDK)."""
+    argv = ["cargo", "build", "-p", row["package"], "--message-format=json-render-diagnostics"]
+    if cargo_profile == "release":
+        argv.append("--release")
+    if cross:
+        argv += ["--target", platform["triple"]]
+        if platform.get("std") == "build-std":
+            argv += ["-Z", "build-std=std,panic_abort"]
+    return argv + (extra_args or [])
+
+
 def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
                 extra_args: list[str] | None = None, extra_env: dict[str, str] | None = None
                 ) -> tuple[pathlib.Path, list[str], dict[str, list[str]]]:
@@ -567,12 +608,7 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
 
     `extra_args` and `extra_env` are what a profile adds: the feature selection and the limits.
     """
-    argv = ["cargo", "build", "-p", row["package"], "--message-format=json-render-diagnostics"]
-    if cargo_profile == "release":
-        argv.append("--release")
-    if cross:
-        argv += ["--target", platform["triple"]]
-    argv += extra_args or []
+    argv = cargo_argv(platform, cross, row, cargo_profile, extra_args)
     run = subprocess.run(argv, cwd=ROOT / "crates", stdout=subprocess.PIPE, text=True, check=False,
                          env={**os.environ, **(extra_env or {})})
     if run.returncode != 0:
@@ -963,11 +999,49 @@ def _selftest() -> int:
                 os.environ.pop(var, None)
             else:
                 os.environ[var] = saved_cc
+    qnx_plat = next(p for p in decl["platforms"] if p["id"] == "qnx710-iosock-aarch64")
+    demo_row = next(a for a in decl["artifacts"] if a["id"] == "ap-demo")
+    expect("a platform with no prebuilt std is built with build-std",
+           cargo_argv(qnx_plat, True, demo_row, "release")[-4:]
+           == ["--target", qnx_plat["triple"], "-Z", "build-std=std,panic_abort"])
+    expect("a platform with a prebuilt std is not",
+           "-Z" not in cargo_argv(next(p for p in decl["platforms"] if p["id"] == "android-arm64"),
+                                  True, demo_row, "release"))
+    expect("a native build is not, whatever its std row says",
+           "-Z" not in cargo_argv(qnx_plat, False, demo_row, "release"))
     expect("a native build has no SDK identity", sdk_identity(platform, False) is None)
     refuses("a cross platform that names no sdk kind", "names no sdk_kind",
             lambda: sdk_identity({"id": "x", "triple": "t-1"}, True))
-    refuses("an sdk kind the entry cannot read", "cannot read a `qnx-sdp` SDK",
-            lambda: sdk_identity({"id": "x", "triple": "t-1", "sdk_kind": "qnx-sdp"}, True))
+    refuses("an sdk kind the entry cannot read", "cannot read a `gcc` SDK",
+            lambda: sdk_identity({"id": "x", "triple": "t-1", "sdk_kind": "gcc"}, True))
+    with tempfile.TemporaryDirectory(prefix="wz-qnx-") as qnx:
+        sdp = pathlib.Path(qnx)
+        (sdp / "target" / "qnx7").mkdir(parents=True)
+        meta = sdp / ".packages" / "metadata"
+        (meta / "com.qnx.qnx710" / "7.1.0.00472T202006132107S").mkdir(parents=True)
+        (meta / "com.qnx.qnx710.target.net.iosock" / "1.0").mkdir(parents=True)
+        target = str(sdp / "target" / "qnx7")
+        expect("the SDP release is the one directory of the release package, not of a part",
+               read_qnx_sdp_release(target) == "7.1.0.00472T202006132107S")
+        (meta / "com.qnx.qnx710" / "7.1.1.0").mkdir()
+        expect("two releases under one SDP give none", read_qnx_sdp_release(target) is None)
+        expect("an empty QNX_TARGET gives none", read_qnx_sdp_release("") is None)
+        expect("a target outside any SDP gives none", read_qnx_sdp_release("/usr") is None)
+        (meta / "com.qnx.qnx710" / "7.1.1.0").rmdir()
+        qnx_row = {"id": "x", "triple": "t-1", "sdk_kind": "qnx-sdp"}
+        saved_t = os.environ.get("QNX_TARGET")
+        os.environ["QNX_TARGET"] = target
+        try:
+            expect("a QNX build records the SDP release and kind only",
+                   sdk_identity(qnx_row, True) == {"kind": "qnx-sdp", "revision": "7.1.0.00472T202006132107S"})
+            os.environ["QNX_TARGET"] = "/usr"
+            refuses("a QNX build whose target leads to no release", "exactly one release",
+                    lambda: sdk_identity(qnx_row, True))
+        finally:
+            if saved_t is None:
+                os.environ.pop("QNX_TARGET", None)
+            else:
+                os.environ["QNX_TARGET"] = saved_t
     yocto_vars = ("OECORE_SDK_VERSION", "OECORE_TARGET_ARCH", "OECORE_TARGET_OS")
     saved_y = {v: os.environ.pop(v) for v in yocto_vars if v in os.environ}
     try:
