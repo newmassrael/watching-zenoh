@@ -209,16 +209,6 @@ KINDS = ("foreign",)
 #: the reason that is correct. `paths` must EQUAL the files whose prose names
 #: it; `owner` is required for `foreign` and must itself be live in non-prose.
 ABSENT: dict[str, tuple[str, str | None, tuple[str, ...]]] = {
-    # The ELF dynamic tag. The gate beside this row runs `readelf -d` and reads
-    # the SONAME out of its output; nothing in the tree spells the tag.
-    "DT_SONAME": (
-        "foreign",
-        "readelf",
-        (
-            "scripts/lib/cdylib_soname_gate.py",
-            "scripts/lib/prose_named_identifier_gate.py",
-        ),
-    ),
     # The dlopen flag that keeps two `z_*` symbol sets apart. The loader is
     # reached through the crate, which is what the lockfile carries.
     "RTLD_LOCAL": (

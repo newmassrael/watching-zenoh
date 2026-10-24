@@ -5810,6 +5810,14 @@ jobs:
         # rather than stated here. It needs no oracle: the stamp is read from the built files.
         run: bash scripts/run-ci.sh --layer C1st
 
+      - name: Layer C1sp — every provisioned cross platform packages and verifies
+        # `docs/target-build-contract.md` T11. This job provisions no cross toolchain (the runner
+        # image's NDK is another release than the one the Android row's lane was read with), so the
+        # lane prints which platforms it did not run and passes: the hosted log is where that is
+        # visible, and it is the reason the lane is wired here at all. It cannot fail for want of a
+        # toolchain, and no arming flag pretends it can (`armed_skip_guard.py`).
+        run: bash scripts/run-ci.sh --layer C1sp
+
       - name: Layer P — throughput differential against the real libzenohc
         # In THIS job because it needs what this job already provisions: the zenoh-c
         # oracle (the same cache key as the steps above) and its upstream examples,
