@@ -281662,6 +281662,60 @@
         "Next: the cooperative engine (D8) over ClientNode and PosixLinks as a second SessionDrive and SessionEngine, selectable beside the tokio one, with a size-gate case beside pico-client and round trips against a pinned zenohd and pico. Rule kept: an ABI crate never coerces an engine type to a port trait object nor drops a boxed engine session; the engine crate hands out as_engine, engine_ref and into_drive (watch pico-client and pico-default text against origin). Read the hosted CI of d06e38645 and of this push."
       ]
     },
+    "Round 3502": {
+      "decision_summary": "The fixed-memory profile's secure channel sits behind the cooperative runtime's stream port as a stream over a stream. The port is split in two: StreamSocket is the I/O of a connected stream and StreamDial is a value the stack holds to open one, so what a dial needs besides an address (an identity) belongs to the dial and the stream link stays written once. The backend is its own crate, wz-tls-mbedtls, over the Mbed TLS revision the Zephyr workspace pins, carried as two submodules and built through its own CMake with a configuration that states the kit image's choices. Its C side keeps every Mbed TLS structure in the static arena and Rust holds only pointers, so no layout crosses the boundary. Against a rustls server built the way zenohd 1.10.1 builds its mutual-TLS server, a device pinned by its own self-signed certificate is admitted and a stranger's pin refuses it.",
+      "changes_bullets": [
+        "crates/wz-runtime-coop: StreamSocket loses connect; StreamDial opens a stream; IpStack and IpLinks hold a dial value.",
+        "crates/wz-runtime-posix: PosixTcpDial is the host's dial; a process with no descriptor left is Exhausted, not Refused.",
+        "deploy/host-slot-node: the stack is given PosixTcpDial.",
+        "vendor/mbedtls and vendor/tf-psa-crypto: the Zephyr workspace's pins of Mbed TLS 4.1.0 and TF-PSA-Crypto 1.1.0; THIRD_PARTY.md records them.",
+        "crates/wz-tls-mbedtls: new crate; config headers, the C side (wz_tls.c), channel (identity, session) and stream (TlsStream, TlsDial), unit tests and a rustls peer test.",
+        "docs/session-lifecycle-intent.md: D9 records the channel behind the port and the missing TLS 1.3 KeyUpdate."
+      ],
+      "verification_bullets": [
+        "On the build machine: wz-runtime-coop lib tests on the heap profile (54) and the slot profile (47), wz-runtime-posix on both profiles (20 and 19), clippy with -D warnings on both crates and profiles, the host-slot-node image clean under the no-allocator gate in both builds, rustdoc Layer C1bz pass.",
+        "wz-tls-mbedtls: 2 unit tests (the identity's zid equals the session core's derivation over its certificate's key; two sessions prove their keys, each names the other's zid, 1,024 bytes cross, close_notify reads as the end; arena peak 49,008 B for both on a 64-bit host) and 2 rustls peer tests (zenohd's mTLS construction admits the device and the router's key zid matches rcgen's key; a stranger's pin refuses the dial); clippy -D warnings on the default and the slot profile.",
+        "Static gates run locally: feature_gate_diagnostic, feature_public_surface_census --check, upstream_citation_anchor_gate, prose_feature_gate --check, workspace_exclude_lane_gate.",
+        "Not run: a zenohd process over the channel, the kit image over the crate."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "The tls/ locator kind (LinkProto::Tls, told to watching-zenoh-11 before its commit) and a stack that dials it, with the stream link naming the tls/ scheme in its endpoints.",
+        "The verified zid on the cooperative session, then session-close-ingress forwarded to the cooperative runtime again under secure-channel.",
+        "A zenohd process over the channel; the Zephyr TCP StreamSocket and the kit image over wz-tls-mbedtls; the 18 percent gap, p256-m, persistent keys and the in-handshake pin from Round 3495 remain.",
+        "Mbed TLS 4.1 refuses a TLS 1.3 KeyUpdate, so a link that reaches the record count at which a rustls peer updates its keys would end there; not measured."
+      ],
+      "publishable_decision_summary": "The fixed-memory profile's secure channel sits behind the cooperative runtime's stream port as a stream over a stream. The port is split in two: StreamSocket is the I/O of a connected stream and StreamDial is a value the stack holds to open one, so what a dial needs besides an address (an identity) belongs to the dial and the stream link stays written once. The backend is its own crate, wz-tls-mbedtls, over the Mbed TLS revision the Zephyr workspace pins, carried as two submodules and built through its own CMake with a configuration that states the kit image's choices. Its C side keeps every Mbed TLS structure in the static arena and Rust holds only pointers, so no layout crosses the boundary. Against a rustls server built the way zenohd 1.10.1 builds its mutual-TLS server, a device pinned by its own self-signed certificate is admitted and a stranger's pin refuses it.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-coop: StreamSocket loses connect; StreamDial opens a stream; IpStack and IpLinks hold a dial value.",
+        "crates/wz-runtime-posix: PosixTcpDial is the host's dial; a process with no descriptor left is Exhausted, not Refused.",
+        "deploy/host-slot-node: the stack is given PosixTcpDial.",
+        "vendor/mbedtls and vendor/tf-psa-crypto: the Zephyr workspace's pins of Mbed TLS 4.1.0 and TF-PSA-Crypto 1.1.0; THIRD_PARTY.md records them.",
+        "crates/wz-tls-mbedtls: new crate; config headers, the C side (wz_tls.c), channel (identity, session) and stream (TlsStream, TlsDial), unit tests and a rustls peer test.",
+        "docs/session-lifecycle-intent.md: D9 records the channel behind the port and the missing TLS 1.3 KeyUpdate."
+      ],
+      "publishable_verification_bullets": [
+        "On the build machine: wz-runtime-coop lib tests on the heap profile (54) and the slot profile (47), wz-runtime-posix on both profiles (20 and 19), clippy with -D warnings on both crates and profiles, the host-slot-node image clean under the no-allocator gate in both builds, rustdoc Layer C1bz pass.",
+        "wz-tls-mbedtls: 2 unit tests (the identity's zid equals the session core's derivation over its certificate's key; two sessions prove their keys, each names the other's zid, 1,024 bytes cross, close_notify reads as the end; arena peak 49,008 B for both on a 64-bit host) and 2 rustls peer tests (zenohd's mTLS construction admits the device and the router's key zid matches rcgen's key; a stranger's pin refuses the dial); clippy -D warnings on the default and the slot profile.",
+        "Static gates run locally: feature_gate_diagnostic, feature_public_surface_census --check, upstream_citation_anchor_gate, prose_feature_gate --check, workspace_exclude_lane_gate.",
+        "Not run: a zenohd process over the channel, the kit image over the crate."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The tls/ locator kind (LinkProto::Tls, told to watching-zenoh-11 before its commit) and a stack that dials it, with the stream link naming the tls/ scheme in its endpoints.",
+        "The verified zid on the cooperative session, then session-close-ingress forwarded to the cooperative runtime again under secure-channel.",
+        "A zenohd process over the channel; the Zephyr TCP StreamSocket and the kit image over wz-tls-mbedtls; the 18 percent gap, p256-m, persistent keys and the in-handshake pin from Round 3495 remain.",
+        "Mbed TLS 4.1 refuses a TLS 1.3 KeyUpdate, so a link that reaches the record count at which a rustls peer updates its keys would end there; not measured."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
