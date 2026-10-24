@@ -221,6 +221,16 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
+        "self.spans.remove(&row.end_key());",
+        "Open-debt item 924, step 5 — the stretches of the stream a unit joined out "
+        "of several (a fragmented WebSocket message) is read from, let go with the "
+        "unit's last row (that row leaves in the `#[must_use] Discarded` receipt "
+        "after the unit was read once more for it) or when the unit's rows are "
+        "kept whole (the frames were read from them before this line); no row "
+        "still held reads them",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
         "None => self.wire_ends.remove(&key),",
         "Open-debt item 924, step 4c — a restatement that gives a unit no end "
         "on the wire: the unit's rows stay held and now state none, which is "

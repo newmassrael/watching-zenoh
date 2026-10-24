@@ -49,6 +49,7 @@
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use wz_session_core::passive_messages::StreamSpan;
 
 /// A continuation of the previous frame's message.
 const OP_CONTINUATION: u8 = 0x0;
@@ -444,11 +445,11 @@ pub struct WsDeframer {
     /// Stream offset of the FIRST frame of `partial`, or `None` when no
     /// message is in progress.
     partial_offset: Option<usize>,
-    /// Where the payload of `partial` stands in the stream, and whether it stands
-    /// there masked, when the message so far is one frame: the stream holds the
-    /// payload, or the payload XORed with the four bytes before it. `None` once
-    /// a continuation joins it, because a joined payload stands nowhere in it.
-    partial_in_stream: Option<(usize, bool)>,
+    /// Where the payload of each frame of `partial` stands in the stream, in
+    /// order, and whether it stands there masked: the stream holds the payload,
+    /// or the payload XORed with the four bytes before it. A message is one of
+    /// these, or several when a continuation joins it.
+    partial_spans: Vec<StreamSpan>,
     /// R311y612 — `Some` while this direction is looking for its framing.
     ///
     /// Was a terminal `bool` until R311y612 (§4.2): a deframer that had lost
@@ -485,7 +486,7 @@ impl Default for WsDeframer {
             preamble_done: false,
             partial: Vec::new(),
             partial_offset: None,
-            partial_in_stream: None,
+            partial_spans: Vec::new(),
             desync: None,
             pending_resync: VecDeque::new(),
             accounting: WsResyncAccounting::default(),
@@ -570,7 +571,7 @@ impl WsDeframer {
         // is the one outcome worse than reporting none.
         self.partial = Vec::new();
         self.partial_offset = None;
-        self.partial_in_stream = None;
+        self.partial_spans = Vec::new();
         if self.desync.is_none() {
             self.accounting.desyncs += 1;
             self.desync = Some(WsDesyncState {
@@ -794,9 +795,9 @@ impl WsDeframer {
                         self.desynchronise(WsDesyncReason::MessageBoundary);
                         return None;
                     }
+                    self.partial_spans = alloc::vec![frame.span()];
                     self.partial = frame.payload;
                     self.partial_offset = Some(frame_start);
-                    self.partial_in_stream = Some((frame.payload_at, frame.masked));
                     if frame.fin {
                         return Some(self.take_partial());
                     }
@@ -811,8 +812,9 @@ impl WsDeframer {
                         return None;
                     }
                     self.partial.extend_from_slice(&frame.payload);
-                    // Joined out of frames, the payload stands nowhere in the stream.
-                    self.partial_in_stream = None;
+                    // Joined out of frames, the payload stands as one run nowhere
+                    // in the stream: it stands in these stretches, in order.
+                    self.partial_spans.push(frame.span());
                     if frame.fin {
                         return Some(self.take_partial());
                     }
@@ -833,12 +835,10 @@ impl WsDeframer {
     /// offset that frame ended at.
     fn take_partial(&mut self) -> Option<WsMessage> {
         let offset = self.partial_offset.take()?;
-        let in_stream = self.partial_in_stream.take();
         Some(WsMessage {
             offset,
             end: self.base,
-            payload_at: in_stream.map(|(at, _)| at),
-            masked: in_stream.is_some_and(|(_, masked)| masked),
+            spans: core::mem::take(&mut self.partial_spans),
             payload: core::mem::take(&mut self.partial),
         })
     }
@@ -957,15 +957,14 @@ pub struct WsMessage {
     /// Stream offset just past its last frame, exclusive. Control frames
     /// interleaved inside a fragmented message lie between the two.
     pub end: usize,
-    /// Stream offset of [`Self::payload`]'s first byte when the message is one
-    /// frame, so that `payload.len()` bytes from here are the payload (as
-    /// [`Self::masked`] says: as they are, or XORed with the four bytes that
-    /// stand just before them). `None` for a message joined out of fragments,
-    /// whose payload stands nowhere in the stream.
-    pub payload_at: Option<usize>,
-    /// Whether the bytes at [`Self::payload_at`] are masked. `false` when
-    /// there is no `payload_at`.
-    pub masked: bool,
+    /// Where the payload of each of the message's frames stands in the stream, in
+    /// order, as it stands or XORed with the four bytes before it
+    /// ([`StreamSpan::masked`]): one for a message that is one frame, so that its
+    /// `payload.len()` bytes from there are the payload, several for one joined
+    /// out of fragments, whose payload is those stretches one after another and
+    /// stands as one run nowhere in the stream. Control frames interleaved
+    /// inside the message are none of them.
+    pub spans: Vec<StreamSpan>,
     /// The message's payload, every frame's unmasked and joined.
     pub payload: Vec<u8>,
 }
@@ -979,6 +978,20 @@ struct ParsedFrame {
     /// Stream offset of the payload's first byte.
     payload_at: usize,
     payload: Vec<u8>,
+}
+
+impl ParsedFrame {
+    /// Where this frame's payload stands in the stream.
+    fn span(&self) -> StreamSpan {
+        StreamSpan {
+            at: self.payload_at,
+            // A payload past `u32` is past `MAX_WS_PAYLOAD` too, which the walk
+            // refuses before it gets here; the sum of the spans is checked
+            // against the payload's length by whoever places it.
+            len: u32::try_from(self.payload.len()).unwrap_or(u32::MAX),
+            masked: self.masked,
+        }
+    }
 }
 
 /// What [`WsDeframer::take_frame`] found.

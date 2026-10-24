@@ -376,7 +376,7 @@ impl MessageList {
             self.note_chain(produced + k as u64, frame);
         }
         self.index()
-            .push_unit(produced, start, &frames, Locus::Streamed);
+            .push_unit(produced, start, &frames, Locus::Streamed, None);
         self.produced += frames.len() as u64;
     }
 
@@ -403,6 +403,7 @@ impl MessageList {
             unit,
             bytes.len(),
             |log| log.place(bytes, in_container),
+            None,
             handshake,
         );
     }
@@ -435,16 +436,42 @@ impl MessageList {
         } else {
             LogPlace::Stream(at)
         };
-        self.push_logged(unit, len, |_| place, handshake);
+        self.push_logged(unit, len, |_| place, None, handshake);
     }
 
-    /// The body of both: the unit's `len` bytes are at the place `place` gives
-    /// the log, and its records are read again from there.
+    /// [`Self::push_datagram_in_stream`] for a unit joined out of several
+    /// stretches of the stream, in order: a WebSocket message fragmented into
+    /// frames, whose payload is the frames' payloads one after another and so
+    /// stands as one run nowhere in the stream. The list keeps the stretches
+    /// (once per unit, [`LogPlace::Frames`]) and joins them as it reads, a copy
+    /// that lives for the read, and is told before the stream lets go of the
+    /// first of them, as for a unit that is one stretch.
+    ///
+    /// `spans` must not be empty. A unit of one stretch is
+    /// [`Self::push_datagram_in_stream`]'s.
+    pub fn push_datagram_in_frames(
+        &mut self,
+        unit: ReadUnit,
+        spans: Vec<StreamSpan>,
+        handshake: LinkHandshake,
+    ) {
+        let Some(first) = spans.first() else {
+            unreachable!("a unit joined out of stretches has one");
+        };
+        let place = LogPlace::Frames(first.needs_from());
+        let len = spans.iter().map(|span| span.len as usize).sum();
+        self.push_logged(unit, len, |_| place, Some(spans), handshake);
+    }
+
+    /// The body of all three: the unit's `len` bytes are at the place `place`
+    /// gives the log, and its records are read again from there. `spans` are the
+    /// stretches of a [`LogPlace::Frames`] unit, which the index keeps.
     fn push_logged(
         &mut self,
         unit: ReadUnit,
         len: usize,
         place: impl FnOnce(&mut UnitLog) -> LogPlace,
+        spans: Option<Vec<StreamSpan>>,
         handshake: LinkHandshake,
     ) {
         let ReadUnit { start, frames } = unit;
@@ -478,6 +505,7 @@ impl MessageList {
                 handshake,
                 wire_end,
             },
+            spans,
         );
         self.produced += frames.len() as u64;
     }
@@ -669,6 +697,58 @@ pub trait UnitBytes {
     }
 }
 
+/// One stretch of a direction's reassembled stream that holds part of a unit's
+/// bytes: the payload of one WebSocket frame, as it stands or masked by the four
+/// bytes before it.
+///
+/// A unit joined out of several of them (a message fragmented into frames) is the
+/// stretches read in order, which the list keeps per unit and not per row
+/// ([`LogPlace::Frames`]); a unit that is one stretch needs no list
+/// ([`LogPlace::Stream`], [`LogPlace::StreamMasked`]). Sixteen bytes, because a
+/// fragmented message has as many as it has frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamSpan {
+    /// Where the payload's first byte stands in the direction's stream.
+    pub at: usize,
+    /// How many bytes it is.
+    pub len: u32,
+    /// Whether the bytes in the stream are XORed with the four that stand just
+    /// before them.
+    pub masked: bool,
+}
+
+impl StreamSpan {
+    /// The first stream offset the stretch needs: its payload, or, when it is
+    /// masked, the key that stands before it.
+    pub fn needs_from(&self) -> usize {
+        if self.masked {
+            self.at.saturating_sub(MASK_KEY_LEN)
+        } else {
+            self.at
+        }
+    }
+
+    /// The stretch's bytes as `direction`'s stream holds them for `source`:
+    /// borrowed as they stand, or, for a masked one, a copy that lives for the
+    /// read. `None` when the stream no longer holds them (or the key).
+    fn read<'a>(&self, direction: Direction, source: &'a dyn UnitBytes) -> Option<Cow<'a, [u8]>> {
+        let len = self.len as usize;
+        if !self.masked {
+            return source.stream_bytes(direction, self.at, self.at + len);
+        }
+        let from = self.at.checked_sub(MASK_KEY_LEN)?;
+        let wire = source.stream_bytes(direction, from, self.at + len)?;
+        let (key, masked) = wire.split_at(MASK_KEY_LEN);
+        Some(Cow::Owned(
+            masked
+                .iter()
+                .enumerate()
+                .map(|(i, byte)| byte ^ key[i % MASK_KEY_LEN])
+                .collect(),
+        ))
+    }
+}
+
 /// The source of a list that keeps every message whole, and so reads no bytes.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoBytes;
@@ -771,6 +851,11 @@ struct Index {
     /// unit for the rows flagged [`WIRE_END`], a flagged row with no end here
     /// has none, and the unit's last row lets it go.
     wire_ends: SortedChunks<(u16, u64), u64>,
+    /// The stretches of the stream each unit joined out of several of them is read
+    /// from ([`LogPlace::Frames`]), by [`UnitRow::end_key`], once per unit; the
+    /// unit's last row lets them go, as it does the unit's end. A unit that is one
+    /// stretch has none here.
+    spans: SortedChunks<(u16, u64), Vec<StreamSpan>>,
 }
 
 /// What a [`MessageList`] holds on the heap, by structure (open-debt item 924,
@@ -779,7 +864,8 @@ struct Index {
 /// Only the structures that follow the row count are named, and `small` is the
 /// rest of the index (the contexts, the cut unit), which does not. A figure is
 /// bytes allocated and not bytes used, because the first is what the process
-/// holds. See [`crate::heap_account`] for what is exact and what is a model.
+/// holds. Every figure is exact (a capacity times an element); see
+/// [`crate::heap_account`] for why none is a model.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ListMemory {
     /// The rows: 48-byte entries when the list is an index, else each row's
@@ -789,21 +875,25 @@ pub struct ListMemory {
     /// The units' bytes the list keeps (copies; a unit in a lent container costs
     /// nothing here).
     pub unit_log: usize,
-    /// The rows kept whole beside the entries, a model of their map.
+    /// The rows kept whole beside the entries, as the chunks of their map allocated
+    /// them.
     pub whole_rows: usize,
     /// The facts few rows have (a sequence gap's count, a fragment's fate, a
-    /// resynchronisation), as the log that holds them allocated them.
+    /// resynchronisation) and the stretches of the stream a fragmented message is
+    /// read from, as the log that holds them allocated them.
     pub sparse: usize,
-    /// Where units a layer below framed end, a model of their map.
+    /// Where units a layer below framed end, as the chunks of their map allocated
+    /// them.
     pub wire_ends: usize,
     /// The messages that completed a fragment chain, joined: the only copy of those
     /// bytes anywhere, kept so a consumer can read the joined message back. It
     /// follows the chains' content and not the row count, and it is read off every
     /// fact the list keeps for a row, so asking costs the number of those.
     pub joined: usize,
-    /// The chain each fragment row belongs to and what became of it, by row (a
-    /// model of the map), and the chains still open. Kept by every list that has
-    /// seen a fragment, whether it keeps its rows as entries or whole.
+    /// The chain each fragment row belongs to and what became of it, by row (as the
+    /// chunks of the map allocated it), and the chains still open. Kept by every
+    /// list that has seen a fragment, whether it keeps its rows as entries or
+    /// whole.
     pub chains: usize,
     /// The rest of the index, which does not follow the row count.
     pub small: usize,
@@ -858,7 +948,14 @@ impl Index {
             rows: self.entries.allocated_bytes(),
             unit_log: self.log.allocated(),
             whole_rows: self.held.allocated_bytes(),
-            sparse: self.sparse.allocated_bytes() + fates,
+            sparse: self.sparse.allocated_bytes()
+                + fates
+                + self.spans.allocated_bytes()
+                + self
+                    .spans
+                    .values()
+                    .map(crate::heap_account::vec_bytes)
+                    .sum::<usize>(),
             wire_ends: self.wire_ends.allocated_bytes(),
             joined,
             // The list's, which owns the chain facts and adds them.
@@ -1292,6 +1389,12 @@ impl UnitRow {
         self.flags & LOGGED != 0
     }
 
+    /// Whether this row's unit is read from several stretches of the stream,
+    /// which [`Index::spans`] keeps ([`LogPlace::Frames`]).
+    fn in_frames(&self) -> bool {
+        self.logged() && matches!(LogPlace::of(self.locator), LogPlace::Frames(_))
+    }
+
     /// Where in its direction's stream the bytes this row's unit is read from
     /// begin, when they are the stream's: a streamed unit's body, or a logged
     /// unit whose place is the stream ([`LogPlace::Stream`]; a masked one needs
@@ -1305,6 +1408,9 @@ impl UnitRow {
         match LogPlace::of(self.locator) {
             LogPlace::Stream(at) => Some(at),
             LogPlace::StreamMasked(at) => Some(at.saturating_sub(MASK_KEY_LEN)),
+            // The word is where the first stretch's bytes begin, which is the
+            // first the unit needs (a later stretch stands after it).
+            LogPlace::Frames(first) => Some(first),
             LogPlace::Kept(_) | LogPlace::Container(_) => None,
         }
     }
@@ -1407,13 +1513,15 @@ impl Index {
     }
 
     /// Append the rows of one unit, lying where `locus` says, as entries;
-    /// `produced` is the produced-index of the first of them.
+    /// `produced` is the produced-index of the first of them. `spans` are the
+    /// stretches of a unit joined out of several ([`LogPlace::Frames`]), kept once.
     fn push_unit(
         &mut self,
         produced: u64,
         start: FlowContext,
         frames: &[PassiveFrame],
         locus: Locus,
+        mut spans: Option<Vec<StreamSpan>>,
     ) {
         if self.contexts.last() != Some(&start) {
             self.contexts.push(start);
@@ -1439,6 +1547,11 @@ impl Index {
             ) = (k, locus)
             {
                 self.wire_ends.insert(row.end_key(), end as u64);
+            }
+            if k == 0 {
+                if let Some(spans) = spans.take() {
+                    self.spans.insert(row.end_key(), spans);
+                }
             }
             self.entries.push_back(row);
         }
@@ -1503,9 +1616,13 @@ impl Index {
                 self.held.insert(key, frame);
                 position += 1;
             }
-            // The end is in the held frames now.
+            // The end is in the held frames now, and the stretches the unit was
+            // joined out of were read for them.
             if row.flags & WIRE_END != 0 {
                 self.wire_ends.remove(&row.end_key());
+            }
+            if row.in_frames() {
+                self.spans.remove(&row.end_key());
             }
         }
         self.whole_below[seat] = first_produced + position.min(self.entries.len()) as u64;
@@ -1669,17 +1786,20 @@ impl Index {
             LogPlace::Stream(at) => source.stream_bytes(row.direction(), at, at + len),
             // The unit is the stream's bytes under a mask whose key stands just
             // before them: read both and unmask, a copy that lives for this read.
-            LogPlace::StreamMasked(at) => {
-                let from = at.checked_sub(MASK_KEY_LEN)?;
-                let wire = source.stream_bytes(row.direction(), from, at + len)?;
-                let (key, masked) = wire.split_at(MASK_KEY_LEN);
-                Some(Cow::Owned(
-                    masked
-                        .iter()
-                        .enumerate()
-                        .map(|(i, byte)| byte ^ key[i % MASK_KEY_LEN])
-                        .collect(),
-                ))
+            LogPlace::StreamMasked(at) => StreamSpan {
+                at,
+                len: row.wire_len,
+                masked: true,
+            }
+            .read(row.direction(), source),
+            // The unit is several stretches of the stream, joined in order: a
+            // copy that lives for this read too.
+            LogPlace::Frames(_) => {
+                let mut joined = Vec::with_capacity(len);
+                for span in self.spans.get(&row.end_key())? {
+                    joined.extend_from_slice(&span.read(row.direction(), source)?);
+                }
+                (joined.len() == len).then_some(Cow::Owned(joined))
             }
             place => self
                 .log
@@ -1770,6 +1890,9 @@ impl Index {
                     }
                     if row.flags & WIRE_END != 0 {
                         self.wire_ends.remove(&row.end_key());
+                    }
+                    if row.in_frames() {
+                        self.spans.remove(&row.end_key());
                     }
                 }
                 frame
@@ -3220,6 +3343,119 @@ mod tests {
             let mut released = TwoStreams(source.0.clone());
             released.0[0][..cut].fill(0);
             assert_reads_as_whole(&streamed, &whole, &released);
+        }
+    }
+
+    /// [`streamed_and_whole`] for units joined out of two stretches of the stream,
+    /// as a message fragmented into two frames is: each unit's first half stands in
+    /// one frame and its second in another, with the bytes of a control frame
+    /// between them, and one of the two frames is masked (the first for an even
+    /// packet, the second for an odd one). The list keeps the stretches once for
+    /// the unit.
+    fn framed_and_whole(
+        units: &[Vec<u8>],
+        handshake: LinkHandshake,
+    ) -> (MessageList, MessageList, TwoStreams) {
+        let mut logging = crate::passive::PassiveSession::new();
+        let mut keeping = crate::passive::PassiveSession::new();
+        let (mut framed, mut whole) = (MessageList::new(), MessageList::new());
+        let mut streams = [Vec::new(), Vec::new()];
+        for (packet, unit) in units.iter().enumerate() {
+            let direction = if packet % 3 == 0 {
+                Direction::B
+            } else {
+                Direction::A
+            };
+            let seat = usize::from(direction == Direction::B);
+            let _ = logging.observe_at_nanos(1_000 * packet as u64);
+            let _ = keeping.observe_at_nanos(1_000 * packet as u64);
+            let (head, tail) = unit.split_at(unit.len() / 2);
+            let mut spans = Vec::new();
+            for (half, bytes) in [head, tail].into_iter().enumerate() {
+                // A frame header's worth of bytes the unit does not read, and for
+                // the second frame a control frame in front of it as well.
+                streams[seat].extend_from_slice(&[0xEE, 0xEE]);
+                if half == 1 {
+                    streams[seat].extend_from_slice(&[0xDD, 0xDD, 0xDD]);
+                }
+                let masked = (packet + half) % 2 == 0;
+                if masked {
+                    let key = [packet as u8 | 1, 0x5A, 0xC3 ^ half as u8, 0x0F];
+                    streams[seat].extend_from_slice(&key);
+                    spans.push(StreamSpan {
+                        at: streams[seat].len(),
+                        len: bytes.len() as u32,
+                        masked,
+                    });
+                    streams[seat].extend(bytes.iter().zip(key.iter().cycle()).map(|(b, k)| b ^ k));
+                } else {
+                    spans.push(StreamSpan {
+                        at: streams[seat].len(),
+                        len: bytes.len() as u32,
+                        masked,
+                    });
+                    streams[seat].extend_from_slice(bytes);
+                }
+            }
+            if let Some(read) = logging.next_datagram_unit_on(direction, unit, packet, handshake) {
+                framed.push_datagram_in_frames(read, spans, handshake);
+            }
+            whole.append(keeping.next_datagram_on(direction, unit, packet, handshake));
+        }
+        (framed, whole, TwoStreams(streams))
+    }
+
+    /// A unit joined out of several stretches of the stream is kept by where they
+    /// stand (once for the unit, so a unit of three rows holds one list of them),
+    /// logs nothing, reads as one kept whole, is kept whole before a release that
+    /// takes the first stretch's bytes or its key, and lets its stretches go with
+    /// its last row.
+    #[test]
+    fn a_unit_in_several_stretches_logs_nothing_and_reads_as_one_kept_whole() {
+        let units = datagrams(96);
+        for handshake in [LinkHandshake::Present, LinkHandshake::Absent] {
+            let (mut framed, whole, source) = framed_and_whole(&units, handshake);
+            assert!(
+                matches!(framed.rows, Store::Indexed(_)),
+                "the units became entries"
+            );
+            assert_eq!(
+                logged_allocation(&framed),
+                0,
+                "a unit in the stream is not copied"
+            );
+            let Store::Indexed(index) = &framed.rows else {
+                unreachable!("checked above");
+            };
+            assert_eq!(index.spans.len(), 96, "the stretches are kept once a unit");
+            assert!(framed.memory().sparse > 0, "and the report counts them");
+            assert_reads_as_whole(&framed, &whole, &source);
+
+            // Direction A lets go of its first 60 bytes: units whose first
+            // stretch (or its key) stands there are kept whole, the rest read
+            // from stretches that still stand, and every row still reads.
+            let cut = 60;
+            framed.keep_whole_before(Direction::A, cut, &source);
+            let oldest_a = framed.oldest_source_offset(Direction::A, usize::MAX);
+            assert!(
+                oldest_a.is_some_and(|at| at >= cut),
+                "A reads from {oldest_a:?}"
+            );
+            let mut released = TwoStreams(source.0.clone());
+            released.0[0][..cut].fill(0);
+            assert_reads_as_whole(&framed, &whole, &released);
+
+            let mut census = DroppedFrameCensus::default();
+            let mut kept_whole = whole;
+            while !framed.is_empty() {
+                census.absorb(framed.discard_oldest(&released).expect("a row"));
+                census.absorb(kept_whole.discard_oldest(&NoBytes).expect("a row"));
+                assert_reads_as_whole(&framed, &kept_whole, &released);
+            }
+            let Store::Indexed(index) = &framed.rows else {
+                unreachable!("still an index");
+            };
+            assert!(index.spans.is_empty(), "an empty list keeps no stretches");
         }
     }
 

@@ -3993,8 +3993,7 @@ impl FlowDissection {
         for ws::WsMessage {
             offset,
             end,
-            payload_at,
-            masked,
+            spans,
             payload,
         } in ready
         {
@@ -4029,33 +4028,36 @@ impl FlowDissection {
             }
             self.ingest.observe_frames(&unit.frames);
             match self.keep {
-                // Open-debt item 924, step 4c — a payload joined out of its
-                // frames in this call stands nowhere in the stream, so the list
-                // logs a copy of it, as it does a recovered datagram's, and keeps
-                // the end apart. One that is a single frame is the stream's own
-                // bytes (or those bytes under the four-byte key that stands
-                // before them, for a masked frame) and is not copied: the list
-                // keeps where it stands and reads it from the stream, unmasking
-                // it as it reads, on the handed door and the lent one alike. The
-                // key is part of what the stream must still hold.
+                // Open-debt item 924, step 4c — a payload is not copied: it
+                // stands in the stream, as its frame's bytes (or those bytes
+                // under the four-byte key that stands before them, for a masked
+                // frame), and the list keeps where it stands and reads it from
+                // there, unmasking and joining as it reads, on the handed door
+                // and the lent one alike. A message that is one frame is one
+                // stretch; one joined out of fragments is the stretches of its
+                // frames, in order, which the list keeps once for the unit. The
+                // stream must still hold every stretch (and its key); where it
+                // does not, or the stretches do not add up to the payload, the
+                // list logs a copy of it, as it does a recovered datagram's. The
+                // end is kept apart either way.
                 Keep::Entries => {
-                    let in_stream = payload_at.filter(|&at| {
-                        let from = if masked {
-                            at.saturating_sub(wz_session_core::byte_log::MASK_KEY_LEN)
-                        } else {
-                            at
-                        };
-                        self.assembler(direction).holds(from, at + payload.len())
-                    });
-                    match in_stream {
-                        Some(at) => self.frames.push_datagram_in_stream(
+                    let assembler = self.assembler(direction);
+                    let joined: usize = spans.iter().map(|span| span.len as usize).sum();
+                    let in_stream = !spans.is_empty()
+                        && joined == payload.len()
+                        && spans.iter().all(|span| {
+                            assembler.holds(span.needs_from(), span.at + span.len as usize)
+                        });
+                    match (in_stream, spans.as_slice()) {
+                        (true, [one]) => self.frames.push_datagram_in_stream(
                             unit,
-                            at,
+                            one.at,
                             payload.len(),
-                            masked,
+                            one.masked,
                             handshake,
                         ),
-                        None => self.frames.push_datagram(unit, &payload, None, handshake),
+                        (true, _) => self.frames.push_datagram_in_frames(unit, spans, handshake),
+                        (false, _) => self.frames.push_datagram(unit, &payload, None, handshake),
                     }
                 }
                 #[cfg(test)]

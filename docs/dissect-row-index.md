@@ -594,10 +594,17 @@ from. So the order is now:
   client frame) is the same with its key: the four bytes that end the frame's
   header stand just before the payload, so the place is `LogPlace::StreamMasked`,
   the dependence reaches back over the key, and the list unmasks as it reads (a
-  copy that lives for the read, not for the row). Only a message joined out of
-  fragments stands nowhere in the stream and is logged. A row on the lent door
-  costs the same at 16 and 4096 bytes (139.4 bytes), masked or not, and the matrix
-  measures both kinds. The deframer's offsets were the stream's own
+  copy that lives for the read, not for the row). A message joined out of
+  fragments is the payloads of its frames one after another, so its place is
+  `LogPlace::Frames` and the index keeps the stretches (a `StreamSpan` of sixteen
+  bytes per frame, once for the unit, counted under `sparse`, with each frame's
+  own mask flag); the list joins them as it reads, the dependence is the first
+  stretch's, and the unit's last row lets the stretches go with it. Control frames
+  between the fragments are none of the stretches. So no WebSocket flow keeps a
+  copy of a payload. A row on the lent door costs the same at 16 and 4096 bytes,
+  masked or not (139.4 bytes), and 285.0 bytes for a message of two frames (its
+  second frame's run in the stream map is the difference), and the matrix measures
+  all three kinds. The deframer's offsets were the stream's own
   across a hole (the TLS keeper's were not, above), which is what lets a place in
   the stream be trusted.
 - 6. Random access to a row's field document (D9), taken before 4c's remaining

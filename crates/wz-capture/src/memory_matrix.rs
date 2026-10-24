@@ -47,8 +47,10 @@
 //! twice in general; they are a log of chunks now. A WebSocket message that is one
 //! frame is the stream's own bytes (under the four-byte key before them, for a
 //! masked frame, which is every one a client sends) and costs nothing beyond it;
-//! one joined out of fragments stands nowhere in the stream and is logged, which
-//! the capture the redecode gate reads carries and this sweep does not.
+//! one joined out of fragments is the stretches of its frames, which the list keeps
+//! by where they stand (a few words a message, whatever the payload) and joins as
+//! it reads, so it costs nothing beyond the stream either. Nothing a WebSocket flow
+//! keeps is a copy of a payload.
 //!
 //! # The population is derived
 //!
@@ -327,16 +329,29 @@ fn websocket(n: usize, lent: bool) -> Run {
 }
 
 fn websocket_of(n: usize, lent: bool, payload: Option<usize>) -> Run {
-    websocket_with(n, lent, payload, None)
+    websocket_with(n, lent, payload, None, false)
 }
 
 /// The same flow with every message's frame masked, as a client sends it: the
-/// payload on the wire is XORed, so it stands nowhere in the stream.
+/// payload on the wire is XORed with the key that stands before it.
 fn websocket_masked_of(n: usize, lent: bool, payload: Option<usize>) -> Run {
-    websocket_with(n, lent, payload, Some([0x37, 0xFA, 0x21, 0x3D]))
+    websocket_with(n, lent, payload, Some([0x37, 0xFA, 0x21, 0x3D]), false)
 }
 
-fn websocket_with(n: usize, lent: bool, payload: Option<usize>, mask: Option<[u8; 4]>) -> Run {
+/// The same flow with every message fragmented into two frames (a BINARY frame
+/// that is not final and a CONTINUATION that is), each masked as a client's are:
+/// the payload is those two stretches of the stream, one after the other.
+fn websocket_fragmented_of(n: usize, lent: bool, payload: Option<usize>) -> Run {
+    websocket_with(n, lent, payload, Some([0x37, 0xFA, 0x21, 0x3D]), true)
+}
+
+fn websocket_with(
+    n: usize,
+    lent: bool,
+    payload: Option<usize>,
+    mask: Option<[u8; 4]>,
+    fragmented: bool,
+) -> Run {
     use crate::ws::tests::frame;
     let unframed = |framed: Vec<u8>| framed[2..].to_vec();
     let upgrade = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n".to_vec();
@@ -357,9 +372,17 @@ fn websocket_with(n: usize, lent: bool, payload: Option<usize>, mask: Option<[u8
         high += f.len() as u32;
     }
     for k in 0..n {
-        let f = frame(true, 0x2, &unframed(unit_of(k, payload)), mask);
-        packets.push(tcp_packet_on(1111, low, &f));
-        low += f.len() as u32;
+        let message = unframed(unit_of(k, payload));
+        let frames = if fragmented {
+            let (head, tail) = message.split_at(message.len() / 2);
+            alloc::vec![frame(false, 0x2, head, mask), frame(true, 0x0, tail, mask)]
+        } else {
+            alloc::vec![frame(true, 0x2, &message, mask)]
+        };
+        for f in frames {
+            packets.push(tcp_packet_on(1111, low, &f));
+            low += f.len() as u32;
+        }
     }
     file_run(pcap_of(&packets), lent, &[])
 }
@@ -925,7 +948,7 @@ struct Sized {
     handed_copies: f64,
 }
 
-fn sized_kinds() -> [Sized; 4] {
+fn sized_kinds() -> [Sized; 5] {
     [
         Sized {
             name: "udp",
@@ -957,6 +980,17 @@ fn sized_kinds() -> [Sized; 4] {
             // A masked payload is XORed in the stream under a key that stands
             // before it: the list keeps where it stands and unmasks it as it
             // reads, so it costs nothing beyond the stream either.
+            lent_copies: 0.0,
+            handed_copies: 1.1,
+        },
+        Sized {
+            name: "websocket (fragmented)",
+            build: websocket_fragmented_of,
+            expect: Expect::List(is_stream),
+            // A message joined out of two frames is two stretches of the stream:
+            // the list keeps where they stand (a few words a message, which do
+            // not grow with the payload) and joins them as it reads, so it costs
+            // nothing beyond the stream either.
             lent_copies: 0.0,
             handed_copies: 1.1,
         },
