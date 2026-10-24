@@ -4748,7 +4748,21 @@ impl McastPlan {
             } => {
                 let on = iface.unwrap_or(0);
                 for g in core::iter::once(group).chain(joins) {
+                    // QNX: `libc` has no `ipv6_mreq` there, so socket2 has no IPv6 group join (it
+                    // compiles the method out for `nto`). The request is refused, never skipped: a
+                    // peer that asked for an IPv6 group must be told it is not in it. IPv4 joins
+                    // are unaffected. The struct is POSIX's and could be written by hand, but its
+                    // QNX header has not been read, so no layout is guessed here.
+                    #[cfg(not(target_os = "nto"))]
                     raw.join_multicast_v6(g, on)?;
+                    #[cfg(target_os = "nto")]
+                    {
+                        let _ = (g, on);
+                        return Err(io::Error::new(
+                            io::ErrorKind::Unsupported,
+                            "an IPv6 multicast group cannot be joined on QNX: libc has no ipv6_mreq",
+                        ));
+                    }
                 }
             }
         }

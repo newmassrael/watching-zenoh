@@ -6,7 +6,9 @@ SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 # THIRD_PARTY.md — vendored code ledger
 
 Top-level register for third-party code carried inside this
-repo as git submodules under `vendor/`. Each entry records the
+repo as git submodules under `vendor/`, and as plain copies of crates.io
+packages under `third-party/` (each with one changed arm and a `WZ-PATCH.md`).
+Each entry records the
 upstream origin, the pinned commit, the upstream license, and
 the scope of use. Updating a vendor pin: bump the entry's
 `Commit pin` line and reference the Round entry in the atomic
@@ -301,6 +303,33 @@ pinned revision for the generation-time policy.
   `conformance/differential`, which links upstream's crates for the comparison only.
 - **Scope of use**: the crates carry upstream's package names so that a `[patch.crates-io]` entry
   swaps them in (`docs/build-configuration.md` C13); they are not published to a registry.
+
+## third-party/socket2 — socket2 0.6.3 with one QNX arm changed
+
+- **Origin**: the `socket2` 0.6.3 package from crates.io (https://github.com/rust-lang/socket2),
+  copied whole except its `Cargo.lock`; the sources keep their own headers (none are added).
+- **License**: MIT OR Apache-2.0 (`LICENSE-MIT` and `LICENSE-APACHE` are in the directory).
+- **Change**: three places in `src/sys/unix.rs`, each marked `WZ PATCH`: the TCP keep-alive idle
+  time on QNX is taken for the io-pkt network stack only, because `libc` defines no such constant on
+  io-sock and the crate did not compile there. `third-party/socket2/WZ-PATCH.md` says what
+  changes, what does not, and when to delete the directory.
+- **Scope of use**: selected by `[patch.crates-io]` in `crates/Cargo.toml`, so every crate of the
+  workspace that uses socket2 (tokio's included) builds this copy; it is excluded from the workspace
+  members and is not published. It is identical to upstream on every other target.
+
+## third-party/tokio — tokio 1.52.3 with one QNX arm changed
+
+- **Origin**: the `tokio` 1.52.3 package from crates.io (https://github.com/tokio-rs/tokio), copied
+  with its sources and tests but not its `Cargo.lock`, `CHANGELOG.md` or `docs/`; the sources keep
+  their own headers (none are added).
+- **License**: MIT (`LICENSE` is in the directory).
+- **Change**: `src/net/unix/ucred.rs`, marked `WZ PATCH`: peer credentials on QNX with the io-sock
+  network stack answer `Unsupported`, because `libc` defines no `unpcbid` or `LOCAL_PEEREID` there
+  and the crate did not compile. `third-party/tokio/WZ-PATCH.md` says what changes, what does
+  not, and when to delete the directory.
+- **Scope of use**: selected by `[patch.crates-io]` in `crates/Cargo.toml`, so every crate of the
+  workspace that uses tokio builds this copy; excluded from the workspace members, not published.
+  Identical to upstream on every other target.
 
 ## How this ledger is maintained
 

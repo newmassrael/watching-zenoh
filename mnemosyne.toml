@@ -66,9 +66,15 @@ entry_id_prefix = "Round "
 # wz-AUTHORED tests that link upstream's crates (the zenoh family's differential tests and the
 # `[patch]` graph that proves the swap), so it is what this validator exists to scan. The
 # new root arrived as `6 unscanned` and a rc=1 validate.
+# `third-party` joins `scan_exclusions` by the rule that put `vendor` there, and it is the opposite
+# of the two roots above: it holds crates.io packages (socket2 and tokio, 553 `.rs` files) copied
+# whole with one arm changed (`THIRD_PARTY.md`, and a `WZ-PATCH.md` in each), so it is NOT
+# author-written and cannot carry a wz citation. Declaring it is the declared-scope path this
+# table exists for and not a silencing: the ledger round that lands the copies says so, the rows
+# of `THIRD_PARTY.md` name each, and the files stay tracked and under the license gate.
 [plugins.set_equality_validator]
 paths = ["conformance", "crates", "deploy", "oracles", "xtask"]
-scan_exclusions = ["vendor", "out"]
+scan_exclusions = ["vendor", "out", "third-party"]
 
 # R311y462 — WHICH Mnemosyne build is allowed to interpret this workspace.
 #

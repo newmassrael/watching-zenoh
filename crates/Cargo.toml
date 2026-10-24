@@ -353,3 +353,11 @@ opt-level = 3
 [profile.capi-small]
 inherits = "release"
 panic = "abort"
+
+# socket2 0.6.3 and tokio 1.52.3 do not compile for QNX on the io-sock network stack: `libc` has
+# no `TCP_KEEPALIVE`, `unpcbid` or `LOCAL_PEEREID` there. Each copy below is upstream's with one
+# arm changed; what it changes, why, and when to delete it are in its `WZ-PATCH.md`. Each reaches
+# every crate that uses it and is identical to upstream on every other target.
+[patch.crates-io]
+socket2 = { path = "../third-party/socket2" }
+tokio = { path = "../third-party/tokio" }
