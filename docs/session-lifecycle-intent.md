@@ -388,11 +388,20 @@ handshake derived, which is the binding D1 requires.
         certificate and to claim the zid its own key names.
       - It holds the run to the image's line, which on the first run read
         "session established, peer verified".
-      - Measured on that run: the main thread's stack peak was 6,864 of
-        12,288 B. Against the same client without the channel, the image
-        grew by 109,604 B of code and 68,781 B of bss, of which 49,152 B
-        is the Mbed TLS arena. These are measurements, not yet a budget
-        row.
+      - Against the same client without the channel, the image grew by
+        109,604 B of code and 68,781 B of bss, of which 49,152 B is the
+        Mbed TLS arena.
+      - Past the verified line the lane asks the image's two documents
+        through the router 2,000 times each, as for an answering image,
+        and holds the run to the image's row in `deploy/resource_budget.json`
+        (Round 3530). The row is set from 8 runs, alternated with the client
+        without the channel:
+        - The main thread's stack peak is 6,864 of 12,288 B in 8 of 8 runs,
+          under the stack gate's static chain of 7,016 B.
+        - The GET median is 644 us (the runs' medians span 0.583 to
+          0.765 ms). The client without the channel gave 0.395 to 0.472 ms
+          in the same sitting, so the channel costs about 0.25 ms on a GET
+          at the median.
   - What this leaves open:
     - Mbed TLS 4.1 does not implement TLS 1.3 KeyUpdate. A KeyUpdate from
       the peer ends the session with an unexpected-message alert: the
@@ -456,8 +465,8 @@ Each step lands with its own done-when; sizes are not estimated here.
      fixed-memory image `host-slot-node` and zenohd 1.10.1 verify each other
      over the channel, with two controls. Done on the kit (Round 3524): the
      T2G kit's fixed-memory client and zenohd 1.10.1 verify each other over
-     the channel. Step 1b is done. Its residue is the kit image's stack and
-     resource rows, set from its runs.
+     the channel. Step 1b is done. The kit image's stack and resource rows
+     are set from its runs (Round 3530).
 2. **D4.** The expected zid on every dial path. Done when a dial to a locator
    that answers with another zid closes at InitAck on AP, the C ABI and the MCU
    host.

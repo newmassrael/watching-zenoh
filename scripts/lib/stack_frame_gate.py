@@ -196,6 +196,24 @@ IMAGES = (
         entry="wz_app_main",
         peak=7672,
     ),
+    # The fixed client over the secure channel (`overlays/t2g_client_tls.conf`, decision D9):
+    # the dial completes a TLS 1.3 handshake in Mbed TLS before the session sees a byte, and every
+    # record the link reads or writes passes through the channel. Its stack is the overlay's own.
+    #
+    # `peak` is 7,016 bytes in the image of 2026-10-24: the same dispatch path as the client
+    # without the channel (`dispatch_copied`, the observer's drain), 112 bytes deeper, with 14
+    # calls through a register not followed (the channel's transport callbacks among them). The
+    # kit's own reading of that image over a dial, a handshake and a session is 6,864 bytes, under
+    # the chain.
+    Image(
+        key="zephyr-client-fixed-tls",
+        elf=None,
+        source="deploy/zephyr-admin-node/overlays/t2g_client_tls.conf",
+        pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
+        unit=1,
+        entry="wz_app_main",
+        peak=7016,
+    ),
 )
 
 _HEAD = re.compile(r"^([0-9a-f]{8}) <(.*)>:$")

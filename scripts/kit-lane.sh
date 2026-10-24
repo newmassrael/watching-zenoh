@@ -16,11 +16,12 @@
 #   scripts/kit-lane.sh --selftest           the table of images against the gates and the overlays
 #
 # Images are the keys of the stack gate: zephyr-client-fixed, zephyr-client-fixed-batching (they answer,
-# and the host measures a GET through a router) and zephyr-client-fixed-get (it asks a responder, and its
-# own console line carries the round trip). A MEASURE image (zephyr-tls-fit, the secure channel's fit)
-# runs alone, with no router: it is flashed, reset, and held to its own console verdict. A VERIFY image
-# (zephyr-client-fixed-tls) dials a router over the secure channel: the lane configures the router to
-# pin the certificate the image prints, and holds the run to the image's line that its peer is verified.
+# and the host measures a GET through a router), zephyr-client-fixed-get (it asks a responder, and its
+# own console line carries the round trip) and zephyr-client-fixed-tls, a VERIFY image: it dials a router
+# over the secure channel, the lane configures the router to pin the certificate the image prints, holds
+# the run to the image's line that its peer is verified, and then measures a GET as for an answering
+# image. A MEASURE image (zephyr-tls-fit, the secure channel's fit) runs alone, with no router: it is
+# flashed, reset, and held to its own console verdict.
 #
 # WHERE IT RUNS: from a checkout of this repository on the host the kit is attached to (the lane builds
 # from the tree it lives in, so what was measured is what is in front of you). Send a tree there with
@@ -112,13 +113,10 @@ image_spec() {
         *) return 1 ;;
     esac
 }
-IMAGES=(zephyr-client-fixed zephyr-client-fixed-batching zephyr-client-fixed-get)
+IMAGES=(zephyr-client-fixed zephyr-client-fixed-batching zephyr-client-fixed-get zephyr-client-fixed-tls)
 # The measure images: not the stack gate's (their stack is what they report) and not yet a resource
 # row's (the row is set from what they measure).
 MEASURE_IMAGES=(zephyr-tls-fit)
-# The verify images: not yet the stack gate's nor a resource row's, for the reason the measure
-# images are not; their first runs on the kit are what those rows will be set from.
-VERIFY_IMAGES=(zephyr-client-fixed-tls)
 # The port a verify image's router listens on for `tls/` (the image's CONFIG_WZ_CLIENT_ENDPOINT).
 TLS_PORT=7448
 
@@ -396,17 +394,32 @@ run() {
     PIDS=()
     ADDR_ADDED=""
     trap stop_all EXIT
-    if [[ "$KIND" == measure || "$KIND" == verify ]]; then
-        if [[ "$KIND" == measure ]]; then
-            run_measure "$key"
-        else
-            run_verify "$key"
-        fi
+    if [[ "$KIND" == measure ]]; then
+        run_measure "$key"
         stop_all
         trap - EXIT
         [[ "$fails" -eq "$before" ]]
         return
     fi
+    local limit=60
+    if [[ "$KIND" == verify ]]; then
+        # The router is configured from what the image prints, so the image comes up first; past
+        # its verified line the run is an answering image's.
+        run_verify "$key" || return 1
+    else
+        start_and_reset "$key" || return 1
+        [[ "$KIND" == ask ]] && limit=150
+    fi
+    hold_the_run "$key" "$limit"
+    stop_all
+    trap - EXIT
+    [[ "$fails" -eq "$before" ]]
+}
+
+# The router, the responder an asking image needs, and the reset, for an image that dials a router
+# at a fixed configuration; then the image's READY line.
+start_and_reset() {
+    local key="$1"
     if ! sudo -n ip addr add "$KIT_HOST_IP/24" dev "$KIT_IFACE" 2>"$OUT/ip.log"; then
         bad "$key" "the interface $KIT_IFACE did not take $KIT_HOST_IP ($OUT/ip.log)"
         return 1
@@ -447,9 +460,9 @@ run() {
         ok "$key" "a responder is reachable through the router"
     fi
 
-    local ready_before getter_before
+    local ready_before
     ready_before="$(count_lines 'ZEPHYR-WZ-CLIENT READY')"
-    getter_before="$(count_lines 'ZEPHYR-WZ-GET done')"
+    GETTER_BEFORE="$(count_lines 'ZEPHYR-WZ-GET done')"
     if timeout 60 "$KIT_PROGTOOLS/openocd/bin/openocd" -s "$KIT_PROGTOOLS/openocd/scripts" \
         -f interface/kitprog3.cfg -f target/infineon/cyt4bf.cfg -c "init" -c "reset run" -c "shutdown" \
         >"$OUT/reset.log" 2>&1; then
@@ -473,10 +486,16 @@ run() {
         return 1
     fi
     ok "$key" "the image booted (READY line after the reset)"
+}
 
+# What a run holds once the image is up: an answering image is asked its two documents through the
+# router (an image over the secure channel too, once it read its router as verified), an asking one
+# says how its queries went; then the console's FAIL lines and the image's row of the budget.
+hold_the_run() {
+    local key="$1" limit="$2" waited=0
     local results=() node_id
     node_id="$(grep -a -o 'ZEPHYR-WZ-CLIENT READY [0-9a-f]*' "$OUT/console.raw" | tail -n 1 | awk '{print $3}')"
-    if [[ "$KIND" == answer ]]; then
+    if [[ "$KIND" == answer || "$KIND" == verify ]]; then
         if python3 -I "$ROOT/scripts/lib/kit_rest_probe.py" "$REST_PORT" "$node_id" "$OUT/rest.json" 2000 >"$OUT/probe.log" 2>&1; then
             ok "$key" "the host asked the kit's two documents 2,000 times each ($OUT/probe.log)"
             results=(--result "$OUT/rest.json")
@@ -489,13 +508,13 @@ run() {
     else
         waited=0
         while [[ "$waited" -lt "$limit" ]]; do
-            if [[ "$(count_lines 'ZEPHYR-WZ-GET done')" -gt "$getter_before" ]]; then
+            if [[ "$(count_lines 'ZEPHYR-WZ-GET done')" -gt "$GETTER_BEFORE" ]]; then
                 break
             fi
             sleep 1
             waited=$((waited + 1))
         done
-        if [[ "$(count_lines 'ZEPHYR-WZ-GET done')" -le "$getter_before" ]]; then
+        if [[ "$(count_lines 'ZEPHYR-WZ-GET done')" -le "$GETTER_BEFORE" ]]; then
             bad "$key" "no getter line after the reset in ${limit} s"
             return 1
         fi
@@ -513,9 +532,6 @@ run() {
     else
         bad "$key" "the run is outside its row: $(sed 's/^ *//' "$OUT/budget.log" | head -n 3 | tr '\n' ' ')"
     fi
-    stop_all
-    trap - EXIT
-    [[ "$fails" -eq "$before" ]]
 }
 
 # A measure image after its flash: the console, a reset, and the image's own `<DONE_TAG> done` line.
@@ -623,8 +639,10 @@ run_verify() {
     listen_certificate: "$OUT/router.pem", listen_private_key: "$OUT/router.key",
     root_ca_certificate: "$OUT/device.pem", enable_mtls: true } } } }
 EOF
+    # The REST plugin is the host's view of the image, as for an answering image.
     setsid "$KIT_ZENOHD" --config "$OUT/router.json5" -l "tls/$KIT_HOST_IP:$TLS_PORT" \
-        --no-multicast-scouting --rest-http-port none >"$OUT/router.log" 2>&1 </dev/null &
+        --no-multicast-scouting --plugin-search-dir "$(dirname "$KIT_ZENOHD")" \
+        --rest-http-port "127.0.0.1:$REST_PORT" >"$OUT/router.log" 2>&1 </dev/null &
     PIDS+=("$!")
     ok "$key" "a router pins the image's certificate and claims zid $id ($OUT/router.json5)"
 
@@ -637,17 +655,12 @@ EOF
     verdict="$(since | grep -a 'session established, peer ' | head -n 1)"
     if [[ -z "$verdict" ]]; then
         bad "$key" "no session in 120 s after the router came up ($OUT/console.raw, $OUT/router.log)"
-    elif [[ "$verdict" == *"peer verified"* ]]; then
-        ok "$key" "the image and the router verify each other: $verdict"
-    else
+        return 1
+    elif [[ "$verdict" != *"peer verified"* ]]; then
         bad "$key" "the session is up but the image does not read the router as verified: $verdict"
+        return 1
     fi
-    sleep 5
-    if since | grep -aq 'wz: FAIL'; then
-        bad "$key" "the console says 'wz: FAIL' ($(since | grep -a 'wz: FAIL' | head -n 1))"
-    else
-        ok "$key" "the console has no 'wz: FAIL' line"
-    fi
+    ok "$key" "the image and the router verify each other: $verdict"
 }
 
 build_responder() {
@@ -691,12 +704,20 @@ PY
 import sys
 sys.path.insert(0, sys.argv[1] + "/scripts/lib")
 import resource_budget_gate as r
-sys.exit(0 if sys.argv[2] in r.population() else 1)
+# The table's own rows: the population is what the table must hold, not what it holds.
+sys.exit(0 if sys.argv[2] in r.read_table().get("images", {}) else 1)
 PY
         then
             ok selftest "$key has a row in the resource budget"
         else
             bad selftest "$key has no row in the resource budget: a run of it would be held to nothing"
+        fi
+        if [[ "$KIND" == verify ]]; then
+            if grep -q "tls/[0-9.]*:$TLS_PORT" "$ROOT/deploy/zephyr-admin-node/overlays/t2g_client_tls.conf"; then
+                ok selftest "$key dials the port its router is given ($TLS_PORT)"
+            else
+                bad selftest "$key's overlay does not dial tls/ on port $TLS_PORT, where its router listens"
+            fi
         fi
     done
     for key in "${MEASURE_IMAGES[@]}"; do
@@ -708,23 +729,6 @@ PY
             bad selftest "$key waits for '$DONE_TAG done', which deploy/$APP never prints"
         else
             ok selftest "$key is a measure image of deploy/$APP that ends on '$DONE_TAG done'"
-        fi
-    done
-    for key in "${VERIFY_IMAGES[@]}"; do
-        if ! image_spec "$key" || [[ "$KIND" != verify ]]; then
-            bad selftest "$key is listed as a verify image and the table does not make it one"
-            continue
-        fi
-        IFS=';' read -ra files <<<"$OVERLAYS"
-        for overlay in "${files[@]}"; do
-            if [[ ! -f "$ROOT/deploy/zephyr-admin-node/$overlay" ]]; then
-                bad selftest "$key names $overlay, which is not in deploy/zephyr-admin-node"
-            fi
-        done
-        if grep -q "tls/[0-9.]*:$TLS_PORT" "$ROOT/deploy/zephyr-admin-node/overlays/t2g_client_tls.conf"; then
-            ok selftest "$key dials the port its router is given ($TLS_PORT)"
-        else
-            bad selftest "$key's overlay does not dial tls/ on port $TLS_PORT, where its router listens"
         fi
     done
     [[ "$fails" -eq 0 ]]
@@ -746,7 +750,7 @@ case "$cmd" in
         done
         ;;
     build-responder) build_responder ;;
-    list) printf '%s\n' "${IMAGES[@]}" "${MEASURE_IMAGES[@]}" "${VERIFY_IMAGES[@]}" ;;
+    list) printf '%s\n' "${IMAGES[@]}" "${MEASURE_IMAGES[@]}" ;;
     --selftest) selftest ;;
     *)
         sed -n '9,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2

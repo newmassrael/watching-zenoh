@@ -32,6 +32,16 @@
       "chain_misses": "the reply sink and the reply view are called through a register (12 such calls on the path of the chain), which the stack gate's reader does not follow; the firmware's own reading is 472 bytes over the chain",
       "measured": "2026-10-23, the T2G kit (CYT4BF M7) asking a responder on the bench host, a client of a zenohd there, for a document of 165 bytes, 2050 queries with 50 of warm-up; the stack line and the getter's median (300 us, p99 1300 to 1400 us) are the same in 8 of 8 clean runs; the kernel tick is 100 us, so the median has that resolution",
       "evidence": "docs/storage-policy-and-link-layer.md section 5.6"
+    },
+    "zephyr-client-fixed-tls": {
+      "built_as": "the fixed-memory client of overlays/t2g_client_tls.conf, which dials tls/ over Zephyr's TCP with the secure channel (wz-tls-mbedtls on Zephyr's Mbed TLS 4.1.0, mutual TLS 1.3, its 49,152-byte arena), the idle wait and batching off (main stack 12288 bytes), its node wz_session_mcu::slot_node",
+      "static_chain_bytes": 7016,
+      "peak_stack_bytes": 6864,
+      "peak_stack_tolerance_bytes": 16,
+      "get_median_us": 644,
+      "get_median_tolerance_pct": 30,
+      "measured": "2026-10-24, the T2G kit (CYT4BF M7) on its own Ethernet to a zenohd 1.10.1 on the bench host that pins the image's certificate and is verified by it; the stack line is the same in 8 of 8 runs, the GET figure is the median of 8 medians (0.583 to 0.765 ms) of 2000 queries for each of the node's two documents; the client without the channel, run in turn with it, gave medians of 0.395 to 0.472 ms",
+      "evidence": "docs/session-lifecycle-intent.md section 3, decision D9 (the witness on the kit)"
     }
   }
 }
