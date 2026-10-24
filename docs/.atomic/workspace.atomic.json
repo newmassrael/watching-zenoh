@@ -284486,6 +284486,44 @@
         "Hosted CI: read the first completed run holding this round and the previous one (the earlier run was pending at its push)"
       ]
     },
+    "Round 3567": {
+      "decision_summary": "Queries step Q1: the answering end of a query runs on both engines. The queryable joins the C ABI's engine port: declare and undeclare on SessionEngine (None from an engine without one in its build) and the vocabulary its callbacks are minted with, QueryHolder and HeldQuery, so a query a C program keeps answers on its own route whatever engine carried it. The tokio engine translates them to its face sessions and held queries; pico's queryable, admin space and advanced cache declare through the port. On the cooperative engine every query is held: a C callback never runs under the session's lock and the observer calls a queryable inside its dispatch, so the engine's queryable copies the query out and holds its Final, the callback runs when deliveries are handed out, its replies go out, the hold is let go, and the dispatch's Final waits for the last hold. Links carry a generation so an answer to a lost link's query reaches no new router.",
+      "changes_bullets": [
+        "wz-capi-port: query.rs (QblId, HeldQuery, QueryHolder, QueryCallback, QueryableSink); SessionEngine gains declare_queryable_on_wire and undeclare_queryable with provided defaults.",
+        "wz-capi-core engine_port.rs: the tokio engine implements both, adapting its face sessions (FaceHolder) and held queries (FaceHeld).",
+        "wz-capi-coop: feature queryable; engine/query.rs (OwnedQuery, FinalHolds, QueryPlane, CoopHolder, CoopHeld); the dispatch holds Finals; queryables redeclared on a new link and dropped at close; tests/queryable.rs.",
+        "wz-capi-pico: queryable forwards to either engine; query.rs, admin_space.rs, advanced_plane.rs declare through the port; the listener example asks queries on its input; client_only_dials_a_listener answers one.",
+        "wz-runtime-coop session_drive.rs: a doc link to a heap-only item made a code span (C1bz back to 7).",
+        "nondefault-tests-gate: a wz-capi-coop queryable leg. Design log updated; session-close-ingress pin moved."
+      ],
+      "verification_bullets": [
+        "On the build host: clippy -D warnings clean for wz-capi-port, wz-capi-core (defaults and none), wz-capi-coop (with and without queryable), wz-capi-pico (defaults, all features, and engine-coop with queryable); wz-capi-pico's tests pass. wz-capi-coop with queryable: 9 tests pass, among them a router stand-in's query answered by a reply then the Final from a callback that steps the session from inside itself, and a kept query whose Final waits for its drop (none reached the router in 400 ms of stepping). client_only_dials_a_listener against the full build's listener passes on the tokio client, the cooperative client and the cooperative multi-threaded one: a reply at once, a late reply from the program's thread, the end only after the copy is dropped. Doc links at budget (wz-runtime-coop 7, wz-capi-core 7, wz-capi-pico 41, the rest 0). Sizes within budget: pico-client 1,809,657, pico-client-coop 888,143, pico-default 4,252,726. Hook round_fed_gates 112/0; audit-catalog-status rc=0; feature surface census rc=0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next: queries step Q2, the requesting end (z_get, the querier) on the cooperative engine. client_only_dials_a_listener runs in no CI lane (two builds, run by hand on each engine): give it one. Read the hosted CI of rounds 3558, 3562 and this one at the next round's start."
+      ],
+      "publishable_decision_summary": "Queries step Q1: the answering end of a query runs on both engines. The queryable joins the C ABI's engine port: declare and undeclare on SessionEngine (None from an engine without one in its build) and the vocabulary its callbacks are minted with, QueryHolder and HeldQuery, so a query a C program keeps answers on its own route whatever engine carried it. The tokio engine translates them to its face sessions and held queries; pico's queryable, admin space and advanced cache declare through the port. On the cooperative engine every query is held: a C callback never runs under the session's lock and the observer calls a queryable inside its dispatch, so the engine's queryable copies the query out and holds its Final, the callback runs when deliveries are handed out, its replies go out, the hold is let go, and the dispatch's Final waits for the last hold. Links carry a generation so an answer to a lost link's query reaches no new router.",
+      "publishable_changes_bullets": [
+        "wz-capi-port: query.rs (QblId, HeldQuery, QueryHolder, QueryCallback, QueryableSink); SessionEngine gains declare_queryable_on_wire and undeclare_queryable with provided defaults.",
+        "wz-capi-core engine_port.rs: the tokio engine implements both, adapting its face sessions (FaceHolder) and held queries (FaceHeld).",
+        "wz-capi-coop: feature queryable; engine/query.rs (OwnedQuery, FinalHolds, QueryPlane, CoopHolder, CoopHeld); the dispatch holds Finals; queryables redeclared on a new link and dropped at close; tests/queryable.rs.",
+        "wz-capi-pico: queryable forwards to either engine; query.rs, admin_space.rs, advanced_plane.rs declare through the port; the listener example asks queries on its input; client_only_dials_a_listener answers one.",
+        "wz-runtime-coop session_drive.rs: a doc link to a heap-only item made a code span (C1bz back to 7).",
+        "nondefault-tests-gate: a wz-capi-coop queryable leg. Design log updated; session-close-ingress pin moved."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: clippy -D warnings clean for wz-capi-port, wz-capi-core (defaults and none), wz-capi-coop (with and without queryable), wz-capi-pico (defaults, all features, and engine-coop with queryable); wz-capi-pico's tests pass. wz-capi-coop with queryable: 9 tests pass, among them a router stand-in's query answered by a reply then the Final from a callback that steps the session from inside itself, and a kept query whose Final waits for its drop (none reached the router in 400 ms of stepping). client_only_dials_a_listener against the full build's listener passes on the tokio client, the cooperative client and the cooperative multi-threaded one: a reply at once, a late reply from the program's thread, the end only after the copy is dropped. Doc links at budget (wz-runtime-coop 7, wz-capi-core 7, wz-capi-pico 41, the rest 0). Sizes within budget: pico-client 1,809,657, pico-client-coop 888,143, pico-default 4,252,726. Hook round_fed_gates 112/0; audit-catalog-status rc=0; feature surface census rc=0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next: queries step Q2, the requesting end (z_get, the querier) on the cooperative engine. client_only_dials_a_listener runs in no CI lane (two builds, run by hand on each engine): give it one. Read the hosted CI of rounds 3558, 3562 and this one at the next round's start."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
