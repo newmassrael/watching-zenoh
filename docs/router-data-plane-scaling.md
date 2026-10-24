@@ -718,8 +718,37 @@ live subscriber waited 10.0 s and received 280 of 1200; with the stage on it wai
 The `Drop` one is its control: it passes with the stage on and off, so the bound is not one the machine fails on
 its own.
 
+**A defect of the first version, found by reading the room seam in 7.6 and fixed.** The probe asks for room with a
+wait of zero, and it asked so for every fragment of a chain. A chain is wire-atomic: put down at the fragment the
+lane fills at, it has to be abandoned (the peer is sent a stop marker and drops what it staged) and begun again
+from the first fragment at the router's next try. A lane of two batches is full after two fragments, and a writer
+is slower than a copy, so a message of more than about two batches (about 128 KiB at the default batch) never
+got through a real queue: every try went as far as the lane is deep and no further, the message stayed held for
+ever, and, being over the destination's budget, it gated the face that sent it. Neither the unit tests nor the
+end-to-end tests of that round met it: their link answered "room" for everything, and their payloads were one batch.
+Reproduced with a 600 KB `Block` put to a real queue (held after 200 tries), fixed by refusing to a probe a chain
+that the lane cannot hold whole, before anything is sent (`Unsent::Chain`: the sequence number is given back, as it
+is for a message over the reassembly cap, the same two lines apart), and held by a test whose writer is a thread that
+is slower than the sender, which is the case; a writer that kept up passes with the fix off, as the first version of
+that test did, so it is not a control. The router sends such a message as it did before it held anything back,
+waiting inside the send, and one held behind others is sent so when it reaches the head of its destination's queue,
+which keeps the order.
+
+The first form of the fix refused EVERY chain, and the end-to-end test of a stopped subscriber that is flooded with
+64 KiB `Block` puts (two fragments) failed on it: the live subscriber waited 5.0 s, the time the router's loop
+spent waiting inside the send for a stopped reader until it closed it. A chain the lane can hold is not a chain the
+probe cannot send; it is a chain that has to find the lane empty enough. The rule is the one that decides: every
+fragment but the last must find the lane under its bound with the ones before it queued, so a chain of `n` fragments
+of at most `mtu` bytes is probed when `(n - 1) * mtu` is under the lane's bound (`TxQueueShape::lane_bytes`, the
+size the session itself gives the link), and sent waiting when it is not. One that fits and finds the lane full is
+abandoned and held like a frame. Only a chain the lane can never hold costs the router's loop a wait, and a stopped
+reader that is sent such a message is closed after `wait_before_close` as it was before the stage; the loop waits
+that once.
+
 **What it does not cover.** A message that comes from no face (a multicast ingress, a local publish) cannot
-gate anything and waits inside its send as before. A message whose payload is in shared memory goes through
+gate anything and waits inside its send as before. A message that is a chain of fragments the lane cannot hold
+(above) waits in its send likewise, and the router's one loop with it. A message whose payload is in shared memory
+goes through
 the relay, whose mapping of the payload for the destination cannot be undone and tried again, and also waits
 as before. A declaration, a query and a reply are rare and are not held. A link behind the reconnect wrapper
 (`reconnect.rs`) forwards the notice to its live link, as it forwards `wait_for_room`; a swap replaces the link

@@ -46,6 +46,9 @@ pub struct PushDeadline {
     step_us: u64,
     /// What is left of `max_wait_before_drop_fragments` (droppable only).
     extend_left_us: u64,
+    /// Whether this is a sender that may not wait at all ([`Self::probe`]). A configured wait of
+    /// zero is not the same: it still sends a chain, and abandons it if the lane fills.
+    probing: bool,
 }
 
 impl PushDeadline {
@@ -58,6 +61,7 @@ impl PushDeadline {
                 left_us: conf.wait_before_drop_us,
                 step_us: conf.wait_before_drop_us,
                 extend_left_us: conf.max_wait_before_drop_fragments_us,
+                probing: false,
             }
         } else {
             Self {
@@ -65,20 +69,32 @@ impl PushDeadline {
                 left_us: conf.wait_before_close_us,
                 step_us: 0,
                 extend_left_us: 0,
+                probing: false,
             }
         }
+    }
+
+    /// Whether this deadline belongs to a sender that may not wait ([`Self::probe`]).
+    pub fn is_probe(&self) -> bool {
+        self.probing
     }
 
     /// The deadline of a sender that may not wait at all: every ask for room is made with a
     /// wait of zero, and no fragment extends it. A router forwarding to many faces uses it so
     /// that one face with a full queue costs the loop an answer and not a stall; the message
     /// that found no room is the caller's to keep and send again.
+    ///
+    /// A message that is a chain of fragments longer than the queue can hold is not sent at all:
+    /// a chain cannot be abandoned and begun again without end, which is what a sender that does
+    /// not wait would do to it, so the sender is told to send it waiting. A chain the queue can
+    /// hold whole is asked for like any frame.
     pub fn probe(droppable: bool) -> Self {
         Self {
             droppable,
             left_us: 0,
             step_us: 0,
             extend_left_us: 0,
+            probing: true,
         }
     }
 

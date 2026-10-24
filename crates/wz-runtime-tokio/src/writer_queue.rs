@@ -1387,7 +1387,7 @@ pub enum ReserveError {
 /// the lock with nothing left to wait for.
 ///
 /// The lane counts what a permit promises as occupied until it is used or dropped
-/// ([`LaneState::has_room`]), by the unit the lane was shaped in when the permit was given, so
+/// (`LaneState::has_room`), by the unit the lane was shaped in when the permit was given, so
 /// that what is given back is what was taken whatever the queue is reshaped to meanwhile.
 /// Dropping an unused permit returns the room and wakes whoever waits for it.
 #[must_use = "a permit that is dropped at once promises nothing: send with it, or do not ask"]

@@ -451,6 +451,136 @@ impl BoxedLinkDriver for QueueLink {
     }
 }
 
+/// A router whose one destination is a session over a real queue of two batches of 65 535 bytes
+/// in every lane, and the queue's reading end. The destination is returned to be kept alive: the
+/// router holds a face by reference.
+fn router_over_a_queue() -> (RouterForwarder, impl Sized, crate::writer_queue::OutboundRx) {
+    let (tx, mut rx) =
+        crate::writer_queue::outbound_channel_with_capacity([2; Priority::NUM], 65_535);
+    let link = Arc::new(QueueLink { tx });
+    let dest = new_session_actions(link, fixture_session_init_params(), TokioTime::new());
+    TokioRuntime::with_mutex_mut(&dest.remote_peer_zid, |s| {
+        *s = Some(zid(0xCC).as_slice().to_vec())
+    });
+    TokioRuntime::with_mutex_mut(&dest.peer_whatami, |s| *s = Some(0b10));
+    let fwd = RouterForwarder::new(zid(0x01));
+    let quiet = RoomLink::new(false);
+    fwd.register(SOURCE, &client_over(&quiet, zid(0xAA)));
+    fwd.register(DEST, &dest);
+    forward_frame(
+        &fwd,
+        DEST,
+        vec![NetworkMessage::Declare(Box::new(
+            build_declare_subscriber(7, 0, Some("demo/x")).expect("declare subscriber"),
+        ))],
+    );
+    while rx.try_recv().is_some() {}
+    (fwd, dest, rx)
+}
+
+/// A message that is a chain of fragments the lane can hold is not waited for when the lane is
+/// full: the router holds it, as it holds a message that is one frame, and goes on.
+///
+/// Only a chain the lane can NEVER hold has to be sent waiting (the test below). A router that
+/// sent every chain waiting would stop its one loop for as long as a stopped subscriber took to
+/// be closed, which is what holding messages back exists to prevent.
+#[test]
+fn a_chain_the_lane_can_hold_is_held_and_not_waited_for_when_the_lane_is_full() {
+    // Two fragments of one message: the first of 65 535 bytes and the second the rest. The lane
+    // holds two batches, so the first message goes in whole, and the second finds the lane full
+    // at its second fragment.
+    const PAYLOAD: usize = 100_000;
+    let (fwd, _dest, _rx) = router_over_a_queue();
+    let started = Instant::now();
+    forward_frame(&fwd, SOURCE, vec![blocking_put(&vec![0x5A; PAYLOAD])]);
+    assert_eq!(fwd.egress_held(), 0, "the first chain fits the empty lane");
+    forward_frame(&fwd, SOURCE, vec![blocking_put(&vec![0x5A; PAYLOAD])]);
+    assert_eq!(
+        fwd.egress_held(),
+        1,
+        "the second chain finds the lane full and is held"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "the router did not wait for room: {:?}",
+        started.elapsed()
+    );
+}
+
+/// A message that is a chain of fragments, longer than the lane that carries it, is delivered
+/// whole through a real queue whose writer takes what is there between the router's tries.
+///
+/// A chain is wire-atomic: it cannot be put down half way and picked up again, because the peer
+/// has to be told to drop what it staged. A router that tried each fragment without waiting would
+/// put two fragments in a lane of two batches, find it full at the third, abandon the chain and
+/// try the whole message again at the next notice, for ever: every try gets as far as the lane is
+/// deep and no further. The router has to leave a message that is a chain to the send that waits
+/// for room under the chain's own lock, as it did before it held anything back.
+#[test]
+fn a_message_longer_than_the_lane_is_delivered_whole_through_a_real_queue() {
+    use wz_session_core::put_payload::payload_len;
+    const PAYLOAD: usize = 600_000;
+    let (fwd, _dest, mut rx) = router_over_a_queue();
+
+    // The link's writer is a thread of its own, as it is in the runtime: a send that waits for
+    // room waits for it, and a test that drained on the thread that sends would wait out the
+    // deadline for a writer that is itself. It is SLOWER than the sender, as a socket is slower
+    // than a memory copy: a writer that kept up would take every fragment as it was queued, and
+    // a sender that never waits would then get a chain through by luck.
+    let written = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (written, stop) = (Arc::clone(&written), Arc::clone(&stop));
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                match rx.try_recv() {
+                    Some(frame) => {
+                        written.fetch_add(frame.len(), Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    None => std::thread::yield_now(),
+                }
+            }
+            while let Some(frame) = rx.try_recv() {
+                written.fetch_add(frame.len(), Ordering::SeqCst);
+            }
+        })
+    };
+
+    let message = blocking_put(&vec![0x5A; PAYLOAD]);
+    let NetworkMessage::Push(push) = &message else {
+        unreachable!("built as a Push");
+    };
+    let wz_session_core::wire::PushOwnedVariant::CodecZenohMsgPut(put) = &push.body else {
+        unreachable!("built as a Put");
+    };
+    assert_eq!(
+        payload_len(put),
+        PAYLOAD,
+        "the case under test is a long message"
+    );
+    forward_frame(&fwd, SOURCE, vec![message]);
+
+    // The router is told as its loop is, and tries what it holds, until the writer has taken the
+    // message or a generous time is up. A router that gets nowhere gets nowhere however long.
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10)
+        && !(fwd.egress_held() == 0 && written.load(Ordering::SeqCst) >= PAYLOAD)
+    {
+        fwd.woken();
+        std::thread::yield_now();
+    }
+    stop.store(true, Ordering::SeqCst);
+    writer.join().expect("the writer thread");
+    let written = written.load(Ordering::SeqCst);
+    assert_eq!(fwd.egress_held(), 0, "nothing is left held");
+    assert!(
+        (PAYLOAD..2 * PAYLOAD).contains(&written),
+        "the message arrived once, in {written} bytes of frames for a payload of {PAYLOAD}: a chain \
+         that is begun and abandoned and begun again writes the same fragments many times over"
+    );
+}
+
 /// The whole path, with nothing standing in for the writer's queue: a message that finds the
 /// queue full is held, the queue's writer taking a frame is what tells the router, and the router
 /// then sends what it held, in the queue.

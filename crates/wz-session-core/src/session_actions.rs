@@ -2512,13 +2512,59 @@ pub enum Unsent {
     /// The link had no room, and the call did not wait for any. The message is returned whole,
     /// as it was given: nothing was sent, counted as a drop, or closed.
     NoRoom(crate::network_message::NetworkMessage),
+    /// The message is a chain of fragments longer than the link's queue can hold, which a call
+    /// that does not wait cannot send, and nothing was sent: it is returned whole, to be sent
+    /// with a wait. Sending it again without one gets the same answer however much room there
+    /// is. A chain the queue can hold whole is not this: it is sent, or is `NoRoom`.
+    Chain(crate::network_message::NetworkMessage),
     /// The send failed for a reason that sending again will not change.
     Failed(SendWireError),
 }
 
+/// R2923 / R2926 — what the unicast dispatch found when it put a message on its conduit's link:
+/// the message is on the link's queue, or no room was found within its deadline (a congestion
+/// drop), or it is a chain of fragments that the sender asked not to wait for.
+///
+/// The multicast queue's own [`crate::tx_deadline::PushOutcome`] has the first two and cannot
+/// meet the third, which is why the third is not there: a result a caller of the multicast
+/// queue could be handed and never is would be an arm each of them has to write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+enum UnicastPush {
+    /// The message is on the link's queue.
+    Pushed,
+    /// No room was found within the message's deadline.
+    Congested,
+    /// The message is a chain of fragments and the sender asked not to wait
+    /// ([`PushDeadline::probe`]): nothing was sent, and the sequence number the message took was
+    /// given back.
+    ///
+    /// A chain is wire-atomic, so it cannot be put down half way and picked up again: the peer is
+    /// told to drop what it staged. A sender that may not wait for room between two fragments
+    /// would send the first of them, find the lane full at the next, abandon the chain and begin
+    /// it again at the next notice, for ever, if the lane cannot hold the chain whole, since
+    /// every try gets as far as the lane is deep and no further. Such a message is the caller's
+    /// to send with a wait; a chain the lane can hold whole is probed like a frame.
+    ///
+    /// Only a build that fragments has a chain to refuse.
+    #[cfg(feature = "transport-fragmentation")]
+    Chain,
+}
+
 /// How a pass through [`SessionLinkActions::dispatch_network_message_at`] ended, when it did not
-/// fail: the message left, or (only on `DispatchStage::Probe`) its conduit had no room for it
-/// and nothing was sent, counted or closed.
+/// fail: the message left, or (only on `DispatchStage::Probe`) its conduit had no room for it, or
+/// it is a chain of fragments, and nothing was sent, counted or closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg(any(
     feature = "codec-push",
@@ -2538,6 +2584,10 @@ enum Dispatched {
     /// A probe found no room.
     #[cfg(feature = "alloc")]
     NoRoom,
+    /// A probe met a message that is a chain of fragments the lane cannot hold, and sent
+    /// nothing: a sender that may not wait cannot send one (`UnicastPush::Chain`).
+    #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
+    Chain,
 }
 
 /// How a message's encoder reaches [`SessionLinkActions::dispatch_network_message_at`].
@@ -2676,7 +2726,7 @@ struct FrameEmit {
     feature = "declare-interest",
     feature = "liveliness-token",
 ))]
-use crate::tx_deadline::{PushDeadline, PushOutcome};
+use crate::tx_deadline::PushDeadline;
 
 impl<R: SessionRuntime, T: TimeSource> Deref for SessionLinkActions<R, T> {
     type Target = SessionCore<R, T>;
@@ -7452,6 +7502,35 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         true
     }
 
+    /// The bytes the link's queue for `priority` holds before it refuses a frame: the shape the
+    /// session gave the link when it was established ([`Self::record_established_at`]), asked
+    /// of the same parameters.
+    #[cfg(all(
+        feature = "transport-fragmentation",
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn tx_lane_bytes(&self, priority: Priority) -> usize {
+        self.params
+            .tx_queue
+            .shape(
+                self.negotiated_qos(),
+                self.negotiated_batch_mtu(),
+                self.params.effective_batch_size() as usize,
+            )
+            .lane_bytes(priority)
+    }
+
     /// R2924 — [`Self::is_qos`] in every build: a build without
     /// `transport-qos` negotiates no QoS, so its answer is `false`.
     pub fn negotiated_qos(&self) -> bool {
@@ -9313,7 +9392,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     if batch.stage.lent {
                         if self.append_lent_batch(batch, idx, priority, reliable, mtu, &encode_body)
                         {
-                            return Ok(PushOutcome::Pushed);
+                            return Ok(UnicastPush::Pushed);
                         }
                         continue;
                     }
@@ -9326,7 +9405,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     #[cfg(feature = "tx-lend-only")]
                     {
                         if congested() {
-                            return Ok(PushOutcome::Congested);
+                            return Ok(UnicastPush::Congested);
                         }
                         let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
                         return match self.open_lent_batch(
@@ -9339,7 +9418,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             mtu,
                             &encode_body,
                         ) {
-                            LentBatchOpen::Opened => Ok(PushOutcome::Pushed),
+                            LentBatchOpen::Opened => Ok(UnicastPush::Pushed),
                             #[cfg(feature = "transport-fragmentation")]
                             LentBatchOpen::Heap(HeapStage::PastBudget) => self
                                 .emit_fragments_encoded(
@@ -9371,7 +9450,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     #[cfg(not(feature = "tx-lend-only"))]
                     if batch.stage.buf.is_empty() {
                         if congested() {
-                            return Ok(PushOutcome::Congested);
+                            return Ok(UnicastPush::Congested);
                         }
                         let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
                         // ARCHITECTURE section 9.1 -- the frame opens in a slot
@@ -9391,7 +9470,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             mtu,
                             &encode_body,
                         ) {
-                            LentBatchOpen::Opened => return Ok(PushOutcome::Pushed),
+                            LentBatchOpen::Opened => return Ok(UnicastPush::Pushed),
                             // The message alone is past the budget, found out
                             // in a slot that holds the whole budget: it leaves
                             // as a chain of lent fragments, and is never staged
@@ -9450,7 +9529,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                             #[cfg(feature = "transport-tx-lend")]
                             batch.lend.count_heap(heap_stage);
                         }
-                        return Ok(PushOutcome::Pushed);
+                        return Ok(UnicastPush::Pushed);
                     }
                     // R311y222 — the open frame is ONE (priority, reliability)
                     // conduit. The PRIORITY half is now the stage index, so only
@@ -9487,7 +9566,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         encode_into(&mut stage.buf);
                         if stage.buf.len() <= mtu {
                             stage.count += 1;
-                            return Ok(PushOutcome::Pushed);
+                            return Ok(UnicastPush::Pushed);
                         }
                         // Overflow: roll the partial encode back, flush this
                         // conduit's open frame, loop into the open-fresh-frame arm.
@@ -9512,7 +9591,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // frame-per-message, mint + encode + emit under the SAME lock
             // hold (pico TX-mutex parity, R311kf).
             if congested() {
-                return Ok(PushOutcome::Congested);
+                return Ok(UnicastPush::Congested);
             }
             let sn = self.next_outbound_frame_sn(priority, reliable, sn_mask);
             let frame_emit = FrameEmit {
@@ -9536,7 +9615,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // of their own (`Self::emit_fragments_encoded`, R3251).
             #[cfg(all(feature = "transport-tx-lend", not(feature = "tx-lend-only")))]
             match self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
-                FrameLend::Sent => return Ok(PushOutcome::Pushed),
+                FrameLend::Sent => return Ok(UnicastPush::Pushed),
                 #[cfg(feature = "transport-fragmentation")]
                 FrameLend::PastMtu => {
                     return self.emit_fragments_encoded(batch, &encode_body, frame_emit);
@@ -9563,7 +9642,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // minted above is spent, as it is for a refused fragment chain.
             #[cfg(feature = "tx-lend-only")]
             match self.send_frame_lent(&frame_emit, worst_case_payload, &encode_body) {
-                FrameLend::Sent => Ok(PushOutcome::Pushed),
+                FrameLend::Sent => Ok(UnicastPush::Pushed),
                 #[cfg(feature = "transport-fragmentation")]
                 FrameLend::PastMtu => self.emit_fragments_encoded(batch, &encode_body, frame_emit),
                 #[cfg(not(feature = "transport-fragmentation"))]
@@ -9590,7 +9669,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // flush takes that lock.
         #[cfg(feature = "transport-batching")]
         if self.tx_conduits.is_auto() {
-            if priority == Priority::Control && matches!(push, Ok(PushOutcome::Pushed)) {
+            if priority == Priority::Control && matches!(push, Ok(UnicastPush::Pushed)) {
                 // The barrier's second half: the control message does not wait for the writer
                 // to go idle, since the data staged after it is owed to follow it.
                 self.flush_open_batch();
@@ -9616,7 +9695,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // A probe is not that decision: it asked once and without waiting, so it did not
             // give up on a deadline. Nothing is counted and nothing is closed, and the message
             // is the caller's to send again when the link has room.
-            Ok(PushOutcome::Congested) => {
+            Ok(UnicastPush::Congested) => {
                 #[cfg(feature = "alloc")]
                 if probing {
                     return Ok(Dispatched::NoRoom);
@@ -9632,6 +9711,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     self.request_congestion_close();
                 }
                 Ok(Dispatched::Sent)
+            }
+            // A probe met a chain of fragments and sent nothing (see `UnicastPush::Chain`): not
+            // counted as a message sent and not a congestion drop, the message is the caller's.
+            #[cfg(all(feature = "alloc", feature = "transport-fragmentation"))]
+            Ok(UnicastPush::Chain) => Ok(Dispatched::Chain),
+            // Only a probe is answered `Chain`, and a probe exists with `alloc`.
+            #[cfg(all(not(feature = "alloc"), feature = "transport-fragmentation"))]
+            Ok(UnicastPush::Chain) => {
+                unreachable!("a chain is refused only to a sender that may not wait")
             }
             // Fixed-memory step S4 — a send the link lent no slot for was never
             // pushed: it is not an `n_msgs` message, as a congestion drop is not,
@@ -9690,7 +9778,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         batch: &mut BatchTx,
         frame: &[u8],
         emit: FrameEmit,
-    ) -> Result<PushOutcome, SendWireError> {
+    ) -> Result<UnicastPush, SendWireError> {
         let FrameEmit {
             ext_qos,
             sn,
@@ -9734,7 +9822,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // The frame's conduit reconstructed from its own ext_qos (`Some(p)` iff
         // `p != DEFAULT`, else `None -> DEFAULT`) — the same key the SN mint used.
         self.send_wire(frame, reliability, ext_qos.unwrap_or(Priority::DEFAULT));
-        Ok(PushOutcome::Pushed)
+        Ok(UnicastPush::Pushed)
     }
 
     /// ARCHITECTURE section 9.1 -- the oversize message cut into a chain WITHOUT
@@ -9772,7 +9860,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         batch: &mut BatchTx,
         encode_body: &P,
         emit: FrameEmit,
-    ) -> Result<PushOutcome, SendWireError>
+    ) -> Result<UnicastPush, SendWireError>
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>,
     {
@@ -9816,7 +9904,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         body: crate::frame_encode::FragmentBody<'_>,
         body_len: usize,
         emit: FrameEmit,
-    ) -> Result<PushOutcome, SendWireError> {
+    ) -> Result<UnicastPush, SendWireError> {
         let FrameEmit {
             ext_qos,
             sn,
@@ -9890,6 +9978,23 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // fragment is written by `Self::send_fragment`, into a lent slot
         // where the link lends one and on the heap where it does not.
         let mut plan = crate::frame_encode::FragmentPlan::new(body_len, mtu, sn, sn_mask, ext_qos);
+        // A sender that may not wait can send a chain only when the lane holds the whole of it
+        // at once. A chain is wire-atomic: it is not put down at the fragment the lane fills at
+        // and picked up again later, so a chain the lane cannot hold would be begun, abandoned
+        // at the same fragment and begun again, for ever, by a sender that asks for room
+        // without waiting. Every fragment but the last has to find the lane under its bound
+        // with the ones before it queued, and a fragment weighs at most `mtu`. Refused here, in
+        // the way the cap above is: before a byte leaves and before a follow-on SN is reserved,
+        // with the SN of this message given back; the sender sends it waiting. The chain that
+        // fits may still find the lane full and is abandoned and put down for later, which is
+        // what a probe does with a frame.
+        if deadline.is_probe() {
+            let before_last = (plan.remaining_fragments() - 1).saturating_mul(mtu);
+            if before_last >= self.tx_lane_bytes(priority) {
+                self.outbound_frame_sn.unmint(priority, reliable);
+                return Ok(UnicastPush::Chain);
+            }
+        }
         let mut emitted = 0usize;
         let mut deadline = deadline;
         while plan.remaining_fragments() > 0 {
@@ -9925,7 +10030,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         reliable,
                         ext_qos,
                     );
-                    return Ok(PushOutcome::Congested);
+                    return Ok(UnicastPush::Congested);
                 }
             }
             if !self.take_fragment_tx_credit() {
@@ -9996,7 +10101,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             emitted += 1;
             deadline.next_fragment();
         }
-        Ok(PushOutcome::Pushed)
+        Ok(UnicastPush::Pushed)
     }
 
     /// Put ONE fragment of a chain on its conduit's link: written straight into
@@ -10560,6 +10665,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     Ok(())
                 }
                 Ok(Dispatched::NoRoom) => Err(Unsent::NoRoom(
+                    crate::network_message::NetworkMessage::Push(push),
+                )),
+                #[cfg(feature = "transport-fragmentation")]
+                Ok(Dispatched::Chain) => Err(Unsent::Chain(
                     crate::network_message::NetworkMessage::Push(push),
                 )),
                 Err(e) => Err(Unsent::Failed(e)),

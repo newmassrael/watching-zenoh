@@ -335,6 +335,16 @@ impl RouterForwarder {
                 self.hold(dest, state, msg, reliable, express, priority);
                 Credited::Held
             }
+            // A chain of fragments cannot be sent without waiting for room between its
+            // fragments, so it is sent as it was before anything was held back: waiting inside
+            // the send. This is the one message the stage does not isolate a stopped reader from.
+            Err(Unsent::Chain(msg)) => {
+                if self.send_to_face_actions(&state.actions, msg, reliable, express, priority) {
+                    Credited::Sent
+                } else {
+                    Credited::Refused
+                }
+            }
             Err(Unsent::Failed(_)) => Credited::Refused,
         }
     }
@@ -438,6 +448,29 @@ impl RouterForwarder {
                             cost,
                         });
                         break;
+                    }
+                    // A message held behind others, and so not probed when it came, turns out to
+                    // be a chain. It is the head of its destination's queue, so sending it now,
+                    // waiting inside the send, keeps the order; what it costs the loop is what it
+                    // cost before anything was held back.
+                    Err(Unsent::Chain(msg)) => {
+                        self.credit.held.set(self.credit.held.get() - 1);
+                        self.credit
+                            .held_bytes
+                            .set(self.credit.held_bytes.get() - cost);
+                        if self.send_to_face_actions(
+                            &state.actions,
+                            msg,
+                            reliable,
+                            express,
+                            priority,
+                        ) {
+                            self.credit.released.set(self.credit.released.get() + 1);
+                            self.note_sent(true);
+                            took = true;
+                        } else {
+                            self.credit.abandoned.set(self.credit.abandoned.get() + 1);
+                        }
                     }
                     Err(Unsent::Failed(_)) => {
                         self.credit.held.set(self.credit.held.get() - 1);

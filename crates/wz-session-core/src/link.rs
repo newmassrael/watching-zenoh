@@ -563,6 +563,20 @@ impl TxQueueShape {
     /// The largest queue size upstream's config accepts
     /// (`commons/zenoh-config/src/defaults.rs` @ `pub const MAX: usize = 16;`).
     pub const MAX_SIZE: usize = 16;
+
+    /// The bytes the queue a frame of `priority` goes to holds before it refuses another: its
+    /// size in units, the `Priority::DEFAULT` queue's when the session negotiated no QoS (every
+    /// priority shares that one). A frame is accepted while the queue holds less than this, so a
+    /// run of frames of at most `batch_bytes` fits whole only while it is shorter than this by
+    /// the last frame.
+    pub fn lane_bytes(&self, priority: crate::qos::Priority) -> usize {
+        let lane = if self.qos {
+            priority.wire_byte()
+        } else {
+            crate::qos::Priority::DEFAULT.wire_byte()
+        };
+        self.sizes[lane as usize].saturating_mul(self.queue_unit_bytes)
+    }
 }
 
 impl RoomWait {
@@ -2125,6 +2139,31 @@ pub enum LostCause {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lane's bound is its size in units, and a session that negotiated no QoS has the one
+    /// queue its DEFAULT priority is sized by, whatever priority a frame has.
+    #[test]
+    fn a_lane_is_bounded_in_units_and_a_session_without_qos_has_one() {
+        use crate::qos::Priority;
+        let mut sizes = [2; Priority::NUM];
+        sizes[Priority::DEFAULT.wire_byte() as usize] = 3;
+        sizes[Priority::DataHigh.wire_byte() as usize] = 5;
+        let qos = TxQueueShape {
+            sizes,
+            qos: true,
+            batch_bytes: 1_000,
+            queue_unit_bytes: 4_000,
+        };
+        assert_eq!(qos.lane_bytes(Priority::DEFAULT), 12_000);
+        assert_eq!(qos.lane_bytes(Priority::DataHigh), 20_000);
+        assert_eq!(qos.lane_bytes(Priority::Background), 8_000);
+        let shared = TxQueueShape { qos: false, ..qos };
+        assert_eq!(
+            shared.lane_bytes(Priority::DataHigh),
+            12_000,
+            "every priority shares the DEFAULT queue"
+        );
+    }
 
     /// A storage standing for a page a payload lies in.
     #[cfg(feature = "rx-shared-bytes")]
