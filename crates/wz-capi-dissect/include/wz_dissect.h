@@ -6478,8 +6478,8 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  *
  * Writes {"document":{"name":"memory","revision":R},"unit":"bytes",
  * "scope":"rows","total":T,"lists":{"rows":..,"unit_log":..,"whole_rows":..,
- * "sparse":..,"wire_ends":..,"small":..},"streams":{"kept":..,"runs":..,
- * "pending":..},"plaintext":P,"scouting":S,"packets":K,"selection":W,"census":{"payload_rows":
+ * "sparse":..,"wire_ends":..,"joined":..,"chains":..,"small":..},"streams":{"kept":..,"runs":..,
+ * "pending":..},"plaintext":P,"tls_records":R,"scouting":S,"packets":K,"selection":W,"census":{"payload_rows":
  * ..,"exchange_rows":..,"row_digests":..},"fields":{"payload_rows":..,
  * "exchange_rows":..,"row_digests":..},"drain":D} to *out.
  *
@@ -6500,6 +6500,16 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  *     not changed. It grows with the rows a consumer has paged through, which is
  *     why a consumer that pages a whole capture holds more than one that read the
  *     first window.
+ *   - lists.joined is the messages that completed a fragment chain, joined: the
+ *     only copy of those bytes, kept so wz_dissect_live_reassembled_bytes can
+ *     hand them back. It follows the chains' content, not the row count, and it
+ *     costs a walk of the facts the lists keep to report.
+ *   - lists.chains is the chain each fragment row belongs to and what became of
+ *     it, which every list that has seen a fragment keeps, whether it holds its
+ *     rows as entries or whole.
+ *   - tls_records is the encrypted records an encrypted flow keeps for a
+ *     decryptor. It is bounded per flow, not per row: at most 4096 a direction,
+ *     so it is the one figure here that stops growing with the capture.
  *   - selection is what wz_dissect_live_selection_since keeps between calls: the
  *     word each selector said of each row, which is how a later call says which
  *     moved. It is a nibble a row, for every selector the handle keeps one for.

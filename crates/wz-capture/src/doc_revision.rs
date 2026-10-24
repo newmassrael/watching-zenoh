@@ -3580,10 +3580,12 @@ pub const MEMORY: &str = "memory";
 /// set cannot tell `payload_rows` under `census` from the one under `fields`.
 pub const MEMORY_R1_KEYS: &[&str] = &[
     "census",
+    "chains",
     "document",
     "drain",
     "exchange_rows",
     "fields",
+    "joined",
     "kept",
     "lists",
     "name",
@@ -3601,6 +3603,7 @@ pub const MEMORY_R1_KEYS: &[&str] = &[
     "small",
     "sparse",
     "streams",
+    "tls_records",
     "total",
     "unit",
     "unit_log",

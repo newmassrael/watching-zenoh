@@ -1084,9 +1084,9 @@ impl LiveDissection {
             s,
             ",\"unit\":\"bytes\",\"scope\":\"rows\",\"total\":{},\
              \"lists\":{{\"rows\":{},\"unit_log\":{},\"whole_rows\":{},\"sparse\":{},\
-             \"wire_ends\":{},\"small\":{}}},\
+             \"wire_ends\":{},\"joined\":{},\"chains\":{},\"small\":{}}},\
              \"streams\":{{\"kept\":{},\"runs\":{},\"pending\":{}}},\
-             \"plaintext\":{},\"scouting\":{},\"packets\":{},\"selection\":{},\
+             \"plaintext\":{},\"tls_records\":{},\"scouting\":{},\"packets\":{},\"selection\":{},\
              \"census\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
              \"fields\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
              \"drain\":{}}}",
@@ -1096,11 +1096,14 @@ impl LiveDissection {
             l.whole_rows,
             l.sparse,
             l.wire_ends,
+            l.joined,
+            l.chains,
             l.small,
             m.dissection.stream_kept,
             m.dissection.stream_runs,
             m.dissection.stream_pending,
             m.dissection.plaintext,
+            m.dissection.tls_records,
             m.dissection.scouting,
             m.dissection.packets,
             m.selection,
