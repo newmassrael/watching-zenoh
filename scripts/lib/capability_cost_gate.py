@@ -73,7 +73,8 @@ PICO_SOURCE = ROOT / "vendor" / "zenoh-pico"
 # The reference builds, one directory per (pin, switches, toolchain), so a run that asks for the
 # same build again reads it instead of building it.
 PICO_BUILDS = CRATES / "target" / "pico-reference"
-TARGET = CRATES / "target" / "release"
+# A case's library is under the directory of the cargo profile it was built with.
+TARGET = CRATES / "target"
 
 PICO_BASE = "serial-drive-own-thread,rx-busy-poll"
 
@@ -108,6 +109,9 @@ class Case:
     forbid: tuple[str, ...] = ()
     require: tuple[str, ...] = ()
     exports: int | None = None
+    # The cargo profile (`crates/Cargo.toml`). It is not a capability, so it leaves the pico
+    # reference alone: that is derived from the features only.
+    profile: str = "release"
     note: str = field(default="", compare=False)
 
 
@@ -120,6 +124,12 @@ CASES: tuple[Case, ...] = (
          note="a single-threaded pub/sub client that dials TCP: no listener, no scouting, "
               "no UDP, no clock, no unstable API. 1,794,085 measured, down from 1,868,267 "
               "with the unstable API and the connectivity plane"),
+    Case("pico-client-small", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_498_000,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
+                 CONNECTIVITY, MULTICAST),
+         require=(SINGLE_THREADED,), profile="capi-small",
+         note="the pico-client build with panics aborting: the like-for-like of zenoh-pico's C. "
+              "1,468,134 measured against pico-client's 1,790,361 (-18.0%)"),
     Case("pico-client-udp", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",link-udp", 1_892_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST),
@@ -139,6 +149,11 @@ CASES: tuple[Case, ...] = (
               "3,790,610 without it"),
     Case("capic-client", "wz-capi-c", "libwz_capi_c.so", "", 3_000_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST)),
+    Case("capic-client-small", "wz-capi-c", "libwz_capi_c.so", "", 1_834_000,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
+         profile="capi-small",
+         note="the capic-client build with panics aborting: 1,797,992 measured against "
+              "capic-client's 2,172,515 (-17.2%)"),
     Case("capic-scout", "wz-capi-c", "libwz_capi_c.so", "scout", 3_275_000,
          forbid=(ACCEPT, RESPONDER, GOSSIP, CLOCK, ADVANCED, MULTICAST),
          require=(SCOUTING, UDP)),
@@ -194,13 +209,13 @@ def grade(case: Case, got: Measured) -> list[str]:
 
 
 def build(case: Case) -> Measured:
-    cmd = ["cargo", "build", "--release", "-p", case.package, "--quiet"]
+    cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet"]
     if case.features is not None:
         cmd += ["--no-default-features"]
         if case.features:
             cmd += ["--features", case.features]
     subprocess.run(cmd, cwd=CRATES, check=True)
-    lib = TARGET / case.lib
+    lib = TARGET / case.profile / case.lib
     size_out = subprocess.run(["size", str(lib)], capture_output=True, text=True, check=True).stdout
     text = int(size_out.splitlines()[1].split()[0])
     names = subprocess.run(
@@ -376,6 +391,16 @@ def cmd_selftest() -> int:
            {"serial-drive-own-thread", "rx-busy-poll"}
            <= case_features(next(c for c in CASES if c.id == "pico-client"))
            and "peer" in case_features(next(c for c in CASES if c.id == "pico-default")))
+    # A profile is a compile property, not a capability: a case that differs from another only in
+    # its profile must be divided by the same pico, or the ratio moves from both sides at once.
+    by_id = {c.id: c for c in CASES}
+    expect("a profile twin has its base case's features, and so its pico reference",
+           all(case_features(by_id[small]) == case_features(by_id[base])
+               for small, base in (("pico-client-small", "pico-client"),
+                                   ("capic-client-small", "capic-client"))))
+    expect("every case's profile is one crates/Cargo.toml defines",
+           {c.profile for c in CASES} <= {"release"} | set(
+               re.findall(r"^\[profile\.([\w-]+)\]", (CRATES / "Cargo.toml").read_text(), re.M)))
     print(f"  capability-cost selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 

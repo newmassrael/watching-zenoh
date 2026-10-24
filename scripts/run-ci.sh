@@ -10628,8 +10628,9 @@ layer_c1cf_reduced_features() {
 #
 # `capability_cost_gate.py` builds each case in its table with exactly its features and grades
 # size, the absence of the planes it leaves out, the presence of the planes it has, and the
-# pinned export count of the default build. Eight release builds of two cdylibs, run as ONE
-# lane because each case replaces the previous one's artifact in the same target directory.
+# pinned export count of the default build. Eight release builds and two `capi-small` builds
+# (panics abort) of two cdylibs, run as ONE lane because each case replaces the previous one's
+# artifact in the target directory of its profile.
 layer_c1cs_capability_cost() {
     python3 scripts/lib/capability_cost_gate.py --check || return 1
 }

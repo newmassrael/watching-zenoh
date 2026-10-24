@@ -316,3 +316,14 @@ warnings = "deny"
 lto = "thin"
 codegen-units = 1
 opt-level = 3
+
+# The C ABI libraries for a deployer who wants the smallest binary, selected with
+# `cargo build --profile capi-small`. A panic ABORTS the process instead of unwinding: the
+# release profile above keeps unwinding because the ABI doors catch a panic and return an error
+# code (`ffi::guarded`), and a deployer who has not chosen otherwise gets that. zenoh-pico is C,
+# where the same bug is an assertion or a fault, so for the pico-class client this is the
+# like-for-like build. What it drops is the unwind tables and the std backtrace support; the
+# size gate grades both profiles (`scripts/lib/capability_cost_gate.py`).
+[profile.capi-small]
+inherits = "release"
+panic = "abort"
