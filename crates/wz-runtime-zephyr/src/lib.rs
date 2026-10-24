@@ -33,7 +33,8 @@
 //!    uses Zephyr's sockets, and so does this profile now. `links` is the same
 //!    sockets as the session shell's `SessionLinks` seam (`ZephyrLinks`: an
 //!    accepting link and a dialling one), which is what lets a node that
-//!    listens and dials, the admin node, run over them.
+//!    listens and dials, the admin node, run over them. [`stream`] is TCP over
+//!    the same sockets, the stream a `tcp/` or `tls/` link runs over.
 //! 4. R2918 — [`ZephyrEntropy`], the session core's `EntropySource`, over the
 //!    board hook `wzApplicationGetRandom`, which a board serves from its RNG
 //!    (`sys_rand_get`, the call zenoh-pico's Zephyr port makes).
@@ -66,6 +67,7 @@ pub mod glue;
 pub mod links;
 pub mod net;
 pub mod stack;
+pub mod stream;
 
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub use links::ZephyrLinks;

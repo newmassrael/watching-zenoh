@@ -44,11 +44,23 @@ pub mod socket {
 
     /// `NET_AF_INET` (`include/zephyr/net/net_ip.h`).
     pub const AF_INET: c_int = 1;
+    /// `NET_SOCK_STREAM`, the first value of `enum net_sock_type`.
+    pub const SOCK_STREAM: c_int = 1;
     /// `NET_SOCK_DGRAM` — the second value of `enum net_sock_type`, which
     /// starts at `NET_SOCK_STREAM = 1`.
     pub const SOCK_DGRAM: c_int = 2;
+    /// `NET_IPPROTO_TCP`.
+    pub const IPPROTO_TCP: c_int = 6;
     /// `NET_IPPROTO_UDP`.
     pub const IPPROTO_UDP: c_int = 17;
+    /// `ZSOCK_MSG_DONTWAIT` (`include/zephyr/net/socket.h`): a read that
+    /// returns at once when nothing is queued.
+    pub const MSG_DONTWAIT: c_int = 0x40;
+    /// `ZSOCK_SHUT_RDWR`: end a connection in both directions.
+    pub const SHUT_RDWR: c_int = 2;
+    /// `ZSOCK_TCP_NODELAY`, at level [`IPPROTO_TCP`]: send a segment without
+    /// waiting to join it with the next write.
+    pub const TCP_NODELAY: c_int = 1;
     /// `ZSOCK_POLLIN` (`include/zephyr/net/socket.h`).
     pub const POLLIN: c_short = 1;
     /// `NET_IPPROTO_IP`, the `level` of the IPv4 socket options below
@@ -138,6 +150,14 @@ pub mod socket {
         ) -> c_int;
         pub fn poll(fds: *mut PollFd, nfds: c_int, timeout_ms: c_int) -> c_int;
         pub fn close(fd: c_int) -> c_int;
+        /// The stream calls (`options/net.c`, beside the rest of the group):
+        /// connect a `SOCK_STREAM` socket, write to and read from it, name its
+        /// peer, and end it. A stream needs `CONFIG_NET_TCP`.
+        pub fn connect(sock: c_int, addr: *const SockaddrIn, addrlen: SockLen) -> c_int;
+        pub fn send(sock: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize;
+        pub fn recv(sock: c_int, buf: *mut c_void, max_len: usize, flags: c_int) -> isize;
+        pub fn getpeername(sock: c_int, addr: *mut SockaddrIn, addrlen: *mut SockLen) -> c_int;
+        pub fn shutdown(sock: c_int, how: c_int) -> c_int;
     }
 }
 

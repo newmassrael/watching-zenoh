@@ -157,6 +157,13 @@ pub enum ZephyrNetError {
     /// built without IGMP refuses the join, and so does an interface address no
     /// interface holds.
     Membership(c_int),
+    /// A stream's `connect` returned this: the other end did not take the
+    /// connection, or the image has no TCP (`CONFIG_NET_TCP`).
+    Connect(c_int),
+    /// A stream's `setsockopt(TCP_NODELAY)` returned this.
+    NoDelay(c_int),
+    /// A stream's `getpeername` returned this.
+    PeerName(c_int),
 }
 
 /// One IPv4 UDP socket on Zephyr's net stack, bound to an explicit local
@@ -177,7 +184,7 @@ pub struct ZephyrUdpSocket {
     times_out: bool,
 }
 
-fn sockaddr(addr: [u8; 4], port: u16) -> SockaddrIn {
+pub(crate) fn sockaddr(addr: [u8; 4], port: u16) -> SockaddrIn {
     SockaddrIn {
         sin_family: AF_INET as u16,
         sin_port: port.to_be(),
