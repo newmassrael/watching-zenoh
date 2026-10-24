@@ -382,6 +382,25 @@ def crate_of(path):
     return parts[1] if len(parts) > 1 and parts[0] == "crates" else parts[0]
 
 
+def scope_of(path):
+    """The scope a fn or const defined in `path` is NAMED in. A file directly under a package's
+    `tests/` is its own integration-test crate, so what it defines is visible to that file alone:
+    two such files of one package may each have a local `fn run(..)` and the one that forwards its
+    argument to a wait must not make the other's `run("REFERENCE", ..)` a wrapper call. Every other
+    file (the sources, and a module a test shares from a subdirectory) is in the package's scope,
+    which every file of the package can see."""
+    parts = Path(path).parts
+    if len(parts) == 4 and parts[0] == "crates" and parts[2] == "tests" \
+            and parts[3].endswith(".rs"):
+        return parts[1] + "|" + path
+    return crate_of(path)
+
+
+def visible_scopes(scope):
+    """The scopes a file in `scope` reads names from: its own, then its package's."""
+    return (scope, scope.split("|", 1)[0]) if "|" in scope else (scope,)
+
+
 def is_test_support(crate):
     return crate == "wz-integration-tests" or crate.endswith("test-support") \
         or crate.endswith("-tests")
@@ -559,6 +578,7 @@ class Src:
     def __init__(self, path, raw):
         self.path = path
         self.crate = crate_of(path)
+        self.scope = scope_of(path)
         _raw, self.lit, self.code = views(path, raw)
         self.fns = silent_skip_gate.fn_table(self.code)
         for f in self.fns:
@@ -660,14 +680,19 @@ class Tree:
             for m in re.finditer(r"\buse\s+[\w:]*?(\w+)\s+as\s+(\w+)\s*;", s.code):
                 self.aliases[(s.path, m.group(2))] = m.group(1)
             for f in s.fns:
-                self.fn_by_name[(s.crate, f.name)].append((s, f))
+                self.fn_by_name[(s.scope, f.name)].append((s, f))
             for m in CONST_RE.finditer(s.code):
                 rhs = s.statement_after(m.end())
                 if rhs:
-                    self.consts[(s.crate, m.group(1))].append((s, rhs))
+                    self.consts[(s.scope, m.group(1))].append((s, rhs))
         self.base = base_needle_index(srcs)
         self._flow = {}
         self.wrappers, self.echo_fns = self._derive()
+
+    def fns_named(self, s, name):
+        """The fns `name` can mean in `s`: the file's own, then the package's."""
+        return [d for sc in visible_scopes(s.scope)
+                for d in self.fn_by_name.get((sc, name), ())]
 
     def flows_to_sink(self, s, f, ident, depth=0):
         key = (s.path, f.body_open, ident)
@@ -687,7 +712,7 @@ class Tree:
                     spans = arg_spans(s.code, op, cl) if cl > 0 else []
                     for k, (a, b) in enumerate(spans):
                         if a <= p < b:
-                            for cs, cf in self.fn_by_name.get((s.crate, name), ()):
+                            for cs, cf in self.fns_named(s, name):
                                 if k < len(cf.params) and self.flows_to_sink(
                                         cs, cf, cf.params[k], depth + 1):
                                     found = True
@@ -708,12 +733,16 @@ class Tree:
         while changed:
             changed = False
             for s in self.srcs:
-                known = {n: i for (c, n), (i, _p) in wrappers.items() if c == s.crate}
-                known.update({n: i for (c, n), (i, _p) in echo.items() if c == s.crate})
+                known = {}
+                # The package's scope first and the file's own after it, so a local fn of the
+                # same name is the one a call in this file means.
+                for sc in reversed(visible_scopes(s.scope)):
+                    known.update({n: i for (c, n), (i, _p) in wrappers.items() if c == sc})
+                    known.update({n: i for (c, n), (i, _p) in echo.items() if c == sc})
                 if s.crate in self.base:
                     known[BASE_WAIT] = self.base[s.crate]
                 for f in s.fns:
-                    k = (s.crate, f.name)
+                    k = (s.scope, f.name)
                     if k in wrappers or k in echo or f.name == BASE_WAIT:
                         continue
                     for name, idx in known.items():
@@ -742,9 +771,10 @@ class Tree:
         return wrappers, echo
 
     def lookup_const(self, s, name):
-        local = [(cs, rhs) for cs, rhs in self.consts.get((s.crate, name), ())
-                 if cs is s]
-        return local or self.consts.get((s.crate, name), [])
+        visible = [d for sc in visible_scopes(s.scope)
+                   for d in self.consts.get((sc, name), ())]
+        local = [(cs, rhs) for cs, rhs in visible if cs is s]
+        return local or visible
 
     def pieces(self, text):
         """Every string literal in `text` as needle material: a plain literal whole,
@@ -790,7 +820,7 @@ class Tree:
         pieces = self.pieces(e)
         for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.sub(
                 r'"(?:[^"\\]|\\.)*"', '""', e)):
-            for cs, cf in self.fn_by_name.get((s.crate, m.group(1)), ()):
+            for cs, cf in self.fns_named(s, m.group(1)):
                 pieces.extend(self.pieces(cs.lit[cf.body_open:cf.body_close]))
         if pieces:
             return ("ok", pieces)
@@ -800,9 +830,9 @@ class Tree:
 
     def _resolve_ident(self, s, e, enclosing, at, depth):
         if enclosing is not None and e in enclosing.params:
-            if (s.crate, enclosing.name) in self.wrappers:
+            if (s.scope, enclosing.name) in self.wrappers:
                 return ("forwarded", [])
-            if (s.crate, enclosing.name) in self.echo_fns \
+            if (s.scope, enclosing.name) in self.echo_fns \
                     or self.flows_to_sink(s, enclosing, e):
                 return ("echo", [])
             return None
@@ -882,8 +912,9 @@ class Tree:
             names = {}
             if s.crate in self.base:
                 names[BASE_WAIT] = (self.base[s.crate], None)
-            names.update({n: v for (c, n), v in self.wrappers.items() if c == s.crate})
-            names.update({n: v for (c, n), v in self.echo_fns.items() if c == s.crate})
+            for sc in reversed(visible_scopes(s.scope)):
+                names.update({n: v for (c, n), v in self.wrappers.items() if c == sc})
+                names.update({n: v for (c, n), v in self.echo_fns.items() if c == sc})
             for name, (idx, nparams) in names.items():
                 for at, args in s.calls(name):
                     if nparams is not None and len(args) != nparams:
@@ -900,7 +931,7 @@ class Tree:
                     if kind in ("forwarded", "echo"):
                         skipped[kind] += 1
                         continue
-                    if (s.crate, name) in self.echo_fns:
+                    if any((sc, name) in self.echo_fns for sc in visible_scopes(s.scope)):
                         skipped["echo"] += 1       # a caller of a send-and-wait fn
                         continue
                     for text in strings:
@@ -1226,7 +1257,7 @@ def selftest():
     src = Src("crates/c/tests/t.rs", text)
     wr = wait_wrappers([src])
     expect("a fn forwarding its needle parameter is derived as a wrapper",
-           wr == {("c", "wait_for_marker"): (1, 3)})
+           wr == {(scope_of(src.path), "wait_for_marker"): (1, 3)})
     sites, unresolved, skipped = find_needles([src])
     expect("callers' literals and let-bound templates are needles",
            sorted(t for _s, t, _k in sites) == [" ok", "never printed", "seq="])
@@ -1236,6 +1267,34 @@ def selftest():
     _s, unres2, _f = find_needles([src2])
     expect("an argument the reader cannot parse is reported, not dropped",
            len(unres2) == 1)
+
+    # Two integration-test files of one package are two crates: a `fn run` of one that forwards
+    # its argument to a wait is not what a local `fn run` of the other means. The package-wide
+    # reading made the second file's `run("A", &args)` a wrapper call with an expression the gate
+    # could not read (the red of the push that added the first file).
+    wait = 'fn wait_for_substring(file: &mut File, needle: &str, t: u64) {}\n'
+    forwarding = Src("crates/c/tests/forwarding.rs", wait + (
+        'fn run(f: &mut File, needle: &str) { wait_for_substring(f, needle, 5); }\n'
+        'fn t() { run(&mut f, "one text"); }\n'))
+    local = Src("crates/c/tests/local.rs", wait + (
+        'fn run(label: &str, args: &[String]) -> String { label.to_string() }\n'
+        'fn t() { let args = vec![]; run("REF", &args); }\n'))
+    both = Tree([forwarding, local])
+    bsites, bunres, _bskipped = both.needle_sites()
+    expect("a wrapper of one test file is not a wrapper in another test file of its package",
+           not bunres and sorted(t for _s, t, _k in bsites) == ["one text"]
+           and (scope_of(forwarding.path), "run") in both.wrappers
+           and (scope_of(local.path), "run") not in both.wrappers)
+    # A module a test file shares from a subdirectory belongs to the package, so its wrapper
+    # is still seen by every test file.
+    shared = Src("crates/c/tests/support/mod.rs", wait + (
+        'pub fn wait_for_line(f: &mut File, needle: &str) { wait_for_substring(f, needle, 5); }\n'))
+    user = Src("crates/c/tests/user.rs",
+               'fn t() { wait_for_line(&mut f, "a shared wait"); }\n')
+    shared_tree = Tree([shared, user])
+    ssites, sunres, _sskipped = shared_tree.needle_sites()
+    expect("a wrapper in a shared test module is seen from a test file",
+           not sunres and [t for _s, t, _k in ssites] == ["a shared wait"])
 
     # A value the test sends is not producer text, and a barrier on a `let`
     # binding is graded against the binding in ITS function, not a namesake.
@@ -1252,7 +1311,7 @@ def selftest():
     tree = Tree([echo])
     esites, eunres, eskipped = tree.needle_sites()
     expect("a send-and-wait fn is an echo fn, not a wrapper",
-           ("c", "send_and_wait") in tree.echo_fns and not tree.wrappers)
+           (scope_of(echo.path), "send_and_wait") in tree.echo_fns and not tree.wrappers)
     expect("its callers' values are skipped as test-sent",
            eskipped["echo"] >= 2 and not eunres)
     expect("a let binding resolves to its own function's value only",
