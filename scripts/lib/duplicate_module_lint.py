@@ -46,8 +46,10 @@ DECL = re.compile(
 )
 
 # Trees this workspace does not author: vendored upstreams keep their own
-# layout, and build output is regenerated rather than reviewed.
-SKIP_PARTS = ("target", "vendor", ".git")
+# layout (`third-party` holds crates.io packages copied whole, `THIRD_PARTY.md`: tokio declares
+# a module twice under disjoint `cfg`s on purpose, which is its code and not this tree's), and
+# build output is regenerated rather than reviewed.
+SKIP_PARTS = ("target", "vendor", "third-party", ".git")
 
 
 def declarations(text: str) -> list[tuple[str, int]]:
