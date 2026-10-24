@@ -77,18 +77,20 @@ owner's machines differ and a licence may bind them).
 
 **T3. A target is a row of the declaration.** `deploy/wz-config.toml` gains `[[target]]`:
 `id`, `triple`, `os`, `libc` (`glibc`, `bionic`, `nto`), `network_stack` (QNX only),
-the toolchain variables required, the system libraries the target provides
-(`system_needed`), the profiles it can build and the lane that grades it. Two QNX
-rows (`io-sock`, `io-pkt`) share a triple because the network stack is part of the
-target's identity; whether their code differs is open (§6). A target whose row is
-absent, or whose profile combination fails an axis `requires` (C6), is refused by the
-entry with the reason; it never builds something "close".
+the toolchain variables required, the system libraries the row ASSUMES the target
+provides (`system_assumed`, see T5), the profiles it can build and the lane that
+grades it. The two QNX stacks are two rows (`io-sock`, `io-pkt`) that share a triple:
+the consumer measured that their artifacts cannot be the same, because the io-sock
+network library is `libsocket.so.4` (under the io-sock library directory) where the
+default SDP has `.so.3`, so the NEEDED entries differ whatever the code does. A target
+whose row is absent, or whose profile combination fails an axis `requires` (C6), is
+refused by the entry with the reason; it never builds something "close".
 
 **T4. Facts come in three classes and the manifest says which.**
 
 | Class | How it is obtained | Examples |
 |---|---|---|
-| measured | read from the artifact's bytes by a host tool that never runs the artifact | sha256, size, ELF class and machine, interpreter, SONAME, NEEDED, the highest symbol-version tag, the API level in `.note.android.ident`, the ABI stamp (T6) |
+| measured | read from the artifact's bytes by a host tool that never runs the artifact | sha256, size, ELF class and machine, interpreter, SONAME, NEEDED, linking (`static` or `dynamic`), RUNPATH and RPATH (present or absent, with the value), the highest symbol-version tag, the API level in `.note.android.ident`, the ABI stamp (T6) |
 | build | recorded by the entry from its own inputs | commit, profile id and version, the resolved features, capabilities and limits, the driver-role table |
 | catalog | read from the declaration | target row, the `requires` a capability declares, the lane |
 
@@ -97,11 +99,17 @@ entry produced and compares it with the manifest, with a deliberately damaged
 artifact as its control; a gate that read the value the writer had written would be
 one statement checked against itself.
 
-**T5. The closure is closed or refused.** Every NEEDED is either `system` (named in
-the target's `system_needed`) or `bundled` (a file in the output directory, listed
-with its own measurements). An artifact that needs anything else makes the entry
-fail naming the library. The consumer's tool therefore receives a closure it can
-ship whole, or nothing.
+**T5. The closure is closed or refused, and what is "system" is the device's fact.**
+Every NEEDED is either `system` (named in the target row's `system_assumed`) or
+`bundled` (a file in the output directory, listed with its own measurements, and the
+NEEDED entry names that artifact). An artifact that needs anything else makes the
+entry fail naming the library. A `system` entry carries its full SONAME, never a
+family name. The row's list is an assumption about a kind of device, not a fact
+about a device: the same io-sock stack has been measured with and without
+`libc++.so.1` and `libcatalog.so.1` on two boards. The manifest therefore states the
+assumption as such, and the consumer, which can ask each device, decides whether a
+given device has what the artifact needs. The entry's check stops a build that
+needs something nobody assumed; it does not prove any device has it.
 
 **T6. Every artifact carries an ABI stamp, readable without running it.** A static
 exported symbol (`wz_abi_stamp`) holds `family`, `revision` and, for the C ABI
@@ -113,9 +121,11 @@ document key, or a changed meaning. Additions do not bump it; they appear in the
 feature list. The consumer's rule is equality: a mismatch stops and names both
 numbers. The single source of each number is a Rust constant, mirrored in the
 header (libraries), a gate pin and the stamp, held together by one gate, as
-`wz-capi-c` does today. The layout arm (`multi_thread`, `unstable_api`,
-`local_subscriber`, `local_queryable`) is a value of the stamp, so a program is told
-when it links the wrong arm instead of crashing in a struct it laid out differently.
+`wz-capi-c` does today. The layout arm is a value of the stamp, so a program is told
+when it links the wrong arm instead of crashing in a struct it laid out differently:
+for `capi-pico` it is `multi_thread`, `unstable_api`, `local_subscriber` and
+`local_queryable`; for `capi-c` it is the two switches that move zenoh-c's types,
+`unstable_api` and `shared_memory` (`build-configuration.md` §2).
 Rejected: reading the number by calling an exported function (it cannot be called
 for a foreign target on the build host), and one number for all families (the headers
 move independently).
@@ -130,12 +140,24 @@ commit, profile and toolchain give the same bytes. Rejected: TOML (the consumer'
 tools read JSON already), and a manifest that embeds the build log.
 
 **T8. Roles are what an artifact provides, not file names.** The manifest lists, per
-artifact, the roles it provides and how each is reached: `pico-library` (a library),
-`session-node` (an executable that takes a stock zenoh config document through an
-argument, present only when the feature is) and `traffic-driver` (the driver key of
-a sessions document, with the role words the build contains). The role table is
-emitted by the same generator that already emits the feature list, so an artifact
-cannot claim a role its build left out.
+artifact, the roles it provides and how each is reached: `pico-library` (a library
+with pico's C ABI), `zenoh-c-dropin` (a library with zenoh-c's C ABI, which a
+program the consumer builds links against), `session-node` (an executable that takes
+a stock zenoh config document through an argument, present only when the feature is)
+and `traffic-driver` (the driver key of a sessions document, with the role words the
+build contains). The last is wz's own driver, inside `wz-ap-demo`; it is not the
+sibling driver program a consumer links against `zenoh-c-dropin`. A deployment may
+use either, and which one is the consumer's decision, so the manifest expresses both
+and prefers neither. The role table is emitted by the same generator that already
+emits the feature list, so an artifact cannot claim a role its build left out.
+
+**T8a. A floor is recorded as measured, and an unknown floor stays unknown.** The
+manifest carries every floor the artifact's bytes give and picks none: for glibc the
+highest `GLIBC_x.y` tag (a device is compared through `getconf GNU_LIBC_VERSION`),
+for Android the API level of the note and the symbol-version tags, both. QNX has no
+version symbols, so its floor is the toolchain identity, which includes the SDP
+version (7.1). A floor the entry could not measure is `null`, never a pass; the rule
+that turns floors into "this device may run it" is the consumer's.
 
 **T9. Device requirements are derived from the declaration, not measured.** A
 capability's `requires` (C6) gains the operating-system facilities it needs
@@ -183,7 +205,9 @@ value is a placeholder, the field is written as `"<...>"`.
     "strongest_green_lane": "build"
   },
   "profile": { "id": "<registered profile>", "version": 1 },
-  "toolchain": { "rustc": "<release line>", "cc": "<first line of --version>" },
+  "toolchain": { "rustc": "<release line>", "cc": "<first line of --version>",
+                 "sdk": "<for QNX: the SDP version, e.g. 7.1>" },
+  "system_assumed": ["libdl.so", "libm.so", "libc.so"],
   "device_requires": ["threads", "sockets:tcp", "sockets:udp", "entropy"],
   "artifacts": [
     {
@@ -191,13 +215,15 @@ value is a placeholder, the field is written as `"<...>"`.
       "path": "lib/libwz_capi_pico.so", "sha256": "<...>", "size": "<bytes>",
       "elf": {
         "class": 64, "machine": "aarch64", "interpreter": null,
+        "linking": "dynamic", "runpath": null, "rpath": null,
         "soname": "libwz_capi_pico.so",
         "needed": [
-          { "name": "libdl.so", "provided_by": "system" },
-          { "name": "libm.so",  "provided_by": "system" },
-          { "name": "libc.so",  "provided_by": "system" }
+          { "soname": "libdl.so", "provided_by": "system" },
+          { "soname": "libm.so",  "provided_by": "system" },
+          { "soname": "libc.so",  "provided_by": "system" }
         ],
-        "os_floor": { "android_api": 36 }
+        "os_floor": { "android_api_note": 36,
+                      "symbol_version_tags": ["LIBC", "LIBC_N"] }
       },
       "abi": {
         "family": "capi-pico", "revision": "<n>",
@@ -205,6 +231,15 @@ value is a placeholder, the field is written as `"<...>"`.
                     "local_subscriber": false, "local_queryable": false }
       },
       "provides": [ { "role": "pico-library" } ],
+      "features": ["<resolved>"]
+    },
+    {
+      "name": "libwz_capi_c.so", "kind": "shared-library",
+      "path": "lib/libwz_capi_c.so", "sha256": "<...>", "size": "<bytes>",
+      "elf": "<as above>",
+      "abi": { "family": "capi-c", "revision": "<n>",
+               "layout": { "unstable_api": "<bool>", "shared_memory": "<bool>" } },
+      "provides": [ { "role": "zenoh-c-dropin" } ],
       "features": ["<resolved>"]
     },
     {
@@ -226,13 +261,15 @@ value is a placeholder, the field is written as `"<...>"`.
 }
 ```
 
-What the example does not claim: that either artifact runs on a device (none was
-run), that the `--sessions` route is available in every build that carries
+What the example does not claim: that any artifact runs on a device (none was run),
+that `libwz_capi_c.so` was built for this target (the probe built neither it nor any
+`bundled` dependency; that entry is shaped from the consumer's request, with
+placeholders; a bundled NEEDED entry would read `{ "soname": "<...>",
+"provided_by": "bundled", "artifact": "lib/<file>" }`), that the `--sessions` route is available in every build that carries
 `zenoh-config` (to be taken from the generator, T8), and that `os_floor` is the
 lowest API level the artifact tolerates. The probe's `.note.android.ident` carries
 the API level of the compiler target (36) and the library's symbols carry version
-tags (`LIBC`, `LIBC_N`); which of the two is the floor, and how the entry reports
-it, is open (§6).
+tags (`LIBC`, `LIBC_N`); T8a records both and picks neither.
 
 ## 5. Steps
 
@@ -261,8 +298,9 @@ the owner approves each use; steps 5 and 6 begin there.
    against the SDK's libraries.
 6. **QNX.** The port first (the cooperative host profile on `nto`, entropy and errno
    behind the target; whether the tokio runtime builds for `nto`), then the two
-   rows, then lanes. Done when each row has a lane at `build` and its network-stack
-   difference is stated, or the two are one row with the reason.
+   rows, then lanes. Done when each of the two rows has a lane at `build` and the
+   measured NEEDED difference between them (the network library's SONAME) is in the
+   rows.
 7. **A fixture for the consumer.** One manifest per green target checked in as a
    fixture its tool can parse, regenerated by `--check`, so a schema change is a
    visible diff.
@@ -271,9 +309,11 @@ the owner approves each use; steps 5 and 6 begin there.
 
 - Whether the ABI stamp is a symbol, an ELF note or both; a note survives stripping
   and is readable by every ELF reader, a symbol is simpler to write from Rust.
-- Whether `os_floor` is the compiler target's API level, the highest symbol-version
-  tag, or both, and the glibc equivalent (the highest `GLIBC_x.y` tag).
-- Whether the two QNX network stacks differ in wz's code at all. If they do not, one
-  row and a note; the consumer's two devices then use the same artifact.
+- Whether wz-ap-demo's session-node role and a consumer-built driver linking the
+  zenoh-c drop-in need any coordination beyond the two roles being listed (for
+  example the same layout arm on both sides of one device).
+- Whether the target row's `system_assumed` list should be generated from the SDK's
+  own library directories instead of written, so an assumption cannot drift from the
+  SDK it names.
 - Where manifests and artifacts are published for a consumer that does not build
   them (a release asset beside `release.yml`, or built on demand through the entry).
