@@ -283238,6 +283238,46 @@
         "system_assumed for this platform is the build's, not yet compared with the board's own libraries."
       ]
     },
+    "Round 3537": {
+      "decision_summary": "D4's first half lands: a session can be told the node its dial is for, and refuses an InitAck from another. The opener calls expect_peer_zid before the handshake; the dispatcher compares the zid with the InitAck's in SentInitSyn, after the InitAck's extension checks and before the OpenSyn's bound is decided, which is upstream's order in open_link. A mismatch drives framing.error, so the session closes INVALID, upstream's reason, and sends no OpenSyn; it returns InitAckPeerMismatch, its own outcome because the peer broke no rule: another node answers at the locator. The value lives in the session's actions rather than in SessionInitParams, which carries a deployment's values to 115 sites, while this is an input of one dial. Two spellings of one zid are one zid, as upstream compares u128s. A dial that names no node is unchanged. The fixed-memory slot grows by 24 bytes. Left of D4: the AP reconcile path, the C ABI's scouted open and the MCU opener name the node.",
+      "changes_bullets": [
+        "crates/wz-session-core: SessionLinkActions::expect_peer_zid and init_ack_zid_acceptable; the drive dispatcher's InitAck identity check; DriverLoopOutcome::InitAckPeerMismatch; credential_identity::zid_from_wire, which zid_is_bound now uses.",
+        "crates/wz-runtime-tokio: OpenError::InitAckPeerMismatch and its arm in the open loop; three tests in session_fsm_driver_loop.rs.",
+        "deploy/session_slot_bytes.json: 36,776 and 36,768 bytes, measured.",
+        "docs/session-lifecycle-intent.md: step 2a of D4 and what is left of it; the slot size."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): cargo test -p wz-runtime-tokio --test session_fsm_driver_loop, 32 passed, the three new among them: an InitAck from another zid closes INVALID on the wire with no OpenSyn, the same InitAck is admitted for a dial made for its node in the sixteen-byte spelling, and bytes that spell no zid name no node. cargo test -p wz-session-core --lib credential_identity, 5 passed. cargo check --workspace --all-targets; clippy -D warnings of wz-session-core (default and no-default-features) and of wz-runtime-tokio; cargo fmt --check.",
+        "session_slot_bytes.py --check failed with the old record (36,752 to 36,776, 36,744 to 36,768) and passes with the new one. upstream_citation_anchor_gate.py --check and --resolve, prose_named_identifier, prose_feature, discard_site, discarded_evidence and accessor_reach_census pass; deploy_sessions --selftest and validate-deploy pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "D4 2b: the three openers name the node: the AP reconcile path (LinkstateOpener's connect set keyed by locator), the C ABI's scouted open (its after-the-handshake check moves to the InitAck) and the MCU opener; each with a witness that a locator answering with another zid closes at InitAck.",
+        "The inventory question of Round 3532: an atom for the fixed-memory profile's secure channel.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to 3537, per job."
+      ],
+      "publishable_decision_summary": "D4's first half lands: a session can be told the node its dial is for, and refuses an InitAck from another. The opener calls expect_peer_zid before the handshake; the dispatcher compares the zid with the InitAck's in SentInitSyn, after the InitAck's extension checks and before the OpenSyn's bound is decided, which is upstream's order in open_link. A mismatch drives framing.error, so the session closes INVALID, upstream's reason, and sends no OpenSyn; it returns InitAckPeerMismatch, its own outcome because the peer broke no rule: another node answers at the locator. The value lives in the session's actions rather than in SessionInitParams, which carries a deployment's values to 115 sites, while this is an input of one dial. Two spellings of one zid are one zid, as upstream compares u128s. A dial that names no node is unchanged. The fixed-memory slot grows by 24 bytes. Left of D4: the AP reconcile path, the C ABI's scouted open and the MCU opener name the node.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core: SessionLinkActions::expect_peer_zid and init_ack_zid_acceptable; the drive dispatcher's InitAck identity check; DriverLoopOutcome::InitAckPeerMismatch; credential_identity::zid_from_wire, which zid_is_bound now uses.",
+        "crates/wz-runtime-tokio: OpenError::InitAckPeerMismatch and its arm in the open loop; three tests in session_fsm_driver_loop.rs.",
+        "deploy/session_slot_bytes.json: 36,776 and 36,768 bytes, measured.",
+        "docs/session-lifecycle-intent.md: step 2a of D4 and what is left of it; the slot size."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): cargo test -p wz-runtime-tokio --test session_fsm_driver_loop, 32 passed, the three new among them: an InitAck from another zid closes INVALID on the wire with no OpenSyn, the same InitAck is admitted for a dial made for its node in the sixteen-byte spelling, and bytes that spell no zid name no node. cargo test -p wz-session-core --lib credential_identity, 5 passed. cargo check --workspace --all-targets; clippy -D warnings of wz-session-core (default and no-default-features) and of wz-runtime-tokio; cargo fmt --check.",
+        "session_slot_bytes.py --check failed with the old record (36,752 to 36,776, 36,744 to 36,768) and passes with the new one. upstream_citation_anchor_gate.py --check and --resolve, prose_named_identifier, prose_feature, discard_site, discarded_evidence and accessor_reach_census pass; deploy_sessions --selftest and validate-deploy pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "D4 2b: the three openers name the node: the AP reconcile path (LinkstateOpener's connect set keyed by locator), the C ABI's scouted open (its after-the-handshake check moves to the InitAck) and the MCU opener; each with a witness that a locator answering with another zid closes at InitAck.",
+        "The inventory question of Round 3532: an atom for the fixed-memory profile's secure channel.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to 3537, per job."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
