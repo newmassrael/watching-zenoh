@@ -1377,12 +1377,17 @@ pub(crate) enum TrimPolicy {
 /// R2205 (open-debt item 560) — WHY a decoded message's own bytes cannot be
 /// handed back, when they cannot.
 ///
-/// Two answers and not one, because they are different facts about the same
-/// reader and a consumer acts differently on each. One is POSITIONAL — those
+/// Two kinds of answer and not one, because they are different facts about the
+/// same reader and a consumer acts differently on each. One is POSITIONAL — those
 /// bytes existed and a ceiling took them, so a newer message of the same list
-/// will answer — and it is [`MessageBytes::Retired`]. The two here are
+/// will answer — and it is [`MessageBytes::Retired`]. The one here is
 /// STRUCTURAL: no message of such a list will ever answer, and a consumer that
 /// retried would be waiting for something that cannot arrive.
+///
+/// A second structural answer stood here, for a stream recovered from inside
+/// an encrypted transport, whose plaintext was not retained. Open-debt item 924
+/// (D8) keeps that plaintext so its messages can be read again, so its messages'
+/// bytes are handed back and the answer went with the reason for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NoByteSource {
     /// The list anchors to a PACKET INDEX, so the caller already holds the
@@ -1395,14 +1400,6 @@ pub enum NoByteSource {
     /// lent) to read the messages again (open-debt item 924, D8); that copy is
     /// the list's means of reading, not a second answer to where the bytes are.
     CallerHoldsThePacket,
-    /// A stream RECOVERED from inside an encrypted transport. Those bytes were
-    /// never on the wire in that form — they were decrypted and reassembled by
-    /// the caller, walked while they were alive, and are not retained here.
-    ///
-    /// [`Dissection::feed_quic_stream_with_sink`] is the consequence, and its
-    /// shape is the proof: the walk happens INSIDE the call because afterwards
-    /// there is nothing left to walk.
-    RecoveredPlaintextNotRetained,
 }
 
 impl NoByteSource {
@@ -1411,9 +1408,6 @@ impl NoByteSource {
         match self {
             Self::CallerHoldsThePacket => {
                 "this list anchors to a packet index, so the bytes are the ones you pushed"
-            }
-            Self::RecoveredPlaintextNotRetained => {
-                "these bytes were recovered from an encrypted transport and are not retained"
             }
         }
     }
@@ -1478,13 +1472,82 @@ pub struct QuicStreamDissection {
     frames: messages::MessageList,
     /// Bytes handed to the framer, per direction.
     fed: [u64; 2],
+    /// The recovered plaintext of each direction, from the first byte a held
+    /// message is read from (open-debt item 924, D8). The bytes exist only in
+    /// the call that hands them in, so this is the smallest form of them the
+    /// dissection can own, and the messages are read again from it.
+    plaintext: [Plaintext; 2],
+    /// How [`Self::frames`] keeps its messages.
+    keep: Keep,
+}
+
+/// One direction of a recovered stream's plaintext, from absolute stream offset
+/// `from` on.
+#[derive(Debug, Default)]
+struct Plaintext {
+    bytes: Vec<u8>,
+    from: usize,
+}
+
+impl Plaintext {
+    /// Bytes `from..to` of the direction's stream, when they are held.
+    fn get(&self, from: usize, to: usize) -> Option<&[u8]> {
+        self.bytes
+            .get(from.checked_sub(self.from)?..to.checked_sub(self.from)?)
+    }
+
+    /// Let go of the bytes before stream offset `at`.
+    fn release_before(&mut self, at: usize) {
+        let cut = at.saturating_sub(self.from).min(self.bytes.len());
+        if cut == 0 {
+            return;
+        }
+        self.bytes.drain(..cut);
+        self.from += cut;
+        // As the TCP stream's kept bytes do (R3358): a buffer that once held a
+        // lot gives its capacity back past twice what it holds now.
+        let held = self.bytes.len();
+        if self.bytes.capacity() > 2 * held + 4096 {
+            self.bytes.shrink_to(held + held / 4 + 4096);
+        }
+    }
+}
+
+/// The two directions' plaintext as a list's source, beside the list.
+struct Plaintexts<'a>(&'a [Plaintext; 2]);
+
+impl messages::UnitBytes for Plaintexts<'_> {
+    fn stream_bytes(
+        &self,
+        direction: Direction,
+        from: usize,
+        to: usize,
+    ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
+        self.0[dir_index(direction)]
+            .get(from, to)
+            .map(alloc::borrow::Cow::Borrowed)
+    }
+}
+
+impl messages::UnitBytes for QuicStreamDissection {
+    fn stream_bytes(
+        &self,
+        direction: Direction,
+        from: usize,
+        to: usize,
+    ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
+        self.plaintext[dir_index(direction)]
+            .get(from, to)
+            .map(alloc::borrow::Cow::Borrowed)
+    }
 }
 
 impl QuicStreamDissection {
-    /// Decoded transport messages, oldest first. Kept whole: the recovered
-    /// stream's bytes are the caller's and are gone once handed in.
+    /// Decoded transport messages, oldest first, kept as index entries read
+    /// again from the stream's recovered plaintext, which this stream keeps
+    /// (open-debt item 924, D8).
     pub fn frames(&self) -> messages::Messages<'_> {
-        self.frames.read(&messages::NoBytes)
+        self.frames.read(self)
     }
 
     /// Bytes this stream's framer was given, per direction.
@@ -2081,7 +2144,8 @@ pub struct DecryptedStream<'a> {
     /// and the space the messages in it are framed in.
     pub plaintext: &'a [u8],
     /// R311y678 — the frames the session decoded OUT OF [`Self::plaintext`],
-    /// with their coordinates still in its space.
+    /// with their coordinates still in the stream's space, which
+    /// [`Self::plaintext`] begins at [`Self::base`] in.
     ///
     /// Offered so a consumer never has to walk the framing a second time. It is
     /// not a convenience: a consumer walking it itself holds a second opinion
@@ -2102,9 +2166,25 @@ pub struct DecryptedStream<'a> {
     /// applied so a consumer can also stay in plaintext space if that is the
     /// question it is answering.
     pub record_origins: &'a [(usize, usize)],
+    /// The stream offset of [`Self::plaintext`]'s first byte: a frame's
+    /// `stream_offset` less this is where the frame's unit begins in
+    /// [`Self::plaintext`], and the coordinate [`Self::record_origin`] takes.
+    ///
+    /// Open-debt item 924, D8 — offered rather than applied. A list that keeps
+    /// its messages as entries reads them again from bytes it keeps, so it
+    /// cannot rewrite their coordinates for the length of a call and restore
+    /// them after, which is how an offer that appended to a longer stream was
+    /// handed over before. Zero where the plaintext is the whole stream.
+    pub base: usize,
 }
 
 impl DecryptedStream<'_> {
+    /// Where the unit of `frame`, one of [`Self::frames`], begins in
+    /// [`Self::plaintext`].
+    pub fn plaintext_offset(&self, frame: &PassiveFrame) -> usize {
+        frame.stream_offset - self.base
+    }
+
     /// The stream offset of the record `at` came out of, for reporting a
     /// plaintext position in the report's coordinate space.
     ///
@@ -3631,14 +3711,12 @@ impl FlowDissection {
 }
 
 /// Open-debt item 924, D8 — the bytes of the message at `index` of a list that
-/// logs its datagram units: the slice `FlowDissection::message_bytes` takes for a
-/// stream, with the unit being the logged payload, from the message's first byte
-/// (`unit_offset`; a datagram unit has no length prefix) to the end of the unit.
-/// `None` for a message the list does not keep as an entry, and past the end.
-fn logged_message_bytes(
-    messages: messages::Messages<'_>,
-    index: usize,
-) -> Option<MessageBytes<'_>> {
+/// keeps it as an entry: the slice `FlowDissection::message_bytes` takes for a
+/// stream, from the message's first byte (`unit_offset` past the unit's prefix)
+/// to the end of its unit, with the unit read from where the list reads it again
+/// (a logged datagram payload, or a recovered stream's kept plaintext). `None`
+/// for a message the list does not keep as an entry, and past the end.
+fn unit_message_bytes(messages: messages::Messages<'_>, index: usize) -> Option<MessageBytes<'_>> {
     let (payload, frame) = (messages.unit_bytes(index)?, messages.get(index)?);
     let span = frame.unit_offset..frame.unit_len;
     let short = |held: usize| {
@@ -4148,11 +4226,17 @@ mod message_list_census {
             id: _,
             session: _,
             fed: _,
+            // The bytes `frames` is read again from, not a list.
+            plaintext: _,
+            // How `frames` keeps its messages, not a list of them.
+            keep: _,
         } = QuicStreamDissection {
             id: 0,
             session: new_session(None),
             frames: messages::MessageList::new(),
             fed: [0, 0],
+            plaintext: Default::default(),
+            keep: Keep::Entries,
         };
     }
 }
@@ -6456,15 +6540,39 @@ impl Dissection {
                     .and_then(|frame| frame.decompressed.clone());
                 match own {
                     Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Owned(bytes)),
-                    None => logged_message_bytes(messages, index).unwrap_or_else(|| {
+                    None => unit_message_bytes(messages, index).unwrap_or_else(|| {
                         MessageBytes::Retired(alloc::string::String::from(
                             "this message is no longer in its flow's recovered datagrams",
                         ))
                     }),
                 }
             }
-            MessageListOrigin::QuicStream(_) => {
-                MessageBytes::NoSource(NoByteSource::RecoveredPlaintextNotRetained)
+            // A recovered stream's plaintext existed only in the calls that
+            // handed it in, and the stream keeps it from the oldest byte a held
+            // message is read from (open-debt item 924, D8).
+            MessageListOrigin::QuicStream(id) => {
+                let Some(stream) = self
+                    .datagram_flows
+                    .iter()
+                    .find(|f| f.flow == flow)
+                    .and_then(|f| f.quic_streams.iter().find(|s| s.id == id))
+                else {
+                    return MessageBytes::Retired(alloc::string::String::from(
+                        "the stream this message came out of is no longer held",
+                    ));
+                };
+                let messages = stream.frames();
+                let own = messages
+                    .get(index)
+                    .and_then(|frame| frame.decompressed.clone());
+                match own {
+                    Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Owned(bytes)),
+                    None => unit_message_bytes(messages, index).unwrap_or_else(|| {
+                        MessageBytes::Retired(alloc::string::String::from(
+                            "this message is no longer in its stream's list",
+                        ))
+                    }),
+                }
             }
             // The serial line's bytes are retained per FRAME rather than as a
             // stream: a serial link is datagram-flowed
@@ -6478,7 +6586,7 @@ impl Dissection {
                 // The frame's payload is the message's unit, which the list
                 // logged when it kept the message as an entry (open-debt item
                 // 924, D8).
-                logged_message_bytes(self.serial_frames(), index).unwrap_or_else(|| {
+                unit_message_bytes(self.serial_frames(), index).unwrap_or_else(|| {
                     MessageBytes::Retired(alloc::string::String::from(
                         "this message is no longer in the serial line's list",
                     ))
@@ -6704,6 +6812,7 @@ impl Dissection {
                     plaintext: &plaintext[index],
                     frames: flow.frames().rows_from(before),
                     record_origins: &spans[index],
+                    base: 0,
                 });
                 remap_decrypted_offsets(
                     flow.frames.iter_mut_from(before),
@@ -6820,6 +6929,8 @@ impl Dissection {
                     session: new_session(self.limits.reassembly_window_ms),
                     frames: messages::MessageList::new(),
                     fed: [0, 0],
+                    plaintext: Default::default(),
+                    keep: dg.keep,
                 });
                 dg.quic_streams.len() - 1
             }
@@ -6836,18 +6947,41 @@ impl Dissection {
         stream.fed[dir_index(direction)] += bytes.len() as u64;
         feed.bytes_fed += bytes.len();
         let before = stream.frames.len();
+        // Open-debt item 924, D8 — the offer's plaintext is kept, in its
+        // direction's stream space, so the messages framed out of it are read
+        // again from it: offsets in the session start at zero where `fed` does.
+        stream.plaintext[dir_index(direction)]
+            .bytes
+            .extend_from_slice(bytes);
         stream.session.push(direction, bytes);
+        let QuicStreamDissection {
+            session,
+            frames,
+            plaintext,
+            keep,
+            ..
+        } = &mut *stream;
+        let source = Plaintexts(plaintext);
         loop {
             let mut progressed = false;
             for dir in [Direction::A, Direction::B] {
                 loop {
-                    match stream.session.next_frame(dir) {
-                        Ok(frame) => {
+                    // A unit at a time, so the list can keep a unit's messages
+                    // side by side with the context it was read in; the order is
+                    // the order one message at a time gave.
+                    match session.next_unit_with(dir, &|_| None) {
+                        Ok(unit) => {
                             // The flow's own ingest, a field beside the
                             // streams: a QUIC connection is one link and its
                             // streams are its sessions' byte streams.
-                            dg.ingest.observe_frame(&frame);
-                            stream.frames.push(frame);
+                            for frame in &unit.frames {
+                                dg.ingest.observe_frame(frame);
+                            }
+                            match keep {
+                                Keep::Entries => frames.push_unit(unit, &source),
+                                #[cfg(test)]
+                                Keep::Whole => frames.append(unit.frames),
+                            }
                             progressed = true;
                         }
                         Err(PassiveStall::NeedMoreBytes) => break,
@@ -6861,7 +6995,7 @@ impl Dissection {
         }
         // Read BEFORE the cap loop below, which discards from the FRONT: after
         // a trim the count is still right and the index `before` is not.
-        let added = stream.frames.len() - before;
+        let added = frames.len() - before;
         feed.messages += added;
         // R311y719 — and the list is BOUNDED, against the same ceiling every
         // other decoded-message list on this flow answers to. Its own loop
@@ -6872,12 +7006,30 @@ impl Dissection {
         // a bound that discards decoded messages and does not say so is the
         // defect `DissectionDrops` exists to prevent.
         if let Some(cap) = self.limits.frames_per_flow {
-            while stream.frames.len() > cap {
-                let Some(receipt) = stream.frames.discard_oldest(&messages::NoBytes) else {
+            let mut discarded = false;
+            while frames.len() > cap {
+                let Some(receipt) = frames.discard_oldest(&source) else {
                     break;
                 };
                 self.dropped_frames.absorb(receipt);
                 self.drops.frames += 1;
+                discarded = true;
+            }
+            // The plaintext before the oldest message a direction still holds
+            // is read by nothing any more, so it goes with the messages.
+            if discarded {
+                let oldest = [Direction::A, Direction::B].map(|dir| {
+                    frames
+                        .read(&source)
+                        .heads_from(0)
+                        .find(|head| head.direction == dir)
+                        .map(|head| head.stream_offset)
+                });
+                for (seat, oldest) in oldest.into_iter().enumerate() {
+                    if let Some(oldest) = oldest {
+                        plaintext[seat].release_before(oldest);
+                    }
+                }
             }
         }
         // OFFERED here, for the same reason the TLS half offers where it does:
@@ -6885,12 +7037,12 @@ impl Dissection {
         // coordinates into those bytes all exist together.
         //
         // R311y749 (N6) — AND AN APPENDING OFFER IS WALKED TOO, by making the
-        // contract true rather than by giving up on it. `DecryptedStream`
-        // promises that a frame's `stream_offset` indexes `plaintext`; a
-        // frame's offset is absolute within its direction's stream, so the two
-        // agree only at `base == 0`. The frames this offer produced are
-        // therefore REBASED for the duration of the call and restored after it,
-        // which leaves every other reader of this stream in absolute space.
+        // contract true rather than by giving up on it. A frame's offset is
+        // absolute within its direction's stream and `plaintext` is this offer
+        // alone, so the offer says where in the stream it begins
+        // (`DecryptedStream::base`) and a sink slices at the difference. The
+        // frames are entries read again from kept plaintext (open-debt item 924)
+        // and are not rewritten for the call.
         //
         // The window is computed from the COUNT this offer added rather than
         // from `before`, because the cap loop above discards from the FRONT:
@@ -6910,20 +7062,14 @@ impl Dissection {
             feed.messages_straddling_offers += 1;
         }
         if walk_from < stream.frames.len() {
-            let shift = base as usize;
-            for f in stream.frames.iter_mut_from(walk_from) {
-                f.stream_offset -= shift;
-            }
             sink.on_plaintext(DecryptedStream {
                 flow,
                 direction,
                 plaintext: bytes,
                 frames: stream.frames().rows_from(walk_from),
                 record_origins: &[],
+                base: base as usize,
             });
-            for f in stream.frames.iter_mut_from(walk_from) {
-                f.stream_offset += shift;
-            }
         } else if added > 0 {
             // Framed, and addressable by nothing: the whole window straddled.
             feed.appends_not_walked += 1;
@@ -14895,9 +15041,11 @@ mod datagram_tests {
     /// It left a live tap with NO field walk, though: a tap feeds a stream
     /// incrementally, so every offer after the first was counted and dropped.
     /// The fix is to make the contract true rather than to give up on it — the
-    /// offered frames are rebased into this offer's space, so a sink slices
-    /// correctly, and restored afterwards so every other reader still sees
-    /// absolute coordinates.
+    /// offer says where in the stream its plaintext begins
+    /// ([`DecryptedStream::base`]), so a sink slices correctly while every
+    /// reader sees absolute coordinates (open-debt item 924: the frames are
+    /// entries read again from kept plaintext, and are no longer rewritten for
+    /// the call).
     ///
     /// The assertion is the SLICE and not the number: an offset that merely
     /// changed would satisfy a `!= 3` check while still naming the wrong bytes.
@@ -14914,7 +15062,11 @@ mod datagram_tests {
             fn on_plaintext(&mut self, stream: DecryptedStream<'_>) {
                 self.calls.push((
                     stream.plaintext.to_vec(),
-                    stream.frames.iter().map(|f| f.stream_offset).collect(),
+                    stream
+                        .frames
+                        .iter()
+                        .map(|f| stream.plaintext_offset(&f))
+                        .collect(),
                 ));
             }
             fn on_recovered_datagram(&mut self, _d: RecoveredDatagram<'_>) {}
@@ -14996,7 +15148,11 @@ mod datagram_tests {
             fn on_plaintext(&mut self, stream: DecryptedStream<'_>) {
                 self.calls.push((
                     stream.plaintext.to_vec(),
-                    stream.frames.iter().map(|f| f.stream_offset).collect(),
+                    stream
+                        .frames
+                        .iter()
+                        .map(|f| stream.plaintext_offset(&f))
+                        .collect(),
                 ));
             }
             fn on_recovered_datagram(&mut self, _d: RecoveredDatagram<'_>) {}
@@ -19557,7 +19713,14 @@ mod tls_flow_tests {
         ));
         let step = unit.len() as u32;
 
-        let mut d = Dissection::new();
+        // A byte ceiling of one unit per direction, so the stream list holds
+        // messages whose bytes it has let go: the `stream/no` cell of the grid,
+        // which no list fills structurally since the recovered stream keeps its
+        // plaintext (open-debt item 924, D8).
+        let mut d = Dissection::with_limits(DissectionLimits {
+            stream_bytes_per_direction: Some(unit.len()),
+            ..DissectionLimits::default()
+        });
         // Declared rather than sniffed, exactly as `--serial` does it. The
         // field is this crate's own, and a test in this module is the one
         // caller that can set it without a capture file.
@@ -19589,8 +19752,8 @@ mod tls_flow_tests {
 
         // 3 and 4 — the two RECOVERED lists. Fed rather than pushed, because
         // this crate carries no cipher: what a caller hands in is the plaintext
-        // it decrypted, which exists only in the call. The datagram list logs a
-        // copy of it (D8); the stream list does not keep it yet.
+        // it decrypted, which exists only in the call. Both lists keep a copy
+        // of it to read their messages again from (open-debt item 924, D8).
         // The stream id is not the one `next_origin` names, so the arm is
         // reached with a value the chain never mentions. TWO units, so this
         // list's second anchor is a byte offset that no packet index reaches.

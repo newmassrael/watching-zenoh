@@ -188,6 +188,14 @@ ALLOWED = [
         "cut below, and nothing else reads them",
     ),
     (
+        "wz-capture/lib.rs",
+        "self.bytes.drain(..cut);",
+        "Open-debt item 924, D8 — a recovered QUIC stream's kept plaintext "
+        "before the oldest message the list still holds: the messages that "
+        "stood there were discarded through `discard_oldest` and counted in "
+        "`drops.frames`, and no held message reads these bytes",
+    ),
+    (
         "wz-capture/e2e_slots.rs",
         "let _ = self.judged.remove(&key);",
         "Open-debt item 924, D9 — the end-to-end outcomes the ledger kept of "

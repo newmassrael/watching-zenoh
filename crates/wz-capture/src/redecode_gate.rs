@@ -521,6 +521,109 @@ fn recovered_quic_datagrams_read_again_from_their_logged_plaintext() {
     }
 }
 
+/// Open-debt item 924, step 4c (3) — A RECOVERED QUIC STREAM, whose plaintext
+/// exists only in the calls that hand it in, keeps it per direction and reads
+/// its messages again from it. Offers of odd lengths split units between calls,
+/// both directions are fed, and a frame ceiling discards from the front and lets
+/// the plaintext before the oldest held message go. Under each, the list reads as
+/// the reading that kept every message whole, every message's bytes are the
+/// stream's own from the message's first byte to the end of its unit, and the
+/// plaintext held under the ceiling is less than what was fed.
+#[test]
+fn a_recovered_quic_stream_reads_again_from_its_kept_plaintext() {
+    use crate::datagram_tests::{frame_carrying, push, sender_space, udp_packet};
+    const LINKTYPE_ETHERNET: u32 = 1;
+    let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+    // One direction's stream: length-prefixed units batching keep-alives ahead
+    // of a frame.
+    let stream_of = |seed: u8| -> Vec<u8> {
+        let mut stream = Vec::new();
+        for k in 0..40u8 {
+            let mut body: Vec<u8> = keepalive.repeat(usize::from(k % 3));
+            body.extend_from_slice(&frame_carrying(&push(
+                sender_space(0, Some("quic/stream")),
+                &[seed ^ k; 11],
+            )));
+            stream.extend_from_slice(&(body.len() as u16).to_le_bytes());
+            stream.extend_from_slice(&body);
+        }
+        stream
+    };
+    let streams = [stream_of(0x10), stream_of(0x80)];
+    let opening = udp_packet([10, 0, 0, 1], 4433, [10, 0, 0, 2], 7447, &keepalive);
+    for limits in [
+        crate::DissectionLimits::default(),
+        crate::DissectionLimits {
+            frames_per_flow: Some(7),
+            ..crate::DissectionLimits::default()
+        },
+    ] {
+        let read = |whole: bool| {
+            let mut d = Dissection::with_limits(limits);
+            if whole {
+                d.keep_messages_whole();
+            }
+            d.push_packet(LINKTYPE_ETHERNET, 0, &opening);
+            let flow = d.datagram_flows()[0].flow;
+            // Offers of 37 bytes, alternating directions: most of them end
+            // inside a unit.
+            let mut at = [0usize; 2];
+            while at[0] < streams[0].len() || at[1] < streams[1].len() {
+                for (seat, direction) in [Direction::A, Direction::B].into_iter().enumerate() {
+                    let end = (at[seat] + 37).min(streams[seat].len());
+                    if at[seat] < end {
+                        d.feed_quic_stream(
+                            flow,
+                            direction,
+                            4,
+                            false,
+                            &streams[seat][at[seat]..end],
+                        );
+                        at[seat] = end;
+                    }
+                }
+            }
+            d.finish();
+            (d, flow)
+        };
+        let what = format!("quic stream, {limits:?}");
+        let ((indexed, flow), (whole, _)) = (read(false), read(true));
+        let read_from_bytes = assert_reads_as_whole(&what, &indexed, &whole);
+        let stream = &indexed.datagram_flows()[0].quic_streams[0];
+        let held = stream.frames().len();
+        assert!(held > 6, "{what}: {held} messages prove little");
+        // The opening keep-alive is a cleartext datagram's row, an entry too.
+        let opening_rows = indexed.datagram_flows()[0].frames().len();
+        assert_eq!(
+            read_from_bytes,
+            held + opening_rows,
+            "{what}: every message is an entry"
+        );
+        assert_eq!(indexed.drops(), whole.drops(), "{what}: drops");
+        for (index, row) in stream.frames().iter().enumerate() {
+            let body = row.stream_offset + row.prefix_width;
+            let want = &streams[usize::from(row.direction == Direction::B)]
+                [body + row.unit_offset..body + row.unit_len];
+            match indexed.message_bytes_at(flow, crate::MessageListOrigin::QuicStream(4), index) {
+                crate::MessageBytes::Retained(bytes) => {
+                    assert_eq!(&bytes[..], want, "{what}: message {index}")
+                }
+                other => panic!("{what}: message {index}: {other:?}"),
+            }
+        }
+        let kept: usize = stream.plaintext.iter().map(|p| p.bytes.len()).sum();
+        let fed = streams[0].len() + streams[1].len();
+        if limits.frames_per_flow.is_some() {
+            assert!(
+                indexed.drops().frames > 0 && kept < fed / 2,
+                "{what}: {kept} of {fed} plaintext bytes kept under the ceiling"
+            );
+        } else {
+            assert_eq!(kept, fed, "{what}: every plaintext byte kept");
+        }
+    }
+}
+
 /// Open-debt item 924, step 4c — A LENT DATAGRAM IS READ WHERE IT SITS: a
 /// dissection lent a capture of UDP datagrams logs no copy of their payloads,
 /// so a flow whose container is taken away has nothing to read a row from. A

@@ -1902,7 +1902,7 @@ fn quic_pass(
         // recovered batch has no stream to be an offset into, and the ordinal
         // of the datagram within this pass is a number that would read as a
         // capture coordinate and is not one.
-        opener.push_datagram(direction, packet.index, &datagram.payload);
+        opener.push_datagram(direction, packet.index, datagram.payload);
     }
 
     let mut flows = Vec::new();
@@ -3196,7 +3196,9 @@ impl wz_capture::PlaintextSink for FieldSink {
     fn on_plaintext(&mut self, stream: wz_capture::DecryptedStream<'_>) {
         let bytes = stream.plaintext;
         for frame in stream.frames {
-            let at = frame.stream_offset;
+            // Where the unit begins in THESE bytes, which start at the stream's
+            // `base`: the space the slice and the record origin are taken in.
+            let at = stream.plaintext_offset(&frame);
             let body = at + frame.prefix_width;
             // R311y687 — the unit's length and this message's place inside it
             // come from the FRAME. This read the two prefix bytes itself, which
@@ -4035,7 +4037,7 @@ fn datagram_field_rows(
                 }
             }
             let Ok(Some(field)) =
-                wz_session_core::dissect::dissect_scouting_message(&udp.payload, 0)
+                wz_session_core::dissect::dissect_scouting_message(udp.payload, 0)
             else {
                 continue;
             };
@@ -4588,10 +4590,9 @@ fn collect_datagram_samples(
         // in the flow would rebuild it here.
         //
         // These bytes cannot be re-read from the file the way the loop above
-        // re-reads its own: they were decrypted and reassembled, and
-        // `Dissection::message_bytes_at` answers `RecoveredPlaintextNotRetained`
-        // for exactly this list. The walk therefore happened inside
-        // `feed_quic_stream_with_sink` while the plaintext was alive, and this
+        // re-reads its own: they were decrypted and reassembled, and the file
+        // holds only ciphertext. The walk therefore happened inside
+        // `feed_quic_stream_with_sink` while the plaintext was in hand, and this
         // is the same `FieldSink` the field listing uses rather than a second
         // one -- two walkers of one recovered stream would be two opinions
         // about where its messages are, with nothing comparing them.
