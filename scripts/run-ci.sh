@@ -11323,6 +11323,12 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
     _runci_guarded_test "C1m mcu adminspace read+write" 24 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
+    # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
+    # with the client core): no leg above selects both, so its tests ran in none until this one. 21 =
+    # the loop's observations, the identity and the handshake, the documents and their declarations,
+    # the body pool, the documents a front end chose, and the single endpoint.
+    _runci_guarded_test "C1m mcu slot node" 21 \
+        cargo test -p wz-session-mcu --features client-slot --lib slot_node --quiet || return 1
     # R3167 moved EVERY wz-session-lwip leg below by FIVE, and the legs that turn
     # on `codec-push` by SIX: the driver's lend tests (the datagram equals the
     # copying send's, the size written, an abandoned lend, the table of places,

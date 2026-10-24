@@ -50,6 +50,7 @@ use wz_runtime_coop::session_drive::{Bind, PumpSlots, SlotStack};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::byte_cells::ByteCells;
+use wz_session_core::connect_endpoints::{ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_init_params::{
     cookie_bytes, zid_bytes, LinkRxConf, SessionInitParams, TxQueueConf,
@@ -196,6 +197,124 @@ pub struct Document {
     pub key: &'static str,
     /// What it answers with.
     pub body: &'static str,
+}
+
+/// The bytes every document is made of: `MAX` bytes of `x`, so that a document of any length up to
+/// `MAX` is a prefix of one `static` and its body (`&'static str`) costs no allocation. The image
+/// declares the pool as a `static`; the front end that chose the documents (a command line, a
+/// declaration) asks it for each body.
+pub struct BodyPool<const MAX: usize>([u8; MAX]);
+
+impl<const MAX: usize> BodyPool<MAX> {
+    /// A pool of `x`. Not all zero, so it is in `.rodata` and not `.bss`: it is read-only data.
+    pub const fn new() -> Self {
+        Self([b'x'; MAX])
+    }
+
+    /// The body of `bytes` bytes, or `None` when the pool is shorter. Usable in a `const`, so a
+    /// declaration's documents are checked when the image is built.
+    pub const fn text(&'static self, bytes: usize) -> Option<&'static str> {
+        if bytes > MAX {
+            return None;
+        }
+        let (prefix, _) = self.0.split_at(bytes);
+        match core::str::from_utf8(prefix) {
+            Ok(text) => Some(text),
+            Err(_) => None,
+        }
+    }
+}
+
+impl<const MAX: usize> Default for BodyPool<MAX> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The documents a front end chose, as the node registers them, and how many: each `(key, bytes)`
+/// is a queryable under `key` that answers with `bytes` bytes of `pool`. The console line, as the
+/// reason, when one does not fit the pool.
+pub fn documents_of<const N: usize, const MAX: usize>(
+    pool: &'static BodyPool<MAX>,
+    chosen: &[Option<(&'static str, usize)>; N],
+) -> Result<([Document; N], usize), &'static str> {
+    let mut out = [Document { key: "", body: "" }; N];
+    let mut taken = 0;
+    for (key, bytes) in chosen.iter().flatten() {
+        let body = pool
+            .text(*bytes)
+            .ok_or("wz: FAIL - a document is longer than the body pool")?;
+        out[taken] = Document { key, body };
+        taken += 1;
+    }
+    Ok((out, taken))
+}
+
+/// Why a [`SingleEndpoint`] refused the locator it was given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndpointRefused {
+    /// The locator's text is longer than one row of the connect manager's table.
+    TooLong,
+    /// The endpoint was set before.
+    Twice,
+}
+
+impl EndpointRefused {
+    /// The console line.
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::TooLong => "wz: FAIL - the router endpoint is longer than a locator row",
+            Self::Twice => "wz: FAIL - the router endpoint was set twice",
+        }
+    }
+}
+
+/// The one endpoint a node dials when it is learned after the program starts (a command line):
+/// written once, before the node exists, and read by the connect manager. An endpoint known when
+/// the image is built is `connect_manager::StaticEndpoints`, which is checked at compile time.
+pub struct SingleEndpoint {
+    endpoint: core::cell::OnceCell<EndpointText>,
+}
+
+// SAFETY: the profile's rule: one thread runs the program, and the cell is written once, before the
+// node that reads it exists.
+unsafe impl Sync for SingleEndpoint {}
+
+impl SingleEndpoint {
+    /// No endpoint yet: the manager sees an empty list.
+    pub const fn new() -> Self {
+        Self {
+            endpoint: core::cell::OnceCell::new(),
+        }
+    }
+
+    /// Set the endpoint to `locator`'s text.
+    pub fn set(&self, locator: &dyn fmt::Display) -> Result<(), EndpointRefused> {
+        use core::fmt::Write;
+        let mut text = EndpointText::new();
+        write!(text, "{locator}").map_err(|_| EndpointRefused::TooLong)?;
+        self.endpoint.set(text).map_err(|_| EndpointRefused::Twice)
+    }
+}
+
+impl Default for SingleEndpoint {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EndpointSource for SingleEndpoint {
+    fn generation(&self) -> u32 {
+        0
+    }
+
+    fn endpoints(&self) -> (u32, ConnectEndpoints) {
+        let mut out = ConnectEndpoints::new();
+        if let Some(text) = self.endpoint.get() {
+            let _ = out.push(ConnectEntry::single(text.clone()));
+        }
+        (0, out)
+    }
 }
 
 /// The declarations the node sends on each session, in the order of their registrations: a
@@ -1008,5 +1127,84 @@ mod tests {
                 assert_ne!(a.message(), b.message());
             }
         }
+    }
+
+    fn pool<const MAX: usize>() -> &'static BodyPool<MAX> {
+        Box::leak(Box::new(BodyPool::new()))
+    }
+
+    #[test]
+    fn a_body_is_a_prefix_of_the_pool_and_the_pool_has_no_more_than_it_has() {
+        let pool = pool::<8>();
+        assert_eq!(pool.text(0), Some(""));
+        assert_eq!(pool.text(3), Some("xxx"));
+        assert_eq!(pool.text(8), Some("xxxxxxxx"));
+        assert_eq!(pool.text(9), None);
+    }
+
+    #[test]
+    fn a_body_can_be_taken_when_the_image_is_built() {
+        // A pool that is a promoted constant, so the body is computed by the compiler and a body
+        // longer than the pool is a build error where this is written in a `const`.
+        const POOL: &BodyPool<16> = &BodyPool::new();
+        const SHORT: Option<&str> = POOL.text(4);
+        const TOO_LONG: Option<&str> = POOL.text(17);
+        assert_eq!(SHORT, Some("xxxx"));
+        assert_eq!(TOO_LONG, None);
+    }
+
+    #[test]
+    fn the_documents_are_registered_in_the_order_they_were_chosen_with_their_lengths() {
+        let pool = pool::<32>();
+        let chosen = [Some(("demo/a", 5)), None, Some(("demo/b", 0))];
+        let (documents, taken) = documents_of(pool, &chosen).unwrap();
+        assert_eq!(taken, 2);
+        assert_eq!(documents[0].key, "demo/a");
+        assert_eq!(documents[0].body.len(), 5);
+        assert_eq!(documents[1].key, "demo/b");
+        assert_eq!(documents[1].body, "");
+    }
+
+    #[test]
+    fn a_document_longer_than_the_pool_is_refused_with_a_console_line() {
+        let pool = pool::<4>();
+        let why = documents_of(pool, &[Some(("demo/a", 5))]).unwrap_err();
+        assert!(why.starts_with("wz: FAIL - "));
+    }
+
+    /// A locator's text of as many bytes as asked.
+    struct Text(usize);
+
+    impl fmt::Display for Text {
+        fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+            (0..self.0).try_for_each(|_| out.write_str("x"))
+        }
+    }
+
+    #[test]
+    fn a_single_endpoint_is_empty_until_it_is_set_and_then_one_row() {
+        let endpoint = SingleEndpoint::new();
+        assert_eq!(endpoint.endpoints().1.len(), 0);
+        endpoint.set(&format_args!("tcp/10.0.0.1:7447")).unwrap();
+        let (generation, list) = endpoint.endpoints();
+        assert_eq!(generation, 0);
+        assert_eq!(list.len(), 1);
+    }
+
+    #[test]
+    fn a_single_endpoint_is_set_once_and_holds_no_more_than_a_row() {
+        let endpoint = SingleEndpoint::new();
+        assert_eq!(
+            endpoint.set(&Text(10_000)),
+            Err(EndpointRefused::TooLong),
+            "a locator longer than a row is refused, never cut short"
+        );
+        assert_eq!(endpoint.endpoints().1.len(), 0);
+        endpoint.set(&Text(4)).unwrap();
+        assert_eq!(endpoint.set(&Text(4)), Err(EndpointRefused::Twice));
+        assert_ne!(
+            EndpointRefused::TooLong.message(),
+            EndpointRefused::Twice.message()
+        );
     }
 }
