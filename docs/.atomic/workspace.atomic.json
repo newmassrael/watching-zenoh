@@ -282530,6 +282530,66 @@
         "No TLS 1.3 KeyUpdate in Mbed TLS 4.1; the Round 3495 items (the 18 percent gap, p256-m, persistent keys, the in-handshake pin)."
       ]
     },
+    "Round 3521": {
+      "decision_summary": "The target build contract lands in steps 1 to 3: every shipped artifact carries an ABI stamp as an ELF note, the declaration names platforms, artifacts, roles and operating-system facilities, and one entry builds for a platform and writes a manifest a deployment tool reads without running anything. docs/target-build-contract.md decides it (T1 to T12). The pico repair for Android and QNX goes upstream, not into the vendored copy.",
+      "changes_bullets": [
+        "crates/wz-abi-stamp: the stamp and facts notes (.note.wz.abi, .note.wz.facts) as const-built ELF notes; capi-pico revision 1, capi-c revision 6 (unchanged), ap-demo-surface revision 1, each with its layout arm; wz-ap-demo's facts note carries the driver roles its table marks available.",
+        "scripts/lib/elf_facts.py: a standard-library ELF reader (notes, dynamic section, version needs, glibc floor, Android API note) with a synthetic-ELF builder; scripts/lib/abi_stamp_gate.py reads the stamps from both profiles and from a stripped copy.",
+        "deploy/wz-config.toml: [os] base, [[platform]] (five rows, each with a support word), os_needs on all 31 capabilities, [[runtime_feature]] (56 rows of wz-runtime-tokio), [[artifact]] and [[role]]; scripts/lib/wz_config.py validates them and holds each platform to the pinned rustc.",
+        "scripts/lib/wz_package.py: the entry (build, measure from bytes, write and verify wz-target-manifest.json; --verify, --selftest); an executable's device_requires derives from the runtime features cargo resolved, and is null with the unassessed features named when one has no row.",
+        "scripts/run-ci.sh Layer C1st and the capi-c-arms job; Layer L no longer reads the lockfiles of other worktrees.",
+        "docs/target-build-contract.md: the design note."
+      ],
+      "verification_bullets": [
+        "Host x86_64 Linux, rebased onto the tip of the remote main: wz_config --selftest 159 arms, --check, wz_package --selftest, abi_stamp_gate --selftest, elf_facts --selftest, and Layer C1st (three artifacts in both profiles, stripped copies, capi-c's stamp equal to its door, two packagings with the same manifest bytes, then --verify).",
+        "The stamp note survives thin LTO and strip; an aarch64-linux-android build of capi-pico and wz-ap-demo was read on the x86 host once by hand, and is not in a lane.",
+        "The ELF reader agrees with readelf on NEEDED, interpreter and the glibc floor of the host artifacts.",
+        "Corrected during the work: cargo tree cut short by its repeat marks said 13 runtime features; the manifest's own list is 54.",
+        "clippy -D warnings and cargo fmt on wz-abi-stamp, wz-capi-pico, wz-capi-c and wz-ap-demo; shellcheck on run-ci.sh; validate-workspace orphan delta 0.",
+        "Not run: the hosted CI; Layer C0 in full; anything on a device."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "Read the first hosted run that judges these commits per job, Layer C1st and Layer C0 first; the hosted cost of C1st is unmeasured.",
+        "Step 4: an Android lane at build through the entry; the Android platform has no os_provides, which needs a source other than a device the owner has not given access to.",
+        "Steps 5 and 6: the aarch64 glibc platform and both QNX platforms are untried; the owner approves each use of the machines that hold their SDKs, and wz-runtime-posix is empty on nto.",
+        "Runtime features beyond the 54 the default executable enables (TLS, QUIC, WebSocket, serial, storage, access control) have no os_needs row.",
+        "Not built: a capi-pico header macro and door for its revision (C10), the profile as an entry input, bundling, and the toolchain.sdk object for cross builds.",
+        "Whether a wz-own socket2 0.6.3 builds on nto, which a peer found blocking in its 0.6.5."
+      ],
+      "publishable_decision_summary": "The target build contract lands in steps 1 to 3: every shipped artifact carries an ABI stamp as an ELF note, the declaration names platforms, artifacts, roles and operating-system facilities, and one entry builds for a platform and writes a manifest a deployment tool reads without running anything. docs/target-build-contract.md decides it (T1 to T12). The pico repair for Android and QNX goes upstream, not into the vendored copy.",
+      "publishable_changes_bullets": [
+        "crates/wz-abi-stamp: the stamp and facts notes (.note.wz.abi, .note.wz.facts) as const-built ELF notes; capi-pico revision 1, capi-c revision 6 (unchanged), ap-demo-surface revision 1, each with its layout arm; wz-ap-demo's facts note carries the driver roles its table marks available.",
+        "scripts/lib/elf_facts.py: a standard-library ELF reader (notes, dynamic section, version needs, glibc floor, Android API note) with a synthetic-ELF builder; scripts/lib/abi_stamp_gate.py reads the stamps from both profiles and from a stripped copy.",
+        "deploy/wz-config.toml: [os] base, [[platform]] (five rows, each with a support word), os_needs on all 31 capabilities, [[runtime_feature]] (56 rows of wz-runtime-tokio), [[artifact]] and [[role]]; scripts/lib/wz_config.py validates them and holds each platform to the pinned rustc.",
+        "scripts/lib/wz_package.py: the entry (build, measure from bytes, write and verify wz-target-manifest.json; --verify, --selftest); an executable's device_requires derives from the runtime features cargo resolved, and is null with the unassessed features named when one has no row.",
+        "scripts/run-ci.sh Layer C1st and the capi-c-arms job; Layer L no longer reads the lockfiles of other worktrees.",
+        "docs/target-build-contract.md: the design note."
+      ],
+      "publishable_verification_bullets": [
+        "Host x86_64 Linux, rebased onto the tip of the remote main: wz_config --selftest 159 arms, --check, wz_package --selftest, abi_stamp_gate --selftest, elf_facts --selftest, and Layer C1st (three artifacts in both profiles, stripped copies, capi-c's stamp equal to its door, two packagings with the same manifest bytes, then --verify).",
+        "The stamp note survives thin LTO and strip; an aarch64-linux-android build of capi-pico and wz-ap-demo was read on the x86 host once by hand, and is not in a lane.",
+        "The ELF reader agrees with readelf on NEEDED, interpreter and the glibc floor of the host artifacts.",
+        "Corrected during the work: cargo tree cut short by its repeat marks said 13 runtime features; the manifest's own list is 54.",
+        "clippy -D warnings and cargo fmt on wz-abi-stamp, wz-capi-pico, wz-capi-c and wz-ap-demo; shellcheck on run-ci.sh; validate-workspace orphan delta 0.",
+        "Not run: the hosted CI; Layer C0 in full; anything on a device."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first hosted run that judges these commits per job, Layer C1st and Layer C0 first; the hosted cost of C1st is unmeasured.",
+        "Step 4: an Android lane at build through the entry; the Android platform has no os_provides, which needs a source other than a device the owner has not given access to.",
+        "Steps 5 and 6: the aarch64 glibc platform and both QNX platforms are untried; the owner approves each use of the machines that hold their SDKs, and wz-runtime-posix is empty on nto.",
+        "Runtime features beyond the 54 the default executable enables (TLS, QUIC, WebSocket, serial, storage, access control) have no os_needs row.",
+        "Not built: a capi-pico header macro and door for its revision (C10), the profile as an entry input, bundling, and the toolchain.sdk object for cross builds.",
+        "Whether a wz-own socket2 0.6.3 builds on nto, which a peer found blocking in its 0.6.5."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
