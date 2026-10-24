@@ -550,6 +550,10 @@ pub trait NodeHandle {
     /// Whether some session is established.
     fn is_established(&self) -> bool;
 
+    /// Whether some established session's peer is verified (its claimed zid is the one the key
+    /// it proved inside a secure channel names).
+    fn peer_verified(&self) -> bool;
+
     /// Ask every session's drive loop to run its next iteration now: for an application that has
     /// just left something for a session's layer (a query in a
     /// [`GetMailbox`](crate::get_mailbox::GetMailbox)).
@@ -566,6 +570,10 @@ where
 {
     fn is_established(&self) -> bool {
         SlotClientNode::is_established(self)
+    }
+
+    fn peer_verified(&self) -> bool {
+        SlotClientNode::peer_verified(self)
     }
 
     #[cfg(feature = "query-get")]
@@ -757,12 +765,20 @@ where
                 ));
             }
             port.observe(now_ms);
-            if let Some(up) = seen.session {
-                port.log(format_args!(
-                    "{}: session {}",
+            match seen.session {
+                // Whether the router is the holder of the key its zid names: only a secure
+                // channel can say yes (decisions D1 and D9).
+                Some(true) => port.log(format_args!(
+                    "{}: session established, peer {}",
                     P::NAME,
-                    if up { "established" } else { "lost" }
-                ));
+                    if node.peer_verified() {
+                        "verified"
+                    } else {
+                        "not verified"
+                    }
+                )),
+                Some(false) => port.log(format_args!("{}: session lost", P::NAME)),
+                None => {}
             }
             // The stack's own wait on a socket is what gives the CPU away while a session is
             // held (its read waits for a datagram). Between two dials of a router that is not up

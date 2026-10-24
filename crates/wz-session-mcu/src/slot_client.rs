@@ -101,6 +101,16 @@ where
             .any(|(_, session)| session.actions().is_established())
     }
 
+    /// Whether some established session's peer is verified: the zid it claimed is the zid the
+    /// key it proved inside a secure channel names (decisions D1 and D9 of
+    /// `docs/session-lifecycle-intent.md`). `false` over a link that is no secure channel.
+    pub fn peer_verified(&self) -> bool {
+        self.manager.sessions().any(|(_, session)| {
+            let actions = session.actions();
+            actions.is_established() && actions.peer_identity_verified()
+        })
+    }
+
     /// Ask every session's drive loop to run its next iteration now, however long its link was
     /// going to sleep. For an application that has just left something for a session's layer
     /// (a query in a [`GetMailbox`](crate::get_mailbox::GetMailbox)): the layer takes it on its

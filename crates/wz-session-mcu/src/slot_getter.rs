@@ -847,6 +847,11 @@ mod tests {
             true
         }
 
+        // The getter never reads it; a test double proves nobody.
+        fn peer_verified(&self) -> bool {
+            false
+        }
+
         fn wake(&self) {}
     }
 
