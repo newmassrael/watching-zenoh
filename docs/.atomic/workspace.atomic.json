@@ -284274,6 +284274,46 @@
         "A gate cycle (face A gated on B while B is gated on A) is resolved by the deadline close, not avoided by construction; recorded here so that the statechart step states it."
       ]
     },
+    "Round 3562": {
+      "decision_summary": "A cooperative session's read now waits on its link outside the session's lock. Each pass of the link's loop used to wait one millisecond on the socket under the engine's lock, so a quiet read task woke a thousand times a second and a publisher could wait behind it; a session waiting to dial again had no socket and its read task spun. The heap stack opens links waited by their owner: the loop reads what is queued and does not wait, and the link hands out a wait on a duplicate of its socket's descriptor, made before the lock, for at most idle_wait_ms (pico's ABI: 100, pico's socket timeout); a link already holding a whole batch says so and is not waited on, and a secure channel, which holds bytes the socket's wait would not see, keeps waiting in its loop. While no link is open a read sleeps until the next dial. Correction to round 3558's carry: the read task did not spin over a live link (it waited the loop's millisecond); it spun while waiting to dial, which that round introduced.",
+      "changes_bullets": [
+        "wz-runtime-coop session_drive.rs: LinkReadiness; SessionDatagramLink gains holds_input and, on the heap profile, readiness (forwarded through Rc and, for holds_input, the slot pump).",
+        "wz-runtime-coop udp_link.rs and stream_link.rs: each socket trait gains readiness (none by default); each driver gains waited_by_owner, under which service does not wait, and answers holds_input.",
+        "wz-runtime-coop ip_stack.rs: IpLinks::waited_by_owner; IpDriver forwards the two.",
+        "wz-runtime-posix: FdReadiness, a poll on a duplicated descriptor, for the UDP and TCP sockets.",
+        "wz-capi-coop: CoopConfig.idle_wait_ms; a read waits before it takes the lock; a dial sends its InitSyn at once; three tests.",
+        "wz-capi-pico: the cooperative open's links are waited by their owner, idle_wait_ms 100.",
+        "Size note and design log updated; session-close-ingress pin moved for session_drive.rs."
+      ],
+      "verification_bullets": [
+        "On the build host: clippy -D warnings clean for wz-runtime-coop on the heap and slot profiles, wz-runtime-posix default and session-slot, wz-capi-coop, and wz-capi-pico at engine-coop and at defaults. wz-capi-coop 7 tests pass: a quiet session makes at most 8 reads in 600 ms, and 258 when its links are not waited by their owner (measured, then restored); its read task wakes for a push within 60 ms; a session waiting to dial makes at most 8 reads in 600 ms, and 1,297,623 with the sleep removed (measured, then restored). wz-runtime-posix 20, wz-runtime-coop 55 and wz-capi-pico at engine-coop 57 tests pass. Size gate: pico-client-coop 888,223 (2.20 times the same pico), pico-client 1,809,217. The session-close-ingress reason's claim about session_drive.rs (SessionPump::step calls check_out_of_band at the head of each iteration) re-read and still true. Hook round_fed_gates: 112 run, 0 failed; audit-catalog-status rc=0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI of rounds 3558 and this one at the next round's start. Open on the cooperative engine: the listening role, scouting, queries, liveliness and the advanced plane; a secure channel's link is still waited in its loop. The heap observer keeps the peer's key expression aliases across a lost link; unmeasured whether a new link should start them empty."
+      ],
+      "publishable_decision_summary": "A cooperative session's read now waits on its link outside the session's lock. Each pass of the link's loop used to wait one millisecond on the socket under the engine's lock, so a quiet read task woke a thousand times a second and a publisher could wait behind it; a session waiting to dial again had no socket and its read task spun. The heap stack opens links waited by their owner: the loop reads what is queued and does not wait, and the link hands out a wait on a duplicate of its socket's descriptor, made before the lock, for at most idle_wait_ms (pico's ABI: 100, pico's socket timeout); a link already holding a whole batch says so and is not waited on, and a secure channel, which holds bytes the socket's wait would not see, keeps waiting in its loop. While no link is open a read sleeps until the next dial. Correction to round 3558's carry: the read task did not spin over a live link (it waited the loop's millisecond); it spun while waiting to dial, which that round introduced.",
+      "publishable_changes_bullets": [
+        "wz-runtime-coop session_drive.rs: LinkReadiness; SessionDatagramLink gains holds_input and, on the heap profile, readiness (forwarded through Rc and, for holds_input, the slot pump).",
+        "wz-runtime-coop udp_link.rs and stream_link.rs: each socket trait gains readiness (none by default); each driver gains waited_by_owner, under which service does not wait, and answers holds_input.",
+        "wz-runtime-coop ip_stack.rs: IpLinks::waited_by_owner; IpDriver forwards the two.",
+        "wz-runtime-posix: FdReadiness, a poll on a duplicated descriptor, for the UDP and TCP sockets.",
+        "wz-capi-coop: CoopConfig.idle_wait_ms; a read waits before it takes the lock; a dial sends its InitSyn at once; three tests.",
+        "wz-capi-pico: the cooperative open's links are waited by their owner, idle_wait_ms 100.",
+        "Size note and design log updated; session-close-ingress pin moved for session_drive.rs."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: clippy -D warnings clean for wz-runtime-coop on the heap and slot profiles, wz-runtime-posix default and session-slot, wz-capi-coop, and wz-capi-pico at engine-coop and at defaults. wz-capi-coop 7 tests pass: a quiet session makes at most 8 reads in 600 ms, and 258 when its links are not waited by their owner (measured, then restored); its read task wakes for a push within 60 ms; a session waiting to dial makes at most 8 reads in 600 ms, and 1,297,623 with the sleep removed (measured, then restored). wz-runtime-posix 20, wz-runtime-coop 55 and wz-capi-pico at engine-coop 57 tests pass. Size gate: pico-client-coop 888,223 (2.20 times the same pico), pico-client 1,809,217. The session-close-ingress reason's claim about session_drive.rs (SessionPump::step calls check_out_of_band at the head of each iteration) re-read and still true. Hook round_fed_gates: 112 run, 0 failed; audit-catalog-status rc=0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI of rounds 3558 and this one at the next round's start. Open on the cooperative engine: the listening role, scouting, queries, liveliness and the advanced plane; a secure channel's link is still waited in its loop. The heap observer keeps the peer's key expression aliases across a lost link; unmeasured whether a new link should start them empty."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
