@@ -2943,6 +2943,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-capi-coop"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "wz-capi-port",
+ "wz-runtime-coop",
+ "wz-runtime-posix",
+ "wz-session-core",
+ "wz-session-mcu",
+]
+
+[[package]]
 name = "wz-capi-core"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-capi-coop — the cooperative engine behind a wz C ABI.
+#
+# A C session is one session-core session, stepped by the program: no OS thread
+# and no async runtime of its own. The program's own calls drive it, as zenoh-pico's
+# single-threaded arm does (`zp_read`, `zp_spin_once`), and a read task, when the
+# program starts one, is a thread that makes the same calls
+# (docs/capi-pico-on-coop-engine.md, decisions D2 and D8). It implements the
+# port's `SessionEngine` and `SessionDrive` (`wz-capi-port`), so the ABI over it
+# names neither this crate's types nor the tokio engine's.
+#
+# Built over the session shell's heap profile (`wz-session-mcu`, `wz-runtime-coop`)
+# and generic over the network stack (`SessionLinks`): a host gives it its sockets
+# (`wz_runtime_posix::links::PosixLinks`), a test the in-memory network.
+#
+# `rlib` only: a Rust-internal seam, like `wz-capi-core` and `wz-capi-port`.
+
+[package]
+name = "wz-capi-coop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The cooperative engine behind a wz C ABI: one session the program steps, implementing the C ABI's engine port."
+publish = false
+
+[lib]
+name = "wz_capi_coop"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+wz-capi-port = { path = "../wz-capi-port" }
+# What a zenoh-pico client does on a session: publish (Put and Delete, with every
+# metadata field), declare key expressions and subscribers and retract them, ask a
+# router who subscribes or answers (the write filter and the matching status),
+# batch, keep the lease, fragment what does not fit a batch and put back together
+# what arrives fragmented, and match key expressions with their wildcards. The
+# set is the tokio engine's session base (`wz-capi-core`'s `wz-runtime-tokio`
+# features) less the local loop, which this engine does not have: zenoh-pico's
+# default build delivers nothing locally (`Z_FEATURE_LOCAL_SUBSCRIBER` 0).
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "alloc",
+    "codec-push",
+    "codec-declare",
+    "codec-fragment",
+    "pubsub-put",
+    "pubsub-delete",
+    "pubsub-encoding",
+    "pubsub-timestamp",
+    "pubsub-attachment",
+    "pubsub-source-info",
+    "pubsub-qos",
+    "pubsub-priority",
+    "pubsub-congestion-control",
+    "pubsub-express",
+    "declare-final",
+    "declare-keyexpr",
+    "declare-subscriber",
+    "declare-queryable",
+    "declare-undeclare",
+    "declare-interest",
+    "session-matching",
+    "transport-batching",
+    "keyexpr-wildcard-single",
+    "keyexpr-wildcard-double",
+    "keyexpr-dollar-star",
+    "keyexpr-includes",
+] }
+wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = [
+    "alloc",
+    "transport-batching",
+] }
+# The dialler's endpoint reader and the application layer's dispatch.
+wz-session-mcu = { path = "../wz-session-mcu", default-features = false, features = [
+    "alloc",
+    "dial",
+    "transport-keepalive",
+    "reassembly",
+] }
+
+[dev-dependencies]
+# The tests run the engine against a router stand-in over the host's UDP sockets: a session that
+# accepts, which the engine itself never is.
+wz-runtime-posix = { path = "../wz-runtime-posix" }
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "session-unicast-accept",
+] }
+# The cooperative runtime's `critical_section::Mutex` needs an implementation, which the image
+# picks, not a library: the C ABI's library on a host picks std's, and so does the test binary.
+critical-section = { version = "1", features = ["std"] }
+
+[lints]
+workspace = true

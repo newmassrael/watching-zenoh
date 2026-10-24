@@ -110,7 +110,12 @@ it behaves as pico behaves in both of pico's threading arms.
    `tcp/` or `udp/`, `z_close`, `zp_read`, `zp_spin_once`,
    `zp_send_keep_alive`, `z_put`, the publisher and the subscriber. A
    size-gate case beside `pico-client`, and a round trip against a pinned
-   `zenohd` and against pico itself.
+   `zenohd` and against pico itself. In two parts:
+   - 3a. The engine as a crate (`wz-capi-coop`), implementing both ports, tested against a
+     router stand-in over the host's sockets.
+   - 3b. The pico ABI over it: an engine feature that builds the client without the tokio
+     engine, `z_open` building the session from the C config, the size-gate case, and the
+     round trips.
 4. The query plane, liveliness and the rest of the client surface, a
    capability at a time, each with its case.
 5. The multi-threaded arm.
@@ -147,7 +152,16 @@ it behaves as pico behaves in both of pico's threading arms.
   which also frees the session through it) and the ABI's per-session state, which no longer
   rides in the engine as an untyped extension. Measured cost on top of the engine port:
   pico-client +2.5 KB, pico-default +1.9 KB.
-- Next: the cooperative engine (D8), selectable beside the tokio one, with its size-gate case.
+- 2026-10-24: step 3a, the cooperative engine (`wz-capi-coop`): `CoopEngine` opens a client
+  session to the first of its endpoints that completes the handshake, implements
+  `SessionEngine` and `SessionDrive` over session-core's application layer (the observer keeps
+  the subscribers, what the peer declared and the matching watches), holds its state behind one
+  lock and hands deliveries out after it (D8), and runs a read task as a thread that steps it.
+  Its session-core features are the tokio engine's session base less the local loop. Tested
+  against an acceptor session on a thread of its own over UDP sockets: the router learns the
+  subscriber, a push is delivered only when the program steps the session, a put reaches the
+  router, and a write filter holds a put back until the router declares a subscriber (30 runs).
+- Next: step 3b, the pico ABI over the engine, with its size-gate case and round trips.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
   engine's session, and the modules of capabilities the cooperative engine does not have yet
