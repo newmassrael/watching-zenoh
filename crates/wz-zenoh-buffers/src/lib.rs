@@ -30,7 +30,10 @@
 //! `conformance/differential` holds each to upstream's over generated sequences of reads and
 //! writes. The code is written without the uninitialised memory and the raw pointers upstream moves
 //! its bytes through, but for the one mark of a slice writer that needs a pointer, which is checked.
-#![cfg_attr(not(feature = "std"), no_std)]
+// A test build links `std` whatever the features say: the unit tests are written against the std
+// prelude (`vec!`, `format!`, `ToString`), and the combination without `std` is still held to
+// `no_std` for the code it ships by the lib-only build of `--no-default-features`.
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 extern crate alloc;
 
 mod bbuf;

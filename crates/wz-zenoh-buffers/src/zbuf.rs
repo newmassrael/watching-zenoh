@@ -792,6 +792,8 @@ mod tests {
         assert_eq!(buf.to_zslice(), [1u8]);
     }
 
+    /// `Read`, `Write` and `Seek` are the buffer's `std` feature's.
+    #[cfg(feature = "std")]
     #[test]
     fn the_buffer_is_an_io_reader_writer_and_seeker() {
         use std::io::{Read, Seek, Write};

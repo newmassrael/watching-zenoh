@@ -541,7 +541,12 @@ mod tests {
             Parameters::from("p1=x=y;p2=a==b"),
             Parameters::from(&[("p1", "x=y"), ("p2", "a==b")][..])
         );
+    }
 
+    /// The conversions from a `HashMap` are the crate's `std` feature's.
+    #[cfg(feature = "std")]
+    #[test]
+    fn test_parameters_from_a_hash_map() {
         let mut hm: HashMap<String, String> = HashMap::new();
         hm.insert("p1".to_string(), "v1".to_string());
         assert_eq!(Parameters::from(hm), Parameters::from("p1=v1"));

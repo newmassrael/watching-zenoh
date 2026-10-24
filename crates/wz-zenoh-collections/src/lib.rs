@@ -25,7 +25,10 @@
 //! crate is upstream's by name, version, library name and public surface (inventory atom
 //! `api-compat-rust`); the containers are written here from what each is for, with no `unsafe`, and
 //! `conformance/differential` holds each to upstream's over generated sequences of operations.
-#![cfg_attr(not(feature = "std"), no_std)]
+// A test build links `std` whatever the features say: the unit tests are written against the std
+// prelude (`vec!`, `format!`, `ToString`), and the combination without `std` is still held to
+// `no_std` for the code it ships by the lib-only build of `--no-default-features`.
+#![cfg_attr(not(any(feature = "std", test)), no_std)]
 extern crate alloc;
 
 pub mod single_or_vec;

@@ -12160,7 +12160,14 @@ layer_c1bf_cargo_clippy_all_features() {
     # `scouting` field that exists with `scout`, and `SessionResources` a `gossip` field that
     # exists with `peer`, so a struct literal of either names the fields of the build its author
     # made. The two ABI crates that build one say each field behind the feature that has it.
-    local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c wz-capi-core wz-capi-pico)
+    #
+    # The zenoh family joined with its buffers and protocol crates (R3556): the `ext_shm` field of
+    # a put, an error and a query body, and the kind of a slice, exist with `shared-memory`, so a
+    # struct literal of either names the fields of the build its author made. An entry is a
+    # DIRECTORY of `crates/`; a family crate keeps upstream's package name under a `wz-` directory,
+    # so the package is read from the manifest below rather than assumed equal to the directory.
+    local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c wz-capi-core wz-capi-pico
+        wz-zenoh-buffers wz-zenoh-protocol)
 
     # Drift audit: re-derive the hazard class from source. A crate qualifies when
     # a `#[cfg(feature ...)]` attribute is immediately followed by a `pub <field>:`
@@ -12187,8 +12194,10 @@ layer_c1bf_cargo_clippy_all_features() {
     fi
     echo "  C1bf audit: hazard class = ${hazard[*]} — all covered"
 
-    local pkg
-    for pkg in "${covered[@]}"; do
+    local dir pkg
+    for dir in "${covered[@]}"; do
+        pkg="$(awk -F'"' '/^name = /{print $2; exit}' "crates/$dir/Cargo.toml")"
+        [ -n "$pkg" ] || { echo "  C1bf FAIL: crates/$dir/Cargo.toml names no package"; return 1; }
         (cd crates && cargo clippy -p "$pkg" --all-targets --all-features \
             --quiet -- -D warnings) || return 1
     done

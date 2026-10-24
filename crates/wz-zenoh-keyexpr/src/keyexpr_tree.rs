@@ -88,5 +88,6 @@ pub use iters::*;
 /// Small pieces the trees share.
 pub mod support;
 
-#[cfg(test)]
+// The tests draw their key expressions from the fuzzer, which is the crate's `std` feature's.
+#[cfg(all(test, feature = "std"))]
 mod tests;
