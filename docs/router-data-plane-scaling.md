@@ -332,3 +332,82 @@ threads and the hogs are weighted by the scheduler, and no figure was read. Samp
 variant on a host whose load was 10 to 30, so the figures show the order of the effect and not its size.
 The measurement is a test now: the E7s test counts the client sessions that ended on their own (the
 client prints `ended (` for one) and asserts none, beside the router's own DOWN count.
+
+### 7.4 Capacity: what the router promises, and for how many sessions (design, not built)
+
+7.2 and 7.3 keep leases alive by making the control work cheap to schedule. None of it says for how many
+sessions, at what CPU, the promise holds, and a router asked past that point degrades every session at
+once instead of refusing the one that does not fit. This section states the promise, the number, and what
+the router does at the number. Nothing here is built yet.
+
+**The promise.** While the process receives at least the CPU share `s` that its operator declared, each
+session of up to `N_max(s)` keeps its lease. It is conditional on `s` on purpose: a router cannot promise
+a lease to a host that takes its CPU away, and a promise that does not name its condition is not testable.
+
+**Two inequalities: one is a condition of the promise, the other of the service.** With `T` the lease (10 s, a keepalive every `T/3`),
+`N` the sessions, `q` the loop's turn quantum (8 units), `c_u` the cost of one loop event of one record,
+`c_k` the cost of one keepalive emission:
+
+- (A) Emission. All `N` keepalive timers can fall due together, and serving them takes `N c_k / s`. For the
+  emission to be late by less than `2T/3` (the invariant a keepalive sent every `T/3` needs, so that one
+  lost interval is still inside the lease) the burst has to finish within `T/3`:
+  `N <= s T / (3 c_k)`. With `c_k` = 4.5 us, `T` = 10 s and `s` = 1.3% this is about 9600 sessions.
+- (B) Service. The loop returns to a face after `R = N q c_u / s` (7.2), and a frame waits in its buffer
+  that long. It does not cost a lease: before the loop judges a peer silent it reads what is waiting
+  (`take_what_is_waiting`, `session_glue.rs`), and a frame decoded there stamps the peer's activity, so a
+  peer with a frame in the buffer is alive to the check. Measured: at 32 hogs `R` is 13 s against a lease
+  of 10 s, no face of the router went DOWN and no client session ended. What `R` costs is how stale the
+  data a face is given is, and how late the router finds a peer that really is gone (by up to `R` past
+  its lease). That is a limit of the service: for a frame to wait at most `L`, the longest wait the
+  operator accepts, `N <= s L / (q c_u)`. With `c_u` = 11 us, `s` = 1.3% and `L` = 5 s this is about 740
+  sessions.
+
+The promise needs (A) alone: `N_max(s) = s T / (3 c_k)`. An operator who declares `L` as well gets
+`min(N_A, N_B(L))`; with no `L` declared there is no limit from (B), as there is none today. In the E7s run
+at 32 hogs (2048 sessions, `s` = 1.3%, (A) allows about 9600) no lease was lost, which is what (A) says.
+
+**Evidence for the form of (B).** The router's longest silence from its peers in the E7s runs of 7.3 against `R`
+computed from the scheduler's weights (the router's threads at nice 10, weight 110, against the hogs at
+1024, four busy router threads, `c_u` = 11 us, 2048 sessions):
+
+| hogs | share `s` | predicted `R` | observed |
+|---|---|---|---|
+| 6 | 6.7% | 2.7 s | 2.8 to 3.3 s |
+| 10 | 4.1% | 4.4 s | 4.3 to 5.0 s |
+| 16 | 2.6% | 6.9 s | 7.1 to 8.2 s |
+| 24 | 1.8% | 10.3 s | 10.2 to 11.0 s |
+| 32 | 1.3% | 13.6 s | 12.0 to 13.8 s |
+
+Four threads is a fit: three or five busy threads miss by 15% to 40%. So the table supports the form of
+the bound, `R` inversely proportional to the share and proportional to the sessions, and not an absolute
+number that holds on another host.
+
+**The share is declared, and measured only to be reported.** The operator states `s`, the CPU share the
+process may count on. A share measured while running is not an input to admission: admitting by an
+observed share admits more sessions when the host is idle and refuses when it is not, which is the
+feedback that makes the number swing. What the process measures (its time waiting for a core against its
+time running, from the scheduler's own counters) is exported to the admin space and raises a
+contract-violated flag when it stays below `s`: the promise is void and says so. With no `s` declared
+there is no cap, as upstream, and no promise.
+
+**The costs are recorded, with margin.** `c_u` and `c_k` are constants of the build, recorded in a file
+beside the slot sizes by a lane that measures them, and held by a gate in the same way. The recorded value
+is the measured upper bound times a margin of 2; the check of the margin is the table above, which a lane
+re-derives and which must stay within 25%.
+
+**What the router does at the number.** One value, the effective `max_sessions`, is the smaller of the
+configured `transport/unicast/max_sessions` (upstream's key, enforced in the accept loop already, default
+1000) and `N_max(s)`. A session past it is refused at accept and the sessions already admitted are kept:
+refuse the new one, not degrade the old. The refusal keeps upstream's close, and counts apart from the
+configured bound (`refused_over_capacity` beside `refused_over_max_sessions`) so that an operator sees
+whether the limit was theirs or the model's.
+
+**What the router sheds.** Control frames are never dropped. Data is shed per face from a bounded lane and
+counted per lane on the admin space. Whether a message that asked to block is dropped, waited for, or
+turned into a drop by the router is not decided here: upstream's egress pipeline has to be read first, and
+a router that blocks its loop on one slow face breaks (B) for all the others.
+
+**How it is held.** A clockless test for the arithmetic (the effective bound from `s`, the costs and `T`,
+and the refusal at it); the E7s test at a declared `s` asserting that no client session ended and that the
+timer service lateness stays under `2T/3`, with a loose bound on the hosted runner; the table above as a
+lane that fails when the model stops predicting the loop's return.
