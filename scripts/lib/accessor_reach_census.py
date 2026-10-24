@@ -171,7 +171,6 @@ ROSTER: frozenset[tuple[str, str]] = frozenset(
         # a note: the gate is a ratchet in both directions.
         ("StreamAssembler", "held_segments"),
         ("StreamAssembler", "is_empty"),
-        ("StreamAssembler", "runs"),
         ("StreamAssembler", "synced_from_syn"),
         ("Tunnel", "depth"),
     }

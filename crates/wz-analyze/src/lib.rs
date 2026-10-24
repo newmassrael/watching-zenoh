@@ -2499,16 +2499,13 @@ fn field_lines(
                     continue;
                 }
             }
-            let assembler = flow.assembler(frame.direction);
-            let stream = assembler.stream();
-            let origin = assembler.retained_from();
             let row = match decrypted_coordinates(flow) {
                 // R311y677 — a decrypted flow's rows come from the SINK, which
                 // took them while the plaintext existed. Emitted once for the
                 // whole flow below rather than once per frame, since the sink
                 // walked the stream itself and its rows are not this loop's.
                 Some(_) => break,
-                None => walk_message(stream, origin, &frame),
+                None => walk_message(flow_message_bytes(flow, &frame), &frame),
             };
             shown += 1;
             if format == Format::Json && emitted > 0 {
@@ -3341,39 +3338,59 @@ fn message_at(frame: &wz_session_core::passive::PassiveFrame) -> usize {
     frame.stream_offset + frame.prefix_width + frame.unit_offset
 }
 
+/// Open-debt item 924, step 3 — the retained stream is read through `fetch`,
+/// which answers the bytes between two absolute offsets: a flow does not hold
+/// its stream as one slice once it reads its bytes from a capture container it
+/// is lent, so this asks for the message's bytes alone.
 fn message_bytes<'a>(
-    stream: &'a [u8],
-    origin: usize,
+    retained: core::ops::Range<usize>,
+    fetch: impl FnOnce(usize, usize) -> Option<std::borrow::Cow<'a, [u8]>>,
     frame: &wz_session_core::passive::PassiveFrame,
-) -> Result<&'a [u8], String> {
+) -> Result<std::borrow::Cow<'a, [u8]>, String> {
+    let origin = retained.start;
     if frame.stream_offset < origin {
         return Err(format!(
             "bytes discarded to stay inside stream_bytes_per_direction (retained from {origin}, this message begins at {})",
             frame.stream_offset
         ));
     }
-    let at = frame.stream_offset - origin;
-    let body = at + frame.prefix_width;
+    let body = frame.stream_offset + frame.prefix_width;
     let end = body + frame.unit_len;
-    if end > stream.len() {
+    if end > retained.end {
         return Err(format!(
             "the framing unit declares {} byte(s) and the retained stream holds {}",
             frame.unit_len,
-            stream.len().saturating_sub(body)
+            retained.end.saturating_sub(body)
         ));
     }
     // R311y690 — the SAME function the row's `message_at` is rendered from, so
     // the offset a reader is given is the offset these bytes were taken at. It
     // was two sums of the same three fields, agreeing by construction; a sum
     // written twice is a sum that can be edited once.
-    let start = message_at(frame) - origin;
+    let start = message_at(frame);
     if start > end {
         return Err(format!(
             "this message stands {} byte(s) into a unit of {}",
             frame.unit_offset, frame.unit_len
         ));
     }
-    Ok(&stream[start..end])
+    fetch(start, end).ok_or_else(|| {
+        String::from("the bytes are retained in a capture container this flow is no longer lent")
+    })
+}
+
+/// [`message_bytes`] of a frame of `flow`, read from the flow's stream.
+fn flow_message_bytes<'a>(
+    flow: &'a wz_capture::FlowDissection,
+    frame: &wz_session_core::passive::PassiveFrame,
+) -> Result<std::borrow::Cow<'a, [u8]>, String> {
+    use wz_capture::messages::UnitBytes as _;
+    let assembler = flow.assembler(frame.direction);
+    message_bytes(
+        assembler.retained_from()..assembler.len(),
+        |from, to| flow.stream_bytes(frame.direction, from, to),
+        frame,
+    )
 }
 
 /// R311y682 (§1.1n) — the stream row, walked and then CHECKED against the
@@ -3411,15 +3428,14 @@ fn message_bytes<'a>(
 /// reader can see. One space everywhere: a span is a range of THE MESSAGE, and
 /// where it sits is on the row, once.
 fn walk_message(
-    stream: &[u8],
-    origin: usize,
+    bytes: Result<std::borrow::Cow<'_, [u8]>, String>,
     frame: &wz_session_core::passive::PassiveFrame,
 ) -> FieldRow {
-    let bytes = match message_bytes(stream, origin, frame) {
+    let bytes = match bytes {
         Err(why) => return FieldRow::Declined(why),
         Ok(bytes) => bytes,
     };
-    match wz_session_core::dissect::dissect_transport_message(bytes, 0) {
+    match wz_session_core::dissect::dissect_transport_message(&bytes, 0) {
         // The error type is `sce_forge_runtime`'s and is not re-exported
         // publicly here, so it is rendered rather than named -- a dependency
         // this crate has no reason to take on for one message string.
@@ -4631,9 +4647,7 @@ fn collect_sample(
     file: Option<&Reread>,
     out: &mut Samples,
 ) {
-    let assembler = flow.assembler(frame.direction);
-    let stream = assembler.stream();
-    let row = walk_message(stream, assembler.retained_from(), frame);
+    let row = walk_message(flow_message_bytes(flow, frame), frame);
     let FieldRow::Walked(field) = row else {
         out.undecodable += 1;
         return;
@@ -8859,6 +8873,18 @@ mod message_name_tests {
         out
     }
 
+    /// [`message_bytes`] over `stream` held whole from offset 0.
+    fn sliced<'a>(
+        stream: &'a [u8],
+        frame: &wz_session_core::passive::PassiveFrame,
+    ) -> Result<std::borrow::Cow<'a, [u8]>, String> {
+        message_bytes(
+            0..stream.len(),
+            |from, to| stream.get(from..to).map(std::borrow::Cow::Borrowed),
+            frame,
+        )
+    }
+
     /// R311y682 (§1.1n) — A ROW WHOSE TWO READERS DISAGREE IS DECLINED, and
     /// this is the committed witness for a branch the datagram path could only
     /// probe.
@@ -8889,7 +8915,7 @@ mod message_name_tests {
                 extensions: Vec::new(),
             }),
         );
-        match walk_message(&stream, 0, &honest) {
+        match walk_message(sliced(&stream, &honest), &honest) {
             FieldRow::Walked(field) => assert_eq!(
                 field.name, "KeepAlive",
                 "the agreeing case must still produce its row"
@@ -8915,7 +8941,7 @@ mod message_name_tests {
                 extensions: Vec::new(),
             }),
         );
-        match walk_message(&stream, 0, &crossed) {
+        match walk_message(sliced(&stream, &crossed), &crossed) {
             FieldRow::Walked(field) => panic!(
                 "bytes the session read as Close must not be rendered as a \
                  confident {} tree",

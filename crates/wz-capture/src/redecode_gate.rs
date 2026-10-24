@@ -252,11 +252,11 @@ fn reread_capture(what: &str, file: &[u8]) -> Reach {
             if frame.offset_space != OffsetSpace::StreamBytes {
                 return None;
             }
-            let assembler = flow.assembler(frame.direction);
-            let origin = assembler.retained_from();
-            let from = (frame.stream_offset + frame.prefix_width).checked_sub(origin)?;
-            let to = frame.wire_end?.checked_sub(origin)?;
-            let bytes = assembler.stream().get(from..to)?.to_vec();
+            use crate::messages::UnitBytes as _;
+            let from = frame.stream_offset + frame.prefix_width;
+            let bytes = flow
+                .stream_bytes(frame.direction, from, frame.wire_end?)?
+                .into_owned();
             Some((bytes, LinkHandshake::Present))
         });
     }

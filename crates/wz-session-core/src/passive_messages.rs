@@ -75,6 +75,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
+use crate::chunk_log::{ChunkLog, Iter};
 use crate::inbound::InboundFrame;
 #[cfg(feature = "reassembly")]
 use crate::passive::FragmentFate;
@@ -1481,353 +1482,6 @@ impl DoubleEndedIterator for Heads<'_> {
 
 impl ExactSizeIterator for Heads<'_> {}
 
-/// Rows per chunk of a [`ChunkLog`].
-///
-/// Large enough that the chunk list itself is negligible (one entry per this
-/// many rows), small enough that the unused tail of the last chunk is
-/// negligible against any list long enough to have one. A power of two, so the
-/// first chunk, which grows the way any buffer does, reaches exactly this
-/// capacity and stops.
-const CHUNK_ROWS: usize = 1024;
-
-/// An append-only list of rows, read by position and released from the front.
-///
-/// # Why chunks
-///
-/// One growable buffer doubles: each growth copies every row into a buffer
-/// twice the size, and up to half of what it holds is capacity no row uses.
-/// For a list of hundreds of thousands of decoded rows that is hundreds of
-/// megabytes of copying while the list grows and up to as much again held
-/// empty. Here rows go into chunks of `CHUNK_ROWS` (1024). The first chunk grows
-/// like any buffer, so a short list costs what a short list costs; every later
-/// chunk is allocated whole, so no row is ever copied again, and the most a
-/// long list holds unused is one chunk's tail.
-///
-/// # Every chunk is one run
-///
-/// A chunk is a ring, so it could hold its rows as two runs. Only a chunk that
-/// is both released from and appended to can wrap, which is the one-chunk list
-/// of a live tap at its ceiling, and such a chunk is straightened when it does
-/// (at most `CHUNK_ROWS` moves, once per `CHUNK_ROWS` appends). So every
-/// chunk reads as ONE slice, and [`Iter`] walks slices and skips whole chunks:
-/// `iter().skip(n)` costs the chunks it passes, as a slice's costs nothing,
-/// rather than one step per row.
-///
-/// # The shape that makes a position O(1)
-///
-/// Every chunk except the first and the last holds exactly `CHUNK_ROWS` rows.
-/// Appending fills the last chunk to `CHUNK_ROWS` before starting another, and
-/// releasing takes rows from the first chunk only, dropping it when it is empty,
-/// so neither can break that. The first chunk's length is the only variable
-/// before a position, and dividing the rest by `CHUNK_ROWS` finds the chunk.
-///
-/// No chunk is ever empty, which is what lets [`Self::len`] of zero mean "no
-/// chunks" and the first chunk always be the one rows are released from.
-#[derive(Debug)]
-pub(crate) struct ChunkLog<T> {
-    /// A `Vec` and not a deque: a position is found by indexing it, and the
-    /// front is dropped once per [`CHUNK_ROWS`] releases, which moves one
-    /// pointer per chunk held.
-    chunks: Vec<VecDeque<T>>,
-    len: usize,
-}
-
-impl<T> Default for ChunkLog<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T> ChunkLog<T> {
-    /// An empty log.
-    pub const fn new() -> Self {
-        Self {
-            chunks: Vec::new(),
-            len: 0,
-        }
-    }
-
-    /// Rows held.
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// No row is held.
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// Append one row.
-    pub fn push_back(&mut self, row: T) {
-        let chunks = self.chunks.len();
-        match self.chunks.last_mut() {
-            Some(last) if last.len() < CHUNK_ROWS => {
-                last.push_back(row);
-                // Only a chunk that is also released from can wrap, and the
-                // last chunk is released from only when it is the first.
-                if chunks == 1 {
-                    straighten(last);
-                }
-            }
-            _ => {
-                // The first chunk grows; any later one is allocated whole.
-                let mut chunk = if chunks == 0 {
-                    VecDeque::new()
-                } else {
-                    VecDeque::with_capacity(CHUNK_ROWS)
-                };
-                chunk.push_back(row);
-                self.chunks.push(chunk);
-            }
-        }
-        self.len += 1;
-    }
-
-    /// Release the oldest row.
-    pub fn pop_front(&mut self) -> Option<T> {
-        let first = self.chunks.first_mut()?;
-        let row = first.pop_front();
-        if first.is_empty() {
-            self.chunks.remove(0);
-        } else {
-            straighten(first);
-        }
-        if row.is_some() {
-            self.len -= 1;
-        }
-        row
-    }
-
-    /// Where the row at `index` sits: its chunk and its place in it.
-    fn locate(&self, index: usize) -> Option<(usize, usize)> {
-        if index >= self.len {
-            return None;
-        }
-        let first = self.chunks.first()?.len();
-        if index < first {
-            return Some((0, index));
-        }
-        let rest = index - first;
-        Some((1 + rest / CHUNK_ROWS, rest % CHUNK_ROWS))
-    }
-
-    /// The row at `index`, oldest first.
-    #[inline]
-    pub fn get(&self, index: usize) -> Option<&T> {
-        let (chunk, at) = self.locate(index)?;
-        run(self.chunks.get(chunk)?).get(at)
-    }
-
-    /// [`Self::get`], mutably.
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        let (chunk, at) = self.locate(index)?;
-        self.chunks.get_mut(chunk)?.as_mut_slices().0.get_mut(at)
-    }
-
-    /// The rows from position `from` on, oldest first: what one call added to
-    /// the list, read without walking what was there before it.
-    pub fn iter_from(&self, from: usize) -> Iter<'_, T> {
-        let chunks = self.chunks.len();
-        let Some((chunk, at)) = self.locate(from) else {
-            return Iter {
-                front: <&[T]>::default().iter(),
-                middle: self.chunks[chunks..].iter(),
-                back: <&[T]>::default().iter(),
-            };
-        };
-        let last = chunks - 1;
-        let front = run(&self.chunks[chunk])[at..].iter();
-        if chunk == last {
-            Iter {
-                front,
-                middle: self.chunks[chunks..].iter(),
-                back: <&[T]>::default().iter(),
-            }
-        } else {
-            // Every chunk strictly between the first read and the last is
-            // full, which is what `Iter::left` counts on.
-            Iter {
-                front,
-                middle: self.chunks[chunk + 1..last].iter(),
-                back: run(&self.chunks[last]).iter(),
-            }
-        }
-    }
-
-    /// The rows from position `from` on, mutably.
-    pub fn iter_mut_from(&mut self, from: usize) -> impl DoubleEndedIterator<Item = &mut T> {
-        let (chunk, at) = self.locate(from).unwrap_or((self.chunks.len(), 0));
-        self.chunks
-            .iter_mut()
-            .enumerate()
-            .skip(chunk)
-            .flat_map(move |(i, rows)| rows.range_mut(if i == chunk { at } else { 0 }..))
-    }
-}
-
-/// Keep a chunk one run: see [`ChunkLog`]. Free while the ring has not
-/// wrapped, which is every chunk but a one-chunk list's at a live ceiling.
-fn straighten<T>(chunk: &mut VecDeque<T>) {
-    if !chunk.as_slices().1.is_empty() {
-        chunk.make_contiguous();
-    }
-}
-
-/// A chunk's rows, as the one run [`straighten`] keeps them in.
-fn run<T>(chunk: &VecDeque<T>) -> &[T] {
-    let (rows, wrapped) = chunk.as_slices();
-    debug_assert!(wrapped.is_empty(), "a chunk holds its rows as one run");
-    rows
-}
-
-/// The rows of a [`MessageList`] (held in chunks, see the list's own doc),
-/// oldest first.
-///
-/// Walks the chunks as slices: the run being read from the front, the run being
-/// read from the back, and the whole chunks between them. A skip passes whole
-/// chunks by their length rather than row by row.
-///
-/// Every chunk between the two runs is a FULL chunk (only a log's first and
-/// last chunk can be short, and those are where the runs begin), so what is
-/// left is known from the three without a count kept per row, and the step
-/// that reads a row is the slice's own.
-#[derive(Debug)]
-pub struct Iter<'a, T> {
-    front: core::slice::Iter<'a, T>,
-    middle: core::slice::Iter<'a, VecDeque<T>>,
-    back: core::slice::Iter<'a, T>,
-}
-
-/// Not derived: a derive would ask `T: Clone`, and cloning an iterator copies
-/// three positions, never a row.
-impl<T> Clone for Iter<'_, T> {
-    fn clone(&self) -> Self {
-        Self {
-            front: self.front.clone(),
-            middle: self.middle.clone(),
-            back: self.back.clone(),
-        }
-    }
-}
-
-impl<'a, T> Iter<'a, T> {
-    /// Rows not yet read.
-    fn left(&self) -> usize {
-        self.front.len() + self.middle.len() * CHUNK_ROWS + self.back.len()
-    }
-
-    /// The iterator, spent.
-    fn spend(&mut self) {
-        self.front = <&[T]>::default().iter();
-        self.middle.by_ref().for_each(drop);
-        self.back = <&[T]>::default().iter();
-    }
-
-    /// [`Iterator::next`] once the front run is spent.
-    #[cold]
-    fn next_past_front(&mut self) -> Option<&'a T> {
-        match self.middle.next() {
-            Some(chunk) => {
-                self.front = run(chunk).iter();
-                self.front.next()
-            }
-            None => self.back.next(),
-        }
-    }
-
-    /// [`DoubleEndedIterator::next_back`] once the back run is spent.
-    #[cold]
-    fn next_back_past_back(&mut self) -> Option<&'a T> {
-        match self.middle.next_back() {
-            Some(chunk) => {
-                self.back = run(chunk).iter();
-                self.back.next_back()
-            }
-            None => self.front.next_back(),
-        }
-    }
-}
-
-impl<'a, T> Iterator for Iter<'a, T> {
-    type Item = &'a T;
-
-    #[inline]
-    fn next(&mut self) -> Option<&'a T> {
-        match self.front.next() {
-            Some(row) => Some(row),
-            None => self.next_past_front(),
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let left = self.left();
-        (left, Some(left))
-    }
-
-    fn count(self) -> usize {
-        self.left()
-    }
-
-    fn last(mut self) -> Option<&'a T> {
-        self.next_back()
-    }
-
-    fn nth(&mut self, mut n: usize) -> Option<&'a T> {
-        if n >= self.left() {
-            // Past the end: the iterator is spent, as a slice's is.
-            self.spend();
-            return None;
-        }
-        loop {
-            let here = self.front.len();
-            if n < here {
-                return self.front.nth(n);
-            }
-            n -= here;
-            // The run is passed whole: spent here, so no later step reads it
-            // again.
-            self.front = <&[T]>::default().iter();
-            match self.middle.next() {
-                Some(chunk) => self.front = run(chunk).iter(),
-                None => return self.back.nth(n),
-            }
-        }
-    }
-}
-
-impl<T> DoubleEndedIterator for Iter<'_, T> {
-    #[inline]
-    fn next_back(&mut self) -> Option<Self::Item> {
-        match self.back.next_back() {
-            Some(row) => Some(row),
-            None => self.next_back_past_back(),
-        }
-    }
-
-    fn nth_back(&mut self, mut n: usize) -> Option<Self::Item> {
-        if n >= self.left() {
-            self.spend();
-            return None;
-        }
-        loop {
-            let here = self.back.len();
-            if n < here {
-                return self.back.nth_back(n);
-            }
-            n -= here;
-            self.back = <&[T]>::default().iter();
-            match self.middle.next_back() {
-                Some(chunk) => self.back = run(chunk).iter(),
-                None => return self.front.nth_back(n),
-            }
-        }
-    }
-}
-
-impl<T> ExactSizeIterator for Iter<'_, T> {}
-
-impl<T> core::iter::FusedIterator for Iter<'_, T> {}
-
 /// R311y723 — one message a bound removed, and the obligation to account for it.
 ///
 /// # Why this is a type and not a comment
@@ -2059,6 +1713,7 @@ fn out_of_range(index: usize, len: usize) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chunk_log::CHUNK_ITEMS;
 
     /// One decoded message, built through the passive observer's own decoder
     /// rather than by naming every field of `PassiveFrame` here -- a fixture
@@ -2316,9 +1971,9 @@ mod tests {
             for n in [
                 0,
                 1,
-                CHUNK_ROWS - 1,
-                CHUNK_ROWS,
-                CHUNK_ROWS + 1,
+                CHUNK_ITEMS - 1,
+                CHUNK_ITEMS,
+                CHUNK_ITEMS + 1,
                 want.len() / 2,
             ]
             .into_iter()
@@ -2354,8 +2009,8 @@ mod tests {
             for from in [
                 0,
                 1,
-                CHUNK_ROWS - 1,
-                CHUNK_ROWS,
+                CHUNK_ITEMS - 1,
+                CHUNK_ITEMS,
                 want.len() / 2,
                 want.len(),
                 want.len() + 3,
@@ -2384,17 +2039,17 @@ mod tests {
         }
         let mut list = MessageList::new();
         let mut census = DroppedFrameCensus::default();
-        let grown = 3 * CHUNK_ROWS + 17;
+        let grown = 3 * CHUNK_ITEMS + 17;
         list.append((0..grown).map(numbered));
         check(&list, 0..grown);
         // Into the middle of the second chunk, so the first chunk is gone and the
         // new first is a partial one.
-        let trimmed = CHUNK_ROWS + 300;
+        let trimmed = CHUNK_ITEMS + 300;
         for _ in 0..trimmed {
             census.absorb(list.discard_oldest(&NoBytes).expect("held"));
         }
         check(&list, trimmed..grown);
-        let regrown = grown + 2 * CHUNK_ROWS;
+        let regrown = grown + 2 * CHUNK_ITEMS;
         list.append((grown..regrown).map(numbered));
         check(&list, trimmed..regrown);
         // And down to nothing, which must leave a list that grows again.

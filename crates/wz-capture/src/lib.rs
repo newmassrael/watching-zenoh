@@ -2364,11 +2364,7 @@ fn retained_bytes(
     from: usize,
     to: usize,
 ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
-    let origin = assembler.retained_from();
-    assembler
-        .stream()
-        .get(from.checked_sub(origin)?..to.checked_sub(origin)?)
-        .map(alloc::borrow::Cow::Borrowed)
+    assembler.bytes(from, to, None)
 }
 
 /// R311y612 (§4.1) — post-hole bytes held per direction while deciding whether
@@ -2625,7 +2621,7 @@ impl FlowDissection {
             let assembler = self.assembler(direction);
             let unreachable = from.saturating_sub(assembler.retained_from());
             if unreachable < STREAM_RELEASE_SLACK
-                || unreachable < assembler.stream().len() / STREAM_RELEASE_DIVISOR
+                || unreachable < assembler.retained_len() / STREAM_RELEASE_DIVISOR
             {
                 continue;
             }
@@ -2811,12 +2807,12 @@ impl FlowDissection {
         frame: &PassiveFrame,
     ) -> Result<alloc::borrow::Cow<'a, [u8]>, alloc::string::String> {
         use core::fmt::Write as _;
+        use messages::UnitBytes as _;
 
         if let Some(own) = &frame.decompressed {
             return Ok(alloc::borrow::Cow::Owned(own.clone()));
         }
         let assembler = self.assembler(frame.direction);
-        let stream = assembler.stream();
         let origin = assembler.retained_from();
         if frame.stream_offset < origin {
             let mut why = alloc::string::String::from(
@@ -2829,21 +2825,22 @@ impl FlowDissection {
             );
             return Err(why);
         }
-        let body = (frame.stream_offset - origin) + frame.prefix_width;
+        // Absolute stream offsets from here on.
+        let body = frame.stream_offset + frame.prefix_width;
         let end = body + frame.unit_len;
-        if end > stream.len() {
+        if end > assembler.len() {
             let mut why = alloc::string::String::from("the framing unit declares ");
             let _ = write!(
                 why,
                 "{} byte(s) and the retained stream holds {}",
                 frame.unit_len,
-                stream.len().saturating_sub(body)
+                assembler.len().saturating_sub(body)
             );
             return Err(why);
         }
         // The SAME sum the row's `message_at` is rendered from, so the offset a
         // reader is given is the offset these bytes were taken at.
-        let start = Self::message_at(frame) - origin;
+        let start = Self::message_at(frame);
         if start > end {
             let mut why = alloc::string::String::from("this message stands ");
             let _ = write!(
@@ -2853,7 +2850,12 @@ impl FlowDissection {
             );
             return Err(why);
         }
-        Ok(alloc::borrow::Cow::Borrowed(&stream[start..end]))
+        self.stream_bytes(frame.direction, start, end)
+            .ok_or_else(|| {
+                alloc::string::String::from(
+                    "the bytes are retained in a capture container this flow is no longer lent",
+                )
+            })
     }
 
     /// The zenoh context inferred for this flow.
@@ -3162,16 +3164,21 @@ impl FlowDissection {
     /// which is why this is one function both link layers call rather than the
     /// four lines each of them used to inline.
     fn deliver_from(&mut self, direction: Direction, before: usize) {
+        use messages::UnitBytes as _;
         let splices = match direction {
             Direction::A => self.low_to_high.take_splices(),
             Direction::B => self.high_to_low.take_splices(),
         };
-        let base = self.assembler(direction).retained_from();
+        let assembler = self.assembler(direction);
+        let base = assembler.retained_from();
         debug_assert!(
             before >= base,
             "trimming must not outrun delivery: base {base} > before {before}"
         );
-        let delivered: Vec<u8> = self.assembler(direction).stream()[before - base..].to_vec();
+        let delivered: Vec<u8> = self
+            .stream_bytes(direction, before, assembler.len())
+            .map(alloc::borrow::Cow::into_owned)
+            .unwrap_or_default();
         self.advance_spliced(direction, before, &delivered, &splices);
     }
 
@@ -4208,9 +4215,9 @@ mod live_tap_tests {
                 "{limits:?}: the bytes behind the taken messages were given back"
             );
             assert!(
-                flow.low_to_high.stream().len() < 16 * 1024,
+                flow.low_to_high.retained_len() < 16 * 1024,
                 "{limits:?}: the retained stream follows the held messages, held {}",
-                flow.low_to_high.stream().len()
+                flow.low_to_high.retained_len()
             );
             for frame in [&flow.frames().row(0), &flow.frames().row(99)] {
                 assert_eq!(
@@ -4236,7 +4243,7 @@ mod live_tap_tests {
         let flow = &d.flows()[0];
         assert_eq!(flow.frames.len(), 46_500);
         assert_eq!(flow.low_to_high.retained_from(), 0);
-        assert_eq!(flow.low_to_high.stream().len(), 100 * 1395);
+        assert_eq!(flow.low_to_high.retained_len(), 100 * 1395);
     }
 
     /// BOTH DIRECTIONS ARE RELEASED, each behind its own oldest held message.
@@ -4276,9 +4283,9 @@ mod live_tap_tests {
                 "{name}: the bytes behind its taken messages were given back"
             );
             assert!(
-                assembler.stream().len() < 16 * 1024,
+                assembler.retained_len() < 16 * 1024,
                 "{name}: its retained stream follows its held messages, held {}",
-                assembler.stream().len()
+                assembler.retained_len()
             );
         }
         assert_eq!(d.drops().stream_bytes, 0);

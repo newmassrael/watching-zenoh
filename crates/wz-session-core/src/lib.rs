@@ -1232,6 +1232,12 @@ pub mod passive;
 ))]
 pub mod passive_messages;
 
+// Open-debt item 924 — the chunked log the message lists and the capture
+// layer's TCP run map are both kept in. Undocumented on this line for the
+// reason the module above gives; its note is in its own file.
+#[cfg(feature = "alloc")]
+pub mod chunk_log;
+
 /// R311y579 (G3 + G6-serde) — the LEAF-SCALAR field walker: a dissection that
 /// reports, per scalar, the byte span it was decoded from, in a wz-owned view
 /// model that can carry `serde` derives the codegen'd mirrors cannot. Gated on

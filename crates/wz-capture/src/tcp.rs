@@ -28,18 +28,38 @@
 //! is a binary search.
 
 use alloc::vec::Vec;
+use wz_session_core::chunk_log::ChunkLog;
 
 use crate::link::Segment;
 
-/// A contiguous run of stream bytes contributed by one packet.
+/// A contiguous run of stream bytes contributed by one packet, as the run map
+/// keeps it.
+///
+/// Open-debt item 924 (`docs/dissect-row-index.md`, step 3): one of these is
+/// kept for every payload-carrying segment of a capture, so it is held at 40
+/// bytes in a [`ChunkLog`] rather than as a struct of machine words in a buffer
+/// that doubles. The fields are read through [`StreamAssembler`]'s lookups.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OffsetRun {
+struct Run {
     /// Offset of the run's first byte within the direction's stream.
-    pub stream_offset: usize,
-    /// Run length in bytes.
-    pub len: usize,
+    stream_offset: u64,
+    /// Where the run's bytes are: an offset in the assembler's own kept bytes,
+    /// or, with [`IN_CONTAINER`] set, an offset in the capture container its
+    /// holder lends (see [`StreamAssembler::push_located`]).
+    place: u64,
     /// Index of the capture packet that carried it.
-    pub packet_index: usize,
+    packet_index: u64,
+    /// The capture instant of that packet, in nanoseconds, as the caller stated
+    /// it ([`StreamAssembler::push_at`]); [`NO_INSTANT`] when it stated none.
+    ///
+    /// Recorded here, with the packet, because this map is the one place that
+    /// still knows which packet a byte came from once the bytes are a stream:
+    /// a record read out of the stream asks it for the instant of its first
+    /// byte, and the answer is the same packet [`StreamAssembler::origin_of_offset`]
+    /// names for that byte, by construction.
+    at_ns: u64,
+    /// Run length in bytes.
+    len: u32,
     /// Where the run's first byte sits within that packet's
     /// transport PAYLOAD (the segment body, header excluded).
     ///
@@ -48,16 +68,56 @@ pub struct OffsetRun {
     /// fresh tail became this run. Without it a byte's packet is known and its
     /// position inside the packet is not, and a reader highlighting it would
     /// have to re-derive the overlap this assembler already resolved.
-    pub segment_offset: usize,
-    /// The capture instant of that packet, in nanoseconds, as the caller stated
-    /// it ([`StreamAssembler::push_at`]); `None` when it stated none.
-    ///
-    /// Recorded here, with the packet, because this map is the one place that
-    /// still knows which packet a byte came from once the bytes are a stream:
-    /// a record read out of the stream asks it for the instant of its first
-    /// byte, and the answer is the same packet [`StreamAssembler::origin_of_offset`]
-    /// names for that byte, by construction.
-    pub at_ns: Option<u64>,
+    segment_offset: u32,
+}
+
+/// [`Run::at_ns`] of a packet the caller stated no instant for. A nanosecond
+/// clock reaches it in the year 2554, so it is never a real instant.
+const NO_INSTANT: u64 = u64::MAX;
+
+/// [`Run::place`] names an offset in the lent capture container, not in the
+/// assembler's kept bytes. No container or kept buffer reaches 2^63 bytes.
+const IN_CONTAINER: u64 = 1 << 63;
+
+impl Run {
+    /// One past the run's last byte.
+    fn end(&self) -> usize {
+        self.stream_offset as usize + self.len as usize
+    }
+
+    fn at_ns(&self) -> Option<u64> {
+        (self.at_ns != NO_INSTANT).then_some(self.at_ns)
+    }
+
+    /// Where the run's bytes are.
+    fn place(&self) -> Place {
+        if self.place & IN_CONTAINER != 0 {
+            Place::Container((self.place & !IN_CONTAINER) as usize)
+        } else {
+            Place::Kept(self.place as usize)
+        }
+    }
+}
+
+/// Where a run's bytes are, read off [`Run::place`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// At this absolute offset of the assembler's kept bytes.
+    Kept(usize),
+    /// At this offset of the capture container the holder lends.
+    Container(usize),
+}
+
+/// Where a segment's payload is, as the caller of
+/// [`StreamAssembler::push_located`] knows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PayloadAt {
+    /// Only in the segment: the assembler keeps a copy of the bytes it uses.
+    Here,
+    /// Also at this offset of the capture container the holder lends and keeps
+    /// unchanged for as long as the assembler is read: the assembler keeps no
+    /// copy, and reads the bytes there.
+    Container(usize),
 }
 
 /// A segment held ahead of the stream, waiting for the bytes before it.
@@ -65,7 +125,8 @@ pub struct OffsetRun {
 struct HeldSegment {
     seq: u32,
     packet_index: usize,
-    payload: Vec<u8>,
+    /// Its payload: a copy, or where the lent container holds it.
+    payload: HeldBytes,
     /// [`StreamAssembler::segments_pushed`] at the moment it was held — the
     /// clock the gap's patience is measured on.
     held_at: usize,
@@ -73,6 +134,55 @@ struct HeldSegment {
     /// segment released by a hole being filled, or stepped over, is stamped with
     /// the instant it was captured at and not the instant it was released.
     at_ns: Option<u64>,
+}
+
+/// The payload of a [`HeldSegment`].
+#[derive(Debug)]
+enum HeldBytes {
+    /// A copy, for a payload only the segment held.
+    Copy(Vec<u8>),
+    /// Its place in the lent container, and its length.
+    Container { at: usize, len: usize },
+}
+
+impl HeldBytes {
+    fn len(&self) -> usize {
+        match self {
+            HeldBytes::Copy(bytes) => bytes.len(),
+            HeldBytes::Container { len, .. } => *len,
+        }
+    }
+
+    fn payload(&self) -> Payload<'_> {
+        match self {
+            HeldBytes::Copy(bytes) => Payload::Here(bytes),
+            HeldBytes::Container { at, len } => Payload::Container { at: *at, len: *len },
+        }
+    }
+}
+
+/// A payload as the assembler takes it in: the bytes, or where the lent
+/// container holds them.
+#[derive(Debug, Clone, Copy)]
+enum Payload<'a> {
+    Here(&'a [u8]),
+    Container { at: usize, len: usize },
+}
+
+impl Payload<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Payload::Here(bytes) => bytes.len(),
+            Payload::Container { len, .. } => *len,
+        }
+    }
+
+    fn hold(&self) -> HeldBytes {
+        match *self {
+            Payload::Here(bytes) => HeldBytes::Copy(bytes.to_vec()),
+            Payload::Container { at, len } => HeldBytes::Container { at, len },
+        }
+    }
 }
 
 /// What a reassembler did with one segment. Reported rather than swallowed:
@@ -122,7 +232,17 @@ pub struct StreamAssembler {
     /// off the first DATA segment instead is missing however much preceded
     /// the capture, and that is a materially different claim.
     synced_from_syn: bool,
-    stream: Vec<u8>,
+    /// The bytes of the runs whose bytes the assembler keeps itself: every run's,
+    /// unless its holder lends the capture container the run's packet sits in
+    /// (open-debt item 924, step 3), in stream order.
+    kept: Vec<u8>,
+    /// The absolute offset, in the sequence of every byte ever kept, of
+    /// `kept[0]`: what [`Run::place`] counts from. Moves only when a trim
+    /// releases kept bytes.
+    kept_from: usize,
+    /// One past the stream's last byte: bytes reassembled so far, trimmed or
+    /// not.
+    end: usize,
     /// R311y594b — absolute offset of the first byte still RETAINED.
     ///
     /// A file dissection keeps the whole stream because the file ends. A live
@@ -134,7 +254,8 @@ pub struct StreamAssembler {
     /// unchanged by trimming. Rebasing to zero instead would silently
     /// re-point every offset a consumer already holds.
     discarded: usize,
-    runs: Vec<OffsetRun>,
+    /// The run map, in stream order.
+    runs: ChunkLog<Run>,
     /// Segments ahead of `next_seq`, kept until the gap before them fills.
     ///
     /// Each carries [`Self::segments_pushed`] AT THE MOMENT IT WAS HELD — the
@@ -206,9 +327,11 @@ impl Default for StreamAssembler {
         Self {
             next_seq: None,
             synced_from_syn: false,
-            stream: Vec::new(),
+            kept: Vec::new(),
+            kept_from: 0,
+            end: 0,
             discarded: 0,
-            runs: Vec::new(),
+            runs: ChunkLog::new(),
             pending: Vec::new(),
             fin_seen: false,
             rst_seen: false,
@@ -297,10 +420,73 @@ impl StreamAssembler {
             .min_by_key(|seq| seq.wrapping_sub(next))
     }
 
-    /// The reassembled bytes still RETAINED. Starts at absolute offset
-    /// [`Self::retained_from`], which is `0` until something is trimmed.
-    pub fn stream(&self) -> &[u8] {
-        &self.stream
+    /// The reassembled bytes from absolute offset `from` up to `to`, or `None`
+    /// when any of them is not retained (trimmed, or not arrived).
+    ///
+    /// `container` is the capture container the assembler's holder lends, which
+    /// a run pushed with [`PayloadAt::Container`] is read from; `None` answers
+    /// `None` for a range touching such a run. A range held in one place is
+    /// lent; one that spans places (it crosses packets) is gathered into a copy.
+    ///
+    /// Open-debt item 924, step 3: this replaced the slice of a contiguous
+    /// retained stream, which a holder that lends its container does not have.
+    pub fn bytes<'a>(
+        &'a self,
+        from: usize,
+        to: usize,
+        container: Option<&'a [u8]>,
+    ) -> Option<alloc::borrow::Cow<'a, [u8]>> {
+        if from < self.discarded || to > self.end || from > to {
+            return None;
+        }
+        if from == to {
+            return Some(alloc::borrow::Cow::Borrowed(&[]));
+        }
+        let first = self.runs.partition_point(|r| r.end() <= from);
+        let mut gathered: Option<Vec<u8>> = None;
+        let mut at = from;
+        for run in self.runs.iter_from(first) {
+            // Runs tile the stream: each begins where the one before it ends.
+            let start = at.checked_sub(run.stream_offset as usize)?;
+            let stop = run.end().min(to) - run.stream_offset as usize;
+            let piece = self.run_bytes(run, start, stop, container)?;
+            at = run.stream_offset as usize + stop;
+            match gathered.as_mut() {
+                None if at == to => return Some(alloc::borrow::Cow::Borrowed(piece)),
+                None => {
+                    let mut out = Vec::with_capacity(to - from);
+                    out.extend_from_slice(piece);
+                    gathered = Some(out);
+                }
+                Some(out) => out.extend_from_slice(piece),
+            }
+            if at == to {
+                break;
+            }
+        }
+        (at == to)
+            .then_some(gathered)
+            .flatten()
+            .map(alloc::borrow::Cow::Owned)
+    }
+
+    /// Bytes `start..stop` of `run`, counted from its first byte.
+    fn run_bytes<'a>(
+        &'a self,
+        run: &Run,
+        start: usize,
+        stop: usize,
+        container: Option<&'a [u8]>,
+    ) -> Option<&'a [u8]> {
+        match run.place() {
+            // The run that straddles a trim has lost its front from the kept
+            // bytes, so its place can stand before `kept_from`; the bytes read
+            // of it cannot.
+            Place::Kept(place) => self
+                .kept
+                .get((place + start).checked_sub(self.kept_from)?..(place + stop) - self.kept_from),
+            Place::Container(place) => container?.get(place + start..place + stop),
+        }
     }
 
     /// Absolute offset of the first retained byte.
@@ -311,7 +497,13 @@ impl StreamAssembler {
     /// Bytes reassembled so far, INCLUDING any since trimmed — an absolute
     /// count, so it never goes backwards when a live reader reclaims memory.
     pub fn len(&self) -> usize {
-        self.discarded + self.stream.len()
+        self.end
+    }
+
+    /// Bytes retained: reassembled and not trimmed, from
+    /// [`Self::retained_from`] to [`Self::len`].
+    pub fn retained_len(&self) -> usize {
+        self.end - self.discarded
     }
 
     /// `true` when no bytes have been reassembled.
@@ -328,23 +520,45 @@ impl StreamAssembler {
     /// an offset it did not read in time, and [`Self::packet_for_offset`]
     /// answers `None` there rather than pointing at the wrong packet.
     pub fn trim(&mut self, keep: usize) -> usize {
-        if self.stream.len() <= keep {
+        let retained = self.retained_len();
+        if retained <= keep {
             return 0;
         }
-        let cut = self.stream.len() - keep;
-        self.stream.drain(..cut);
+        let cut = retained - keep;
+        self.discarded += cut;
+        let base = self.discarded;
+        // Runs are in stream order, so the ones wholly behind the new base are
+        // at the front.
+        while self.runs.front().is_some_and(|r| r.end() <= base) {
+            let _ = self.runs.pop_front();
+        }
+        // The kept bytes still read: from the first retained run the assembler
+        // keeps the bytes of (kept places rise with the stream), from the base
+        // where that run straddles it. None: every kept byte goes.
+        let kept_end = self.kept_from + self.kept.len();
+        if self.kept.is_empty() {
+            return cut;
+        }
+        let kept_base = self
+            .runs
+            .iter_from(0)
+            .find_map(|r| match r.place() {
+                Place::Kept(place) => Some(place + base.saturating_sub(r.stream_offset as usize)),
+                Place::Container(_) => None,
+            })
+            .unwrap_or(kept_end)
+            .clamp(self.kept_from, kept_end);
+        self.kept.drain(..kept_base - self.kept_from);
+        self.kept_from = kept_base;
         // R3358 — `drain` shortens the vector and keeps its capacity, so a stream
         // that once held a lot kept the allocation after the trim and the trim
         // freed nothing a process could see. Past twice what is now held, the
         // capacity comes down to a quarter above it, which the stream's next
         // growth fits inside without another allocation.
-        let held = self.stream.len();
-        if self.stream.capacity() > 2 * held + 4096 {
-            self.stream.shrink_to(held + held / 4 + 4096);
+        let held = self.kept.len();
+        if self.kept.capacity() > 2 * held + 4096 {
+            self.kept.shrink_to(held + held / 4 + 4096);
         }
-        self.discarded += cut;
-        let base = self.discarded;
-        self.runs.retain(|r| r.stream_offset + r.len > base);
         cut
     }
 
@@ -387,9 +601,19 @@ impl StreamAssembler {
         self.rst_seen
     }
 
-    /// The per-run offset map, in stream order.
-    pub fn runs(&self) -> &[OffsetRun] {
-        &self.runs
+    /// The run holding the byte at `stream_offset`, when one does and the byte
+    /// was not trimmed.
+    fn run_at(&self, stream_offset: usize) -> Option<&Run> {
+        // An offset whose bytes were trimmed is UNANSWERABLE, not answerable
+        // by the nearest surviving run: a live reader that reclaimed memory
+        // must not thereby start misattributing old messages to new packets.
+        if stream_offset < self.discarded {
+            return None;
+        }
+        let idx = self.runs.partition_point(|r| r.end() <= stream_offset);
+        self.runs
+            .get(idx)
+            .filter(|r| stream_offset >= r.stream_offset as usize)
     }
 
     /// Which capture packet carried the byte at `stream_offset`.
@@ -411,16 +635,15 @@ impl StreamAssembler {
         if start < self.discarded || end <= start {
             return None;
         }
-        let first = self
-            .runs
-            .partition_point(|r| r.stream_offset + r.len <= start);
+        let first = self.runs.partition_point(|r| r.end() <= start);
         let mut packets: Vec<usize> = Vec::new();
-        for run in self.runs.iter().skip(first) {
-            if run.stream_offset >= end {
+        for run in self.runs.iter_from(first) {
+            if run.stream_offset as usize >= end {
                 break;
             }
-            if packets.last() != Some(&run.packet_index) {
-                packets.push(run.packet_index);
+            let packet = run.packet_index as usize;
+            if packets.last() != Some(&packet) {
+                packets.push(packet);
             }
         }
         (!packets.is_empty()).then_some(packets)
@@ -432,24 +655,12 @@ impl StreamAssembler {
     /// One lookup for both halves, so the packet and the position can never
     /// come from two different runs.
     pub fn origin_of_offset(&self, stream_offset: usize) -> Option<(usize, usize)> {
-        // An offset whose bytes were trimmed is UNANSWERABLE, not answerable
-        // by the nearest surviving run: a live reader that reclaimed memory
-        // must not thereby start misattributing old messages to new packets.
-        if stream_offset < self.discarded {
-            return None;
-        }
-        let idx = self
-            .runs
-            .partition_point(|r| r.stream_offset + r.len <= stream_offset);
-        self.runs
-            .get(idx)
-            .filter(|r| stream_offset >= r.stream_offset)
-            .map(|r| {
-                (
-                    r.packet_index,
-                    r.segment_offset + (stream_offset - r.stream_offset),
-                )
-            })
+        self.run_at(stream_offset).map(|r| {
+            (
+                r.packet_index as usize,
+                r.segment_offset as usize + (stream_offset - r.stream_offset as usize),
+            )
+        })
     }
 
     /// The capture instant, in nanoseconds, of the packet that carried the byte
@@ -461,16 +672,7 @@ impl StreamAssembler {
     /// row names and the instant its record carries cannot come from two
     /// different runs.
     pub fn instant_of_offset(&self, stream_offset: usize) -> Option<u64> {
-        if stream_offset < self.discarded {
-            return None;
-        }
-        let idx = self
-            .runs
-            .partition_point(|r| r.stream_offset + r.len <= stream_offset);
-        self.runs
-            .get(idx)
-            .filter(|r| stream_offset >= r.stream_offset)
-            .and_then(|r| r.at_ns)
+        self.run_at(stream_offset).and_then(Run::at_ns)
     }
 
     /// Feed one segment belonging to THIS direction, stating no instant for it.
@@ -487,6 +689,22 @@ impl StreamAssembler {
     /// carries the instant it was CAPTURED at, however much later it is
     /// delivered. See [`Self::instant_of_offset`].
     pub fn push_at(&mut self, seg: &Segment, at_ns: Option<u64>) -> SegmentOutcome {
+        self.push_located(seg, at_ns, PayloadAt::Here)
+    }
+
+    /// [`Self::push_at`], saying where else the segment's payload is.
+    ///
+    /// Open-debt item 924, step 3 (`docs/dissect-row-index.md`): a holder that
+    /// lends the capture container the segment's packet sits in names the
+    /// payload's offset there, and the assembler then keeps no copy of it; it
+    /// reads the bytes from the container through [`Self::bytes`]. The stream,
+    /// its offsets and every answer are the ones a copy gives.
+    pub fn push_located(
+        &mut self,
+        seg: &Segment,
+        at_ns: Option<u64>,
+        at: PayloadAt,
+    ) -> SegmentOutcome {
         if seg.rst {
             self.rst_seen = true;
         }
@@ -517,7 +735,14 @@ impl StreamAssembler {
             }
         };
 
-        let outcome = self.absorb(next, seg.seq, &seg.payload, seg.packet_index, at_ns);
+        let payload = match at {
+            PayloadAt::Here => Payload::Here(&seg.payload),
+            PayloadAt::Container(at) => Payload::Container {
+                at,
+                len: seg.payload.len(),
+            },
+        };
+        let outcome = self.absorb(next, seg.seq, payload, seg.packet_index, at_ns);
         match outcome {
             SegmentOutcome::Duplicate => self.retransmits += 1,
             SegmentOutcome::HeldOutOfOrder => self.out_of_order += 1,
@@ -591,7 +816,7 @@ impl StreamAssembler {
         &mut self,
         next: u32,
         seq: u32,
-        payload: &[u8],
+        payload: Payload<'_>,
         packet_index: usize,
         at_ns: Option<u64>,
     ) -> SegmentOutcome {
@@ -604,7 +829,7 @@ impl StreamAssembler {
             self.pending.push(HeldSegment {
                 seq,
                 packet_index,
-                payload: payload.to_vec(),
+                payload: payload.hold(),
                 held_at: self.segments_pushed,
                 at_ns,
             });
@@ -622,25 +847,35 @@ impl StreamAssembler {
         if already > 0 {
             self.partial_overlaps += 1;
         }
-        let fresh = &payload[already..];
-        // R311y594b — ABSOLUTE, not an index into the retained Vec. Trimming
-        // drops bytes off the front, so `self.stream.len()` stops being the
+        let fresh = payload.len() - already;
+        // R311y594b — ABSOLUTE, not an index into the retained bytes. Trimming
+        // drops bytes off the front, so the retained length stops being the
         // stream position the moment it happens; runs recorded relatively
         // would all point one trim-length too early, and the run map went
         // EMPTY in the first version of this because `retain` compared those
         // relative offsets against an absolute base.
-        let stream_offset = self.discarded + self.stream.len();
-        self.stream.extend_from_slice(fresh);
-        self.runs.push(OffsetRun {
-            stream_offset,
-            len: fresh.len(),
-            packet_index,
-            segment_offset: already,
-            at_ns,
+        let stream_offset = self.end;
+        // Only the fresh tail is the run's, wherever the payload is.
+        let place = match payload {
+            Payload::Here(bytes) => {
+                let place = self.kept_from + self.kept.len();
+                self.kept.extend_from_slice(&bytes[already..]);
+                place as u64
+            }
+            Payload::Container { at, .. } => (at + already) as u64 | IN_CONTAINER,
+        };
+        self.end += fresh;
+        self.runs.push_back(Run {
+            stream_offset: stream_offset as u64,
+            place,
+            packet_index: packet_index as u64,
+            at_ns: at_ns.unwrap_or(NO_INSTANT),
+            len: u32::try_from(fresh).unwrap_or(u32::MAX),
+            segment_offset: u32::try_from(already).unwrap_or(u32::MAX),
         });
-        self.next_seq = Some(next.wrapping_add(fresh.len() as u32));
+        self.next_seq = Some(next.wrapping_add(fresh as u32));
         SegmentOutcome::Appended {
-            len: fresh.len(),
+            len: fresh,
             stream_offset,
         }
     }
@@ -661,7 +896,13 @@ impl StreamAssembler {
             match found {
                 Some(i) => {
                     let held = self.pending.remove(i);
-                    self.absorb(next, held.seq, &held.payload, held.packet_index, held.at_ns);
+                    self.absorb(
+                        next,
+                        held.seq,
+                        held.payload.payload(),
+                        held.packet_index,
+                        held.at_ns,
+                    );
                 }
                 None => return,
             }
@@ -674,6 +915,13 @@ mod tests {
     use super::*;
     use crate::link::{decapsulate, LINKTYPE_IPV4};
     use alloc::vec;
+
+    /// The bytes `s` retains, as one run.
+    fn stream(s: &StreamAssembler) -> Vec<u8> {
+        s.bytes(s.retained_from(), s.len(), None)
+            .expect("an assembler that lends nothing holds every byte it retains")
+            .into_owned()
+    }
 
     /// Build a bare IPv4 + TCP packet and decapsulate it, so the fixtures go
     /// through the REAL parser rather than constructing `Segment` by hand —
@@ -727,7 +975,7 @@ mod tests {
             s.push(&seg(behind, 0x18, b"x", 1)),
             SegmentOutcome::Duplicate
         );
-        assert_eq!(s.stream(), b"hello", "nothing was added");
+        assert_eq!(stream(&s), b"hello", "nothing was added");
     }
 
     /// `trim_before` drops the bytes ahead of an offset, leaves the rest at its
@@ -741,17 +989,17 @@ mod tests {
             s.push(&seg(1000 + i * 1000, 0x18, &chunk, i as usize));
         }
         assert_eq!(s.len(), 64_000);
-        assert!(s.stream.capacity() >= 64_000);
+        assert!(s.kept.capacity() >= 64_000);
 
         assert_eq!(s.trim_before(0), 0, "an offset at the start trims nothing");
         assert_eq!(s.trim_before(63_000), 63_000);
         assert_eq!(s.retained_from(), 63_000);
-        assert_eq!(s.stream().len(), 1_000);
+        assert_eq!(stream(&s).len(), 1_000);
         assert_eq!(s.len(), 64_000, "the absolute count never goes backwards");
         assert!(
-            s.stream.capacity() < 8 * 1024,
+            s.kept.capacity() < 8 * 1024,
             "the allocation follows what is held, not what once was: {}",
-            s.stream.capacity()
+            s.kept.capacity()
         );
         assert_eq!(
             s.trim_before(62_000),
@@ -763,7 +1011,7 @@ mod tests {
             1_000,
             "past the end empties the stream"
         );
-        assert!(s.stream().is_empty());
+        assert!(stream(&s).is_empty());
     }
 
     /// The ordinary case: a SYN establishes the origin, then contiguous data.
@@ -786,7 +1034,7 @@ mod tests {
                 stream_offset: 6
             }
         );
-        assert_eq!(s.stream(), b"hello world");
+        assert_eq!(stream(&s), b"hello world");
     }
 
     /// A capture that started mid-connection has no SYN. The stream still
@@ -796,7 +1044,7 @@ mod tests {
     fn a_capture_without_a_syn_synchronises_but_says_so() {
         let mut s = StreamAssembler::new();
         s.push(&seg(5000, 0x18, b"midstream", 0));
-        assert_eq!(s.stream(), b"midstream");
+        assert_eq!(stream(&s), b"midstream");
         assert!(
             !s.synced_from_syn(),
             "offset 0 is where the CAPTURE began, not the stream"
@@ -815,7 +1063,7 @@ mod tests {
             s.push(&seg(101, 0x18, b"abcd", 2)),
             SegmentOutcome::Duplicate
         );
-        assert_eq!(s.stream(), b"abcd", "exactly once");
+        assert_eq!(stream(&s), b"abcd", "exactly once");
     }
 
     /// A PARTIAL overlap contributes only its tail. Dropping it whole would
@@ -860,7 +1108,7 @@ mod tests {
             "one segment repeated and progressed"
         );
         assert_eq!(
-            s.stream(),
+            stream(&s),
             b"abcdef",
             "the counters must not have changed what was reassembled",
         );
@@ -879,7 +1127,7 @@ mod tests {
                 stream_offset: 4
             }
         );
-        assert_eq!(s.stream(), b"abcdef");
+        assert_eq!(stream(&s), b"abcdef");
     }
 
     /// Reordering is repaired, not accepted. The out-of-order segment is held
@@ -902,7 +1150,7 @@ mod tests {
         assert!(s.is_empty(), "nothing is delivered while the gap is open");
         s.push(&seg(101, 0x18, b"AAA", 3));
         assert_eq!(
-            s.stream(),
+            stream(&s),
             b"AAABBBCCC",
             "the whole held chain drains in SEQUENCE order, not arrival order"
         );
@@ -918,7 +1166,7 @@ mod tests {
         s.push(&seg(101, 0x18, b"AAA", 1));
         s.push(&seg(200, 0x18, b"ZZZ", 2)); // far ahead; the gap never fills
         assert_eq!(
-            s.stream(),
+            stream(&s),
             b"AAA",
             "the hole is not closed by concatenation"
         );
@@ -941,11 +1189,11 @@ mod tests {
         // Sequence 104..=199 never arrives. Segments beyond it keep coming.
         for (i, seq) in [200u32, 203, 206].iter().enumerate() {
             s.push(&seg(*seq, 0x18, b"ZZZ", 2 + i));
-            assert_eq!(s.stream(), b"AAA", "still waiting at push {}", i + 1);
+            assert_eq!(stream(&s), b"AAA", "still waiting at push {}", i + 1);
         }
         s.push(&seg(209, 0x18, b"ZZZ", 5));
         assert_eq!(
-            s.stream(),
+            stream(&s),
             b"AAAZZZZZZZZZZZZ",
             "the far side of the gap is delivered once the gap is judged permanent"
         );
@@ -969,7 +1217,7 @@ mod tests {
         for i in 0..64u32 {
             s.push(&seg(200 + i * 3, 0x18, b"ZZZ", 2 + i as usize));
         }
-        assert_eq!(s.stream(), b"AAA", "nothing is stepped over");
+        assert_eq!(stream(&s), b"AAA", "nothing is stepped over");
         assert_eq!(s.gaps_forced(), 0);
         assert_eq!(s.bytes_missing(), 0);
         assert_eq!(s.held_segments(), 64);
@@ -984,7 +1232,7 @@ mod tests {
         s.push(&seg(101, 0x18, b"AAA", 1));
         s.push(&seg(107, 0x18, b"CCC", 2)); // ahead: 104..=106 missing
         s.push(&seg(104, 0x18, b"BBB", 3)); // it arrives, late
-        assert_eq!(s.stream(), b"AAABBBCCC");
+        assert_eq!(stream(&s), b"AAABBBCCC");
         assert_eq!(s.gaps_forced(), 0);
         assert_eq!(s.bytes_missing(), 0);
     }
@@ -997,9 +1245,9 @@ mod tests {
         s.push(&seg(100, 0x02, b"", 0));
         s.push(&seg(101, 0x18, b"AAA", 1));
         s.push(&seg(200, 0x18, b"ZZZ", 2));
-        assert_eq!(s.stream(), b"AAA", "the patience is nowhere near spent");
+        assert_eq!(stream(&s), b"AAA", "the patience is nowhere near spent");
         assert_eq!(s.force_oldest_gap(), Some(96));
-        assert_eq!(s.stream(), b"AAAZZZ");
+        assert_eq!(stream(&s), b"AAAZZZ");
         assert_eq!(s.force_oldest_gap(), None, "no gap is open now");
     }
 
@@ -1037,7 +1285,7 @@ mod tests {
             },
             "the segment across the wrap is the NEXT one, not an old one"
         );
-        assert_eq!(s.stream(), b"ABCD");
+        assert_eq!(stream(&s), b"ABCD");
     }
 
     /// A retransmitted SYN mid-capture must not rewind an established origin
@@ -1056,7 +1304,7 @@ mod tests {
                 stream_offset: 3
             }
         );
-        assert_eq!(s.stream(), b"AAABBB");
+        assert_eq!(stream(&s), b"AAABBB");
         assert_eq!(s.held_segments(), 0);
     }
 

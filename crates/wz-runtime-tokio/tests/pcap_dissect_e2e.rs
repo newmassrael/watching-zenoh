@@ -322,14 +322,19 @@ async fn a_pcap_of_a_real_handshake_dissects_end_to_end() {
     // The reassembled streams must equal the tapped bytes EXACTLY. This is
     // where the retransmission and the reordering are actually judged: a
     // duplicated run or a transposed pair changes these vectors.
+    let whole = |direction: Direction| {
+        use wz_capture::messages::UnitBytes as _;
+        flow.stream_bytes(direction, 0, flow.assembler(direction).len())
+            .map(std::borrow::Cow::into_owned)
+    };
     assert_eq!(
-        flow.assembler(Direction::A).stream(),
-        a_bytes.as_slice(),
+        whole(Direction::A).as_deref(),
+        Some(a_bytes.as_slice()),
         "client->server reassembles to the tapped bytes despite the retransmission"
     );
     assert_eq!(
-        flow.assembler(Direction::B).stream(),
-        b_bytes.as_slice(),
+        whole(Direction::B).as_deref(),
+        Some(b_bytes.as_slice()),
         "server->client reassembles to the tapped bytes despite the reordering"
     );
     assert!(

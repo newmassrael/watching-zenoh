@@ -86,6 +86,10 @@ SRCS = [
 # but widening the scan to that crate is a real gap and its own round's work.
 SRC_FILES = [
     ROOT / "crates" / "wz-session-core" / "src" / "passive_messages.rs",
+    # Open-debt item 924, step 3 — the chunked log the message list keeps its
+    # rows in moved to a module of its own when the TCP run map came to use it
+    # too; the gate follows the removal it already watched.
+    ROOT / "crates" / "wz-session-core" / "src" / "chunk_log.rs",
 ]
 
 REMOVAL = re.compile(r"\.(drain|remove|pop|pop_front|swap_remove|retain)\s*\(")
@@ -204,20 +208,36 @@ ALLOWED = [
         "to it out of a unit read again for it: a copy, never the list's row",
     ),
     (
-        "wz-session-core/passive_messages.rs",
-        "let row = first.pop_front();",
-        "Open-debt item 924 — the STORAGE under the door above. `ChunkLog` "
-        "holds `MessageList`'s rows in chunks; this is where the oldest row "
-        "leaves the oldest chunk, and its one caller is `discard_oldest`, which "
-        "hands the row back inside the `#[must_use] Discarded` receipt. "
-        "`ChunkLog` is `pub(crate)` so no other door can reach this removal",
+        "wz-session-core/chunk_log.rs",
+        "let item = first.pop_front();",
+        "Open-debt item 924 — the STORAGE under the doors that release: "
+        "`ChunkLog` holds a message list's rows and a TCP run map in chunks, and "
+        "this is where the oldest item leaves the oldest chunk, returned to the "
+        "caller. Its callers account for what they take: `discard_oldest` hands "
+        "the row back inside the `#[must_use] Discarded` receipt, and the run "
+        "map's trim returns the bytes it cut",
     ),
     (
-        "wz-session-core/passive_messages.rs",
+        "wz-session-core/chunk_log.rs",
         "self.chunks.remove(0);",
         "Open-debt item 924 — drops an EMPTY chunk: the branch is taken only "
         "when the row taken above left the first chunk with nothing in it, so "
         "no row goes with it (one pointer per held chunk moves)",
+    ),
+    (
+        "wz-session-core/chunk_log.rs",
+        "assert_eq!(log.pop_front().as_ref(), Some(expected));",
+        "Open-debt item 924, step 3 — a TEST of the log itself: each released "
+        "item is compared with the one it must be, so nothing is lost unseen",
+    ),
+    (
+        "wz-capture/tcp.rs",
+        "let _ = self.runs.pop_front();",
+        "Open-debt item 924, step 3 — the run-map entries of bytes a trim has "
+        "just discarded, which can no longer be attributed (`origin_of_offset` "
+        "answers `None` before `retained_from`). The bytes are what the trim "
+        "returns and every caller counts in `DissectionDrops::stream_bytes`; "
+        "the entries only located them",
     ),
     (
         "wz-session-core/passive_messages.rs",

@@ -165,7 +165,7 @@ impl Retention {
             .max()
             .unwrap_or(0);
 
-        // The bytes RETAINED, which is `stream().len()`. `len()` is the
+        // The bytes RETAINED, which is `retained_len()`. `len()` is the
         // absolute count reassembled and never goes backwards when a trim
         // reclaims memory, so summing it would report a handle that had trimmed
         // everything as full.
@@ -173,7 +173,7 @@ impl Retention {
             d.flows()
                 .iter()
                 .flat_map(|flow| [&flow.low_to_high, &flow.high_to_low])
-                .map(|assembler| assembler.stream().len())
+                .map(|assembler| assembler.retained_len())
         };
 
         Self {
