@@ -282590,6 +282590,46 @@
         "Whether a wz-own socket2 0.6.3 builds on nto, which a peer found blocking in its 0.6.5."
       ]
     },
+    "Round 3522": {
+      "decision_summary": "Open-debt item 924, step 4c, the WebSocket messages (owner: long-term correct, cost not counted). A ws message's payload is unmasked and joined out of its frames by the deframer and stands nowhere in the TCP stream, so its messages were kept whole. The flow's list now logs the payload as a datagram list logs a unit and reads its rows again from it. A ws row ends where its last frame does, which the payload cannot say; the list keeps that end once per unit beside the entries (a row flag and a table by locator, released with the unit's last row), since the 48-byte row has no field to spare. Found while gating: the byte door answered a ws message with a TCP stream slice at its anchor, the frame header and a masked prefix; it now reads the logged payload, and FlowDissection::message_bytes takes the row, whose place names that payload, instead of a frame.",
+      "changes_bullets": [
+        "wz-session-core passive_messages.rs: WIRE_END row flag and Index::wire_ends by locator; push_datagram accepts a unit whose records agree on an end and keeps one otherwise whole; heads and rows read again carry the end; the unit's last row releases it",
+        "wz-capture lib.rs: feed_websocket pushes each message's unit as a logged entry; message_bytes takes a Row and reads a message anchored at a packet from its unit's logged payload (message_in_unit shared with unit_message_bytes); fields_json and row_plane hand the row",
+        "redecode_gate.rs: a ws capture with a batch, a masked message, a split frame and a fragmented message, plain, under the stream ceilings and lent, with every message's bytes against its payload; discard_site_lint.py: the end release registered; docs/dissect-row-index.md: step 4c (4), its WebSocket part"
+      ],
+      "verification_bullets": [
+        "The ws gate passes plain, under every stream ceiling and lent against handed; before the byte door change it failed on message 0 with the frame header in front of the payload. Dropping the end when a unit is read again fails the gate, and releasing the end at a unit's first row fails the session-core test that reads every row after every discard (mutations)",
+        "cargo test wz-session-core all features, wz-capture all features, wz-capi-dissect, wz-analyze all features; cargo check wz-integration-tests all targets (its callers already hand a row)",
+        "clippy -D warnings wz-session-core all features, wz-capture all and no default features, wz-capi-dissect; rustfmt; discard_site_lint, accessor_reach_census, analysis_surface_parity"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 4c landing (4), the rest: TLS plaintext (its remap rewrites rows after the sink; give it a base, a kept plaintext and the stream end beside the entries, as the ws rows now have) and the scouting rows; then step 5, the memory gate",
+        "Hosted CI: read the first completed run holding rounds 3504 to this one; the consumer session takes this round's pin, and its ws message bytes change from a stream slice to the payload"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 4c, the WebSocket messages (owner: long-term correct, cost not counted). A ws message's payload is unmasked and joined out of its frames by the deframer and stands nowhere in the TCP stream, so its messages were kept whole. The flow's list now logs the payload as a datagram list logs a unit and reads its rows again from it. A ws row ends where its last frame does, which the payload cannot say; the list keeps that end once per unit beside the entries (a row flag and a table by locator, released with the unit's last row), since the 48-byte row has no field to spare. Found while gating: the byte door answered a ws message with a TCP stream slice at its anchor, the frame header and a masked prefix; it now reads the logged payload, and FlowDissection::message_bytes takes the row, whose place names that payload, instead of a frame.",
+      "publishable_changes_bullets": [
+        "wz-session-core passive_messages.rs: WIRE_END row flag and Index::wire_ends by locator; push_datagram accepts a unit whose records agree on an end and keeps one otherwise whole; heads and rows read again carry the end; the unit's last row releases it",
+        "wz-capture lib.rs: feed_websocket pushes each message's unit as a logged entry; message_bytes takes a Row and reads a message anchored at a packet from its unit's logged payload (message_in_unit shared with unit_message_bytes); fields_json and row_plane hand the row",
+        "redecode_gate.rs: a ws capture with a batch, a masked message, a split frame and a fragmented message, plain, under the stream ceilings and lent, with every message's bytes against its payload; discard_site_lint.py: the end release registered; docs/dissect-row-index.md: step 4c (4), its WebSocket part"
+      ],
+      "publishable_verification_bullets": [
+        "The ws gate passes plain, under every stream ceiling and lent against handed; before the byte door change it failed on message 0 with the frame header in front of the payload. Dropping the end when a unit is read again fails the gate, and releasing the end at a unit's first row fails the session-core test that reads every row after every discard (mutations)",
+        "cargo test wz-session-core all features, wz-capture all features, wz-capi-dissect, wz-analyze all features; cargo check wz-integration-tests all targets (its callers already hand a row)",
+        "clippy -D warnings wz-session-core all features, wz-capture all and no default features, wz-capi-dissect; rustfmt; discard_site_lint, accessor_reach_census, analysis_surface_parity"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 4c landing (4), the rest: TLS plaintext (its remap rewrites rows after the sink; give it a base, a kept plaintext and the stream end beside the entries, as the ws rows now have) and the scouting rows; then step 5, the memory gate",
+        "Hosted CI: read the first completed run holding rounds 3504 to this one; the consumer session takes this round's pin, and its ws message bytes change from a stream slice to the payload"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
