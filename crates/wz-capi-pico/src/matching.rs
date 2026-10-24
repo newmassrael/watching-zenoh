@@ -38,7 +38,8 @@
 
 use std::ffi::c_void;
 
-use wz_capi_core::faces::{MatchId, MatchingSink, SharedSession};
+use wz_capi_core::faces::SharedSession;
+use wz_capi_port::{MatchId, MatchingSink};
 
 use crate::abi::handle_ref;
 use crate::ffi::{guarded, CClosure};

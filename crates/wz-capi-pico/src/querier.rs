@@ -42,7 +42,8 @@
 use std::ffi::{c_char, c_int, c_void};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use wz_capi_core::faces::{FilterPlane, MatchId, MatchingSink, SharedSession};
+use wz_capi_core::faces::SharedSession;
+use wz_capi_port::{FilterPlane, MatchId, MatchingSink};
 
 use crate::abi::{handle_ref, impl_handle_ownership7, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::ffi::guarded;

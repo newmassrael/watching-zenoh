@@ -130,7 +130,7 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // second C ABI (§5.27 `api-compat-c`, the zenoh-c drop-in) over the same session
 // model without either duplicating this file or generalising it.
 //
-// The dependency is inverted through the three FACTORY aliases below: the ABI
+// The dependency is inverted through the FACTORY aliases below: the ABI
 // shim hands in something that MINTS a callback, and this file never learns what
 // it closes over. A factory rather than a ready-made callback because a callback
 // is needed once PER FACE — every declaration is replayed onto each new face
@@ -140,11 +140,16 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // the factory owns whatever the shim captured (its `Arc<CClosure>`), so the last
 // factory released still runs the C `drop(context)` — which is why every release
 // below stays OUTSIDE the registry lock.
-
-/// Mints one subscriber callback per face — the inverted form of what used to be
-/// `make_subscriber_callback(Arc<CClosure>)`.
-pub type SubscriberSink =
-    Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
+//
+// The vocabulary an ABI and an engine both name — the subscriber and matching
+// factories, the ids, a key's wire form, the write filter's plane and its answer —
+// lives in `wz-capi-port`, so a C ABI over another engine names the same types
+// (docs/capi-pico-on-coop-engine.md). It is re-exported here, so every path into
+// this module keeps resolving. What stays is what names this engine's sessions.
+pub use wz_capi_port::{
+    FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, SubId, SubscriberSink,
+    WireKey,
+};
 
 /// Mints one liveliness-subscriber callback per face.
 pub type LivelinessSink =
@@ -174,39 +179,6 @@ pub type QueryableSink = Arc<
         + Send
         + Sync,
 >;
-
-/// Delivers ONE aggregated matching verdict to C.
-///
-/// Unlike the four sinks above this is NOT a per-face factory, and the
-/// difference is the whole design of the matching plane: a C program holds one
-/// matching listener and must be told about the SESSION's verdict, not about
-/// each face's. See [`SharedSession::declare_matching_listener`] for why a
-/// per-face pass-through would report the opposite of the truth.
-pub type MatchingSink = Arc<dyn Fn(bool) + Send + Sync>;
-
-/// A C-level matching-listener id, keying the per-face wz listeners one C
-/// declaration spawned.
-pub type MatchId = u64;
-
-/// A C-level WRITE FILTER id — zenoh-pico's `_z_write_filter_t`, which a
-/// publisher or querier holds for its whole life.
-pub type FilterId = u64;
-
-/// Which declarations a write filter counts: pico's
-/// `_Z_WRITE_FILTER_SUBSCRIBER` for a publisher, `_Z_WRITE_FILTER_QUERYABLE`
-/// for a querier (`vendor/zenoh-pico/src/net/filtering.c` @
-/// `ctx->target_type = expects_queryable ? _Z_WRITE_FILTER_QUERYABLE : _Z_WRITE_FILTER_SUBSCRIBER;`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FilterPlane {
-    /// A publisher: does any peer subscribe to the key.
-    Subscribers,
-    /// A querier: does any peer answer on the key. `complete_required` is a
-    /// target of `ALL_COMPLETE`, which counts only queryables declared complete.
-    Queryables {
-        /// See the variant.
-        complete_required: bool,
-    },
-}
 
 /// A C-declared write filter — the SSOT replayed onto every face that comes up,
 /// as every other entry here is.
@@ -255,38 +227,6 @@ type FaceEpochs = Option<(
     Arc<std::sync::atomic::AtomicU64>,
     Arc<std::sync::atomic::AtomicU64>,
 )>;
-
-/// Why a fan-out publish could not be delivered to ANY face.
-///
-/// Named `FanoutError`, not `PublishError`: wz-runtime-tokio already exports a
-/// per-session `PublishError` that this module imports, and two types with one
-/// name in one file is the shape a later reader resolves wrongly.
-///
-/// R311y498 — a real type rather than `Result<_, ()>`, and not merely to satisfy
-/// `clippy::result_unit_err`: this became public when the model moved out of the
-/// ABI crate, and a public function whose error carries no information leaves
-/// every shim mapping "something went wrong" onto its own generic code with no
-/// way to do better. The variant is face-INDEPENDENT by construction — a
-/// per-face failure is skipped rather than surfaced (see the fan-out docs).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FanoutError {
-    /// The payload or keyexpr exceeded the bounded codec's capacity, so no face
-    /// could have carried it.
-    ExceedsCapacity,
-}
-
-/// What [`SharedSession::put_plain_filtered`] did with a put.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FilteredPut {
-    /// The write filter said nothing matches: nothing was sent, and the put is answered as
-    /// a success, as pico's is.
-    Suppressed,
-    /// The put was sent, with the answer [`SharedSession::put_plain_declared`] gives.
-    Sent(Result<usize, FanoutError>),
-    /// The put is not plain on this node (a local subscriber wants it, or a face stamps what
-    /// it sends): nothing was sent, and the caller takes the general publish.
-    NotPlain,
-}
 
 /// How ONE leg of a publish fan-out ended, which is all [`SharedSession`]'s fan-out needs
 /// to know about a call that is otherwise a bytes publish, an SHM publish or either of
@@ -547,81 +487,6 @@ impl QueryLeg<'_> {
     }
 }
 
-/// How a C declaration's key goes on the WIRE, as distinct from the literal it
-/// matches on locally.
-///
-/// The two differ whenever a declaring ABI names a key through one of its own
-/// keyexpr declarations: the entity still matches the resolved literal, but the
-/// peer is told `(mapping_id, suffix)`. `mapping_id == 0` is the literal
-/// itself, which is what zenoh-c's session sends and the default here; the
-/// pico ABI announces through the declarations zenoh-pico makes for its
-/// entities (`_z_declared_keyexpr_declare` and its non-wild-prefix twin,
-/// `vendor/zenoh-pico/src/session/keyexpr.c`).
-///
-/// Recorded on each SSOT entry, because a face that joins later replays the
-/// declaration and must announce it the same way. The id stays valid there:
-/// keyexpr declarations are session-global and replayed onto a new face FIRST
-/// (see [`SharedSession::face_up`]).
-///
-/// ## What keeps the id declared
-///
-/// An entry that names `mapping_id` on the wire needs that declaration to
-/// outlive it, and the ABI that made the declaration is the one that knows what
-/// retracts it. So the key carries what it [`keeps`](Self::keeping) alive, and
-/// the entry holding the key holds that. For an entity with a handle the ABI
-/// usually holds its own reference too; for a BACKGROUND entity, which has no
-/// handle and lives as long as the session, the entry is the only holder —
-/// which is exactly the lifetime zenoh-pico gives the declaration, stored with
-/// the subscription in the session's table.
-///
-/// Entries are always released OUTSIDE the registry lock, so what they keep may
-/// re-enter the session as it drops (a keyexpr retraction does).
-#[derive(Clone, Default)]
-pub struct WireKey {
-    /// The keyexpr declaration the wire names, `0` for none.
-    pub mapping_id: u64,
-    /// What follows the declared prefix, `None` when it covers the whole key.
-    pub suffix: Option<String>,
-    keeps: Option<Arc<dyn Send + Sync>>,
-}
-
-impl std::fmt::Debug for WireKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WireKey")
-            .field("mapping_id", &self.mapping_id)
-            .field("suffix", &self.suffix)
-            .field("keeps", &self.keeps.is_some())
-            .finish()
-    }
-}
-
-impl WireKey {
-    /// The literal itself — no declaration.
-    pub fn literal() -> Self {
-        Self::default()
-    }
-
-    /// Declaration `mapping_id` followed by `suffix`.
-    pub fn aliased(mapping_id: u64, suffix: Option<String>) -> Self {
-        Self {
-            mapping_id,
-            suffix,
-            keeps: None,
-        }
-    }
-
-    /// This key, holding `anchor` alive for as long as a declaration made on
-    /// it stays recorded.
-    pub fn keeping(mut self, anchor: Arc<dyn Send + Sync>) -> Self {
-        self.keeps = Some(anchor);
-        self
-    }
-
-    fn is_literal(&self) -> bool {
-        self.mapping_id == 0
-    }
-}
-
 /// Declare a subscriber on one face in `wire`'s form.
 fn declare_subscriber_on(
     session: &TokioSession,
@@ -699,10 +564,6 @@ fn declare_liveliness_subscriber_on(
             .ok()
     }
 }
-
-/// A C-level subscription id — what a `z_owned_subscriber_t` handle carries.
-/// It keys the per-face wz [`Subscriber`]s this one C subscription spawned.
-pub type SubId = u64;
 
 /// A C-level queryable id — what a `z_owned_queryable_t` handle carries. The
 /// responder-side mirror of [`SubId`], keying the per-face wz [`Queryable`]s

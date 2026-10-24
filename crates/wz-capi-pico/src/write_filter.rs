@@ -48,7 +48,8 @@
 use std::sync::Arc;
 
 use wz_capi_core::drive::SessionState;
-use wz_capi_core::faces::{FilterId, FilterPlane, SharedSession, WireKey};
+use wz_capi_core::faces::SharedSession;
+use wz_capi_port::{FilterId, FilterPlane, FilteredPut, WireKey};
 #[cfg(feature = "advanced")]
 use wz_runtime_tokio::node_clock::NodeHlc;
 use wz_runtime_tokio::session::InterestForm;
@@ -161,7 +162,7 @@ impl WriteFilter {
         mapping_id: u64,
         payload: &[u8],
         params: &wz_session_core::publish_options::PlainPutParams,
-    ) -> wz_capi_core::faces::FilteredPut {
+    ) -> FilteredPut {
         self.shared
             .put_plain_filtered(self.id, keyexpr, mapping_id, payload, params)
     }

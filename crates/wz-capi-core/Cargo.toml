@@ -442,6 +442,10 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # build `String`s; it adds nothing to any dependent, since `wz-runtime-tokio`, which every build
 # of this crate links, already turns it on.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
+# The vocabulary a C ABI and its engine both name (the subscriber and matching factories, the ids,
+# a key's wire form, the write filter's plane and answer), which `faces` re-exports: this crate is
+# one engine of that port, and a C ABI over another engine names the same types without it.
+wz-capi-port = { path = "../wz-capi-port" }
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]

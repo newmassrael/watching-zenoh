@@ -50,7 +50,8 @@ use crate::result::{
 };
 use crate::session::{session_state, z_loaned_session_t};
 use crate::write_filter::{PicoSession, WriteFilter};
-use wz_capi_core::faces::{FilterPlane, FilteredPut, MatchId, SharedSession, SubId, WireKey};
+use wz_capi_core::faces::SharedSession;
+use wz_capi_port::{FilterPlane, FilteredPut, MatchId, SubId, WireKey};
 
 // --- opaque loaned sample --------------------------------------------------
 

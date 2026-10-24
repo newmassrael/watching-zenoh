@@ -12,7 +12,8 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::{Arc, Weak};
 
-use wz_capi_core::faces::{SharedSession, WireKey};
+use wz_capi_core::faces::SharedSession;
+use wz_capi_port::WireKey;
 use wz_runtime_tokio::session::RetractionKey;
 use wz_session_core::WhatAmI;
 

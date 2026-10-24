@@ -143,7 +143,8 @@ use crate::pubsub::{
 use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t, ANYKE_PARAM, PARAM_SEPARATOR};
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
 use crate::session::{session_state, z_loaned_session_t};
-use wz_capi_core::faces::{SharedSession, WireKey};
+use wz_capi_core::faces::SharedSession;
+use wz_capi_port::WireKey;
 
 // --- pico enum-typed option fields -----------------------------------------
 

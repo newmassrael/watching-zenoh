@@ -58,6 +58,10 @@ members = [
     # alternative was duplicating the race-free close and the drop-outside-the-lock
     # discipline — the two things a second copy would get wrong invisibly.
     "wz-capi-core",
+    # The port between a C ABI and the engine that runs its sessions: the vocabulary both name,
+    # independent of any engine, so the pico C ABI over the cooperative engine names the same
+    # types the tokio engine (`wz-capi-core`) does (docs/capi-pico-on-coop-engine.md).
+    "wz-capi-port",
     # Inventory atom `api-compat-rust` (open-debt item 910, docs/build-configuration.md C13): the
     # zenoh crate's public Rust API at the pin, its library named `zenoh` and versioned as the
     # pinned zenoh, so a Rust user replaces zenoh by changing one dependency line.

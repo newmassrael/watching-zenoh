@@ -350,6 +350,10 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
 # serialization format, named where they live for the reason above. Nothing named: both modules
 # are ungated, and a feature named here would become every dependent's (R311y614).
 wz-codecs = { path = "../wz-codecs", default-features = false }
+# The port between this ABI and the engine that runs its sessions: the vocabulary both name
+# (ids, callback factories, a key's wire form, the write filter's plane and answer), so the ABI
+# layer is spelled in no engine's types (docs/capi-pico-on-coop-engine.md, D1).
+wz-capi-port = { path = "../wz-capi-port" }
 # Depend on wz-runtime-tokio DIRECTLY, not the `wz` facade: the facade
 # re-exports this crate (`wz::capi_pico`), so a facade dependency here would
 # form a package cycle Cargo rejects. wz-runtime-tokio's default feature

@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-capi-port — the port between a wz C ABI and the engine that runs its sessions.
+#
+# A C ABI (`wz-capi-pico`, `wz-capi-c`) describes what a C program asks of a session: open it,
+# publish, declare a subscriber, declare a key expression, watch for matching peers. An engine
+# runs the session: today `wz-capi-core`, one OS thread and a tokio runtime per session; next the
+# cooperative engine, which the application steps as zenoh-pico's single-threaded arm does
+# (docs/capi-pico-on-coop-engine.md). The port is what both sides name, and nothing else: the
+# vocabulary a request and its answer are spelled in, and (as it lands) the operations an engine
+# implements. So it depends on no engine, no async runtime and no thread.
+#
+# It is not `wz-capi-core` under another name. That crate IS the tokio engine (its features
+# forward into `wz-runtime-tokio`, its session model is a thread and a runtime), and a C ABI over
+# another engine cannot depend on it. What both engines must agree on moves here, and
+# `wz-capi-core` re-exports it, so the zenoh-c ABI keeps its paths.
+#
+# `rlib` only, like `wz-capi-core`: a Rust-internal seam, not an artifact anyone links from C.
+
+[package]
+name = "wz-capi-port"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The port between a wz C ABI and the engine that runs its sessions: the vocabulary both name, independent of any engine."
+publish = false
+
+[lib]
+name = "wz_capi_port"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+# The sample view a subscriber callback reads, and the session-core types the vocabulary is
+# spelled in. `alloc` for the owned suffix of a key's wire form; nothing else named, so this
+# crate adds no feature to any dependent (R311y614).
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
+
+[lints]
+workspace = true

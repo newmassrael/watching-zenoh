@@ -47,6 +47,7 @@ on:
       - "crates/wz-session-core/**"
       - "crates/wz-integration-tests/**"
       - "crates/wz-capi-core/**"
+      - "crates/wz-capi-port/**"
       - "crates/wz-capi-pico/**"
       - "crates/wz-capi-c/**"
       - "crates/zenoh-pico-sys/**"
