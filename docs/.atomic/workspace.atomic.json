@@ -281342,6 +281342,58 @@
         "Next: the p256-m driver or the chip's crypto block for the handshake, persistent PSA keys, the pin inside the handshake, the TlsStream and its locator kind, and a resource row for the fit image."
       ]
     },
+    "Round 3496": {
+      "decision_summary": "Round 3490's capacity model rests on a share the router was assumed to get, and reading the router's threads showed that a thread's CPU time is its demand and not its entitlement: at 32 hogs and 1100 sessions the keepalive thread used 0.12 to 0.13% of a core, woke 49 to 60 times in 20 s, and waited 136 to 147 ms for a core each time. What the lease depends on is how long after its time a keepalive timer is served, and the process can read that itself. The pacer now records how late each of its wakes was, the router logs the longest so far and warns once when it passes 2T/3, and the test of the promise asserts it: 775 to 1060 ms against the 6667 ms a 10 s lease allows, in three runs. The same push repairs the C1bz red that round 3490's capacity module doc introduced (six links resolved from the crate root).",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/keepalive_pacer.rs: pace records the lateness of each wake (now minus the planned time) into a process-wide maximum; keepalive_timer_lateness_max_ms reads it, re-exported from lib.rs.",
+        "crates/wz-session-core/src/capacity.rs: keepalive_lateness_limit_ms (2T/3) with a test; the module doc's five links use full crate::capacity paths, which is what C1bz for wz-session-core spends its budget on again.",
+        "crates/wz-runtime-tokio/src/config.rs: WzConfig::effective_lease_ms, taken out of effective_max_sessions.",
+        "crates/wz-ap-demo/src/runner.rs: the router-hat loop logs the longest lateness when it grows by 100 ms and warns once when it passes the limit.",
+        "crates/wz-integration-tests/tests/wz_router_hat_data_plane_scaling.rs: the router's lateness line is read; the test of the promise asserts the longest lateness under 2T/3 and prints it; the starved test prints it.",
+        "docs/router-data-plane-scaling.md section 7.4: the thread table, what it shows about the model, the lateness meter."
+      ],
+      "verification_bullets": [
+        "On a build host (four cores, 32 hogs, 1100 sessions admitted), the routers threads sampled each second from schedstat in two runs of the test of the promise: wz-ctl 24 and 26 ms of CPU in 20 s, 136 to 147 ms waited per wake, 426 to 489 us run per wake; wz-tx waited 396 to 461 ms per wake; the process 0.84% and 3.0% of a core.",
+        "The test of the promise with the lateness assertion, three runs, host load 22 to 25: longest keepalive timer lateness 895, 775 and 1060 ms, no face DOWN, no admitted client ended.",
+        "clippy with warnings denied reports nothing on wz-session-core, wz-runtime-tokio, wz-ap-demo (router-hat build) and the E7s test; C1bz for wz-session-core, wz-runtime-tokio and wz-ap-demo passes on a build host.",
+        "The gate array (110 of 110) and the guarded-count gate pass on the tree rebased on round 3494; the reason-citation gate failed once on the tree before that rebase (a path another session removed) and passes after it.",
+        "Not measured: the lateness above the threshold (N past 1536) as the meter reads it, so the meter is checked at the admitted number and not against the loss; a hosted runner."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "The bound of round 3490 is anchored to the loss measured at 32 hogs and not to a mechanism: the keepalive thread is not limited by its share of the CPU, it is limited by how long it waits for a core. The next measurement is the meter's reading at N = 1536 and 2048 against the loss (does the longest lateness pass 6667 ms where clients are lost), which would turn the lateness into the bound itself.",
+        "Not built: the export of the lateness to the admin space (it is on the log only); the refusal counter that says whether a limit was the configured one or the model's; the data-drop policy and its counters; the lane that re-derives the tables.",
+        "The new assertion runs in the hosted E7s lane (the count stays 4). A hosted runner has not measured it.",
+        "C1bz was red on origin/main from round 3490's push (501 against 495); this entry's push repairs it, found by another session that measured the diff."
+      ],
+      "publishable_decision_summary": "Round 3490's capacity model rests on a share the router was assumed to get, and reading the router's threads showed that a thread's CPU time is its demand and not its entitlement: at 32 hogs and 1100 sessions the keepalive thread used 0.12 to 0.13% of a core, woke 49 to 60 times in 20 s, and waited 136 to 147 ms for a core each time. What the lease depends on is how long after its time a keepalive timer is served, and the process can read that itself. The pacer now records how late each of its wakes was, the router logs the longest so far and warns once when it passes 2T/3, and the test of the promise asserts it: 775 to 1060 ms against the 6667 ms a 10 s lease allows, in three runs. The same push repairs the C1bz red that round 3490's capacity module doc introduced (six links resolved from the crate root).",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/keepalive_pacer.rs: pace records the lateness of each wake (now minus the planned time) into a process-wide maximum; keepalive_timer_lateness_max_ms reads it, re-exported from lib.rs.",
+        "crates/wz-session-core/src/capacity.rs: keepalive_lateness_limit_ms (2T/3) with a test; the module doc's five links use full crate::capacity paths, which is what C1bz for wz-session-core spends its budget on again.",
+        "crates/wz-runtime-tokio/src/config.rs: WzConfig::effective_lease_ms, taken out of effective_max_sessions.",
+        "crates/wz-ap-demo/src/runner.rs: the router-hat loop logs the longest lateness when it grows by 100 ms and warns once when it passes the limit.",
+        "crates/wz-integration-tests/tests/wz_router_hat_data_plane_scaling.rs: the router's lateness line is read; the test of the promise asserts the longest lateness under 2T/3 and prints it; the starved test prints it.",
+        "docs/router-data-plane-scaling.md section 7.4: the thread table, what it shows about the model, the lateness meter."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host (four cores, 32 hogs, 1100 sessions admitted), the routers threads sampled each second from schedstat in two runs of the test of the promise: wz-ctl 24 and 26 ms of CPU in 20 s, 136 to 147 ms waited per wake, 426 to 489 us run per wake; wz-tx waited 396 to 461 ms per wake; the process 0.84% and 3.0% of a core.",
+        "The test of the promise with the lateness assertion, three runs, host load 22 to 25: longest keepalive timer lateness 895, 775 and 1060 ms, no face DOWN, no admitted client ended.",
+        "clippy with warnings denied reports nothing on wz-session-core, wz-runtime-tokio, wz-ap-demo (router-hat build) and the E7s test; C1bz for wz-session-core, wz-runtime-tokio and wz-ap-demo passes on a build host.",
+        "The gate array (110 of 110) and the guarded-count gate pass on the tree rebased on round 3494; the reason-citation gate failed once on the tree before that rebase (a path another session removed) and passes after it.",
+        "Not measured: the lateness above the threshold (N past 1536) as the meter reads it, so the meter is checked at the admitted number and not against the loss; a hosted runner."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The bound of round 3490 is anchored to the loss measured at 32 hogs and not to a mechanism: the keepalive thread is not limited by its share of the CPU, it is limited by how long it waits for a core. The next measurement is the meter's reading at N = 1536 and 2048 against the loss (does the longest lateness pass 6667 ms where clients are lost), which would turn the lateness into the bound itself.",
+        "Not built: the export of the lateness to the admin space (it is on the log only); the refusal counter that says whether a limit was the configured one or the model's; the data-drop policy and its counters; the lane that re-derives the tables.",
+        "The new assertion runs in the hosted E7s lane (the count stays 4). A hosted runner has not measured it.",
+        "C1bz was red on origin/main from round 3490's push (501 against 495); this entry's push repairs it, found by another session that measured the diff."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
