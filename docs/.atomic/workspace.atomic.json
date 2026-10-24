@@ -280824,6 +280824,52 @@
         "Next is step 2 of the note: the engine port, the subset of wz_capi_core's SharedSession and SessionState the single-threaded client calls, implemented first by the tokio engine, so that the crate builds without it; then step 3, the cooperative engine over ClientNode and PosixLinks with a size-gate case beside pico-client. The build-configuration axis for the selection belongs to the session that owns the runtime axis; ask before touching deploy/Kconfig, configs/profiles or the wz-config generator."
       ]
     },
+    "Round 3485": {
+      "decision_summary": "Open-debt item 924, step 4b of docs/dissect-row-index.md: a TCP flow's own stream units are kept as 40-byte index entries (D2) with the facts a unit's bytes do not say kept apart by produced-index and the context once per change (D3), and every reader reads a row again from the flow's reassembled stream through Messages, the list with its UnitBytes source. A row that cannot be read again is kept whole: datagram, WebSocket and decrypted rows, a unit whose front a byte ceiling released before it completed, and a row whose bytes are about to be released. Every row's head, kind included, answers without a decode, so drain, capture-order keys and the node census decode only Init and Join rows. The census's four selector planes became one fold over one walk (D6). Resident memory falls 56% at 409,064 rows and 57% at 1,386,564; census and replay are faster; a field window costs 19% to 22% more, the price section 5 stated, and the bounded cache (D5) is left open with that measurement.",
+      "changes_bullets": [
+        "wz-session-core passive.rs: PassiveSession::next_unit_with hands out a whole framing unit as a ReadUnit with the context it was read in; MessageFacts::of; InboundFrame::KIND_INIT and KIND_JOIN",
+        "wz-session-core passive_messages.rs: MessageList keeps rows Held or Indexed (UnitRow entries, sparse facts, contexts, the cut of a front unit), push_unit, discard_oldest and keep_whole_before take a UnitBytes source; Messages, Rows, RowIter, Heads and RowHead are the read API; NoBytes for lists kept whole",
+        "wz-capture: FlowDissection, DatagramDissection and QuicStreamDissection lists are private behind frames() and quic_datagrams(); the flow's two streams are the source; byte trims keep a row whole before its bytes go; capture-order keys, drain, oldest-message probes and the node census read heads; CensusFold folds the four census planes in one walk; the field renderer hands up to 8,192 rows from its first pass to its second",
+        "wz-capi-dissect drain records come from RowHead; wz-analyze, wz-integration-tests, wz-runtime-tokio and wz-tls-record callers read frames(); redecode_gate compares entries with a reading kept whole, also under ceilings; discard_site_lint and accessor_reach_census lists follow the code"
+      ],
+      "verification_bullets": [
+        "Consumer generator captures through the C ABI (replay, drain, fields windows of 8192, census), median of six alternating runs at 409,064 rows and three at 1,386,564 against a build of 270780967: peak RSS 404 to 177 MB and 1,364 to 590 MB; heap after census 348 to 117 MiB and 1,355 to 444 MiB; replay 308 to 257 ms and 1,047 to 874 ms; census 210 to 166 ms and 803 to 551 ms; fields windows 2,185 to 2,590 ms and 7,699 to 9,368 ms",
+        "redecode_gate 6 tests: entries read row for row, head for head, forward, backward and by position as the reading kept whole, also under message and byte ceilings; mutation-checked by dropping sparse SN verdicts, reading every unit in the first context, and dropping the cut facts, each failing it",
+        "cargo test: wz-session-core 622 default and 2577 all features, wz-capture 1560 all features and 1004 no default, wz-capi-dissect and wz-analyze 367, wz-tls-record end_to_end 16, wz-runtime-tokio pcap_dissect_e2e; cargo check workspace all targets on the rebased tree",
+        "clippy -D warnings: wz-session-core both feature sets, wz-capture both, wz-capi-dissect, wz-analyze, wz-integration-tests, wz-tls-record, wz-runtime-tokio, wz-session-mcu session-slot; Layer C0 and C1bz on the rebased tree; discard_site_lint OK; accessor_reach_census ok; guarded_count_gate 9 of 9"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "D5 of docs/dissect-row-index.md: a field window reads each row three times (declaration pre-pass, exchange pairing fold, the renderer's list-order pass); decide between a cache in the list (costs Dissection its Sync), a reader-owned cache carried through the enumeration doors, or one walk feeding the three, from the measurement in section 7",
+        "Step 3 of docs/dissect-row-index.md: the byte source, so the reassembled stream copy goes; then 4c (datagram, serial and QUIC rows as entries) and 5 (memory gate, lent-buffer door)"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 4b of docs/dissect-row-index.md: a TCP flow's own stream units are kept as 40-byte index entries (D2) with the facts a unit's bytes do not say kept apart by produced-index and the context once per change (D3), and every reader reads a row again from the flow's reassembled stream through Messages, the list with its UnitBytes source. A row that cannot be read again is kept whole: datagram, WebSocket and decrypted rows, a unit whose front a byte ceiling released before it completed, and a row whose bytes are about to be released. Every row's head, kind included, answers without a decode, so drain, capture-order keys and the node census decode only Init and Join rows. The census's four selector planes became one fold over one walk (D6). Resident memory falls 56% at 409,064 rows and 57% at 1,386,564; census and replay are faster; a field window costs 19% to 22% more, the price section 5 stated, and the bounded cache (D5) is left open with that measurement.",
+      "publishable_changes_bullets": [
+        "wz-session-core passive.rs: PassiveSession::next_unit_with hands out a whole framing unit as a ReadUnit with the context it was read in; MessageFacts::of; InboundFrame::KIND_INIT and KIND_JOIN",
+        "wz-session-core passive_messages.rs: MessageList keeps rows Held or Indexed (UnitRow entries, sparse facts, contexts, the cut of a front unit), push_unit, discard_oldest and keep_whole_before take a UnitBytes source; Messages, Rows, RowIter, Heads and RowHead are the read API; NoBytes for lists kept whole",
+        "wz-capture: FlowDissection, DatagramDissection and QuicStreamDissection lists are private behind frames() and quic_datagrams(); the flow's two streams are the source; byte trims keep a row whole before its bytes go; capture-order keys, drain, oldest-message probes and the node census read heads; CensusFold folds the four census planes in one walk; the field renderer hands up to 8,192 rows from its first pass to its second",
+        "wz-capi-dissect drain records come from RowHead; wz-analyze, wz-integration-tests, wz-runtime-tokio and wz-tls-record callers read frames(); redecode_gate compares entries with a reading kept whole, also under ceilings; discard_site_lint and accessor_reach_census lists follow the code"
+      ],
+      "publishable_verification_bullets": [
+        "Consumer generator captures through the C ABI (replay, drain, fields windows of 8192, census), median of six alternating runs at 409,064 rows and three at 1,386,564 against a build of 270780967: peak RSS 404 to 177 MB and 1,364 to 590 MB; heap after census 348 to 117 MiB and 1,355 to 444 MiB; replay 308 to 257 ms and 1,047 to 874 ms; census 210 to 166 ms and 803 to 551 ms; fields windows 2,185 to 2,590 ms and 7,699 to 9,368 ms",
+        "redecode_gate 6 tests: entries read row for row, head for head, forward, backward and by position as the reading kept whole, also under message and byte ceilings; mutation-checked by dropping sparse SN verdicts, reading every unit in the first context, and dropping the cut facts, each failing it",
+        "cargo test: wz-session-core 622 default and 2577 all features, wz-capture 1560 all features and 1004 no default, wz-capi-dissect and wz-analyze 367, wz-tls-record end_to_end 16, wz-runtime-tokio pcap_dissect_e2e; cargo check workspace all targets on the rebased tree",
+        "clippy -D warnings: wz-session-core both feature sets, wz-capture both, wz-capi-dissect, wz-analyze, wz-integration-tests, wz-tls-record, wz-runtime-tokio, wz-session-mcu session-slot; Layer C0 and C1bz on the rebased tree; discard_site_lint OK; accessor_reach_census ok; guarded_count_gate 9 of 9"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "D5 of docs/dissect-row-index.md: a field window reads each row three times (declaration pre-pass, exchange pairing fold, the renderer's list-order pass); decide between a cache in the list (costs Dissection its Sync), a reader-owned cache carried through the enumeration doors, or one walk feeding the three, from the measurement in section 7",
+        "Step 3 of docs/dissect-row-index.md: the byte source, so the reassembled stream copy goes; then 4c (datagram, serial and QUIC rows as entries) and 5 (memory gate, lent-buffer door)"
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
