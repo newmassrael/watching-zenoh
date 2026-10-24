@@ -23454,6 +23454,9 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh-codec network)" 4 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_codec_network || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh-codec transport)" 17 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_codec_transport || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-buffers)" 5 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_buffers || return 1
