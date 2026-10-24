@@ -160,7 +160,7 @@ impl WriteFilter {
         keyexpr: &str,
         mapping_id: u64,
         payload: &[u8],
-        params: &wz_runtime_tokio::session::PlainPutParams,
+        params: &wz_session_core::publish_options::PlainPutParams,
     ) -> wz_capi_core::faces::FilteredPut {
         self.shared
             .put_plain_filtered(self.id, keyexpr, mapping_id, payload, params)

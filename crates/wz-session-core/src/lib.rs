@@ -690,6 +690,12 @@ pub mod sample;
 #[cfg(feature = "alloc")]
 pub mod encoding_hint;
 
+/// What one publish asks for, independent of the engine that sends it (`PublishOptions`, the
+/// plain-put facts, the typed refusal). Moved down from `wz-runtime-tokio`, which re-exports it,
+/// so a C ABI over the cooperative engine describes a publish without that engine.
+#[cfg(feature = "alloc")]
+pub mod publish_options;
+
 /// §5.19 — predefined Encoding constants + the MIME id<->str table, the wz mirror
 /// of zenoh's high-level Encoding API (the convenience layer the encoding-* atoms
 /// name, on top of the active `pubsub-encoding` wire field). FOUNDATIONAL

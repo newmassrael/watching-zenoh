@@ -13162,6 +13162,12 @@ layer_c1bz_docs_resolve() {
     # DIFFED the same way: the encoding table's doc in `encoding.rs` named its
     # old home with a redundant explicit target, and the rewritten sentence that
     # names `wz_codecs::encoding_ids` (where the table lives) carries none.
+    # wz-runtime-tokio 475 -> 474, by removal: `PublishOptions` moved down to
+    # wz-session-core (`publish_options.rs`), and the one finding its old file
+    # held went with it -- `with_priority`'s public doc linked the then
+    # `pub(super)` `priority_band` (read off this lane's command over
+    # `005a50669`: `publish_common.rs:282`). There the method is public, so the
+    # link resolves and wz-session-core stays at its budget.
     budget="
         wz:4
         wz-ap-demo:25
@@ -13172,7 +13178,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:1
         wz-routing-graph:5
         wz-runtime-coop:7
-        wz-runtime-tokio:475
+        wz-runtime-tokio:474
         wz-session-core:495
         wz-switchboard-codegen:8
         zenoh-pico-sys:3

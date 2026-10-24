@@ -238,7 +238,13 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "dissect-serde",
             "liveliness-subscriber",
             "no_std",
-            "pubsub-attachment",
+            # `pubsub-attachment`, `pubsub-encoding`, `pubsub-qos`,
+            # `pubsub-source-info` and `pubsub-timestamp` LEFT this list by the
+            # R2386 route: the round that moved `PublishOptions` down from
+            # `wz-runtime-tokio` (`publish_options.rs`) made the claim false.
+            # Each now gates a `with_*` setter of that type, a METHOD, so they
+            # are deferred below as `impl-method`, beside the other method-only
+            # features.
             "pubsub-congestion-control",
             # `pubsub-delete` and `pubsub-put` LEFT this list, by the R2386
             # route: the round that delivered a Push read in place to its
@@ -248,12 +254,8 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # `all(feature = "alloc", any(feature = "pubsub-put", feature =
             # "pubsub-delete"))`. Both sites are compound, so both features are
             # DEFERRED below as `compound-cfg`, not probed.
-            "pubsub-encoding",
             "pubsub-express",
             "pubsub-priority",
-            "pubsub-qos",
-            "pubsub-source-info",
-            "pubsub-timestamp",
             "query-queryable",
             "query-reply",
             "query-selector-parameters",
@@ -639,6 +641,15 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "declare-token",
                 "declare-undeclare",
                 "multicast-declarations",
+                # The five metadata features of a publish join: `PublishOptions` moved here
+                # from `wz-runtime-tokio` (`publish_options.rs`), and what each gates is its
+                # `with_*` setter (`with_qos`, `with_priority`, `with_congestion_control`
+                # and `with_express` for `pubsub-qos`), METHODS of that type.
+                "pubsub-attachment",
+                "pubsub-encoding",
+                "pubsub-qos",
+                "pubsub-source-info",
+                "pubsub-timestamp",
                 "query-attachment",
                 "query-reply-err",
                 "query-source-info",

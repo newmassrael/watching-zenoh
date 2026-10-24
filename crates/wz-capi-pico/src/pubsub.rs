@@ -31,8 +31,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 #[cfg(feature = "liveliness")]
 use wz_runtime_tokio::declare::LivelinessSample;
-use wz_runtime_tokio::session::PublishOptions;
 use wz_session_core::locality::Locality;
+use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
 use wz_session_core::sink::SampleView;
@@ -763,7 +763,7 @@ pub(crate) struct PlainPublisher {
     /// id the key is named by when its declaration covers the whole key. Both
     /// `Some` is what lets [`PlainPublisher::publish_plain`] skip the per-put clone
     /// of the options and the per-put look-up of the key's wire form.
-    plain: Option<(wz_runtime_tokio::session::PlainPutParams, u64)>,
+    plain: Option<(wz_session_core::publish_options::PlainPutParams, u64)>,
 }
 
 /// What a pico publisher is declared with, and sends with on every put and
