@@ -2855,6 +2855,133 @@ static int check_message_in_door(void) {
     return 0;
 }
 
+/* (ABI 50, open-debt item 924) -- the records and the message bytes a handle
+ * reads through `lent_door` over `lent`, against what one HANDED `file` reads.
+ * Returns 0 when every record and every message's bytes agree. */
+static int lent_reads_as_handed(wz_dissect_live *lent_h,
+                                const unsigned char *file, size_t file_len,
+                                size_t expected) {
+    wz_dissect_live *handed = NULL;
+    wz_dissect_record want[8];
+    wz_dissect_record got[8];
+    unsigned char want_bytes[64];
+    unsigned char got_bytes[64];
+    size_t want_n = 999;
+    size_t got_n = 999;
+    size_t want_len;
+    size_t got_len;
+    size_t i;
+    int rc;
+
+    rc = wz_dissect_pcap_replay(file, file_len, WZ_DISSECT_LIMITS_NONE, &handed);
+    CHECK(rc == WZ_DISSECT_OK, "handed replay rc=%d", rc);
+    rc = wz_dissect_live_drain(handed, want, 8, &want_n);
+    CHECK(rc == WZ_DISSECT_OK, "handed drain rc=%d", rc);
+    rc = wz_dissect_live_drain(lent_h, got, 8, &got_n);
+    CHECK(rc == WZ_DISSECT_OK, "lent drain rc=%d", rc);
+    /* THE POPULATION: a stream of `expected` records, each read back from its
+     * bytes, or the comparisons below hold vacuously. */
+    CHECK(want_n == expected, "handed: %zu records, expected %zu", want_n,
+          expected);
+    CHECK(got_n == want_n, "lent: %zu records, handed %zu", got_n, want_n);
+    for (i = 0; i < got_n; i++) {
+        CHECK(got[i].anchor == want[i].anchor && got[i].kind == want[i].kind &&
+                  got[i].origin == want[i].origin,
+              "record %zu differs between the lent and the handed handle", i);
+        rc = wz_dissect_live_message_bytes(handed, &want[i], want_bytes,
+                                           sizeof want_bytes, &want_len);
+        CHECK(rc == WZ_DISSECT_OK, "handed bytes of %zu rc=%d", i, rc);
+        rc = wz_dissect_live_message_bytes(lent_h, &got[i], got_bytes,
+                                           sizeof got_bytes, &got_len);
+        CHECK(rc == WZ_DISSECT_OK, "lent bytes of %zu rc=%d", i, rc);
+        CHECK(got_len == want_len && memcmp(got_bytes, want_bytes, got_len) == 0,
+              "record %zu: the lent handle read other bytes", i);
+    }
+    wz_dissect_live_close(handed);
+    return 0;
+}
+
+/* (ABI 50, open-debt item 924) -- A CAPTURE THE CALLER LENDS THE HANDLE.
+ *
+ * A stream of TCP batches, so there are payloads for the handle to remember the
+ * place of rather than copy. Read through wz_dissect_pcap_replay_lent from a
+ * heap buffer, and through wz_dissect_live_follow_lent from a container that
+ * GROWS BY MOVING: the first half in one buffer, then the whole in another,
+ * after which the first is overwritten and freed -- a handle that still read
+ * the first would read the overwrite. Both must read what a handle handed the
+ * same bytes reads. */
+static int check_lent_doors(void) {
+    unsigned char frame[64];
+    unsigned char one[24 + 16 + 64];
+    unsigned char file[24 + 3 * (16 + 64)];
+    unsigned char *container;
+    unsigned char *half;
+    wz_dissect_live *h = NULL;
+    size_t frame_len;
+    size_t record_len;
+    size_t file_len = 24;
+    size_t i;
+    int rc;
+
+    for (i = 0; i < 3; i++) {
+        frame_len = tcp_batch_frame(frame, 1000 + 4 * (unsigned long)i);
+        record_len = pcap_of_frames(one, frame, frame_len, 1) - 24;
+        if (i == 0) {
+            memcpy(file, one, 24);
+        }
+        memcpy(file + file_len, one + 24, record_len);
+        file_len += record_len;
+    }
+
+    /* Cast: the C++ syntax check of this file refuses a bare void pointer. */
+    container = (unsigned char *)malloc(file_len);
+    CHECK(container != NULL, "allocating the lent container");
+    memcpy(container, file, file_len);
+    rc = wz_dissect_pcap_replay_lent(container, file_len, WZ_DISSECT_LIMITS_NONE,
+                                     &h);
+    CHECK(rc == WZ_DISSECT_OK, "pcap_replay_lent rc=%d", rc);
+    if (lent_reads_as_handed(h, file, file_len, 6) != 0) {
+        return 1;
+    }
+    wz_dissect_live_close(h);
+    free(container);
+
+    h = NULL;
+    rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_OK, "lent live_open rc=%d", rc);
+    half = (unsigned char *)malloc(file_len / 2);
+    CHECK(half != NULL, "allocating the first lent container");
+    memcpy(half, file, file_len / 2);
+    rc = wz_dissect_live_follow_lent(h, half, file_len / 2);
+    CHECK(rc == WZ_DISSECT_OK, "follow_lent of the half rc=%d", rc);
+    container = (unsigned char *)malloc(file_len);
+    CHECK(container != NULL, "allocating the second lent container");
+    memcpy(container, file, file_len);
+    rc = wz_dissect_live_follow_lent(h, container, file_len);
+    CHECK(rc == WZ_DISSECT_OK, "follow_lent of the whole rc=%d", rc);
+    memset(half, 0xAA, file_len / 2);
+    free(half);
+    /* A file's end, as the replay door reaches it, so the two read alike. */
+    wz_dissect_live_end(h);
+    if (lent_reads_as_handed(h, file, file_len, 6) != 0) {
+        return 1;
+    }
+    /* A shrunk container is refused as the copying door refuses it. */
+    rc = wz_dissect_live_follow_lent(h, container, file_len - 1);
+    CHECK(rc == WZ_DISSECT_ERR_CONTAINER_SHRANK, "shrunk follow_lent rc=%d", rc);
+    wz_dissect_live_close(h);
+    free(container);
+
+    /* Nulls are refused before anything is dereferenced or retained. */
+    rc = wz_dissect_pcap_replay_lent(NULL, 0, WZ_DISSECT_LIMITS_NONE, &h);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null bytes replay_lent rc=%d", rc);
+    rc = wz_dissect_pcap_replay_lent(file, file_len, WZ_DISSECT_LIMITS_NONE, NULL);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out replay_lent rc=%d", rc);
+    rc = wz_dissect_live_follow_lent(NULL, file, file_len);
+    CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null handle follow_lent rc=%d", rc);
+    return 0;
+}
+
 int main(void) {
     /* The symbol/memory-contract revision. A consumer refuses a library whose
      * memory rules moved; this asserts the value the header was written for. */
@@ -4303,6 +4430,12 @@ int main(void) {
      * the replay door cannot serve: it hands back a new handle, and a growing
      * capture has no moment at which that is the right answer. */
     if (check_follow_door() != 0) {
+        return 1;
+    }
+
+    /* (ABI 50) -- and both over a capture the caller LENDS the handle, which
+     * keeps no copy of the TCP payloads in it. */
+    if (check_lent_doors() != 0) {
         return 1;
     }
 

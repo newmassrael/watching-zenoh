@@ -182,10 +182,32 @@ fn read_again(list: Messages<'_>, position: usize) -> bool {
 /// walking, forward and back. Returns the rows that were read again from their
 /// bytes, which a capture with stream units must make more than zero.
 fn assert_reads_as_whole(what: &str, indexed: &Dissection, whole: &Dissection) -> usize {
-    let lists: Vec<_> = indexed.message_lists_with_origin().collect();
-    let reference: Vec<_> = whole.message_lists_with_origin().collect();
-    assert_eq!(lists.len(), reference.len(), "{what}: lists");
     let mut read_from_bytes = 0usize;
+    assert_reads_as(what, indexed, whole, |n, list, list_w, position| {
+        assert!(
+            !read_again(list_w, position),
+            "{what}: the reference keeps list {n} row {position} whole"
+        );
+        if read_again(list, position) {
+            read_from_bytes += 1;
+        }
+    });
+    read_from_bytes
+}
+
+/// Every list of `subject` reads, row for row and head for head, as the same
+/// list of `reference`, by position and walking, forward and back. `each` is
+/// handed the number of every pair of lists, the pair, and the position of each
+/// row in them.
+fn assert_reads_as<'d>(
+    what: &str,
+    subject: &'d Dissection,
+    reference: &'d Dissection,
+    mut each: impl FnMut(usize, Messages<'d>, Messages<'d>, usize),
+) {
+    let lists: Vec<_> = subject.message_lists_with_origin().collect();
+    let reference: Vec<_> = reference.message_lists_with_origin().collect();
+    assert_eq!(lists.len(), reference.len(), "{what}: lists");
     for (n, ((flow, origin, list), (flow_w, origin_w, list_w))) in
         lists.into_iter().zip(reference).enumerate()
     {
@@ -212,16 +234,127 @@ fn assert_reads_as_whole(what: &str, indexed: &Dissection, whole: &Dissection) -
                 want,
                 "{what}: list {n}, row {position} by position"
             );
-            assert!(
-                !read_again(list_w, position),
-                "{what}: the reference keeps list {n} row {position} whole"
-            );
-            if read_again(list, position) {
-                read_from_bytes += 1;
-            }
+            each(n, list, list_w, position);
         }
     }
-    read_from_bytes
+}
+
+/// Open-debt item 924, step 3 — THE CLAIM OF THE LENT CONTAINER: a dissection
+/// LENT `file` reads every list, row for row and head for head, every message's
+/// bytes, the drop counts and the census of what was discarded as the one
+/// HANDED the same bytes, and keeps no copy of a TCP payload.
+///
+/// `cuts` are the prefixes the container is followed through before the whole
+/// of it, each lent as a container of its own at a new address: a container
+/// that grows by moving, which every flow already held must follow. Returns
+/// the rows compared.
+fn assert_lent_reads_as_handed(
+    what: &str,
+    file: &[u8],
+    limits: crate::DissectionLimits,
+    cuts: &[usize],
+) -> usize {
+    let mut handed = Dissection::with_limits(limits);
+    let mut lent = Dissection::with_limits(limits);
+    let (mut handed_at, mut lent_at) = (crate::CaptureCursor::new(), crate::CaptureCursor::new());
+    for &upto in cuts.iter().chain([&file.len()]) {
+        let prefix = &file[..upto];
+        let read = handed
+            .follow_container(&mut handed_at, prefix)
+            .unwrap_or_else(|e| panic!("{what}: handed {upto}: {e:?}"));
+        let container: alloc::sync::Arc<dyn crate::LentCapture> =
+            alloc::sync::Arc::new(prefix.to_vec());
+        let read_lent = lent
+            .follow_lent(&mut lent_at, container)
+            .unwrap_or_else(|e| panic!("{what}: lent {upto}: {e:?}"));
+        assert_eq!(read_lent, read, "{what}: packets read to {upto}");
+    }
+    handed.finish();
+    lent.finish();
+    let mut rows = 0usize;
+    assert_reads_as(what, &lent, &handed, |_, _, _, _| rows += 1);
+    for ((flow, origin, list), (_, _, list_h)) in lent
+        .message_lists_with_origin()
+        .zip(handed.message_lists_with_origin())
+    {
+        for index in 0..list.len() {
+            let (bytes, bytes_h) = (
+                format!("{:?}", lent.message_bytes_at(flow, origin, index)),
+                format!("{:?}", handed.message_bytes_at(flow, origin, index)),
+            );
+            assert_eq!(bytes, bytes_h, "{what}: {flow:?} message {index} bytes");
+        }
+        assert_eq!(list.len(), list_h.len(), "{what}: {flow:?}");
+    }
+    assert_eq!(lent.drops(), handed.drops(), "{what}: drops");
+    assert_eq!(
+        lent.dropped_frame_census(),
+        handed.dropped_frame_census(),
+        "{what}: what was discarded"
+    );
+    // The control: the same bytes HANDED are copied, at least every retained
+    // one, so the zero below is the lending's and not the capture's.
+    let assemblers = |d: &'_ Dissection| -> Vec<(String, usize, usize)> {
+        d.flows
+            .iter()
+            .flat_map(|flow| {
+                [Direction::A, Direction::B].map(|dir| {
+                    let assembler = flow.assembler(dir);
+                    let at = format!("{:?} {dir:?}", flow.flow);
+                    (at, assembler.bytes_kept(), assembler.retained_len())
+                })
+            })
+            .collect()
+    };
+    for (at, kept, retained) in assemblers(&handed) {
+        assert!(
+            kept >= retained,
+            "{what}: {at} handed keeps {kept} of {retained}"
+        );
+    }
+    for (at, kept, _) in assemblers(&lent) {
+        assert_eq!(kept, 0, "{what}: {at} kept a copy of a lent payload");
+    }
+    rows
+}
+
+/// THE LENT CONTAINER over every tracked capture and the stream shapes, read
+/// whole and grown through cuts, and under the ceilings the list of entries is
+/// gated under: a ceiling that trims a stream trims the place a run remembers,
+/// and a message ceiling keeps messages whole out of bytes still in the
+/// container.
+#[test]
+fn a_lent_container_reads_as_the_same_bytes_handed() {
+    let shapes = stream_shapes_capture();
+    let mut files: Vec<(&str, &[u8])> = alloc::vec![("stream shapes", &shapes)];
+    files.extend(tracked_captures());
+    // The tracked captures are mostly datagram links; the stream shapes are
+    // what holds TCP payloads to lend, in both directions of three flows.
+    let handed = Dissection::from_capture(&shapes).expect("the capture reads");
+    let streams = handed
+        .flows
+        .iter()
+        .flat_map(|flow| [Direction::A, Direction::B].map(|dir| flow.assembler(dir)))
+        .filter(|assembler| !assembler.is_empty())
+        .count();
+    assert_eq!(streams, 4, "stream shapes: the directions holding a stream");
+    for (name, file) in &files {
+        let cuts: Vec<usize> = (1..4).map(|k| file.len() * k / 4).collect();
+        let whole =
+            assert_lent_reads_as_handed(name, file, crate::DissectionLimits::default(), &[]);
+        let grown =
+            assert_lent_reads_as_handed(name, file, crate::DissectionLimits::default(), &cuts);
+        assert_eq!(whole, grown, "{name}: rows read whole and grown");
+        // Scouting rides its own list, as in the tracked captures' test.
+        if *name != "scout-and-hello-ipv4-ipv6" {
+            assert!(whole > 0, "{name}: nothing was read");
+        }
+    }
+    for limits in ceilings() {
+        let what = format!("stream shapes, {limits:?}");
+        let rows = assert_lent_reads_as_handed(&what, &shapes, limits, &[shapes.len() / 2]);
+        assert!(rows > 0, "{what}: nothing was read");
+    }
 }
 
 /// Read every unit of every stream and datagram flow of `file` again. A stream
@@ -289,7 +422,22 @@ fn reread_file(what: &str, file: &[u8]) -> Reach {
 /// that has no handshake at all.
 #[test]
 fn every_unit_of_the_tracked_captures_reads_again_the_same() {
-    let tracked: [(&str, &[u8]); 5] = [
+    let mut total = Reach::default();
+    for (name, file) in tracked_captures() {
+        // Scouting rides its own list, so the discovery capture holds no
+        // transport record; every other tracked capture must be read whole.
+        let reach = reread_file(name, file);
+        if name != "scout-and-hello-ipv4-ipv6" {
+            reach.assert_whole(name);
+        }
+        total += reach;
+    }
+    total.assert_whole("the tracked captures");
+}
+
+/// The tracked captures the test above reads, by name.
+fn tracked_captures() -> [(&'static str, &'static [u8]); 5] {
+    [
         (
             "compressed-session-refused-body",
             include_bytes!("../../../captures/compressed-session-refused-body.pcap"),
@@ -310,18 +458,7 @@ fn every_unit_of_the_tracked_captures_reads_again_the_same() {
             "scout-and-hello-ipv4-ipv6",
             include_bytes!("../../../captures/scout-and-hello-ipv4-ipv6.pcap"),
         ),
-    ];
-    let mut total = Reach::default();
-    for (name, file) in tracked {
-        // Scouting rides its own list, so the discovery capture holds no
-        // transport record; every other tracked capture must be read whole.
-        let reach = reread_file(name, file);
-        if name != "scout-and-hello-ipv4-ipv6" {
-            reach.assert_whole(name);
-        }
-        total += reach;
-    }
-    total.assert_whole("the tracked captures");
+    ]
 }
 
 /// A STREAM's own shapes, which no tracked capture holds: batches of several
@@ -372,26 +509,8 @@ fn every_unit_of_a_stream_with_batches_gaps_and_garbage_reads_again_the_same() {
 fn a_list_of_entries_under_message_and_byte_ceilings_reads_as_the_reference() {
     let file = stream_shapes_capture();
     let parsed = crate::pcap::parse(&file).expect("the capture reads");
-    let mut ceilings: Vec<crate::DissectionLimits> = Vec::new();
-    for cap in 1..=8 {
-        ceilings.push(crate::DissectionLimits {
-            frames_per_flow: Some(cap),
-            ..crate::DissectionLimits::default()
-        });
-    }
-    for keep in [6, 16, 40, 120] {
-        ceilings.push(crate::DissectionLimits {
-            stream_bytes_per_direction: Some(keep),
-            ..crate::DissectionLimits::default()
-        });
-        ceilings.push(crate::DissectionLimits {
-            stream_bytes_per_direction: Some(keep),
-            frames_per_flow: Some(3),
-            ..crate::DissectionLimits::default()
-        });
-    }
     let mut converted = 0usize;
-    for limits in ceilings {
+    for limits in ceilings() {
         let what = format!("{limits:?}");
         let indexed = Dissection::from_pcap_declaring_bounded(&file, &[], &[], limits)
             .unwrap_or_else(|e| panic!("{what}: {e:?}"));
@@ -423,6 +542,30 @@ fn a_list_of_entries_under_message_and_byte_ceilings_reads_as_the_reference() {
         converted > 0,
         "a byte ceiling released bytes under a message the list then kept whole"
     );
+}
+
+/// The ceilings the stream shapes are read under: a message ceiling of one to
+/// eight per flow, and byte ceilings with and without a message ceiling beside.
+fn ceilings() -> Vec<crate::DissectionLimits> {
+    let mut ceilings: Vec<crate::DissectionLimits> = Vec::new();
+    for cap in 1..=8 {
+        ceilings.push(crate::DissectionLimits {
+            frames_per_flow: Some(cap),
+            ..crate::DissectionLimits::default()
+        });
+    }
+    for keep in [6, 16, 40, 120] {
+        ceilings.push(crate::DissectionLimits {
+            stream_bytes_per_direction: Some(keep),
+            ..crate::DissectionLimits::default()
+        });
+        ceilings.push(crate::DissectionLimits {
+            stream_bytes_per_direction: Some(keep),
+            frames_per_flow: Some(3),
+            ..crate::DissectionLimits::default()
+        });
+    }
+    ceilings
 }
 
 /// The capture `every_unit_of_a_stream_with_batches_gaps_and_garbage_reads_\

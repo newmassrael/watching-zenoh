@@ -807,6 +807,27 @@ ONLY_CAPI = {
         "half at all.",
         (),
     ),
+    # (ABI 50, open-debt item 924) -- filed in the round that added the symbols.
+    "a FROZEN capture LENT to a handle rather than copied into it": (
+        "wz_dissect_pcap_replay_lent",
+        "DELIBERATE. It answers exactly what `wz_dissect_pcap_replay` answers "
+        "over the same bytes; what it changes is what the handle HOLDS, which "
+        "is a question only a consumer that keeps a handle open beside its own "
+        "copy of the capture can ask. The command line reads a file once and "
+        "exits, holding one copy of nothing between calls, so it has no "
+        "second copy to give up and no flag to add.",
+        (),
+    ),
+    "a GROWING capture container LENT to an open handle": (
+        "wz_dissect_live_follow_lent",
+        "DELIBERATE, and it rides the lent replay row above: the same answers "
+        "as `wz_dissect_live_follow` over the same bytes, with the handle "
+        "keeping no copy of the TCP payloads in the container. The growing-"
+        "container half a PERSON would want is the flag already filed as open "
+        "debt against `wz_dissect_live_follow`, and it is not double-counted "
+        "here.",
+        (),
+    ),
     # R2373 (open-debt item 661) — the door that CONTINUES a handle as a writer
     # appends, which is the half the replay row above leaves open. Filed in the
     # round that added the symbol, which is where this table's own header says

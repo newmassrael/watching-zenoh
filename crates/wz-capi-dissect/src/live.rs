@@ -58,12 +58,13 @@
 //! a floor as a total.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use wz_capture::link::FlowKey;
 use wz_capture::messages::RowHead;
 use wz_capture::{
     AnchorSpace, CaptureCursor, CaptureError, Dissection, DissectionLimits, FollowError,
-    MessageListOrigin, ScoutingDatagram,
+    LentCapture, MessageListOrigin, ScoutingDatagram,
 };
 use wz_session_core::passive::Direction;
 
@@ -452,7 +453,33 @@ impl LiveDissection {
     /// is one function calling the other.
     pub fn from_capture(bytes: &[u8], limits: DissectionLimits) -> Result<Self, CaptureError> {
         let mut me = Self::over(Dissection::with_limits(limits));
-        me.follow(bytes).map_err(|e| match e {
+        let walked = me.follow(bytes);
+        me.read_to_the_end(walked, bytes)
+    }
+
+    /// [`Self::from_capture`] over a capture this handle is LENT rather than
+    /// handed (open-debt item 924, `docs/dissect-row-index.md` step 3): it keeps
+    /// no copy of a TCP stream's bytes that sit in `capture`, and reads them
+    /// there again when a message is read. Every answer is the one
+    /// [`Self::from_capture`] gives over the same bytes.
+    pub fn from_capture_lent(
+        capture: Arc<dyn LentCapture>,
+        limits: DissectionLimits,
+    ) -> Result<Self, CaptureError> {
+        let mut me = Self::over(Dissection::with_limits(limits));
+        let walked = me.follow_lent(capture.clone());
+        me.read_to_the_end(walked, capture.bytes())
+    }
+
+    /// What a FILE asks of a walk over the whole of it, which `walked` is: that
+    /// it read, that it ended on a block boundary, and then the end.
+    fn read_to_the_end(
+        self,
+        walked: Result<usize, FollowError>,
+        bytes: &[u8],
+    ) -> Result<Self, CaptureError> {
+        let mut me = self;
+        walked.map_err(|e| match e {
             FollowError::Capture(c) => c,
             // Unreachable from a fresh cursor: nothing has been consumed, so
             // no prefix can be shorter than it. Mapped rather than unwrapped
@@ -507,6 +534,13 @@ impl LiveDissection {
     /// packet.
     pub fn follow(&mut self, bytes: &[u8]) -> Result<usize, FollowError> {
         self.dissection.follow_container(&mut self.cursor, bytes)
+    }
+
+    /// [`Self::follow`] over a container this handle is LENT: see
+    /// [`wz_capture::Dissection::follow_lent`] for what the handle then holds,
+    /// and [`LentCapture`] for what the lender keeps.
+    pub fn follow_lent(&mut self, capture: Arc<dyn LentCapture>) -> Result<usize, FollowError> {
+        self.dissection.follow_lent(&mut self.cursor, capture)
     }
 
     /// How many bytes of the container [`Self::follow`] has consumed.

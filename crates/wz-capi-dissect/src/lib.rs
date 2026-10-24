@@ -440,6 +440,10 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // packets whose code is reserved for local use, as 32-byte records into a
     // buffer the caller sized, joined to the packets by number and naming where
     // each value is in the caller's own container.
+    // 50, for `wz_dissect_pcap_replay_lent` and `wz_dissect_live_follow_lent`:
+    // the replay and follow doors over a container the caller lends the handle,
+    // which keeps no copy of the TCP payloads in it and reads them there again.
+    // The memory rule moves with them: the handle retains the caller's pointer.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -457,7 +461,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 49;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 50;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -699,6 +703,11 @@ enum Door {
     /// would have meant either a silent hole in `doors` or a name chosen to
     /// dodge the check.
     Replay,
+    /// (ABI 50, open-debt item 924) — `Replay` over a capture the caller LENDS
+    /// the handle. It answers what `Replay` answers over the same bytes and
+    /// asks a different promise of the caller, so neither is the older shape of
+    /// the other and it joins nothing.
+    ReplayLent,
     /// The one pcap door that hands back a captured FRAME's bytes
     /// rather than a document or a handle: the frame a field row's
     /// `first_byte.packet` names, in the coordinate space `frame_offset`
@@ -759,6 +768,7 @@ impl Door {
             Door::FieldsLimited => "wz_dissect_pcap_fields_limited",
             Door::FieldsWhereLimited => "wz_dissect_pcap_fields_where_limited",
             Door::Replay => "wz_dissect_pcap_replay",
+            Door::ReplayLent => "wz_dissect_pcap_replay_lent",
             Door::FrameBytes => "wz_dissect_pcap_frame_bytes",
             Door::SessionTable => "wz_dissect_pcap_session_table",
             Door::PacketsOfLinkType => "wz_dissect_pcap_packets_of_link_type",
@@ -804,6 +814,7 @@ impl Door {
             | Door::CensusWhereLimited
             | Door::FieldsWhereLimited
             | Door::Replay
+            | Door::ReplayLent
             // Like `Replay`, it emits no document and joins nothing.
             | Door::FrameBytes
             | Door::SessionTable
@@ -826,7 +837,8 @@ impl Door {
             Door::FieldsWithPayloads => Some(Door::FieldsLimited),
             Door::FieldsLimited => Some(Door::FieldsWhereLimited),
             Door::FieldsWhereLimited => Some(Door::Replay),
-            Door::Replay => Some(Door::FrameBytes),
+            Door::Replay => Some(Door::ReplayLent),
+            Door::ReplayLent => Some(Door::FrameBytes),
             Door::FrameBytes => Some(Door::SessionTable),
             Door::SessionTable => Some(Door::PacketsOfLinkType),
             Door::PacketsOfLinkType => Some(Door::CustomOptionsOfLinkType),
@@ -3438,11 +3450,49 @@ pub unsafe extern "C" fn wz_dissect_live_follow(
     let handle = unsafe { &mut *handle };
     // SAFETY: caller contract above.
     let container = unsafe { core::slice::from_raw_parts(bytes, len) };
-    match handle.follow(container) {
+    follow_answer(handle.follow(container))
+}
+
+/// The code a follow door answers for what the walk gave.
+fn follow_answer(walked: Result<usize, wz_capture::FollowError>) -> c_int {
+    match walked {
         Ok(_) => WZ_DISSECT_OK,
         Err(wz_capture::FollowError::Shrank { .. }) => WZ_DISSECT_ERR_CONTAINER_SHRANK,
         Err(wz_capture::FollowError::Capture(_)) => WZ_DISSECT_ERR_BAD_CAPTURE,
     }
+}
+
+/// (ABI 50) — [`wz_dissect_live_follow`] over a container the caller LENDS the
+/// handle, as [`wz_dissect_pcap_replay_lent`] lends a file (open-debt item 924,
+/// `docs/dissect-row-index.md` step 3).
+///
+/// The container may have MOVED since the last call (a buffer the caller grew
+/// by reallocating): every flow the handle holds reads from the container this
+/// call names from then on, which must hold every byte an earlier one did at the
+/// same offset. A handle may be lent a container after it read others it was
+/// handed; what it copied then it keeps.
+///
+/// # Errors
+///
+/// As for [`wz_dissect_live_follow`].
+///
+/// # Safety
+/// As for [`wz_dissect_live_follow`], and the `len` bytes at `bytes` must stay
+/// readable and unchanged until the handle is closed or a later call to this
+/// door names the container where it then is. The handle reads them during any
+/// call made on it, so no call may be made on it while the container is moving.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_follow_lent(
+    handle: *mut live::LiveDissection,
+    bytes: *const u8,
+    len: usize,
+) -> c_int {
+    if handle.is_null() || bytes.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    let handle = unsafe { &mut *handle };
+    follow_answer(handle.follow_lent(lent(bytes, len)))
 }
 
 /// (ABI 39) — HOW MANY BYTES OF THE CONTAINER [`wz_dissect_live_follow`] HAS
@@ -5446,6 +5496,81 @@ pub unsafe extern "C" fn wz_dissect_pcap_replay(
     // SAFETY: caller contract above.
     let input = unsafe { core::slice::from_raw_parts(bytes, len) };
     let handle = match live::LiveDissection::from_capture(input, preset) {
+        Ok(h) => Box::new(h),
+        Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
+    };
+    // SAFETY: null-checked above.
+    unsafe { *out = Box::into_raw(handle) };
+    WZ_DISSECT_OK
+}
+
+/// A capture container a C caller LENDS a handle: where its bytes are and how
+/// many, as the lending door was handed them (open-debt item 924,
+/// `docs/dissect-row-index.md` step 3).
+#[derive(Debug)]
+struct CallerContainer {
+    bytes: *const u8,
+    len: usize,
+}
+
+// SAFETY: the bytes are the caller's, and the lending doors' contract keeps
+// them readable and unchanged for as long as the handle holds them; nothing
+// here writes through the pointer, so a read from another thread is a read of
+// memory no one writes.
+unsafe impl Send for CallerContainer {}
+// SAFETY: as for `Send` above.
+unsafe impl Sync for CallerContainer {}
+
+impl wz_capture::LentCapture for CallerContainer {
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: the lending doors' contract; `bytes` was null-checked there.
+        unsafe { core::slice::from_raw_parts(self.bytes, self.len) }
+    }
+}
+
+/// The container a lending door was handed, as the handle holds it.
+fn lent(bytes: *const u8, len: usize) -> std::sync::Arc<dyn wz_capture::LentCapture> {
+    std::sync::Arc::new(CallerContainer { bytes, len })
+}
+
+/// (ABI 50) — [`wz_dissect_pcap_replay`] over a capture the caller LENDS the
+/// handle rather than hands it (open-debt item 924, `docs/dissect-row-index.md`
+/// step 3).
+///
+/// # Why a second door
+///
+/// A handle that reads a capture through [`wz_dissect_pcap_replay`] copies
+/// every TCP payload it reassembles, because it cannot know the caller keeps
+/// the file: the bytes then sit in the process twice, once in the caller's
+/// buffer and once in the handle. A caller that keeps the file anyway (to read a
+/// packet's bytes out of it, which the field documents point it at) can say so
+/// here, and the handle remembers where each payload is in it instead. Every
+/// answer is the one the replay door gives over the same bytes; what differs is
+/// what the handle holds.
+///
+/// It is a door of its own rather than a flag on the replay door because what
+/// the caller promises differs: there, the bytes are read during the call;
+/// here, for the life of the handle.
+///
+/// # Safety
+/// As for [`wz_dissect_pcap_replay`], and the `len` bytes at `bytes` must stay
+/// readable and unchanged until the handle is closed or a later
+/// [`wz_dissect_live_follow_lent`] names the container where it then is. The
+/// handle reads them during any call made on it.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_pcap_replay_lent(
+    bytes: *const u8,
+    len: usize,
+    limits: c_int,
+    out: *mut *mut live::LiveDissection,
+) -> c_int {
+    if bytes.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    let Some(preset) = preset_limits(limits) else {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    };
+    let handle = match live::LiveDissection::from_capture_lent(lent(bytes, len), preset) {
         Ok(h) => Box::new(h),
         Err(_) => return WZ_DISSECT_ERR_BAD_CAPTURE,
     };
@@ -9125,7 +9250,9 @@ mod tests {
         // 49, for `wz_dissect_pcap_local_options_of_link_type`: one symbol,
         // 32-byte records into a buffer the caller sized, joined to the packets
         // of the 46 door by number; nothing copied or retained.
-        assert_eq!(wz_dissect_abi_version(), 49);
+        // 50, for `wz_dissect_pcap_replay_lent` and `wz_dissect_live_follow_lent`:
+        // two symbols, and the handle retains the caller's container pointer.
+        assert_eq!(wz_dissect_abi_version(), 50);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT

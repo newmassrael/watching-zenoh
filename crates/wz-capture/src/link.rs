@@ -1721,7 +1721,7 @@ pub fn ethernet_header(link_type: u32, bytes: &[u8]) -> Option<EthernetHeader> {
 /// Answered from the two slices' address ranges and nothing else, so a slice
 /// that merely holds EQUAL bytes elsewhere is never mistaken for this one —
 /// the failure a search over the contents would have on a one-byte payload.
-fn offset_within(outer: &[u8], inner: &[u8]) -> Option<usize> {
+pub(crate) fn offset_within(outer: &[u8], inner: &[u8]) -> Option<usize> {
     let outer_range = outer.as_ptr_range();
     let inner_range = inner.as_ptr_range();
     let start = inner_range.start as usize;

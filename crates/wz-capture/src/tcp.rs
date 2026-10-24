@@ -506,6 +506,13 @@ impl StreamAssembler {
         self.end - self.discarded
     }
 
+    /// Bytes the assembler holds a copy of itself, rather than remembering where
+    /// they are in a lent container.
+    #[cfg(test)]
+    pub(crate) fn bytes_kept(&self) -> usize {
+        self.kept.len()
+    }
+
     /// `true` when no bytes have been reassembled.
     pub fn is_empty(&self) -> bool {
         self.len() == 0

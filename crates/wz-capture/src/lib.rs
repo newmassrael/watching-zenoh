@@ -2278,6 +2278,10 @@ pub struct FlowDissection {
     /// dissection but the reference reading `redecode_gate` holds them equal
     /// to.
     keep: Keep,
+    /// The capture container the dissection is lent, when it is: the stream
+    /// bytes of a segment that sat in it are read from it and not kept
+    /// (open-debt item 924, step 3).
+    lent: Option<alloc::sync::Arc<dyn LentCapture>>,
     /// R311y594b — capture index of the last packet on this flow, the key
     /// `Dissection` evicts by. A packet index rather than a timestamp because
     /// every source has one and not every source has a clock.
@@ -2323,6 +2327,9 @@ pub struct FlowDissection {
 struct Streams<'a> {
     low_to_high: &'a StreamAssembler,
     high_to_low: &'a StreamAssembler,
+    /// The capture container the flow is lent, which runs located there are
+    /// read from.
+    container: Option<&'a [u8]>,
 }
 
 impl messages::UnitBytes for Streams<'_> {
@@ -2332,7 +2339,7 @@ impl messages::UnitBytes for Streams<'_> {
         from: usize,
         to: usize,
     ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
-        retained_bytes(self.assembler(direction), from, to)
+        self.assembler(direction).bytes(from, to, self.container)
     }
 }
 
@@ -2353,18 +2360,9 @@ impl messages::UnitBytes for FlowDissection {
         from: usize,
         to: usize,
     ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
-        retained_bytes(self.assembler(direction), from, to)
+        self.assembler(direction)
+            .bytes(from, to, self.lent.as_deref().map(LentCapture::bytes))
     }
-}
-
-/// The bytes of `assembler`'s stream from absolute offset `from` up to `to`,
-/// or `None` where any of them were released or have not arrived.
-fn retained_bytes(
-    assembler: &StreamAssembler,
-    from: usize,
-    to: usize,
-) -> Option<alloc::borrow::Cow<'_, [u8]>> {
-    assembler.bytes(from, to, None)
 }
 
 /// R311y612 (§4.1) — post-hole bytes held per direction while deciding whether
@@ -2417,11 +2415,13 @@ impl FlowDissection {
             frames,
             low_to_high,
             high_to_low,
+            lent,
             ..
         } = self;
         frames.discard_oldest(&Streams {
             low_to_high,
             high_to_low,
+            container: lent.as_deref().map(LentCapture::bytes),
         })
     }
 
@@ -2433,6 +2433,7 @@ impl FlowDissection {
             frames,
             low_to_high,
             high_to_low,
+            lent,
             ..
         } = self;
         frames.keep_whole_before(
@@ -2441,6 +2442,7 @@ impl FlowDissection {
             &Streams {
                 low_to_high,
                 high_to_low,
+                container: lent.as_deref().map(LentCapture::bytes),
             },
         );
         match direction {
@@ -2479,6 +2481,7 @@ impl FlowDissection {
             session: new_session(window_ms),
             frames: messages::MessageList::new(),
             keep,
+            lent: None,
             last_activity: 0,
             framing: Framing::Undecided,
             held: [Vec::new(), Vec::new()],
@@ -3497,11 +3500,13 @@ impl FlowDissection {
             ingest,
             low_to_high,
             high_to_low,
+            lent,
             ..
         } = self;
         let streams = Streams {
             low_to_high,
             high_to_low,
+            container: lent.as_deref().map(LentCapture::bytes),
         };
         stream_into_session(
             session,
@@ -3926,6 +3931,8 @@ mod message_list_census {
             scouts: _,
             gap_patience: _,
             stream_keep: _,
+            // The container the flows' bytes are read from, not a list.
+            lent: _,
             capture_origin_ms: _,
             abandoned_chains: _,
             // The census OF discarded messages, which is the opposite of a list
@@ -3984,6 +3991,8 @@ mod message_list_census {
             ingest: _,
             // How `frames` keeps its messages, not a list of them.
             keep: _,
+            // Where the stream's bytes are read from, not a list.
+            lent: _,
         } = FlowDissection::new(FlowKey::serial_line(), None, None, Keep::Entries);
     }
 
@@ -5135,6 +5144,9 @@ pub struct Dissection {
     /// own stream ([`FlowDissection`]'s `keep`): as index entries, except in the
     /// reference reading the redecode gate builds.
     stream_keep: Keep,
+    /// The capture container this dissection is lent ([`Self::follow_lent`]),
+    /// which every TCP flow holds too and reads its stream's bytes from.
+    lent: Option<alloc::sync::Arc<dyn LentCapture>>,
     /// R311y638 (§1.1r) — the earliest capture instant this dissection was
     /// shown, over every packet whatever it decoded to.
     ///
@@ -5252,6 +5264,7 @@ impl Default for Dissection {
             scouts: ScoutingCorrelation::default(),
             gap_patience: Some(crate::tcp::DEFAULT_GAP_PATIENCE),
             stream_keep: Keep::Entries,
+            lent: None,
             capture_origin_ms: None,
             abandoned_chains: 0,
             dropped_frames: DroppedFrameCensus::default(),
@@ -5544,7 +5557,8 @@ impl Dissection {
                     return;
                 }
                 Ok(Transport::Tcp(s)) => {
-                    self.push_segment(s, ts_nanos);
+                    // Reassembled from pieces: no one packet holds the payload.
+                    self.push_segment(s, ts_nanos, tcp::PayloadAt::Here);
                     return;
                 }
                 Ok(Transport::IpFragment(inner)) => {
@@ -7083,6 +7097,22 @@ impl Dissection {
         ts_nanos: Option<u64>,
         bytes: &[u8],
     ) {
+        self.push_packet_located(link_type, packet_index, interface_id, ts_nanos, bytes, None)
+    }
+
+    /// [`Self::push_packet_on_nanos`], with where `bytes` sits in the capture
+    /// container this dissection is lent ([`Self::follow_lent`]), when it sits
+    /// in one: a TCP segment's payload is then read from there and not copied
+    /// (open-debt item 924, step 3).
+    fn push_packet_located(
+        &mut self,
+        link_type: u32,
+        packet_index: usize,
+        interface_id: u32,
+        ts_nanos: Option<u64>,
+        bytes: &[u8],
+        in_container: Option<usize>,
+    ) {
         // R2171 (item 547) — FIRST, and on every path: the serial branch below
         // returns early, and a coordinate the serial reader consumed is just as
         // spent as one the transport reader did.
@@ -7103,7 +7133,14 @@ impl Dissection {
             self.push_serial(interface_id, packet_index, ts_nanos, bytes);
             return;
         }
-        self.push_packet_inner(link_type, packet_index, interface_id, ts_nanos, bytes)
+        self.push_packet_inner(
+            link_type,
+            packet_index,
+            interface_id,
+            ts_nanos,
+            bytes,
+            in_container,
+        )
     }
 
     /// R311y720 (§D M3) — one read of a declared serial line.
@@ -7210,6 +7247,7 @@ impl Dissection {
         interface_id: u32,
         ts_nanos: Option<u64>,
         bytes: &[u8],
+        in_container: Option<usize>,
     ) {
         // R311y638 (§1.1r) — recorded BEFORE decapsulation, so a packet this
         // reader cannot decode still counts as part of the capture's timeline.
@@ -7272,7 +7310,16 @@ impl Dissection {
                 return;
             }
         };
-        self.push_segment(segment, ts_nanos);
+        // Open-debt item 924, step 3 — a packet that sits in the lent container
+        // has its payload there too, at the place the same walk the strips use
+        // names ([`link::transport_payload_at`]); the assembler then keeps no copy.
+        let at = in_container
+            .and_then(|packet| {
+                link::transport_payload_at(link_type, packet_index, bytes)
+                    .map(|payload| tcp::PayloadAt::Container(packet + payload))
+            })
+            .unwrap_or(tcp::PayloadAt::Here);
+        self.push_segment(segment, ts_nanos, at);
     }
 
     /// Feed one TCP segment to its flow's assembler and the observer behind it.
@@ -7281,18 +7328,20 @@ impl Dissection {
     /// by fragment reassembly takes the identical path. Duplicating it was the
     /// alternative, and the duplicate would have been the copy that forgot the
     /// `retained_from` rebase below.
-    fn push_segment(&mut self, segment: link::Segment, ts_nanos: Option<u64>) {
+    fn push_segment(&mut self, segment: link::Segment, ts_nanos: Option<u64>, at: tcp::PayloadAt) {
         let packet_index = segment.packet_index;
         self.tally_checksums(&segment.checksums);
         let idx = match self.flows.iter().position(|f| f.flow == segment.flow) {
             Some(i) => i,
             None => {
-                self.flows.push(FlowDissection::new(
+                let mut flow = FlowDissection::new(
                     segment.flow,
                     self.limits.reassembly_window_ms,
                     self.gap_patience,
                     self.stream_keep,
-                ));
+                );
+                flow.lent = self.lent.clone();
+                self.flows.push(flow);
                 self.flows.len() - 1
             }
         };
@@ -7321,8 +7370,8 @@ impl Dissection {
         let at_ns = flow.session.observed_at_nanos();
         let before = flow.assembler(direction).len();
         match direction {
-            Direction::A => flow.low_to_high.push_at(&segment, at_ns),
-            Direction::B => flow.high_to_low.push_at(&segment, at_ns),
+            Direction::A => flow.low_to_high.push_located(&segment, at_ns, at),
+            Direction::B => flow.high_to_low.push_located(&segment, at_ns, at),
         };
         flow.deliver_from(direction, before);
         flow.last_activity = packet_index;
@@ -7576,12 +7625,14 @@ impl Dissection {
         let idx = match self.flows.iter().position(|f| f.flow == record.flow) {
             Some(i) => i,
             None => {
-                self.flows.push(FlowDissection::new(
+                let mut flow = FlowDissection::new(
                     record.flow,
                     self.limits.reassembly_window_ms,
                     self.gap_patience,
                     self.stream_keep,
-                ));
+                );
+                flow.lent = self.lent.clone();
+                self.flows.push(flow);
                 self.flows.len() - 1
             }
         };
@@ -8241,6 +8292,55 @@ impl Dissection {
         cursor: &mut CaptureCursor,
         bytes: &[u8],
     ) -> Result<usize, FollowError> {
+        self.follow_bytes(cursor, bytes, false)
+    }
+
+    /// [`Self::follow_container`] over a container this dissection is LENT
+    /// rather than handed: the dissection keeps no copy of a TCP stream's bytes
+    /// that sit in it, and reads them there again when a message is read
+    /// (open-debt item 924, `docs/dissect-row-index.md` step 3).
+    ///
+    /// `capture` is the whole container prefix on every call, as for
+    /// [`Self::follow_container`], and is lent for the life of the dissection:
+    /// see [`LentCapture`] for what its holder keeps. Every flow, the ones held
+    /// already and the ones to come, reads from the container lent last, which
+    /// must hold every byte an earlier one did at the same offset.
+    ///
+    /// Every answer is the one [`Self::follow_container`] over the same bytes
+    /// gives; what differs is what the dissection holds.
+    pub fn follow_lent(
+        &mut self,
+        cursor: &mut CaptureCursor,
+        capture: alloc::sync::Arc<dyn LentCapture>,
+    ) -> Result<usize, FollowError> {
+        self.lend(&capture);
+        self.follow_bytes(cursor, capture.bytes(), true)
+    }
+
+    /// Lend this dissection `capture`, for every flow it holds and every flow
+    /// it makes.
+    fn lend(&mut self, capture: &alloc::sync::Arc<dyn LentCapture>) {
+        if self
+            .lent
+            .as_ref()
+            .is_some_and(|held| alloc::sync::Arc::ptr_eq(held, capture))
+        {
+            return;
+        }
+        self.lent = Some(capture.clone());
+        for flow in self.flows.iter_mut() {
+            flow.lent = Some(capture.clone());
+        }
+    }
+
+    /// The walk both doors above share; `located` says the bytes are the
+    /// container this dissection is lent, so a packet's place in them is kept.
+    fn follow_bytes(
+        &mut self,
+        cursor: &mut CaptureCursor,
+        bytes: &[u8],
+        located: bool,
+    ) -> Result<usize, FollowError> {
         if bytes.len() < cursor.consumed() {
             return Err(FollowError::Shrank {
                 consumed: cursor.consumed(),
@@ -8278,12 +8378,15 @@ impl Dissection {
                         // R311y720 — the INTERFACE travels with the packet. A
                         // classic pcap has one, numbered 0, which is also what
                         // `push_packet_at` passes.
-                        dissection.push_packet_on_nanos(
+                        dissection.push_packet_located(
                             f.link_type,
                             f.index,
                             f.interface_id,
                             f.ts_nanos,
                             f.data,
+                            located
+                                .then(|| link::offset_within(bytes, f.data))
+                                .flatten(),
                         );
                     }
                     CaptureEvent::Secrets(s) => dissection.decryption_secrets.push(s),
@@ -8300,6 +8403,39 @@ impl Dissection {
             })
             .map_err(FollowError::Capture)?;
         Ok(cursor.packets_produced() - before)
+    }
+}
+
+/// A capture container a [`Dissection`] is LENT rather than handed
+/// ([`Dissection::follow_lent`]; open-debt item 924, `docs/dissect-row-index.md`
+/// step 3).
+///
+/// A dissection that reads a container it is lent keeps no copy of a TCP
+/// stream's bytes that sit in it: it remembers where each segment's payload
+/// is, and reads the bytes there again when a message is read. The caller holds
+/// the container anyway (the field documents read packets out of it), so the
+/// bytes then exist once in the process instead of twice.
+///
+/// # The contract
+///
+/// [`Self::bytes`] answers the container from its first byte. Every byte it
+/// has answered stays at the same offset with the same value for as long as a
+/// dissection holds the container: it may GROW (a capture still being
+/// written), and never shrinks or changes.
+pub trait LentCapture: Send + Sync + core::fmt::Debug {
+    /// The container as it stands.
+    fn bytes(&self) -> &[u8];
+}
+
+impl LentCapture for Vec<u8> {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+impl LentCapture for alloc::boxed::Box<[u8]> {
+    fn bytes(&self) -> &[u8] {
+        self
     }
 }
 

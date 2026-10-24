@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 49
+EXPECTED_VERSION = 50
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -429,6 +429,14 @@ EXPECTED_SYMBOLS = {
     # option in `*malformed` and whether the container was cut off in `*partial`.
     # Nothing is retained.
     "wz_dissect_pcap_local_options_of_link_type",
+    # (ABI 50, open-debt item 924) -- the replay and follow doors over a capture
+    # the caller LENDS the handle. Two symbols, and the memory rule moves with
+    # them: the handle RETAINS the caller's pointer and reads through it during
+    # any later call, so the container's bytes must outlive the handle (or the
+    # next lending call that names where the container then is). In return the
+    # handle keeps no copy of the TCP payloads that sit in it.
+    "wz_dissect_pcap_replay_lent",
+    "wz_dissect_live_follow_lent",
     # (ABI 43) -- a live handle whose two ceilings on decoded messages the caller
     # sets: how many one flow keeps, and how many the handle keeps in all. One
     # symbol: two integers in and the handle through a pointer the CALLER owns,

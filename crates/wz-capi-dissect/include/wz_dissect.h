@@ -1571,7 +1571,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 49
+#define WZ_DISSECT_ABI_REVISION 50
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -6590,6 +6590,53 @@ void wz_dissect_live_close(wz_dissect_live *h);
  * the file is read, and wz_dissect_live_lost is what it discarded. */
 int wz_dissect_pcap_replay(const unsigned char *bytes, size_t len, int limits,
                            wz_dissect_live **out);
+
+/* ── (ABI 50) — A CAPTURE THE CALLER LENDS THE HANDLE ────────────────────
+ *
+ * wz_dissect_pcap_replay and wz_dissect_live_follow over a container the
+ * caller LENDS the handle rather than hands it.
+ *
+ * A handle opened by wz_dissect_pcap_replay copies every TCP payload it
+ * reassembles, because it cannot know the caller keeps the file: the bytes
+ * then sit in the process twice, once in your buffer and once in the handle.
+ * If you keep the container anyway -- to read a packet's bytes out of it, which
+ * the field documents point you at -- say so through these doors, and the
+ * handle remembers where each payload is in your container instead of copying
+ * it. Every answer is the one the copying doors give over the same bytes; what
+ * differs is what the handle holds.
+ *
+ *     wz_dissect_live *h;
+ *     if (wz_dissect_pcap_replay_lent(file, len, WZ_DISSECT_LIMITS_NONE, &h))
+ *         { ... }
+ *     ...                     // `file` stays mapped and unchanged
+ *     wz_dissect_live_close(h);
+ *     munmap(file, len);      // only now
+ *
+ * WHAT YOU PROMISE. The `len` bytes at `bytes` stay readable and unchanged
+ * until the handle is closed, or until a later wz_dissect_live_follow_lent
+ * names the container where it then is. The handle keeps the pointer and reads
+ * through it during ANY later call on it, so it is a promise about the life of
+ * the handle, not of this call -- which is why these are doors of their own and
+ * not a flag on the copying ones.
+ *
+ * A GROWING CONTAINER. wz_dissect_live_follow_lent continues a handle as
+ * wz_dissect_live_follow does. The container may have MOVED since the last call
+ * (a buffer you grew by reallocating): every flow reads from the container the
+ * latest call names, which must hold every byte an earlier one did at the
+ * same offset. Make no call on the handle while the container is moving. A
+ * handle may be lent a container after reading ones it was handed; what it
+ * copied then, it keeps.
+ *
+ * Return codes as for wz_dissect_pcap_replay and wz_dissect_live_follow.
+ *
+ * @bound limits work-ceiling -- as for wz_dissect_pcap_replay. */
+int wz_dissect_pcap_replay_lent(const unsigned char *bytes, size_t len,
+                                int limits, wz_dissect_live **out);
+
+/* `len` is how much of the lent container is readable and committed now, as
+ * for wz_dissect_live_follow; see the paragraph above for what is promised. */
+int wz_dissect_live_follow_lent(wz_dissect_live *h, const unsigned char *bytes,
+                                size_t len);
 
 /* R2108 -- the record's layout, AS THE BUILT LIBRARY SEES IT.
  *
