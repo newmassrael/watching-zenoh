@@ -60,6 +60,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use wz_runtime_core::{Runtime, TimeSource};
+use wz_session_core::capacity::LatenessWindows;
 use wz_session_core::drive::keepalive_wake_deadline;
 use wz_session_core::lease::{KeepAliveCheckOutcome, LEASE_EXPIRE_FACTOR};
 
@@ -124,12 +125,59 @@ async fn pace(weak: Weak<SessionLinkActions>, clock: TokioTime, generation: u64)
     }
 }
 
-/// The longest any pacer of this process woke after the time it had planned to wake, in
-/// milliseconds, since the process started or the figure was last taken.
-static WAKE_LATENESS_MAX_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// How late the pacers of this process woke, per window of time
+/// ([`wz_session_core::capacity::LatenessWindows`]). Behind a lock the pacers take once per wake and a
+/// reader takes once per look, which is a few hundred a second on a router and costs nothing next
+/// to the emission a wake makes.
+static WAKE_LATENESS: std::sync::Mutex<LatenessWindows> =
+    std::sync::Mutex::new(LatenessWindows::new());
+
+/// Milliseconds on a clock of this process that every record and every read shares: the sessions'
+/// own clocks are theirs, and a window needs one that does not depend on which session woke.
+fn lateness_clock_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    u64::try_from(
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
 
 fn note_wake_lateness(late_ms: u64) {
-    WAKE_LATENESS_MAX_MS.fetch_max(late_ms, std::sync::atomic::Ordering::Relaxed);
+    let now_ms = lateness_clock_ms();
+    // A poisoned lock means a panic while holding two integers; the figures are still integers.
+    let mut windows = WAKE_LATENESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    windows.record(now_ms, late_ms);
+}
+
+/// How late the keepalive timers of this process were served, in three readings
+/// ([`wz_session_core::capacity::LatenessWindows`]), in milliseconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeepaliveLateness {
+    /// The longest in the current ten-second window.
+    pub current_ms: u64,
+    /// The longest in the last minute, the current window included.
+    pub last_minute_ms: u64,
+    /// The longest since the process started.
+    pub since_start_ms: u64,
+}
+
+/// The lateness of the keepalive timers now, per window: the reading a monitor and an admission
+/// rule need, where [`keepalive_timer_lateness_max_ms`] can only say what the worst was.
+pub fn keepalive_timer_lateness() -> KeepaliveLateness {
+    let now_ms = lateness_clock_ms();
+    let windows = WAKE_LATENESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    KeepaliveLateness {
+        current_ms: windows.current(now_ms),
+        last_minute_ms: windows.last_minute(now_ms),
+        since_start_ms: windows.since_start(),
+    }
 }
 
 /// The longest a keepalive timer of this process was served after its time, in milliseconds,
@@ -142,5 +190,27 @@ fn note_wake_lateness(late_ms: u64) {
 /// the thread's own wake, which on a host short of CPU is its wait for a core
 /// (`docs/router-data-plane-scaling.md` section 7.4).
 pub fn keepalive_timer_lateness_max_ms() -> u64 {
-    WAKE_LATENESS_MAX_MS.load(std::sync::atomic::Ordering::Relaxed)
+    keepalive_timer_lateness().since_start_ms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two readings are one meter: what a wake records is what both functions say, and a
+    /// window never reads below the maximum it holds.
+    #[test]
+    fn a_wake_is_read_by_the_windows_and_by_the_process_maximum() {
+        let before = keepalive_timer_lateness();
+        // Later than anything another test of this process recorded.
+        let late = before.since_start_ms + 1_000;
+        note_wake_lateness(late);
+        let after = keepalive_timer_lateness();
+        // Another test of this process may record a longer one meanwhile, never a shorter.
+        assert!(after.since_start_ms >= late);
+        assert!(keepalive_timer_lateness_max_ms() >= late);
+        assert!(after.current_ms >= late || after.last_minute_ms >= late);
+        assert!(after.last_minute_ms >= after.current_ms);
+        assert!(after.since_start_ms >= after.last_minute_ms);
+    }
 }

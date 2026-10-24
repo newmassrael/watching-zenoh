@@ -515,6 +515,16 @@ depends on and would bound what the model's constant cannot. It needs the latene
 and a rule for how fast the ceiling rises again; neither is measured. The model's number stays the first line of
 defence, and 1100 gives 0.9 to 1.3 s, about a seventh of the limit.
 
+**The lateness per window, not one maximum (built 2026-10-24).** `keepalive_timer_lateness_max_ms` stays, but it
+can only rise, so it says that a bad second happened and not whether the router is in one now. The pacers now
+record into `wz_session_core::capacity::LatenessWindows` (six windows of ten seconds, pure, no lock or clock of
+its own), and `keepalive_timer_lateness()` reads three figures: the current window, the last minute and since
+the start. They are the gauges of the report the next steps put on the wire and the input of an admission
+that follows the lateness, so that the quantity is defined once. Four unit tests hold the window arithmetic
+(the maximum of a window and not its last record, the forgetting after a minute, a reused slot keeping nothing of
+the window it replaced, and a read earlier than a record); the second was run against a slot that keeps the old
+maximum and went red.
+
 **What the router does at the number.** One value, the effective `max_sessions`, is the smaller of the
 configured `transport/unicast/max_sessions` (upstream's key, enforced in the accept loop already, default
 1000) and `N_max(s)` (`WzConfig::effective_max_sessions`, read by the accept loop in place of the bare

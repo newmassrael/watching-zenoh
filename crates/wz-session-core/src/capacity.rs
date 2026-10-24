@@ -247,6 +247,94 @@ pub const fn keepalive_lateness_limit_ms(lease_ms: u64) -> u64 {
     lease_ms - lease_ms / LEASE_EXPIRE_FACTOR
 }
 
+/// The width of one lateness window, in milliseconds.
+pub const LATENESS_WINDOW_MS: u64 = 10_000;
+
+/// How many windows [`LatenessWindows`] keeps: with [`LATENESS_WINDOW_MS`], the last minute.
+pub const LATENESS_WINDOWS: usize = 6;
+
+/// The longest a keepalive timer was served late, kept per window of time and not as one maximum
+/// for the life of the process.
+///
+/// A maximum over the whole life can only rise, so it can say that a bad second happened once but
+/// neither whether the node is in one now nor whether it has left it, and a control that read it
+/// would refuse sessions for ever after a single bad second. Three readings answer the three
+/// questions an operator and an admission rule ask: [`Self::current`] (the window the clock is
+/// in), [`Self::last_minute`] (the windows of the last minute, the current one included) and
+/// [`Self::since_start`] (the old process maximum, kept because it is what the capacity promise
+/// was asserted on).
+///
+/// Pure: the caller names the time of each record and of each read, in milliseconds on one clock
+/// that never goes back, and the type holds no lock and reads no clock, so it is the same on every
+/// profile. A host wraps it in whatever lock its runtime has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LatenessWindows {
+    /// For each slot, the window number it holds plus one (zero is an empty slot) and the longest
+    /// lateness recorded in that window.
+    slots: [(u64, u64); LATENESS_WINDOWS],
+    since_start_ms: u64,
+}
+
+impl LatenessWindows {
+    /// No lateness recorded.
+    pub const fn new() -> Self {
+        Self {
+            slots: [(0, 0); LATENESS_WINDOWS],
+            since_start_ms: 0,
+        }
+    }
+
+    /// The window `now_ms` falls in, plus one, so that zero stays "empty".
+    const fn tag(now_ms: u64) -> u64 {
+        now_ms / LATENESS_WINDOW_MS + 1
+    }
+
+    /// Record that a timer was served `late_ms` after its time, at `now_ms`.
+    pub fn record(&mut self, now_ms: u64, late_ms: u64) {
+        self.since_start_ms = self.since_start_ms.max(late_ms);
+        let tag = Self::tag(now_ms);
+        // `tag % LATENESS_WINDOWS` is below the array's length by construction.
+        let slot = &mut self.slots[(tag % LATENESS_WINDOWS as u64) as usize];
+        if slot.0 == tag {
+            slot.1 = slot.1.max(late_ms);
+        } else {
+            *slot = (tag, late_ms);
+        }
+    }
+
+    /// The longest lateness recorded in the window `now_ms` falls in.
+    pub fn current(&self, now_ms: u64) -> u64 {
+        let tag = Self::tag(now_ms);
+        self.slots
+            .iter()
+            .find(|slot| slot.0 == tag)
+            .map_or(0, |slot| slot.1)
+    }
+
+    /// The longest lateness recorded in the last [`LATENESS_WINDOWS`] windows, the current one
+    /// included. A slot that holds an older window than that is not read, whatever it holds.
+    pub fn last_minute(&self, now_ms: u64) -> u64 {
+        let tag = Self::tag(now_ms);
+        self.slots
+            .iter()
+            .filter(|slot| slot.0 != 0 && slot.0 <= tag && tag - slot.0 < LATENESS_WINDOWS as u64)
+            .map(|slot| slot.1)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// The longest lateness recorded since the process started: the figure that only rises.
+    pub const fn since_start(&self) -> u64 {
+        self.since_start_ms
+    }
+}
+
+impl Default for LatenessWindows {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The sessions a node admits at once: the configured `max_sessions`, or less when the declared
 /// contract says the node cannot keep that many leases (and, when it declared a longest data wait,
 /// serve that many faces in it).
@@ -436,6 +524,80 @@ mod tests {
         assert_eq!(keepalive_lateness_limit_ms(10_000), 6_667);
         assert_eq!(keepalive_lateness_limit_ms(30_000), 20_000);
         assert_eq!(keepalive_lateness_limit_ms(0), 0);
+    }
+
+    #[test]
+    fn a_window_reads_what_was_recorded_in_it_and_forgets_it_a_minute_later() {
+        let mut w = LatenessWindows::new();
+        assert_eq!((w.current(0), w.last_minute(0), w.since_start()), (0, 0, 0));
+        w.record(1_000, 400);
+        w.record(9_999, 900);
+        w.record(5_000, 100);
+        assert_eq!(
+            w.current(9_999),
+            900,
+            "the maximum of the window, not the last record"
+        );
+        // The next window has recorded nothing, the last minute still holds the first.
+        assert_eq!(w.current(10_000), 0);
+        assert_eq!(w.last_minute(10_000), 900);
+        // Five windows on it is still the last minute; the sixth after it is not.
+        assert_eq!(w.last_minute(59_999), 900);
+        assert_eq!(
+            w.last_minute(60_000),
+            0,
+            "a minute later it is out of the last minute"
+        );
+        // And what only rises still holds it.
+        assert_eq!(w.since_start(), 900);
+    }
+
+    #[test]
+    fn a_slot_reused_by_a_later_window_does_not_keep_the_old_one() {
+        let mut w = LatenessWindows::new();
+        w.record(0, 5_000);
+        // Six windows later the same slot is the current window's.
+        w.record(60_000, 300);
+        assert_eq!(
+            w.current(60_000),
+            300,
+            "the old window's 5000 is gone from the slot"
+        );
+        assert_eq!(w.last_minute(60_000), 300);
+        assert_eq!(w.since_start(), 5_000);
+    }
+
+    #[test]
+    fn the_last_minute_is_the_longest_of_its_windows() {
+        let mut w = LatenessWindows::new();
+        for (at, late) in [(5_000, 100), (15_000, 2_500), (25_000, 700), (55_000, 300)] {
+            w.record(at, late);
+        }
+        assert_eq!(w.last_minute(55_000), 2_500);
+        assert_eq!(w.current(55_000), 300);
+        // The window of the 2500 leaves the minute after the sixth window past it.
+        assert_eq!(w.last_minute(75_000), 700);
+        assert_eq!(w.last_minute(85_000), 300);
+        assert_eq!(w.last_minute(115_000), 0);
+    }
+
+    #[test]
+    fn a_read_before_a_record_is_not_confused_by_an_empty_slot() {
+        // A window number of zero is a real window, and an empty slot is not it.
+        let mut w = LatenessWindows::new();
+        assert_eq!(w.current(0), 0);
+        w.record(0, 7);
+        assert_eq!(w.current(0), 7);
+        assert_eq!(w.last_minute(0), 7);
+        // A reading earlier than a record (a clock read by two threads) does not underflow.
+        assert_eq!(w.last_minute(0), 7);
+        let mut late = LatenessWindows::new();
+        late.record(30_000, 9);
+        assert_eq!(
+            late.last_minute(0),
+            0,
+            "a window from the future is not in the last minute"
+        );
     }
 
     /// The document the numbers are explained in, read from the workspace this test runs in.
