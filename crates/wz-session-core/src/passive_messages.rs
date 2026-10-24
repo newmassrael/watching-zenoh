@@ -75,6 +75,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
+use crate::ascending_map::AscendingMap;
 use crate::byte_log::{LogPlace, UnitLog};
 use crate::chunk_log::{ChunkLog, Iter};
 use crate::inbound::InboundFrame;
@@ -177,7 +178,7 @@ struct ChainFacts {
     fold: ChainFold,
     /// By produced-index, the outcome and identity of every held row the fold
     /// moved; a row it did not move (no fragment, or no outcome) has none.
-    rows: BTreeMap<u64, (IngestOutcome, Option<u64>)>,
+    rows: AscendingMap<(IngestOutcome, Option<u64>)>,
 }
 
 /// The key a fragment chain is held under: the direction it travelled, whether
@@ -305,7 +306,7 @@ impl MessageList {
     /// row that is not a fragment or carries no outcome, and for one not held.
     #[cfg(feature = "reassembly")]
     pub fn chain_of(&self, produced: u64) -> Option<(IngestOutcome, Option<u64>)> {
-        self.chains.rows.get(&produced).copied()
+        self.chains.rows.get(produced).copied()
     }
 
     /// Move the chain fold by the message about to be appended at `produced`.
@@ -487,7 +488,7 @@ impl MessageList {
         let _ = self.chain_prefix.observe(&frame);
         // A row no longer held has no fact to be read.
         #[cfg(feature = "reassembly")]
-        self.chains.rows.remove(&first_produced);
+        self.chains.rows.remove(first_produced);
         Some(Discarded {
             // `produced` deliberately does NOT move here. It counts what was
             // ever appended, and a trim is the one event a consumer's watermark
@@ -703,8 +704,13 @@ struct Index {
     /// units were read; a [`UnitRow`] names one by place. A context changes only
     /// at a handshake message, so this stays a few long.
     contexts: Vec<FlowContext>,
-    /// The facts few rows have, by the row's produced-index.
-    sparse: BTreeMap<u64, Sparse>,
+    /// The facts few rows have, by the row's produced-index
+    /// ([`AscendingMap`]: the keys arrive in order and leave from the front).
+    sparse: AscendingMap<Sparse>,
+    /// What each fragment row came to, apart from [`Self::sparse`] because a
+    /// completed chain's fate owns a buffer and the others are three bytes.
+    #[cfg(feature = "reassembly")]
+    fates: Fates,
     /// The facts of the rows of the OLDEST unit a discard has already taken,
     /// while rows of that unit are still held: what reading those rows again
     /// needs and no entry holds any more. Empty otherwise. Only the oldest unit
@@ -739,8 +745,8 @@ pub struct ListMemory {
     pub unit_log: usize,
     /// The rows kept whole beside the entries, a model of their map.
     pub whole_rows: usize,
-    /// The facts few rows have (an SN verdict other than continuous, a fragment's
-    /// fate, a resynchronisation), a model of their map.
+    /// The facts few rows have (a sequence gap's count, a fragment's fate, a
+    /// resynchronisation), as the log that holds them allocated them.
     pub sparse: usize,
     /// Where units a layer below framed end, a model of their map.
     pub wire_ends: usize,
@@ -786,33 +792,29 @@ impl ListMemory {
 }
 
 impl Index {
-    /// Bytes the joined messages of completed fragment chains hold.
+    /// Bytes the fragment fates hold: the class of each, and the joined messages of
+    /// the chains that completed with the slots that hold them.
     #[cfg(feature = "reassembly")]
-    fn joined_bytes(&self) -> usize {
-        self.sparse
-            .values()
-            .map(|facts| match &facts.fragment {
-                Some(FragmentFate::Joined(bytes)) => bytes.capacity(),
-                _ => 0,
-            })
-            .sum()
+    fn fate_bytes(&self) -> (usize, usize) {
+        self.fates.bytes()
     }
 
     /// Without reassembly no row has a fate to hold.
     #[cfg(not(feature = "reassembly"))]
-    fn joined_bytes(&self) -> usize {
-        0
+    fn fate_bytes(&self) -> (usize, usize) {
+        (0, 0)
     }
 
     /// What the index holds on the heap.
     fn memory(&self) -> ListMemory {
+        let (fates, joined) = self.fate_bytes();
         ListMemory {
             rows: self.entries.allocated_bytes(),
             unit_log: self.log.allocated(),
             whole_rows: crate::heap_account::btree_bytes::<u64, PassiveFrame>(self.held.len()),
-            sparse: crate::heap_account::btree_bytes::<u64, Sparse>(self.sparse.len()),
+            sparse: self.sparse.allocated_bytes() + fates,
             wire_ends: crate::heap_account::btree_bytes::<(u16, u64), u64>(self.wire_ends.len()),
-            joined: self.joined_bytes(),
+            joined,
             // The list's, which owns the chain facts and adds them.
             chains: 0,
             small: crate::heap_account::vec_bytes(&self.contexts)
@@ -823,13 +825,12 @@ impl Index {
 
 impl MessageList {
     /// What the chain facts of the list hold: the outcome and identity of every
-    /// fragment row (a model of the map), and the chains still open and the ones
-    /// the discarded rows left counted.
+    /// fragment row, and the chains still open and the ones the discarded rows
+    /// left counted.
     #[cfg(feature = "reassembly")]
     fn chain_bytes(&self) -> usize {
-        crate::heap_account::btree_bytes::<u64, (IngestOutcome, Option<u64>)>(
-            self.chains.rows.len(),
-        ) + crate::heap_account::vec_bytes(&self.chains.fold.open)
+        self.chains.rows.allocated_bytes()
+            + crate::heap_account::vec_bytes(&self.chains.fold.open)
             + crate::heap_account::vec_bytes(&self.chain_prefix.open)
     }
 
@@ -911,8 +912,10 @@ const OVER_BATCH: u16 = 1 << 2;
 const AFTER_RESYNC: u16 = 1 << 3;
 /// The row was read out of an lz4 batch ([`PassiveFrame::decompressed`]).
 const DECOMPRESSED: u16 = 1 << 4;
-// Bit 5 is unused: it was the flag for a `SnVerdict::Continuous` row, which the SN
-// class (`SN_SHIFT`) now holds with every other verdict that carries no number.
+/// The row is a fragment with a fate, which [`Index`] keeps in its [`Fates`]. (Bit 5
+/// was the flag for a `SnVerdict::Continuous` row, which the SN class
+/// (`SN_SHIFT`) now holds with every other verdict that carries no number.)
+const FRAGMENT: u16 = 1 << 5;
 /// [`Index::sparse`] holds facts for this row.
 const SPARSE: u16 = 1 << 6;
 /// The row is kept whole, in [`Index::held`]; no other field means anything.
@@ -995,27 +998,105 @@ fn sn_verdict_of(class: u16, gap: Option<SnVerdict>) -> Option<SnVerdict> {
     }
 }
 
-/// The facts few rows have.
+/// The facts few rows have, and that are small.
+///
+/// A fragment's fate is not here: it owns a buffer when its chain completed, and a
+/// slot that has to hold that costs 88 bytes for every row that has a fate, which
+/// was the dearest thing a fragment row cost. See [`Fates`].
 #[derive(Debug, Clone, Default)]
 struct Sparse {
     /// An SN verdict that has a number to keep: a [`SnVerdict::Gap`].
     sn_verdict: Option<SnVerdict>,
-    /// What a `Fragment` came to.
-    #[cfg(feature = "reassembly")]
-    fragment: Option<FragmentFate>,
     /// The resynchronisation a unit's first row carried.
     resync: Option<StreamResync>,
 }
 
 impl Sparse {
     fn has_any(&self) -> bool {
-        #[cfg(feature = "reassembly")]
-        let fragment = self.fragment.is_some();
-        #[cfg(not(feature = "reassembly"))]
-        let fragment = false;
-        self.sn_verdict.is_some() || self.resync.is_some() || fragment
+        self.sn_verdict.is_some() || self.resync.is_some()
     }
 }
+
+/// What a fragment row's fate is, without the buffer a completed chain's carries.
+#[cfg(feature = "reassembly")]
+#[derive(Debug, Clone, Copy)]
+enum FateClass {
+    /// The chain completed here; the joined message is in [`Fates::joined`].
+    Joined,
+    /// The flow had no sequence ring, so the chain could not be followed.
+    WithoutResolution,
+    /// The chain went on, or ended, as the router's outcome says.
+    Pending(IngestOutcome),
+}
+
+/// What a fragment came to, for the rows that are fragments: a class a row (three
+/// bytes and its key), and the joined message of a chain that completed, by row,
+/// in a map of its own because only that fate has a buffer.
+#[cfg(feature = "reassembly")]
+#[derive(Debug, Default)]
+struct Fates {
+    classes: AscendingMap<FateClass>,
+    joined: AscendingMap<Vec<u8>>,
+}
+
+#[cfg(feature = "reassembly")]
+impl Fates {
+    fn insert(&mut self, key: u64, fate: FragmentFate) {
+        match fate {
+            FragmentFate::Joined(bytes) => {
+                self.classes.insert(key, FateClass::Joined);
+                self.joined.insert(key, bytes);
+            }
+            FragmentFate::WithoutResolution => {
+                self.classes.insert(key, FateClass::WithoutResolution);
+            }
+            FragmentFate::Pending(outcome) => {
+                self.classes.insert(key, FateClass::Pending(outcome));
+            }
+        }
+    }
+
+    /// The fate of the row at `key`, the joined message copied.
+    fn get(&self, key: u64) -> Option<FragmentFate> {
+        Some(match *self.classes.get(key)? {
+            FateClass::Joined => {
+                FragmentFate::Joined(self.joined.get(key).cloned().unwrap_or_default())
+            }
+            FateClass::WithoutResolution => FragmentFate::WithoutResolution,
+            FateClass::Pending(outcome) => FragmentFate::Pending(outcome),
+        })
+    }
+
+    /// Take the fate of the row at `key` out.
+    fn remove(&mut self, key: u64) -> Option<FragmentFate> {
+        Some(match self.classes.remove(key)? {
+            FateClass::Joined => FragmentFate::Joined(self.joined.remove(key).unwrap_or_default()),
+            FateClass::WithoutResolution => FragmentFate::WithoutResolution,
+            FateClass::Pending(outcome) => FragmentFate::Pending(outcome),
+        })
+    }
+
+    /// Bytes of the fates' classes, and of the joined messages with the slots that
+    /// hold them.
+    fn bytes(&self) -> (usize, usize) {
+        (
+            self.classes.allocated_bytes(),
+            self.joined.allocated_bytes()
+                + self
+                    .joined
+                    .values()
+                    .map(|bytes| bytes.capacity())
+                    .sum::<usize>(),
+        )
+    }
+}
+
+/// What a fragment came to, as a row's first reading hands it over: the fate when
+/// the build reads fragments, and no value when it does not.
+#[cfg(feature = "reassembly")]
+type Fate = FragmentFate;
+#[cfg(not(feature = "reassembly"))]
+type Fate = core::convert::Infallible;
 
 impl UnitRow {
     /// The row of a message kept whole.
@@ -1077,7 +1158,7 @@ impl UnitRow {
     /// The entry for `frame`, of a unit lying where `locus` says, read in the
     /// context at `context`, and the facts it keeps apart. `frame` passed the
     /// `can_hold` of its locus.
-    fn of(frame: &PassiveFrame, locus: Locus, context: u32) -> (Self, Sparse) {
+    fn of(frame: &PassiveFrame, locus: Locus, context: u32) -> (Self, Sparse, Option<Fate>) {
         let narrow = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
         let facts = MessageFacts::of(frame);
         let (locator, wire_len, mut flags) = match locus {
@@ -1116,10 +1197,15 @@ impl UnitRow {
         if frame.decompressed.is_some() {
             flags |= DECOMPRESSED;
         }
+        #[cfg(feature = "reassembly")]
+        let fate: Option<Fate> = facts.fragment;
+        #[cfg(not(feature = "reassembly"))]
+        let fate: Option<Fate> = None;
+        if fate.is_some() {
+            flags |= FRAGMENT;
+        }
         let mut sparse = Sparse {
             resync: frame.resync,
-            #[cfg(feature = "reassembly")]
-            fragment: facts.fragment,
             ..Sparse::default()
         };
         let (class, gap) = sn_class(facts.sn_verdict);
@@ -1141,7 +1227,7 @@ impl UnitRow {
             kind: kind_of(frame),
             flags,
         };
-        (row, sparse)
+        (row, sparse, fate)
     }
 
     fn direction(&self) -> Direction {
@@ -1207,7 +1293,8 @@ impl UnitRow {
     }
 
     /// What the walk asks of this row when its unit is read again.
-    fn facts(&self, sparse: Option<&Sparse>) -> MessageFacts {
+    #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
+    fn facts(&self, sparse: Option<&Sparse>, fate: Option<Fate>) -> MessageFacts {
         MessageFacts {
             unit_offset: self.unit_offset as usize,
             observed_at_ns: self.observed_at_ns(),
@@ -1216,7 +1303,7 @@ impl UnitRow {
                 sparse.and_then(|s| s.sn_verdict),
             ),
             #[cfg(feature = "reassembly")]
-            fragment: sparse.and_then(|s| s.fragment.clone()),
+            fragment: fate,
         }
     }
 }
@@ -1270,10 +1357,16 @@ impl Index {
         }
         let context = u32::try_from(self.contexts.len() - 1).unwrap_or(u32::MAX);
         for (k, frame) in frames.iter().enumerate() {
-            let (row, sparse) = UnitRow::of(frame, locus, context);
+            let (row, sparse, fate) = UnitRow::of(frame, locus, context);
             if row.flags & SPARSE != 0 {
                 self.sparse.insert(produced + k as u64, sparse);
             }
+            #[cfg(feature = "reassembly")]
+            if let Some(fate) = fate {
+                self.fates.insert(produced + k as u64, fate);
+            }
+            #[cfg(not(feature = "reassembly"))]
+            let _ = fate;
             if let (
                 0,
                 Locus::Logged {
@@ -1337,7 +1430,10 @@ impl Index {
                 if let Some(slot) = self.entries.get_mut(position) {
                     *slot = UnitRow::HELD_ROW;
                 }
-                self.sparse.remove(&key);
+                self.sparse.remove(key);
+                // The frame kept whole carries what the fate says.
+                #[cfg(feature = "reassembly")]
+                let _ = self.fates.remove(key);
                 self.held.insert(key, frame);
                 position += 1;
             }
@@ -1421,12 +1517,18 @@ impl Index {
                 break;
             }
             let sparse = (member.flags & SPARSE != 0)
-                .then(|| self.sparse.get(&(first_produced + (from + at) as u64)))
+                .then(|| self.sparse.get(first_produced + (from + at) as u64))
                 .flatten();
             if messages.is_empty() {
                 resync = sparse.and_then(|s| s.resync);
             }
-            messages.push(member.facts(sparse));
+            #[cfg(feature = "reassembly")]
+            let fate = (member.flags & FRAGMENT != 0)
+                .then(|| self.fates.get(first_produced + (from + at) as u64))
+                .flatten();
+            #[cfg(not(feature = "reassembly"))]
+            let fate: Option<Fate> = None;
+            messages.push(member.facts(sparse, fate));
         }
         let facts = UnitFacts {
             start: self.contexts[row.context as usize],
@@ -1556,7 +1658,11 @@ impl Index {
             Entry::Unit(row) => {
                 let frame = self.read_unit(0, first_produced, source).take(0);
                 let _ = self.entries.pop_front();
-                let sparse = self.sparse.remove(&first_produced);
+                let sparse = self.sparse.remove(first_produced);
+                #[cfg(feature = "reassembly")]
+                let fate = self.fates.remove(first_produced);
+                #[cfg(not(feature = "reassembly"))]
+                let fate: Option<Fate> = None;
                 // The rest of the unit is still held: keep what reading it again
                 // needs of the row going. Otherwise the cut, if any, ends here.
                 let continues = matches!(
@@ -1567,7 +1673,7 @@ impl Index {
                     if self.cut.is_empty() {
                         self.cut_resync = sparse.as_ref().and_then(|s| s.resync);
                     }
-                    self.cut.push(row.facts(sparse.as_ref()));
+                    self.cut.push(row.facts(sparse.as_ref(), fate));
                 } else {
                     self.cut.clear();
                     self.cut_resync = None;
@@ -2451,6 +2557,7 @@ mod tests {
             ("OVER_BATCH", OVER_BATCH),
             ("AFTER_RESYNC", AFTER_RESYNC),
             ("DECOMPRESSED", DECOMPRESSED),
+            ("FRAGMENT", FRAGMENT),
             ("SPARSE", SPARSE),
             ("HELD", HELD),
             ("LOGGED", LOGGED),

@@ -527,19 +527,23 @@ fn is_stream(o: &MessageListOrigin) -> bool {
 /// | scouting            |  57.3  |  41.0  | a SCOUT, a HELLO, a SCOUT with tail  |
 /// | quic datagram       |  60.1  | (none) | recovered plaintext                  |
 /// | quic stream         |  79.1  | (none) | recovered plaintext                  |
-/// | udp fragment chains | 322.6  | 300.6  | two fragments a chain                |
-/// | tcp fragment chains | 366.2  | 341.6  | two fragments a chain                |
+/// | udp fragment chains | 137.6  | 115.7  | two fragments a chain                |
+/// | tcp fragment chains | 181.3  | 156.7  | two fragments a chain                |
 ///
 /// The handshake is a fixed cost and is not in a slope. Each of these includes the
 /// SN verdict class a row carries in its flags: before that class, a capture that
 /// began after the handshake (so no ring to measure a step against) kept every row's
 /// verdict in a map, and udp read 241 and tcp 284.
 ///
-/// A fragment row is the dearest by far, at about 180 bytes in the facts map and
-/// about 60 in the chain map beside it. That is a cost per FRAGMENT, and a fragment
-/// exists because its message did not fit a batch, so on a real capture it is
-/// amortised over a row of hundreds to thousands of bytes; the fixture's are
-/// twelve. It is the largest structure left to pack.
+/// A fragment row costs about 78 bytes beyond a plain row: its fate (a class in a
+/// log, and the joined message in another where its chain completed) and the chain
+/// it belongs to (outcome and identity, in a log of its own). It read 322 and 366
+/// when those were three B-tree maps (an 88-byte slot holding a fate that owned a
+/// buffer, and a node's header around every entry), and reads 138 and 181 as logs
+/// that keep their keys in order and drop their front a chunk at a time. What is
+/// left of it is per FRAGMENT, and a fragment exists because its message did not
+/// fit a batch, so on a real capture it is amortised over a row of hundreds to
+/// thousands of bytes; the fixture's are twelve.
 fn cases() -> Vec<Case> {
     let mut cases = alloc::vec![
         Case {
@@ -628,8 +632,8 @@ fn cases() -> Vec<Case> {
             build: udp_chains,
             lendable: true,
             expect: Expect::List(|o| matches!(o, MessageListOrigin::Datagram)),
-            ceiling: 355.0,
-            ceiling_lent: 331.0,
+            ceiling: 152.0,
+            ceiling_lent: 128.0,
             tolerance: 0.01,
         },
         Case {
@@ -637,8 +641,8 @@ fn cases() -> Vec<Case> {
             build: tcp_chains,
             lendable: true,
             expect: Expect::List(is_stream),
-            ceiling: 403.0,
-            ceiling_lent: 376.0,
+            ceiling: 200.0,
+            ceiling_lent: 173.0,
             tolerance: 0.01,
         },
     ]);
