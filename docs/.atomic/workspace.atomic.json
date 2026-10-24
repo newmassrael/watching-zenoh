@@ -281204,6 +281204,48 @@
         "Next: the engine port (SessionEngine trait for the single-threaded client surface, implemented by the tokio engine; session_state returns the selected engine's session; the modules of capabilities the cooperative engine lacks build with the tokio engine only). The wz-session-core C1bz overrun (501 against 495, capacity.rs) belongs to the session that landed the capacity contract and is reported to it; do not lower the budget over it. Another session builds TlsStream over StreamSocket and will name the LinkProto variant before adding it."
       ]
     },
+    "Round 3493": {
+      "decision_summary": "The fixed-memory profile's secure channel (decision D9) is Mbed TLS on its PSA Crypto line, at the revision the Zephyr workspace pins (4.1.0), and the same revision as a pinned source elsewhere; owner decision of 2026-10-24 on the cost-ignored criterion. The structure: the identity key is generated in the PSA key store and never leaves it; the certificate is self-signed on the device; a peer is accepted by the zid its key derives, not by a chain; every allocation comes from one static arena; and the session sees a stream over a stream, so the stream link is written once. Before any of it is built, the fit was measured on the T2G kit. A new image runs a mutual TLS 1.3 handshake between two in-memory peers, and the kit lane gained measure images, which are held to their own console verdict, to run it.",
+      "changes_bullets": [
+        "deploy/zephyr-tls-fit: the fit image (C over Zephyr's Mbed TLS module): PSA P-256 identities, self-signed certificates, a mutual TLS 1.3 handshake over an in-memory pipe, zid pinning both ways, a wrong-zid refusal round; a user configuration header supplies the X.509 creation core Zephyr's configuration omits beside the certificate writer.",
+        "scripts/kit-lane.sh: measure images (APP, KIND=measure, DONE_TAG), built from their own application, flashed, reset and held to their `<TAG> done ok=1` line with no router; the selftest checks each measure image's application and its done line.",
+        "docs/session-lifecycle-intent.md: D9 records the stack decision, the structure, the kit's figures and what they leave open."
+      ],
+      "verification_bullets": [
+        "T2G kit through the kit lane on pc2: build ok (text 98808, data 192, bss 183260); run ok, the image's verdict line `TLS-FIT done ok=1 rounds=3`. Three rounds of TLS_AES_128_GCM_SHA256 with each side pinning the other; a wrong expected zid refused (client pins, server does not).",
+        "Figures: handshake about 1.76 s per role (M7 at 350 MHz, software P-256 with the NIST curve optimisation); two identities 1.56 s together; arena peak 14,368 B in 95 blocks for both peers with Zephyr's default 1,500 B record lengths; main stack 2,336 B used. The link map of the same build puts Mbed TLS at about 72.7 KB of code and read-only data (crypto 42.4 KB, TLS 18.2 KB, X.509 12.2 KB).",
+        "Local: the kit lane's selftest, zephyr_board_table_gate selftest and no_allocator_link_gate population rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "The 1,500 B records hold only while the peer honours RFC 8449's record size limit: enable the extension and measure what zenohd and zenoh-pico send, or size the receive buffer for 16 KiB records.",
+        "Shorten the handshake: the p256-m driver, then the chip's crypto block as a PSA driver; the kit's runtime cache state was not read in this image.",
+        "Production form still to build: persistent PSA keys, the pin inside the handshake (trusted-certificate callback), the TlsStream over StreamSocket and its locator kind (tell watching-zenoh-11 the spelling first), and a resource row for the fit image."
+      ],
+      "publishable_decision_summary": "The fixed-memory profile's secure channel (decision D9) is Mbed TLS on its PSA Crypto line, at the revision the Zephyr workspace pins (4.1.0), and the same revision as a pinned source elsewhere; owner decision of 2026-10-24 on the cost-ignored criterion. The structure: the identity key is generated in the PSA key store and never leaves it; the certificate is self-signed on the device; a peer is accepted by the zid its key derives, not by a chain; every allocation comes from one static arena; and the session sees a stream over a stream, so the stream link is written once. Before any of it is built, the fit was measured on the T2G kit. A new image runs a mutual TLS 1.3 handshake between two in-memory peers, and the kit lane gained measure images, which are held to their own console verdict, to run it.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-tls-fit: the fit image (C over Zephyr's Mbed TLS module): PSA P-256 identities, self-signed certificates, a mutual TLS 1.3 handshake over an in-memory pipe, zid pinning both ways, a wrong-zid refusal round; a user configuration header supplies the X.509 creation core Zephyr's configuration omits beside the certificate writer.",
+        "scripts/kit-lane.sh: measure images (APP, KIND=measure, DONE_TAG), built from their own application, flashed, reset and held to their `<TAG> done ok=1` line with no router; the selftest checks each measure image's application and its done line.",
+        "docs/session-lifecycle-intent.md: D9 records the stack decision, the structure, the kit's figures and what they leave open."
+      ],
+      "publishable_verification_bullets": [
+        "T2G kit through the kit lane on pc2: build ok (text 98808, data 192, bss 183260); run ok, the image's verdict line `TLS-FIT done ok=1 rounds=3`. Three rounds of TLS_AES_128_GCM_SHA256 with each side pinning the other; a wrong expected zid refused (client pins, server does not).",
+        "Figures: handshake about 1.76 s per role (M7 at 350 MHz, software P-256 with the NIST curve optimisation); two identities 1.56 s together; arena peak 14,368 B in 95 blocks for both peers with Zephyr's default 1,500 B record lengths; main stack 2,336 B used. The link map of the same build puts Mbed TLS at about 72.7 KB of code and read-only data (crypto 42.4 KB, TLS 18.2 KB, X.509 12.2 KB).",
+        "Local: the kit lane's selftest, zephyr_board_table_gate selftest and no_allocator_link_gate population rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The 1,500 B records hold only while the peer honours RFC 8449's record size limit: enable the extension and measure what zenohd and zenoh-pico send, or size the receive buffer for 16 KiB records.",
+        "Shorten the handshake: the p256-m driver, then the chip's crypto block as a PSA driver; the kit's runtime cache state was not read in this image.",
+        "Production form still to build: persistent PSA keys, the pin inside the handshake (trusted-certificate callback), the TlsStream over StreamSocket and its locator kind (tell watching-zenoh-11 the spelling first), and a resource row for the fit image."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
