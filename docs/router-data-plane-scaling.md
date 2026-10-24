@@ -292,9 +292,43 @@ because those runs collapsed.
 
 **Not built, and why it is still wanted.** The quantum bounds the return in proportion to the number
 of faces and inversely to the CPU share, and nothing yet states the share and the number of faces
-below which the bound is promised. What remains of 4.3: keepalive and lease work in an executor of its
+below which the bound is promised. What remained of 4.3 when this was written (the keepalive half of the
+first item is built, 7.3): keepalive and lease work in an executor of its
 own with strict priority over data (a stage measured on a saturated shared runtime put a 100 ms timer
 late by up to 2.4 s, and on a dedicated one-thread runtime by at most 31 ms), a capacity model that
 admits a session only while the control work it adds fits the configured budget, a stated drop policy
 for data with counters on the admin space, and a test that asserts the latest a timer was served
 and not the count of faces that went DOWN.
+
+### 7.3 What the control-plane change adds, measured by taking its parts away (2026-10-24)
+
+The control-plane change of the lifecycle line (ledger 3482) has three parts: keepalive timers on a
+runtime of their own (`ctl`, `WzRuntime::Control`), the keepalive frame sent as an urgent frame that
+passes every lane and is written from the calling thread when the link can
+(`BoxedLinkDriver::send_urgent`), and the keepalive baseline stamped when a write finishes and not when a
+frame is queued. It landed with E7s passing over the loop's yield and no reading of what each part
+adds on its own. Each was switched off alone and in combination on one binary, E7s on four cores of a build host, offered 40000 messages a second, 2048
+subscribers, the router on one core at nice 10 beside N CPU hogs. What is read is the longest silence a
+client session saw from the router, between two receptions on one session, against the 10 s lease, and
+the count of client sessions that ended on their own.
+
+- Up to 16 hogs neither the loop alone nor the whole change ends a session (6, 10 and 16 hogs were run
+  for those two only): the quantum keeps the return of the loop inside the lease. At 3 hogs the longest
+  silence is 3.1 to 3.3 s in all six variants, and no part moves it.
+- At 32 hogs the loop alone ends sessions (0, 2, 2 in three runs; longest silence 9.9 to 10.1 s). Each of
+  `ctl` alone (8.2 to 8.9 s) and the urgent frame alone (8.0 to 9.7 s) ended none, and both together
+  gave 6.9 to 7.9 s and none. The router's own longest silence from its peers, 12 to 14 s here, is the
+  loop's return time and none of them moves it: it is what the capacity model has to state.
+- The write-end stamp alone matched the loop alone (0, 2, 5 sessions ended) and, with the other two,
+  did not beat them. No reading here shows what it adds. The reasoning for it (zenoh's tracker resets
+  after the write) stands, so it is kept; a scenario in which it matters, and a test of it, are not
+  found yet, and until one is its share of the guarantee is not demonstrated.
+
+So `ctl` and the urgent frame are the part that holds a lease past the point where the loop's return
+time alone does not, which for this population is around 32 hogs; beyond that the router's reception of
+its peers is what fails (its longest silence is already past the lease at 24 hogs), and that is a
+capacity question. The share of a core that 32 hogs leave the router is not stated here: the router's
+threads and the hogs are weighted by the scheduler, and no figure was read. Samples are three runs a
+variant on a host whose load was 10 to 30, so the figures show the order of the effect and not its size.
+The measurement is a test now: the E7s test counts the client sessions that ended on their own (the
+client prints `ended (` for one) and asserts none, beside the router's own DOWN count.
