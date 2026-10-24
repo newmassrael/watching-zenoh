@@ -31,7 +31,8 @@ set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../crates" || exit 2
 
-GUARD='needs `secure-channel`'
+# The guard's own words, backticks included: escaped, so the text is data and never a command.
+GUARD="needs \`secure-channel\`"
 fail=0
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
