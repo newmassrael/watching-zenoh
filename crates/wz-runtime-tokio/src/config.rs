@@ -1430,7 +1430,7 @@ impl WzConfig {
     /// the answer can fall while the node runs and never rises above the recorded one.
     pub fn effective_max_sessions(&self) -> wz_session_core::capacity::EffectiveBound {
         #[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
-        let measured = crate::emission_cost::keepalive_emission_cost_median_ns();
+        let measured = crate::emission_cost::keepalive_emission_cost_floor_ns();
         #[cfg(not(all(feature = "transport-unicast", feature = "transport-keepalive")))]
         let measured = None;
         self.effective_max_sessions_under(
@@ -3029,11 +3029,11 @@ mod tests {
         let bound = small.effective_max_sessions_under(RECORDED);
         assert_eq!((bound.limit, bound.limiter), (500, Limiter::Configured));
 
-        // A host whose emissions have a median four times the build host's (5.7 us) admits a
-        // quarter of what the build host does.
-        let slow = RECORDED.calibrated(Some(22_800));
+        // A host whose emissions have a lower decile four times the build host's (4.5 us) admits
+        // a quarter of what the build host does.
+        let slow = RECORDED.calibrated(Some(18_000));
         let bound = declared.effective_max_sessions_under(slow);
-        assert_eq!((bound.limit, bound.limiter), (275, Limiter::Liveness));
+        assert_eq!((bound.limit, bound.limiter), (277, Limiter::Liveness));
     }
 
     /// The bound is computed for the node's own lease when it set one, and for upstream's default

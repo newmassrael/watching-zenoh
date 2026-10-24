@@ -457,18 +457,25 @@ promise about another, so the router now measures the cost on its own host. Ever
 process is timed (`wz-runtime-tokio`, `emission_cost`: the session loop's and the pacer's, one population, the
 last 256 kept), and the first 64 sessions of a process make one on purpose at establishment, so that the
 figure exists within milliseconds and not a third of a lease after the first session (a burst of peers that
-arrives in that time would be admitted on the recorded cost alone). The median of the window is compared
-with the recorded cost after it is given the room the recorded cost has over its own median,
-`MEDIAN_HEADROOM_PERCENT` = 175: the build host reads a median of 5.4 to 5.8 us under 32 hogs (two runs of
-the promise test) and the recorded cost is 10, so a median of 22.8 us on a host four times dearer is bound at
-39.9 us and `N_max` there is 275, with the same room under the loss that 1100 has here. The larger of the two
-is the cost the bound uses: a measurement can only tighten the bound, never loosen it, because a few
-emissions read on a quiet moment are not evidence for a larger promise. The ceiling is worked out at each
-admission (`FaceSources::ceiling`), the router logs the figure and the limit when either moves, and the test
-prints the router's last such line with a failure. Measured on this host: the median reads 5.4 and 5.8 us in
-two runs, the recorded cost stays, 1100 is admitted, no client ended. NOT measured: a host that is dearer; the
-hosted run of this change is the first reading of the calibration where it matters, and the headroom of 175
-is one host's ratio.
+arrives in that time would be admitted on the recorded cost alone). The figure compared is the LOWER DECILE of
+the window, not the median, and that was learned by running it: the first version used the median, and on
+the build host under 32 hogs the median swings between 4 and 19 us with the load of the moment (a duration
+holds how long the thread waited for a core, which the declared share already accounts for), so the router
+admitted 516 to 816 sessions in runs where the recorded cost admits 1100 and the test could not tell a
+calibrating router from a refusing one. The lower decile, what an emission costs when nothing interrupts it,
+reads 3.3 to 5.9 us after the first seconds in the same runs, and is the speed of the host. It is compared
+with the recorded cost after it is given the room the recorded cost has over it, `FLOOR_HEADROOM_PERCENT` =
+220 (10 us against about 4.5), so a lower decile of 18 us on a host four times dearer is bound at 39.6 us and
+`N_max` there is 277, with the same room under the loss that 1100 has here. The larger of the two is the cost
+the bound uses: a measurement can only tighten the bound, never loosen it, because a few emissions read on a
+quiet moment are not evidence for a larger promise. The ceiling is worked out at each admission
+(`FaceSources::ceiling`), the router logs the figure and the limit when either moves, and the test prints
+what the router said with a failure; it waits for every session to be answered, admitted or refused, and
+asserts the router admitted at least a quarter of the recorded number, so a router that refuses where it
+should calibrate fails. Measured: on the build host (pc2) three runs at the lower decile before the room was
+raised to 220, no client ended, no face DOWN; on pc3 (slower, lateness 0.9 to 1.8 s) three runs on the final
+code, the limit sampled between 850 and 1100, no client ended, no face DOWN. NOT measured: a host that is dearer than these; the hosted run of this change is the
+first reading of the calibration where it matters, and the headroom of 220 is one host's ratio.
 
 **What the router does at the number.** One value, the effective `max_sessions`, is the smaller of the
 configured `transport/unicast/max_sessions` (upstream's key, enforced in the accept loop already, default

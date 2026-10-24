@@ -244,8 +244,13 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
                 } else if let Some(late) = keepalive_lateness_ms(&line) {
                     lateness_ms.store(late, Ordering::Relaxed);
                 } else if line.contains("admitting at most") {
-                    if let Ok(mut last) = capacity_line.lock() {
-                        *last = line.clone();
+                    // Each statement, in order: the series is what says whether the limit
+                    // followed the host or the burst.
+                    if let Ok(mut said) = capacity_line.lock() {
+                        if said.lines().count() < 16 {
+                            said.push('\n');
+                            said.push_str(&line);
+                        }
                     }
                 }
             }
@@ -498,16 +503,27 @@ fn measure(scenario: Scenario) -> Window {
     let up_deadline = Instant::now() + Duration::from_secs(60 + subscribers as u64 / 20);
     // Every session, or as many as the declared share lets the router admit and a refusal for each of
     // the rest: the router that says no to the session that does not fit is the behaviour measured.
-    while router.up.load(Ordering::Relaxed) < expected_up
-        || router.refused.load(Ordering::Relaxed) < subscribers - expected_up
-    {
+    // A router told its share measures its own host and may admit fewer than the recorded costs
+    // allow, so there the wait is for every session to have been answered, one way or the other.
+    while if cpu_share.is_some() {
+        router.up.load(Ordering::Relaxed) + router.refused.load(Ordering::Relaxed) < subscribers
+    } else {
+        router.up.load(Ordering::Relaxed) < expected_up
+            || router.refused.load(Ordering::Relaxed) < subscribers - expected_up
+    } {
         assert!(
             Instant::now() < up_deadline,
-            "only {} of {expected_up} sessions came up and {} of {} were refused (went DOWN {})",
+            "only {} of {expected_up} sessions came up and {} of {} were refused (went DOWN {}); \
+             the router said:{}",
             router.up.load(Ordering::Relaxed),
             router.refused.load(Ordering::Relaxed),
             subscribers - expected_up,
             router.down.load(Ordering::Relaxed),
+            router
+                .capacity_line
+                .lock()
+                .map(|said| said.clone())
+                .unwrap_or_default(),
         );
         thread::sleep(Duration::from_millis(200));
     }
@@ -588,9 +604,22 @@ fn measure(scenario: Scenario) -> Window {
             "the router admitted {up} sessions past the {expected_up} its declared share allows"
         );
         assert!(
-            refused >= subscribers - expected_up,
-            "the router refused {refused} of the {} sessions that do not fit",
-            subscribers - expected_up
+            refused >= subscribers - up,
+            "the router refused {refused} of the {} sessions it did not admit",
+            subscribers - up
+        );
+        // The router measures its own host, so on a dearer one it admits fewer than the build
+        // host's costs allow; a router that admits under a quarter of that is not calibrating,
+        // it is refusing.
+        assert!(
+            up >= expected_up / 4,
+            "the router admitted {up} sessions, under a quarter of the {expected_up} the recorded \
+             costs allow; the router said:{}",
+            router
+                .capacity_line
+                .lock()
+                .map(|said| said.clone())
+                .unwrap_or_default()
         );
     }
     if !churn {

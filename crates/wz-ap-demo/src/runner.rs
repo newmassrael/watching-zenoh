@@ -7540,7 +7540,8 @@ async fn run_router_hat_until(
                 // bound. Said once per change, with the cost behind it.
                 {
                     let admitted = host_cfg.borrow().effective_max_sessions();
-                    let cost = wz::runtime_tokio::keepalive_emission_cost_median_ns();
+                    let cost = wz::runtime_tokio::keepalive_emission_cost_floor_ns();
+                    let median = wz::runtime_tokio::keepalive_emission_cost_median_ns();
                     // A median that wobbles by a few percent moves the limit by a few
                     // sessions and the cost by a few nanoseconds; that is not news. The cost
                     // is said when it is first read and when it moves by a tenth, because it
@@ -7554,10 +7555,11 @@ async fn run_router_hat_until(
                     if cost_moved || admitted.limit.abs_diff(last_ceiling) > last_ceiling / 20 {
                         log::info!(
                             "wz-ap-demo router-hat: admitting at most {} sessions ({:?} bound; \
-                             a keepalive emission costs {:?} ns here, median)",
+                             a keepalive emission costs {:?} ns here, lower decile; median {:?})",
                             admitted.limit,
                             admitted.limiter,
-                            cost
+                            cost,
+                            median
                         );
                         last_ceiling = admitted.limit;
                         last_cost_ns = cost;

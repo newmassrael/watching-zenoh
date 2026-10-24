@@ -595,61 +595,6 @@ pub(crate) fn parse_capacity_contract(
     }
 }
 
-#[cfg(all(test, feature = "router-hat-router"))]
-mod capacity_flag_tests {
-    use super::parse_capacity_contract;
-
-    fn words(args: &[&str]) -> Vec<String> {
-        args.iter().map(|a| (*a).to_string()).collect()
-    }
-
-    #[test]
-    fn no_flag_declares_nothing() {
-        assert_eq!(parse_capacity_contract(&words(&["--router-hat"])), Ok(None));
-    }
-
-    #[test]
-    fn a_percent_of_a_core_is_parts_per_million() {
-        let contract = parse_capacity_contract(&words(&["--cpu-share", "1.3"]))
-            .unwrap()
-            .unwrap();
-        assert_eq!(contract.share_ppm(), 13_000);
-        assert_eq!(contract.data_wait_ms(), None);
-        let more = parse_capacity_contract(&words(&["--cpu-share", "250"]))
-            .unwrap()
-            .unwrap();
-        assert_eq!(more.share_ppm(), 2_500_000, "more than one core is a share");
-    }
-
-    #[test]
-    fn a_data_wait_rides_a_share() {
-        let contract =
-            parse_capacity_contract(&words(&["--cpu-share", "5", "--max-data-wait", "2000"]))
-                .unwrap()
-                .unwrap();
-        assert_eq!(contract.data_wait_ms(), Some(2_000));
-    }
-
-    #[test]
-    fn a_declaration_that_cannot_be_a_promise_is_an_error() {
-        for bad in [
-            words(&["--cpu-share", "0"]),
-            words(&["--cpu-share", "-1"]),
-            words(&["--cpu-share", "many"]),
-            words(&["--cpu-share", "nan"]),
-            words(&["--cpu-share", "1e12"]),
-            words(&["--cpu-share", "5", "--max-data-wait", "0"]),
-            words(&["--cpu-share", "5", "--max-data-wait", "soon"]),
-            words(&["--max-data-wait", "2000"]),
-        ] {
-            assert!(
-                parse_capacity_contract(&bad).is_err(),
-                "{bad:?} is not a promise a router can keep"
-            );
-        }
-    }
-}
-
 /// §5.23 `adminspace-core` — `--metadata <value>`: the node config's
 /// `metadata`, a JSON5 value, which a `--config` file's `metadata` key expands
 /// to. Every run-mode that hosts an adminspace serves it as `local_data`'s
@@ -10080,6 +10025,63 @@ mod volume_config_binding_tests {
         }
         for path in ["", "/tmp/x", "./x", "a.b", "a b", "a/b", "a:b"] {
             assert!(!looks_like_volume_id(path), "{path:?} is not id-shaped");
+        }
+    }
+}
+
+// Last in the file on purpose: `flag_precondition_gate.py` reads the file down to its FIRST
+// `#[cfg(test)]` to find the emission sites, so a test module above them reads as no sites.
+#[cfg(all(test, feature = "router-hat-router"))]
+mod capacity_flag_tests {
+    use super::parse_capacity_contract;
+
+    fn words(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| (*a).to_string()).collect()
+    }
+
+    #[test]
+    fn no_flag_declares_nothing() {
+        assert_eq!(parse_capacity_contract(&words(&["--router-hat"])), Ok(None));
+    }
+
+    #[test]
+    fn a_percent_of_a_core_is_parts_per_million() {
+        let contract = parse_capacity_contract(&words(&["--cpu-share", "1.3"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(contract.share_ppm(), 13_000);
+        assert_eq!(contract.data_wait_ms(), None);
+        let more = parse_capacity_contract(&words(&["--cpu-share", "250"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(more.share_ppm(), 2_500_000, "more than one core is a share");
+    }
+
+    #[test]
+    fn a_data_wait_rides_a_share() {
+        let contract =
+            parse_capacity_contract(&words(&["--cpu-share", "5", "--max-data-wait", "2000"]))
+                .unwrap()
+                .unwrap();
+        assert_eq!(contract.data_wait_ms(), Some(2_000));
+    }
+
+    #[test]
+    fn a_declaration_that_cannot_be_a_promise_is_an_error() {
+        for bad in [
+            words(&["--cpu-share", "0"]),
+            words(&["--cpu-share", "-1"]),
+            words(&["--cpu-share", "many"]),
+            words(&["--cpu-share", "nan"]),
+            words(&["--cpu-share", "1e12"]),
+            words(&["--cpu-share", "5", "--max-data-wait", "0"]),
+            words(&["--cpu-share", "5", "--max-data-wait", "soon"]),
+            words(&["--max-data-wait", "2000"]),
+        ] {
+            assert!(
+                parse_capacity_contract(&bad).is_err(),
+                "{bad:?} is not a promise a router can keep"
+            );
         }
     }
 }

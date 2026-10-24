@@ -90,14 +90,20 @@ impl ControlModel {
     /// cost, because a figure read from a few emissions on a quiet moment is not evidence for a
     /// larger promise. The measurement can therefore only tighten the bound, never loosen it.
     ///
-    /// `measured_median_ns` is the MEDIAN of the node's emissions, and the recorded cost is not a
-    /// median: it carries the room the bound keeps under the loss
-    /// ([`MEDIAN_HEADROOM_PERCENT`]). The measurement gets the same room before it is compared, so
-    /// that a host four times dearer is bound four times tighter and not to the edge of the loss.
-    pub const fn calibrated(self, measured_median_ns: Option<u64>) -> Self {
-        let emission_ns = match measured_median_ns {
-            Some(median) => {
-                let with_room = median.saturating_mul(MEDIAN_HEADROOM_PERCENT) / 100;
+    /// `measured_floor_ns` is the LOWER DECILE of the node's emission durations: what one costs
+    /// when nothing interrupts it, which is the speed of the host. The median and the upper
+    /// deciles also carry how long the thread waited for a core, and that is the declared share's
+    /// business and is already in the bound, so a measurement that carried it would count it
+    /// twice (on the build host the median swings between 4 and 12 us with the load of the
+    /// moment, the lower decile between 3 and 6 after the first seconds). The recorded cost is not
+    /// a floor either: it carries the room the bound keeps under the loss
+    /// ([`FLOOR_HEADROOM_PERCENT`]), and the measurement gets the same room before the two are
+    /// compared, so that a host four times dearer is bound four times tighter and not to the edge
+    /// of the loss.
+    pub const fn calibrated(self, measured_floor_ns: Option<u64>) -> Self {
+        let emission_ns = match measured_floor_ns {
+            Some(floor) => {
+                let with_room = floor.saturating_mul(FLOOR_HEADROOM_PERCENT) / 100;
                 if with_room > self.emission_ns {
                     with_room
                 } else {
@@ -130,12 +136,14 @@ impl ControlModel {
 /// section 7.4.
 pub const RECORDED_HOST_MODEL: ControlModel = ControlModel::new(10_000, 11_000, 4);
 
-/// The room [`RECORDED_HOST_MODEL`]'s emission cost has over the median of the emissions it stands
-/// for, in percent: 10 us against the 5.4 to 5.8 us median that `wz-runtime-tokio`'s emission meter
-/// reads on the build host under 32 hogs (two runs of the promise test), 1.75 times. It is what
-/// keeps the bound at 0.72 of the largest population that lost no client; a cost measured on
-/// another host is a median too and takes the same room ([`ControlModel::calibrated`]).
-pub const MEDIAN_HEADROOM_PERCENT: u64 = 175;
+/// The room [`RECORDED_HOST_MODEL`]'s emission cost has over the lower decile of the emissions it
+/// stands for, in percent: 10 us against the 4.5 us that `wz-runtime-tokio`'s emission meter reads
+/// on the build host under 32 hogs once the first seconds are over (3.3 to 5.7 us in three runs of
+/// the promise test; the first reading of a run, with cold caches and the handshakes in progress,
+/// is 5.7 to 8.5), 2.2 times. It is what keeps the bound at 0.72 of the largest population that
+/// lost no client; a cost measured on another host is a lower decile too and takes the same room
+/// ([`ControlModel::calibrated`]).
+pub const FLOOR_HEADROOM_PERCENT: u64 = 220;
 
 /// What an operator declares about the CPU a node may count on, and how stale a frame may get.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,14 +362,14 @@ mod tests {
 
     #[test]
     fn a_dearer_measured_emission_tightens_the_bound_and_a_cheaper_one_does_not_loosen_it() {
-        // A host four times dearer than the build host's 5.7 us median holds a quarter of what
-        // the recorded model admits there, with the same room under the loss: 22.8 us measured
-        // is 39.9 us bound, and 0.0132 * 10 s / (3 * 4 * 39.9 us) = 275.
-        let slow = MEASURED.calibrated(Some(22_800));
-        assert_eq!(slow.emission_ns, 39_900);
-        assert_eq!(liveness_bound(SHARE_32_HOGS, LEASE_MS, slow), 275);
-        // The build host's own medians keep the recorded cost: its room is already in it.
-        assert_eq!(MEASURED.calibrated(Some(5_700)), MEASURED);
+        // A host four times dearer than the build host's 4.5 us lower decile holds a quarter of
+        // what the recorded model admits there, with the same room under the loss: 18 us measured
+        // is 39.6 us bound, and 0.0132 * 10 s / (3 * 4 * 39.6 us) = 277.
+        let slow = MEASURED.calibrated(Some(18_000));
+        assert_eq!(slow.emission_ns, 39_600);
+        assert_eq!(liveness_bound(SHARE_32_HOGS, LEASE_MS, slow), 277);
+        // The build host's own floor keeps the recorded cost: its room is already in it.
+        assert_eq!(MEASURED.calibrated(Some(4_500)), MEASURED);
         // A quiet moment's cheap emissions are not a reason to promise more.
         assert_eq!(MEASURED.calibrated(Some(4_500)), MEASURED);
         // No measurement yet: the recorded model.

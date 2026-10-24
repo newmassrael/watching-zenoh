@@ -13,12 +13,16 @@
 //! Every emission of the process, from the session loop or from the pacer, is timed by
 //! [`check_keepalive_timed`], which keeps the last [`WINDOW`] durations, and the first sessions
 //! of a process make one on purpose ([`calibrate_on_establishment`]) so that the figure exists
-//! before the first one falls due. [`keepalive_emission_cost_median_ns`] is their median once
-//! [`MIN_SAMPLES`] have been taken, and `None` before, so a node that has emitted nothing yet is
-//! bounded by the recorded model alone. The capacity model gives a median the room the recorded
-//! cost has over its own median ([`wz_session_core::capacity::MEDIAN_HEADROOM_PERCENT`]) before
-//! it compares them, and a window rather than a running mean keeps a burst of preempted emissions
-//! from fixing the figure for the process's life.
+//! before the first one falls due. [`keepalive_emission_cost_floor_ns`] is the lower decile of
+//! them once [`MIN_SAMPLES`] have been taken, and `None` before, so a node that has emitted
+//! nothing yet is bounded by the recorded model alone. It is the lower decile and not the median
+//! because a duration also holds how long the thread waited for a core, which the declared share
+//! already accounts for: on the build host under 32 hogs the median swings between 4 and 12 us
+//! with the load of the moment and the lower decile stays within 3 and 6 after the first seconds.
+//! The capacity model gives the floor the room the recorded cost has over its own floor
+//! ([`wz_session_core::capacity::FLOOR_HEADROOM_PERCENT`]) before it compares them, and a window
+//! rather than a running mean keeps a burst of preempted emissions from fixing the figure for the
+//! process's life.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -60,10 +64,10 @@ impl Meter {
         self.ring[slot].store(ns, Ordering::Relaxed);
     }
 
-    /// The median of the window, or `None` while fewer than [`MIN_SAMPLES`] were recorded. A slot
-    /// being overwritten while this reads gives either its old or its new duration, and both are
-    /// real emissions.
-    fn median_ns(&self) -> Option<u64> {
+    /// The duration `per_mille` thousandths of the way up the sorted window (500 is the median),
+    /// or `None` while fewer than [`MIN_SAMPLES`] were recorded. A slot being overwritten while
+    /// this reads gives either its old or its new duration, and both are real emissions.
+    fn percentile_ns(&self, per_mille: usize) -> Option<u64> {
         let held = self.written.load(Ordering::Relaxed).min(WINDOW);
         if held < MIN_SAMPLES {
             return None;
@@ -73,7 +77,16 @@ impl Meter {
             .map(|slot| slot.load(Ordering::Relaxed))
             .collect();
         seen.sort_unstable();
-        seen.get(held / 2).copied()
+        seen.get(held * per_mille / 1000).copied()
+    }
+
+    fn median_ns(&self) -> Option<u64> {
+        self.percentile_ns(500)
+    }
+
+    /// The lower decile: what an emission costs when nothing interrupts it.
+    fn floor_ns(&self) -> Option<u64> {
+        self.percentile_ns(100)
     }
 }
 
@@ -113,11 +126,17 @@ pub(crate) fn check_keepalive_timed(
 }
 
 /// The median cost of one keepalive emission of this process, in nanoseconds, over its latest
-/// [`WINDOW`] emissions; `None` until [`MIN_SAMPLES`] were taken. Read by the capacity bound
-/// ([`crate::config::WzConfig::effective_max_sessions`]) and by an operator who wants to see what
-/// the host charges.
+/// 256 emissions; `None` until 64 were taken. For an operator who wants to see what the host
+/// charges; the capacity bound reads [`keepalive_emission_cost_floor_ns`].
 pub fn keepalive_emission_cost_median_ns() -> Option<u64> {
     METER.median_ns()
+}
+
+/// The lower decile of the same window, in nanoseconds: what one emission costs when nothing
+/// interrupts it. Read by the capacity bound
+/// ([`crate::config::WzConfig::effective_max_sessions`]).
+pub fn keepalive_emission_cost_floor_ns() -> Option<u64> {
+    METER.floor_ns()
 }
 
 #[cfg(test)]
@@ -148,6 +167,21 @@ mod tests {
             !meter.wants_samples(),
             "from here emissions are timed as they fall due"
         );
+    }
+
+    #[test]
+    fn the_floor_is_the_speed_of_the_host_while_the_median_follows_its_load() {
+        let meter = Meter::new();
+        // A host that spends most of its emissions waiting for a core: 4 us when nothing
+        // interrupts one, 20 us in the majority that something does.
+        for _ in 0..60 {
+            meter.record(4_000);
+        }
+        for _ in 0..196 {
+            meter.record(20_000);
+        }
+        assert_eq!(meter.floor_ns(), Some(4_000));
+        assert_eq!(meter.median_ns(), Some(20_000));
     }
 
     #[test]
