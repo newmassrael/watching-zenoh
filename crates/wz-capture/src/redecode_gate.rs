@@ -456,6 +456,71 @@ fn the_serial_lines_entries_read_as_the_reference() {
     );
 }
 
+/// Open-debt item 924, step 4c (3) — THE RECOVERED RFC 9221 DATAGRAMS, whose
+/// plaintext exists only in the call that hands it in, are logged by their list
+/// and read again from there: the list reads as the reading that kept them
+/// whole, and every message's bytes are the plaintext from the message's first
+/// byte to the end of its datagram, where the capture's packet holds only
+/// ciphertext.
+#[test]
+fn recovered_quic_datagrams_read_again_from_their_logged_plaintext() {
+    use crate::datagram_tests::{frame_carrying, push, sender_space, udp_packet};
+    const LINKTYPE_ETHERNET: u32 = 1;
+    let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+    let opening = udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, &keepalive);
+    let plaintexts: Vec<Vec<u8>> = (0..30u8)
+        .map(|k| {
+            let mut unit: Vec<u8> = keepalive.repeat(usize::from(k % 3));
+            unit.extend_from_slice(&frame_carrying(&push(
+                sender_space(0, Some("quic/dg")),
+                &[k; 7],
+            )));
+            unit
+        })
+        .collect();
+    let read = |whole: bool| {
+        let mut d = Dissection::new();
+        if whole {
+            d.keep_messages_whole();
+        }
+        d.push_packet(LINKTYPE_ETHERNET, 0, &opening);
+        let flow = d.datagram_flows()[0].flow;
+        for (k, plaintext) in plaintexts.iter().enumerate() {
+            let direction = if k % 4 == 3 {
+                Direction::B
+            } else {
+                Direction::A
+            };
+            d.feed_quic_datagram(flow, direction, k + 1, plaintext);
+        }
+        d.finish();
+        (d, flow)
+    };
+    let ((indexed, flow), (whole, _)) = (read(false), read(true));
+    let read_from_bytes = assert_reads_as_whole("quic datagrams", &indexed, &whole);
+    let held = indexed.datagram_flows()[0].quic_datagrams().len();
+    assert!(held > 50, "{held} recovered messages prove little");
+    assert!(
+        read_from_bytes >= held,
+        "every recovered message is an entry"
+    );
+    for (index, row) in indexed.datagram_flows()[0]
+        .quic_datagrams()
+        .iter()
+        .enumerate()
+    {
+        let plaintext = &plaintexts[row.stream_offset - 1];
+        match indexed.message_bytes_at(flow, crate::MessageListOrigin::QuicDatagram, index) {
+            crate::MessageBytes::Retained(bytes) => assert_eq!(
+                &bytes[..],
+                &plaintext[row.unit_offset..row.unit_len],
+                "message {index}"
+            ),
+            other => panic!("message {index}: {other:?}"),
+        }
+    }
+}
+
 /// Open-debt item 924, step 4c — A LENT DATAGRAM IS READ WHERE IT SITS: a
 /// dissection lent a capture of UDP datagrams logs no copy of their payloads,
 /// so a flow whose container is taken away has nothing to read a row from. A

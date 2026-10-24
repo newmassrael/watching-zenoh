@@ -1389,9 +1389,11 @@ pub enum NoByteSource {
     /// bytes: the packet it pushed is the one that carried the message, and
     /// `unit_offset` says where inside it the message stands.
     ///
-    /// This reader keeps no copy of a pushed packet on purpose. Holding one per
-    /// message would double what a live tap retains, in order to hand back
-    /// bytes the caller has not let go of.
+    /// The bytes' home is the caller's packet, so this door names it rather
+    /// than handing back a copy. A list that keeps its messages as entries does
+    /// keep each datagram's payload once (or its place in a container it is
+    /// lent) to read the messages again (open-debt item 924, D8); that copy is
+    /// the list's means of reading, not a second answer to where the bytes are.
     CallerHoldsThePacket,
     /// A stream RECOVERED from inside an encrypted transport. Those bytes were
     /// never on the wire in that form — they were decrypted and reassembled by
@@ -3628,14 +3630,34 @@ impl FlowDissection {
     }
 }
 
-/// The answer for a serial message whose unit is shorter than the message's own
-/// coordinates say, which no message the line decoded can be.
-fn serial_unit_short(frame: &PassiveFrame, held: usize) -> MessageBytes<'static> {
-    MessageBytes::Retired(alloc::format!(
-        "this message stands {} byte(s) into a unit of {} and the frame holds {held}",
-        frame.unit_offset,
-        frame.unit_len,
-    ))
+/// Open-debt item 924, D8 — the bytes of the message at `index` of a list that
+/// logs its datagram units: the slice `FlowDissection::message_bytes` takes for a
+/// stream, with the unit being the logged payload, from the message's first byte
+/// (`unit_offset`; a datagram unit has no length prefix) to the end of the unit.
+/// `None` for a message the list does not keep as an entry, and past the end.
+fn logged_message_bytes(
+    messages: messages::Messages<'_>,
+    index: usize,
+) -> Option<MessageBytes<'_>> {
+    let (payload, frame) = (messages.unit_bytes(index)?, messages.get(index)?);
+    let span = frame.unit_offset..frame.unit_len;
+    let short = |held: usize| {
+        MessageBytes::Retired(alloc::format!(
+            "this message stands {} byte(s) into a unit of {} and the payload holds {held}",
+            frame.unit_offset,
+            frame.unit_len,
+        ))
+    };
+    Some(match payload {
+        alloc::borrow::Cow::Borrowed(payload) => match payload.get(span) {
+            Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Borrowed(bytes)),
+            None => short(payload.len()),
+        },
+        alloc::borrow::Cow::Owned(payload) => match payload.get(span) {
+            Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Owned(bytes.to_vec())),
+            None => short(payload.len()),
+        },
+    })
 }
 
 /// What the serial line keeps beside each message it decoded: the envelope of
@@ -6418,50 +6440,49 @@ impl Dissection {
                     None => MessageBytes::NoSource(NoByteSource::CallerHoldsThePacket),
                 }
             }
+            // A RECOVERED datagram's packet holds QUIC ciphertext, so the
+            // caller does not hold these bytes: the plaintext existed only in
+            // the call that handed it in, and the list logged it there (open-debt
+            // item 924, D8). Its message's bytes are read from that log.
             MessageListOrigin::QuicDatagram => {
-                MessageBytes::NoSource(NoByteSource::CallerHoldsThePacket)
+                let Some(dg) = self.datagram_flows.iter().find(|f| f.flow == flow) else {
+                    return MessageBytes::Retired(alloc::string::String::from(
+                        "the flow this message came out of is no longer held",
+                    ));
+                };
+                let messages = dg.quic_datagrams();
+                let own = messages
+                    .get(index)
+                    .and_then(|frame| frame.decompressed.clone());
+                match own {
+                    Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Owned(bytes)),
+                    None => logged_message_bytes(messages, index).unwrap_or_else(|| {
+                        MessageBytes::Retired(alloc::string::String::from(
+                            "this message is no longer in its flow's recovered datagrams",
+                        ))
+                    }),
+                }
             }
             MessageListOrigin::QuicStream(_) => {
                 MessageBytes::NoSource(NoByteSource::RecoveredPlaintextNotRetained)
             }
-            // The serial line is the one producer whose bytes are retained
-            // WHOLE rather than as a stream: a serial link is datagram-flowed
+            // The serial line's bytes are retained per FRAME rather than as a
+            // stream: a serial link is datagram-flowed
             // (`vendor/zenoh-pico/src/link/unicast/serial.c:67-68`), so one
-            // COBS frame carries one framing unit and this reader keeps it
-            // beside the message it decoded (`serial_origins`). The two lists
-            // are appended together in `decode_pending_serial` and nowhere
-            // else, which is what makes the index correspondence an invariant
-            // rather than a convention.
+            // COBS frame carries one framing unit, and the line's list logs its
+            // payload once and reads its messages again from it (open-debt item
+            // 924, D8); the frame's envelope stands beside each message in
+            // `serial_origins`, appended with it in `decode_pending_serial` and
+            // nowhere else.
             MessageListOrigin::Serial => {
                 // The frame's payload is the message's unit, which the list
                 // logged when it kept the message as an entry (open-debt item
                 // 924, D8).
-                let messages = self.serial_frames();
-                let (Some(payload), Some(frame)) =
-                    (messages.unit_bytes(index), messages.get(index))
-                else {
-                    return MessageBytes::Retired(alloc::string::String::from(
+                logged_message_bytes(self.serial_frames(), index).unwrap_or_else(|| {
+                    MessageBytes::Retired(alloc::string::String::from(
                         "this message is no longer in the serial line's list",
-                    ));
-                };
-                // The same slice `message_bytes` takes for a stream, with the
-                // unit being the frame's payload: from this message's first
-                // byte to the end of the unit. `prefix_width` is zero on this
-                // path -- a serial frame has no length prefix inside it -- so
-                // the message begins at `unit_offset`.
-                let span = frame.unit_offset..frame.unit_len;
-                match payload {
-                    alloc::borrow::Cow::Borrowed(payload) => match payload.get(span) {
-                        Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Borrowed(bytes)),
-                        None => serial_unit_short(&frame, payload.len()),
-                    },
-                    alloc::borrow::Cow::Owned(payload) => match payload.get(span) {
-                        Some(bytes) => {
-                            MessageBytes::Retained(alloc::borrow::Cow::Owned(bytes.to_vec()))
-                        }
-                        None => serial_unit_short(&frame, payload.len()),
-                    },
-                }
+                    ))
+                })
             }
         }
     }
@@ -6973,16 +6994,26 @@ impl Dissection {
         // `Absent` is the multicast-capability answer -- UDP multicast and
         // pico's raweth -- and claiming it here would have this reader discard
         // the very exchange that names the peers.
-        let batch = dg.session.next_datagram_on(
-            direction,
-            bytes,
-            packet_index,
-            wz_session_core::passive::LinkHandshake::Present,
-        );
-        feed.messages += batch.len();
+        let handshake = wz_session_core::passive::LinkHandshake::Present;
         let before = dg.quic_datagrams.len();
-        dg.ingest.observe_frames(&batch);
-        dg.quic_datagrams.append(batch);
+        if let Some(unit) =
+            dg.session
+                .next_datagram_unit_on(direction, bytes, packet_index, handshake)
+        {
+            feed.messages += unit.frames.len();
+            dg.ingest.observe_frames(&unit.frames);
+            match dg.keep {
+                // Open-debt item 924, step 4c — the recovered plaintext exists
+                // only in this call, so the list logs a copy of it, the smallest
+                // form of these bytes a dissection can own, and reads the
+                // messages again from there.
+                Keep::Entries => dg
+                    .quic_datagrams
+                    .push_datagram(unit, bytes, None, handshake),
+                #[cfg(test)]
+                Keep::Whole => dg.quic_datagrams.append(unit.frames),
+            }
+        }
         // OFFERED with the payload still in hand, which is the only moment it
         // exists: the capture packet this came out of holds the QUIC
         // ciphertext, so a later walk of the file cannot recover it.
@@ -19558,7 +19589,8 @@ mod tls_flow_tests {
 
         // 3 and 4 — the two RECOVERED lists. Fed rather than pushed, because
         // this crate carries no cipher: what a caller hands in is the plaintext
-        // it decrypted, which is precisely why those bytes are not retained.
+        // it decrypted, which exists only in the call. The datagram list logs a
+        // copy of it (D8); the stream list does not keep it yet.
         // The stream id is not the one `next_origin` names, so the arm is
         // reached with a value the chain never mentions. TWO units, so this
         // list's second anchor is a byte offset that no packet index reaches.
