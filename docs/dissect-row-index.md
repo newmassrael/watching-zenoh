@@ -203,11 +203,45 @@ resumable memories already exist (`CensusMemory`, `FieldsMemory`,
 `SelectionMemories`), so a walk from the start happens only where it happens
 today.
 
-### D7. A memory gate
+### D7. A handle reports what it holds, and a gate holds the report to the allocator
 
-A gate opens the generator's capture through the C ABI and fails when the
-handle's heap per row, after replay, exceeds a ceiling set from the measured
-value with stated slack. It is what keeps the structure from drifting back.
+A gate that reads one total from the allocator can say that a handle grew and
+not which structure did, and a consumer that budgets by what a handle holds has
+nothing to read. So the structure is three things, each answering a different
+question.
+
+- THE REPORT. A handle says what it holds that follows its row count, by
+  structure: `wz_dissect_live_memory`, the `memory` document. Every value is a
+  number of bytes allocated, in groups named for the structure that holds them
+  (the lists' entries, their logged bytes, the facts few rows have, the TCP run
+  maps, what the census and the field walk keep for the next call). A buffer is
+  counted by its capacity, which is exact; a B-tree map by a model checked
+  against the allocator (`wz-session-core`'s `btree_model` test, within 3% at
+  three sizes and three entry shapes). A new structure is a new key and not a
+  new symbol, which is why it is a document and not a fixed record. The report
+  names the structures that follow rows; what is fixed, or follows the count of
+  distinct things, is not in it, and it says so (`scope`).
+- THE ORACLE. The allocator is the one reading that is not the report, so the
+  gate compares the two. A report that omits a structure growing with the rows
+  is a difference there, and the failure prints which allocation sizes grew
+  between the two captures: a size names its structure (a B-tree leaf of one
+  map, a record's ciphertext of one length), which is how each unreported
+  structure of this step was found.
+- THE POPULATION. The matrix reads every kind of message list (TCP, UDP,
+  serial, WebSocket, TLS, scouting, both QUIC kinds, fragment chains), handed
+  and lent where the door differs, and the case list is derived: an exhaustive
+  `match` over `MessageListOrigin` fails to compile when a kind has no case.
+  Two sizes are read and the slope between them is judged, so what is fixed is
+  not charged to a row. Each kind has a ceiling (the measured value plus 10%)
+  and a tolerance for the report (1%; TLS 4%, a residual this step did not
+  attribute and states on its case).
+
+What a row costs is read off the kinds, not argued: 49 to 130 bytes after the
+replay on the two transports the C gate reads (UDP and TCP, handed and lent),
+and 41 to 181 across every kind after every read a consumer makes. The cost per
+row of one kind does not change with the size of the capture, and a structure
+that does (the TLS flow's kept encrypted records, bounded per flow and not per
+row) is named as such.
 
 ### D8. Every list reads its units from a byte source; a datagram list's is a unit log
 
@@ -496,7 +530,31 @@ from. So the order is now:
   whose datagram holds more than the message, handed and lent, plain and under
   message ceilings, against decoding each packet's payload; a discard that keeps
   the copy fails it, and so does a lent payload copied.
-- 5. The memory gate.
+- 5. The memory gate (D7).
+  Landed (5): the report, the oracle and the matrix, and what they found.
+  Four structures cost a row more than its entry and were not reported, and each
+  was shrunk where it was found and not argued down. What the selector said of
+  each row (about 100 bytes a row as a map entry with its own vector) is a
+  coordinate and the number of an interned answer pattern, 12 bytes
+  (`verdict_column`). The field walk's digest of each row it wrote (about 49
+  bytes, a map entry) is one word at the row's number (`digest_column`), and the
+  selection door's word per row (about 40) is a nibble (`word_column`). A frame's
+  sequence verdict, which every row of a capture that began after the handshake
+  has (there is no ring to measure a step against), was a map entry at about 180
+  bytes and is a class in the row's flags; only a `Gap`, which has a number,
+  keeps one. Last, the facts few rows have and the chain facts were B-tree maps,
+  which hold seven entries of an eleven-slot node and a header around each node:
+  they are `AscendingMap`s now, a chunked log with a bisected key (the keys
+  arrive in order and leave from the front, which is what `ChunkLog` already is
+  for the rows), and a fragment's fate is a class there with the joined message
+  in a log of its own, because only that fate owns a buffer. A fragment row went
+  from 323 and 366 bytes to 138 and 181. Every redecode gate passes unchanged
+  over all of it, and the report agrees with the allocator to 0.2% for every kind
+  but TLS.
+  Not done, and named: the TLS flow's kept encrypted records duplicate bytes the
+  TCP stream holds and could be read from it, but the record type is public and
+  the opener trait in another crate reads its bytes, so it is a change across a
+  crate boundary and is reported (bounded, 4096 a direction) and not touched.
 - 6. Random access to a row's field document (D9), taken before 4c's remaining
   landings because it is what the consumer's budget waits on: (a) the tables
   that do not depend on a window survive a walk that begins again; (b) the
