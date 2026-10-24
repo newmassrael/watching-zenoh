@@ -78,6 +78,7 @@ members = [
     "wz-zenoh-keyexpr",
     "wz-zenoh-macros",
     "wz-zenoh-collections",
+    "wz-zenoh-buffers",
     # R311y578 (G1) — pcap ingest + link/IP/TCP decapsulation + TCP flow
     # reassembly, feeding `wz_session_core::passive`. Knows nothing about
     # zenoh; the seam is a byte stream plus a direction, so a live tap can

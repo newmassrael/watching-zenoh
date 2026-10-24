@@ -285,7 +285,7 @@ pinned revision for the generation-time policy.
 ## crates/wz-zenoh-* — the zenoh family's public API, reproduced
 
 - **Origin**: https://github.com/eclipse-zenoh/zenoh, tag `1.10.1` (the crates `zenoh-result`,
-  `zenoh-runtime`, `zenoh-core`, `zenoh-keyexpr`, `zenoh-macros`, `zenoh-collections` and those that follow them).
+  `zenoh-runtime`, `zenoh-core`, `zenoh-keyexpr`, `zenoh-macros`, `zenoh-collections`, `zenoh-buffers` and those that follow them).
 - **License of the origin**: EPL-2.0 OR Apache-2.0.
 - **What is reproduced**: the public API of each crate, which a drop-in has to equal: item names,
   signatures, trait implementations, the text and expansion of the exported macros (a crate that

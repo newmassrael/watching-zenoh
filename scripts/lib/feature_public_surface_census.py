@@ -309,6 +309,16 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "rather than to this sentence",
         frozenset({"internal", "unstable"}),
     ),
+    # R3525 -- the second family member with features of its own.
+    "zenoh-buffers": (
+        "a crate of the zenoh compatibility family: `shared-memory` is an arm of upstream's own "
+        "public surface that `scripts/lib/rust_api_surface.py` emits the wz crate with and holds "
+        "it to (it adds the kind a slice carries). The `test` feature, whose doc-hidden random "
+        "constructors sit in a gated `impl` and so attach to no public item the census reads, "
+        "is held as an arm there too. Held to `FAMILY_GRADED` below rather than to this "
+        "sentence",
+        frozenset({"shared-memory"}),
+    ),
     "wz-capi-core": (
         "the ABI-neutral session model: a workspace-internal rlib whose only "
         "consumers are the two C ABI crates, and the one of them that turns the "
@@ -1095,6 +1105,7 @@ def axis_reachable_crate(pkg: str) -> str | None:
 # whose surfaces are not split per arm, or a row the table covers only part of.
 FAMILY_GRADED: dict[str, frozenset[str]] = {
     "zenoh-keyexpr": frozenset({"internal", "unstable"}),
+    "zenoh-buffers": frozenset({"shared-memory"}),
 }
 
 #: The manifest of the differential workspace, whose dependency line names the features the wz

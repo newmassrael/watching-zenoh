@@ -2784,7 +2784,10 @@ PIN_NO_SYMBOL = 0
 # R3517 -- 26 -> 27, one atom. `api-compat-rust`'s reason gains the collections crate and cites
 # the test that holds its containers to upstream's. READ off the census's own FAIL line, `wz
 # citations: 27 against a pin of 26`.
-PIN_WZ_CITATIONS = 27
+# R3525 -- 27 -> 28, one atom. `api-compat-rust`'s reason gains the buffers crate and cites the
+# test that holds its readers and writers to upstream's. READ off the census's own FAIL line,
+# `wz citations: 28 against a pin of 27`.
+PIN_WZ_CITATIONS = 28
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

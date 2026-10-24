@@ -571,6 +571,8 @@ dependencies = [
  "token-cell",
  "tokio",
  "tracing",
+ "zenoh-buffers 1.10.1",
+ "zenoh-buffers 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-collections 1.10.1",
  "zenoh-collections 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-core 1.10.1",
@@ -581,6 +583,22 @@ dependencies = [
  "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-runtime 1.10.1",
  "zenoh-runtime 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "zenoh-buffers"
+version = "1.10.1"
+dependencies = [
+ "zenoh-collections 1.10.1",
+]
+
+[[package]]
+name = "zenoh-buffers"
+version = "1.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "555a8169c9888fc5571f1b38d2843a63db786621e153abad1b075c40b20e83b4"
+dependencies = [
+ "zenoh-collections 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]
