@@ -1771,7 +1771,7 @@ jobs:
         # history". That is true of C1cn; it is FALSE of Layer C0, which moved
         # here in the same round. `scripts/lib/reason_citation_gate.py` builds
         # its "ever" index from
-        # `git log --all --pretty=format: --name-only --diff-filter=ADR`
+        # `git log HEAD --pretty=format: --name-only --diff-filter=ADR`
         # to tell a path wz DELETED from one wz NEVER HAD, and on a depth-1
         # clone that index holds only files that still exist.
         #

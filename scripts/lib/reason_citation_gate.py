@@ -169,14 +169,32 @@ def git_paths(args: list[str]) -> list[str]:
     ).stdout.split()
 
 
+# Trees of other projects' code kept in this repository (`third-party/`, copies a platform
+# build carries). A citation into one is upstream's, as one into the upstream checkout is, so
+# its paths are neither wz's code now nor wz's code dropped.
+FOREIGN_TREES = ("third-party/",)
+
+
+def wz_paths(paths: list[str]) -> list[str]:
+    return [p for p in paths if not p.startswith(FOREIGN_TREES)]
+
+
 def audit() -> tuple[list[str], dict[str, int]]:
     rows = inventory()
-    now = suffix_index(git_paths(["ls-files"]))
-    # Every path this history has ever ADDED, DELETED or RENAMED. A citation
-    # whose path is here but not in `now` is one wz used to carry and dropped;
-    # a path in neither is upstream's, cited correctly.
+    now = suffix_index(wz_paths(git_paths(["ls-files"])))
+    # Every path the history of the tree being graded has ever ADDED, DELETED or
+    # RENAMED. A citation whose path is here but not in `now` is one wz used to
+    # carry and dropped; a path in neither is upstream's, cited correctly.
+    #
+    # HEAD's history and not `--all`: the other refs of a clone are not this tree's
+    # past. On a machine where several sessions share one repository they include
+    # every session's unpushed branch and stash, and a file one of them added (a
+    # vendored copy, a crate's first slice) turned a correct upstream citation red
+    # on every other session's push, by what that machine happened to hold.
     ever = suffix_index(
-        git_paths(["log", "--all", "--pretty=format:", "--name-only", "--diff-filter=ADR"])
+        wz_paths(
+            git_paths(["log", "HEAD", "--pretty=format:", "--name-only", "--diff-filter=ADR"])
+        )
     )
 
     findings: list[str] = []
