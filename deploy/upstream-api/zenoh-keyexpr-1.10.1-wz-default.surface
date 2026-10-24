@@ -6,6 +6,8 @@ const zenoh_keyexpr::include::DEFAULT_INCLUDER
 const zenoh_keyexpr::intersect::DEFAULT_INTERSECTOR
 const zenoh_keyexpr::key_expr::include::DEFAULT_INCLUDER
 const zenoh_keyexpr::key_expr::intersect::DEFAULT_INTERSECTOR
+enum zenoh_keyexpr::format::FormatSetError
+enum zenoh_keyexpr::key_expr::format::FormatSetError
 fn zenoh_keyexpr::key_expr::Chunks::as_keyexpr(Self) -> core::option::Option<&'0 zenoh_keyexpr::key_expr::keyexpr> ; const ; in impl<'0> zenoh_keyexpr::key_expr::Chunks<'0>
 fn zenoh_keyexpr::key_expr::Chunks::peek(&Self) -> core::option::Option<&zenoh_keyexpr::key_expr::keyexpr> ; in impl<'0> zenoh_keyexpr::key_expr::Chunks<'0>
 fn zenoh_keyexpr::key_expr::Chunks::peek_back(&Self) -> core::option::Option<&zenoh_keyexpr::key_expr::keyexpr> ; in impl<'0> zenoh_keyexpr::key_expr::Chunks<'0>
@@ -13,6 +15,22 @@ fn zenoh_keyexpr::key_expr::OwnedKeyExpr::autocanonize<T, E>(T) -> core::result:
 fn zenoh_keyexpr::key_expr::OwnedKeyExpr::from_boxed_str_unchecked(alloc::boxed::Box<str>) -> Self ; unsafe ; in impl zenoh_keyexpr::key_expr::OwnedKeyExpr
 fn zenoh_keyexpr::key_expr::OwnedKeyExpr::from_string_unchecked(alloc::string::String) -> Self ; unsafe ; in impl zenoh_keyexpr::key_expr::OwnedKeyExpr
 fn zenoh_keyexpr::key_expr::OwnedKeyExpr::new<T, E>(T) -> core::result::Result<Self, E> where Self: core::convert::TryFrom<T, Error = E> ; in impl zenoh_keyexpr::key_expr::OwnedKeyExpr
+fn zenoh_keyexpr::key_expr::format::KeFormat::formatter(&'0 Self) -> zenoh_keyexpr::key_expr::format::KeFormatter<'0, Storage> ; in impl<'0, Storage: '0 + zenoh_keyexpr::key_expr::format::IKeFormatStorage<'0>> zenoh_keyexpr::key_expr::format::KeFormat<'0, Storage>
+fn zenoh_keyexpr::key_expr::format::KeFormat::new<S: ?core::marker::Sized + core::convert::AsRef<str>>(&'0 S) -> zenoh_result::ZResult<Self> ; in impl<'0> zenoh_keyexpr::key_expr::format::KeFormat<'0, alloc::vec::Vec<zenoh_keyexpr::key_expr::format::Segment<'0>>>
+fn zenoh_keyexpr::key_expr::format::KeFormat::noalloc_new<const N: usize>(&'0 str) -> zenoh_result::ZResult<zenoh_keyexpr::key_expr::format::KeFormat<'0, [zenoh_keyexpr::key_expr::format::Segment<'0>; N]>> ; in impl<'0> zenoh_keyexpr::key_expr::format::KeFormat<'0, alloc::vec::Vec<zenoh_keyexpr::key_expr::format::Segment<'0>>>
+fn zenoh_keyexpr::key_expr::format::KeFormat::parse(&'0 Self, &'0 zenoh_keyexpr::key_expr::keyexpr) -> zenoh_result::ZResult<zenoh_keyexpr::key_expr::format::Parsed<'0, Storage>> ; in impl<'0, Storage: '0 + zenoh_keyexpr::key_expr::format::IKeFormatStorage<'0>> zenoh_keyexpr::key_expr::format::KeFormat<'0, Storage>
+fn zenoh_keyexpr::key_expr::format::KeFormatter::build(&Self) -> zenoh_result::ZResult<zenoh_keyexpr::key_expr::OwnedKeyExpr> ; in impl<'0, Storage: zenoh_keyexpr::key_expr::format::IKeFormatStorage<'0>> zenoh_keyexpr::key_expr::format::KeFormatter<'0, Storage>
+fn zenoh_keyexpr::key_expr::format::KeFormatter::clear(&mut Self) -> &mut Self ; in impl<'0, Storage: zenoh_keyexpr::key_expr::format::IKeFormatStorage<'0>> zenoh_keyexpr::key_expr::format::KeFormatter<'0, Storage>
+fn zenoh_keyexpr::key_expr::format::KeFormatter::format(&Self) -> &zenoh_keyexpr::key_expr::format::KeFormat<'0, Storage> ; in impl<'0, Storage: zenoh_keyexpr::key_expr::format::IKeFormatStorage<'0>> zenoh_keyexpr::key_expr::format::KeFormatter<'0, Storage>
+fn zenoh_keyexpr::key_expr::format::KeFormatter::get(&Self, &str) -> core::option::Option<&str> ; in impl<'0, Storage: zenoh_keyexpr::key_expr::format::IKeFormatStorage<'0>> zenoh_keyexpr::key_expr::format::KeFormatter<'0, Storage>
+fn zenoh_keyexpr::key_expr::format::KeFormatter::set<S: core::fmt::Display>(&mut Self, &str, S) -> core::result::Result<&mut Self, zenoh_keyexpr::key_expr::format::FormatSetError> ; in impl<'0, Storage: zenoh_keyexpr::key_expr::format::IKeFormatStorage<'0>> zenoh_keyexpr::key_expr::format::KeFormatter<'0, Storage>
+fn zenoh_keyexpr::key_expr::format::Parsed::get(&Self, &str) -> zenoh_result::ZResult<&'0 str> ; in impl<'0, Storage: zenoh_keyexpr::key_expr::format::IKeFormatStorage<'0>> zenoh_keyexpr::key_expr::format::Parsed<'0, Storage>
+fn zenoh_keyexpr::key_expr::format::Parsed::iter(&'0 Self) -> zenoh_keyexpr::key_expr::format::Iter<'0, Storage> ; in impl<'0, Storage: zenoh_keyexpr::key_expr::format::IKeFormatStorage<'0>> zenoh_keyexpr::key_expr::format::Parsed<'0, Storage>
+fn zenoh_keyexpr::key_expr::format::Parsed::values(&Self) -> &[core::option::Option<&'0 zenoh_keyexpr::key_expr::keyexpr>] ; in impl<'0, Storage: zenoh_keyexpr::key_expr::format::IKeFormatStorage<'0>> zenoh_keyexpr::key_expr::format::Parsed<'0, Storage>
+fn zenoh_keyexpr::key_expr::format::Segment::default(&Self) -> core::option::Option<&zenoh_keyexpr::key_expr::keyexpr> ; in impl zenoh_keyexpr::key_expr::format::Segment<'_>
+fn zenoh_keyexpr::key_expr::format::Segment::id(&Self) -> &str ; in impl zenoh_keyexpr::key_expr::format::Segment<'_>
+fn zenoh_keyexpr::key_expr::format::Segment::pattern(&Self) -> &zenoh_keyexpr::key_expr::keyexpr ; in impl zenoh_keyexpr::key_expr::format::Segment<'_>
+fn zenoh_keyexpr::key_expr::format::Segment::prefix(&Self) -> core::option::Option<&zenoh_keyexpr::key_expr::keyexpr> ; in impl zenoh_keyexpr::key_expr::format::Segment<'_>
 fn zenoh_keyexpr::key_expr::keyexpr::as_str(&Self) -> &str ; const ; in impl zenoh_keyexpr::key_expr::keyexpr
 fn zenoh_keyexpr::key_expr::keyexpr::autocanonize<'0, T, E>(&'0 mut T) -> core::result::Result<&'0 Self, E> where &'0 Self: core::convert::TryFrom<&'0 T, Error = E>, T: ?core::marker::Sized + zenoh_keyexpr::key_expr::canon::Canonize ; in impl zenoh_keyexpr::key_expr::keyexpr
 fn zenoh_keyexpr::key_expr::keyexpr::from_slice_unchecked(&[u8]) -> &Self ; unsafe ; in impl zenoh_keyexpr::key_expr::keyexpr
@@ -30,9 +48,15 @@ impl core::borrow::Borrow for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
 impl core::clone::Clone for zenoh_keyexpr::key_expr::Chunks
 impl core::clone::Clone for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl core::clone::Clone for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
+impl core::clone::Clone for zenoh_keyexpr::key_expr::format::FormatSetError
+impl core::clone::Clone for zenoh_keyexpr::key_expr::format::KeFormat
+impl core::clone::Clone for zenoh_keyexpr::key_expr::format::KeFormatter
+impl core::clone::Clone for zenoh_keyexpr::key_expr::format::Segment
 impl core::cmp::Eq for zenoh_keyexpr::key_expr::Chunks
 impl core::cmp::Eq for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl core::cmp::Eq for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
+impl core::cmp::Eq for zenoh_keyexpr::key_expr::format::FormatSetError
+impl core::cmp::Eq for zenoh_keyexpr::key_expr::format::Segment
 impl core::cmp::Eq for zenoh_keyexpr::key_expr::keyexpr
 impl core::cmp::Eq for zenoh_keyexpr::key_expr::nonwild_keyexpr
 impl core::cmp::Ord for zenoh_keyexpr::key_expr::Chunks
@@ -42,6 +66,9 @@ impl core::cmp::PartialEq for str
 impl core::cmp::PartialEq for zenoh_keyexpr::key_expr::Chunks
 impl core::cmp::PartialEq for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl core::cmp::PartialEq for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
+impl core::cmp::PartialEq for zenoh_keyexpr::key_expr::format::FormatSetError
+impl core::cmp::PartialEq for zenoh_keyexpr::key_expr::format::KeFormat
+impl core::cmp::PartialEq for zenoh_keyexpr::key_expr::format::Segment
 impl core::cmp::PartialEq for zenoh_keyexpr::key_expr::keyexpr
 impl core::cmp::PartialEq for zenoh_keyexpr::key_expr::nonwild_keyexpr
 impl core::cmp::PartialOrd for zenoh_keyexpr::key_expr::Chunks
@@ -55,30 +82,55 @@ impl core::convert::From for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl core::convert::From for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
 impl core::convert::TryFrom for &zenoh_keyexpr::key_expr::keyexpr
 impl core::convert::TryFrom for &zenoh_keyexpr::key_expr::nonwild_keyexpr
+impl core::convert::TryFrom for alloc::string::String
 impl core::convert::TryFrom for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl core::convert::TryFrom for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
+impl core::convert::TryFrom for zenoh_keyexpr::key_expr::format::KeFormat
+impl core::convert::TryFrom for zenoh_keyexpr::key_expr::format::OwnedKeFormat
+impl core::error::Error for zenoh_keyexpr::key_expr::format::FormatSetError
 impl core::fmt::Debug for zenoh_keyexpr::key_expr::Chunks
 impl core::fmt::Debug for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl core::fmt::Debug for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
+impl core::fmt::Debug for zenoh_keyexpr::key_expr::format::FormatSetError
+impl core::fmt::Debug for zenoh_keyexpr::key_expr::format::Iter
+impl core::fmt::Debug for zenoh_keyexpr::key_expr::format::KeFormat
+impl core::fmt::Debug for zenoh_keyexpr::key_expr::format::KeFormatter
+impl core::fmt::Debug for zenoh_keyexpr::key_expr::format::OwnedKeFormat
+impl core::fmt::Debug for zenoh_keyexpr::key_expr::format::Parsed
+impl core::fmt::Debug for zenoh_keyexpr::key_expr::format::Segment
 impl core::fmt::Debug for zenoh_keyexpr::key_expr::fuzzer::KeyExprFuzzer
 impl core::fmt::Debug for zenoh_keyexpr::key_expr::include::LTRIncluder
 impl core::fmt::Debug for zenoh_keyexpr::key_expr::intersect::ClassicIntersector
 impl core::fmt::Debug for zenoh_keyexpr::key_expr::keyexpr
 impl core::fmt::Debug for zenoh_keyexpr::key_expr::nonwild_keyexpr
 impl core::fmt::Display for zenoh_keyexpr::key_expr::OwnedKeyExpr
+impl core::fmt::Display for zenoh_keyexpr::key_expr::format::FormatSetError
+impl core::fmt::Display for zenoh_keyexpr::key_expr::format::KeFormat
 impl core::fmt::Display for zenoh_keyexpr::key_expr::keyexpr
 impl core::hash::Hash for zenoh_keyexpr::key_expr::Chunks
 impl core::hash::Hash for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl core::hash::Hash for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
+impl core::hash::Hash for zenoh_keyexpr::key_expr::format::FormatSetError
+impl core::hash::Hash for zenoh_keyexpr::key_expr::format::KeFormat
+impl core::hash::Hash for zenoh_keyexpr::key_expr::format::Segment
 impl core::hash::Hash for zenoh_keyexpr::key_expr::keyexpr
 impl core::hash::Hash for zenoh_keyexpr::key_expr::nonwild_keyexpr
+impl core::iter::traits::collect::IntoIterator for &zenoh_keyexpr::key_expr::format::Parsed
 impl core::iter::traits::double_ended::DoubleEndedIterator for zenoh_keyexpr::key_expr::Chunks
+impl core::iter::traits::double_ended::DoubleEndedIterator for zenoh_keyexpr::key_expr::format::Iter
+impl core::iter::traits::exact_size::ExactSizeIterator for zenoh_keyexpr::key_expr::format::Iter
 impl core::iter::traits::iterator::Iterator for zenoh_keyexpr::key_expr::Chunks
+impl core::iter::traits::iterator::Iterator for zenoh_keyexpr::key_expr::format::Iter
 impl core::iter::traits::iterator::Iterator for zenoh_keyexpr::key_expr::fuzzer::KeyExprFuzzer
 impl core::marker::Copy for zenoh_keyexpr::key_expr::Chunks
+impl core::marker::Copy for zenoh_keyexpr::key_expr::format::FormatSetError
+impl core::marker::Copy for zenoh_keyexpr::key_expr::format::KeFormat
+impl core::marker::Copy for zenoh_keyexpr::key_expr::format::Segment
 impl core::marker::StructuralPartialEq for zenoh_keyexpr::key_expr::Chunks
 impl core::marker::StructuralPartialEq for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl core::marker::StructuralPartialEq for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
+impl core::marker::StructuralPartialEq for zenoh_keyexpr::key_expr::format::FormatSetError
+impl core::marker::StructuralPartialEq for zenoh_keyexpr::key_expr::format::Segment
 impl core::marker::StructuralPartialEq for zenoh_keyexpr::key_expr::keyexpr
 impl core::marker::StructuralPartialEq for zenoh_keyexpr::key_expr::nonwild_keyexpr
 impl core::ops::arith::Div for &zenoh_keyexpr::key_expr::OwnedKeyExpr
@@ -87,9 +139,11 @@ impl core::ops::arith::Div for &zenoh_keyexpr::key_expr::keyexpr
 impl core::ops::arith::Div for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl core::ops::deref::Deref for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl core::ops::deref::Deref for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
+impl core::ops::deref::Deref for zenoh_keyexpr::key_expr::format::OwnedKeFormat
 impl core::ops::deref::Deref for zenoh_keyexpr::key_expr::keyexpr
 impl core::ops::deref::Deref for zenoh_keyexpr::key_expr::nonwild_keyexpr
 impl core::str::traits::FromStr for zenoh_keyexpr::key_expr::OwnedKeyExpr
+impl core::str::traits::FromStr for zenoh_keyexpr::key_expr::format::OwnedKeFormat
 impl schemars::JsonSchema for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl schemars::JsonSchema for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
 impl serde_core::de::Deserialize for zenoh_keyexpr::key_expr::OwnedKeyExpr
@@ -99,23 +153,39 @@ impl serde_core::ser::Serialize for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
 impl zenoh_keyexpr::key_expr::include::Includer for zenoh_keyexpr::key_expr::include::LTRIncluder
 impl zenoh_keyexpr::key_expr::intersect::Intersector for zenoh_keyexpr::key_expr::intersect::ClassicIntersector
 mod zenoh_keyexpr::canon
+mod zenoh_keyexpr::format
+mod zenoh_keyexpr::format::macro_support
 mod zenoh_keyexpr::fuzzer
 mod zenoh_keyexpr::include
 mod zenoh_keyexpr::intersect
 mod zenoh_keyexpr::key_expr
 mod zenoh_keyexpr::key_expr::canon
+mod zenoh_keyexpr::key_expr::format
+mod zenoh_keyexpr::key_expr::format::macro_support
 mod zenoh_keyexpr::key_expr::fuzzer
 mod zenoh_keyexpr::key_expr::include
 mod zenoh_keyexpr::key_expr::intersect
 struct zenoh_keyexpr::Chunks
 struct zenoh_keyexpr::OwnedKeyExpr
 struct zenoh_keyexpr::OwnedNonWildKeyExpr
+struct zenoh_keyexpr::format::Iter
+struct zenoh_keyexpr::format::KeFormat
+struct zenoh_keyexpr::format::KeFormatter
+struct zenoh_keyexpr::format::OwnedKeFormat
+struct zenoh_keyexpr::format::Parsed
+struct zenoh_keyexpr::format::Segment
 struct zenoh_keyexpr::fuzzer::KeyExprFuzzer
 struct zenoh_keyexpr::include::LTRIncluder
 struct zenoh_keyexpr::intersect::ClassicIntersector
 struct zenoh_keyexpr::key_expr::Chunks
 struct zenoh_keyexpr::key_expr::OwnedKeyExpr
 struct zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
+struct zenoh_keyexpr::key_expr::format::Iter
+struct zenoh_keyexpr::key_expr::format::KeFormat
+struct zenoh_keyexpr::key_expr::format::KeFormatter
+struct zenoh_keyexpr::key_expr::format::OwnedKeFormat
+struct zenoh_keyexpr::key_expr::format::Parsed
+struct zenoh_keyexpr::key_expr::format::Segment
 struct zenoh_keyexpr::key_expr::fuzzer::KeyExprFuzzer
 struct zenoh_keyexpr::key_expr::include::LTRIncluder
 struct zenoh_keyexpr::key_expr::intersect::ClassicIntersector
@@ -124,8 +194,10 @@ struct zenoh_keyexpr::key_expr::nonwild_keyexpr
 struct zenoh_keyexpr::keyexpr
 struct zenoh_keyexpr::nonwild_keyexpr
 trait zenoh_keyexpr::canon::Canonize
+trait zenoh_keyexpr::format::IKeFormatStorage
 trait zenoh_keyexpr::include::Includer
 trait zenoh_keyexpr::intersect::Intersector
 trait zenoh_keyexpr::key_expr::canon::Canonize
+trait zenoh_keyexpr::key_expr::format::IKeFormatStorage
 trait zenoh_keyexpr::key_expr::include::Includer
 trait zenoh_keyexpr::key_expr::intersect::Intersector

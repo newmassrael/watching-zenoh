@@ -276,7 +276,9 @@ pinned revision for the generation-time policy.
   Nothing else is vendored and no upstream crate is a dependency of the product graph.
 - **What is original**: the algorithms behind that API are written here from the language's
   definition (key expression validation, canonization, inclusion and intersection) or restructured
-  (the runtime pool's shutdown), and each is held to upstream's behaviour by
+  (the runtime pool's shutdown; the format parser's search order, which IS its behaviour and is
+  the documented greedy left-to-right one, is followed step by step because no other definition
+  of which parse a format returns exists), and each is held to upstream's behaviour by
   `conformance/differential`, which links upstream's crates for the comparison only.
 - **Scope of use**: the crates carry upstream's package names so that a `[patch.crates-io]` entry
   swaps them in (`docs/build-configuration.md` C13); they are not published to a registry.

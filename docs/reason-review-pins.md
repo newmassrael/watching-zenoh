@@ -39,7 +39,7 @@ normal state once nothing remains.
 
 | atom | file | blob | round |
 |---|---|---|---|
-| api-compat-rust | conformance/differential/tests/zenoh_keyexpr.rs | 69e68e8a35dbb05a0666ca60491e8acc8c3e87f2 | R3494 |
+| api-compat-rust | conformance/differential/tests/zenoh_keyexpr.rs | 69e68e8a35dbb05a0666ca60491e8acc8c3e87f2 | R3498 |
 | api-compat-rust | conformance/patch-scenario/tests/one_zenoh_result.rs | 6ec323ad91aff120e1b3b597f22f37ec284a2fe7 | R3483 |
 | session-close-ingress | crates/wz-integration-tests/tests/wz_router_hat_connect_reconcile.rs | 31cee437ba6c4c3bf6eeab254f30dcdf9c7bd423 | R3450 |
 | session-close-ingress | crates/wz-routing-graph/src/lib.rs | 2123f96404cdfc158a6c875d4440a7febca3e3c5 | R3450 |

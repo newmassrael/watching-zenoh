@@ -22,6 +22,8 @@ pub mod include;
 /// The average user doesn't need to bother with it.
 pub mod intersect;
 
+pub mod format;
+
 /// A random key expression generator, to help with testing.
 #[cfg(feature = "std")]
 pub mod fuzzer;

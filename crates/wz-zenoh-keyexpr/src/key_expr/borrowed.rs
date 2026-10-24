@@ -119,6 +119,12 @@ impl keyexpr {
         self.0.contains(super::SINGLE_WILD as char)
     }
 
+    /// Whether `self` is exactly `**`.
+    pub(crate) const fn is_double_wild(&self) -> bool {
+        let bytes = self.0.as_bytes();
+        bytes.len() == 2 && bytes[0] == b'*'
+    }
+
     /// Returns `true` if `self` contains any wildcard character (`**` or `$*`).
     #[cfg(feature = "internal")]
     #[doc(hidden)]
