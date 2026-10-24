@@ -94,10 +94,13 @@ A row is declared and CHECKED against the compiler (`wz_config.py --check`): the
 must be a target of the pinned rustc, `os` must be its `target_os`, and `libc` what its
 `target_os` and `target_env` give. The variables a build reads for the triple
 (`CC_<triple>`, `AR_<triple>`, `CARGO_TARGET_<TRIPLE>_LINKER`) are derived from it, so
-they cannot drift. A key a row leaves out is NOT ASSESSED, never guessed: today none of
-the four rows states `os_provides`, and only Android states `system_assumed` (measured
-on the probe); the entry refuses a platform it has no such statement for. `lane` is
-`none` for all four until a lane exists and has passed. Which registered profiles a
+they cannot drift. A key a row leaves out is NOT ASSESSED, never guessed: of the five
+rows only the host row (`linux-x86_64-glibc`, the platform the workspace is built and
+tested on) states `os_provides` and `system_assumed` (the latter measured from the
+artifacts the entry builds), and Android states `system_assumed` alone (measured on the
+probe); the entry refuses a platform it has no such statement for. `lane` is `none` for
+all five until a lane's result has been read: Layer C1st exists and passes locally, and
+the host row changes in the commit that records its hosted run. Which registered profiles a
 platform can build is not a key yet: the mapping from a profile to the artifacts and
 their features is step 3's. A platform whose row is absent is refused by the entry with
 the reason; it never builds something "close".
@@ -223,86 +226,75 @@ copies of the port knowledge, and a conflict at every pin move).
 
 ## 4. The manifest
 
-Illustrative: assembled by hand from the Android probe's measurements, not produced
-by an entry (none exists). The hash and some build-class fields are elided. Where a
-value is a placeholder, the field is written as `"<...>"`.
+What `scripts/lib/wz_package.py` writes for the host platform, shortened: the long lists
+are cut to their first entries (`...`) and the hashes to their first twelve digits. The
+keys, their order and their values are the entry's own output.
 
 ```json
 {
   "schema": 1,
-  "catalog_version": "<version>",
-  "built_from": { "commit": "<sha>", "tree_clean": true },
-  "target": {
-    "id": "android-arm64", "triple": "aarch64-linux-android",
-    "os": "android", "libc": "bionic", "network_stack": null,
-    "strongest_green_lane": "build"
+  "catalog_version": 2,
+  "built_from": { "commit": "762f45e1d2c4...", "tree_clean": false },
+  "platform": {
+    "id": "linux-x86_64-glibc", "triple": "x86_64-unknown-linux-gnu",
+    "os": "linux", "libc": "glibc", "network_stack": null,
+    "strongest_green_lane": "none"
   },
-  "profile": { "id": "<registered profile>", "version": 1 },
-  "toolchain": { "rustc": "<release line>", "cc": "<first line of --version>",
-                 "sdk": "<for QNX: the SDP version, e.g. 7.1>" },
-  "system_assumed": ["libdl.so", "libm.so", "libc.so"],
-  "device_requires": ["threads", "sockets:tcp", "sockets:udp", "entropy"],
+  "toolchain": { "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
+                 "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0", "sdk": null },
+  "system_assumed": ["libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"],
   "artifacts": [
     {
-      "name": "libwz_capi_pico.so", "kind": "shared-library",
-      "path": "lib/libwz_capi_pico.so", "sha256": "<...>", "size": "<bytes>",
+      "id": "capi-pico", "name": "libwz_capi_pico.so", "kind": "shared-library",
+      "path": "lib/libwz_capi_pico.so", "sha256": "df533337579b...", "size": 5873672,
       "elf": {
-        "class": 64, "machine": "aarch64", "interpreter": null,
-        "linking": "dynamic", "runpath": null, "rpath": null,
-        "soname": "libwz_capi_pico.so",
+        "class": 64, "machine": "x86_64", "linking": "dynamic", "interpreter": null,
+        "soname": "libwz_capi_pico.so", "runpath": null, "rpath": null,
         "needed": [
-          { "soname": "libdl.so", "provided_by": "system" },
-          { "soname": "libm.so",  "provided_by": "system" },
-          { "soname": "libc.so",  "provided_by": "system" }
+          { "soname": "libgcc_s.so.1", "provided_by": "system" },
+          { "soname": "libm.so.6", "provided_by": "system" },
+          { "soname": "libc.so.6", "provided_by": "system" },
+          { "soname": "ld-linux-x86-64.so.2", "provided_by": "system" }
         ],
-        "os_floor": { "android_api_note": 36,
-                      "symbol_version_tags": ["LIBC", "LIBC_N"] }
+        "os_floor": { "glibc": "GLIBC_2.39", "android_api_note": null,
+                      "symbol_version_tags": ["GCC_12.0.0", "...", "GLIBC_2.9"] }
       },
-      "abi": {
-        "family": "capi-pico", "revision": "<n>",
-        "layout": { "multi_thread": true, "unstable_api": true,
-                    "local_subscriber": false, "local_queryable": false }
-      },
+      "abi": { "family": "capi-pico", "revision": 1,
+               "layout": { "multi_thread": true, "unstable_api": true,
+                           "local_subscriber": false, "local_queryable": false } },
       "provides": [ { "role": "pico-library" } ],
-      "features": ["<resolved>"]
+      "features": ["advanced", "...", "unstable-api"],
+      "device_requires": ["entropy", "multicast", "sockets-tcp", "sockets-udp", "threads", "wall-clock"]
     },
+    { "id": "capi-c", "name": "libwz_capi_c.so", "...": "the same keys; provides zenoh-c-dropin,
+      abi layout { unstable_api: true, shared_memory: false }, revision 6" },
     {
-      "name": "libwz_capi_c.so", "kind": "shared-library",
-      "path": "lib/libwz_capi_c.so", "sha256": "<...>", "size": "<bytes>",
-      "elf": "<as above>",
-      "abi": { "family": "capi-c", "revision": "<n>",
-               "layout": { "unstable_api": "<bool>", "shared_memory": "<bool>" } },
-      "provides": [ { "role": "zenoh-c-dropin" } ],
-      "features": ["<resolved>"]
-    },
-    {
-      "name": "wz-ap-demo", "kind": "executable",
-      "path": "bin/wz-ap-demo", "sha256": "<...>", "size": "<bytes>",
-      "elf": { "class": 64, "machine": "aarch64", "interpreter": "<...>",
-               "needed": [ "<as above>" ] },
-      "abi": { "family": "ap-demo-surface", "revision": "<n>" },
+      "id": "ap-demo", "name": "wz-ap-demo", "kind": "executable",
+      "path": "bin/wz-ap-demo", "sha256": "36d2d5afcf63...", "size": 5156072,
+      "elf": { "...": "as above, with the interpreter /lib64/ld-linux-x86-64.so.2" },
+      "abi": { "family": "ap-demo-surface", "revision": 1, "layout": {} },
       "provides": [
-        { "role": "session-node",
-          "via": { "argument": "--config", "kind": "stock-zenoh-config" } },
         { "role": "traffic-driver",
           "via": { "argument": "--sessions", "key": "driver" },
-          "driver_roles": ["<words of ROLES in this build>"] }
+          "driver_roles": ["publish", "put", "delete", "subscribe", "get", "answer", "..."] }
       ],
-      "features": ["<resolved>"]
+      "features": ["..."],
+      "device_requires": null
     }
   ]
 }
 ```
 
-What the example does not claim: that any artifact runs on a device (none was run),
-that `libwz_capi_c.so` was built for this target (the probe built neither it nor any
-`bundled` dependency; that entry is shaped from the consumer's request, with
-placeholders; a bundled NEEDED entry would read `{ "soname": "<...>",
-"provided_by": "bundled", "artifact": "lib/<file>" }`), that the `--sessions` route is available in every build that carries
-`zenoh-config` (to be taken from the generator, T8), and that `os_floor` is the
-lowest API level the artifact tolerates. The probe's `.note.android.ident` carries
-the API level of the compiler target (36) and the library's symbols carry version
-tags (`LIBC`, `LIBC_N`); T8a records both and picks neither.
+What the example shows about this build, and does not: the default `wz-ap-demo` has no
+`session-node` role because `zenoh-config` is off in `preset-ap-client`, and its driver
+roles are the ones its table marks available, read from the file (its facts note). A
+library's `device_requires` is the union of what the capabilities its features turn on
+may ask for; an executable's is `null` because no capability mapping reaches it. The
+glibc floor `GLIBC_2.39` is the host's own, which is the measured reason a library built
+on this host does not run on an older glibc: the manifest of a cross build records the
+SDK's. The entry does not bundle yet, so a NEEDED nobody assumed is a refusal and `provided_by`
+is always `system`; a bundled entry would read `{ "soname": "<...>", "provided_by":
+"bundled", "artifact": "lib/<file>" }`. Nothing here was run on a device.
 
 ## 5. Steps
 
@@ -329,11 +321,28 @@ the owner approves each use; steps 5 and 6 begin there.
    capabilities were assessed from each capability's help text and the code that reads
    files (the TLS, QUIC, user/password and public-key planes, and the timestamp
    source); `scout` is marked `multicast` as an upper bound.
-3. **The entry and the manifest.** `package`, the measuring tool (the standard-library
-   Python reader `scripts/lib/elf_facts.py`, extended from notes to the dynamic section
-   and the version needs, so the gate and the entry share one reader), the
-   schema file, the re-measurement gate with a damaged-artifact control, and the
-   reproducibility check (two runs, same bytes). Done on the host target first.
+3. **The entry and the manifest (landed on the host platform).**
+   `scripts/lib/wz_package.py` builds the named artifacts, measures each file with the
+   shared reader (`scripts/lib/elf_facts.py`, extended to the dynamic section, the
+   version needs, the Android note and the facts note), writes the manifest and
+   verifies it before it returns; `--verify DIR` re-measures every file a manifest
+   names; `--selftest` drives each refusal and each finding through a synthetic ELF with
+   a clean control, including a changed byte, a replaced file, a hand-edited manifest, a
+   stray file and a path leaving the directory. The declaration gained `[[artifact]]`
+   and `[[role]]` rows and the host row `linux-x86_64-glibc`, the one platform with
+   `os_provides` and `system_assumed` stated. Layer C1st packages the host platform
+   twice, requires the two manifests to be the same bytes, and verifies. The schema is
+   `shape_findings` (the keys of schema 1, in order, none more) and `verify_dir`, not a
+   second description in a schema file: a file would be a second statement of the same
+   shape, and the consumer's parser is the fixture of step 7.
+
+   What it does not do yet: the profile is not an input (it builds each artifact's
+   default features; resolving a registered profile into features waits for the mapping
+   from a profile to its artifacts); the cross path (`--target`, the toolchain
+   variables, the features read from cargo's message) is exercised by the selftest's
+   refusals and not by a cross build through the entry, which is step 4; it does not
+   bundle a library; and "the same bytes" is checked in one build directory, which says
+   the manifest is deterministic and not that two machines' builds agree.
 4. **The Android lane at `build`.** The probe's command, run through the entry with
    the toolchain variables named by the row. Done when the lane is green and the
    `preset-ap-full` bindgen cause is either fixed by the row's variables or recorded

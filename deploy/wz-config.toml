@@ -144,6 +144,79 @@ toolchain_env_extra = ["QNX_HOST", "QNX_TARGET"]
 lane = "none"
 help = "QNX 7.1 on aarch64le with the io-pkt network stack; no wz build of it exists yet."
 
+# The one platform the entry has run on: the x86_64 Linux host the workspace is built and tested
+# on. `os_provides` is what the lanes exercise there (every facility, `raw-ethernet` with the
+# CAP_NET_RAW the capture lane holds); `system_assumed` is what a build of the three artifacts
+# below measured NEEDED on this host (`scripts/lib/wz_package.py --verify` holds it to the files).
+[[platform]]
+id = "linux-x86_64-glibc"
+triple = "x86_64-unknown-linux-gnu"
+os = "linux"
+libc = "glibc"
+std = "prebuilt"
+lane = "none"
+os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "raw-ethernet", "unix-sockets", "filesystem", "entropy", "wall-clock"]
+system_assumed = ["libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"]
+help = "The x86_64 Linux host the workspace is built and tested on; the one platform the entry has run on."
+
+# ─── Artifacts and roles (docs/target-build-contract.md T8) ───────────────────────────────────
+#
+# The three files the entry packages. A library names the ABI whose capability graph resolves what
+# its build asks of a device; the `family` is the one its stamp carries. A role is what the file
+# provides and how it is reached: the session node needs the stock-config feature, and the traffic
+# driver's role words come from the facts note the executable was built with.
+[[artifact]]
+id = "capi-pico"
+package = "wz-capi-pico"
+kind = "shared-library"
+file = "wz_capi_pico"
+family = "capi-pico"
+abi = "pico"
+help = "The pico C ABI: a library a pico C program links."
+
+[[artifact]]
+id = "capi-c"
+package = "wz-capi-c"
+kind = "shared-library"
+file = "wz_capi_c"
+family = "capi-c"
+abi = "c"
+help = "The zenoh-c drop-in: a library a zenoh-c C program links."
+
+[[artifact]]
+id = "ap-demo"
+package = "wz-ap-demo"
+kind = "executable"
+file = "wz-ap-demo"
+family = "ap-demo-surface"
+help = "The session node and the traffic driver, one executable driven by its arguments and documents."
+
+[[role]]
+artifact = "capi-pico"
+id = "pico-library"
+help = "A library with pico's C ABI."
+
+[[role]]
+artifact = "capi-c"
+id = "zenoh-c-dropin"
+help = "A library with zenoh-c's C ABI."
+
+[[role]]
+artifact = "ap-demo"
+id = "session-node"
+needs_feature = "zenoh-config"
+via_argument = "--config"
+via_kind = "stock-zenoh-config"
+help = "A node that takes a stock zenoh config document."
+
+[[role]]
+artifact = "ap-demo"
+id = "traffic-driver"
+via_argument = "--sessions"
+via_key = "driver"
+facts_list = "driver_roles"
+help = "The traffic one session of a --sessions document generates."
+
 [[capability]]
 id = "link-udp"
 kconfig = "WZ_CAP_LINK_UDP"

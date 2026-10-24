@@ -31,6 +31,17 @@
 //! The words (the family and each layout key) are ASCII `[a-z0-9_-]`: the writer does no
 //! escaping, and a word outside that set is a compile error, not a stamp a reader cannot parse.
 //!
+//! # The facts note
+//!
+//! A second note, written by [`facts!`], carries what a build contains that a reader cannot learn by
+//! running it: named lists of words, in the same alphabet. The executable puts the driver roles it
+//! plays there, computed at compile time from its own role table, so a tool that describes it for
+//! another operating system reads the list from the file and keeps no second copy of the table.
+//!
+//! ```text
+//! {"schema":1,"lists":{"driver_roles":["publish","subscribe"]}}
+//! ```
+//!
 //! # Where it exists
 //!
 //! The note is emitted on the ELF targets of `wz_cdylib_build::SONAME_TARGET_OS`. Elsewhere
@@ -50,6 +61,13 @@ pub const NOTE_TYPE_ABI_STAMP: u32 = 1;
 
 /// The section the note lives in.
 pub const NOTE_SECTION: &str = ".note.wz.abi";
+
+/// The note type of a facts note: what this build contains that a reader cannot learn by running
+/// it, as named lists of words (the driver roles an executable plays).
+pub const NOTE_TYPE_FACTS: u32 = 2;
+
+/// The section the facts note lives in.
+pub const FACTS_SECTION: &str = ".note.wz.facts";
 
 /// What a word may be made of. The writer does no escaping, so this is what keeps the object
 /// parseable.
@@ -143,6 +161,44 @@ pub const fn json_len(family: &str, revision: u32, layout: &[(&str, bool)]) -> u
     fill::<0>([], family, revision, layout).1
 }
 
+/// The facts object, written into `buf` and counted like [`fill`]: named lists of words, each
+/// word and each name held to the same alphabet as the stamp's.
+const fn fill_facts<const N: usize>(buf: [u8; N], lists: &[(&str, &[&str])]) -> ([u8; N], usize) {
+    let (buf, pos) = put(buf, 0, b"{\"schema\":");
+    let (buf, pos) = put_u32(buf, pos, SCHEMA);
+    let (mut buf, mut pos) = put(buf, pos, b",\"lists\":{");
+    let mut i = 0;
+    while i < lists.len() {
+        check_word(lists[i].0);
+        if i > 0 {
+            (buf, pos) = put(buf, pos, b",");
+        }
+        (buf, pos) = put(buf, pos, b"\"");
+        (buf, pos) = put(buf, pos, lists[i].0.as_bytes());
+        (buf, pos) = put(buf, pos, b"\":[");
+        let words = lists[i].1;
+        let mut j = 0;
+        while j < words.len() {
+            check_word(words[j]);
+            if j > 0 {
+                (buf, pos) = put(buf, pos, b",");
+            }
+            (buf, pos) = put(buf, pos, b"\"");
+            (buf, pos) = put(buf, pos, words[j].as_bytes());
+            (buf, pos) = put(buf, pos, b"\"");
+            j += 1;
+        }
+        (buf, pos) = put(buf, pos, b"]");
+        i += 1;
+    }
+    put(buf, pos, b"}}")
+}
+
+/// The length of the facts object for these lists, without the closing NUL.
+pub const fn facts_len(lists: &[(&str, &[&str])]) -> usize {
+    fill_facts::<0>([], lists).1
+}
+
 /// The size of the note's descriptor for a JSON object of `json_len` bytes: the object, one NUL,
 /// and the padding that brings it to a multiple of four, which an ELF note requires.
 pub const fn desc_size(json_len: usize) -> usize {
@@ -182,6 +238,23 @@ impl<const D: usize> Note<D> {
         }
     }
 
+    /// The facts note for these lists, which a const assertion holds `D` to the size of.
+    pub const fn new_facts(lists: &[(&str, &[&str])]) -> Self {
+        let len = facts_len(lists);
+        assert!(
+            D == desc_size(len),
+            "a note's descriptor size is not the padded object size"
+        );
+        let (desc, _) = fill_facts::<D>([0u8; D], lists);
+        Note {
+            namesz: (NOTE_OWNER.len() + 1) as u32,
+            descsz: (len + 1) as u32,
+            kind: NOTE_TYPE_FACTS,
+            name: [b'w', b'z', 0, 0],
+            desc,
+        }
+    }
+
     /// The JSON object the note carries.
     pub fn json(&self) -> &str {
         let len = self.descsz as usize - 1;
@@ -212,28 +285,65 @@ macro_rules! stamp {
         revision = $revision:expr,
         layout = [ $( ($key:expr, $value:expr) ),* $(,)? ] $(,)?
     ) => {
-        #[cfg(any(
-            target_os = "android",
-            target_os = "dragonfly",
-            target_os = "freebsd",
-            target_os = "fuchsia",
-            target_os = "haiku",
-            target_os = "illumos",
-            target_os = "linux",
-            target_os = "netbsd",
-            target_os = "nto",
-            target_os = "openbsd",
-            target_os = "redox",
-            target_os = "solaris",
-        ))]
-        const _: () = {
-            const LAYOUT: &[(&str, bool)] = &[ $( ($key, $value) ),* ];
-            const LEN: usize = $crate::json_len($family, $revision, LAYOUT);
-            #[used]
-            #[link_section = ".note.wz.abi"]
-            static ABI_STAMP: $crate::Note<{ $crate::desc_size(LEN) }> =
-                $crate::Note::new($family, $revision, LAYOUT);
-        };
+        $crate::__on_elf! {
+            const _: () = {
+                const LAYOUT: &[(&str, bool)] = &[ $( ($key, $value) ),* ];
+                const LEN: usize = $crate::json_len($family, $revision, LAYOUT);
+                #[used]
+                #[link_section = ".note.wz.abi"]
+                static ABI_STAMP: $crate::Note<{ $crate::desc_size(LEN) }> =
+                    $crate::Note::new($family, $revision, LAYOUT);
+            };
+        }
+    };
+}
+
+/// Put a facts note in this artifact: named lists of words that say what this build contains.
+///
+/// ```ignore
+/// wz_abi_stamp::facts!(lists = [("driver_roles", &["publish", "subscribe"])]);
+/// ```
+///
+/// Each list is a constant expression of type `&[&str]`, so a build can compute it from its own
+/// tables (the roles whose feature is on). Call it once, in the artifact, like [`stamp!`].
+#[macro_export]
+macro_rules! facts {
+    ( lists = [ $( ($name:expr, $words:expr) ),* $(,)? ] $(,)? ) => {
+        $crate::__on_elf! {
+            const _: () = {
+                const LISTS: &[(&str, &[&str])] = &[ $( ($name, $words) ),* ];
+                const LEN: usize = $crate::facts_len(LISTS);
+                #[used]
+                #[link_section = ".note.wz.facts"]
+                static BUILD_FACTS: $crate::Note<{ $crate::desc_size(LEN) }> =
+                    $crate::Note::new_facts(LISTS);
+            };
+        }
+    };
+}
+
+/// The items it wraps, on the ELF targets only: the one place that list is written.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __on_elf {
+    ( $( $item:item )* ) => {
+        $(
+            #[cfg(any(
+                target_os = "android",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "fuchsia",
+                target_os = "haiku",
+                target_os = "illumos",
+                target_os = "linux",
+                target_os = "netbsd",
+                target_os = "nto",
+                target_os = "openbsd",
+                target_os = "redox",
+                target_os = "solaris",
+            ))]
+            $item
+        )*
     };
 }
 
@@ -295,5 +405,31 @@ mod tests {
             revision = 7,
             layout = [("flag", true)]
         );
+    }
+
+    #[test]
+    fn a_facts_note_lists_words_by_name() {
+        const LISTS: &[(&str, &[&str])] =
+            &[("driver_roles", &["publish", "subscribe"]), ("empty", &[])];
+        const LEN: usize = facts_len(LISTS);
+        let note = Note::<{ desc_size(LEN) }>::new_facts(LISTS);
+        assert_eq!(
+            note.json(),
+            r#"{"schema":1,"lists":{"driver_roles":["publish","subscribe"],"empty":[]}}"#
+        );
+        assert_eq!(note.kind, NOTE_TYPE_FACTS);
+        assert_eq!(note.descsz as usize, LEN + 1);
+    }
+
+    #[test]
+    fn a_facts_note_with_no_list_writes_an_empty_object() {
+        const LEN: usize = facts_len(&[]);
+        let note = Note::<{ desc_size(LEN) }>::new_facts(&[]);
+        assert_eq!(note.json(), r#"{"schema":1,"lists":{}}"#);
+    }
+
+    #[test]
+    fn the_facts_macro_leaves_a_note_in_the_test_binary() {
+        facts!(lists = [("roles", &["a", "b-c"])]);
     }
 }

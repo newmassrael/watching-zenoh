@@ -13801,10 +13801,27 @@ layer_c1st_abi_stamp() {
     done
     local t=crates/target
     python3 scripts/lib/abi_stamp_gate.py --call-doors \
-        capi-pico=$t/debug/libwz_capi_pico.so capi-pico=$t/release/libwz_capi_pico.so \
-        capi-c=$t/debug/libwz_capi_c.so capi-c=$t/release/libwz_capi_c.so \
-        ap-demo-surface=$t/debug/wz-ap-demo ap-demo-surface=$t/release/wz-ap-demo || return 1
-    return 0
+        "capi-pico=$t/debug/libwz_capi_pico.so" "capi-pico=$t/release/libwz_capi_pico.so" \
+        "capi-c=$t/debug/libwz_capi_c.so" "capi-c=$t/release/libwz_capi_c.so" \
+        "ap-demo-surface=$t/debug/wz-ap-demo" "ap-demo-surface=$t/release/wz-ap-demo" || return 1
+    # The entry of the same note (T1, T7, T10): package the host platform twice and require the two
+    # manifests to be the SAME BYTES (a manifest that differs between runs of one input is not a
+    # description), then re-measure every file the first one names. Both selftests first: each
+    # drives its refusals and findings through files whose defect is known, with a clean control.
+    # The release profile is the one the loop above just built, so the package costs a copy.
+    python3 scripts/lib/elf_facts.py --selftest >/dev/null || return 1
+    python3 scripts/lib/wz_package.py --selftest >/dev/null || return 1
+    local work rc=0
+    work="$(mktemp -d)" || return 1
+    local pkg=(python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc
+        --artifact capi-pico --artifact capi-c --artifact ap-demo)
+    "${pkg[@]}" --out "$work/a" || rc=1
+    [ "$rc" -eq 0 ] && { "${pkg[@]}" --out "$work/b" || rc=1; }
+    [ "$rc" -eq 0 ] && { cmp "$work/a/wz-target-manifest.json" "$work/b/wz-target-manifest.json" \
+        || { echo "  C1st FAIL: two packagings of one input wrote different manifests"; rc=1; }; }
+    [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/a" || rc=1; }
+    rm -rf "$work"
+    return "$rc"
 }
 
 # R311y612 (§5.11) — wz-capture at `--no-default-features`, which NO lane had.

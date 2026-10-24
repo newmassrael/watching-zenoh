@@ -244,6 +244,8 @@ def decl_of(data: dict) -> dict:
         "switches": list(data.get("upstream_switch", [])),
         "os_base": list(data["os"]["base"]),
         "platforms": list(data["platform"]),
+        "artifacts": list(data["artifact"]),
+        "roles": list(data["role"]),
     }
 
 
@@ -253,7 +255,7 @@ def validate_decl(data: dict) -> list[str]:
         out.append(f"schema_version is {data.get('schema_version')!r}, this reader is {SCHEMA_VERSION}")
     if not isinstance(data.get("catalog_version"), int):
         out.append("catalog_version is not an integer")
-    for kind in ("base", "capability", "limit", "os", "platform"):
+    for kind in ("base", "capability", "limit", "os", "platform", "artifact", "role"):
         if kind not in data:
             out.append(f"the declaration has no `{kind}`")
     if out:
@@ -261,6 +263,7 @@ def validate_decl(data: dict) -> list[str]:
     out += validate_os(data)
     out += validate_caps(data)
     out += validate_platforms(data)
+    out += validate_artifacts(data)
     out += validate_limits(data["limit"])
     out += validate_images(data)
     out += validate_switches(data)
@@ -445,7 +448,7 @@ LANES = ("none", "build", "run", "interop")
 LIBCS = ("glibc", "bionic", "nto")
 STD_KINDS = ("prebuilt", "build-std")
 NETWORK_STACKS = ("io-sock", "io-pkt")
-PLATFORM_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+PLATFORM_ID_RE = re.compile(r"^[a-z0-9]+([-_][a-z0-9]+)*$")
 TRIPLE_RE = re.compile(r"^[a-z0-9_]+(-[a-z0-9_.]+)+$")
 
 
@@ -499,7 +502,7 @@ def validate_platforms(data: dict) -> list[str]:
         for key in sorted(PLATFORM_REQUIRED - set(p)):
             out.append(f"{who} has no `{key}`")
         if not isinstance(p.get("id"), str) or not PLATFORM_ID_RE.match(p.get("id", "")):
-            out.append(f"{who}: the id is not lower-case words joined by `-`")
+            out.append(f"{who}: the id is not lower-case words and digits joined by `-` or `_`")
         if not isinstance(p.get("triple"), str) or not TRIPLE_RE.match(p.get("triple", "")):
             out.append(f"{who}: `{p.get('triple')}` is not a target triple")
         if p.get("libc") not in LIBCS:
@@ -522,6 +525,70 @@ def validate_platforms(data: dict) -> list[str]:
             if isinstance(p["os_provides"], list):
                 for lacking in sorted(base - set(p["os_provides"])):
                     out.append(f"{who} does not provide `{lacking}`, which every host build asks for")
+    return out
+
+
+# ─── The artifacts the entry packages, and the roles each provides (T8) ───────────────────────
+#
+# An ARTIFACT is a cargo package's one file: a library or an executable, with the stamp family it
+# carries (`wz-abi-stamp`) and, for a library, the ABI whose capability graph resolves what the
+# build asks of a device. A ROLE is what an artifact provides and how it is reached; it is present
+# in a manifest only when its `needs_feature` is on in the build, and an executable's
+# `traffic-driver` takes its role words from the facts note the build wrote (`facts_list`), so no
+# table of them is kept here.
+ARTIFACT_KEYS = {"id", "package", "kind", "file", "family", "abi", "help"}
+ARTIFACT_REQUIRED = {"id", "package", "kind", "file", "family", "help"}
+ARTIFACT_KINDS = ("shared-library", "executable")
+ROLE_IDS = ("pico-library", "zenoh-c-dropin", "session-node", "traffic-driver")
+ROLE_KEYS = {"artifact", "id", "needs_feature", "via_argument", "via_kind", "via_key", "facts_list", "help"}
+ROLE_ABI = {"pico-library": "pico", "zenoh-c-dropin": "c"}
+
+
+def validate_artifacts(data: dict) -> list[str]:
+    out: list[str] = []
+    artifacts = data["artifact"]
+    ids = [a.get("id") for a in artifacts]
+    if len(ids) != len(set(ids)):
+        out.append("an artifact id is declared twice")
+    by_id = {a.get("id"): a for a in artifacts}
+    for a in artifacts:
+        who = f"artifact {a.get('id')!r}"
+        for key in sorted(set(a) - ARTIFACT_KEYS):
+            out.append(f"{who} has the unknown key `{key}`")
+        for key in sorted(ARTIFACT_REQUIRED - set(a)):
+            out.append(f"{who} has no `{key}`")
+        if a.get("kind") not in ARTIFACT_KINDS:
+            out.append(f"{who}: kind is `{a.get('kind')}`, not one of {', '.join(ARTIFACT_KINDS)}")
+        if a.get("kind") == "shared-library":
+            if a.get("abi") not in ABIS:
+                out.append(f"{who}: a library names the ABI whose capabilities it has ({', '.join(ABIS)})")
+        elif "abi" in a:
+            out.append(f"{who}: only a library has an ABI")
+    roles = data["role"]
+    seen = set()
+    for r in roles:
+        who = f"role {r.get('id')!r} of {r.get('artifact')!r}"
+        for key in sorted(set(r) - ROLE_KEYS):
+            out.append(f"{who} has the unknown key `{key}`")
+        if r.get("artifact") not in by_id:
+            out.append(f"{who}: the artifact is not declared")
+            continue
+        if r.get("id") not in ROLE_IDS:
+            out.append(f"{who}: `{r.get('id')}` is not one of {', '.join(ROLE_IDS)}")
+        if (r.get("artifact"), r.get("id")) in seen:
+            out.append(f"{who} is declared twice")
+        seen.add((r.get("artifact"), r.get("id")))
+        art = by_id[r["artifact"]]
+        want = ROLE_ABI.get(r.get("id"))
+        if want is not None and art.get("abi") != want:
+            out.append(f"{who}: a `{r['id']}` is a library of the {want} ABI")
+        if want is None and art.get("kind") != "executable":
+            out.append(f"{who}: a `{r.get('id')}` is an executable")
+        if "facts_list" in r and art.get("kind") != "executable":
+            out.append(f"{who}: only an executable carries a facts note")
+    for aid in by_id:
+        if not any(r.get("artifact") == aid for r in roles):
+            out.append(f"artifact {aid!r} provides no role")
     return out
 
 
@@ -1637,6 +1704,20 @@ lane = "none"
 os_provides = ["threads", "sockets-tcp", "sockets-udp", "entropy"]
 help = "A sample platform."
 
+[[artifact]]
+id = "lib-a"
+package = "pkg-a"
+kind = "shared-library"
+file = "pkg_a"
+family = "fam-a"
+abi = "pico"
+help = "A sample library."
+
+[[role]]
+artifact = "lib-a"
+id = "pico-library"
+help = "A sample role."
+
 [[limit]]
 id = "MAX_A"
 kconfig = "WZ_LIMIT_MAX_A"
@@ -2000,6 +2081,39 @@ def cmd_selftest() -> int:
     expect("a pair nobody classified is a finding, not a pass",
            any("does not classify" in f for f in platform_rustc_findings(
                [row], {"t-1"}, lambda t: {"target_os": "linux", "target_env": "musl"})))
+    # The artifacts and their roles (docs/target-build-contract.md T8).
+    expect("a role naming an artifact nobody declared is refused",
+           caps_refused('artifact = "lib-a"', 'artifact = "nope"', "the artifact is not declared"))
+    expect("an artifact that provides no role is refused",
+           caps_refused('artifact = "lib-a"', 'artifact = "nope"', "provides no role"))
+    expect("an artifact kind outside the list is refused",
+           caps_refused('kind = "shared-library"', 'kind = "static-library"', "not one of shared-library"))
+    expect("a library that names no ABI is refused",
+           caps_refused('abi = "pico"\n', "", "names the ABI"))
+    expect("an artifact with an unknown key is refused",
+           caps_refused('family = "fam-a"', 'family = "fam-a"\nextra = "x"', "unknown key `extra`"))
+    expect("a role id outside the vocabulary is refused",
+           caps_refused('id = "pico-library"', 'id = "daemon"', "is not one of pico-library"))
+    expect("a pico role on a library of another ABI is refused",
+           caps_refused('abi = "pico"', 'abi = "c"', "is a library of the pico ABI"))
+    expect("a session role on a library is refused",
+           caps_refused('id = "pico-library"', 'id = "session-node"', "is an executable"))
+    expect("a role declared twice is refused",
+           any("declared twice" in p for p in validate_decl(read_decl_toml(
+               SAMPLE + SAMPLE[SAMPLE.index("[[role]]"):]))))
+    exe = SAMPLE.replace('kind = "shared-library"', 'kind = "executable"').replace(
+        'abi = "pico"\n', "").replace('id = "pico-library"', 'id = "session-node"')
+    expect("an executable with a session role validates", validate_decl(read_decl_toml(exe)) == [])
+    expect("an executable that names an ABI is refused",
+           any("only a library has an ABI" in p for p in validate_decl(read_decl_toml(
+               exe.replace('family = "fam-a"', 'family = "fam-a"\nabi = "pico"')))))
+    expect("a library carrying a facts list is refused",
+           caps_refused('artifact = "lib-a"\nid = "pico-library"',
+                        'artifact = "lib-a"\nid = "pico-library"\nfacts_list = "x"',
+                        "only an executable carries a facts note"))
+    expect("a declaration with no artifact is refused",
+           any("no `artifact`" in p for p in validate_decl(read_decl_toml(
+               SAMPLE[: SAMPLE.index("[[artifact]]")] + SAMPLE[SAMPLE.index("[[limit]]"):]))))
     expect("an original in both upstream_on and upstream_off is refused",
            caps_refused('upstream_on = ["zenoh-pico"]',
                         'upstream_on = ["zenoh-pico"]\nupstream_off = ["zenoh-pico"]', "in both"))

@@ -41,7 +41,6 @@ from __future__ import annotations
 import ctypes
 import pathlib
 import shutil
-import struct
 import subprocess
 import sys
 import tempfile
@@ -211,41 +210,7 @@ def run(items: list[tuple[str, pathlib.Path]], call_doors: bool) -> int:
 
 def mini_elf(notes: list[tuple[str, str, int, bytes]], cls: int = 64, order: str = "<") -> bytes:
     """An ELF with no segments and one note section per entry: (section, owner, type, desc)."""
-    def note(owner: str, kind: int, desc: bytes) -> bytes:
-        name = owner.encode() + b"\x00"
-        pad = lambda b: b + b"\x00" * (-len(b) % 4)  # noqa: E731
-        return struct.pack(order + "III", len(name), len(desc), kind) + pad(name) + pad(desc)
-
-    names = b"\x00"
-    shstr_off = {}
-    for section, *_ in notes:
-        shstr_off[section] = len(names)
-        names += section.encode() + b"\x00"
-    shstr_off[".shstrtab"] = len(names)
-    names += b".shstrtab\x00"
-    header_size = 64 if cls == 64 else 52
-    body = b""
-    placed = []
-    for section, owner, kind, desc in notes:
-        blob = note(owner, kind, desc)
-        placed.append((section, header_size + len(body), len(blob)))
-        body += blob
-    names_off = header_size + len(body)
-    body += names
-    shoff = header_size + len(body)
-    shdr = order + ("IIQQQQIIQQ" if cls == 64 else "IIIIIIIIII")
-    table = struct.pack(shdr, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-    for section, off, size in placed:
-        table += struct.pack(shdr, shstr_off[section], elf_facts.SHT_NOTE, 2, 0, off, size, 0, 0, 4, 0)
-    table += struct.pack(shdr, shstr_off[".shstrtab"], 3, 0, 0, names_off, len(names), 0, 0, 1, 0)
-    count = len(placed) + 2
-    ident = b"\x7fELF" + bytes([1 if cls == 32 else 2, 1 if order == "<" else 2, 1]) + b"\x00" * 9
-    if cls == 64:
-        head = ident + struct.pack(order + "HHIQQQIHHHHHH", 3, 183, 1, 0, 0, shoff, 0, 64, 0, 0, 64, count, count - 1)
-    else:
-        head = ident + struct.pack(order + "HHIIIIIHHHHHH", 3, 40, 1, 0, 0, shoff, 0, 52, 0, 0, 40, count, count - 1)
-    assert len(head) == header_size, (len(head), header_size)
-    return head + body + table
+    return elf_facts.build_test_elf(notes_=notes, cls=cls, order=order)
 
 
 def stamp_bytes(family: str, revision, layout: dict, schema: int = 1, extra: dict | None = None) -> bytes:

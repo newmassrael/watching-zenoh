@@ -27,3 +27,12 @@ wz_abi_stamp::stamp!(
     revision = SURFACE_REVISION,
     layout = [],
 );
+
+// What this build plays, computed from its own role table: the driver roles whose feature is on.
+// A tool describing the executable for another operating system reads it from the file.
+wz_abi_stamp::facts!(
+    lists = [(
+        "driver_roles",
+        &crate::sessions_driver::roles::AVAILABLE_WORDS
+    )]
+);
