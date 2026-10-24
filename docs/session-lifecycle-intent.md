@@ -222,6 +222,64 @@ handshake derived, which is the binding D1 requires.
   is the candidate, and its fit is measured first. Writing a TLS stack here is
   rejected (cryptography is not re-implemented), and the port lets a mature
   Rust stack with no heap replace the choice later.
+- **The fixed-memory stack, decided (owner, 2026-10-24).** Mbed TLS on its
+  PSA Crypto line (4.x), at the one revision the Zephyr workspace pins, and
+  the same revision as a pinned source for the profiles that are not Zephyr.
+  The PSA line does every cryptographic operation through the PSA Crypto API,
+  which is what lets the chip's crypto block serve as a driver and lets a
+  private key be opaque to the application. The 3.6 line is the last of the
+  older API, and on the kit it would be a second copy beside Zephyr's.
+  zenoh-pico 1.10.1 refuses Mbed TLS 4 in its own build
+  (`vendor/zenoh-pico/CMakeLists.txt`); that constrains building pico, not
+  the TLS 1.3 wire both sides speak. The structure:
+  - The identity key is a P-256 key the device generates in the PSA key store
+    at its first boot. The key never leaves it, and the handshake's
+    CertificateVerify is signed inside it. The certificate is self-signed on
+    the device over that key, and the zid is derived from the key (D1).
+  - A peer is accepted by pinning, not by a chain. Its certificate's key
+    proves possession in the handshake, and the zid D1 derives from it must
+    equal the zid the dial expected (D4). There is no certificate authority,
+    so a chain error is not the verdict.
+  - Memory is one static arena that Mbed TLS's buffer allocator serves. The
+    tree has no heap. The record buffers are bounded by the record size limit
+    (RFC 8449, which this line implements on both sides) and by the
+    configured record lengths. A peer that ignores the limit still sends
+    16 KiB records, so whether the receive buffer can shrink is measured
+    against the peers, not assumed.
+  - The session tier sees one port. The channel is a stream over a stream
+    (`TlsStream<S: StreamSocket>: StreamSocket`), so the stream link's
+    framing, loss handling and lent-slot send stay written once. The locator
+    gains a TLS link kind, and a stack without it refuses the dial as
+    unsupported. The backend is its own crate behind the port.
+  - First, the fit is measured on the kit: an image runs a mutual TLS 1.3
+    handshake between two in-memory peers. It reports code size, the arena's
+    peak, and each role's handshake time, as a row of the kit lane.
+  - **Measured (Round 3493, T2G kit, M7 at 350 MHz, image
+    `deploy/zephyr-tls-fit`, Zephyr's Mbed TLS 4.1.0).** The lane image is
+    `zephyr-tls-fit`.
+    - Three rounds of mutual TLS 1.3 completed with
+      TLS_AES_128_GCM_SHA256. Each side pinned the other's zid, and a wrong
+      expected zid was refused.
+    - Each role's handshake took about 1.76 s, in software P-256 with the
+      NIST curve optimisation on.
+    - Generating the two identities (key and self-signed certificate)
+      took 1.56 s together.
+    - The arena's peak was 14,368 B in 95 blocks for both peers together,
+      with Zephyr's default record lengths of 1,500 B each way.
+    - The main thread used 2,336 B of stack.
+    - The link map puts Mbed TLS at about 72.7 KB of code and read-only
+      data: crypto 42.4 KB, TLS 18.2 KB, X.509 12.2 KB.
+  - What this leaves open:
+    - The 1,500 B records hold only while the peer honours the record size
+      limit. A peer that sends 16 KiB records needs a receive buffer that
+      large, so the extension and the peers' behaviour are measured next.
+    - The handshake time is software P-256 throughout. The p256-m driver
+      and the chip's crypto block, which is reached as a PSA driver, are
+      the two ways to shorten it.
+    - The keys here are volatile. The persistent PSA key store is the
+      production form.
+    - The pin is checked after the handshake and before any data. The
+      trusted-certificate callback would check it inside the handshake.
 - **Rejected.** EDHOC (RFC 9528), the constrained-device design, because no
   zenoh or zenoh-pico peer speaks it and it needs OSCORE to protect messages,
   which would make a wz-only channel. Noise (XX or IK), for the same

@@ -17,7 +17,8 @@
 #
 # Images are the keys of the stack gate: zephyr-client-fixed, zephyr-client-fixed-batching (they answer,
 # and the host measures a GET through a router) and zephyr-client-fixed-get (it asks a responder, and its
-# own console line carries the round trip).
+# own console line carries the round trip). A MEASURE image (zephyr-tls-fit, the secure channel's fit)
+# runs alone, with no router: it is flashed, reset, and held to its own console verdict.
 #
 # WHERE IT RUNS: from a checkout of this repository on the host the kit is attached to (the lane builds
 # from the tree it lives in, so what was measured is what is in front of you). Send a tree there with
@@ -72,10 +73,21 @@ bad() {
     fails=$((fails + 1))
 }
 
-# image key -> overlays, and whether it answers or asks. THE TABLE: `--selftest` holds it to the stack
-# gate's population and to the files.
+# image key -> the application, its overlays, and whether it answers, asks or only measures. THE TABLE:
+# `--selftest` holds it to the stack gate's population and to the files.
 image_spec() {
+    APP=zephyr-admin-node
     case "$1" in
+        # A MEASURE image runs alone on the kit, with no router and no network, and its console says
+        # what it measured and whether it held (a line `<TAG> done ok=1`). The secure channel's fit
+        # (decision D9 of docs/session-lifecycle-intent.md): Mbed TLS's mutual TLS 1.3 handshake
+        # between two in-memory peers, each pinning the other's key.
+        zephyr-tls-fit)
+            APP=zephyr-tls-fit
+            OVERLAYS=""
+            KIND=measure
+            DONE_TAG="TLS-FIT"
+            ;;
         zephyr-client-fixed)
             OVERLAYS="overlays/t2g_zeth.conf;overlays/t2g_client.conf;overlays/t2g_client_fixed.conf"
             KIND=answer
@@ -92,6 +104,9 @@ image_spec() {
     esac
 }
 IMAGES=(zephyr-client-fixed zephyr-client-fixed-batching zephyr-client-fixed-get)
+# The measure images: not the stack gate's (their stack is what they report) and not yet a resource
+# row's (the row is set from what they measure).
+MEASURE_IMAGES=(zephyr-tls-fit)
 
 load_lab() {
     if [[ ! -r "$LAB_ENV" ]]; then
@@ -241,9 +256,12 @@ build() {
     . "$ZEPHYR_HOME/.venv/bin/activate"
     export ZEPHYR_BASE="$ZEPHYR_HOME/zephyr"
     export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-8}" CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-8}"
+    local extra=()
+    if [[ "$APP" == zephyr-admin-node ]]; then
+        extra=(-- -DEXTRA_CONF_FILE="$OVERLAYS" -DEXTRA_DTC_OVERLAY_FILE=overlays/t2g_zeth.overlay)
+    fi
     if (
-        cd "$ROOT" && nice -n 10 west build -b "$BOARD" -d "$dir" deploy/zephyr-admin-node -p auto -- \
-            -DEXTRA_CONF_FILE="$OVERLAYS" -DEXTRA_DTC_OVERLAY_FILE=overlays/t2g_zeth.overlay
+        cd "$ROOT" && nice -n 10 west build -b "$BOARD" -d "$dir" "deploy/$APP" -p auto "${extra[@]}"
     ) >"$out/build.log" 2>&1; then
         ok "$key" "west build ($out/build.log)"
     else
@@ -269,7 +287,9 @@ PY
     echo "$sha" >"$out/m7.sha256"
     echo "$elf" >"$out/elf.path"
     ok "$key" "$(arm-none-eabi-size "$elf" | awk 'NR==2 {printf "text %s, data %s, bss %s", $1, $2, $3}'); padded image sha256 ${sha:0:16}"
-    if python3 "$ROOT/scripts/lib/stack_frame_gate.py" --check "$key" --elf "$elf" >"$out/stack-gate.log" 2>&1; then
+    if [[ "$KIND" == measure ]]; then
+        ok "$key" "a measure image: its stack is one of the figures it reports, not the stack gate's"
+    elif python3 "$ROOT/scripts/lib/stack_frame_gate.py" --check "$key" --elf "$elf" >"$out/stack-gate.log" 2>&1; then
         ok "$key" "the stack gate holds the image ($(grep -a 'stack-chain: OK' "$out/stack-gate.log" | head -n 1 | cut -c1-120))"
     else
         bad "$key" "the stack gate refuses the image ($out/stack-gate.log)"
@@ -360,6 +380,13 @@ run() {
     PIDS=()
     ADDR_ADDED=""
     trap stop_all EXIT
+    if [[ "$KIND" == measure ]]; then
+        run_measure "$key"
+        stop_all
+        trap - EXIT
+        [[ "$fails" -eq "$before" ]]
+        return
+    fi
     if ! sudo -n ip addr add "$KIT_HOST_IP/24" dev "$KIT_IFACE" 2>"$OUT/ip.log"; then
         bad "$key" "the interface $KIT_IFACE did not take $KIT_HOST_IP ($OUT/ip.log)"
         return 1
@@ -471,6 +498,49 @@ run() {
     [[ "$fails" -eq "$before" ]]
 }
 
+# A measure image after its flash: the console, a reset, and the image's own `<DONE_TAG> done` line.
+# No router, no address on the interface: the image touches nothing but the kit.
+run_measure() {
+    local key="$1" done_before
+    stty -F "$KIT_CONSOLE" 115200 raw -echo -hupcl
+    setsid timeout 600 cat "$KIT_CONSOLE" >"$OUT/console.raw" 2>"$OUT/console.err" </dev/null &
+    PIDS+=("$!")
+    sleep 2
+    done_before="$(count_lines "$DONE_TAG done")"
+    # Where the console stood at the reset: the run's lines are the ones after it, and the boot the
+    # flash caused printed its own set before.
+    local mark
+    mark="$(stat -c %s "$OUT/console.raw")"
+    if timeout 60 "$KIT_PROGTOOLS/openocd/bin/openocd" -s "$KIT_PROGTOOLS/openocd/scripts" \
+        -f interface/kitprog3.cfg -f target/infineon/cyt4bf.cfg -c "init" -c "reset run" -c "shutdown" \
+        >"$OUT/reset.log" 2>&1; then
+        ok "$key" "the kit was reset ($OUT/reset.log)"
+    else
+        bad "$key" "the reset failed ($OUT/reset.log)"
+        return 1
+    fi
+    local waited=0 limit=180
+    while [[ "$waited" -lt "$limit" ]]; do
+        if [[ "$(count_lines "$DONE_TAG done")" -gt "$done_before" ]]; then
+            break
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if [[ "$(count_lines "$DONE_TAG done")" -le "$done_before" ]]; then
+        bad "$key" "no '$DONE_TAG done' line after the reset in ${limit} s ($OUT/console.raw)"
+        return 1
+    fi
+    tail -c +"$((mark + 1))" "$OUT/console.raw" | grep -a "^$DONE_TAG" >"$OUT/measure.txt"
+    local verdict
+    verdict="$(grep -a "$DONE_TAG done" "$OUT/measure.txt" | tail -n 1)"
+    if [[ "$verdict" == *" ok=1"* ]]; then
+        ok "$key" "the image held what it measured: $verdict ($OUT/measure.txt)"
+    else
+        bad "$key" "the image says it did not hold: $verdict ($OUT/measure.txt)"
+    fi
+}
+
 build_responder() {
     # The host node with the getter, built here from this tree: the peer the asking image asks.
     mkdir -p "$LANE_HOME"
@@ -520,6 +590,17 @@ PY
             bad selftest "$key has no row in the resource budget: a run of it would be held to nothing"
         fi
     done
+    for key in "${MEASURE_IMAGES[@]}"; do
+        if ! image_spec "$key" || [[ "$KIND" != measure || -z "${DONE_TAG:-}" ]]; then
+            bad selftest "$key is listed as a measure image and the table does not say how it ends"
+        elif [[ ! -f "$ROOT/deploy/$APP/CMakeLists.txt" ]]; then
+            bad selftest "$key builds deploy/$APP, which is not an application"
+        elif ! grep -q "$DONE_TAG done" "$ROOT/deploy/$APP/src/main.c"; then
+            bad selftest "$key waits for '$DONE_TAG done', which deploy/$APP never prints"
+        else
+            ok selftest "$key is a measure image of deploy/$APP that ends on '$DONE_TAG done'"
+        fi
+    done
     [[ "$fails" -eq 0 ]]
 }
 
@@ -539,7 +620,7 @@ case "$cmd" in
         done
         ;;
     build-responder) build_responder ;;
-    list) printf '%s\n' "${IMAGES[@]}" ;;
+    list) printf '%s\n' "${IMAGES[@]}" "${MEASURE_IMAGES[@]}" ;;
     --selftest) selftest ;;
     *)
         sed -n '9,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2

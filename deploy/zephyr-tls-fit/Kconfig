@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+mainmenu "The secure channel's fit on the T2G kit"
+
+rsource "../zephyr-eth-wzmac/Kconfig.zeth"
+
+config TLS_FIT_ROUNDS
+	int "Handshakes the image runs and reports"
+	default 3
+	help
+	  The first handshake includes what warms once (the PSA subsystem's first use of
+	  each algorithm); the console reports every round, so the first and the steady
+	  cost are both read.
+
+source "Kconfig.zephyr"
