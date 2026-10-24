@@ -280870,6 +280870,54 @@
         "Step 3 of docs/dissect-row-index.md: the byte source, so the reassembled stream copy goes; then 4c (datagram, serial and QUIC rows as entries) and 5 (memory gate, lent-buffer door)"
       ]
     },
+    "Round 3486": {
+      "decision_summary": "Round 3482 landed the control-plane change (a ctl runtime for the keepalive timers, an urgent keepalive frame, the write-end baseline) with E7s passing over the loop's yield and no reading of what each part adds. Each part was switched off alone and in combination on one binary, E7s on four cores with rising CPU hogs, and read by the longest silence a client saw from the router against the 10 s lease and by the client sessions that ended on their own. Up to 16 hogs the loop alone keeps every lease. At 32 it ends sessions; the control runtime and the urgent frame each prevent that and together do best; the write-end stamp adds nothing in any reading and stays. E7s now counts the client sessions that end on their own and asserts none, and a test holds that a saturated tx runtime leaves a control task running.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_router_hat_data_plane_scaling.rs: spawn_sessions reads a steady client's log and counts the sessions that print their end (SESSION_ENDED); the window carries the count, the starved test prints it, and every steady window asserts it is zero beside the DOWN count; the module doc names the new assertion.",
+        "crates/wz-runtime-tokio/tests/runtime_partition.rs: saturated_tx_does_not_starve_control_when_partitioned holds every tx worker and runs a task on the control runtime.",
+        "docs/router-data-plane-scaling.md: section 7.3 gives the variants, the hog counts, the readings and what they show, and says where the stamp's share is not shown; section 7.2 points to it."
+      ],
+      "verification_bullets": [
+        "On a build host (four cores, a host load of 10 to 70), six variants of the change at 3 hogs, three runs each: longest silence a client saw 3.1 to 3.3 s in all, no session ended. At 6, 10, 16, 24 and 32 hogs, the loop alone against the whole change, two runs each: no session ended up to 16 hogs; at 32 the loop alone lost sessions and the whole change lost none.",
+        "At 32 hogs, six variants, three runs each: loop alone 9.9 to 10.1 s and 0, 2, 2 sessions ended; ctl alone 8.2 to 8.9 s and none; urgent frame alone 8.0 to 9.7 s and none; both 6.9 to 7.9 s and none; all three 7.1 to 8.8 s and none; stamp alone 8.9 to 9.9 s and 2, 0, 5.",
+        "The router's own longest silence from its peers was 2.0 to 2.4 s at 3 hogs, 10.2 to 11.0 s at 24, and 12 to 14 s at 32, the same in every variant.",
+        "The whole E7s binary passes on the tip that holds round 3482, with the new assertion (0 DOWN, 0 ended, 316 of 316 admitted, 32% forwarded); the partition tests pass, 21 of 21; clippy with warnings denied reports nothing on wz-runtime-tokio, wz-session-core and the E7s test.",
+        "The hosted CI run of round 3480's push is green, so the repairs of C1bnl and Layer Q read there. Layer Q was not run on this tip."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "The measurements switched the parts off through a temporary environment variable and read the silence through a temporary counter; both were removed, and only the client count remains. The share of a core that the hogs leave the router was not read.",
+        "The write-end stamp's share of the guarantee is not shown by any reading, and it is kept because zenoh resets its tracker after the write. Left: a scenario in which it matters and a test of it, or its removal; it is the lifecycle line's change and not touched here.",
+        "Left of the structure the owner approved: a capacity model that admits a session only while its control work fits a stated CPU budget (the router's own silence is past the lease from 24 hogs on, which is where it starts; the definition of the budget, configured or measured, is the owner's), a stated drop policy for data with counters on the admin space, and a test that asserts the latest a timer was served; the client count asserted here stands in for it until there is a counter.",
+        "The hosted result of the new E7s assertion is unread; it is a count of zero with a margin of about 6 s of a 10 s lease at 3 hogs on a build host, and a hosted runner is not measured.",
+        "The latency of one request and reply with the loop's yield is not measured: the harness on the comparison host spreads 82 to 104 us between runs, wider than the effect a yield once in eight events could have, so a run there could not show it."
+      ],
+      "publishable_decision_summary": "Round 3482 landed the control-plane change (a ctl runtime for the keepalive timers, an urgent keepalive frame, the write-end baseline) with E7s passing over the loop's yield and no reading of what each part adds. Each part was switched off alone and in combination on one binary, E7s on four cores with rising CPU hogs, and read by the longest silence a client saw from the router against the 10 s lease and by the client sessions that ended on their own. Up to 16 hogs the loop alone keeps every lease. At 32 it ends sessions; the control runtime and the urgent frame each prevent that and together do best; the write-end stamp adds nothing in any reading and stays. E7s now counts the client sessions that end on their own and asserts none, and a test holds that a saturated tx runtime leaves a control task running.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_router_hat_data_plane_scaling.rs: spawn_sessions reads a steady client's log and counts the sessions that print their end (SESSION_ENDED); the window carries the count, the starved test prints it, and every steady window asserts it is zero beside the DOWN count; the module doc names the new assertion.",
+        "crates/wz-runtime-tokio/tests/runtime_partition.rs: saturated_tx_does_not_starve_control_when_partitioned holds every tx worker and runs a task on the control runtime.",
+        "docs/router-data-plane-scaling.md: section 7.3 gives the variants, the hog counts, the readings and what they show, and says where the stamp's share is not shown; section 7.2 points to it."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host (four cores, a host load of 10 to 70), six variants of the change at 3 hogs, three runs each: longest silence a client saw 3.1 to 3.3 s in all, no session ended. At 6, 10, 16, 24 and 32 hogs, the loop alone against the whole change, two runs each: no session ended up to 16 hogs; at 32 the loop alone lost sessions and the whole change lost none.",
+        "At 32 hogs, six variants, three runs each: loop alone 9.9 to 10.1 s and 0, 2, 2 sessions ended; ctl alone 8.2 to 8.9 s and none; urgent frame alone 8.0 to 9.7 s and none; both 6.9 to 7.9 s and none; all three 7.1 to 8.8 s and none; stamp alone 8.9 to 9.9 s and 2, 0, 5.",
+        "The router's own longest silence from its peers was 2.0 to 2.4 s at 3 hogs, 10.2 to 11.0 s at 24, and 12 to 14 s at 32, the same in every variant.",
+        "The whole E7s binary passes on the tip that holds round 3482, with the new assertion (0 DOWN, 0 ended, 316 of 316 admitted, 32% forwarded); the partition tests pass, 21 of 21; clippy with warnings denied reports nothing on wz-runtime-tokio, wz-session-core and the E7s test.",
+        "The hosted CI run of round 3480's push is green, so the repairs of C1bnl and Layer Q read there. Layer Q was not run on this tip."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The measurements switched the parts off through a temporary environment variable and read the silence through a temporary counter; both were removed, and only the client count remains. The share of a core that the hogs leave the router was not read.",
+        "The write-end stamp's share of the guarantee is not shown by any reading, and it is kept because zenoh resets its tracker after the write. Left: a scenario in which it matters and a test of it, or its removal; it is the lifecycle line's change and not touched here.",
+        "Left of the structure the owner approved: a capacity model that admits a session only while its control work fits a stated CPU budget (the router's own silence is past the lease from 24 hogs on, which is where it starts; the definition of the budget, configured or measured, is the owner's), a stated drop policy for data with counters on the admin space, and a test that asserts the latest a timer was served; the client count asserted here stands in for it until there is a counter.",
+        "The hosted result of the new E7s assertion is unread; it is a count of zero with a margin of about 6 s of a 10 s lease at 3 hogs on a build host, and a hosted runner is not measured.",
+        "The latency of one request and reply with the loop's yield is not measured: the harness on the comparison host spreads 82 to 104 us between runs, wider than the effect a yield once in eight events could have, so a run there could not show it."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
