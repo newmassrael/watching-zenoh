@@ -12,22 +12,28 @@
 //!
 //! The gate opens a capture through the C ABI the consumer uses, does what the
 //! consumer does (read every row, take a field window, take the census), and
-//! counts the bytes the handle holds, with the strings the calls returned
-//! already given back. It is read at two points, because they fail for different
-//! reasons:
+//! reads the handle two ways at two points: what the ALLOCATOR counted (the
+//! strings the calls returned already given back), and what the handle REPORTS
+//! of itself through `wz_dissect_live_memory`, the `memory` document. The points
+//! are after the replay, which is the row structure (the entries, the units'
+//! bytes the handle keeps, the index beside them), and after the reads, which
+//! adds what the field walk and the census keep for the next call.
 //!
-//! * after the replay, which is the row structure: the entries, the units' bytes
-//!   the handle keeps, the index beside them;
-//! * after the reads, which adds what the field walk and the census keep for the
-//!   next call (their resumable memories).
+//! Three things are held, each failing for a reason of its own:
 //!
-//! Each is held to a ceiling per row that is the measured value plus 10%, for
-//! each transport and each replay door. The doors are separate cases because the
-//! owned door copies what it reads and the lent door keeps only where it is in
-//! the caller's file, and a stream list and a datagram list keep their rows in
-//! different places, so one figure cannot vouch for another. A ceiling that moved
-//! is a decision to be recorded where the measured value is, not a number to be
-//! raised until the test passes.
+//! * the allocator's bytes per row, to a ceiling that is the measured value plus
+//!   10%, for each transport and each replay door. The doors are separate cases
+//!   because the owned door copies what it reads and the lent door keeps only
+//!   where it is in the caller's file, and a stream list and a datagram list keep
+//!   their rows in different places, so one figure cannot vouch for another. A
+//!   ceiling that moved is a decision to be recorded where the measured value is,
+//!   not a number to be raised until the test passes;
+//! * the report against the allocator: the bytes per row the handle says it holds
+//!   agree with the ones the allocator counted within 6%. This is what makes the
+//!   report a measurement and not a belief, and it is what shows a structure that
+//!   grows with the rows and that no one reported;
+//! * the report's own figures per structure, which a failure prints, so a ceiling
+//!   that was crossed names the structure that grew.
 //!
 //! It also fails when
 //!
@@ -47,8 +53,9 @@ use std::ffi::{c_char, c_int, CStr};
 use wz_capi_dissect::live::LiveDissection;
 use wz_capi_dissect::{
     wz_dissect_live_census, wz_dissect_live_close, wz_dissect_live_drain,
-    wz_dissect_live_fields_since_window, wz_dissect_pcap_replay, wz_dissect_pcap_replay_lent,
-    wz_dissect_string_free, WzDissectRecord, WZ_DISSECT_LIMITS_NONE, WZ_DISSECT_OK,
+    wz_dissect_live_fields_since_window, wz_dissect_live_memory, wz_dissect_pcap_replay,
+    wz_dissect_pcap_replay_lent, wz_dissect_string_free, WzDissectRecord, WZ_DISSECT_LIMITS_NONE,
+    WZ_DISSECT_OK,
 };
 use wz_capture::fixtures::{push_run_capture, RunTransport};
 
@@ -93,10 +100,18 @@ const HANDSHAKE_ROWS: usize = 4;
 /// The size the gate measures at, and twice it for the growth.
 const ROWS: usize = 20_000;
 
+/// Rows a field window covers: what a consumer draws a page of.
+const FIELD_WINDOW: u64 = 8192;
+
 /// What an empty handle (a handshake and no pushes) may hold. Measured at about
 /// 46 KiB; the bound is what keeps a table sized for the largest capture out of
 /// the handle every capture pays for.
 const FLOOR_BOUND: isize = 64 * 1024;
+
+/// How far the handle's report of its bytes per row may be from the allocator's:
+/// the B-tree model is held to 3% (`wz-session-core`'s `btree_model` test), and
+/// what the report leaves out is fixed and spread over the rows.
+const REPORT_TOLERANCE: f64 = 0.06;
 
 /// Which replay door opens the capture.
 #[derive(Clone, Copy)]
@@ -115,11 +130,17 @@ enum Door {
 /// |-------------|--------------|-------------|
 /// | udp owned   | 82.0         | 183.1       |
 /// | udp lent    | 49.2         | 150.3       |
-/// | tcp owned   | 130.4        | 251.4       |
-/// | tcp lent    | 90.2         | 211.3       |
+/// | tcp owned   | 130.4        | 280.5       |
+/// | tcp lent    | 90.2         | 240.4       |
+///
+/// The reads are every field window to the end of the capture, then the census.
+/// A stream capture holds 49 bytes per row more after them than after the first
+/// window alone (211 and 251 were measured that way): the field walk keeps a
+/// digest of every row it has written, which a datagram capture's walk does not,
+/// and which only paging to the end brings out.
 ///
 /// The capture file is 90 (udp) and 104 (tcp) bytes per row, so the handle holds
-/// about 1.7 to 2.4 times the file after the reads on this fixture, whose packets
+/// about 1.7 to 2.7 times the file after the reads on this fixture, whose packets
 /// are the smallest a Push makes. A capture of larger messages shrinks the
 /// multiple, because the per-row figures here do not grow with the payload.
 struct Case {
@@ -136,10 +157,16 @@ struct Measured {
     rows: usize,
     /// Bytes the capture file is, for the report only.
     file_bytes: usize,
-    /// Bytes the handle held after the replay.
+    /// Bytes the allocator counted the handle holding after the replay.
     after_replay: isize,
-    /// Bytes the handle held after the consumer's reads, strings given back.
+    /// Bytes the allocator counted after the consumer's reads, strings given back.
     after_reads: isize,
+    /// What the handle reported of itself after the replay.
+    reported_replay: usize,
+    /// What the handle reported of itself after the reads.
+    reported_reads: usize,
+    /// The `memory` document after the reads, for a failure to print.
+    document: String,
     /// Bytes left over after the handle was closed.
     leaked: isize,
 }
@@ -174,12 +201,44 @@ fn take_string(rc: c_int, out: *mut c_char, what: &str) -> String {
     text
 }
 
+/// The number that follows `key` in `text`.
+fn number_after(text: &str, key: &str) -> usize {
+    let at = text
+        .find(key)
+        .unwrap_or_else(|| panic!("the memory document has no {key}: {text}"))
+        + key.len();
+    text[at..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|_| panic!("{key} is not a number in {text}"))
+}
+
+/// What the handle says it holds, through the door a consumer uses. The document
+/// is copied into `into` (made with room before the count began, so copying it
+/// does not move the allocator's figure) and its string is given back.
+fn report(handle: *const LiveDissection, into: &mut String) -> usize {
+    let mut out: *mut c_char = core::ptr::null_mut();
+    let rc = unsafe { wz_dissect_live_memory(handle, &mut out) };
+    let text = take_string(rc, out, "memory");
+    assert!(
+        text.contains("\"scope\":\"rows\""),
+        "the memory document does not say what it counts: {text}"
+    );
+    into.clear();
+    into.push_str(&text);
+    number_after(&text, "\"total\":")
+}
+
 fn measure(pushes: usize, transport: RunTransport, door: Door) -> Measured {
     let file = push_run_capture(pushes, transport);
     // The consumer's own buffer, sized before the count starts: it is the caller's
     // memory and not the handle's.
     let cap = pushes + HANDSHAKE_ROWS + 8;
     let mut buffer = vec![blank(); cap];
+    // Room for the document the report copies, for the same reason.
+    let mut scratch = String::with_capacity(2048);
 
     let base = outstanding();
     let mut handle: *mut LiveDissection = core::ptr::null_mut();
@@ -203,27 +262,46 @@ fn measure(pushes: usize, transport: RunTransport, door: Door) -> Measured {
     assert_eq!(rc, WZ_DISSECT_OK, "replay rc");
     assert!(!handle.is_null(), "replay returned no handle");
     let after_replay = outstanding() - base;
+    let reported_replay = report(handle, &mut scratch);
 
     let mut written = usize::MAX;
     let rc = unsafe { wz_dissect_live_drain(handle, buffer.as_mut_ptr(), cap, &mut written) };
     assert_eq!(rc, WZ_DISSECT_OK, "drain rc");
 
-    let mut out: *mut c_char = core::ptr::null_mut();
-    let rc = unsafe {
-        wz_dissect_live_fields_since_window(
-            handle,
-            core::ptr::null(),
-            0,
-            c"".as_ptr(),
-            0,
-            8192,
-            &mut out,
-        )
-    };
-    assert!(
-        !take_string(rc, out, "fields window").is_empty(),
-        "the field window is empty"
-    );
+    // The field documents, a window at a time to the end of the capture, which is
+    // how a consumer that shows every row reads them. What the walk keeps for the
+    // rows it has written grows with how far this goes, so a gate that read the
+    // first window alone would measure a structure that has not grown yet.
+    let last = (pushes + HANDSHAKE_ROWS) as u64;
+    let mut after = 0u64;
+    let mut windows = 0;
+    while after < last {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_live_fields_since_window(
+                handle,
+                core::ptr::null(),
+                0,
+                c"".as_ptr(),
+                after,
+                FIELD_WINDOW,
+                &mut out,
+            )
+        };
+        // The document is the caller's memory and is gone with this iteration.
+        let through =
+            number_after(&take_string(rc, out, "fields window"), "\"through_seq\":") as u64;
+        assert!(
+            through > after,
+            "the field window made no progress at {after}: it says it ends at {through}"
+        );
+        after = through;
+        windows += 1;
+        assert!(
+            windows <= pushes / 1000 + 8,
+            "the windows did not reach the end"
+        );
+    }
 
     let mut out: *mut c_char = core::ptr::null_mut();
     let rc = unsafe { wz_dissect_live_census(handle, c"".as_ptr(), &mut out) };
@@ -248,6 +326,7 @@ fn measure(pushes: usize, transport: RunTransport, door: Door) -> Measured {
     }
 
     let after_reads = outstanding() - base;
+    let reported_reads = report(handle, &mut scratch);
     unsafe { wz_dissect_live_close(handle) };
     let leaked = outstanding() - base;
 
@@ -256,6 +335,9 @@ fn measure(pushes: usize, transport: RunTransport, door: Door) -> Measured {
         file_bytes: file.len(),
         after_replay,
         after_reads,
+        reported_replay,
+        reported_reads,
+        document: scratch,
         leaked,
     }
 }
@@ -288,28 +370,49 @@ fn gate(case: &Case) {
             m.leaked
         );
         let rows = m.rows as f64;
-        let replay = (m.after_replay - floor.after_replay) as f64 / rows;
-        let reads = (m.after_reads - floor.after_reads) as f64 / rows;
+        let per_row = |bytes: isize, floor: isize| (bytes - floor) as f64 / rows;
+        let replay = per_row(m.after_replay, floor.after_replay);
+        let reads = per_row(m.after_reads, floor.after_reads);
+        let reported_replay = (m.reported_replay as f64 - floor.reported_replay as f64) / rows;
+        let reported_reads = (m.reported_reads as f64 - floor.reported_reads as f64) / rows;
         eprintln!(
-            "{name}: {} rows, file {:.2} B/row, after replay {replay:.2} B/row, \
-             after reads {reads:.2} B/row",
+            "{name}: {} rows, file {:.2} B/row; allocator {replay:.2} then {reads:.2} B/row, \
+             handle reports {reported_replay:.2} then {reported_reads:.2} B/row",
             m.rows,
             m.file_bytes as f64 / rows,
         );
         assert!(
             replay <= case.after_replay_ceiling,
             "{name}: the handle holds {replay:.2} B per row after the replay at {} rows, \
-             over the ceiling of {}: the row structure grew",
+             over the ceiling of {}: the row structure grew. It reports {}",
             m.rows,
-            case.after_replay_ceiling
+            case.after_replay_ceiling,
+            m.document
         );
         assert!(
             reads <= case.after_reads_ceiling,
             "{name}: the handle holds {reads:.2} B per row after the reads at {} rows, \
-             over the ceiling of {}: what the field walk or the census keeps grew",
+             over the ceiling of {}: what the field walk or the census keeps grew. It \
+             reports {}",
             m.rows,
-            case.after_reads_ceiling
+            case.after_reads_ceiling,
+            m.document
         );
+        for (stage, measured, reported) in [
+            ("replay", replay, reported_replay),
+            ("reads", reads, reported_reads),
+        ] {
+            let off = (reported - measured).abs() / measured;
+            assert!(
+                off <= REPORT_TOLERANCE,
+                "{name}: after the {stage} the handle reports {reported:.2} B per row and the \
+                 allocator counted {measured:.2} ({:.1}% apart, over {:.0}%): a structure that \
+                 follows the rows is unreported, or modelled wrongly. It reports {}",
+                off * 100.0,
+                REPORT_TOLERANCE * 100.0,
+                m.document
+            );
+        }
     }
 }
 
@@ -342,7 +445,7 @@ fn a_stream_capture_s_handle_holds_a_constant_per_row() {
         transport: RunTransport::Stream,
         door: Door::Owned,
         after_replay_ceiling: 144.0,
-        after_reads_ceiling: 277.0,
+        after_reads_ceiling: 310.0,
     });
 }
 
@@ -353,6 +456,6 @@ fn a_lent_stream_capture_s_handle_holds_a_constant_per_row() {
         transport: RunTransport::Stream,
         door: Door::Lent,
         after_replay_ceiling: 100.0,
-        after_reads_ceiling: 233.0,
+        after_reads_ceiling: 266.0,
     });
 }
