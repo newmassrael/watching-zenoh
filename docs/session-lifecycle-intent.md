@@ -374,8 +374,25 @@ handshake derived, which is the binding D1 requires.
       Mbed TLS the arena, its allocator is one that refuses, so the image
       references no C heap symbol and still names no Rust allocator (the
       no-allocator gate's `linux-x86_64-tls` build).
-    - Not yet: the same witness on the kit, which needs a TCP stream socket on
-      the Zephyr profile and the kit image over the crate.
+    - The same witness on the kit (Round 3524). The T2G kit's fixed-memory
+      client, built with `CONFIG_WZ_TLS`
+      (`deploy/zephyr-admin-node/overlays/t2g_client_tls.conf`), dials
+      `tls/` over Zephyr's TCP (`wz_runtime_zephyr::stream`). Its channel's
+      C side is compiled by the image's CMake against Zephyr's own Mbed TLS
+      4.1.0, and its arena is the one Zephyr gives Mbed TLS. The kit lane's
+      verify image (`scripts/kit-lane.sh`, `zephyr-client-fixed-tls`) does
+      the rest:
+      - It resets the kit with no router and reads the certificate the
+        image prints.
+      - It configures zenohd 1.10.1, built at the pin, to pin that
+        certificate and to claim the zid its own key names.
+      - It holds the run to the image's line, which on the first run read
+        "session established, peer verified".
+      - Measured on that run: the main thread's stack peak was 6,864 of
+        12,288 B. Against the same client without the channel, the image
+        grew by 109,604 B of code and 68,781 B of bss, of which 49,152 B
+        is the Mbed TLS arena. These are measurements, not yet a budget
+        row.
   - What this leaves open:
     - Mbed TLS 4.1 does not implement TLS 1.3 KeyUpdate. A KeyUpdate from
       the peer ends the session with an unexpected-message alert: the
@@ -437,7 +454,10 @@ Each step lands with its own done-when; sizes are not estimated here.
      proven key read by the session on every profile, and the verbs offered
      by the channel crate (D9 above). Done on the host (Round 3520): the
      fixed-memory image `host-slot-node` and zenohd 1.10.1 verify each other
-     over the channel, with two controls. Left of 1b: the same on the kit.
+     over the channel, with two controls. Done on the kit (Round 3524): the
+     T2G kit's fixed-memory client and zenohd 1.10.1 verify each other over
+     the channel. Step 1b is done. Its residue is the kit image's stack and
+     resource rows, set from its runs.
 2. **D4.** The expected zid on every dial path. Done when a dial to a locator
    that answers with another zid closes at InitAck on AP, the C ABI and the MCU
    host.
