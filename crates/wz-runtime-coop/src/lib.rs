@@ -289,9 +289,10 @@ pub mod link_storage;
 #[cfg(feature = "session-unicast")]
 pub mod stream_link;
 
-// The two links above as one stack of the slot profile's session host: a dial names its protocol,
-// and the stack opens that link into the same session slots.
-#[cfg(all(feature = "session-unicast", feature = "session-slot"))]
+// The two links above as one network stack: a dial names its protocol, and the stack opens that
+// link, into the session slots on the slot profile (`IpStack`) and as the session shell's links on
+// the heap profile (`IpLinks`).
+#[cfg(feature = "session-unicast")]
 pub mod ip_stack;
 
 // The multicast group session's seam to the network stack, the twin of

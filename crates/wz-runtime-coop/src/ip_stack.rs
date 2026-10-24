@@ -1,17 +1,28 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A platform's datagram and stream sockets as ONE stack of the slot profile's session host: a
-//! dial to `udp/...` opens the datagram link (`udp_link`), a dial to `tcp/...` the stream link
-//! (`stream_link`), and both live in the same session slots, because the slot table holds one
-//! driver type and that type is [`IpDriver`], either link.
+//! A platform's datagram and stream sockets as ONE network stack: a dial to `udp/...` opens the
+//! datagram link (`udp_link`), a dial to `tcp/...` the stream link (`stream_link`), and either is
+//! an [`IpDriver`], so whatever holds a session's link holds one type for both.
+//!
+//! On the slot profile the stack is `IpStack`, whose links claim their buffers from the image's
+//! tables and live in the session slots. On the heap profile it is `IpLinks`, the session shell's
+//! `SessionLinks` over the same two sockets, whose links allocate their buffers when they open.
 //!
 //! A platform with both sockets (the host's) uses this stack; one with datagram sockets only uses
-//! `udp_link::UdpStack`, which refuses a `tcp/` dial as unsupported. Which links an image can dial
-//! is then the stack it names, not a flag beside it.
+//! the datagram stack alone, which refuses a `tcp/` dial as unsupported. Which links an image can
+//! dial is then the stack it names, not a flag beside it.
 
+#[cfg(feature = "session-slot")]
 use core::marker::PhantomData;
 
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use alloc::rc::Rc;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use alloc::vec::Vec;
+
+use wz_session_core::byte_cells::ByteBuf;
+#[cfg(feature = "session-slot")]
 use wz_session_core::byte_cells::ByteSource;
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
@@ -20,21 +31,47 @@ use wz_session_core::link::{
 };
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
+#[cfg(feature = "session-slot")]
 use wz_session_core::session_slot::SlotDriver;
 
-use crate::session_drive::{
-    Bind, DriverPump, LinkOpenError, LinkProto, Locator, SessionDatagramLink, SlotStack,
-};
-use crate::stream_link::{FixedStreamDriver, StreamDriver, StreamSocket};
-use crate::udp_link::{DatagramSocket, FixedUdpDriver, UdpStack};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::link_storage::HeapTx;
+use crate::link_storage::TxStore;
+use crate::session_drive::SessionDatagramLink;
+#[cfg(feature = "session-slot")]
+use crate::session_drive::{Bind, DriverPump, SlotStack};
+#[cfg(any(feature = "session-slot", feature = "alloc"))]
+use crate::session_drive::{LinkOpenError, LinkProto, Locator};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::{OpenedLink, SessionLinks};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::stream_link::STREAM_RX_CAPACITY;
+use crate::stream_link::{StreamDriver, StreamSocket};
+#[cfg(feature = "session-slot")]
+use crate::udp_link::UdpStack;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::udp_link::UDP_RX_CAPACITY;
+use crate::udp_link::{DatagramSocket, UdpDriver};
 
-/// The link of one session of an [`IpStack`]: a datagram link or a stream link, as its dial named.
-pub enum IpDriver<U: DatagramSocket + 'static, T: StreamSocket + 'static> {
+/// The link of one session over a platform's datagram sockets `U` and stream sockets `T`: a
+/// datagram link or a stream link, as its dial named. `B` holds its receive buffer and `X` the
+/// memory it encodes its frames into: the image's byte tables on the slot profile (the defaults),
+/// a `Vec<u8>` and `HeapTx` on the heap profile (`HeapIpDriver`, which a slot build has not).
+pub enum IpDriver<
+    U: DatagramSocket + 'static,
+    T: StreamSocket + 'static,
+    B: AsMut<[u8]> + 'static = ByteBuf,
+    X: TxStore + 'static = ByteBuf,
+> {
     /// A `udp/` link.
-    Udp(FixedUdpDriver<U>),
+    Udp(UdpDriver<U, B, X>),
     /// A `tcp/` link.
-    Tcp(FixedStreamDriver<T>),
+    Tcp(StreamDriver<T, B, X>),
 }
+
+/// The heap profile's [`IpDriver`]: each link allocates its buffers when it opens.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub type HeapIpDriver<U, T> = IpDriver<U, T, Vec<u8>, HeapTx>;
 
 /// Every method of the two links, answered by the one this driver is.
 macro_rules! either {
@@ -46,7 +83,13 @@ macro_rules! either {
     };
 }
 
-impl<U: DatagramSocket + 'static, T: StreamSocket + 'static> BoxedLinkDriver for IpDriver<U, T> {
+impl<U, T, B, X> BoxedLinkDriver for IpDriver<U, T, B, X>
+where
+    U: DatagramSocket + 'static,
+    T: StreamSocket + 'static,
+    B: AsMut<[u8]> + 'static,
+    X: TxStore + 'static,
+{
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
         either!(self, link => link.send_blocking(bytes, reliability))
     }
@@ -99,8 +142,12 @@ impl<U: DatagramSocket + 'static, T: StreamSocket + 'static> BoxedLinkDriver for
     }
 }
 
-impl<U: DatagramSocket + 'static, T: StreamSocket + 'static> SessionDatagramLink
-    for IpDriver<U, T>
+impl<U, T, B, X> SessionDatagramLink for IpDriver<U, T, B, X>
+where
+    U: DatagramSocket + 'static,
+    T: StreamSocket + 'static,
+    B: AsMut<[u8]> + 'static,
+    X: TxStore + 'static,
 {
     fn service(&self) {
         either!(self, link => link.service())
@@ -128,10 +175,107 @@ impl<U: DatagramSocket + 'static, T: StreamSocket + 'static> SessionDatagramLink
     }
 }
 
+/// A platform's datagram sockets `U` and stream sockets `T` as the session shell's links on the
+/// heap profile: what a node dials opens the link of the protocol it names, and what it accepts on
+/// is a datagram link (a stream listener is not written yet). Each link allocates its receive
+/// buffer when it opens, a datagram link's sized to the largest datagram and a stream link's to
+/// the largest batch with its length, and lends the session `tx_slots` buffers of `tx_capacity`
+/// bytes to encode its frames into (none by default: the session then builds each frame in a
+/// buffer of its own).
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub struct IpLinks<U, T> {
+    local: [u8; 4],
+    tx_slots: usize,
+    tx_capacity: usize,
+    sockets: core::marker::PhantomData<fn() -> (U, T)>,
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<U: DatagramSocket + 'static, T: StreamSocket + 'static> IpLinks<U, T> {
+    /// Links bound on the node's own address `local` (`[0; 4]` for every interface of the host).
+    pub fn new(local: [u8; 4]) -> Self {
+        Self {
+            local,
+            tx_slots: 0,
+            tx_capacity: 0,
+            sockets: core::marker::PhantomData,
+        }
+    }
+
+    /// Links that lend the session `slots` buffers of `bytes` each to encode its frames into, as
+    /// a datagram stack's do: `bytes` is the batch the sessions negotiate, and a session that
+    /// batches holds one slot open while it encodes into another, so it needs two.
+    #[must_use]
+    pub fn with_tx_buffers(mut self, slots: usize, bytes: usize) -> Self {
+        self.tx_slots = slots;
+        self.tx_capacity = bytes;
+        self
+    }
+
+    fn tx(&self) -> HeapTx {
+        HeapTx::new(self.tx_slots, self.tx_capacity)
+    }
+
+    /// The link of a dial to `to`, before it is shared. A stack that cannot make a socket is
+    /// [`LinkOpenError::Exhausted`]; a connection the other end does not take is
+    /// [`LinkOpenError::Refused`].
+    pub fn dial(&self, to: Locator) -> Result<HeapIpDriver<U, T>, LinkOpenError> {
+        match to.proto {
+            LinkProto::Udp => {
+                // Port 0 has the stack choose a free one, one per initiator session.
+                let socket = U::bind(self.local, 0).map_err(|_| LinkOpenError::Exhausted)?;
+                Ok(IpDriver::Udp(UdpDriver::initiator_with_buffers(
+                    socket,
+                    (to.at.addr, to.at.port),
+                    UDP_RX_CAPACITY,
+                    self.tx(),
+                )))
+            }
+            LinkProto::Tcp => {
+                let socket =
+                    T::connect(to.at.addr, to.at.port).map_err(|_| LinkOpenError::Refused)?;
+                Ok(IpDriver::Tcp(StreamDriver::with_buffers(
+                    socket,
+                    STREAM_RX_CAPACITY,
+                    self.tx(),
+                )))
+            }
+        }
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl<U: DatagramSocket + 'static, T: StreamSocket + 'static> SessionLinks for IpLinks<U, T> {
+    type Pump = Rc<HeapIpDriver<U, T>>;
+
+    fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+        // The peer is whoever opens a session first; the driver is bound by its InitSyn.
+        let socket = U::bind(self.local, port).map_err(|_| LinkOpenError::Exhausted)?;
+        let driver = Rc::new(IpDriver::Udp(UdpDriver::acceptor_with_buffers(
+            socket,
+            UDP_RX_CAPACITY,
+            self.tx(),
+        )));
+        Ok(OpenedLink {
+            sink: driver.clone(),
+            pump: driver,
+        })
+    }
+
+    fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
+        let driver = Rc::new(self.dial(to)?);
+        Ok(OpenedLink {
+            sink: driver.clone(),
+            pump: driver,
+        })
+    }
+}
+
 /// A platform's datagram sockets `U` and stream sockets `T` as one stack of the slot profile's
 /// session host. Each link it opens claims its receive buffer and the buffer its frames are
 /// encoded into from the two tables the image declares, whichever protocol it speaks: a stream
 /// link's receive buffer holds a batch with its length, so the tables are sized for that.
+#[cfg(feature = "session-slot")]
 pub struct IpStack<U, T> {
     udp: UdpStack<U>,
     rx: &'static dyn ByteSource,
@@ -140,14 +284,17 @@ pub struct IpStack<U, T> {
 }
 
 // Not derived: a derive would ask `U: Clone` and `T: Clone`, and the stack holds no socket.
+#[cfg(feature = "session-slot")]
 impl<U, T> Clone for IpStack<U, T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
+#[cfg(feature = "session-slot")]
 impl<U, T> Copy for IpStack<U, T> {}
 
+#[cfg(feature = "session-slot")]
 impl<U: DatagramSocket + 'static, T: StreamSocket + 'static> IpStack<U, T> {
     /// The stack of a node whose own address is `local`, whose links take their receive buffers
     /// from `rx` and their frame buffers from `tx`.
@@ -189,6 +336,7 @@ impl<U: DatagramSocket + 'static, T: StreamSocket + 'static> IpStack<U, T> {
     }
 }
 
+#[cfg(feature = "session-slot")]
 impl<U: DatagramSocket + 'static, T: StreamSocket + 'static> Bind<IpDriver<U, T>>
     for IpStack<U, T>
 {
@@ -197,6 +345,7 @@ impl<U: DatagramSocket + 'static, T: StreamSocket + 'static> Bind<IpDriver<U, T>
     }
 }
 
+#[cfg(feature = "session-slot")]
 impl<U: DatagramSocket + 'static, T: StreamSocket + 'static> SlotStack for IpStack<U, T> {
     type Driver = IpDriver<U, T>;
     type Pump = DriverPump<IpDriver<U, T>>;
@@ -211,6 +360,7 @@ impl<U: DatagramSocket + 'static, T: StreamSocket + 'static> SlotStack for IpSta
 mod tests {
     use super::*;
     use core::ffi::c_int;
+    #[cfg(feature = "session-slot")]
     use wz_session_core::byte_cells::ByteCells;
 
     use crate::session_drive::IpEndpoint;
@@ -277,9 +427,12 @@ mod tests {
         port: 7447,
     };
 
+    #[cfg(feature = "session-slot")]
     static RX: ByteCells<66, 1> = ByteCells::new();
+    #[cfg(feature = "session-slot")]
     static TX: ByteCells<34, 1> = ByteCells::new();
 
+    #[cfg(feature = "session-slot")]
     #[test]
     fn a_dial_opens_the_link_of_the_protocol_it_names() {
         let mut stack = IpStack::<Datagrams, Stream>::new([10, 0, 0, 2], &RX, &TX);
@@ -306,9 +459,12 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "session-slot")]
     static REFUSED_RX: ByteCells<66, 1> = ByteCells::new();
+    #[cfg(feature = "session-slot")]
     static REFUSED_TX: ByteCells<34, 1> = ByteCells::new();
 
+    #[cfg(feature = "session-slot")]
     #[test]
     fn a_refused_connection_is_refused_and_gives_its_buffers_back() {
         let mut stack = IpStack::<Datagrams, Stream>::new([10, 0, 0, 2], &REFUSED_RX, &REFUSED_TX);
@@ -328,5 +484,62 @@ mod tests {
             Err(LinkOpenError::Exhausted)
         ));
         drop(open);
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_heap_dial_opens_the_link_of_the_protocol_it_names() {
+        let links = IpLinks::<Datagrams, Stream>::new([10, 0, 0, 2]).with_tx_buffers(2, 34);
+        let udp = links
+            .open_initiator(Locator::udp(ROUTER))
+            .expect("a datagram link")
+            .pump;
+        assert!(matches!(*udp, IpDriver::Udp(_)));
+        assert!(!udp.batch_length_prefixed());
+        assert_eq!(
+            udp.link_endpoints().map(|ends| ends.dst.as_str()),
+            Some("udp/10.0.0.1:7447")
+        );
+        let tcp = links
+            .open_initiator(Locator::tcp(ROUTER))
+            .expect("a stream link")
+            .pump;
+        assert!(matches!(*tcp, IpDriver::Tcp(_)));
+        assert!(tcp.batch_length_prefixed(), "a stream frames its batches");
+        assert_eq!(
+            tcp.link_endpoints().map(|ends| ends.dst.as_str()),
+            Some("tcp/10.0.0.1:7447")
+        );
+        assert_eq!(
+            tcp.link_mtu(),
+            34,
+            "a whole lent buffer: the length is counted in the batch"
+        );
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_heap_dial_the_other_end_refuses_is_refused() {
+        let links = IpLinks::<Datagrams, Stream>::new([10, 0, 0, 2]);
+        let refusing = IpEndpoint {
+            port: REFUSING,
+            ..ROUTER
+        };
+        assert!(matches!(
+            links.open_initiator(Locator::tcp(refusing)),
+            Err(LinkOpenError::Refused)
+        ));
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_heap_acceptor_is_a_datagram_link_with_no_peer_yet() {
+        let links = IpLinks::<Datagrams, Stream>::new([10, 0, 0, 2]);
+        let accepting = links.open_acceptor(7447).expect("an accepting link").pump;
+        assert!(matches!(*accepting, IpDriver::Udp(_)));
+        assert!(
+            accepting.link_endpoints().is_none(),
+            "no peer until an InitSyn names one"
+        );
     }
 }

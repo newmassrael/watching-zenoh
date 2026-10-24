@@ -38,6 +38,8 @@
 extern crate std;
 
 pub mod glue;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub mod links;
 pub mod net;
 #[cfg(feature = "session-slot")]
 pub mod slot;
