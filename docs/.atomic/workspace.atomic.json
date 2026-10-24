@@ -284142,6 +284142,50 @@
         "Read this push's hosted CI at the start of the next round. Open on the cooperative engine: the read task's idle wait (pico sleeps Z_RUNTIME_IDLE_READ_TASK_SLEEP; this one steps in a loop over non-blocking reads), the listening role, scouting, queries, liveliness and the advanced plane. The heap observer keeps the peer's key expression aliases across a lost link, as the tokio reconnect does; whether a new link should start them empty is unmeasured."
       ]
     },
+    "Round 3559": {
+      "decision_summary": "Open-debt item 924, step 5, the memory gate (owner: long-term correct, cost not counted). A handle reports what it holds that follows its rows, by structure, through wz_dissect_live_memory (ABI 51, the memory document), and a gate holds the report to the allocator. The matrix reads every kind of message list, handed and lent, and its case list is derived from MessageListOrigin, so a kind with no case does not compile. It found four structures that cost a row far more than they hold, each shrunk where found: the census's verdict per row is a coordinate and an interned pattern (12 B, from about 100), the field walk's digest per row one word (8 B, from 49), the selection door's word a nibble, and the sequence verdict a class in the row's flags. The facts few rows have are chunked logs (AscendingMap), not B-trees, and a fragment's fate is a class there: a fragment row costs 138 and 181 B, from 323 and 366. The report agrees with the allocator to 0.2% for every kind but TLS (3%, stated).",
+      "changes_bullets": [
+        "wz-session-core: heap_account.rs (buffer and B-tree byte counting, the model held to the allocator by tests/btree_model.rs), ascending_map.rs (AscendingMap), ChunkLog::allocated_bytes; passive_messages.rs: ListMemory and MessageList::memory, the SN verdict class in a row's flags, Fates, and the sparse and chain facts as AscendingMaps",
+        "wz-capture: Dissection::memory and DissectionMemory, the census, field and selection memories' reports, verdict_column.rs, digest_column.rs, word_column.rs, TlsFlowState::memory, fixtures::push_run_capture, memory_matrix.rs",
+        "wz-capi-dissect: wz_dissect_live_memory and the memory document at revision 1, ABI 51; wz_dissect.h, c_abi_consumer.c, handle_memory_gate.rs; capi_abi_pin.py, analysis_surface_parity.py and discard_site_lint.py rows moved with it",
+        "Eleven module-doc links of the peer table, locator directory and credential identity are full paths and one private link in a doc is code; docs/dissect-row-index.md: D7 and step 5"
+      ],
+      "verification_bullets": [
+        "cargo test wz-capture (dissect, fixtures), wz-session-core all features and wz-capi-dissect pass, and every redecode gate passes unchanged; the memory matrix passes, and fails when a ceiling is lowered below its measurement or a report term is removed (mutations)",
+        "clippy -D warnings wz-capture default, all and no default features, wz-session-core all and no default features, wz-capi-dissect; cargo check wz-analyze and wz-replay; rustfmt; the C consumer, capi_abi_pin, capi_header_subsumption, doc_revision_consumer_pin, analysis_surface_parity, discard_site_lint, accessor_reach_census, and the hook's round_fed_gates array (112, each exit code read from the rc file, all 0)",
+        "C1bz: wz-session-core measured 495 at the commit that set its budget and 507 at origin/main before this round; the diff of the error messages is 12 new errors, 11 in another lineage's module docs and 1 in this one; 495 after"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "TLS: the kept encrypted records duplicate bytes the TCP stream holds; reading them from it changes a public type and another crate's opener trait, so it is reported and not changed; 3% of the TLS report is unattributed",
+        "The matrix reads one fixture shape per list kind; payload sizes are not swept",
+        "Hosted CI: read the first completed run holding this round; the consumer session takes this round's pin and may read wz_dissect_live_memory"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 5, the memory gate (owner: long-term correct, cost not counted). A handle reports what it holds that follows its rows, by structure, through wz_dissect_live_memory (ABI 51, the memory document), and a gate holds the report to the allocator. The matrix reads every kind of message list, handed and lent, and its case list is derived from MessageListOrigin, so a kind with no case does not compile. It found four structures that cost a row far more than they hold, each shrunk where found: the census's verdict per row is a coordinate and an interned pattern (12 B, from about 100), the field walk's digest per row one word (8 B, from 49), the selection door's word a nibble, and the sequence verdict a class in the row's flags. The facts few rows have are chunked logs (AscendingMap), not B-trees, and a fragment's fate is a class there: a fragment row costs 138 and 181 B, from 323 and 366. The report agrees with the allocator to 0.2% for every kind but TLS (3%, stated).",
+      "publishable_changes_bullets": [
+        "wz-session-core: heap_account.rs (buffer and B-tree byte counting, the model held to the allocator by tests/btree_model.rs), ascending_map.rs (AscendingMap), ChunkLog::allocated_bytes; passive_messages.rs: ListMemory and MessageList::memory, the SN verdict class in a row's flags, Fates, and the sparse and chain facts as AscendingMaps",
+        "wz-capture: Dissection::memory and DissectionMemory, the census, field and selection memories' reports, verdict_column.rs, digest_column.rs, word_column.rs, TlsFlowState::memory, fixtures::push_run_capture, memory_matrix.rs",
+        "wz-capi-dissect: wz_dissect_live_memory and the memory document at revision 1, ABI 51; wz_dissect.h, c_abi_consumer.c, handle_memory_gate.rs; capi_abi_pin.py, analysis_surface_parity.py and discard_site_lint.py rows moved with it",
+        "Eleven module-doc links of the peer table, locator directory and credential identity are full paths and one private link in a doc is code; docs/dissect-row-index.md: D7 and step 5"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test wz-capture (dissect, fixtures), wz-session-core all features and wz-capi-dissect pass, and every redecode gate passes unchanged; the memory matrix passes, and fails when a ceiling is lowered below its measurement or a report term is removed (mutations)",
+        "clippy -D warnings wz-capture default, all and no default features, wz-session-core all and no default features, wz-capi-dissect; cargo check wz-analyze and wz-replay; rustfmt; the C consumer, capi_abi_pin, capi_header_subsumption, doc_revision_consumer_pin, analysis_surface_parity, discard_site_lint, accessor_reach_census, and the hook's round_fed_gates array (112, each exit code read from the rc file, all 0)",
+        "C1bz: wz-session-core measured 495 at the commit that set its budget and 507 at origin/main before this round; the diff of the error messages is 12 new errors, 11 in another lineage's module docs and 1 in this one; 495 after"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "TLS: the kept encrypted records duplicate bytes the TCP stream holds; reading them from it changes a public type and another crate's opener trait, so it is reported and not changed; 3% of the TLS report is unattributed",
+        "The matrix reads one fixture shape per list kind; payload sizes are not swept",
+        "Hosted CI: read the first completed run holding this round; the consumer session takes this round's pin and may read wz_dissect_live_memory"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
