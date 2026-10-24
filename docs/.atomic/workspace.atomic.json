@@ -284640,6 +284640,40 @@
         "Hosted CI for the rounds since 3504 has not been read by this session; wz-runtime-tokio (478 against 474) and wz-tls-mbedtls (1 against 0) measured over their doc budgets on the tree of the previous round, which belong to other sessions"
       ]
     },
+    "Round 3571": {
+      "decision_summary": "Queries step Q2a: QueryOptions, the options of one query and the rules read from them (expected finals, the gated target, consolidation resolved once for wire and sink, the default timeout, the accepted reply keys, the wire metadata), moves down from wz-runtime-tokio to session-core's query_options, as PublishOptions moved before it, so the cooperative engine asks its queries by the same rules as the tokio one. The requesting end's capabilities query-get, query-target, query-timeout and query-consolidation become session-core features and the runtime's same-named features forward to them, so every gate means what it meant: the type that carries the slots is now also the last hop that knows. wz-runtime-tokio re-exports the type and the two consolidation functions under their old paths. Owner-chosen over a port-level request type, which would have kept two copies of these rules (2026-10-25).",
+      "changes_bullets": [
+        "wz-session-core: query_options.rs (QueryOptions, DEFAULT_QUERY_TIMEOUT_MS, wire_consolidation, resolved_consolidation, the effective_* readings as pub); features query-get, query-target, query-timeout, query-consolidation.",
+        "wz-runtime-tokio: querier.rs and query.rs re-export them; the four features forward; imports narrowed; five test struct literals of the now foreign non_exhaustive type rewritten as field writes.",
+        "feature_gate_diagnostic.py: the new features and query-queryable / query-selector-parameters classified (impl-method, compound-cfg, no public path).",
+        "run-ci.sh: C1bz budget for wz-runtime-tokio 474 -> 467, counted."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings clean: wz-session-core all-features, alloc, alloc+query-get, alloc+liveliness-get; wz-runtime-tokio default, all-features, no-default, and the zget-reply-only, liveliness-get-only and queryable-only subsets; wz-ap-demo, wz-capi-core, wz-capi-c, wz-capi-pico. wz-runtime-tokio query tests pass: 97 at defaults, 30 in the zget-reply-only subset. C1bz counted with the lane's command: wz-session-core 495 (its budget; one redundant link and four module-doc links fixed on the way), wz-runtime-tokio 467 (origin 475 less eight links the moved docs took). feature_gate_diagnostic and feature_public_surface_census rc 0; the hook's round_fed_gates plus the prose and surface gates: 114 run, 0 failed; audit-catalog-status rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "wz-runtime-tokio's C1bz budget is 467 and counts 7600a7709's writer_queue.rs link; the round that fixes that link lowers it to 466 (its owner, watching-zenoh-17, knows). Next: Q2b, the cancellation token to the port and SessionEngine::get_on_wire over QueryOptions, the tokio engine implementing it and pico's get and querier issuing through it; then Q2c, GET on the cooperative engine."
+      ],
+      "publishable_decision_summary": "Queries step Q2a: QueryOptions, the options of one query and the rules read from them (expected finals, the gated target, consolidation resolved once for wire and sink, the default timeout, the accepted reply keys, the wire metadata), moves down from wz-runtime-tokio to session-core's query_options, as PublishOptions moved before it, so the cooperative engine asks its queries by the same rules as the tokio one. The requesting end's capabilities query-get, query-target, query-timeout and query-consolidation become session-core features and the runtime's same-named features forward to them, so every gate means what it meant: the type that carries the slots is now also the last hop that knows. wz-runtime-tokio re-exports the type and the two consolidation functions under their old paths. Owner-chosen over a port-level request type, which would have kept two copies of these rules (2026-10-25).",
+      "publishable_changes_bullets": [
+        "wz-session-core: query_options.rs (QueryOptions, DEFAULT_QUERY_TIMEOUT_MS, wire_consolidation, resolved_consolidation, the effective_* readings as pub); features query-get, query-target, query-timeout, query-consolidation.",
+        "wz-runtime-tokio: querier.rs and query.rs re-export them; the four features forward; imports narrowed; five test struct literals of the now foreign non_exhaustive type rewritten as field writes.",
+        "feature_gate_diagnostic.py: the new features and query-queryable / query-selector-parameters classified (impl-method, compound-cfg, no public path).",
+        "run-ci.sh: C1bz budget for wz-runtime-tokio 474 -> 467, counted."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings clean: wz-session-core all-features, alloc, alloc+query-get, alloc+liveliness-get; wz-runtime-tokio default, all-features, no-default, and the zget-reply-only, liveliness-get-only and queryable-only subsets; wz-ap-demo, wz-capi-core, wz-capi-c, wz-capi-pico. wz-runtime-tokio query tests pass: 97 at defaults, 30 in the zget-reply-only subset. C1bz counted with the lane's command: wz-session-core 495 (its budget; one redundant link and four module-doc links fixed on the way), wz-runtime-tokio 467 (origin 475 less eight links the moved docs took). feature_gate_diagnostic and feature_public_surface_census rc 0; the hook's round_fed_gates plus the prose and surface gates: 114 run, 0 failed; audit-catalog-status rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wz-runtime-tokio's C1bz budget is 467 and counts 7600a7709's writer_queue.rs link; the round that fixes that link lowers it to 466 (its owner, watching-zenoh-17, knows). Next: Q2b, the cancellation token to the port and SessionEngine::get_on_wire over QueryOptions, the tokio engine implementing it and pico's get and querier issuing through it; then Q2c, GET on the cooperative engine."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
