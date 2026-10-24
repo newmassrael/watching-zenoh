@@ -114,6 +114,9 @@ const PROBE_FRAME: [u8; 3] = [1, 0, 0x04];
 ///
 /// Returns how many frames were timed; `0` when the socket pair could not be made, in which case
 /// the recorded model stands.
+// LINK-SOCKET-SEAM-NOT-APPLICABLE: a private loopback pair this function makes and drops, not a
+// link: it carries no locator, so no `iface`, `bind`, `dscp` or buffer option has a socket here
+// to apply to, and applying one would change what the probe measures.
 pub fn calibrate_with_probe() -> usize {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
