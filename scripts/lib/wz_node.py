@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+"""R3573 (no register item) -- the node declaration of `docs/target-build-contract.md` section 5b:
+one file per node that says which endpoints it dials, which entities it declares and which budgets
+it runs on, held to what the target profile can build.
+
+    wz_node.py --check                  every deploy/nodes/*.toml validates for its target
+    wz_node.py --emit ID                print the generated `declared.rs` of the node ID
+    wz_node.py --env ID                 print `WZ_LIMIT_<NAME>=<value>` for the budgets the node states
+    wz_node.py --selftest
+
+A node is a declaration and not an argument vector. This module is the first half of turning one
+into an executable: it reads the file, refuses what it cannot hold to the target, and generates the
+constants the node's code reads. It does not build, and it writes no file: `--emit` prints.
+
+## What a declaration may say
+
+    [node]                     id (the file's name), help, target
+    [[endpoint]]               role = "dial", locator = "<scheme>/<a.b.c.d>:<port>"
+    [[entity]]                 kind = "queryable", key, document_bytes
+    [limits]                   <LIMIT_ID> = <integer>, any limit `deploy/wz-config.toml` declares
+
+## What it refuses, and why that is an exit and not a skip
+
+The vocabulary is wider than any one target can build: a declaration may name a listening endpoint,
+a multicast group, a publisher, a subscriber, a liveliness token or a querier. A target states which
+of those it builds (`TARGETS`), and a word it does not build is REFUSED with the target's reason,
+never dropped: a node that silently lost its subscriber would run and be wrong. A word outside the
+vocabulary is refused as a typo. A budget the target cannot give, a key longer than the key limit,
+more queryables than the registry holds and a document longer than the node's storage are refused
+by name.
+
+## What it does not do yet
+
+It does not build the node: the crate that includes the generated constants and the entry's step
+that builds it, stamps it and gives it a role in the manifest are the second half (section 5b). The
+only target is `slot`, the per-session fixed-memory profile (`wz_session_mcu::slot_node`), whose
+node holds one dialled session and answers queries from documents; the heap runtime is not a target
+here.
+"""
+
+from __future__ import annotations
+
+import pathlib
+import re
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import wz_config  # noqa: E402
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+NODES = ROOT / "deploy" / "nodes"
+
+# The words a declaration may use. A word outside these is a typo; one inside them that a target does
+# not build is a refusal with the target's own reason.
+ENDPOINT_ROLES = ("dial", "listen", "multicast")
+ENTITY_KINDS = ("publisher", "subscriber", "queryable", "querier", "liveliness-token")
+NODE_KEYS = {"id", "help", "target"}
+ENDPOINT_KEYS = {"role", "locator"}
+ENTITY_KEYS = {"kind", "key", "document_bytes"}
+TOP_KEYS = {"node", "endpoint", "entity", "limits"}
+
+# What each target builds. `slot` is the per-session fixed-memory profile of the cooperative runtime:
+# one dialled session, no allocator, queries answered from documents that are prefixes of one static.
+TARGETS = {
+    "slot": {
+        # The node's session table (`SESSIONS` in deploy/host-slot-node/src/main.rs).
+        "max_endpoints": 1,
+        "endpoint_roles": {"dial"},
+        "schemes": ("tcp", "udp", "tls"),
+        "entity_kinds": {"queryable"},
+        # `DOC_MAX` of the same file: the static every document is a prefix of.
+        "document_max": 4096,
+        "refused": {
+            "listen": "the slot node holds one session that it dials; it has no accept loop",
+            "multicast": "the multicast group session has a slot table but no node that joins "
+            "one yet",
+            "publisher": "the slot node declares queryables only",
+            "subscriber": "the slot node declares queryables only",
+            "liveliness-token": "the slot node declares queryables only",
+            "querier": "the slot node's getter is a plan its arguments drive (a lab tool), not an "
+            "entity a declaration can state",
+        },
+    },
+}
+
+LOCATOR_RE = re.compile(r"(?P<scheme>[a-z]+)/(?P<a>\d{1,3})\.(?P<b>\d{1,3})\.(?P<c>\d{1,3})\.(?P<d>\d{1,3}):(?P<port>\d{1,5})")
+
+
+def limit_values(decl: dict, stated: dict) -> tuple[dict[str, int], list[str]]:
+    """The effective value of every declared limit: the node's, or the declaration's default."""
+    known = {lim["id"]: lim["default"] for lim in decl["limits"]}
+    problems = []
+    for name, value in stated.items():
+        if name not in known:
+            problems.append(f"limits: `{name}` is not a limit deploy/wz-config.toml declares")
+        elif isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            problems.append(f"limits: `{name}` is {value!r}, not a positive integer")
+    return ({**known, **{k: v for k, v in stated.items() if k in known and isinstance(v, int)}}, problems)
+
+
+def key_problem(key: str, limit: int) -> str | None:
+    """Why `key` is not a key expression a node can declare, or None."""
+    if not key:
+        return "is empty"
+    if len(key.encode("utf-8")) > limit:
+        return f"is longer than MAX_KEYEXPR_BYTES ({limit})"
+    if key.startswith("/") or key.endswith("/") or "//" in key:
+        return "has an empty chunk"
+    if any(c in key for c in "?#") or any(ord(c) < 0x21 or ord(c) == 0x7F for c in key):
+        return "has a character a key expression does not (`?`, `#`, a space or a control)"
+    return None
+
+
+def validate(name: str, data: dict, decl: dict) -> list[str]:
+    """Every reason `data` (the file `name`, read) is not a node its target can build."""
+    out = []
+    for extra in sorted(set(data) - TOP_KEYS):
+        out.append(f"`{extra}` is not a table a node declaration has")
+    node = data.get("node")
+    if not isinstance(node, dict):
+        return out + ["there is no [node] table"]
+    for extra in sorted(set(node) - NODE_KEYS):
+        out.append(f"node: `{extra}` is not a key of [node]")
+    if node.get("id") != name:
+        out.append(f"node: id is {node.get('id')!r}, the file is named {name!r}")
+    if not isinstance(node.get("help"), str) or not node["help"].strip():
+        out.append("node: help is missing")
+    target = TARGETS.get(node.get("target"))
+    if target is None:
+        return out + [f"node: target is {node.get('target')!r}, not one of {', '.join(sorted(TARGETS))}"]
+
+    values, problems = limit_values(decl, data.get("limits", {}))
+    out += problems
+
+    endpoints = data.get("endpoint", [])
+    if not endpoints:
+        out.append("a node with no endpoint reaches nothing: declare one [[endpoint]]")
+    if len(endpoints) > target["max_endpoints"]:
+        out.append(f"{len(endpoints)} endpoints; the {node['target']} target holds {target['max_endpoints']}")
+    for n, ep in enumerate(endpoints, 1):
+        who = f"endpoint {n}"
+        for extra in sorted(set(ep) - ENDPOINT_KEYS):
+            out.append(f"{who}: `{extra}` is not a key of [[endpoint]]")
+        role = ep.get("role")
+        if role not in ENDPOINT_ROLES:
+            out.append(f"{who}: role is {role!r}, not one of {', '.join(ENDPOINT_ROLES)}")
+        elif role not in target["endpoint_roles"]:
+            out.append(f"{who}: a `{role}` endpoint is not built on {node['target']}: {target['refused'][role]}")
+        match = LOCATOR_RE.fullmatch(ep.get("locator", "")) if isinstance(ep.get("locator"), str) else None
+        if match is None:
+            out.append(f"{who}: locator {ep.get('locator')!r} is not <scheme>/<a.b.c.d>:<port>")
+        else:
+            if match["scheme"] not in target["schemes"]:
+                out.append(f"{who}: scheme `{match['scheme']}` is not one of {', '.join(target['schemes'])}")
+            if any(int(match[o]) > 255 for o in "abcd") or not 1 <= int(match["port"]) <= 65535:
+                out.append(f"{who}: locator {ep['locator']!r} has an octet above 255 or a port outside 1..65535")
+
+    seen = set()
+    queryables = 0
+    for n, ent in enumerate(data.get("entity", []), 1):
+        who = f"entity {n}"
+        for extra in sorted(set(ent) - ENTITY_KEYS):
+            out.append(f"{who}: `{extra}` is not a key of [[entity]]")
+        kind = ent.get("kind")
+        if kind not in ENTITY_KINDS:
+            out.append(f"{who}: kind is {kind!r}, not one of {', '.join(ENTITY_KINDS)}")
+            continue
+        if kind not in target["entity_kinds"]:
+            out.append(f"{who}: a `{kind}` is not built on {node['target']}: {target['refused'][kind]}")
+            continue
+        queryables += 1
+        key = ent.get("key")
+        why = key_problem(key, values["MAX_KEYEXPR_BYTES"]) if isinstance(key, str) else "is missing"
+        if why:
+            out.append(f"{who}: key {key!r} {why}")
+        elif key in seen:
+            out.append(f"{who}: key {key!r} is declared twice")
+        else:
+            seen.add(key)
+        size = ent.get("document_bytes")
+        if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= target["document_max"]:
+            out.append(f"{who}: document_bytes is {size!r}, not an integer from 0 to {target['document_max']}")
+    if queryables > values["MAX_QUERYABLES"]:
+        out.append(f"{queryables} queryables; MAX_QUERYABLES is {values['MAX_QUERYABLES']} (state a larger one in [limits])")
+    return out
+
+
+def rust_string(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def emit(name: str, data: dict) -> str:
+    """The `declared.rs` the node's code includes. Valid input only: `validate` ran first."""
+    endpoint = data["endpoint"][0]["locator"]
+    entities = [(e["key"], e["document_bytes"]) for e in data.get("entity", []) if e["kind"] == "queryable"]
+    docs = ", ".join(f"({rust_string(k)}, {b})" for k, b in entities)
+    return "\n".join(
+        [
+            f"// {wz_config.SPDX}",
+            f"// {wz_config.COPYRIGHT}",
+            "",
+            f"// GENERATED from deploy/nodes/{name}.toml by scripts/lib/wz_node.py --emit {name}.",
+            "// Do not edit: a change is made in the declaration and generated again.",
+            "",
+            f"pub const NODE_ID: &str = {rust_string(name)};",
+            "/// The one endpoint the node dials, as a locator.",
+            f"pub const ROUTER: &str = {rust_string(endpoint)};",
+            "/// Whether that endpoint is `tls/`, which the node's `tls` feature must be built for.",
+            f"pub const TLS: bool = {'true' if endpoint.startswith('tls/') else 'false'};",
+            "/// The queryables the node declares, and the documents they answer with: (key, bytes).",
+            f"pub const DOCS: usize = {len(entities)};",
+            f"pub const DOCUMENTS: [(&str, usize); {len(entities)}] = [{docs}];",
+            "",
+        ]
+    )
+
+
+def load(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
+    data = wz_config.read_decl_toml((directory / f"{name}.toml").read_text(encoding="utf-8"))
+    problems = validate(name, data, decl)
+    if problems:
+        raise ValueError(f"{name}: " + "; ".join(problems))
+    return data
+
+
+def env_lines(data: dict) -> list[str]:
+    return [f"WZ_LIMIT_{k}={v}" for k, v in sorted(data.get("limits", {}).items())]
+
+
+def check(decl: dict, directory: pathlib.Path = NODES) -> int:
+    files = sorted(directory.glob("*.toml")) if directory.is_dir() else []
+    bad = 0
+    for path in files:
+        try:
+            load(path.stem, decl, directory)
+        except (ValueError, OSError) as err:
+            print(f"  wz-node FAIL: {err}", file=sys.stderr)
+            bad += 1
+    print(f"wz-node: {len(files)} node declaration(s), {len(files) - bad} valid")
+    return 1 if bad else 0
+
+
+# ---------------------------------------------------------------------------
+# Selftest
+# ---------------------------------------------------------------------------
+
+SAMPLE = """[node]
+id = "n"
+help = "A node."
+target = "slot"
+
+[[endpoint]]
+role = "dial"
+locator = "tcp/10.0.0.1:7447"
+
+[[entity]]
+kind = "queryable"
+key = "lab/doc/a"
+document_bytes = 512
+
+[limits]
+MAX_QUERYABLES = 2
+"""
+
+
+def _selftest() -> int:
+    decl = wz_config.load_decl()
+
+    def expect(what: str, ok: bool) -> None:
+        if not ok:
+            raise AssertionError(what)
+
+    def problems(text: str, name: str = "n") -> list[str]:
+        return validate(name, wz_config.read_decl_toml(text), decl)
+
+    def refuses(what: str, text: str, needle: str, name: str = "n") -> None:
+        found = problems(text, name)
+        expect(f"{what}: expected a finding naming {needle!r}, got {found}", any(needle in p for p in found))
+
+    expect("the sample is a valid node", problems(SAMPLE) == [])
+    data = wz_config.read_decl_toml(SAMPLE)
+    rs = emit("n", data)
+    expect("the endpoint is the generated router", 'pub const ROUTER: &str = "tcp/10.0.0.1:7447";' in rs)
+    expect("a tcp endpoint is not tls", "pub const TLS: bool = false;" in rs)
+    expect("the documents are the queryables", 'pub const DOCUMENTS: [(&str, usize); 1] = [("lab/doc/a", 512)];' in rs)
+    expect("a tls endpoint sets the flag", "pub const TLS: bool = true;" in emit(
+        "n", wz_config.read_decl_toml(SAMPLE.replace("tcp/", "tls/"))))
+    expect("the file names its source and says it is generated", "GENERATED from deploy/nodes/n.toml" in rs)
+    expect("the budgets become the limit environment", env_lines(data) == ["WZ_LIMIT_MAX_QUERYABLES=2"])
+
+    refuses("a file named otherwise than its id", SAMPLE, "the file is named", "other")
+    refuses("an unknown target", SAMPLE.replace('"slot"', '"heap"'), "target is 'heap'")
+    refuses("a listening endpoint is refused with the target's reason",
+            SAMPLE.replace('role = "dial"', 'role = "listen"'), "no accept loop")
+    refuses("a multicast endpoint", SAMPLE.replace('role = "dial"', 'role = "multicast"'), "not built on slot")
+    refuses("a role outside the vocabulary", SAMPLE.replace('role = "dial"', 'role = "dail"'), "not one of dial")
+    refuses("a subscriber is refused, not dropped", SAMPLE.replace('kind = "queryable"', 'kind = "subscriber"'),
+            "not built on slot")
+    refuses("a kind outside the vocabulary", SAMPLE.replace('kind = "queryable"', 'kind = "queryble"'),
+            "not one of publisher")
+    refuses("a locator with no scheme", SAMPLE.replace("tcp/10.0.0.1:7447", "10.0.0.1:7447"), "locator")
+    refuses("a scheme the target does not dial", SAMPLE.replace("tcp/", "quic/"), "scheme `quic`")
+    refuses("an octet above 255", SAMPLE.replace("10.0.0.1", "10.0.0.256"), "octet above 255")
+    refuses("port zero", SAMPLE.replace(":7447", ":0"), "port outside")
+    refuses("a second endpoint", SAMPLE + '\n[[endpoint]]\nrole = "dial"\nlocator = "tcp/10.0.0.2:7447"\n',
+            "the slot target holds 1")
+    refuses("no endpoint", SAMPLE.replace('[[endpoint]]\nrole = "dial"\nlocator = "tcp/10.0.0.1:7447"\n', ""),
+            "no endpoint")
+    refuses("a key with an empty chunk", SAMPLE.replace("lab/doc/a", "lab//a"), "empty chunk")
+    refuses("a key with a space", SAMPLE.replace("lab/doc/a", "lab doc"), "character a key expression does not")
+    refuses("a key longer than the limit", SAMPLE.replace("lab/doc/a", "k" * 300), "MAX_KEYEXPR_BYTES")
+    refuses("a duplicate key", SAMPLE + '\n[[entity]]\nkind = "queryable"\nkey = "lab/doc/a"\ndocument_bytes = 1\n',
+            "declared twice")
+    refuses("a document above the node's storage", SAMPLE.replace("512", "4097"), "document_bytes")
+    refuses("more queryables than the registry holds",
+            SAMPLE + '\n[[entity]]\nkind = "queryable"\nkey = "lab/b"\ndocument_bytes = 1\n'
+            '\n[[entity]]\nkind = "queryable"\nkey = "lab/c"\ndocument_bytes = 1\n', "MAX_QUERYABLES")
+    refuses("a budget no limit has", SAMPLE.replace("MAX_QUERYABLES = 2", "MAX_NOTHING = 2"), "not a limit")
+    refuses("a budget of zero", SAMPLE.replace("MAX_QUERYABLES = 2", "MAX_QUERYABLES = 0"), "positive integer")
+    refuses("a key the table does not have", SAMPLE.replace('help = "A node."', 'help = "A node."\ncolour = "red"'),
+            "not a key of [node]")
+    refuses("a table the declaration does not have", SAMPLE + "\n[extra]\nx = 1\n", "not a table")
+    refuses("no help", SAMPLE.replace('help = "A node."\n', ""), "help is missing")
+    refuses("no node table", "[limits]\nMAX_QUERYABLES = 2\n", "no [node] table")
+
+    # Every registered declaration validates, and the directory is the population.
+    expect("every registered declaration validates", check(decl) == 0)
+    print("wz-node: selftest OK")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if argv == ["--selftest"]:
+        try:
+            return _selftest()
+        except AssertionError as err:
+            print(f"wz-node: FAIL -- {err}", file=sys.stderr)
+            return 1
+    decl = wz_config.load_decl()
+    if argv == ["--check"]:
+        return check(decl)
+    if len(argv) == 2 and argv[0] in ("--emit", "--env"):
+        try:
+            data = load(argv[1], decl)
+        except (ValueError, OSError) as err:
+            print(f"wz-node: REFUSED -- {err}", file=sys.stderr)
+            return 1
+        print(emit(argv[1], data) if argv[0] == "--emit" else "\n".join(env_lines(data)))
+        return 0
+    print(__doc__, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

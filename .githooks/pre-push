@@ -917,6 +917,10 @@ round_fed_gates=(
     # rules, with a synthetic file for every refusal). A text read, no build; the entry itself builds
     # its subject and is run by Layers C1st and C1sp, not here.
     "wz_package.py --selftest"
+    # R3573 -- the node declaration (docs/target-build-contract.md 5b). Round-fed by
+    # deploy/wz-config.toml (the limits a node's budgets name) and every deploy/nodes/*.toml; the
+    # selftest holds each refusal and ends by checking the registered declarations. A text read.
+    "wz_node.py --selftest"
     # R3440 -- the pico drop-in header against zenoh-pico's own, and wz_ext.h. Round-fed by
     # the two headers and the pico submodule. MEASURED: 0.66s, three `cc -E` runs, no build.
     "drop_in_header_gate.py"

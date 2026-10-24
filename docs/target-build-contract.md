@@ -491,7 +491,29 @@ set against what the tree has. It is a list of obligations, not a claim that the
 | Capabilities it names: client mode, peer links over TCP (dial and listen), UDP multicast group join, publish and subscribe, liveliness, queryable and querier, fragmentation; none of router mode, scouting, admin keys | A superset: each is a capability or a default of the graph (`peer`, `link-udp`, `multicast-transport`, `liveliness`, `query`, `queryable`, the fragmentation feature) | A table that holds each named capability to a declared capability and fails when one disappears; not written. The reverse (what wz has that the path does not place) needs no table |
 | Device facts it checks: the executable's machine and interpreter, every library of the closure by SONAME, the run place's properties, process facts, the transport (ssh, adb) | The manifest carries machine, interpreter, SONAME, NEEDED with `provided_by`, `linking`, `runpath`, `rpath` and the floors | The closure must be COMPLETE and enumerable, because the path binds it by SONAME: where a platform lacks a library (a QNX board without the C++ runtime), the entry must bundle it from the SDK (`provided_by: bundled`), which it does not yet. The run-place, process and transport checks are the consumer's and are not wz's to model |
 
-## 5b. The node declaration (proposal, not decided)
+## 5b. The node declaration (decided: the slot profile; first half landed)
+
+**Decision (owner, 2026-10-25, on the recommendation):** the generated node targets the
+fixed-memory slot profile, not the heap runtime. The first half, below, is `scripts/lib/wz_node.py`
+and `deploy/nodes/`; the build step and the manifest role are the second half and are not written.
+
+What landed: a declaration file per node (`[node]`, `[[endpoint]]`, `[[entity]]`, `[limits]`),
+validated against the target's own table (`TARGETS`), with `--emit` printing the `declared.rs` the
+node's code includes and `--env` printing the `WZ_LIMIT_*` budgets. The vocabulary is wider than
+the slot target builds (a listening or multicast endpoint, a publisher, a subscriber, a token, a
+querier): a word the target does not build is REFUSED with its reason, never dropped, so a
+declaration that asks for a subscriber cannot produce a node that quietly has none. What the slot
+target builds today is what its node does: one dialled endpoint (`tcp`, `udp` or `tls`) and
+queryables that answer from documents. The registered node, `slot-answerer`, is the existing
+`deploy/host-slot-node` stated as data.
+
+Not written, in order: the crate that includes `declared.rs` (the host slot node reads its router
+and documents from its arguments, so it needs a build that takes them from constants); the entry's
+step that generates, builds, stamps and describes it, with a role beside `session-node`; then the
+entities the slot profile does not build yet, each of which is a change to the profile before it is
+a word the declaration accepts.
+
+The text below is the proposal the decision answers.
 
 A node is a declaration, not an argument vector: which links it dials and listens on, which
 multicast groups it joins, which entities it declares (publishers, subscribers, tokens,
