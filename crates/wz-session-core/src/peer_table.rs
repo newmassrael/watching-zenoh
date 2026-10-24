@@ -9,11 +9,13 @@
 //! in a table of `N` entries with no allocator, so the
 //! fixed-memory profile holds the same table as AP. The lifecycle verbs are the
 //! machine's administrative events (BGP's ManualStart and ManualStop, RFC 4271,
-//! section 8): [`PeerTable::open`] and [`PeerTable::close`]. What the host
+//! section 8): [`crate::peer_table::PeerTable::open`] and
+//! [`crate::peer_table::PeerTable::close`]. What the host
 //! learns while it works for a peer (a resolution, the end of a dial, a lost
-//! session, a timer) it reports with [`PeerTable::report`].
+//! session, a timer) it reports with [`crate::peer_table::PeerTable::report`].
 //!
-//! Every call returns the [`PeerDuties`] the machine asked of the host: resolve
+//! Every call returns the [`crate::peer_table::PeerDuties`] the machine asked of
+//! the host: resolve
 //! the candidates, dial them, arm or cancel the retry timer, give an attempt or
 //! a session back. The host performs them and reports what came of them. The
 //! table holds no timer, socket or session itself, so its behaviour is a pure

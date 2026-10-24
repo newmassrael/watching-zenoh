@@ -23,7 +23,8 @@
 //! No allocation and no feature gate: the MCU profile shares the rule, and the
 //! hash is the `sha2` the cookie path already links. For the same reason the
 //! module holds the rule every comparison of two zids rests on, that two
-//! spellings of one zid are one zid ([`canonical_zid`], [`zid_from_wire`]).
+//! spellings of one zid are one zid ([`crate::credential_identity::canonical_zid`],
+//! [`crate::credential_identity::zid_from_wire`]).
 
 use sha2::{Digest, Sha256};
 

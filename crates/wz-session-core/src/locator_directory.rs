@@ -14,23 +14,26 @@
 //! Three sources confirm a hint, and they differ in how a hint stops being
 //! true:
 //!
-//! - [`LocatorSource::Declared`]: the build or the operator stated it. It does
+//! - [`crate::locator_directory::LocatorSource::Declared`]: the build or the
+//!   operator stated it. It does
 //!   not expire and is never evicted; it leaves only when it is withdrawn.
-//! - [`LocatorSource::Hello`]: a scouting Hello from the node listed it. Nothing
+//! - [`crate::locator_directory::LocatorSource::Hello`]: a scouting Hello from the node listed it. Nothing
 //!   ever says a Hello's locators stopped being true, so the confirmation
 //!   expires unless a later Hello confirms it again (soft state: Clark, 1988;
 //!   Raman and McCanne, 1999), and it must carry a lifetime.
-//! - [`LocatorSource::Linkstate`]: the link-state flood carried it (AP). The
+//! - [`crate::locator_directory::LocatorSource::Linkstate`]: the link-state
+//!   flood carried it (AP). The
 //!   flood is event-driven, and the graph drops a node it no longer reaches,
 //!   so its source may confirm until it withdraws, or give a lifetime as a
 //!   bound on a withdrawal it might miss.
 //!
 //! The directory is the mechanism only: how long a confirmation lasts is the
 //! source's to say, since only the source knows how often it refreshes or
-//! whether it withdraws, so every confirmation carries its own [`Lifetime`].
+//! whether it withdraws, so every confirmation carries its own
+//! [`crate::locator_directory::Lifetime`].
 //!
-//! Lookups never return an expired hint, whether or not [`LocatorDirectory::expire`]
-//! has run since. Candidates come in the order an opener should try them: the
+//! Lookups never return an expired hint, whether or not
+//! [`crate::locator_directory::LocatorDirectory::expire`] has run since. Candidates come in the order an opener should try them: the
 //! declared ones first, as the operator's intent, then the most recently
 //! confirmed first, as the likeliest to be current.
 //!

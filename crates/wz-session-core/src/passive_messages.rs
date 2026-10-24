@@ -523,7 +523,7 @@ impl MessageList {
     /// stands where the record that carried it does. A message kept as an
     /// index entry is still read from where it was read (its locator does not
     /// move); its anchor takes the new offset, and its end is kept beside the
-    /// entries, once per unit ([`Index::wire_ends`]). Every row of one unit
+    /// entries, once per unit (`Index::wire_ends`, which is private). Every row of one unit
     /// must be given the same end, which a restatement by the unit's own
     /// coordinates does.
     pub fn restate_from(
