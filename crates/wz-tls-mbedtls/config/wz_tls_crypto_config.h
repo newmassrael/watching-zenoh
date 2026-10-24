@@ -43,11 +43,18 @@
 #define MBEDTLS_PK_PARSE_C
 #define MBEDTLS_PK_WRITE_C
 
-/* Every allocation comes from the arena the program hands `wz_tls_start`; its peak is measured. */
+/* Every allocation comes from the arena the program hands `wz_tls_start`; its peak is measured.
+ * Before that, Mbed TLS's allocator is not the C library's but one that refuses (`wz_tls.c`), so
+ * no allocation can reach a heap: the arena is the only memory the channel can be given. */
 #define MBEDTLS_PLATFORM_C
 #define MBEDTLS_PLATFORM_MEMORY
 #define MBEDTLS_MEMORY_BUFFER_ALLOC_C
 #define MBEDTLS_MEMORY_DEBUG
+#include <stddef.h>
+void *wz_tls_no_calloc(size_t count, size_t size);
+void wz_tls_no_free(void *ptr);
+#define MBEDTLS_PLATFORM_STD_CALLOC wz_tls_no_calloc
+#define MBEDTLS_PLATFORM_STD_FREE wz_tls_no_free
 
 /* The NIST curve reduction, as the kit's build has it. */
 #define MBEDTLS_ECP_NIST_OPTIM

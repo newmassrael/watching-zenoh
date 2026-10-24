@@ -32,6 +32,21 @@
 
 static int started;
 
+/* Mbed TLS's allocator before `wz_tls_start` hands it the arena, where the configuration names
+ * them (`wz_tls_crypto_config.h`): a refusal, so nothing allocates from a heap. An image built
+ * against another configuration (Zephyr's) does not reference them. */
+void *wz_tls_no_calloc(size_t count, size_t size)
+{
+	(void)count;
+	(void)size;
+	return NULL;
+}
+
+void wz_tls_no_free(void *ptr)
+{
+	(void)ptr;
+}
+
 int wz_tls_start(unsigned char *arena, size_t len)
 {
 	if (started) {

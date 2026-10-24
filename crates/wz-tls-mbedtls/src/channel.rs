@@ -8,9 +8,11 @@
 //! arena in process-wide state with no lock, so every object here is neither `Send` nor `Sync`,
 //! and a program starts the library once.
 
+use core::cell::{OnceCell, UnsafeCell};
 use core::ffi::{c_int, c_void, CStr};
 use core::marker::PhantomData;
 use core::ptr::{self, NonNull};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ffi;
 
@@ -60,6 +62,41 @@ pub fn start(arena: &'static mut [u8]) -> Result<(), TlsError> {
     // SAFETY: `arena` is writable for its length and lives for the program, and the library
     // keeps the only reference to it from here on (the slice is consumed).
     check(unsafe { ffi::wz_tls_start(arena.as_mut_ptr(), arena.len()) }).map(drop)
+}
+
+/// The static memory every Mbed TLS allocation of a program comes from. An image declares one
+/// `static` (all zero bytes, so it costs no image size) and starts the library on it once
+/// ([`Arena::start`]); the size is the image's budget for the channel, which
+/// [`arena_peak`] measures.
+pub struct Arena<const N: usize> {
+    bytes: UnsafeCell<[u8; N]>,
+    taken: AtomicBool,
+}
+
+// SAFETY: the bytes are handed out once, behind the `taken` flag, and from then on only the
+// library (single-threaded by contract) touches them.
+unsafe impl<const N: usize> Sync for Arena<N> {}
+
+impl<const N: usize> Arena<N> {
+    /// An arena of `N` zero bytes.
+    #[allow(clippy::new_without_default)]
+    pub const fn new() -> Self {
+        Self {
+            bytes: UnsafeCell::new([0; N]),
+            taken: AtomicBool::new(false),
+        }
+    }
+
+    /// Start the library on this arena ([`start`]). A second start, on this arena or any other,
+    /// is [`TlsError::State`].
+    pub fn start(&'static self) -> Result<(), TlsError> {
+        if self.taken.swap(true, Ordering::AcqRel) {
+            return Err(TlsError::State);
+        }
+        // SAFETY: the flag above lets exactly one caller here, so this is the only reference to
+        // the bytes that will ever exist, and they live for the program.
+        start(unsafe { &mut *self.bytes.get() })
+    }
 }
 
 /// Start the library on an allocator the platform already gave Mbed TLS (Zephyr starts one from
@@ -120,6 +157,37 @@ impl Identity {
             ffi::wz_tls_identity_cert(self.raw.as_ptr(), &mut der, &mut len);
             core::slice::from_raw_parts(der, len)
         }
+    }
+}
+
+/// Where a program keeps its identity for as long as it runs: a `static` the image declares, made
+/// once and lent for the program, which is the borrow a [`crate::stream::TlsDial`] holds.
+pub struct IdentitySlot {
+    cell: OnceCell<Identity>,
+}
+
+// SAFETY: single-threaded by contract, as the library is; the identity is written once and only
+// read after.
+unsafe impl Sync for IdentitySlot {}
+
+impl IdentitySlot {
+    /// An empty slot.
+    #[allow(clippy::new_without_default)]
+    pub const fn new() -> Self {
+        Self {
+            cell: OnceCell::new(),
+        }
+    }
+
+    /// Generate the program's identity ([`Identity::generate`]) into the slot and lend it. A
+    /// second call is [`TlsError::State`]: a program has one identity.
+    pub fn generate(&'static self, subject: &CStr) -> Result<&'static Identity, TlsError> {
+        if self.cell.get().is_some() {
+            return Err(TlsError::State);
+        }
+        let id = Identity::generate(subject)?;
+        let _ = self.cell.set(id);
+        self.cell.get().ok_or(TlsError::State)
     }
 }
 
