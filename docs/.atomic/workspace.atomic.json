@@ -283076,6 +283076,42 @@
         "Read the first completed hosted CI run that judges Rounds 3502 to 3532, per job."
       ]
     },
+    "Round 3533": {
+      "decision_summary": "Open-debt item 924, two reds of this item's own rounds paid off. Layer C1bn builds wz-capture at its DEFAULT features and failed to compile its tests: a field-window test of round 3509 built its capture from crate::fixtures without the fixtures feature gate its siblings carry; it is gated now. The hook's round-fed static gate datagram_half_lint refused round 3526's analyser test, which reads flows() only to hold its fixture to being a WebSocket flow; it is marked as concerning the stream half, with the reason. Both reached origin because the verification of those rounds ran wz-capture at all and at no default features but never at its default set, and ran named gates rather than the hook's whole round-fed array; this round runs both. The hosted Layer E red reported beside them is not this item's: its reference driver failed before any dissection (querier failed), and its owner has reproduced the cause.",
+      "changes_bullets": [
+        "wz-capture fields_json.rs: a_packet_read_back_from_the_rows_before_is_the_one_a_walk_carries gated on the fixtures feature",
+        "wz-analyze: a_websocket_capture_yields_samples_from_its_payloads names its stream-half read with DATAGRAM-HALF-NOT-APPLICABLE and the reason"
+      ],
+      "verification_bullets": [
+        "cargo test and clippy -D warnings wz-capture at its default features (the C1bn set), 1246 tests; clippy wz-analyze, wz-capi-replay and wz-replay with no default features (the C1cf set, red on run effec629d through round 3504's needless borrows, which round 3519 fixed)",
+        "All 111 members of the pre-push hook's round_fed_gates array run against the tree with this round and the next: 109 passed, datagram_half_lint among them; the two that failed (discard_site_lint, accessor_reach_census) were moved by the next round's scouting change, fixed in it and re-run to pass"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Verify each round of this item at wz-capture's default, all and no default features, and run the hook's whole round_fed_gates array before pushing",
+        "Hosted CI: read the first completed run holding this round"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, two reds of this item's own rounds paid off. Layer C1bn builds wz-capture at its DEFAULT features and failed to compile its tests: a field-window test of round 3509 built its capture from crate::fixtures without the fixtures feature gate its siblings carry; it is gated now. The hook's round-fed static gate datagram_half_lint refused round 3526's analyser test, which reads flows() only to hold its fixture to being a WebSocket flow; it is marked as concerning the stream half, with the reason. Both reached origin because the verification of those rounds ran wz-capture at all and at no default features but never at its default set, and ran named gates rather than the hook's whole round-fed array; this round runs both. The hosted Layer E red reported beside them is not this item's: its reference driver failed before any dissection (querier failed), and its owner has reproduced the cause.",
+      "publishable_changes_bullets": [
+        "wz-capture fields_json.rs: a_packet_read_back_from_the_rows_before_is_the_one_a_walk_carries gated on the fixtures feature",
+        "wz-analyze: a_websocket_capture_yields_samples_from_its_payloads names its stream-half read with DATAGRAM-HALF-NOT-APPLICABLE and the reason"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test and clippy -D warnings wz-capture at its default features (the C1bn set), 1246 tests; clippy wz-analyze, wz-capi-replay and wz-replay with no default features (the C1cf set, red on run effec629d through round 3504's needless borrows, which round 3519 fixed)",
+        "All 111 members of the pre-push hook's round_fed_gates array run against the tree with this round and the next: 109 passed, datagram_half_lint among them; the two that failed (discard_site_lint, accessor_reach_census) were moved by the next round's scouting change, fixed in it and re-run to pass"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Verify each round of this item at wz-capture's default, all and no default features, and run the hook's whole round_fed_gates array before pushing",
+        "Hosted CI: read the first completed run holding this round"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
