@@ -362,7 +362,7 @@ fn run(args: Args) -> i32 {
     #[cfg(feature = "tls")]
     let channel_identity = match tls::identity() {
         Ok(identity) => {
-            tls::print_certificate(identity, log_args);
+            identity.certificate_pem(log_args);
             zid = identity.zid();
             identity
         }

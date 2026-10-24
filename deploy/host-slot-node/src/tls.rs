@@ -11,8 +11,6 @@
 //! completes the handshake before the session sees a byte; every allocation of the channel comes
 //! from [`ARENA`], and none from a heap.
 
-use core::fmt;
-
 use wz_runtime_coop::ip_stack::IpStack;
 use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::PosixTcpDial;
@@ -53,42 +51,4 @@ pub fn stack(
     identity: &'static Identity,
 ) -> Stack {
     IpStack::new(local, rx, tx, PosixTcpDial).with_tls(TlsDial::new(PosixTcpDial, identity))
-}
-
-/// The PEM lines of `identity`'s certificate, each handed to `line`: the block a router's
-/// operator copies into its configuration.
-pub fn print_certificate(identity: &Identity, mut line: impl FnMut(fmt::Arguments<'_>)) {
-    line(format_args!("-----BEGIN CERTIFICATE-----"));
-    // 48 bytes of DER are one 64-character line of base64, PEM's line length.
-    for chunk in identity.certificate_der().chunks(48) {
-        line(format_args!("{}", Base64(chunk)));
-    }
-    line(format_args!("-----END CERTIFICATE-----"));
-}
-
-/// Bytes in standard base64 (RFC 4648, with padding).
-struct Base64<'a>(&'a [u8]);
-
-impl fmt::Display for Base64<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const ALPHABET: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        for group in self.0.chunks(3) {
-            let b = [
-                group[0],
-                group.get(1).copied().unwrap_or(0),
-                group.get(2).copied().unwrap_or(0),
-            ];
-            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-            for i in 0..4 {
-                if i <= group.len() {
-                    let index = (n >> (18 - 6 * i)) & 0x3f;
-                    fmt::Write::write_char(f, char::from(ALPHABET[index as usize]))?;
-                } else {
-                    fmt::Write::write_char(f, '=')?;
-                }
-            }
-        }
-        Ok(())
-    }
 }

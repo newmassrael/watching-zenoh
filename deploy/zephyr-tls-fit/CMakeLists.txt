@@ -20,8 +20,10 @@ project(wz_zephyr_tls_fit C)
 target_sources(app PRIVATE src/main.c)
 
 # Mbed TLS's user configuration (CONFIG_MBEDTLS_USER_CONFIG_FILE) is found on the include path of
-# the libraries that read their configuration, the module's `mbedtls_iface`.
-target_include_directories(mbedtls_iface INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/mbedtls)
+# the libraries that read their configuration, the module's `mbedtls_iface`. It is the channel
+# crate's, shared with every Zephyr image that carries the channel.
+target_include_directories(mbedtls_iface INTERFACE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../crates/wz-tls-mbedtls/config/zephyr)
 
 if(NOT CONFIG_WZ_ZETH_TRNG)
   message(FATAL_ERROR "wz: the TLS fit image draws its keys from the board's TRNG, and this "
