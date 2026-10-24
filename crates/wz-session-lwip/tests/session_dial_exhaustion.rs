@@ -52,7 +52,9 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::WhatAmI;
 use wz_session_lwip::driver::LwipUdpDriver;
-use wz_session_lwip::session_host::{DialRefused, OpenRefused, OpenedSession, SessionHost};
+use wz_session_lwip::session_host::{
+    DialRefused, DialTarget, OpenRefused, OpenedSession, SessionHost,
+};
 use wz_session_lwip::{LwipLinks, LwipSessionLink};
 
 #[path = "support/alloc_count.rs"]
@@ -180,10 +182,10 @@ impl<const SLOTS: usize, const PUMPS: usize, const POOL: usize, const TASKS: usi
         self.next += 1;
         self.host.dial(
             &self.links,
-            IpEndpoint {
+            DialTarget::address(IpEndpoint {
                 addr: [127, 0, 0, 1],
                 port: self.sink_port,
-            },
+            }),
             Counting(zid),
             params(zid),
             config(),

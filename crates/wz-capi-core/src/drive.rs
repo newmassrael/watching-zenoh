@@ -173,35 +173,37 @@ impl Dialer {
             .find(|(e, _)| e == endpoint)
             .map(|(_, cfg)| cfg)
             .ok_or(OpenError::DriveFailed)?;
-        self.open_with(endpoint, dial_cfg).await
+        self.open_with(endpoint, dial_cfg, None).await
     }
 
     /// Dial a locator the session found by scouting and open a session to `expected`, the node
     /// that answered from it. Upstream's `open_transport_unicast_with_zid`: a link that opens to
-    /// another node than the Hello named is not the connection that was wanted, and is closed.
+    /// another node than the Hello named is not the connection that was wanted. The dial is made
+    /// for that node (decision D4 of `docs/session-lifecycle-intent.md`), so a link that another
+    /// node answers closes at its InitAck, before any OpenSyn, as upstream's `open_link` closes
+    /// it; it is [`OpenError::LinkFailed`], as a link that does not open is. `expected` is the
+    /// zid as the routing graph spells it, trimmed or not.
     #[cfg(feature = "scout")]
     async fn open_scouted(
         &self,
         locator: &str,
         expected: &[u8],
     ) -> Result<OpenedSession, OpenError> {
+        let expected = wz_session_core::credential_identity::zid_from_wire(expected)
+            .ok_or(OpenError::LinkFailed)?;
         let dial_cfg = dial_config(&self.tls, locator).map_err(|_| OpenError::LinkFailed)?;
-        let session = self.open_with(locator, &dial_cfg).await?;
-        if is_expected_peer(session.peer_zid().as_deref(), expected) {
-            Ok(session)
-        } else {
-            session.drain_to_close().await;
-            Err(OpenError::LinkFailed)
-        }
+        self.open_with(locator, &dial_cfg, Some(expected)).await
     }
 
     /// Dial `endpoint` and open a session over the link: a link that cannot be dialled is
-    /// named as [`OpenError::of_endpoint`] names it, and a handshake that does not complete is
+    /// named as [`OpenError::of_endpoint`] names it, a link another node answers than the one
+    /// `expected` names is [`OpenError::LinkFailed`], and a handshake that does not complete is
     /// [`OpenError::DriveFailed`].
     async fn open_with(
         &self,
         endpoint: &str,
         dial_cfg: &DialConfig,
+        expected: Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]>,
     ) -> Result<OpenedSession, OpenError> {
         // The endpoint's own QoS band rides the node's offer, as upstream's
         // opener reads it off the endpoint it dials.
@@ -214,6 +216,9 @@ impl Dialer {
         // it always did.
         let auth = self.auth.clone();
         let stage = move |actions: &Arc<wz_runtime_tokio::session_glue::SessionLinkActions>| {
+            if let Some(zid) = expected {
+                actions.expect_peer_zid(zid);
+            }
             #[cfg(any(feature = "access-extauth-usrpwd", feature = "access-extauth-pubkey"))]
             if let Some(dispatch) = auth.as_ref().and_then(|auth| auth.dial_dispatch()) {
                 actions.install_auth_dispatch(dispatch);
@@ -232,7 +237,10 @@ impl Dialer {
             DEFAULT_OPEN_TICK_MS,
         )
         .await
-        .map_err(|_| OpenError::DriveFailed)
+        .map_err(|e| match e {
+            wz_runtime_tokio::session_open::OpenError::InitAckPeerMismatch => OpenError::LinkFailed,
+            _ => OpenError::DriveFailed,
+        })
     }
 }
 
@@ -1122,14 +1130,6 @@ fn minted_zids(minted: [u8; ZID_LENGTH]) -> ([u8; ZID_LENGTH], Vec<u8>) {
         minted,
         wz_runtime_tokio::zid_hex::canonical_zid(&minted).to_vec(),
     )
-}
-
-/// Whether the node a link opened to is the one that was dialled. The expected id comes from
-/// the routing graph, which holds an id trimmed; the link holds the bytes the peer sent; the
-/// comparison is of the id, not of its spelling.
-#[cfg(feature = "scout")]
-fn is_expected_peer(peer: Option<&[u8]>, expected: &[u8]) -> bool {
-    peer.is_some_and(|peer| wz_runtime_tokio::zid_hex::same_zid(peer, expected))
 }
 
 /// The zid a config STATES for its session, checked and in the form zenoh puts
@@ -4470,20 +4470,99 @@ mod tests {
         assert_eq!(wire.len(), ZID_LENGTH - 3, "every trailing zero byte goes");
     }
 
-    /// The node a link opened to is the node that was dialled whatever the spelling of its id:
-    /// the expected one is read off the routing graph (trimmed), the other off the handshake.
+    /// Decision D4 on the C ABI: a scouted open is made for the node the Hello named, so a
+    /// locator another node answers closes at its InitAck, with INVALID and no OpenSyn, and the
+    /// open is `LinkFailed`; the same far end, dialled for the node it is, gets the OpenSyn. The
+    /// far end answers every InitSyn with an InitAck from `FIXTURE_LISTENER_ZID` and reports the
+    /// first frame the dialler sends after it.
+    #[cfg(feature = "scout")]
+    fn scouted_open_for(expected: &[u8]) -> (Result<(), OpenError>, Vec<u8>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use wz_session_wire_fixtures::craft_initack_wire_with_caps;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind");
+            let addr = listener.local_addr().expect("local_addr");
+            let far_end = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut len = [0u8; 2];
+                stream.read_exact(&mut len).await.expect("read prefix");
+                let mut body = vec![0u8; u16::from_le_bytes(len) as usize];
+                stream.read_exact(&mut body).await.expect("read InitSyn");
+                // The dialler's resolutions (2 and 2) and batch, answered unchanged: nothing
+                // but the zid can refuse this InitAck.
+                let init_ack = craft_initack_wire_with_caps(&[0xC0, 0x01], 2 | (2 << 2), 1024);
+                let mut wire = (init_ack.len() as u16).to_le_bytes().to_vec();
+                wire.extend_from_slice(&init_ack);
+                stream.write_all(&wire).await.expect("write InitAck");
+                stream.read_exact(&mut len).await.expect("read next prefix");
+                let mut next = vec![0u8; u16::from_le_bytes(len) as usize];
+                stream.read_exact(&mut next).await.expect("read next frame");
+                next
+            });
+            let dialer = Dialer {
+                dial_cfgs: Vec::new(),
+                params: init_params(
+                    WhatAmI::Client,
+                    vec![0xC1; 4],
+                    LinkTx {
+                        queue: TxQueueConf::default(),
+                        batch_size: 1024,
+                    },
+                )
+                .expect("entropy"),
+                offer: SessionOffer::universal(),
+                clock: TokioTime::new(),
+                tls: CapiTlsConfig::default(),
+                auth: None,
+            };
+            let opened = dialer
+                .open_scouted(&format!("tcp/{addr}"), expected)
+                .await
+                .map(|_| ());
+            let next = tokio::time::timeout(std::time::Duration::from_secs(5), far_end)
+                .await
+                .expect("the dialler sent a frame after the InitAck")
+                .expect("the far end ran");
+            (opened, next)
+        })
+    }
+
     #[cfg(feature = "scout")]
     #[test]
-    fn a_link_to_the_dialled_node_is_the_dialled_node_whatever_its_zero_tail() {
-        let trimmed = [0x0a, 0x0b, 0x0c];
-        let padded = [0x0a, 0x0b, 0x0c, 0x00];
-        assert!(is_expected_peer(Some(&padded), &trimmed));
-        assert!(is_expected_peer(Some(&trimmed), &padded));
-        assert!(is_expected_peer(Some(&trimmed), &trimmed));
-        assert!(!is_expected_peer(None, &trimmed), "no peer id is no match");
-        assert!(
-            !is_expected_peer(Some(&[0x0a, 0x0b, 0x0d, 0x00]), &trimmed),
-            "another node whose id has a zero tail is another node"
+    fn a_scouted_open_another_node_answers_closes_invalid_at_its_init_ack() {
+        use wz_codecs::wire_const::T_MID_CLOSE;
+        let (opened, next) = scouted_open_for(&[0xB0, 0xB1, 0xB2, 0xB3]);
+        assert_eq!(opened, Err(OpenError::LinkFailed));
+        assert_eq!(
+            next.first().map(|h| h & 0x1f),
+            Some(T_MID_CLOSE),
+            "the frame after the InitAck is a Close, not an OpenSyn: {next:02x?}"
+        );
+        assert_eq!(
+            next.get(1).copied(),
+            Some(wz_session_core::close_reason::CloseReason::Invalid as u8),
+            "and it carries INVALID: {next:02x?}"
+        );
+    }
+
+    #[cfg(feature = "scout")]
+    #[test]
+    fn a_scouted_open_of_the_node_that_answers_goes_on_to_the_open() {
+        use wz_codecs::wire_const::T_MID_OPEN;
+        // The trimmed spelling, as the routing graph holds it.
+        let (_opened, next) = scouted_open_for(&wz_session_wire_fixtures::FIXTURE_LISTENER_ZID);
+        assert_eq!(
+            next.first().map(|h| h & 0x1f),
+            Some(T_MID_OPEN),
+            "the frame after the InitAck is the OpenSyn: {next:02x?}"
         );
     }
 
@@ -5110,7 +5189,9 @@ mod tests {
                         } else if !faces.iter().any(|(session, _)| {
                             // `ours` is the sixteen bytes `z_info_zid` reports and the wire
                             // carries the id trimmed: the same id, in two spellings.
-                            is_expected_peer(session.actions().peer_zid().as_deref(), &ours[..])
+                            session.actions().peer_zid().is_some_and(|peer| {
+                                wz_session_core::zid_hex::same_zid(&peer, &ours[..])
+                            })
                         }) {
                             foreign += 1;
                             if sightings.len() < 3 {

@@ -21,7 +21,9 @@
 //! [`zid_is_bound`](crate::credential_identity::zid_is_bound).
 //!
 //! No allocation and no feature gate: the MCU profile shares the rule, and the
-//! hash is the `sha2` the cookie path already links.
+//! hash is the `sha2` the cookie path already links. For the same reason the
+//! module holds the rule every comparison of two zids rests on, that two
+//! spellings of one zid are one zid ([`canonical_zid`], [`zid_from_wire`]).
 
 use sha2::{Digest, Sha256};
 
@@ -37,22 +39,40 @@ pub fn zid_from_spki_der(spki_der: &[u8]) -> [u8; CREDENTIAL_ZID_BYTES] {
     zid
 }
 
+/// The canonical, length-trimmed form of a zid: the little-endian bytes with the
+/// trailing zero high bytes dropped, which is how zenoh sends one.
+///
+/// The ONE place that rule is written, and in this module because every profile
+/// builds it. Two spellings of one zid are the same zid to zenoh, so a comparison
+/// of raw bytes would call them two nodes; a caller matching a zid it READ against
+/// a zid it PARSED or was given compares both through this
+/// ([`crate::zid_hex::same_zid`], [`zid_from_wire`]).
+pub fn canonical_zid(zid: &[u8]) -> &[u8] {
+    let end = zid.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    &zid[..end]
+}
+
 /// The zid `wire_zid` spells, read back to sixteen bytes, or `None` for bytes
-/// that spell no zid (empty, or longer than sixteen).
+/// that spell no zid (longer than sixteen, or zero, which no node is).
 ///
 /// The wire form drops a zid's high zero bytes: zenoh writes the little-endian
 /// bytes of a non-zero `u128` up to its last non-zero byte
 /// (`commons/zenoh-codec/src/core/zenohid.rs` @
 /// `self.write(&mut *writer, &x.to_le_bytes()[..x.size()])`), so a zid whose
 /// last bytes are zero arrives shorter than sixteen bytes, and two spellings of
-/// one zid differ only in those zeros. Upstream compares the `u128`s; this is
-/// the same comparison on bytes.
+/// one zid differ only in those zeros. Upstream compares the `u128`s. The rule
+/// that two spellings are one zid is [`canonical_zid`]'s; this writes its value
+/// in the sixteen-byte form a derived zid has.
 pub fn zid_from_wire(wire_zid: &[u8]) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
-    if wire_zid.is_empty() || wire_zid.len() > CREDENTIAL_ZID_BYTES {
+    if wire_zid.len() > CREDENTIAL_ZID_BYTES {
+        return None;
+    }
+    let canonical = canonical_zid(wire_zid);
+    if canonical.is_empty() {
         return None;
     }
     let mut padded = [0u8; CREDENTIAL_ZID_BYTES];
-    padded[..wire_zid.len()].copy_from_slice(wire_zid);
+    padded[..canonical.len()].copy_from_slice(canonical);
     Some(padded)
 }
 
@@ -74,6 +94,7 @@ mod tests {
         assert_eq!(zid_from_wire(&[0x0a, 0x0b]), Some(sixteen));
         assert_eq!(zid_from_wire(&sixteen), Some(sixteen));
         assert_eq!(zid_from_wire(&[]), None);
+        assert_eq!(zid_from_wire(&[0x00, 0x00]), None, "zero is no node's zid");
         assert_eq!(zid_from_wire(&[0x01; CREDENTIAL_ZID_BYTES + 1]), None);
     }
 

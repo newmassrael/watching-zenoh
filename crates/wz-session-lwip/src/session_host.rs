@@ -21,6 +21,7 @@ use wz_link_lwip::LwipLink;
 use wz_runtime_coop::session_drive::{IpEndpoint, PumpSlots, SessionDriveConfig};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime};
+use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::driver_loop::IterationEvent;
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_init_params::SessionInitParams;
@@ -52,6 +53,37 @@ where
         match lane {
             Some(lane) => LwipSessionLink::with_lane(self.link.clone(), driver, lane),
             None => LwipSessionLink::new(self.link.clone(), driver),
+        }
+    }
+}
+
+/// Where a dial goes and the node it is made for: the peer's address, and the zid of the node the
+/// dial is for or `None` for a dial made to the address alone (decision D4 of
+/// `docs/session-lifecycle-intent.md`). A session dialled for a node closes at an InitAck from
+/// another zid, before any OpenSyn, as the stack-neutral host's
+/// [`dial`](wz_session_mcu::slot_host::SessionHost::dial) installs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DialTarget {
+    /// The peer's address.
+    pub peer: IpEndpoint,
+    /// The node the dial is made for.
+    pub expected_zid: Option<[u8; CREDENTIAL_ZID_BYTES]>,
+}
+
+impl DialTarget {
+    /// A dial to `peer` that names no node: a configured endpoint's.
+    pub fn address(peer: IpEndpoint) -> Self {
+        Self {
+            peer,
+            expected_zid: None,
+        }
+    }
+
+    /// A dial to `peer` made for the node `zid` names.
+    pub fn node(peer: IpEndpoint, zid: [u8; CREDENTIAL_ZID_BYTES]) -> Self {
+        Self {
+            peer,
+            expected_zid: Some(zid),
         }
     }
 }
@@ -119,14 +151,14 @@ where
             .open(driver, Some(lane), entropy, params, config, on_event)
     }
 
-    /// Dial `peer` over UDP: bind a socket on a port the stack picks (out of the pool the image
-    /// declared, so a full pool is [`DialRefused::Link`]), then open the session over it. The
-    /// socket is bound before any table is claimed and is given back when one refuses; the
-    /// `InitSyn` leaves only once the session's task first runs.
+    /// Dial `target`'s peer over UDP: bind a socket on a port the stack picks (out of the pool
+    /// the image declared, so a full pool is [`DialRefused::Link`]), then open the session over
+    /// it. The socket is bound before any table is claimed and is given back when one refuses;
+    /// the `InitSyn` leaves only once the session's task first runs.
     pub fn dial<F>(
         &self,
         links: &LwipLinks<L>,
-        peer: IpEndpoint,
+        target: DialTarget,
         entropy: E,
         params: SessionInitParams,
         config: SessionDriveConfig,
@@ -135,8 +167,10 @@ where
     where
         F: FnMut(IterationEvent<'_>) + 'static,
     {
+        let DialTarget { peer, expected_zid } = target;
         self.host.dial(
             || links.bind_driver(0, peer),
+            expected_zid,
             entropy,
             params,
             config,

@@ -185,6 +185,9 @@ where
             .host
             .dial(
                 || bind.bind(to),
+                // A configured endpoint names no node, as upstream's
+                // `connect/endpoints` does not.
+                None,
                 entropy,
                 params,
                 SessionDriveConfig {

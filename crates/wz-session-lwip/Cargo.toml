@@ -359,6 +359,9 @@ wz-link-lwip = { path = "../wz-link-lwip", features = ["test-support", "tx-pool"
 # window on today; the feature only compiles it, and a session that never calls
 # `batch_start` sends exactly as before, so no other test here moves.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["transport-tx-lend", "codec-keep-alive", "transport-batching"] }
+# Decision D4 — the InitAck a far end answers a dial with (`session_dial_for_a_node`),
+# from the one source of synthetic session frames.
+wz-session-wire-fixtures = { path = "../wz-session-wire-fixtures" }
 
 # The inbound frame path counted with a counting allocator: a real lwIP session
 # pair, a frame of N Puts to a subscriber. It needs both handshake halves and
@@ -442,6 +445,20 @@ required-features = [
 # allocates when a refused dial gives it back.
 [[test]]
 name = "session_dial_exhaustion"
+required-features = [
+    "session-unicast-open",
+    "session-unicast-accept",
+    "pubsub-put",
+    "codec-close",
+    "session-slot",
+    "static-link-storage",
+]
+
+# Decision D4 of docs/session-lifecycle-intent.md -- a dial the fixed-memory host makes for a
+# node closes at an InitAck from another one, with INVALID and no OpenSyn; on the node's real
+# profile, as the exhaustion test above runs it.
+[[test]]
+name = "session_dial_for_a_node"
 required-features = [
     "session-unicast-open",
     "session-unicast-accept",

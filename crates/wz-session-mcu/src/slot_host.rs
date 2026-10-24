@@ -39,6 +39,7 @@ use wz_runtime_coop::session_drive::{
 };
 use wz_runtime_coop::session_runtime::{new_session_in_slot, SessionHandle};
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
+use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_init_params::SessionInitParams;
@@ -174,9 +175,15 @@ where
     /// the stack picks), then the session is opened over it. The socket is bound before any
     /// table is claimed and is given back when one refuses; the `InitSyn` leaves only once the
     /// session's task first runs. A pool with no socket is [`DialRefused::Link`].
+    ///
+    /// `expected_zid` is the node the dial is made for, or `None` for a dial made to the locator
+    /// alone (decision D4 of `docs/session-lifecycle-intent.md`). The session closes at an
+    /// InitAck from another zid, before any OpenSyn. It is installed between the open and the
+    /// task's first run, which is before the `InitSyn` leaves.
     pub fn dial<F>(
         &self,
         bind: impl FnOnce() -> Result<T::Driver, LinkOpenError>,
+        expected_zid: Option<[u8; CREDENTIAL_ZID_BYTES]>,
         entropy: E,
         params: SessionInitParams,
         config: SessionDriveConfig,
@@ -186,7 +193,12 @@ where
         F: FnMut(IterationEvent<'_>) + 'static,
     {
         let driver = bind().map_err(DialRefused::Link)?;
-        self.open(driver, None, entropy, params, config, on_event)
-            .map_err(DialRefused::Open)
+        let opened = self
+            .open(driver, None, entropy, params, config, on_event)
+            .map_err(DialRefused::Open)?;
+        if let Some(zid) = expected_zid {
+            opened.actions.expect_peer_zid(zid);
+        }
+        Ok(opened)
     }
 }

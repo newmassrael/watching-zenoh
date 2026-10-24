@@ -34,19 +34,12 @@ pub(crate) fn zid_to_le_array(zid: &[u8]) -> [u8; 16] {
     zid16
 }
 
-/// The canonical, length-trimmed form of a zid: the little-endian bytes with the
-/// trailing zero high bytes dropped, which is how zenoh sends one and how
-/// [`zenoh_hex_to_zid`] returns one.
-///
-/// The ONE place that rule is written. Two spellings of one zid are
-/// the same zid to zenoh: [`zid_to_zenoh_hex`] zero-pads to 16 bytes and so
-/// prints `[0x01]` and `[0x01, 0x00]` as the same `1`. A comparison of raw bytes
-/// would call them two nodes, so a caller matching a zid it READ against a zid
-/// it PARSED compares both through this.
-pub fn canonical_zid(zid: &[u8]) -> &[u8] {
-    let end = zid.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
-    &zid[..end]
-}
+/// The canonical, length-trimmed form of a zid, written once in
+/// [`crate::credential_identity`], which every profile builds, and named here
+/// beside the rendering that relies on it: [`zid_to_zenoh_hex`] zero-pads to 16
+/// bytes and so prints `[0x01]` and `[0x01, 0x00]` as the same `1`, and
+/// [`zenoh_hex_to_zid`] returns the trimmed form.
+pub use crate::credential_identity::canonical_zid;
 
 /// Whether two byte strings name one zid.
 ///

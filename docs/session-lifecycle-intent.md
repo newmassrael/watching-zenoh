@@ -495,8 +495,28 @@ Each step lands with its own done-when; sizes are not estimated here.
      far end answers every InitSyn with the same InitAck. A dial made for
      another zid sends a Close carrying INVALID and no OpenSyn. A dial made
      for the zid it carries sends its OpenSyn.
-   - Left of D4: the C ABI's scouted open (its after-the-handshake check
-     moves here) and the MCU opener name the node.
+   - **2c, the C ABI's scouted open (Round 3542).** `open_scouted` dials the
+     locator a Hello gave for the node that sent it. Its check after the
+     handshake (compare, then drain the session) is gone. The node's zid is
+     installed by the dial's staging, so a link another node answers closes
+     at its InitAck with no OpenSyn, and the open is `LinkFailed`, as before.
+     Witness: `crates/wz-capi-core/src/drive.rs`, the two
+     `a_scouted_open_*` tests over one far end. The cooperative engine of the
+     C ABI has no scouting, so it has no scouted open to change.
+   - **2d, the fixed-memory host (Round 3542).** `SessionHost::dial`
+     (`wz_session_mcu::slot_host`) takes the node a dial is made for, and
+     lwIP's host takes it as a `DialTarget` (an address, or an address and a
+     zid). It is installed after the open and before the session's task first
+     runs, which is before the InitSyn leaves. A configured endpoint names no
+     node. Witness: `crates/wz-session-lwip/tests/session_dial_for_a_node.rs`
+     on the lwIP loopback, on the node's real profile. The MCU opener of step
+     6 dials through it.
+   - The rule that two spellings of one zid are one zid is written once,
+     `credential_identity::canonical_zid`, in the module every profile builds.
+     `zid_hex` re-exports it.
+   - D4 is done: on AP, on the C ABI and on the fixed-memory host, a dial
+     made for a node closes at an InitAck from another zid, before any
+     OpenSyn and with INVALID.
 3. **D3.** The directory and its three sources, with expiry.
 4. **D5.** The peer machine in SCXML and the bounded peer table; the AP
    `ConnectReconcile` desired set is replaced by it.

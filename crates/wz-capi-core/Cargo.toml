@@ -470,6 +470,9 @@ tempfile = "3"
 # Paused time (`test-util`) for the multicast face's tests, whose beacons and lease then run
 # on their own schedule at no cost; the demo's group tests take it the same way.
 tokio = { version = "1", features = ["test-util"] }
+# Decision D4 — the InitAck a far end answers a scouted open with, from the one source of
+# synthetic session frames.
+wz-session-wire-fixtures = { path = "../wz-session-wire-fixtures" }
 
 [lints]
 workspace = true
