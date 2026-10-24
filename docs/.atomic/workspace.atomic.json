@@ -282398,6 +282398,42 @@
         "Read the hosted runs of the pushes of rounds 3500, 3503, 3506, 3512 and this one per job, Layer E18 first."
       ]
     },
+    "Round 3518": {
+      "decision_summary": "Step 1 of the owner-approved capacity report: the keepalive lateness is kept per window of time and not as one process maximum. The report that follows (a snapshot, an endpoint under a wz-owned root outside upstream's admin space, a differential test that upstream's admin answers do not move) and the admission that follows the lateness both need a gauge that can fall, and the old figure can only rise, so the quantity is defined once here and both read it. A pure type in wz-session-core keeps six windows of ten seconds and answers three readings (the current window, the last minute, since the start); the pacers record into it and the runtime reads it. The old figure stays, as the since-start reading, because the capacity promise is asserted on it.",
+      "changes_bullets": [
+        "wz-session-core `capacity`: `LatenessWindows` (`LATENESS_WINDOW_MS` 10000, `LATENESS_WINDOWS` 6; `record`, `current`, `last_minute`, `since_start`), integers only, no lock or clock; four unit tests.",
+        "wz-runtime-tokio `keepalive_pacer`: the pacers record into a process-wide `LatenessWindows` behind a mutex on a process clock of their own; `keepalive_timer_lateness()` returns `KeepaliveLateness {current_ms, last_minute_ms, since_start_ms}`; `keepalive_timer_lateness_max_ms` is the since-start reading and keeps its callers; one test.",
+        "docs/router-data-plane-scaling.md 7.4: a paragraph on the window and its tests."
+      ],
+      "verification_bullets": [
+        "The four window tests and the pacer test pass (25 capacity tests, 1 pacer test); the second window test, run against a slot that keeps the old window's maximum when it is reused, fails alone (24 passed, 1 failed) and the change was reverted.",
+        "clippy with warnings denied clean on wz-session-core and wz-runtime-tokio; C1bz for wz-session-core, wz-runtime-tokio and wz-ap-demo passes; gate array 110 of 110 on the tree rebased on round 3516.",
+        "Not run: the E7s lane (the router's log and the promise test read the since-start reading, whose value is unchanged by construction); the windows are not yet read by anything but their own tests."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Approved structure, in order, step 1 landed: (2) the pure snapshot struct of the capacity report in wz-session-core (share, lease, limit and limiter, admitted, the measured floor and median, the three lateness readings, refusals by cause, schema version) with a test that fails when the report and the document drift; (3) the responder under a wz-owned root (wz/@/<zid>/capacity), gated by the same read permission and ACL, answering nothing when denied; (4) a differential test that a query for @/** answers what it answered before; (5) the admission that follows the windowed lateness, as its own round. In parallel: a face that stops reading against blocking publishers, to see whether wait_for_room costs other faces their keepalives (the demo has neither a stoppable client nor a blocking publisher). Also open: the hosted E7s jobs of rounds 3507, 3514 and 3515 (runs cancelled by later pushes)."
+      ],
+      "publishable_decision_summary": "Step 1 of the owner-approved capacity report: the keepalive lateness is kept per window of time and not as one process maximum. The report that follows (a snapshot, an endpoint under a wz-owned root outside upstream's admin space, a differential test that upstream's admin answers do not move) and the admission that follows the lateness both need a gauge that can fall, and the old figure can only rise, so the quantity is defined once here and both read it. A pure type in wz-session-core keeps six windows of ten seconds and answers three readings (the current window, the last minute, since the start); the pacers record into it and the runtime reads it. The old figure stays, as the since-start reading, because the capacity promise is asserted on it.",
+      "publishable_changes_bullets": [
+        "wz-session-core `capacity`: `LatenessWindows` (`LATENESS_WINDOW_MS` 10000, `LATENESS_WINDOWS` 6; `record`, `current`, `last_minute`, `since_start`), integers only, no lock or clock; four unit tests.",
+        "wz-runtime-tokio `keepalive_pacer`: the pacers record into a process-wide `LatenessWindows` behind a mutex on a process clock of their own; `keepalive_timer_lateness()` returns `KeepaliveLateness {current_ms, last_minute_ms, since_start_ms}`; `keepalive_timer_lateness_max_ms` is the since-start reading and keeps its callers; one test.",
+        "docs/router-data-plane-scaling.md 7.4: a paragraph on the window and its tests."
+      ],
+      "publishable_verification_bullets": [
+        "The four window tests and the pacer test pass (25 capacity tests, 1 pacer test); the second window test, run against a slot that keeps the old window's maximum when it is reused, fails alone (24 passed, 1 failed) and the change was reverted.",
+        "clippy with warnings denied clean on wz-session-core and wz-runtime-tokio; C1bz for wz-session-core, wz-runtime-tokio and wz-ap-demo passes; gate array 110 of 110 on the tree rebased on round 3516.",
+        "Not run: the E7s lane (the router's log and the promise test read the since-start reading, whose value is unchanged by construction); the windows are not yet read by anything but their own tests."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Approved structure, in order, step 1 landed: (2) the pure snapshot struct of the capacity report in wz-session-core (share, lease, limit and limiter, admitted, the measured floor and median, the three lateness readings, refusals by cause, schema version) with a test that fails when the report and the document drift; (3) the responder under a wz-owned root (wz/@/<zid>/capacity), gated by the same read permission and ACL, answering nothing when denied; (4) a differential test that a query for @/** answers what it answered before; (5) the admission that follows the windowed lateness, as its own round. In parallel: a face that stops reading against blocking publishers, to see whether wait_for_room costs other faces their keepalives (the demo has neither a stoppable client nor a blocking publisher). Also open: the hosted E7s jobs of rounds 3507, 3514 and 3515 (runs cancelled by later pushes)."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
