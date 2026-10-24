@@ -283712,6 +283712,44 @@
         "Not built: the egress counters in the capacity report (schema version 1 has 20 fields, so it is a version step); held messages for a payload in shared memory; declarations, queries and replies still wait inside their send; wait_for_slot under runtime-zero-copy; a swap behind the reconnect wrapper clears the waker with the link it was set on, and the 25 ms backstop covers the interval."
       ]
     },
+    "Round 3548": {
+      "decision_summary": "D3 lands on AP: the face loop holds the locator directory, and both points where it dials a node by zid read it. A discovery intent and the lifecycle opener's AddNode first take what they carry into it: a Hello's locators for 42 s, RSVP's soft-state rule (RFC 2205, L >= (K + 0.5) * 1.5 * R, K = 3) over upstream's longest scout period of 8 s; a link-state read as the graph's whole set for the node, replacing the earlier one. Then the node's candidates are dialled for its zid, so a node both planes found is tried at either one's locators, newest first. Since every read of a zid follows a link-state read for that zid, a node the graph lost is never dialled from a hint it dropped, and the discovery channel needs no withdrawal message: a found/lost channel across four producers was the alternative, and it buys nothing this does not. The declared source has no producer yet: a declaration naming nodes by zid is D6's intent baseline.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/accept_loop.rs: LOOP_DIRECTORY_ROWS, HELLO_LIFETIME_MS, LoopDirectory, learn_locators, DialIntentOrigin::locator_source; the loop holds a boxed directory; learn_and_decide and dial_decision dial the directory's candidates for the node; apply_connect_reconcile takes the directory and plans AddNode's members from it; ConnectReconcile::AddNode carries the graph's text; a test of the joined hints.",
+        "crates/wz-runtime-tokio/src/session_lifecycle_open.rs: the opener sends the advertised text that parses.",
+        "scripts/run-ci.sh: C1v counts 12 and C1y accept_loop 16, the joined-hints test in each.",
+        "docs/session-lifecycle-intent.md: step 3c, D3 done for every source with a producer; docs/reason-review-pins.md: the accept_loop.rs and session_lifecycle_open.rs rows, and the session_actions.rs row Round 3547's commit moved without moving (its OutOfBand claim read again; its session was not found to ask)."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): cargo test -p wz-runtime-tokio --lib with session-close-ingress, transport-link-tls, routing-peer, routing-accept, router-connect-reconcile, transport-link-tcp and transport-unicast, filtered to accept_loop and session_lifecycle_open: 29 passed, among them the joined-hints test (newest first, a link-state read replacing the node's set, a Hello ending at 42 s), dial_decision, the two reconcile tests and the opener's request. cargo check --workspace --all-targets; cargo check -p wz-ap-demo --features router-connect-reconcile; clippy -D warnings of wz-runtime-tokio by default, with that feature set, and with transport-multilink added. guarded_count_gate over this round's commit: 15 reached guards; it found C1v and C1y accept_loop one short (11 and 15 declared, 12 and 16 printed), and with the counts moved all 15 agree. reason_review_pin_gate passes with the three rows. cargo fmt --check; upstream_citation_anchor, prose_named_identifier, prose_feature, discard_site, count_guard_lint and accessor_reach_census pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "D5: the peer machine in SCXML and the bounded peer table; the AP ConnectReconcile desired set is replaced by it, and it reads the loop's directory for a peer's candidates.",
+        "D6's intent baseline is the declared source of the directory.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
+      ],
+      "publishable_decision_summary": "D3 lands on AP: the face loop holds the locator directory, and both points where it dials a node by zid read it. A discovery intent and the lifecycle opener's AddNode first take what they carry into it: a Hello's locators for 42 s, RSVP's soft-state rule (RFC 2205, L >= (K + 0.5) * 1.5 * R, K = 3) over upstream's longest scout period of 8 s; a link-state read as the graph's whole set for the node, replacing the earlier one. Then the node's candidates are dialled for its zid, so a node both planes found is tried at either one's locators, newest first. Since every read of a zid follows a link-state read for that zid, a node the graph lost is never dialled from a hint it dropped, and the discovery channel needs no withdrawal message: a found/lost channel across four producers was the alternative, and it buys nothing this does not. The declared source has no producer yet: a declaration naming nodes by zid is D6's intent baseline.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/accept_loop.rs: LOOP_DIRECTORY_ROWS, HELLO_LIFETIME_MS, LoopDirectory, learn_locators, DialIntentOrigin::locator_source; the loop holds a boxed directory; learn_and_decide and dial_decision dial the directory's candidates for the node; apply_connect_reconcile takes the directory and plans AddNode's members from it; ConnectReconcile::AddNode carries the graph's text; a test of the joined hints.",
+        "crates/wz-runtime-tokio/src/session_lifecycle_open.rs: the opener sends the advertised text that parses.",
+        "scripts/run-ci.sh: C1v counts 12 and C1y accept_loop 16, the joined-hints test in each.",
+        "docs/session-lifecycle-intent.md: step 3c, D3 done for every source with a producer; docs/reason-review-pins.md: the accept_loop.rs and session_lifecycle_open.rs rows, and the session_actions.rs row Round 3547's commit moved without moving (its OutOfBand claim read again; its session was not found to ask)."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): cargo test -p wz-runtime-tokio --lib with session-close-ingress, transport-link-tls, routing-peer, routing-accept, router-connect-reconcile, transport-link-tcp and transport-unicast, filtered to accept_loop and session_lifecycle_open: 29 passed, among them the joined-hints test (newest first, a link-state read replacing the node's set, a Hello ending at 42 s), dial_decision, the two reconcile tests and the opener's request. cargo check --workspace --all-targets; cargo check -p wz-ap-demo --features router-connect-reconcile; clippy -D warnings of wz-runtime-tokio by default, with that feature set, and with transport-multilink added. guarded_count_gate over this round's commit: 15 reached guards; it found C1v and C1y accept_loop one short (11 and 15 declared, 12 and 16 printed), and with the counts moved all 15 agree. reason_review_pin_gate passes with the three rows. cargo fmt --check; upstream_citation_anchor, prose_named_identifier, prose_feature, discard_site, count_guard_lint and accessor_reach_census pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "D5: the peer machine in SCXML and the bounded peer table; the AP ConnectReconcile desired set is replaced by it, and it reads the loop's directory for a peer's candidates.",
+        "D6's intent baseline is the declared source of the directory.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
