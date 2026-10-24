@@ -381,6 +381,17 @@ pub enum ConnectReconcile {
     /// Add these to the desired connect-set, leaving every existing member —
     /// including the DNS-resolved startup seed — in place.
     Add(Vec<AnyLocator>),
+    /// Add a NODE: its locators, each dialled for its zid, as an [`Self::Add`]
+    /// does otherwise (decision D4 of `docs/session-lifecycle-intent.md`). A
+    /// session one of them opens closes at an InitAck from another zid, so a
+    /// node now answering at a locator the directory gave for this one is not
+    /// mistaken for it. Re-dials of these members carry the zid too.
+    AddNode {
+        /// The node's zid in its sixteen-byte form.
+        zid: [u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES],
+        /// The locators the node advertised.
+        locators: Vec<AnyLocator>,
+    },
 }
 
 /// The payload alias a feature-off build still needs for the channel types to
@@ -436,9 +447,10 @@ pub fn apply_connect_reconcile(
     request: ConnectReconcile,
     mut on_refused: impl FnMut(AnyLocator),
 ) {
-    let (rows, replace) = match request {
-        ConnectReconcile::Replace(rows) => (rows, true),
-        ConnectReconcile::Add(rows) => (rows, false),
+    let (rows, replace, node) = match request {
+        ConnectReconcile::Replace(rows) => (rows, true, None),
+        ConnectReconcile::Add(rows) => (rows, false, None),
+        ConnectReconcile::AddNode { zid, locators } => (locators, false, Some(zid)),
     };
     // R2233 — fold each through the ONE classification and refuse a member with
     // no pre-handshake identity, exactly as the startup seed does. Keyed by the
@@ -448,7 +460,13 @@ pub fn apply_connect_reconcile(
         .into_iter()
         .filter_map(
             |locator| match crate::session_open::mesh_dial_plan(locator) {
-                Ok(target) => Some((target.key.clone(), target)),
+                Ok(target) => {
+                    let target = match node {
+                        Some(zid) => target.for_node(zid),
+                        None => target,
+                    };
+                    Some((target.key.clone(), target))
+                }
                 Err(rejected) => {
                     on_refused(rejected);
                     None
@@ -965,10 +983,12 @@ pub type SessionAuth =
 impl FaceTemplate {
     /// The template and the staging that installs the partition and the node's authentication
     /// on a session before its first wire byte, split for one open call. `role` is the side the
-    /// session is opened from.
+    /// session is opened from. `expected_zid` is the node a dial is made for
+    /// ([`MeshDialTarget::expected_zid`]); an accepted session names none.
     fn into_parts(
         self,
         role: AuthRole,
+        expected_zid: Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]>,
     ) -> (
         SessionInitParams,
         impl FnOnce(&Arc<SessionLinkActions>) -> Result<(), OpenError>,
@@ -979,6 +999,9 @@ impl FaceTemplate {
         #[cfg(not(feature = "session-extauth"))]
         let _ = role;
         (self.params, move |actions: &Arc<SessionLinkActions>| {
+            if let Some(zid) = expected_zid {
+                actions.expect_peer_zid(zid);
+            }
             actions.set_south_partition((*partition).clone());
             #[cfg(feature = "session-extauth")]
             if let Some(dispatch) = auth.as_ref().and_then(|build| build(role)) {
@@ -1008,7 +1031,7 @@ async fn open_face(
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
-    let (params, stage) = template.into_parts(AuthRole::Accept);
+    let (params, stage) = template.into_parts(AuthRole::Accept, None);
     let result = match accepted.handshake().await {
         // R2095 — the loop's WHOLE capability offer rides the accept open, the
         // same value its dials carry. A declared QoS band still arms the
@@ -1072,7 +1095,7 @@ async fn dial_face(
     tick_interval_ms: u64,
 ) -> OpenResult {
     let peer = target.peer_tag();
-    let (params, stage) = template.into_parts(AuthRole::Dial);
+    let (params, stage) = template.into_parts(AuthRole::Dial, target.expected_zid);
     // R2944 — the link's QoS metadata is its endpoint's, read before the dial.
     let offer = match crate::session_open::offer_for_endpoint(offer, &target.locator) {
         Ok(offer) => offer,
@@ -1145,7 +1168,7 @@ async fn open_face_multilink(
     clock: TokioTime,
     tick_interval_ms: u64,
 ) -> OpenResult {
-    let (params, stage) = template.into_parts(AuthRole::Accept);
+    let (params, stage) = template.into_parts(AuthRole::Accept, None);
     // The deferred transport handshake runs here in the spawned future (never the
     // loop's `select!` arm), same as the single-link [`open_face`] — a failed
     // ws/tls handshake is an isolated `FaceFailed`, not a loop stall.
@@ -1188,7 +1211,7 @@ async fn dial_face_multilink(
     tick_interval_ms: u64,
 ) -> OpenResult {
     let peer = target.peer_tag();
-    let (params, stage) = template.into_parts(AuthRole::Dial);
+    let (params, stage) = template.into_parts(AuthRole::Dial, target.expected_zid);
     // R2944 — the link's QoS metadata is its endpoint's, read before the dial;
     // `band` stands in only where the endpoint declares none.
     let offer = match crate::session_open::offer_for_endpoint(offer, &target.locator) {
@@ -3913,6 +3936,42 @@ mod tests {
             "a pre-handshake-identityless endpoint is refused by name"
         );
         assert_eq!(desired.len(), 3, "and the rest of the ADD still applies");
+    }
+
+    /// Decision D4 — an add of a NODE plans each of its locators for its zid,
+    /// so every dial and re-dial of them is made for that node; an add of
+    /// locators plans them for none. The two verbs over the same locator give
+    /// the two answers, so the zid can only have come from the verb.
+    #[cfg(all(feature = "router-connect-reconcile", feature = "routing-peer"))]
+    #[test]
+    fn an_added_node_is_dialled_for_its_zid_and_added_locators_for_none() {
+        let addr: SocketAddr = "127.0.0.1:7004".parse().expect("fixture addr");
+        let mut zid = [0u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES];
+        zid[..2].copy_from_slice(&[0xab, 0x01]);
+        let key = MeshDialKey::Ip(addr);
+
+        let mut desired = std::collections::HashMap::new();
+        apply_connect_reconcile(
+            &mut desired,
+            ConnectReconcile::Add(vec![tcp_dial(addr)]),
+            |_| panic!("a tcp locator is mesh-dialable"),
+        );
+        assert_eq!(desired[&key].expected_zid, None, "a locator names no node");
+
+        apply_connect_reconcile(
+            &mut desired,
+            ConnectReconcile::AddNode {
+                zid,
+                locators: vec![tcp_dial(addr)],
+            },
+            |_| panic!("a tcp locator is mesh-dialable"),
+        );
+        assert_eq!(desired.len(), 1, "the same locator is one member");
+        assert_eq!(
+            desired[&key].expected_zid,
+            Some(zid),
+            "the member is now dialled for the node"
+        );
     }
 
     use futures_util::future::join_all;

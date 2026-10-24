@@ -484,9 +484,19 @@ Each step lands with its own done-when; sizes are not estimated here.
      Witness: `crates/wz-runtime-tokio/tests/session_fsm_driver_loop.rs`, one
      InitAck refused for a dial made for another node and admitted for a dial
      made for it.
-   - Left of D4: the three openers name the node. That is the AP reconcile
-     path, the C ABI's scouted open (its after-the-handshake check moves
-     here) and the MCU opener.
+   - **2b, the AP opener (Round 3539).** `LinkstateOpener` sends
+     `ConnectReconcile::AddNode`, the node's zid with the locators it
+     advertised, and each becomes a dial plan for that zid
+     (`MeshDialTarget::expected_zid`). The face template's staging installs
+     it on the session of every dial and re-dial of that plan, the way
+     upstream's `connect` dials each scouted locator for its zid. A plain
+     `Add` and the startup seed still name no node. Witness:
+     `crates/wz-runtime-tokio/tests/connect_and_open_session.rs`, where one
+     far end answers every InitSyn with the same InitAck. A dial made for
+     another zid sends a Close carrying INVALID and no OpenSyn. A dial made
+     for the zid it carries sends its OpenSyn.
+   - Left of D4: the C ABI's scouted open (its after-the-handshake check
+     moves here) and the MCU opener name the node.
 3. **D3.** The directory and its three sources, with expiry.
 4. **D5.** The peer machine in SCXML and the bounded peer table; the AP
    `ConnectReconcile` desired set is replaced by it.

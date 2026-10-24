@@ -2435,7 +2435,7 @@ impl<A: SessionLifecycleAuthority + ?Sized> SessionLifecycleAuthority for &A {
 /// MEASURED, which is why this is an `Option` at the injector rather than a
 /// required collaborator: AP has both halves of an open already — resolve the
 /// key's `peer_zid` through `LinkstateNetwork::node_locators` and dial through
-/// `ConnectReconcile::Add` — while no MCU crate depends on `wz-routing-graph`
+/// `ConnectReconcile::AddNode` — while no MCU crate depends on `wz-routing-graph`
 /// at all, and `wz-session-lwip`'s `run_session` drives exactly ONE session
 /// whose Acceptor/Initiator role is fixed before the loop starts. A profile
 /// with no session manager has nothing to bind here, and forcing it to bind a

@@ -209,3 +209,114 @@ async fn enlarging_init_ack_surfaces_caps_rejected() {
     }
     acceptor.abort();
 }
+
+/// Decision D4 over a socket: a dial made for a node, answered at its locator by
+/// another, closes at the InitAck. The far end answers every InitSyn with an
+/// InitAck from `FIXTURE_LISTENER_ZID` and reports the first frame the dialler
+/// sends after it. A dial made for another zid sends a Close carrying INVALID,
+/// upstream's reason, and never an OpenSyn; a dial made for the zid the InitAck
+/// carries sends its OpenSyn. The same far end gives the two answers, so the
+/// refusal can only be the zid's. The staging is the one the mesh dial installs
+/// (`FaceTemplate::into_parts` with the plan's `expected_zid`).
+async fn first_frame_after_the_init_ack(
+    expected: [u8; 16],
+) -> (
+    Result<wz_runtime_tokio::session_open::OpenedSession, OpenError>,
+    Vec<u8>,
+) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use wz_runtime_tokio::session_open::{
+        dial_locator, initiate_and_open_session_with_staging, SessionOffer,
+    };
+    use wz_session_wire_fixtures::craft_initack_wire;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+
+    let far_end = tokio::spawn(async move {
+        let (mut stream, _peer) = listener.accept().await.expect("accept");
+        let mut len = [0u8; 2];
+        stream.read_exact(&mut len).await.expect("read prefix");
+        let mut body = vec![0u8; u16::from_le_bytes(len) as usize];
+        stream.read_exact(&mut body).await.expect("read InitSyn");
+        let initack = craft_initack_wire(&[0xC0, 0x01]);
+        let mut wire = (initack.len() as u16).to_le_bytes().to_vec();
+        wire.extend_from_slice(&initack);
+        stream.write_all(&wire).await.expect("write InitAck");
+        stream
+            .read_exact(&mut len)
+            .await
+            .expect("read the next prefix");
+        let mut next = vec![0u8; u16::from_le_bytes(len) as usize];
+        stream
+            .read_exact(&mut next)
+            .await
+            .expect("read the next frame");
+        next
+    });
+
+    let locator = parse_any_locator(&format!("tcp/{addr}")).expect("parse loopback locator");
+    let link = dial_locator(locator, &DialConfig::default())
+        .await
+        .expect("dial loopback");
+    let result = initiate_and_open_session_with_staging(
+        link,
+        fixture_session_init_params(),
+        SessionOffer::universal(),
+        move |actions| {
+            actions.expect_peer_zid(expected);
+            Ok(())
+        },
+        TokioTime::new(),
+        Some(ITER_CAP),
+        DEFAULT_OPEN_TICK_MS,
+    )
+    .await;
+    let next = tokio::time::timeout(std::time::Duration::from_secs(5), far_end)
+        .await
+        .expect("the dialler sent a frame after the InitAck")
+        .expect("the far end ran");
+    (result, next)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dial_made_for_another_node_closes_invalid_at_the_init_ack() {
+    use wz_codecs::wire_const::T_MID_CLOSE;
+    use wz_runtime_tokio::session_glue::CloseReason;
+
+    let mut another = [0u8; 16];
+    another[..4].copy_from_slice(&[0xB0, 0xB1, 0xB2, 0xB3]);
+    let (result, next) = first_frame_after_the_init_ack(another).await;
+    match result {
+        Err(OpenError::InitAckPeerMismatch) => {}
+        Err(other) => panic!("expected InitAckPeerMismatch, got {other:?}"),
+        Ok(_) => panic!("a node the dial was not made for must not reach Established"),
+    }
+    assert_eq!(
+        next.first().map(|h| h & 0x1f),
+        Some(T_MID_CLOSE),
+        "the frame after the InitAck is a Close, not an OpenSyn: {next:02x?}"
+    );
+    assert_eq!(
+        next.get(1).copied(),
+        Some(CloseReason::Invalid as u8),
+        "and it carries INVALID: {next:02x?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dial_made_for_the_node_that_answers_goes_on_to_the_open() {
+    use wz_codecs::wire_const::T_MID_OPEN;
+    use wz_session_wire_fixtures::FIXTURE_LISTENER_ZID;
+
+    let mut the_node = [0u8; 16];
+    the_node[..FIXTURE_LISTENER_ZID.len()].copy_from_slice(&FIXTURE_LISTENER_ZID);
+    let (_result, next) = first_frame_after_the_init_ack(the_node).await;
+    // The far end stops at the OpenSyn, so the open does not finish; what is
+    // held is the frame the dialler sent.
+    assert_eq!(
+        next.first().map(|h| h & 0x1f),
+        Some(T_MID_OPEN),
+        "the frame after the InitAck is the OpenSyn: {next:02x?}"
+    );
+}

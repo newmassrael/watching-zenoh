@@ -8722,17 +8722,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// the session closes with `CloseReason::Invalid` before the OpenSyn, which
     /// is where upstream checks it (`io/zenoh-transport/src/unicast/establishment/open.rs`
     /// @ `// Check if the expected_zid matches the peer's ZID`). `wire_zid` is the
-    /// zid as the wire or a routing graph spells it, read by
-    /// [`crate::credential_identity::zid_from_wire`]. Returns `false`, and
-    /// expects nothing, for bytes that spell no zid.
+    /// zid in its sixteen-byte form; a zid the wire or a routing graph spells
+    /// shorter is read into it by [`crate::credential_identity::zid_from_wire`].
     ///
     /// The opener calls it once, before the handshake starts.
-    pub fn expect_peer_zid(&self, wire_zid: &[u8]) -> bool {
-        let Some(zid) = crate::credential_identity::zid_from_wire(wire_zid) else {
-            return false;
-        };
+    pub fn expect_peer_zid(&self, zid: [u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]) {
         R::with_mutex_mut(&self.expected_peer_zid, |slot| *slot = Some(zid));
-        true
     }
 
     /// Initiator-side InitAck identity admission, the dispatcher pre-classify

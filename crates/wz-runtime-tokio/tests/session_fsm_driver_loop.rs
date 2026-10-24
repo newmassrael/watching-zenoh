@@ -1337,7 +1337,9 @@ async fn an_init_ack_from_another_node_than_the_dial_named_closes_invalid_before
     use wz_runtime_tokio::session_glue::CloseReason;
 
     let (recorder, actions, mut engine) = fresh_recording_setup();
-    assert!(actions.expect_peer_zid(&[0xB0, 0xB1, 0xB2, 0xB3]));
+    let mut another = [0u8; 16];
+    another[..4].copy_from_slice(&[0xB0, 0xB1, 0xB2, 0xB3]);
+    actions.expect_peer_zid(another);
     drive_to_sent_init_syn(&mut engine);
 
     let wire = craft_initack_wire(&[0xC0, 0x01]);
@@ -1369,7 +1371,7 @@ async fn an_init_ack_from_the_node_the_dial_named_is_admitted_whatever_its_spell
     // bytes, so this spelling and the InitAck's four bytes are one zid.
     let mut padded = [0u8; 16];
     padded[..FIXTURE_LISTENER_ZID.len()].copy_from_slice(&FIXTURE_LISTENER_ZID);
-    assert!(actions.expect_peer_zid(&padded));
+    actions.expect_peer_zid(padded);
     drive_to_sent_init_syn(&mut engine);
 
     let wire = craft_initack_wire(&[0xC0, 0x01]);
@@ -1383,15 +1385,5 @@ async fn an_init_ack_from_the_node_the_dial_named_is_admitted_whatever_its_spell
     assert!(
         sent_an_open(&recorder),
         "the handshake goes on to the OpenSyn"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bytes_that_spell_no_zid_name_no_node() {
-    let (_recorder, actions, _engine) = fresh_recording_setup();
-    assert!(!actions.expect_peer_zid(&[]), "an empty zid names no node");
-    assert!(
-        !actions.expect_peer_zid(&[0x01; 17]),
-        "seventeen bytes are wider than any zid"
     );
 }

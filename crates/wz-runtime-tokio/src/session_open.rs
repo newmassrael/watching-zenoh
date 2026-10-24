@@ -2787,7 +2787,11 @@ pub fn mesh_dial_plan(locator: AnyLocator) -> Result<MeshDialTarget, AnyLocator>
         },
         AnyLocator::Named { .. } => return Err(locator),
     };
-    Ok(MeshDialTarget { key, locator })
+    Ok(MeshDialTarget {
+        key,
+        locator,
+        expected_zid: None,
+    })
 }
 
 /// R2900 — a mesh dial target's PRE-HANDSHAKE identity: the dedup key for "am I
@@ -2833,9 +2837,27 @@ pub struct MeshDialTarget {
     pub key: MeshDialKey,
     /// What is dialed.
     pub locator: AnyLocator,
+    /// The node the dial is made for, or `None` for a dial made to the locator
+    /// alone (decision D4 of `docs/session-lifecycle-intent.md`). The session
+    /// it opens closes at an InitAck from another zid, as upstream's
+    /// `connect_peer` dials each of a peer's locators for its zid
+    /// (`zenoh/src/net/runtime/orchestrator.rs`
+    /// @ `match manager.open_transport_unicast_with_zid(endpoint, zid).await {`).
+    pub expected_zid: Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]>,
 }
 
 impl MeshDialTarget {
+    /// This plan, made for the node `zid` names.
+    pub fn for_node(
+        self,
+        zid: [u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES],
+    ) -> Self {
+        Self {
+            expected_zid: Some(zid),
+            ..self
+        }
+    }
+
     /// The endpoint's own `#`-tail retry span, where its shape carries one
     /// (the IP family's; the other shapes re-dial at the global policy).
     pub fn retry(&self) -> Option<&wz_session_core::locator::LocatorRetry> {

@@ -23,7 +23,9 @@
 //!     directory, populated by the link-state flood this node already ingests.
 //!   * `session_open::plan_endpoint` — the locator-string parse.
 //!   * `ConnectReconcile::Add` — the desired-connect-set merge that ends in a
-//!     dial, and the same one `connect-add` drives.
+//!     dial, and the same one `connect-add` drives. This verb sends its
+//!     `AddNode` form, which dials each locator for the node's zid (decision
+//!     D4 of `docs/session-lifecycle-intent.md`).
 //!
 //! WHICH IS WHY `connect-add` STAYS. It addresses by LOCATOR and this verb
 //! addresses by ZID; they are two ways onto one mechanism, not two mechanisms,
@@ -42,6 +44,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use wz_routing_graph::{LinkstateNetwork, Zid};
+use wz_session_core::credential_identity::zid_from_wire;
 use wz_session_core::drive::{LifecycleKey, SessionOpener};
 use wz_session_core::zid_hex::zenoh_hex_to_zid;
 
@@ -126,8 +129,22 @@ impl SessionOpener for LinkstateOpener {
 
         // ADD, never Replace: this verb asks for one more peer, and adopting its
         // locators as the WHOLE desired set would silently stop re-dialling every
-        // endpoint the startup seed and earlier commands put there.
-        if self.reconcile.send(ConnectReconcile::Add(planned)).is_err() {
+        // endpoint the startup seed and earlier commands put there. And an add of
+        // the NODE, not of its locators (decision D4): a locator is a hint for
+        // reaching the zid, so each dial is made for the zid and a session that
+        // another node answers closes at its InitAck.
+        let Some(expected) = zid_from_wire(&bytes) else {
+            log::warn!(
+                "LinkstateOpener: `{}` does not read as a sixteen-byte zid; refusing to open.",
+                key.peer_zid
+            );
+            return false;
+        };
+        let request = ConnectReconcile::AddNode {
+            zid: expected,
+            locators: planned,
+        };
+        if self.reconcile.send(request).is_err() {
             log::warn!(
                 "LinkstateOpener: the face loop is gone, so the dial request for `{}` \
                  reached nobody.",
@@ -231,10 +248,16 @@ mod tests {
             "a peer the flood placed and gave locators to is dialable"
         );
         match rx.try_recv().expect("a reconcile request was sent") {
-            ConnectReconcile::Add(locators) => {
+            ConnectReconcile::AddNode { zid, locators } => {
                 assert_eq!(locators.len(), 1, "one advertised locator, one dial");
+                // Decision D4: the dial is made for the node the key named.
+                assert_eq!(
+                    Some(zid),
+                    zid_from_wire(PEER_ZID),
+                    "the dial carries the zid the key named"
+                );
             }
-            other => panic!("open must ADD to the connect set, got {other:?}"),
+            other => panic!("open must ADD the node to the connect set, got {other:?}"),
         }
     }
 
