@@ -150,6 +150,12 @@ CLASSIFIED: dict[tuple[str, str], tuple[str, str]] = {
         "outbound",
         "replaces a capability entry this side stages in its own handshake chain",
     ),
+    ("crates/wz-zenoh-protocol/src/common/extension.rs", "mid"): (
+        "upstream-id",
+        "the zenoh family's own `iext::mid`, which IS upstream's accessor of the 4-bit id and "
+        "reads no chain: "
+        "`commons/zenoh-protocol/src/common/extension.rs` @ `pub const fn mid(header: u8) -> u8 {`",  # noqa: E501
+    ),
 }
 
 KINDS = {"upstream-id", "outbound", "renders", "family", "hint"}
