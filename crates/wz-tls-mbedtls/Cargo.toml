@@ -32,6 +32,10 @@ links = "wz_tls_mbedtls"
 # The stream port the channel implements (`stream_link::StreamSocket`, `StreamDial`) and the
 # dial's error (`session_drive::LinkOpenError`).
 wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["session-unicast"] }
+# This crate IS a secure channel, so it states one: `secure-channel` is the marker the lifecycle
+# verbs need before they compile (decision D2), and a cooperative build gets it from here and
+# from nowhere else.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["no_std", "secure-channel"] }
 
 [build-dependencies]
 # The pinned Mbed TLS through its own CMake, as zenoh-pico-sys builds zenoh-pico.
@@ -42,8 +46,6 @@ cc = "1"
 dunce = "1"
 
 [dev-dependencies]
-# The derivation the session core pins a zid with (decision D1), as the oracle of this crate's.
-wz-session-core = { path = "../wz-session-core", default-features = false, features = ["no_std"] }
 # The host's TCP, for the dial against a peer in another thread.
 wz-runtime-posix = { path = "../wz-runtime-posix" }
 # The peer zenohd 1.10.1 is: rustls 0.23 with webpki's client verifier.
@@ -62,6 +64,10 @@ session-slot = ["wz-runtime-coop/session-slot"]
 # Build the pinned Mbed TLS and the channel's C side here. Off for an image whose platform
 # carries Mbed TLS and compiles `csrc/wz_tls.c` itself.
 vendored = []
+# The session lifecycle verbs on the cooperative runtime. Offered here, by the channel, because
+# they compile only beside one (decision D2): this crate always states `secure-channel`, so every
+# build that has the verbs through it has the channel too. The runtime offers no such feature.
+session-close-ingress = ["wz-session-core/session-close-ingress"]
 
 [lints]
 workspace = true

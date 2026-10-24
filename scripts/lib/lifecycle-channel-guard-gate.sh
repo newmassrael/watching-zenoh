@@ -12,7 +12,8 @@
 # such channel must not compile the verbs at all. `wz-session-core` refuses
 # `session-close-ingress` without `secure-channel` by a `compile_error!`, and the
 # link features that provide a channel (`transport-link-tls`,
-# `transport-link-quic` in `wz-runtime-tokio`) turn `secure-channel` on.
+# `transport-link-quic` in `wz-runtime-tokio`) and the fixed-memory profile's
+# channel crate (`wz-tls-mbedtls`) turn `secure-channel` on.
 #
 # A guard is a claim about a build that is NOT made, and nothing else in the tree
 # builds one: every lane that turns the verbs on names a channel, so a guard that
@@ -24,6 +25,11 @@
 #   wz-session-core   session-close-ingress,secure-channel   -> builds
 #   wz-runtime-tokio  session-close-ingress                  -> refused (the
 #                     runtime's forward must not bring a channel with it)
+#   wz-runtime-coop   alloc,session-unicast,                 -> refused (the
+#                     wz-session-core/session-close-ingress     cooperative runtime
+#                                                               brings no channel)
+#   wz-tls-mbedtls    session-close-ingress                  -> builds (the fixed-
+#                     memory profile's D9 channel offers the verbs and brings itself)
 #
 # Usage:
 #   lifecycle-channel-guard-gate.sh
@@ -37,8 +43,15 @@ fail=0
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# A build's log, named by its package and features; a dependency's feature
+# (`dep/feature`) carries a slash, which a file name cannot.
+log_of() {
+    echo "$work/$1.${2//\//:}.log"
+}
+
 refused() {
-    local pkg="$1" feats="$2" log="$work/$1.$2.log"
+    local pkg="$1" feats="$2" log
+    log="$(log_of "$1" "$2")"
     if cargo check -p "$pkg" --features "$feats" --quiet >"$log" 2>&1; then
         echo "lifecycle-channel-guard: FAIL -- $pkg --features $feats BUILT; the lifecycle verbs compiled with no secure channel (decision D2)" >&2
         fail=1
@@ -52,7 +65,8 @@ refused() {
 }
 
 admitted() {
-    local pkg="$1" feats="$2" log="$work/$1.$2.log"
+    local pkg="$1" feats="$2" log
+    log="$(log_of "$1" "$2")"
     if cargo check -p "$pkg" --features "$feats" --quiet >"$log" 2>&1; then
         echo "  lifecycle-channel-guard: $pkg --features $feats builds"
     else
@@ -65,6 +79,8 @@ admitted() {
 refused wz-session-core session-close-ingress
 admitted wz-session-core session-close-ingress,secure-channel
 refused wz-runtime-tokio session-close-ingress
+refused wz-runtime-coop alloc,session-unicast,wz-session-core/session-close-ingress
+admitted wz-tls-mbedtls session-close-ingress
 
 if [[ $fail -ne 0 ]]; then
     exit 1

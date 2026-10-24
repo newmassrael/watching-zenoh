@@ -73,7 +73,14 @@ set -uo pipefail
 
 # Tier 2: checked LIB-ONLY, because some test target of theirs does not survive
 # every feature being on at once. Populated by measurement, never by guess.
-lib_only=""
+#
+# `wz-tls-mbedtls`, measured: `--all-features` turns its `session-slot` on, which
+# makes `wz-runtime-coop` the slot profile, while the dev-dependency its tests
+# dial with, `wz-runtime-posix`, keeps its own heap default and so names the
+# heap-only `IpLinks` the slot profile does not have (E0425 in posix's
+# `links.rs`). A feature cannot turn on a dev-dependency's feature, so no row of
+# its manifest can make the two agree; its library builds clean either way.
+lib_only="wz-tls-mbedtls"
 # Tier 3: no all-features check at all.
 #
 # `wz` is the facade crate and it has NO all-features build, because a vendored
