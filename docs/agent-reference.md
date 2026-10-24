@@ -230,6 +230,18 @@ one -- SCE owns the generation-time header policy (see
 first vendored snippet lands, add a top-level `THIRD_PARTY.md` ledger
 recording origin, version, and license.
 
+**The zenoh family** (`crates/wz-zenoh-*`, atom `api-compat-rust`) is
+derived from upstream's crates, so it is NOT under the wz header: every
+source file keeps upstream's notice block, then `SPDX-License-Identifier:
+EPL-2.0 OR Apache-2.0`, then our `SPDX-FileCopyrightText` and a `Modified by
+... Derived from <crate> 1.10.1, file <path>` statement, and the manifests
+declare that expression (`LICENSES/` holds both texts). A new file of a family
+crate copies the block of the file it derives from. `scripts/lib/
+family_notice_gate.py` enforces it (form in the hook and Layer C0, resolution
+against the pin in Layer Z); the only exempt member is the empty `zenoh`
+facade, until it declares a public item. Decided 2026-10-24 under the owner's
+delegation; the reasoning is in `THIRD_PARTY.md`.
+
 **Doc / config files** that are not source (Markdown, JSON metadata,
 config TOML) inherit the repo-level `LICENSE` and do not require
 in-file SPDX headers.

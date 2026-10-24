@@ -289,6 +289,24 @@ pinned revision for the generation-time policy.
 - **Origin**: https://github.com/eclipse-zenoh/zenoh, tag `1.10.1` (the crates `zenoh-result`,
   `zenoh-runtime`, `zenoh-core`, `zenoh-keyexpr`, `zenoh-macros`, `zenoh-collections`, `zenoh-buffers`, `zenoh-protocol` and those that follow them).
 - **License of the origin**: EPL-2.0 OR Apache-2.0.
+- **License of these crates**: the same, `EPL-2.0 OR Apache-2.0`, and not this repository's
+  non-commercial expression. A family file is a derivative of the upstream file it names (its
+  documentation, its declarations and, in several files, its source line for line), and both
+  licenses ask a derivative to keep upstream's copyright and license notice, to say it was
+  changed, and to ship the license text (Apache-2.0 section 4, EPL-2.0 section 3). So every
+  source file of a family crate keeps upstream's notice block verbatim, adds
+  `SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael` and a `Modified by newmassrael ...
+  Derived from <crate> 1.10.1, file <path>` statement, and names `EPL-2.0 OR Apache-2.0`; a file
+  whose upstream original carries no notice says so and takes the crate's declared license. The
+  manifests declare `license = "EPL-2.0 OR Apache-2.0"`. The modifications are offered under the
+  same expression: the crates exist to be patched into other people's graphs, which a
+  non-commercial term on them would defeat. (Apache-2.0 section 4 would allow different terms for
+  the modifications alone; that is a choice the owner can still make file by file.)
+  `LICENSES/Apache-2.0.txt` and `LICENSES/EPL-2.0.txt` are the two license texts, copied from
+  upstream's own `LICENSE` (the Apache text is upstream's, which ends at section 9 and omits the
+  appendix; the EPL text differs from upstream's only in the trailing space of two lines of its
+  Exhibit A). `scripts/lib/family_notice_gate.py` holds all of this, and its `--resolve` arm
+  holds each file's statement to the file at the pin.
 - **What is reproduced**: the public API of each crate, which a drop-in has to equal: item names,
   signatures, trait implementations, the text and expansion of the exported macros (a crate that
   uses a macro expands this text), the error messages, and the documentation of the public items.

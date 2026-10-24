@@ -1900,6 +1900,15 @@ layer_c0_test_discipline() {
     # the reader fixes: all 24 functions red.
     python3 scripts/lib/ext_identity_gate.py --selftest || return 1
     python3 scripts/lib/ext_identity_gate.py --check || return 1
+    # R3553 -- the zenoh family's NOTICE gate. The family crates reproduce the API and the
+    # documentation of upstream's crates (EPL-2.0 OR Apache-2.0), and both licenses ask a derived
+    # file to keep upstream's notice, say it was changed, and ship the license text; the first
+    # slices dropped the notice for this repository's own header. Every file of every family crate
+    # must carry the notice, the manifests must declare upstream's expression, and LICENSES/ must
+    # hold both texts. The FORM arm runs here; the arm that holds each statement to the pinned
+    # checkout is in Layer Z, which provisions one.
+    python3 scripts/lib/family_notice_gate.py --selftest || return 1
+    python3 scripts/lib/family_notice_gate.py --check || return 1
     # R311y621 (§7.14) — the SOLO-PLANE-PAGE gate. R311y618 severed one leg of
     # `CaptureReport::is_complete` and all 229 tests stayed green: the pages
     # that should have caught it attached TWO planes, and the other plane
@@ -18398,6 +18407,12 @@ layer_z_zenohd_interop() {
     # checkout) and prints that it deferred this half.
     if ! python3 scripts/lib/upstream_citation_anchor_gate.py --check --resolve; then
         echo "  Layer Z FAIL: an upstream citation no longer resolves at the pin" >&2
+        return 1
+    fi
+    # R3553 -- the RESOLUTION arm of the family notice gate: each `Derived from` statement of a
+    # family file names a file that is at the pin, and keeps that file's copyright line.
+    if ! python3 scripts/lib/family_notice_gate.py --check --resolve; then
+        echo "  Layer Z FAIL: a family file's notice does not match the upstream file at the pin" >&2
         return 1
     fi
     # R2356 — the SAME question asked of the STORE's live atom reasons, which

@@ -1,5 +1,10 @@
-# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# This package reproduces the public API and the documentation of the crate of the same name of
+# eclipse-zenoh/zenoh, which is EPL-2.0 OR Apache-2.0, so the whole package is under that expression.
+# The notices of the upstream files it derives from are kept in its sources (see LICENSES/ and
+# THIRD_PARTY.md at the root of this repository).
 #
 # zenoh-buffers -- the byte buffers of the zenoh family: the traits that a message is written to and
 # read from (`Writer`, `Reader` and their backtracking, advancing and siphoning forms), a fixed
@@ -16,7 +21,7 @@ name = "zenoh-buffers"
 version = "1.10.1"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "EPL-2.0 OR Apache-2.0"
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
