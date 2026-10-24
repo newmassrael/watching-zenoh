@@ -281904,6 +281904,58 @@
         "Read the hosted runs of the pushes of rounds 3500, 3503 and this one per job, Layer E18 first."
       ]
     },
+    "Round 3507": {
+      "decision_summary": "The hosted run of the capacity promise failed: in the E7s job of CI run 40066938187 (tip 2ea53d076) 308 admitted client sessions ended on their own. The cause is the recorded keepalive cost: 10 us is one machine's figure, and the hosted runner serves a forwarded message in 46 to 52 us where the build host reads 12 to 13, so 1100 sessions were admitted on a host that holds about a quarter of that. A constant recorded on one host is not a promise about another. The router now measures the cost on its own host: every keepalive emission is timed, the first 64 sessions of a process emit once at establishment so the figure exists before a burst is over, and the lower decile of the window, given the room the recorded cost has over it (220 percent), bounds admission when it is dearer than the recorded cost. The first version used the median and was wrong: it swings with load and admitted 516 to 816 where 1100 fit.",
+      "changes_bullets": [
+        "wz-runtime-tokio `emission_cost`: a lock-free window of the last 256 keepalive emission durations, timed by one wrapper at the four call sites (the session loop's three and the pacer's); the lower decile is read through `keepalive_emission_cost_floor_ns` and the median through `keepalive_emission_cost_median_ns` once 64 are taken; the first 64 sessions of a process make one timed KeepAlive at establishment.",
+        "wz-session-core `capacity`: `ControlModel::calibrated` takes the larger of the recorded cost and the measured floor times `FLOOR_HEADROOM_PERCENT` (220), so a measurement can tighten the bound and never loosen it; unit tests.",
+        "`WzConfig::effective_max_sessions` reads the calibrated model; `effective_max_sessions_under(model)` takes a stated one, which the config tests use.",
+        "`FaceSources::ceiling` (`SessionCeiling`, worked out at each admission) and `AcceptLoopSummary::refused_over_capacity`; 21 literals gained `ceiling: None`; a test for the ceiling and the separate counter.",
+        "The router-hat logs the limit with the floor and the median when either moves; the E7s test prints those lines with a failure, waits for every session to be answered, and asserts at least a quarter of the recorded number was admitted.",
+        "wz-ap-demo `args.rs`: the capacity flag tests moved below the emission sites, because `flag_precondition_gate.py` reads the file down to its first `#[cfg(test)]` and read no sites (a red of round 3496's change, reported by two peers).",
+        "docs/router-data-plane-scaling.md 7.4: the hosted failure, the median that was wrong, the floor, the refusal counters. Pins of `session-close-ingress` for accept_loop.rs and session_glue.rs moved."
+      ],
+      "verification_bullets": [
+        "Hosted read: CI run 40066938187 on 2ea53d076, E7s job: the promise test failed at the ended-client assertion, 308 ended. The same job's table read 46.4 to 52.0 us per forwarded message at 8000 messages/s, against 12 to 13 on the build host. Peers reported the same failure on d06e38645 (286 ended) and a Layer C0 flag-precondition red caused by the test module placement in args.rs; `flag_precondition_gate.py` passes after the move.",
+        "With the median as the compared figure, five runs on the build host: the promise test failed twice on its population wait (516 and 672 of 1100 came up) because the median swung between 4 and 19 us; that is why the lower decile is used.",
+        "With the lower decile: three runs on the build host (before the room was set to 220) and three on a slower host on the final code, no face DOWN, no client ended, the limit between 850 and 1100 on the slower host; the lower decile read 3.3 to 5.9 us.",
+        "Unit tests of wz-session-core and wz-runtime-tokio pass (meter, calibrated, config bound, ceiling test); clippy with warnings denied clean on wz-session-core, wz-runtime-tokio, wz-ap-demo (router-hat build) and the E7s test; C1bz for the three crates passes (wz-runtime-tokio 474 of 474 after repairing four links of mine); gate array 110 of 110.",
+        "NOT measured: a host dearer than these, which is the hosted run of this change; the 220 percent room is one host's ratio."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Read the E7s job of the hosted run of this change first: it is the only reading of the calibration where the host is dearer. If it still ends sessions, the router's lines in the failure message give the floor and the median it measured and the limit it set; move FLOOR_HEADROOM_PERCENT only on that evidence.",
+        "Open: the meter's lateness against the loss at N = 1536 and 2048 (would make lateness the bound itself); the admin-space export of the lateness, the measured cost and the two refusal counters (the demo prints neither counter yet); the data-drop policy with per-lane counters; the lane that re-derives the tables; the request-reply latency with the yield. The loop unit cost is still the recorded one and binds only with --max-data-wait.",
+        "The first 64 sessions of a process now send one extra KeepAlive at establishment; a test that counts a process's first KeepAlive frames sees it. Lesson: a figure compared against a constant recorded on another host must not contain the thing the model already accounts for (the wait for a core), or it counts it twice."
+      ],
+      "publishable_decision_summary": "The hosted run of the capacity promise failed: in the E7s job of CI run 40066938187 (tip 2ea53d076) 308 admitted client sessions ended on their own. The cause is the recorded keepalive cost: 10 us is one machine's figure, and the hosted runner serves a forwarded message in 46 to 52 us where the build host reads 12 to 13, so 1100 sessions were admitted on a host that holds about a quarter of that. A constant recorded on one host is not a promise about another. The router now measures the cost on its own host: every keepalive emission is timed, the first 64 sessions of a process emit once at establishment so the figure exists before a burst is over, and the lower decile of the window, given the room the recorded cost has over it (220 percent), bounds admission when it is dearer than the recorded cost. The first version used the median and was wrong: it swings with load and admitted 516 to 816 where 1100 fit.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio `emission_cost`: a lock-free window of the last 256 keepalive emission durations, timed by one wrapper at the four call sites (the session loop's three and the pacer's); the lower decile is read through `keepalive_emission_cost_floor_ns` and the median through `keepalive_emission_cost_median_ns` once 64 are taken; the first 64 sessions of a process make one timed KeepAlive at establishment.",
+        "wz-session-core `capacity`: `ControlModel::calibrated` takes the larger of the recorded cost and the measured floor times `FLOOR_HEADROOM_PERCENT` (220), so a measurement can tighten the bound and never loosen it; unit tests.",
+        "`WzConfig::effective_max_sessions` reads the calibrated model; `effective_max_sessions_under(model)` takes a stated one, which the config tests use.",
+        "`FaceSources::ceiling` (`SessionCeiling`, worked out at each admission) and `AcceptLoopSummary::refused_over_capacity`; 21 literals gained `ceiling: None`; a test for the ceiling and the separate counter.",
+        "The router-hat logs the limit with the floor and the median when either moves; the E7s test prints those lines with a failure, waits for every session to be answered, and asserts at least a quarter of the recorded number was admitted.",
+        "wz-ap-demo `args.rs`: the capacity flag tests moved below the emission sites, because `flag_precondition_gate.py` reads the file down to its first `#[cfg(test)]` and read no sites (a red of round 3496's change, reported by two peers).",
+        "docs/router-data-plane-scaling.md 7.4: the hosted failure, the median that was wrong, the floor, the refusal counters. Pins of `session-close-ingress` for accept_loop.rs and session_glue.rs moved."
+      ],
+      "publishable_verification_bullets": [
+        "Hosted read: CI run 40066938187 on 2ea53d076, E7s job: the promise test failed at the ended-client assertion, 308 ended. The same job's table read 46.4 to 52.0 us per forwarded message at 8000 messages/s, against 12 to 13 on the build host. Peers reported the same failure on d06e38645 (286 ended) and a Layer C0 flag-precondition red caused by the test module placement in args.rs; `flag_precondition_gate.py` passes after the move.",
+        "With the median as the compared figure, five runs on the build host: the promise test failed twice on its population wait (516 and 672 of 1100 came up) because the median swung between 4 and 19 us; that is why the lower decile is used.",
+        "With the lower decile: three runs on the build host (before the room was set to 220) and three on a slower host on the final code, no face DOWN, no client ended, the limit between 850 and 1100 on the slower host; the lower decile read 3.3 to 5.9 us.",
+        "Unit tests of wz-session-core and wz-runtime-tokio pass (meter, calibrated, config bound, ceiling test); clippy with warnings denied clean on wz-session-core, wz-runtime-tokio, wz-ap-demo (router-hat build) and the E7s test; C1bz for the three crates passes (wz-runtime-tokio 474 of 474 after repairing four links of mine); gate array 110 of 110.",
+        "NOT measured: a host dearer than these, which is the hosted run of this change; the 220 percent room is one host's ratio."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the E7s job of the hosted run of this change first: it is the only reading of the calibration where the host is dearer. If it still ends sessions, the router's lines in the failure message give the floor and the median it measured and the limit it set; move FLOOR_HEADROOM_PERCENT only on that evidence.",
+        "Open: the meter's lateness against the loss at N = 1536 and 2048 (would make lateness the bound itself); the admin-space export of the lateness, the measured cost and the two refusal counters (the demo prints neither counter yet); the data-drop policy with per-lane counters; the lane that re-derives the tables; the request-reply latency with the yield. The loop unit cost is still the recorded one and binds only with --max-data-wait.",
+        "The first 64 sessions of a process now send one extra KeepAlive at establishment; a test that counts a process's first KeepAlive frames sees it. Lesson: a figure compared against a constant recorded on another host must not contain the thing the model already accounts for (the wait for a core), or it counts it twice."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
