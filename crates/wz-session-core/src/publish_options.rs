@@ -427,12 +427,14 @@ pub struct PlainPutParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublishError {
     /// The payload or keyexpr exceeded the declared bounded-codec capacity while being copied
-    /// into the no-alloc owned Push mirror — the same bound the decode path enforces. No wire
-    /// bytes were emitted.
+    /// into the no-alloc owned Push mirror — the same bound the decode path enforces — or, on
+    /// the lend-only profile, the frame is past the link's budget and there is no heap to build
+    /// its fragments in. No wire bytes were emitted.
     ExceedsCapacity,
     /// F2 — the transport is not currently accepting data sends (link released or reconnecting;
-    /// Established not re-entered). No wire bytes were emitted; retry after the session
-    /// re-establishes (zenoh-pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE` parity).
+    /// Established not re-entered) or, on the lend-only profile, the link lent no slot to build
+    /// the frame in. No wire bytes were emitted; retry after the session re-establishes or the
+    /// pool refills (zenoh-pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE` parity).
     TransportUnavailable,
     /// B5b-2b (R311nc) — an ALIASED publish (`publish_aliased{,_auto}`, which resolves the
     /// unicast outbound keyexpr-mapping table) was attempted on a session whose transport is not
@@ -507,6 +509,21 @@ impl From<SendWireError> for PublishError {
             // R2238 — kept SEPARATE from the two above precisely because the "no wire bytes
             // emitted" half does not hold; see `PublishError::FragmentChainAbandoned`.
             SendWireError::FragmentTxBudgetExhausted => PublishError::FragmentChainAbandoned,
+            // The lend-only profile's refusal: the link refused the frame before it was built,
+            // so no bytes were emitted, and the session counted the cause (`tx_refusals`). It
+            // folds into the two classes this type already distinguishes, as the codec's and
+            // the reassembly slot's bounds do above, rather than adding a variant that only one
+            // feature of this crate defines: an engine in another crate matches this type
+            // exhaustively and cannot name that feature. A dry pool and a gone writer are
+            // moments the same send may get past (the pool refills, the session re-establishes);
+            // a frame past the link's budget is a message that can never be sent as it is.
+            #[cfg(feature = "tx-lend-only")]
+            SendWireError::LinkRefused(cause) => match cause {
+                crate::link::LinkDropCause::NoTxSlot | crate::link::LinkDropCause::WriterGone => {
+                    PublishError::TransportUnavailable
+                }
+                crate::link::LinkDropCause::Oversize => PublishError::ExceedsCapacity,
+            },
         }
     }
 }
