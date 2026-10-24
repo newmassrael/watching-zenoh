@@ -282086,6 +282086,50 @@
         "A zenohd process over a tls/ link; the Zephyr TCP StreamSocket and the kit image over wz-tls-mbedtls; no TLS 1.3 KeyUpdate in Mbed TLS 4.1; the Round 3495 items."
       ]
     },
+    "Round 3511": {
+      "decision_summary": "Open-debt item 924, step 6 (d) of D9 (owner: long-term correct, cost not counted), taken next because the consumer's application judges declaration end-to-end rules. An end-to-end verdict depends on the frames of its slot before it, so a window under such a rule still walked from the cursor. The ledger now keeps, per declaration text, the outcome of every frame it judged by row, and per list a frontier: the first row not judged and the largest capture-order key judged. A row behind the frontier is read back and moves no counter, and a window begins no later than the frontier, so every row past it is judged in the order one walk over everything judges it. A walk that begins again keeps the ledger only while the capture grew and every row not judged sorts after the frontier; a slot judged from two lists still judges afresh, as before.",
+      "changes_bullets": [
+        "wz-capture e2e_slots.rs: SlotLedger keeps each judged frame's outcome by (list, produced-index, ordinal) and a Frontier per list (dissect builds); payload_decode.rs: Declarations knows the row being judged, reads back a row behind the frontier and judges and keeps the rest",
+        "fields_json.rs: a window under an end-to-end rule begins no later than its list's frontier, says each row before judging it, and moves the frontier when it ends; the since-door keeps the ledger across a walk that begins again while it still holds (FieldsMemory::e2e_ledger_holds)",
+        "wz-capi-dissect: the one-row gate gains a capture of end-to-end frames whose counters repeat, skip and go back, plain and under a frame ceiling; discard_site_lint.py: the kept outcomes' release registered; docs/dissect-row-index.md: step 6 (d) recorded"
+      ],
+      "verification_bullets": [
+        "The one-row gate passes with the end-to-end captures: every window of one and three rows, picked between the two ends, is the document's rows, visits at most its own and writes nothing again; a ledger that judges a row behind the frontier again instead of reading it back fails it (mutation)",
+        "cargo test wz-capture all features, wz-capi-dissect, wz-capi-replay, wz-replay, wz-analyze all features",
+        "clippy -D warnings wz-capture all, default and no default features, wz-capi-dissect; rustfmt; discard_site_lint, accessor_reach_census",
+        "No end-to-end capture of the consumer's size exists, so the window cost under a rule is held by the work counter and not timed"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 4c landings 2 to 4 of docs/dissect-row-index.md (serial, recovered QUIC, WebSocket, TLS plaintext and scouting) and step 5, the memory gate",
+        "The hosted CI runs holding rounds 3485, 3488, 3497, 3504, 3509 and this one: read the first completed run that holds them, and tell the consumer session which pin to take if it is red",
+        "Tell the consumer session this round's pin carries the end-to-end half, so a capture with declaration end-to-end rules can be picked from at the cost of its own rows"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 6 (d) of D9 (owner: long-term correct, cost not counted), taken next because the consumer's application judges declaration end-to-end rules. An end-to-end verdict depends on the frames of its slot before it, so a window under such a rule still walked from the cursor. The ledger now keeps, per declaration text, the outcome of every frame it judged by row, and per list a frontier: the first row not judged and the largest capture-order key judged. A row behind the frontier is read back and moves no counter, and a window begins no later than the frontier, so every row past it is judged in the order one walk over everything judges it. A walk that begins again keeps the ledger only while the capture grew and every row not judged sorts after the frontier; a slot judged from two lists still judges afresh, as before.",
+      "publishable_changes_bullets": [
+        "wz-capture e2e_slots.rs: SlotLedger keeps each judged frame's outcome by (list, produced-index, ordinal) and a Frontier per list (dissect builds); payload_decode.rs: Declarations knows the row being judged, reads back a row behind the frontier and judges and keeps the rest",
+        "fields_json.rs: a window under an end-to-end rule begins no later than its list's frontier, says each row before judging it, and moves the frontier when it ends; the since-door keeps the ledger across a walk that begins again while it still holds (FieldsMemory::e2e_ledger_holds)",
+        "wz-capi-dissect: the one-row gate gains a capture of end-to-end frames whose counters repeat, skip and go back, plain and under a frame ceiling; discard_site_lint.py: the kept outcomes' release registered; docs/dissect-row-index.md: step 6 (d) recorded"
+      ],
+      "publishable_verification_bullets": [
+        "The one-row gate passes with the end-to-end captures: every window of one and three rows, picked between the two ends, is the document's rows, visits at most its own and writes nothing again; a ledger that judges a row behind the frontier again instead of reading it back fails it (mutation)",
+        "cargo test wz-capture all features, wz-capi-dissect, wz-capi-replay, wz-replay, wz-analyze all features",
+        "clippy -D warnings wz-capture all, default and no default features, wz-capi-dissect; rustfmt; discard_site_lint, accessor_reach_census",
+        "No end-to-end capture of the consumer's size exists, so the window cost under a rule is held by the work counter and not timed"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 4c landings 2 to 4 of docs/dissect-row-index.md (serial, recovered QUIC, WebSocket, TLS plaintext and scouting) and step 5, the memory gate",
+        "The hosted CI runs holding rounds 3485, 3488, 3497, 3504, 3509 and this one: read the first completed run that holds them, and tell the consumer session which pin to take if it is red",
+        "Tell the consumer session this round's pin carries the end-to-end half, so a capture with declaration end-to-end rules can be picked from at the cost of its own rows"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
