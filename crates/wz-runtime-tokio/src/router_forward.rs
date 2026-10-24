@@ -444,7 +444,7 @@ use wz_session_core::wire::{PushOwned, PushOwnedVariant, RequestOwned, ResponseO
 mod egress;
 #[cfg(test)]
 mod egress_tests;
-pub use egress::EGRESS_CREDIT;
+pub use egress::EgressBudget;
 
 /// R2866 (open-debt item 751, step 2) — the router's faces, planes and tables
 /// are keyed by the pin's [`Region`] now. The 1.5.0 `FaceTier` classifier

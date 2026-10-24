@@ -664,15 +664,34 @@ because it did not wait out a deadline. The router holds it in a queue of the de
 
 - a destination that holds messages takes every later credited message behind them, so one source's messages
   to one destination keep their order;
-- a destination that holds `EGRESS_CREDIT` (64) messages gates the face whose message filled it
-  (`FaceForwarder::read_gate`, asked after every event by the drive of the face, in the loop's `after_dispatch`
-  stage that R2702/R2703 made for a slow consumer). The face is not read, and keeps its keepalives and its
-  lease check, until every destination it fed holds half the credit or less. What it had already read is
-  what the destination holds past the credit, at most one inbound frame for each gated face;
+- a destination that holds its budget in bytes (`EgressBudget::per_destination_bytes`, 256 KiB, four batches)
+  gates the face whose message filled it (`FaceForwarder::read_gate`, asked after every event by the drive of
+  the face, in the loop's `after_dispatch` stage that R2702/R2703 made for a slow consumer). The face is not
+  read, and keeps its keepalives and its lease check, until every destination it fed holds half its budget or
+  less. What it had already read is what the destination holds past the budget, at most one inbound frame for
+  each gated face;
+- the router as a whole holds at most `EgressBudget::pool_bytes` (64 MiB, which is 256 destinations each at its
+  own budget): once the pool is full, every face whose message is held is gated, whatever its destination
+  holds, until the pool is down to half. A face is gated on a destination or on the pool, and released when
+  what it waits on is down to half;
 - a destination whose oldest held message has waited its own `wait_before_close` is closed as unresponsive
   (`request_congestion_close`), which is what a send that waited that long would have done, and what it held
   is dropped with it and counted (`egress_abandoned`). The check is the router's tick and the gated face's
   own recheck.
+
+**What is bounded, and in what.** The first version counted messages (sixty-four a destination), which bounded
+nothing that matters: sixty-four messages of a megabyte each are sixty-four megabytes for one stopped reader, and
+every destination of a router could do the same. The budget is bytes, the memory a held message occupies (the
+entry that carries it, which is about a kilobyte, and its payload), counted inside the queue that holds the
+entries so that the bytes and the entries cannot disagree, and two-level as a transport's connection and stream
+credit are (HTTP/2, QUIC): a stopped reader costs the router at most its own budget, and many together at most
+the pool. A message larger than a whole destination budget is held as the only one its destination holds, since a
+queue that refused it could never send it and its face would wait for nothing; it gates that face at once.
+Counted in the cost and not in the budget: the extension chain and the key suffix of a Put. The two numbers are
+bounds on memory and are not tuned to a measured load; `RouterForwarder::with_egress_budget` sets them for a host.
+Held by tests that read the pool in bytes after every way a message leaves it (sent, abandoned at a closed
+destination, gone with a face that left), that a count of messages is no longer a reason to gate, that one large
+message is, and that the pool gates on its own with every destination under its budget.
 
 **How the router learns there is room (the write-queue notice).** A destination that holds a message asks its
 link to say when it has room (`BoxedLinkDriver::watch_room`, a default no-op for a driver with no queue, so the
@@ -704,6 +723,6 @@ gate anything and waits inside its send as before. A message whose payload is in
 the relay, whose mapping of the payload for the destination cannot be undone and tried again, and also waits
 as before. A declaration, a query and a reply are rare and are not held. A link behind the reconnect wrapper
 (`reconnect.rs`) forwards the notice to its live link, as it forwards `wait_for_room`; a swap replaces the link
-and the waker with it, and the gated face's 25 ms recheck covers the interval. Counters are on the forwarder (`egress_held`, `egress_released`, `egress_abandoned`,
+and the waker with it, and the gated face's 25 ms recheck covers the interval. Counters are on the forwarder (`egress_held`, `egress_held_bytes`, `egress_released`, `egress_abandoned`,
 `egress_destinations_closed`, `egress_gated_faces`) and not in the capacity report yet. `wait_for_slot`, the
 wait for a pooled frame slot under `runtime-zero-copy`, is not touched.

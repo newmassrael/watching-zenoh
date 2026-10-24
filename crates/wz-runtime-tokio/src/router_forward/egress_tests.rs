@@ -10,7 +10,7 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use super::egress::EGRESS_CREDIT;
+use super::egress::{message_cost, EgressBudget};
 use super::*;
 use crate::runtime_impl::{TokioRuntime, TokioTime};
 use crate::session_glue::{new_session_actions, BoxedLinkDriver, LinkSendOutcome};
@@ -151,6 +151,28 @@ const SOURCE: FaceId = FaceId(1);
 const OTHER_SOURCE: FaceId = FaceId(3);
 const DEST: FaceId = FaceId(2);
 
+/// How many messages of [`filler`] fill a destination's budget in the tests that fill one.
+const FILL: usize = 8;
+
+/// A message of a fixed size, so that `FILL` of them cost exactly what a destination may hold.
+fn filler(i: usize) -> NetworkMessage {
+    blocking_put(format!("m-{i:04}").as_bytes())
+}
+
+/// A budget a destination reaches with `FILL` messages of [`filler`], and a pool nothing in the
+/// tests reaches unless it is the case under test.
+fn filling_budget() -> EgressBudget {
+    EgressBudget {
+        per_destination_bytes: FILL * message_cost(&filler(0)),
+        pool_bytes: usize::MAX / 2,
+    }
+}
+
+/// `FILL` messages, which fill a destination under [`filling_budget`].
+fn a_destinations_worth() -> Vec<NetworkMessage> {
+    (0..FILL).map(filler).collect()
+}
+
 /// A router with two publishing faces and one face subscribed to `demo/x`, whose link is full or
 /// not as the test says. `now` moves the router's clock.
 struct Rig {
@@ -164,13 +186,22 @@ struct Rig {
 
 impl Rig {
     fn new(full: bool) -> Self {
+        Self::with_budget(full, EgressBudget::default())
+    }
+
+    /// A rig whose destination holds [`FILL`] messages of [`filler`] before its sources are gated.
+    fn filling(full: bool) -> Self {
+        Self::with_budget(full, filling_budget())
+    }
+
+    fn with_budget(full: bool, budget: EgressBudget) -> Self {
         let base = Instant::now();
         let now = Rc::new(Cell::new(Duration::ZERO));
         let clock = {
             let now = Rc::clone(&now);
             Box::new(move || base + now.get())
         };
-        let fwd = RouterForwarder::with_clock(zid(0x01), clock);
+        let fwd = RouterForwarder::with_clock(zid(0x01), clock).with_egress_budget(budget);
         let link = RoomLink::new(false);
         let dest = client_over(&link, zid(0xCC));
         let quiet = RoomLink::new(false);
@@ -197,6 +228,22 @@ impl Rig {
 
     fn advance(&self, by: Duration) {
         self.now.set(self.now.get() + by);
+    }
+
+    /// Another face subscribed to `demo/x`, whose link is full or not, so that one Put has two
+    /// destinations. The link is the test's to switch.
+    fn add_destination(&self, face: FaceId, peer: Zid, full: bool) -> Arc<RoomLink> {
+        let link = RoomLink::new(false);
+        self.fwd.register(face, &client_over(&link, peer));
+        forward_frame(
+            &self.fwd,
+            face,
+            vec![NetworkMessage::Declare(Box::new(
+                build_declare_subscriber(7, 0, Some("demo/x")).expect("declare subscriber"),
+            ))],
+        );
+        link.set_full(full);
+        link
     }
 }
 
@@ -263,13 +310,15 @@ fn held_messages_leave_in_the_order_they_arrived_and_a_later_one_waits_behind_th
 /// A destination that holds its credit gates the face that filled it, and only that face; the
 /// face is read again when the destination has drained.
 #[test]
-fn a_destination_at_its_credit_gates_the_face_that_fed_it_and_no_other() {
-    let rig = Rig::new(true);
-    let frame: Vec<NetworkMessage> = (0..EGRESS_CREDIT)
-        .map(|i| blocking_put(format!("m-{i}").as_bytes()))
-        .collect();
-    forward_frame(&rig.fwd, SOURCE, frame);
-    assert_eq!(rig.fwd.egress_held(), EGRESS_CREDIT);
+fn a_destination_at_its_budget_gates_the_face_that_fed_it_and_no_other() {
+    let rig = Rig::filling(true);
+    forward_frame(&rig.fwd, SOURCE, a_destinations_worth());
+    assert_eq!(rig.fwd.egress_held(), FILL);
+    assert_eq!(
+        rig.fwd.egress_held_bytes(),
+        FILL * message_cost(&filler(0)),
+        "the pool holds what the messages cost, in bytes"
+    );
     assert_eq!(rig.fwd.egress_gated_faces(), 1);
     assert!(
         rig.fwd.read_gate(SOURCE).is_some(),
@@ -290,19 +339,17 @@ fn a_destination_at_its_credit_gates_the_face_that_fed_it_and_no_other() {
         "the face is read again once the destination has taken what it held"
     );
     assert_eq!(rig.fwd.egress_held(), 0);
+    assert_eq!(rig.fwd.egress_held_bytes(), 0, "and the pool is given back");
     assert_eq!(rig.fwd.egress_gated_faces(), 0);
-    assert_eq!(rig.link.sent(), rig.baseline + EGRESS_CREDIT);
+    assert_eq!(rig.link.sent(), rig.baseline + FILL);
 }
 
 /// A destination that does not take its oldest message within `wait_before_close` is closed as
 /// unresponsive, and its held messages and the gates on it go; before that it is not.
 #[test]
 fn a_destination_that_does_not_take_its_oldest_message_in_time_is_closed() {
-    let rig = Rig::new(true);
-    let frame: Vec<NetworkMessage> = (0..EGRESS_CREDIT)
-        .map(|i| blocking_put(format!("m-{i}").as_bytes()))
-        .collect();
-    forward_frame(&rig.fwd, SOURCE, frame);
+    let rig = Rig::filling(true);
+    forward_frame(&rig.fwd, SOURCE, a_destinations_worth());
     let deadline = rig.dest.wait_before_close();
 
     rig.advance(deadline - Duration::from_millis(1));
@@ -311,7 +358,7 @@ fn a_destination_that_does_not_take_its_oldest_message_in_time_is_closed() {
         !rig.dest.take_congestion_close(),
         "one millisecond short of the deadline the destination is not closed"
     );
-    assert_eq!(rig.fwd.egress_held(), EGRESS_CREDIT);
+    assert_eq!(rig.fwd.egress_held(), FILL);
 
     rig.advance(Duration::from_millis(2));
     rig.fwd.tick();
@@ -320,7 +367,8 @@ fn a_destination_that_does_not_take_its_oldest_message_in_time_is_closed() {
         "past the deadline it is closed, as a send that waited that long closes it"
     );
     assert_eq!(rig.fwd.egress_held(), 0);
-    assert_eq!(rig.fwd.egress_abandoned(), EGRESS_CREDIT);
+    assert_eq!(rig.fwd.egress_held_bytes(), 0, "and the pool is given back");
+    assert_eq!(rig.fwd.egress_abandoned(), FILL);
     assert_eq!(rig.fwd.egress_destinations_closed(), 1);
     assert!(
         rig.fwd.read_gate(SOURCE).is_none(),
@@ -345,16 +393,14 @@ fn a_droppable_put_is_not_held() {
 /// A face that leaves takes what it held, and the faces gated on it are released.
 #[test]
 fn a_destination_that_leaves_takes_what_it_held_and_releases_the_faces_gated_on_it() {
-    let rig = Rig::new(true);
-    let frame: Vec<NetworkMessage> = (0..EGRESS_CREDIT)
-        .map(|i| blocking_put(format!("m-{i}").as_bytes()))
-        .collect();
-    forward_frame(&rig.fwd, SOURCE, frame);
+    let rig = Rig::filling(true);
+    forward_frame(&rig.fwd, SOURCE, a_destinations_worth());
     assert_eq!(rig.fwd.egress_gated_faces(), 1);
 
     rig.fwd.deregister(DEST);
     assert_eq!(rig.fwd.egress_held(), 0);
-    assert_eq!(rig.fwd.egress_abandoned(), EGRESS_CREDIT);
+    assert_eq!(rig.fwd.egress_held_bytes(), 0, "and the pool is given back");
+    assert_eq!(rig.fwd.egress_abandoned(), FILL);
     assert_eq!(rig.fwd.egress_gated_faces(), 0);
     assert!(rig.fwd.read_gate(SOURCE).is_none());
 }
@@ -505,11 +551,8 @@ fn a_destination_asks_its_link_for_room_while_it_holds_and_not_after() {
 /// permit, so that a notice raised while it is busy is not lost) and sends what is held.
 #[tokio::test(flavor = "current_thread")]
 async fn a_links_room_wakes_the_gated_face_and_the_loop_and_what_is_held_leaves() {
-    let rig = Rig::new(true);
-    let frame: Vec<NetworkMessage> = (0..EGRESS_CREDIT)
-        .map(|i| blocking_put(format!("m-{i}").as_bytes()))
-        .collect();
-    forward_frame(&rig.fwd, SOURCE, frame);
+    let rig = Rig::filling(true);
+    forward_frame(&rig.fwd, SOURCE, a_destinations_worth());
     let gate = rig.fwd.read_gate(SOURCE).expect("the face is gated");
 
     // Holding the first message woke the loop once, for room made between the probe and the
@@ -540,9 +583,124 @@ async fn a_links_room_wakes_the_gated_face_and_the_loop_and_what_is_held_leaves(
 
     rig.fwd.woken();
     assert_eq!(rig.fwd.egress_held(), 0, "what was held left");
-    assert_eq!(rig.link.sent(), rig.baseline + EGRESS_CREDIT);
+    assert_eq!(rig.link.sent(), rig.baseline + FILL);
     assert!(
         rig.fwd.read_gate(SOURCE).is_none(),
         "and the face is read again"
     );
+}
+
+/// What a held message costs is the entry that carries it and its payload, so that two messages of
+/// the same kind differ by exactly the bytes of their payloads, and the entry itself is not free.
+#[test]
+fn a_messages_cost_is_its_entry_and_its_payload() {
+    let small = message_cost(&blocking_put(&[0u8; 10]));
+    let large = message_cost(&blocking_put(&[0u8; 10_010]));
+    assert_eq!(large - small, 10_000, "the payload, byte for byte");
+    assert!(
+        small > 10 + 100,
+        "and the entry that holds a message is more than its payload: {small}"
+    );
+}
+
+/// The budget is bytes and not messages: the number of messages the credit used to gate at, held
+/// by a destination, is no reason to gate a face when they are small.
+#[test]
+fn many_small_messages_are_not_a_destinations_budget() {
+    let rig = Rig::new(true);
+    let many = 64;
+    assert!(
+        many * message_cost(&filler(0)) < EgressBudget::DEFAULT_PER_DESTINATION_BYTES,
+        "the case under test is small messages"
+    );
+    forward_frame(&rig.fwd, SOURCE, (0..many).map(filler).collect());
+    assert_eq!(rig.fwd.egress_held(), many, "they are all held");
+    assert_eq!(
+        rig.fwd.egress_gated_faces(),
+        0,
+        "and the face that sent them is read"
+    );
+}
+
+/// A message larger than the whole budget of a destination is held, alone: a queue that refused it
+/// could never send it. It gates the face that sent it all the same, and leaves when there is room.
+#[test]
+fn a_message_larger_than_a_destinations_whole_budget_is_held_alone_and_gates_its_face() {
+    let rig = Rig::new(true);
+    let size = EgressBudget::DEFAULT_PER_DESTINATION_BYTES + 1;
+    forward_frame(&rig.fwd, SOURCE, vec![blocking_put(&vec![0xAB; size])]);
+    assert_eq!(
+        rig.fwd.egress_held(),
+        1,
+        "held, though it is more than the budget"
+    );
+    assert!(rig.fwd.egress_held_bytes() > size);
+    assert_eq!(
+        rig.fwd.egress_gated_faces(),
+        1,
+        "one message was enough to gate its face"
+    );
+    assert!(rig.fwd.read_gate(SOURCE).is_some());
+
+    rig.link.set_full(false);
+    assert!(
+        rig.fwd.read_gate(SOURCE).is_none(),
+        "when the destination has room the message leaves and the face is read"
+    );
+    assert_eq!(rig.fwd.egress_held(), 0);
+    assert_eq!(rig.fwd.egress_held_bytes(), 0);
+    // A message this large leaves as a chain of fragments, so it is the bytes that are counted:
+    // every byte of the payload is on the link.
+    assert!(rig.link.sent() > rig.baseline, "it was written");
+    assert!(
+        rig.link.bytes().len() > size,
+        "all of it: {} bytes written for a payload of {size}",
+        rig.link.bytes().len()
+    );
+}
+
+/// The router's pool is a budget of its own: destinations that are each under their budget, but
+/// hold together as much as the pool, gate the faces that feed them, including a face that
+/// feeds a destination nothing is held for yet, until the pool is down.
+#[test]
+fn the_pool_gates_faces_when_destinations_are_each_under_their_budget() {
+    let rig = Rig::with_budget(
+        true,
+        EgressBudget {
+            per_destination_bytes: usize::MAX / 2,
+            pool_bytes: FILL * message_cost(&filler(0)),
+        },
+    );
+    let second = rig.add_destination(FaceId(4), zid(0xCD), true);
+
+    // Four puts, each to two destinations: eight held, which is the whole pool.
+    forward_frame(&rig.fwd, SOURCE, (0..FILL / 2).map(filler).collect());
+    assert_eq!(rig.fwd.egress_held(), FILL);
+    assert_eq!(rig.fwd.egress_held_bytes(), FILL * message_cost(&filler(0)));
+    assert_eq!(
+        rig.fwd.egress_gated_faces(),
+        1,
+        "the face that filled the pool"
+    );
+    assert!(rig.fwd.read_gate(SOURCE).is_some());
+    assert!(
+        rig.fwd.read_gate(OTHER_SOURCE).is_none(),
+        "a face that has sent nothing is read"
+    );
+
+    // With the pool full, another source's message is gated as well: that face adds to what the
+    // router holds.
+    forward_frame(&rig.fwd, OTHER_SOURCE, vec![filler(99)]);
+    assert_eq!(rig.fwd.egress_gated_faces(), 2);
+
+    rig.link.set_full(false);
+    second.set_full(false);
+    assert!(
+        rig.fwd.read_gate(SOURCE).is_none(),
+        "released once the pool is given back"
+    );
+    assert!(rig.fwd.read_gate(OTHER_SOURCE).is_none());
+    assert_eq!(rig.fwd.egress_held(), 0);
+    assert_eq!(rig.fwd.egress_held_bytes(), 0);
+    assert_eq!(rig.fwd.egress_gated_faces(), 0);
 }
