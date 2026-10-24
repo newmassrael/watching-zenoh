@@ -284444,6 +284444,48 @@
         "Before a push run Layer C1bf and the reduced-features gate of the changed packages by hand, with no default features and the test feature of the protocol crate in the graph; read the hosted runs of this family's pushes per job, Layer C1bf, C1cf, E18 and Z first."
       ]
     },
+    "Round 3566": {
+      "decision_summary": "Open-debt item 924, step 5 made exact (owner: no tolerance and no model; the 4% TLS tolerance was a workaround). Every figure of the memory report is a capacity times an element: ordered maps are SortedChunks (sorted chunks of at most 64 entries, all buffers), so the B-tree model and its test are gone. The matrix and the C gate hold the growth between two sizes to the allocator, to the byte. Two unreported structures were found by the live-size histogram: ByteLog did not count its chunk list, and the session's stream buffer, grown to a decrypted flow's whole plaintext, kept that capacity (the 3% TLS residual, exactly 5 B a row); both are counted and the buffer is given back. A sweep of units of 16, 256 and 4096 B shows a lent UDP or TCP row costs the same at every size, and bounds the copies the rest hold: the TCP kept buffer holds 1.4 times its bytes and a WebSocket flow copies its payload on both doors.",
+      "changes_bullets": [
+        "wz-session-core: sorted_chunks.rs (SortedChunks) replaces ascending_map.rs and every modelled B-tree map; heap_account.rs keeps only vec_bytes and tests/btree_model.rs is removed; ByteLog::allocated counts its chunk list and shrinks it as the front leaves; PassiveSession::buffer_capacity and DirectionStream::give_back_capacity",
+        "wz-capture: the verdict column's delta and the overlay map are SortedChunks; the report counts the session buffers under plaintext; memory_matrix.rs compares growth to the allocator exactly (no tolerance field), names grown and shrunk sizes by a sixteenth of a power of two, and sweeps units of 16, 256 and 4096 B for udp, tcp and websocket",
+        "wz-capi-dissect: the drain figure counts only the per-list run vectors; handle_memory_gate.rs holds the slope between two sizes to the allocator exactly; discard_site_lint.py entries follow the maps' removal lines; docs/dissect-row-index.md: D7 and step 5 without the model or tolerance"
+      ],
+      "verification_bullets": [
+        "cargo test wz-session-core all features, wz-capture (dissect, fixtures) and the handle memory gate pass; the matrix reports allocator equal to report to 0.01 B/row in all 16 cases and its growth check is an equality, which failed on TLS (40000 B, 5 B/row) and on UDP fragment chains (256 B) until the two structures above were counted",
+        "clippy -D warnings wz-session-core all and no default features, wz-capture default, all and no default features, wz-capi-dissect; rustfmt; discard_site_lint; the hook's round_fed_gates array (112, each exit code read from the rc file, all 0)",
+        "C1bz: wz-session-core 495 (the one link this round added, in sorted_chunks.rs, is fixed); measured on the same tree and not these crates: wz-runtime-tokio 478 against a budget of 474 and wz-tls-mbedtls 1 against 0"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "TLS: the kept encrypted records duplicate bytes the TCP stream holds (up to 4096 records a direction); reading them from the stream changes a public type, another crate's opener trait and which bytes a trimmed live stream can still decrypt",
+        "The sweep found two structures that hold a unit's bytes more than once: the TCP assembler's kept bytes are one doubling buffer (1.4 times at 4 KiB units) and a WebSocket flow logs its unmasked payload on the lent door too",
+        "Hosted CI: read the first completed run holding this round and the previous one (the earlier run was pending at its push)"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 5 made exact (owner: no tolerance and no model; the 4% TLS tolerance was a workaround). Every figure of the memory report is a capacity times an element: ordered maps are SortedChunks (sorted chunks of at most 64 entries, all buffers), so the B-tree model and its test are gone. The matrix and the C gate hold the growth between two sizes to the allocator, to the byte. Two unreported structures were found by the live-size histogram: ByteLog did not count its chunk list, and the session's stream buffer, grown to a decrypted flow's whole plaintext, kept that capacity (the 3% TLS residual, exactly 5 B a row); both are counted and the buffer is given back. A sweep of units of 16, 256 and 4096 B shows a lent UDP or TCP row costs the same at every size, and bounds the copies the rest hold: the TCP kept buffer holds 1.4 times its bytes and a WebSocket flow copies its payload on both doors.",
+      "publishable_changes_bullets": [
+        "wz-session-core: sorted_chunks.rs (SortedChunks) replaces ascending_map.rs and every modelled B-tree map; heap_account.rs keeps only vec_bytes and tests/btree_model.rs is removed; ByteLog::allocated counts its chunk list and shrinks it as the front leaves; PassiveSession::buffer_capacity and DirectionStream::give_back_capacity",
+        "wz-capture: the verdict column's delta and the overlay map are SortedChunks; the report counts the session buffers under plaintext; memory_matrix.rs compares growth to the allocator exactly (no tolerance field), names grown and shrunk sizes by a sixteenth of a power of two, and sweeps units of 16, 256 and 4096 B for udp, tcp and websocket",
+        "wz-capi-dissect: the drain figure counts only the per-list run vectors; handle_memory_gate.rs holds the slope between two sizes to the allocator exactly; discard_site_lint.py entries follow the maps' removal lines; docs/dissect-row-index.md: D7 and step 5 without the model or tolerance"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test wz-session-core all features, wz-capture (dissect, fixtures) and the handle memory gate pass; the matrix reports allocator equal to report to 0.01 B/row in all 16 cases and its growth check is an equality, which failed on TLS (40000 B, 5 B/row) and on UDP fragment chains (256 B) until the two structures above were counted",
+        "clippy -D warnings wz-session-core all and no default features, wz-capture default, all and no default features, wz-capi-dissect; rustfmt; discard_site_lint; the hook's round_fed_gates array (112, each exit code read from the rc file, all 0)",
+        "C1bz: wz-session-core 495 (the one link this round added, in sorted_chunks.rs, is fixed); measured on the same tree and not these crates: wz-runtime-tokio 478 against a budget of 474 and wz-tls-mbedtls 1 against 0"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "TLS: the kept encrypted records duplicate bytes the TCP stream holds (up to 4096 records a direction); reading them from the stream changes a public type, another crate's opener trait and which bytes a trimmed live stream can still decrypt",
+        "The sweep found two structures that hold a unit's bytes more than once: the TCP assembler's kept bytes are one doubling buffer (1.4 times at 4 KiB units) and a WebSocket flow logs its unmasked payload on the lent door too",
+        "Hosted CI: read the first completed run holding this round and the previous one (the earlier run was pending at its push)"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
