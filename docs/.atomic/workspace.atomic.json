@@ -282180,6 +282180,56 @@
         "Read the hosted runs of the pushes of rounds 3500, 3503, 3506 and this one per job, Layer E18 first; it now compiles two probe programs."
       ]
     },
+    "Round 3513": {
+      "decision_summary": "The session lifecycle verbs return to the cooperative profile through the secure channel, not through the runtime. A feature should promise its own precondition, and the verbs' precondition is a channel (decision D2). The cooperative runtime cannot promise one, so it keeps offering no lifecycle feature; an all-features build of it stays coherent. wz-tls-mbedtls is the channel, always states wz-session-core's secure-channel marker, and offers session-close-ingress, so every cooperative build with the verbs has the channel. The guard gate now also builds the runtime with the verbs reached directly on the session core and no channel, which the guard refuses, and the channel crate with the verbs, which builds. The atom's reason gains a step-1b paragraph that records the guard, the channel and its revision, the tls/ kind and the proven key, and corrects its clause that both runtimes forward the feature, false from Round 3491 until this round.",
+      "changes_bullets": [
+        "crates/wz-tls-mbedtls/Cargo.toml: wz-session-core becomes a normal dependency with secure-channel on; the crate offers session-close-ingress.",
+        "crates/wz-runtime-coop/Cargo.toml: the comment states why the runtime offers no lifecycle feature and where the verbs are offered.",
+        "scripts/lib/lifecycle-channel-guard-gate.sh: two rows (coop with the verbs and no channel refused; the channel crate with the verbs built); a log name safe for a dependency's feature.",
+        "scripts/lib/nondefault-features-gate.sh: wz-tls-mbedtls in the lib-only tier with its measured cause.",
+        "docs/.atomic/workspace.atomic.json: the session-close-ingress reason gains the step-1b paragraph (set_inventory_status, status unchanged).",
+        "docs/session-lifecycle-intent.md: D9 and step 1b record it."
+      ],
+      "verification_bullets": [
+        "On the build machine: lifecycle-channel-guard-gate.sh, all five rows as stated (session core alone refused, with the marker built, tokio refused, coop with the verbs and no channel refused by the guard's own sentence, the channel crate with the verbs built); nondefault-features-gate.sh for wz-tls-mbedtls and wz-runtime-coop clean. The first form, a coop forward, was refused by that gate's all-features build, which is why the verbs moved to the channel crate; the channel crate's own all-features build met E0425 in its posix dev-dependency, measured and tiered lib-only.",
+        "Static: feature_gate_diagnostic, feature_public_surface_census --check, prose_feature_gate --check, upstream_citation_anchor_gate, store_reason_citation_gate, reason_review_pin_gate (26 wz citations, unchanged by the paragraph), depth_axis_census, shellcheck 0.11; validate-workspace orphan delta 0.",
+        "Hosted: the CI runs of Rounds 3502, 3505 and 3510 were cancelled by later pushes before any job started; Platform at 3d3a7ac68, which carries 3502, passed six of six."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "Step 1b's witness: a fixed-memory image and a router verifying each other over the channel. First a zenohd process over a tls/ link from the host's cooperative profile, then the Zephyr TCP StreamSocket and the kit image over wz-tls-mbedtls.",
+        "Read the first CI run that judges Rounds 3502 to 3513 per job, with the two submodules in mind.",
+        "No TLS 1.3 KeyUpdate in Mbed TLS 4.1; the Round 3495 items (the 18 percent gap, p256-m, persistent keys, the in-handshake pin)."
+      ],
+      "publishable_decision_summary": "The session lifecycle verbs return to the cooperative profile through the secure channel, not through the runtime. A feature should promise its own precondition, and the verbs' precondition is a channel (decision D2). The cooperative runtime cannot promise one, so it keeps offering no lifecycle feature; an all-features build of it stays coherent. wz-tls-mbedtls is the channel, always states wz-session-core's secure-channel marker, and offers session-close-ingress, so every cooperative build with the verbs has the channel. The guard gate now also builds the runtime with the verbs reached directly on the session core and no channel, which the guard refuses, and the channel crate with the verbs, which builds. The atom's reason gains a step-1b paragraph that records the guard, the channel and its revision, the tls/ kind and the proven key, and corrects its clause that both runtimes forward the feature, false from Round 3491 until this round.",
+      "publishable_changes_bullets": [
+        "crates/wz-tls-mbedtls/Cargo.toml: wz-session-core becomes a normal dependency with secure-channel on; the crate offers session-close-ingress.",
+        "crates/wz-runtime-coop/Cargo.toml: the comment states why the runtime offers no lifecycle feature and where the verbs are offered.",
+        "scripts/lib/lifecycle-channel-guard-gate.sh: two rows (coop with the verbs and no channel refused; the channel crate with the verbs built); a log name safe for a dependency's feature.",
+        "scripts/lib/nondefault-features-gate.sh: wz-tls-mbedtls in the lib-only tier with its measured cause.",
+        "docs/.atomic/workspace.atomic.json: the session-close-ingress reason gains the step-1b paragraph (set_inventory_status, status unchanged).",
+        "docs/session-lifecycle-intent.md: D9 and step 1b record it."
+      ],
+      "publishable_verification_bullets": [
+        "On the build machine: lifecycle-channel-guard-gate.sh, all five rows as stated (session core alone refused, with the marker built, tokio refused, coop with the verbs and no channel refused by the guard's own sentence, the channel crate with the verbs built); nondefault-features-gate.sh for wz-tls-mbedtls and wz-runtime-coop clean. The first form, a coop forward, was refused by that gate's all-features build, which is why the verbs moved to the channel crate; the channel crate's own all-features build met E0425 in its posix dev-dependency, measured and tiered lib-only.",
+        "Static: feature_gate_diagnostic, feature_public_surface_census --check, prose_feature_gate --check, upstream_citation_anchor_gate, store_reason_citation_gate, reason_review_pin_gate (26 wz citations, unchanged by the paragraph), depth_axis_census, shellcheck 0.11; validate-workspace orphan delta 0.",
+        "Hosted: the CI runs of Rounds 3502, 3505 and 3510 were cancelled by later pushes before any job started; Platform at 3d3a7ac68, which carries 3502, passed six of six."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 1b's witness: a fixed-memory image and a router verifying each other over the channel. First a zenohd process over a tls/ link from the host's cooperative profile, then the Zephyr TCP StreamSocket and the kit image over wz-tls-mbedtls.",
+        "Read the first CI run that judges Rounds 3502 to 3513 per job, with the two submodules in mind.",
+        "No TLS 1.3 KeyUpdate in Mbed TLS 4.1; the Round 3495 items (the 18 percent gap, p256-m, persistent keys, the in-handshake pin)."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
