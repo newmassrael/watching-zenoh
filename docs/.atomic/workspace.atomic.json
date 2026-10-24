@@ -284712,6 +284712,50 @@
         "Hosted CI for the rounds since 3504 has not been read by this session (the runs holding them were cancelled by later pushes or still pending); wz-runtime-tokio measured 476 against its doc budget of 474 on the tree after round 3570, in files no round of this debt touches"
       ]
     },
+    "Round 3573": {
+      "decision_summary": "All three artifacts (capi-pico, capi-c, ap-demo) now build for both QNX 7.1 aarch64le network stacks, and both QNX platform rows are lane build, support verified: Layer C1sp, run on the machine that holds the SDP, packages each twice in the release profile with the same manifest bytes and verifies. Four crates.io copies and a QNX arm of the pico host layer were needed; nothing ran on a board.",
+      "changes_bullets": [
+        "third-party/ring (0.17.14): target_os nto joins the systems whose SystemRandom uses the getrandom crate (/dev/urandom on QNX); without it rustls did not compile. third-party/quinn-udp (0.5.14): IP_RECVTOS is defined as 68 for QNX with io-sock, where the SDP's netinet/in.h declares it, and left out for io-pkt, whose headers have none (nto_iopkt alias in build.rs). Each has a WZ-PATCH.md, a THIRD_PARTY.md entry, a [patch.crates-io] line and a Platform workflow path; the socket2 and tokio notes now record the constants read from the headers since (TCP_KEEPIDLE, LOCAL_PEERCRED with struct xucred).",
+        "crates/wz-capi-pico/src/os/unix.rs: a QNX row for the pthread sizes measured with the SDP's compiler on both stacks (pthread_t 4, pthread_attr_t 104, mutex 8, condvar 8 bytes), checked at build time; strftime declared by hand from the SDP's time.h; random_fill reads /dev/urandom (the SDP has no getrandom) and aborts when it cannot, instead of spinning.",
+        "scripts/lib/wz_package.py: a qnx-sdp compiler is read through qcc's preprocessor macro dump, since qcc answers no --version; scripts/qnx-toolchain-env.sh names qcc as CC. deploy/wz-config.toml: both QNX rows lane build, support verified, with the limits in their help; docs/target-build-contract.md step 6 rewritten to what landed and what did not."
+      ],
+      "verification_bullets": [
+        "Layer C1sp run on the SDP machine with both QNX platforms provisioned: both OK in 307 s (release profile, each platform's three artifacts packaged twice, same manifest bytes, verified); the Android and glibc rows report not provisioned there. The manifests record the SDP release name, the GCC 8.3.0 identity and the same NEEDED set for every artifact (libsocket.so.4 or libsocket.so.3, libgcc_s.so.1, libc.so.5, libm.so.3).",
+        "Layer C1st on pc2 passes (host packaging twice plus the profile leg), so the host path is unchanged. wz_package.py --selftest, wz_config.py --check and every member of the pre-push round_fed_gates array, run one by one, exit 0 (111 members); capi_abi_pin and capability_cost_gate need a built cdylib or a build and were not run.",
+        "Not run: anything on a board; the hosted CI; the pre-push hook on the final rebased commits (the push went with --no-verify at the owner's explicit request after five refusals by the remote, each because another session moved main while the hook ran, the hook itself having passed)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "A QNX run is the next step and needs a board: whether io-sock delivers a received TOS as an IP_RECVTOS control message, whether /dev/urandom is present, and what ring's missing run-time CPU detection costs are read from headers and sources only.",
+        "The Unsupported answers (keep-alive idle time, peer credential, IPv6 group join) can become real calls on io-sock: the SDP headers declare TCP_KEEPIDLE, LOCAL_PEERCRED with struct xucred and ipv6_mreq, and what is missing is libc's declaration or a header-checked definition carried with it.",
+        "Hosted CI has no SDP, so the QNX lane reports not provisioned there and nothing can turn that into a failure; a break is seen only where the SDP is. A library the SDP provides and a board may lack still needs bundling or a named assumption.",
+        "Sending the socket2, tokio, ring, quinn-udp and libc changes upstream is an outward act and waits for the owner; each WZ-PATCH.md says when its copy is deleted."
+      ],
+      "publishable_decision_summary": "All three artifacts (capi-pico, capi-c, ap-demo) now build for both QNX 7.1 aarch64le network stacks, and both QNX platform rows are lane build, support verified: Layer C1sp, run on the machine that holds the SDP, packages each twice in the release profile with the same manifest bytes and verifies. Four crates.io copies and a QNX arm of the pico host layer were needed; nothing ran on a board.",
+      "publishable_changes_bullets": [
+        "third-party/ring (0.17.14): target_os nto joins the systems whose SystemRandom uses the getrandom crate (/dev/urandom on QNX); without it rustls did not compile. third-party/quinn-udp (0.5.14): IP_RECVTOS is defined as 68 for QNX with io-sock, where the SDP's netinet/in.h declares it, and left out for io-pkt, whose headers have none (nto_iopkt alias in build.rs). Each has a WZ-PATCH.md, a THIRD_PARTY.md entry, a [patch.crates-io] line and a Platform workflow path; the socket2 and tokio notes now record the constants read from the headers since (TCP_KEEPIDLE, LOCAL_PEERCRED with struct xucred).",
+        "crates/wz-capi-pico/src/os/unix.rs: a QNX row for the pthread sizes measured with the SDP's compiler on both stacks (pthread_t 4, pthread_attr_t 104, mutex 8, condvar 8 bytes), checked at build time; strftime declared by hand from the SDP's time.h; random_fill reads /dev/urandom (the SDP has no getrandom) and aborts when it cannot, instead of spinning.",
+        "scripts/lib/wz_package.py: a qnx-sdp compiler is read through qcc's preprocessor macro dump, since qcc answers no --version; scripts/qnx-toolchain-env.sh names qcc as CC. deploy/wz-config.toml: both QNX rows lane build, support verified, with the limits in their help; docs/target-build-contract.md step 6 rewritten to what landed and what did not."
+      ],
+      "publishable_verification_bullets": [
+        "Layer C1sp run on the SDP machine with both QNX platforms provisioned: both OK in 307 s (release profile, each platform's three artifacts packaged twice, same manifest bytes, verified); the Android and glibc rows report not provisioned there. The manifests record the SDP release name, the GCC 8.3.0 identity and the same NEEDED set for every artifact (libsocket.so.4 or libsocket.so.3, libgcc_s.so.1, libc.so.5, libm.so.3).",
+        "Layer C1st on pc2 passes (host packaging twice plus the profile leg), so the host path is unchanged. wz_package.py --selftest, wz_config.py --check and every member of the pre-push round_fed_gates array, run one by one, exit 0 (111 members); capi_abi_pin and capability_cost_gate need a built cdylib or a build and were not run.",
+        "Not run: anything on a board; the hosted CI; the pre-push hook on the final rebased commits (the push went with --no-verify at the owner's explicit request after five refusals by the remote, each because another session moved main while the hook ran, the hook itself having passed)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A QNX run is the next step and needs a board: whether io-sock delivers a received TOS as an IP_RECVTOS control message, whether /dev/urandom is present, and what ring's missing run-time CPU detection costs are read from headers and sources only.",
+        "The Unsupported answers (keep-alive idle time, peer credential, IPv6 group join) can become real calls on io-sock: the SDP headers declare TCP_KEEPIDLE, LOCAL_PEERCRED with struct xucred and ipv6_mreq, and what is missing is libc's declaration or a header-checked definition carried with it.",
+        "Hosted CI has no SDP, so the QNX lane reports not provisioned there and nothing can turn that into a failure; a break is seen only where the SDP is. A library the SDP provides and a board may lack still needs bundling or a named assumption.",
+        "Sending the socket2, tokio, ring, quinn-udp and libc changes upstream is an outward act and waits for the owner; each WZ-PATCH.md says when its copy is deleted."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
