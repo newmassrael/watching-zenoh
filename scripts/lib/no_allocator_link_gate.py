@@ -534,6 +534,9 @@ IMAGES: dict[str, Image] = {
         (
             Build(HOST, label="linux-x86_64"),
             Build(HOST, None, ("get", "batching"), label="linux-x86_64-get-batching"),
+            # The secure channel (decision D9): Mbed TLS links in, and every allocation it
+            # makes is from its static arena, so the image still names no Rust allocator.
+            Build(HOST, None, ("tls",), label="linux-x86_64-tls"),
         ),
     ),
     # The wz half of the zenoh-pico comparison image: the CYT4BF MAC behind Zephyr's Ethernet

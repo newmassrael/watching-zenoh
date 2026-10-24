@@ -101,6 +101,12 @@ UNRESOLVED_DECLARED: dict[tuple[str, str], str] = {
         "workspace's metadata cannot adjudicate its features; its `get` feature is the one that "
         "node's own `--get` needs"
     ),
+    ("scripts/run-ci.sh", "tls"): (
+        "Layer Z builds `deploy/host-slot-node` with `tls` for the fixed-memory secure-channel "
+        "witness; that image is a standalone workspace of its own (`[workspace]` in its "
+        "manifest) outside `crates/`, the shape of the kit-lane row above, so this workspace's "
+        "metadata cannot adjudicate its features"
+    ),
     ("scripts/lib/guarded_count_gate.py", "zenoh-config"): (
         "a FIXTURE string naming an invented package (`demo-crate`), which is "
         "that gate's own test input rather than a command anyone runs"

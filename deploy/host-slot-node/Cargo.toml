@@ -39,6 +39,12 @@ batching = ["wz-runtime-coop/transport-batching", "wz-session-core/transport-bat
 # The node can ASK: `--get KEY --count N` issues N queries one after another and reports the round
 # trips (`src/getter.rs`). Off, the node only answers, as the kit's client does.
 get = ["wz-session-mcu/query-get"]
+# The node can dial `tls/`: the fixed-memory profile's secure channel (decision D9 of
+# docs/session-lifecycle-intent.md), TLS 1.3 with mutual authentication over the pinned Mbed TLS,
+# its memory one static arena. The node generates its identity at start, prints its certificate
+# (PEM) for the router's operator to pin, and takes the zid its key names. Off, the stack refuses
+# `tls/` as unsupported.
+tls = ["dep:wz-tls-mbedtls"]
 
 [dependencies]
 # The implementation of the `critical_section` the image glue names (`posix_image_no_heap!`). It
@@ -67,6 +73,11 @@ wz-runtime-coop = { path = "../../crates/wz-runtime-coop", default-features = fa
 # The host's seams: clock, entropy, date, UDP socket, image glue. Defaults off, so no heap form of
 # the cooperative runtime is named.
 wz-runtime-posix = { path = "../../crates/wz-runtime-posix", default-features = false, features = ["session-slot"] }
+# The secure channel, on the slot profile, built from the pinned source (`tls`).
+wz-tls-mbedtls = { path = "../../crates/wz-tls-mbedtls", default-features = false, features = [
+    "session-slot",
+    "vendored",
+], optional = true }
 # The types the facade does not re-export (SessionInitParams, SigningKey, SessionTimeouts, the
 # entropy trait).
 wz-session-core = { path = "../../crates/wz-session-core", default-features = false, features = [

@@ -32,12 +32,14 @@
 //! date, the socket and the entry point (`wz-runtime-posix`).
 //!
 //! ```text
-//! host-slot-node <router [udp/|tcp/]a.b.c.d:port> [--local a.b.c.d] [--doc KEY:BYTES]...
+//! host-slot-node <router [udp/|tcp/|tls/]a.b.c.d:port> [--local a.b.c.d] [--doc KEY:BYTES]...
 //! ```
 //!
 //! It dials the router (over UDP when the address names no scheme), declares a queryable under
 //! each `--doc` key (at most two), and answers every query with a document of BYTES bytes under the
-//! key the query asked.
+//! key the query asked. Built with `tls`, it can dial `tls/` (the secure channel, `tls.rs`), and
+//! the line it prints when a session is established says whether the router's zid is the one the
+//! key it proved names.
 #![no_std]
 #![no_main]
 
@@ -47,7 +49,9 @@ use core::fmt::{self, Write};
 
 use wz_runtime_coop::session_drive::{IpEndpoint, Locator};
 use wz_runtime_posix::glue::{log, log_args, yield_us};
+#[cfg(not(feature = "tls"))]
 use wz_runtime_posix::slot::PosixStack;
+#[cfg(not(feature = "tls"))]
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps::MAX_QUERYABLES;
@@ -65,6 +69,8 @@ wz_runtime_posix::posix_image_no_heap!();
 
 #[cfg(feature = "get")]
 mod getter;
+#[cfg(feature = "tls")]
+mod tls;
 
 /// Sessions the node holds at most: the one it dials.
 const SESSIONS: usize = 1;
@@ -112,7 +118,10 @@ const DOCS: usize = 2;
 const ZID_LEN: usize = 16;
 
 type Clock = PosixClock;
+#[cfg(not(feature = "tls"))]
 type Stack = PosixStack;
+#[cfg(feature = "tls")]
+type Stack = tls::Stack;
 
 /// The node's big tables, in one `static` whose initial value is ALL ZERO BYTES, so the linker
 /// places it in `.bss` and not in `.data` (`wz_session_mcu::slot_node`, shared with the kit).
@@ -223,10 +232,11 @@ fn parse_router(text: &str) -> Option<Locator> {
 
 fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static str> {
     #[cfg(not(feature = "get"))]
-    const USAGE: &str = "usage: host-slot-node <router [udp/|tcp/]a.b.c.d:port> \
+    const USAGE: &str = "usage: host-slot-node <router [udp/|tcp/|tls/]a.b.c.d:port> \
                          [--local a.b.c.d] [--doc KEY:BYTES]...";
     #[cfg(feature = "get")]
-    const USAGE: &str = "usage: host-slot-node <router [udp/|tcp/]a.b.c.d:port> [--local a.b.c.d] \
+    const USAGE: &str =
+        "usage: host-slot-node <router [udp/|tcp/|tls/]a.b.c.d:port> [--local a.b.c.d] \
                          [--doc KEY:BYTES]... [--get KEY --count N [--warmup N] [--timeout-ms MS] \
                          [--inflight K] [--mailbox]]";
     let mut router = None;
@@ -347,6 +357,20 @@ fn run(args: Args) -> i32 {
         log("wz: FAIL - getrandom could not fill the signing key");
         return 2;
     }
+    // Over the secure channel the node's zid is the one its key names (decision D1), and its
+    // certificate is printed for the router's operator to pin.
+    #[cfg(feature = "tls")]
+    let channel_identity = match tls::identity() {
+        Ok(identity) => {
+            tls::print_certificate(identity, log_args);
+            zid = identity.zid();
+            identity
+        }
+        Err(why) => {
+            log(why);
+            return 2;
+        }
+    };
 
     let mut endpoint = EndpointText::new();
     if write!(endpoint, "{}", args.router).is_err() {
@@ -375,7 +399,11 @@ fn run(args: Args) -> i32 {
         storage: &NODE,
         declared: &DECLARED,
         clock: Clock::default(),
+        #[cfg(not(feature = "tls"))]
         stack: Stack::new(args.local, &NODE.rx, &NODE.tx, PosixTcpDial)
+            .with_idle_wait_ms(IDLE_WAIT_MS),
+        #[cfg(feature = "tls")]
+        stack: tls::stack(args.local, &NODE.rx, &NODE.tx, channel_identity)
             .with_idle_wait_ms(IDLE_WAIT_MS),
         identity,
         batch_size: BATCH_SIZE,
