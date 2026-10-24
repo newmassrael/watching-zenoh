@@ -3479,6 +3479,21 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: CENSUS_R6_PLANES,
         carries: CENSUS_R20_CARRIES,
     },
+    // A document of its own because it answers a question no other document's
+    // subject is: what the handle holds in memory, by structure (open-debt item
+    // 924, D7). The retention document counts what a handle still HOLDS of the
+    // capture and the ceilings that bound it; this one counts the bytes that
+    // costs. Every value is a number of bytes allocated, in groups named for the
+    // structure that holds them. No value family, no plane and no carried word.
+    DocumentShape {
+        document: MEMORY,
+        revision: 1,
+        keys: MEMORY_R1_KEYS,
+        retiring: &[],
+        families: &[],
+        planes: &[],
+        carries: &[],
+    },
 ];
 
 // The key sets below are MEASURED, never transcribed: each was printed by the
@@ -3555,6 +3570,42 @@ pub const RETENTION: &str = "retention";
 /// What a live handle has lost or doubted, and how many flows that is over
 /// (`wz_dissect_live_health`).
 pub const HEALTH: &str = "health";
+/// What a live handle holds in memory that follows its row count, by structure
+/// (`wz_dissect_live_memory`).
+pub const MEMORY: &str = "memory";
+
+/// The memory document's key set at revision 1: the envelope, the byte figures,
+/// and the groups that name the structure each is held in (`lists`, `streams`,
+/// `census`, `fields`), whose inner keys are listed once here because a flat key
+/// set cannot tell `payload_rows` under `census` from the one under `fields`.
+pub const MEMORY_R1_KEYS: &[&str] = &[
+    "census",
+    "document",
+    "drain",
+    "exchange_rows",
+    "fields",
+    "kept",
+    "lists",
+    "name",
+    "packets",
+    "payload_rows",
+    "pending",
+    "plaintext",
+    "revision",
+    "row_digests",
+    "rows",
+    "runs",
+    "scope",
+    "scouting",
+    "small",
+    "sparse",
+    "streams",
+    "total",
+    "unit",
+    "unit_log",
+    "whole_rows",
+    "wire_ends",
+];
 
 /// The census document's key set at revision 1.
 ///
@@ -18230,6 +18281,8 @@ mod tests {
             // To 5 on the summary's move to 8: `skips` gained
             // `link_type_interfaces`.
             (HEALTH, 5),
+            // What a live handle holds in memory, by structure.
+            (MEMORY, 1),
         ] {
             named.push(name);
             assert_eq!(revision(name), Some(expected), "{name}");

@@ -1571,7 +1571,7 @@ extern "C" {
  * calls the function, and refuses when the two disagree.
  *
  * @unknown ABI not-an-enumeration */
-#define WZ_DISSECT_ABI_REVISION 50
+#define WZ_DISSECT_ABI_REVISION 51
 
 /* Symbol/memory-contract revision. Not a JSON-shape revision. This is the
  * revision the LOADED library reports; the block above says why it exists
@@ -6469,6 +6469,45 @@ int wz_dissect_live_set_selector_memories(wz_dissect_live *h, size_t n,
  * Null `h` or `out` is WZ_DISSECT_ERR_INVALID_ARG and no string. The string is
  * released by wz_dissect_string_free. */
 int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
+
+/* WHAT A LIVE HANDLE HOLDS IN MEMORY, by structure (ABI 51).
+ *
+ * A program that opens captures budgets by this, and the library's own memory
+ * gate compares it with what the allocator counted. wz_dissect_live_retention
+ * says which messages a handle still holds; this says what holding them costs.
+ *
+ * Writes {"document":{"name":"memory","revision":R},"unit":"bytes",
+ * "scope":"rows","total":T,"lists":{"rows":..,"unit_log":..,"whole_rows":..,
+ * "sparse":..,"wire_ends":..,"small":..},"streams":{"kept":..,"runs":..,
+ * "pending":..},"plaintext":P,"scouting":S,"packets":K,"census":{"payload_rows":
+ * ..,"exchange_rows":..,"row_digests":..},"fields":{"payload_rows":..,
+ * "exchange_rows":..,"row_digests":..},"drain":D} to *out.
+ *
+ *   - Every value is a number of bytes ALLOCATED, which is what the process
+ *     holds and not what is in use.
+ *   - "scope":"rows": only the structures whose size follows the row count are
+ *     counted (a list's entries and the bytes it keeps, the TCP run maps, what
+ *     the census and the field walk keep for the next call). What is fixed, or
+ *     follows the count of distinct things, is not, so the figure is the
+ *     row-following part of the heap and not all of it. A buffer is counted
+ *     exactly and a B-tree map by a model within 3% of the allocator. "total" is
+ *     the sum of the rest.
+ *   - lists.rows is 48 bytes per message when a list is kept as index entries,
+ *     which every list the library reads again from its bytes is; a list that
+ *     keeps its messages whole is counted by the slot each sits in.
+ *   - fields.row_digests is the field walk's memory of the rows it has written,
+ *     by which a later call tells a row it must write again from one that has
+ *     not changed. It grows with the rows a consumer has paged through, which is
+ *     why a consumer that pages a whole capture holds more than one that read the
+ *     first window.
+ *   - A new structure is a new key and not a new symbol: read it by name and
+ *     tolerate keys you do not know, as every document here asks.
+ *
+ * A READ, and `h` is const to say so: no record is handed out, no id is settled
+ * and the census's and the field walk's memories are left as they were. Null `h`
+ * or `out` is WZ_DISSECT_ERR_INVALID_ARG and no string. The string is released
+ * by wz_dissect_string_free. */
+int wz_dissect_live_memory(const wz_dissect_live *h, char **out);
 
 /* ── (ABI 24) — WHAT AN OPEN HANDLE HAS LOST OR DOUBTED ──────────────────
  *

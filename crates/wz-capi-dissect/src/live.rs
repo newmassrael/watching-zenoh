@@ -338,6 +338,27 @@ fn seq_in_runs(runs: &[SeqRun], produced: u64) -> Option<u64> {
     runs.get(after.checked_sub(1)?)?.seq_of(produced)
 }
 
+/// What a [`LiveDissection`] holds on the heap that follows its row count, by
+/// structure (open-debt item 924, D7). See [`LiveDissection::memory`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LiveMemory {
+    /// The capture's lists, run maps and logged bytes.
+    pub dissection: wz_capture::DissectionMemory,
+    /// What the census keeps between calls.
+    pub census: wz_capture::FoldMemory,
+    /// What the field walk keeps between calls.
+    pub fields: wz_capture::FoldMemory,
+    /// The drain's marks and the runs that map a message to its number.
+    pub drain: usize,
+}
+
+impl LiveMemory {
+    /// Every structure's bytes together.
+    pub fn total(&self) -> usize {
+        self.dissection.total() + self.census.total() + self.fields.total() + self.drain
+    }
+}
+
 /// What [`LiveDissection::reassembled_bytes`] answers.
 ///
 /// Three answers and not [`wz_capture::MessageBytes`]'s three, because the
@@ -611,6 +632,35 @@ impl LiveDissection {
     /// from "this reader could not keep up".
     pub fn lost(&self) -> u64 {
         self.lost
+    }
+
+    /// What this handle holds on the heap that follows its row count, by
+    /// structure (open-debt item 924, D7): the dissection's lists and run maps,
+    /// what the census and the field walk keep for the next call, and the
+    /// drain's bookkeeping.
+    ///
+    /// A lower bound on the process's heap for this handle, and a figure in
+    /// bytes allocated. A program that opens captures budgets by it; the memory
+    /// gate compares it with what the allocator counted.
+    pub fn memory(&self) -> LiveMemory {
+        let census = self
+            .census_memory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .memory();
+        LiveMemory {
+            dissection: self.dissection.memory(),
+            census,
+            fields: self.fields_memory.memory(),
+            drain: wz_session_core::heap_account::btree_bytes::<(FlowKey, MessageListOrigin), Mark>(
+                self.marks.len(),
+            ) + self
+                .marks
+                .values()
+                .chain(self.scouting_marks.values())
+                .map(|mark| mark.runs.capacity() * std::mem::size_of::<SeqRun>())
+                .sum::<usize>(),
+        }
     }
 
     /// Fill `out` with the messages decoded since the last drain, and return
@@ -997,6 +1047,63 @@ impl LiveDissection {
     /// made.
     pub fn retention(&self) -> String {
         wz_capture::retention_json::retention_json(&self.dissection)
+    }
+
+    /// WHAT THIS HANDLE HOLDS IN MEMORY, by structure: [`Self::memory`] as the
+    /// `memory` document.
+    ///
+    /// # `&self`, for the reason [`Self::retention`] is
+    ///
+    /// The structures are counted in place, so asking changes nothing the next
+    /// drain returns.
+    ///
+    /// # A document and not a struct
+    ///
+    /// The structures a handle holds are the ones this library has today, and a
+    /// new one (a list kind, a fold's plane) is a new key, which a reader by name
+    /// does not see. A fixed record would have moved the ABI for each. Every value
+    /// is a number of bytes allocated, `scope` says only the structures that
+    /// follow the row count are counted (so the figure is the row-following part
+    /// of the heap, not all of it), and `total` is the sum so a reader does not
+    /// add what a later revision may group differently.
+    pub fn memory_json(&self) -> String {
+        use std::fmt::Write as _;
+        let m = self.memory();
+        let l = &m.dissection.lists;
+        let mut s = String::from("{");
+        wz_capture::doc_revision::envelope_into(wz_capture::doc_revision::MEMORY, &mut s);
+        let _ = write!(
+            s,
+            ",\"unit\":\"bytes\",\"scope\":\"rows\",\"total\":{},\
+             \"lists\":{{\"rows\":{},\"unit_log\":{},\"whole_rows\":{},\"sparse\":{},\
+             \"wire_ends\":{},\"small\":{}}},\
+             \"streams\":{{\"kept\":{},\"runs\":{},\"pending\":{}}},\
+             \"plaintext\":{},\"scouting\":{},\"packets\":{},\
+             \"census\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
+             \"fields\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
+             \"drain\":{}}}",
+            m.total(),
+            l.rows,
+            l.unit_log,
+            l.whole_rows,
+            l.sparse,
+            l.wire_ends,
+            l.small,
+            m.dissection.stream_kept,
+            m.dissection.stream_runs,
+            m.dissection.stream_pending,
+            m.dissection.plaintext,
+            m.dissection.scouting,
+            m.dissection.packets,
+            m.census.payload_rows,
+            m.census.exchange_rows,
+            m.census.row_digests,
+            m.fields.payload_rows,
+            m.fields.exchange_rows,
+            m.fields.row_digests,
+            m.drain,
+        );
+        s
     }
 
     /// THE SESSIONS THIS HANDLE HAS SEEN, one row per zid pair.

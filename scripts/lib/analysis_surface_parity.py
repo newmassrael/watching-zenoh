@@ -828,6 +828,17 @@ ONLY_CAPI = {
         "here.",
         (),
     ),
+    # (ABI 51, open-debt item 924, D7) -- filed in the round that added the symbol.
+    "what an OPEN handle holds in memory, by structure": (
+        "wz_dissect_live_memory",
+        "DELIBERATE. It reports the cost of a handle that stays open beside the "
+        "program that holds it, so that program can budget by it; the command "
+        "line reads a file once and exits, holding no handle between calls, so "
+        "there is no standing figure for it to report and no flag to add. The "
+        "library's own memory gate reads the same document, which is the check "
+        "that the figure is the heap and not a belief.",
+        (),
+    ),
     # R2373 (open-debt item 661) — the door that CONTINUES a handle as a writer
     # appends, which is the half the replay row above leaves open. Filed in the
     # round that added the symbol, which is where this table's own header says

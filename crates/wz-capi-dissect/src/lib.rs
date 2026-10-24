@@ -444,6 +444,8 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
     // the replay and follow doors over a container the caller lends the handle,
     // which keeps no copy of the TCP payloads in it and reads them there again.
     // The memory rule moves with them: the handle retains the caller's pointer.
+    // 51, for `wz_dissect_live_memory`: what a handle holds in memory, by
+    // structure, as the `memory` document. One symbol, a read of a handle.
     WZ_DISSECT_ABI_REVISION
 }
 
@@ -461,7 +463,7 @@ pub extern "C" fn wz_dissect_abi_version() -> c_int {
 /// It lives AFTER the function rather than above it on purpose: an item placed
 /// between a doc comment and the item it documents takes that doc, which is
 /// the doc-ownership defect the C1bz budget records.
-pub const WZ_DISSECT_ABI_REVISION: c_int = 50;
+pub const WZ_DISSECT_ABI_REVISION: c_int = 51;
 
 /// R2108 (open-debt item 525) — THE RECORD'S LAYOUT, reported by the artifact.
 ///
@@ -5305,6 +5307,57 @@ pub unsafe extern "C" fn wz_dissect_live_retention(
     write_string(unsafe { (*handle).retention() }, out)
 }
 
+/// WHAT A LIVE HANDLE HOLDS IN MEMORY, by structure (ABI 51, open-debt item 924,
+/// D7).
+///
+/// A program that opens captures budgets by this, and the library's own memory
+/// gate compares it with what the allocator counted. The retention document says
+/// which messages a handle still holds; this says what holding them costs.
+///
+/// # The document
+///
+/// `{"document":{"name":"memory","revision":R},"unit":"bytes","scope":"rows",
+///   "total":T,"lists":{...},"streams":{...},"plaintext":P,"scouting":S,
+///   "packets":K,"census":{...},"fields":{...},"drain":D}`
+///
+/// Every value is a number of bytes ALLOCATED, which is what the process holds
+/// and not what is in use. `scope` is `rows`: only the structures whose size
+/// follows the row count are counted (the entries of a message list, the bytes it
+/// keeps, the run maps, what the census and the field walk keep for the next
+/// call). What is fixed, or follows the count of distinct things, is not, so the
+/// figure is the row-following part of the heap and not all of it; the library's
+/// gate holds the rest to a small bound. A buffer is counted exactly, and a
+/// B-tree map by a model that agrees with the allocator within 3%. `total` is the
+/// sum of the rest.
+///
+/// A new structure is a new key, not a new symbol: a reader by name does not see
+/// it, which is why this is a document and not a fixed record.
+///
+/// # A READ, and the handle is `const` to say so
+///
+/// Nothing is handed out, no id is settled, and the census's and the field
+/// walk's memories are left as they were, so the next call to any door returns
+/// what it would have.
+///
+/// Returns [`WZ_DISSECT_ERR_INVALID_ARG`] and no string for a null `handle` or
+/// `out`. The string is released by [`wz_dissect_string_free`].
+///
+/// # Safety
+/// `handle` must be a handle from [`wz_dissect_live_open`] or
+/// [`wz_dissect_pcap_replay`] that has not been closed, and `out` a writable
+/// pointer to a `*mut c_char`. Neither may be null.
+#[no_mangle]
+pub unsafe extern "C" fn wz_dissect_live_memory(
+    handle: *const live::LiveDissection,
+    out: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() || out.is_null() {
+        return WZ_DISSECT_ERR_INVALID_ARG;
+    }
+    // SAFETY: caller contract above.
+    write_string(unsafe { (*handle).memory_json() }, out)
+}
+
 /// WHAT A LIVE HANDLE HAS LOST OR DOUBTED, read where it already sits.
 ///
 /// The summary's `health` object (`wz_dissect_pcap_summary`) needs the whole
@@ -9252,7 +9305,9 @@ mod tests {
         // of the 46 door by number; nothing copied or retained.
         // 50, for `wz_dissect_pcap_replay_lent` and `wz_dissect_live_follow_lent`:
         // two symbols, and the handle retains the caller's container pointer.
-        assert_eq!(wz_dissect_abi_version(), 50);
+        // 51, for `wz_dissect_live_memory`: one symbol, a read of a handle that
+        // returns the `memory` document.
+        assert_eq!(wz_dissect_abi_version(), 51);
     }
 
     /// R311y913 (unregistered item 435) — THE LINKED SURFACE CAN SAY WHAT IT
@@ -10044,6 +10099,9 @@ mod tests {
             (rev::SELECTION_SINCE, selection_since_documents()),
             (rev::RETENTION, retention_documents()),
             (rev::HEALTH, health_documents()),
+            // Read empty, replayed, and after the census and the field walk
+            // kept their memories; one key set, three sets of values.
+            (rev::MEMORY, memory_documents()),
         ];
 
         let mut failures: Vec<String> = Vec::new();
@@ -10293,6 +10351,12 @@ mod tests {
                 rev::HEALTH,
                 health_documents().into_iter().next().expect("a document"),
             ),
+            // Declares no plane either: every key is a number of bytes or a
+            // group of them.
+            (
+                rev::MEMORY,
+                memory_documents().into_iter().next().expect("a document"),
+            ),
             (rev::CENSUS, call_census(&stream).expect("the census door")),
             (
                 rev::FIELDS,
@@ -10458,6 +10522,8 @@ mod tests {
             // A stream flow and datagram flows in one handle, and a lone
             // datagram in the other.
             (rev::HEALTH, health_documents()),
+            // Empty, replayed and read: no top-level `null` in any.
+            (rev::MEMORY, memory_documents()),
             (
                 rev::CENSUS,
                 vec![call_census(&stream).expect("the census door")],
@@ -14388,6 +14454,106 @@ mod tests {
         let clockless = live_retention(fed).expect("a fed handle");
         unsafe { wz_dissect_live_close(fed) };
         vec![clocked, clockless]
+    }
+
+    /// `wz_dissect_live_memory`, the way C calls it, with the refusal code when it
+    /// refuses.
+    fn live_memory(handle: *const live::LiveDissection) -> Result<String, c_int> {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe { wz_dissect_live_memory(handle, &mut out) };
+        if rc != WZ_DISSECT_OK {
+            assert!(out.is_null(), "an error must hand back no string");
+            return Err(rc);
+        }
+        assert!(!out.is_null(), "OK must come with a string");
+        let doc = unsafe { std::ffi::CStr::from_ptr(out) }
+            .to_str()
+            .expect("utf8")
+            .to_string();
+        unsafe { wz_dissect_string_free(out) };
+        Ok(doc)
+    }
+
+    /// The `memory` document in the states it can be read in: a handle that has
+    /// read nothing, one replayed from a capture, and that one after the census
+    /// and the field walk have each kept what they keep for the next call. The
+    /// key set does not differ between them, and the values do, which is what the
+    /// top-level checks that read the document's shape need to see.
+    fn memory_documents() -> Vec<String> {
+        let empty = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        let nothing = live_memory(empty).expect("an empty handle");
+        unsafe { wz_dissect_live_close(empty) };
+
+        let capture = verdict_capture();
+        let replayed = replay(&capture, WZ_DISSECT_LIMITS_NONE).expect("the replay opens");
+        let read = live_memory(replayed).expect("a replayed handle");
+        let census = unsafe {
+            let mut out: *mut c_char = core::ptr::null_mut();
+            let rc = wz_dissect_live_census(replayed, c"".as_ptr(), &mut out);
+            assert_eq!(rc, WZ_DISSECT_OK, "the census of a replayed handle");
+            wz_dissect_string_free(out);
+            let rc = wz_dissect_live_fields_since_window(
+                replayed,
+                core::ptr::null(),
+                0,
+                c"".as_ptr(),
+                0,
+                0,
+                &mut out,
+            );
+            assert_eq!(rc, WZ_DISSECT_OK, "the fields of a replayed handle");
+            wz_dissect_string_free(out);
+            live_memory(replayed).expect("a handle that has been read")
+        };
+        unsafe { wz_dissect_live_close(replayed) };
+        vec![nothing, read, census]
+    }
+
+    /// (ABI 51, open-debt item 924, D7) A HANDLE SAYS WHAT IT HOLDS, and what it
+    /// says grows when the handle has read more.
+    ///
+    /// An empty handle holds no row; a replayed one holds the rows it read, as
+    /// entries; and after the census and the field walk have kept their memories
+    /// it holds more again. The sum is `total`, which a reader does not have to
+    /// add. A null handle and a null out are refused with no string.
+    #[test]
+    fn a_handle_reports_what_it_holds_in_memory() {
+        let [nothing, read, kept]: [String; 3] =
+            memory_documents().try_into().expect("three documents");
+        let number = |doc: &str, key: &str| -> usize {
+            let at = doc.find(key).unwrap_or_else(|| panic!("no {key} in {doc}")) + key.len();
+            doc[at..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or_else(|_| panic!("{key} is not a number in {doc}"))
+        };
+        assert_eq!(number(&nothing, "\"lists\":{\"rows\":"), 0, "{nothing}");
+        assert!(
+            number(&read, "\"lists\":{\"rows\":") > 0,
+            "a replayed capture's rows are entries a handle holds: {read}"
+        );
+        assert!(
+            number(&kept, "\"total\":") >= number(&read, "\"total\":"),
+            "reading cannot make a handle hold less: {read} then {kept}"
+        );
+        for doc in [&nothing, &read, &kept] {
+            assert!(
+                doc.contains("\"unit\":\"bytes\",\"scope\":\"rows\",\"total\":"),
+                "{doc}"
+            );
+        }
+        assert_eq!(
+            live_memory(core::ptr::null()),
+            Err(WZ_DISSECT_ERR_INVALID_ARG)
+        );
+        let handle = open_live(WZ_DISSECT_LIMITS_NONE).expect("the preset opens");
+        assert_eq!(
+            unsafe { wz_dissect_live_memory(handle, core::ptr::null_mut()) },
+            WZ_DISSECT_ERR_INVALID_ARG
+        );
+        unsafe { wz_dissect_live_close(handle) };
     }
 
     /// (ABI 43) THE BOUNDED OPEN SETS BOTH CEILINGS, REPORTS THEM, AND THEY BITE.

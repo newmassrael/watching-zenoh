@@ -50,7 +50,7 @@ import subprocess
 import sys
 
 # The pinned pair. Edit BOTH halves deliberately -- see the module doc.
-EXPECTED_VERSION = 50
+EXPECTED_VERSION = 51
 
 # R2108 (open-debt item 525) -- THE RECORD'S LAYOUT, pinned HERE and read from
 # the artifact through `wz_dissect_record_layout`.
@@ -437,6 +437,10 @@ EXPECTED_SYMBOLS = {
     # handle keeps no copy of the TCP payloads that sit in it.
     "wz_dissect_pcap_replay_lent",
     "wz_dissect_live_follow_lent",
+    # (ABI 51, open-debt item 924, D7) -- what a live handle holds in memory, by
+    # structure, as the `memory` document. One symbol, a read of a handle (const),
+    # a string released by `wz_dissect_string_free`. No memory rule moves.
+    "wz_dissect_live_memory",
     # (ABI 43) -- a live handle whose two ceilings on decoded messages the caller
     # sets: how many one flow keeps, and how many the handle keeps in all. One
     # symbol: two integers in and the handle through a pointer the CALLER owns,

@@ -3660,7 +3660,7 @@ int main(void) {
         const char *name;
         unsigned revision;
         char *doc;
-    } revisioned[20];
+    } revisioned[21];
     revisioned[0].name = "census";
     /* R2119 (open-debt item 455) -- 2: the census announced `first_packet`'s
      * retirement beside its successor `first_anchor`.
@@ -4229,6 +4229,36 @@ int main(void) {
                          "{\"start\":23,\"end\":31,\"kind\":\"word\",\"role\":\"value\"}") != NULL,
               "the list's tokens carry the parser's roles: %s", taken ? taken : "(null)");
         wz_dissect_string_free(taken);
+    }
+
+    /* (ABI 51) -- WHAT A HANDLE HOLDS IN MEMORY, from an empty handle for the
+     * reason the retention document is: an empty handle still answers, and the
+     * opening is what this consumer pins. 1: the first revision a consumer could
+     * read. The document says what it counts (`scope`), in what unit, and the
+     * sum, so a program that budgets by it reads three words before any group. */
+    revisioned[20].name = "memory";
+    revisioned[20].revision = 1;
+    revisioned[20].doc = NULL;
+    {
+        wz_dissect_live *kept = NULL;
+        char *refused = NULL;
+        rc = wz_dissect_live_open(WZ_DISSECT_LIMITS_NONE, &kept);
+        CHECK(rc == WZ_DISSECT_OK, "memory handle rc=%d", rc);
+        rc = wz_dissect_live_memory(kept, &revisioned[20].doc);
+        CHECK(rc == WZ_DISSECT_OK && revisioned[20].doc != NULL,
+              "memory rc=%d", rc);
+        CHECK(strstr(revisioned[20].doc, "\"unit\":\"bytes\",\"scope\":\"rows\","
+                                         "\"total\":") != NULL,
+              "the memory document says what it counts and in what unit: %s",
+              revisioned[20].doc);
+        CHECK(strstr(revisioned[20].doc, "\"lists\":{\"rows\":0,") != NULL,
+              "an empty handle holds no row: %s", revisioned[20].doc);
+        rc = wz_dissect_live_memory(NULL, &refused);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG && refused == NULL,
+              "null handle memory rc=%d", rc);
+        rc = wz_dissect_live_memory(kept, NULL);
+        CHECK(rc == WZ_DISSECT_ERR_INVALID_ARG, "null out memory rc=%d", rc);
+        wz_dissect_live_close(kept);
     }
 
     /* R2182 -- THE ENVELOPE MAY CARRY MORE AFTER THE REVISION, and this loop
