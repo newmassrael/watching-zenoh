@@ -290,6 +290,16 @@ router 12 of 320 before and 320 of 320 after; the cost table 13.2 us a message b
 the starved router forwards 25 to 35% of what is offered, and there is no figure for it before
 because those runs collapsed.
 
+**What the yield costs a request-reply (bounded 2026-10-24, not a before-and-after).** The earlier plan was to
+read it as the difference of two builds' round trips (86 to 92 us in the harness), and the harness's own spread
+(82 to 104 us) is wider than any effect the yield could have, so that comparison could not have answered. The
+bound comes from the other side: one `tokio::task::yield_now` with nothing else runnable costs 58 ns on a current-thread
+runtime and 357 ns (341 to 404) on a four-worker multi-thread runtime, medians of nine runs of 200000 on the
+developer machine with its cores idle (a release build of a ten-line program, since removed; not the build host). The loop yields once per `TURN_UNIT_BUDGET` = 8 units and a reply is one or two units, so the
+yield adds at most `357 ns x 2 / 8` = 0.09 us to a request, a thousandth of the round trip and a hundredth of the
+spread. Not measured: the same cost with the runtime's workers busy, where a yield costs the wait for a worker and
+not the call, which is the case 7.4 is about and is not a latency of the unloaded client.
+
 **Not built, and why it is still wanted.** The quantum bounds the return in proportion to the number
 of faces and inversely to the CPU share, and nothing yet states the share and the number of faces
 below which the bound is promised. What remained of 4.3 when this was written (the keepalive half of the
@@ -342,8 +352,10 @@ the router does at the number. Built: the bound (`wz-session-core`, `capacity`),
 (`WzConfig::with_capacity_contract`, the demo's `--cpu-share` and `--max-data-wait`), the refusal at the
 bound (the existing `max_sessions` refusal, now fed the smaller number) and the test of the promise.
 Also built: the keepalive timer lateness meter and its assertion, the router's own measurement of what a
-keepalive costs on its host and the bound calibrated with it, and the separate refusal counter. Not built:
-the admin-space export of the lateness and of the cost, the drop policy.
+keepalive costs on its host and the bound calibrated with it, the separate refusal counter, and two tests that
+re-derive this section's numbers from the model. The drop policy is upstream's and was already built (read
+below). Not built: the admin-space export of the lateness and of the cost, which waits on the owner's decision
+about a wz key in upstream's admin space.
 
 **The promise.** While the process receives at least the CPU share `s` that its operator declared, each
 session of up to `N_max(s)` keeps its lease. It is conditional on `s` on purpose: a router cannot promise
@@ -446,8 +458,11 @@ recorded as `RECORDED_HOST_MODEL` in `wz-session-core`'s `capacity` module (inte
 computes the same number from the same inputs): `c_k` 10 us, `c_u` 11 us, `b` 4, with no further margin,
 because the room a margin is for is already measured (1100 against 1536 with no loss and 2048 with loss).
 A unit test holds that room: the bound at 32 hogs must stay under 1536 and above two thirds of it. They
-are the costs of this host and this runtime, which a hosted run showed (next paragraph), and a lane that
-re-derives the table above and fails when it drifts is not built.
+are the costs of this host and this runtime, which a hosted run showed (next paragraph). Two tests in
+`capacity::tests` read this document and fail when it drifts from the code: one that the costs and the
+headroom stated here are the constants of the model, and one that every row of the table above is what the
+model gives (the share from the scheduler's weights, the return time from `c_u`, and within a tenth of the
+observed range); both were run against a changed figure and went red.
 
 **The first hosted run of the promise failed, and what it showed.** On the hosted runner (CI run of
 `2ea53d076`, E7s job) the test of the promise ended 308 admitted client sessions: the router's cost per
@@ -510,10 +525,21 @@ configured and which bound did it. The refusal by the configured number is count
 (`refused_over_capacity`), so an operator can tell whether the limit was theirs or the model's; the demo does
 not yet print either in its shutdown summary.
 
-**What the router sheds.** Control frames are never dropped. Data is shed per face from a bounded lane and
-counted per lane on the admin space. Whether a message that asked to block is dropped, waited for, or
-turned into a drop by the router is not decided here: upstream's egress pipeline has to be read first, and
-a router that blocks its loop on one slow face breaks (B) for all the others.
+**What the router sheds.** Read in the code on 2026-10-24, and not new: the shedding policy is upstream's and
+is built. Each face's outbound queue is bounded per priority lane at upstream's defaults (two batches,
+`writer_queue.rs`, `DEFAULT_QUEUE_SIZE`). A message that asked for `Drop` congestion control meets the lane's
+congested mark and is dropped at once, counted as `zenoh_tx_network_message_dropped_payload` with the reason
+`congestion` (`stats_registry.rs`, `ReasonLabel::Congestion`, fed from `session_actions.rs`); one that asked
+to `Block` waits for room whatever the mark says, up to `wait_before_close`, and the session whose room does not
+come is closed as unresponsive (`link.rs`, `RoomWait`; `session_congestion_close.rs`). Control frames do not go through that path: the keepalive takes the
+urgent write (`send_urgent`). So the question 7.2 left open, what the router does with data for a face that
+does not read, is answered by upstream's pipeline and wz follows it; what is NOT measured is the thing (B)
+asks: whether a face that stops reading, with publishers that `Block`, holds a router worker long enough
+to cost the other faces their keepalives. The wait is a condition-variable wait on a runtime worker
+(`wait_for_room`), bounded by `wait_before_close` (5 s by default, half a lease) and by the close, which is
+the cost to measure; the keepalives do not run there, but the session loops of the other faces do. The counters
+are the node's existing metrics and not a wz-only admin key: a wz key in upstream's admin space would be an
+extension of a surface this repository holds to upstream's, which is the owner's decision and is not made here.
 
 **How it is held.** Clockless tests of the arithmetic (`capacity::tests`, and the config's effective bound
 from a declared share and a lease). The promise itself is

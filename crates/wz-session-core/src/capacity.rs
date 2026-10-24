@@ -438,6 +438,94 @@ mod tests {
         assert_eq!(keepalive_lateness_limit_ms(0), 0);
     }
 
+    /// The document the numbers are explained in, read from the workspace this test runs in.
+    fn scaling_document() -> std::string::String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/router-data-plane-scaling.md");
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is read by the capacity tests: {e}", path.display()))
+    }
+
+    /// The costs the document states are the costs the code carries: a constant moved without the
+    /// text, or the text without the constant, fails here and not in a reader's arithmetic.
+    #[test]
+    fn the_document_states_the_costs_the_model_carries() {
+        let doc = scaling_document();
+        let m = RECORDED_HOST_MODEL;
+        for stated in [
+            std::format!(
+                "`c_k` {} us, `c_u` {} us, `b` {}",
+                m.emission_ns / 1_000,
+                m.loop_unit_ns / 1_000,
+                m.busy_threads
+            ),
+            std::format!("`FLOOR_HEADROOM_PERCENT` =\n{FLOOR_HEADROOM_PERCENT}"),
+            std::format!("`TURN_UNIT_BUDGET` ({LOOP_TURN_UNITS})"),
+        ] {
+            assert!(
+                doc.contains(&stated),
+                "docs/router-data-plane-scaling.md no longer states: {stated}"
+            );
+        }
+    }
+
+    /// The table of section 7.4 that sets the predicted return time of the loop against the
+    /// observed one, re-derived from the model: the share is `4 x 110 / (4 x 110 + hogs x 1024)`
+    /// (the scheduler's weights at nice 10 and nice 0) and the return is
+    /// `2048 x LOOP_TURN_UNITS x c_u / share`. A row whose prediction the model no longer gives, or
+    /// that sits outside what was observed by more than a tenth, fails.
+    #[test]
+    fn the_documented_return_times_are_the_ones_the_model_gives() {
+        let doc = scaling_document();
+        let mut rows = 0;
+        for line in doc.lines() {
+            let cells: std::vec::Vec<&str> = line.split('|').map(str::trim).collect();
+            // | hogs | share | predicted R | observed |
+            let [_, hogs, share, predicted, observed, _] = cells[..] else {
+                continue;
+            };
+            let (Ok(hogs), Some(share), Some(predicted)) = (
+                hogs.parse::<f64>(),
+                share.strip_suffix('%').and_then(|s| s.parse::<f64>().ok()),
+                predicted
+                    .strip_suffix(" s")
+                    .and_then(|s| s.parse::<f64>().ok()),
+            ) else {
+                continue;
+            };
+            let Some((low, high)) = observed
+                .strip_suffix(" s")
+                .and_then(|s| s.split_once(" to "))
+                .and_then(|(l, h)| Some((l.parse::<f64>().ok()?, h.parse::<f64>().ok()?)))
+            else {
+                continue;
+            };
+            let busy = f64::from(RECORDED_HOST_MODEL.busy_threads);
+            let ours = busy * 110.0 / (busy * 110.0 + hogs * 1024.0);
+            let ret = 2048.0 * f64::from(LOOP_TURN_UNITS) * RECORDED_HOST_MODEL.loop_unit_ns as f64
+                / 1e9
+                / ours;
+            assert!(
+                (100.0 * ours - share).abs() < 0.06,
+                "{hogs} hogs: the table says a share of {share}%, the weights give {:.2}%",
+                100.0 * ours
+            );
+            assert!(
+                (ret - predicted).abs() < 0.06,
+                "{hogs} hogs: the table predicts {predicted} s, the model gives {ret:.2} s"
+            );
+            assert!(
+                ret >= 0.9 * low && ret <= 1.1 * high,
+                "{hogs} hogs: the model's {ret:.2} s is not within a tenth of the observed {low} to {high} s"
+            );
+            rows += 1;
+        }
+        assert_eq!(
+            rows, 5,
+            "the table has five rows, and every one was checked"
+        );
+    }
+
     #[test]
     fn a_contract_of_nothing_is_refused() {
         assert_eq!(CapacityContract::new(0), Err(ContractError::ZeroShare));
