@@ -280732,6 +280732,62 @@
         "The next hosted run decides E7s on the hosted runner for this commit too."
       ]
     },
+    "Round 3483": {
+      "decision_summary": "The Rust API replacement is a family of crates under upstream's own package names, swapped in by one `[patch.crates-io]` entry each, and not a dependency line: measured, a patch whose package is named otherwise is not used by Cargo, so the graph keeps upstream's crate and an ecosystem crate meets a second, different type, while the same name unifies them. The first crate, zenoh-result, is built complete and api-compat-rust moves from reserved to active and PARTIAL (owner decision of 2026-10-24, refining C13).",
+      "changes_bullets": [
+        "The surface gate is a table of family members (`Member`: package, library name, wz package, arms, ratchet) and every function of it takes one, where it was written for `zenoh` alone; the numbers for `zenoh` did not move, and a selftest holds the table to its own arms and to the Cargo naming rule.",
+        "The `zenoh-result` crate, `crates/wz-zenoh-result`, named `zenoh-result` and versioned 1.10.1, with upstream's two features by their names: its surface equals upstream's line for line, with `anyhow` as the one third-party type of its API, and its `std` and `no_std` forms both build.",
+        "`ZError` states `Send` and `Sync` by hand, behind a compile-time check of its fields, because upstream's surface carries those two lines and the gate reads a stated impl as a line; the blind spot that implies, auto-trait parity not being measured, is recorded in the atom's reason.",
+        "Layer E18 and three standalone workspaces under `conformance/`: a differential test of the crate against upstream's (six tests), a graph with the `[patch]` in which upstream's `zenoh-keyexpr` raises a `ZError` that is the patched crate's (three tests), and the same graph without the patch as its control (one test, the downcast answers nothing).",
+        "`api-compat-rust` is active and PARTIAL: a facade feature that pulls the crate and re-exports it as `wz::zenoh_family`, a member of `preset-ap-full` (the unbuilt exclusion left the membership table), the reason rewritten, its one test citation pinned, and the two census pins that move with an arrival.",
+        "docs/build-configuration.md states C13 as a `[patch]` block per crate and step 12 as the family lowest first; `conformance` joins the citation validator's scan paths, which raises coverage as `oracles` did."
+      ],
+      "verification_bullets": [
+        "The generalised gate: its selftest and its committed-file run pass; `zenoh` still reads 709, 965 and 1025 missing lines, and `zenoh-result` reads 37 of 37 with 0 missing and 0 extra, from a re-emission of both surfaces on the pinned nightly.",
+        "The swap, measured twice: a patch under another package name was not used (the tree kept upstream's crate and an upstream type failed to unify with the wz one), a patch under the same name unified them; Layer E18 holds it as 6 differential, 3 patched-graph and 1 control test, all passing, each guarded by its count.",
+        "Controls: two faults injected into the crate (the cause text of `Display`, the number of a foreign error) each turned exactly the test that owns it red and left four green; the unpatched graph answers none where the patched graph answers a `ZError`, so the probe is not blind.",
+        "Static: the catalog audit reads PARTIAL 2 and REMAINING WORK 2 and passes; the AP-full membership, store-reason, citation, pin, census, prose, lane, job-budget and cache gates pass; validate-workspace reads orphans 14 against 14 carried and 0 new, T3 warn 4 and 0 unscanned sources; rustfmt, clippy with warnings denied, the no-std build and the facade build with the feature pass.",
+        "Not run here: the hosted run of Layer E18 (it needs the registry, which this host has cached), and Layer C0, which this machine cannot pass for a reason older than this round."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "carry_forward_bullets": [
+        "Next crate of the family: zenoh-core, whose `ResolveFuture::wait` blocks on upstream's `zenoh-runtime`; decide with it whether that crate is a member (one process must hold one application runtime) and how it meets wz's own runtime pools. Then zenoh-keyexpr, zenoh-protocol, zenoh-config, zenoh-util and `zenoh`, which is renamed from `wz-zenoh` in the slice that makes it patchable.",
+        "The surface gate does not measure auto-trait parity: a derived `Send` or `Sync` is no line and a stated one is, so a wz type that is not `Send` where upstream's is passes unseen. Emitting the compiler's own synthetic auto-trait impls for every type would measure it, at the cost of re-emitting every committed surface.",
+        "The conformance workspaces build with the registry and each has its own target directory, which the hosted cache does not hold; measure the cold cost on the first hosted run and fold them under one target if it shows.",
+        "The MCP mutation primitives write the MAIN checkout's store, not the worktree's: a status change made through them landed in the main tree and was reverted there; mutate with the CLI and `--sidecar` from the worktree.",
+        "Read the hosted runs of this push per job at the start of the next round, and the Windows C ABI job of the earlier push once more."
+      ],
+      "publishable_decision_summary": "The Rust API replacement is a family of crates under upstream's own package names, swapped in by one `[patch.crates-io]` entry each, and not a dependency line: measured, a patch whose package is named otherwise is not used by Cargo, so the graph keeps upstream's crate and an ecosystem crate meets a second, different type, while the same name unifies them. The first crate, zenoh-result, is built complete and api-compat-rust moves from reserved to active and PARTIAL (owner decision of 2026-10-24, refining C13).",
+      "publishable_changes_bullets": [
+        "The surface gate is a table of family members (`Member`: package, library name, wz package, arms, ratchet) and every function of it takes one, where it was written for `zenoh` alone; the numbers for `zenoh` did not move, and a selftest holds the table to its own arms and to the Cargo naming rule.",
+        "The `zenoh-result` crate, `crates/wz-zenoh-result`, named `zenoh-result` and versioned 1.10.1, with upstream's two features by their names: its surface equals upstream's line for line, with `anyhow` as the one third-party type of its API, and its `std` and `no_std` forms both build.",
+        "`ZError` states `Send` and `Sync` by hand, behind a compile-time check of its fields, because upstream's surface carries those two lines and the gate reads a stated impl as a line; the blind spot that implies, auto-trait parity not being measured, is recorded in the atom's reason.",
+        "Layer E18 and three standalone workspaces under `conformance/`: a differential test of the crate against upstream's (six tests), a graph with the `[patch]` in which upstream's `zenoh-keyexpr` raises a `ZError` that is the patched crate's (three tests), and the same graph without the patch as its control (one test, the downcast answers nothing).",
+        "`api-compat-rust` is active and PARTIAL: a facade feature that pulls the crate and re-exports it as `wz::zenoh_family`, a member of `preset-ap-full` (the unbuilt exclusion left the membership table), the reason rewritten, its one test citation pinned, and the two census pins that move with an arrival.",
+        "docs/build-configuration.md states C13 as a `[patch]` block per crate and step 12 as the family lowest first; `conformance` joins the citation validator's scan paths, which raises coverage as `oracles` did."
+      ],
+      "publishable_verification_bullets": [
+        "The generalised gate: its selftest and its committed-file run pass; `zenoh` still reads 709, 965 and 1025 missing lines, and `zenoh-result` reads 37 of 37 with 0 missing and 0 extra, from a re-emission of both surfaces on the pinned nightly.",
+        "The swap, measured twice: a patch under another package name was not used (the tree kept upstream's crate and an upstream type failed to unify with the wz one), a patch under the same name unified them; Layer E18 holds it as 6 differential, 3 patched-graph and 1 control test, all passing, each guarded by its count.",
+        "Controls: two faults injected into the crate (the cause text of `Display`, the number of a foreign error) each turned exactly the test that owns it red and left four green; the unpatched graph answers none where the patched graph answers a `ZError`, so the probe is not blind.",
+        "Static: the catalog audit reads PARTIAL 2 and REMAINING WORK 2 and passes; the AP-full membership, store-reason, citation, pin, census, prose, lane, job-budget and cache gates pass; validate-workspace reads orphans 14 against 14 carried and 0 new, T3 warn 4 and 0 unscanned sources; rustfmt, clippy with warnings denied, the no-std build and the facade build with the feature pass.",
+        "Not run here: the hosted run of Layer E18 (it needs the registry, which this host has cached), and Layer C0, which this machine cannot pass for a reason older than this round."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next crate of the family: zenoh-core, whose `ResolveFuture::wait` blocks on upstream's `zenoh-runtime`; decide with it whether that crate is a member (one process must hold one application runtime) and how it meets wz's own runtime pools. Then zenoh-keyexpr, zenoh-protocol, zenoh-config, zenoh-util and `zenoh`, which is renamed from `wz-zenoh` in the slice that makes it patchable.",
+        "The surface gate does not measure auto-trait parity: a derived `Send` or `Sync` is no line and a stated one is, so a wz type that is not `Send` where upstream's is passes unseen. Emitting the compiler's own synthetic auto-trait impls for every type would measure it, at the cost of re-emitting every committed surface.",
+        "The conformance workspaces build with the registry and each has its own target directory, which the hosted cache does not hold; measure the cold cost on the first hosted run and fold them under one target if it shows.",
+        "The MCP mutation primitives write the MAIN checkout's store, not the worktree's: a status change made through them landed in the main tree and was reverted there; mutate with the CLI and `--sidecar` from the worktree.",
+        "Read the hosted runs of this push per job at the start of the next round, and the Windows C ABI job of the earlier push once more."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
