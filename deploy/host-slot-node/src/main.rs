@@ -48,6 +48,7 @@ use core::fmt::{self, Write};
 use wz_runtime_coop::session_drive::{IpEndpoint, Locator};
 use wz_runtime_posix::glue::{log, log_args, yield_us};
 use wz_runtime_posix::slot::PosixStack;
+use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps::MAX_QUERYABLES;
 use wz_session_core::connect_endpoints::{ConnectEndpoints, ConnectEntry, EndpointText};
@@ -374,7 +375,8 @@ fn run(args: Args) -> i32 {
         storage: &NODE,
         declared: &DECLARED,
         clock: Clock::default(),
-        stack: Stack::new(args.local, &NODE.rx, &NODE.tx).with_idle_wait_ms(IDLE_WAIT_MS),
+        stack: Stack::new(args.local, &NODE.rx, &NODE.tx, PosixTcpDial)
+            .with_idle_wait_ms(IDLE_WAIT_MS),
         identity,
         batch_size: BATCH_SIZE,
         entropy: || PosixEntropy,

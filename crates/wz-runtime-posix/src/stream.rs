@@ -4,7 +4,8 @@
 //! The host profile's stream seam: TCP over the kernel's own sockets.
 //!
 //! [`PosixTcpSocket`] is the socket `wz_runtime_coop::stream_link` is written against
-//! ([`StreamSocket`]); the session's link over it is that module's `StreamDriver`. Nothing here allocates: the socket is a
+//! ([`StreamSocket`]), and [`PosixTcpDial`] the dial a stack opens it with ([`StreamDial`]); the
+//! session's link over it is that module's `StreamDriver`. Nothing here allocates: the socket is a
 //! file descriptor and its two ends.
 //!
 //! The socket blocks on a write and never on a read: a write returns once the kernel has taken
@@ -16,7 +17,8 @@
 use core::ffi::c_int;
 use core::mem::size_of;
 
-use wz_runtime_coop::stream_link::StreamSocket;
+use wz_runtime_coop::session_drive::LinkOpenError;
+use wz_runtime_coop::stream_link::{StreamDial, StreamSocket};
 
 use crate::net::{errno, sockaddr, PosixNetError};
 
@@ -48,10 +50,9 @@ fn name_of(
     ))
 }
 
-impl StreamSocket for PosixTcpSocket {
-    type Error = PosixNetError;
-
-    fn connect(addr: [u8; 4], port: u16) -> Result<Self, PosixNetError> {
+impl PosixTcpSocket {
+    /// Connect to `addr:port`, blocking until the connection is made or refused.
+    pub fn connect(addr: [u8; 4], port: u16) -> Result<Self, PosixNetError> {
         // SAFETY: plain system call with value arguments.
         let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
         if fd < 0 {
@@ -93,6 +94,27 @@ impl StreamSocket for PosixTcpSocket {
         this.peer = name_of(fd, libc::getpeername).map_err(PosixNetError::PeerName)?;
         Ok(this)
     }
+}
+
+/// The host's TCP connect as a stack's dial: the stream a `tcp/` link runs over is a plain
+/// connection.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PosixTcpDial;
+
+impl StreamDial for PosixTcpDial {
+    type Stream = PosixTcpSocket;
+
+    fn dial(&self, addr: [u8; 4], port: u16) -> Result<PosixTcpSocket, LinkOpenError> {
+        PosixTcpSocket::connect(addr, port).map_err(|e| match e {
+            // The process has no descriptor left: worth a later try, as a full table is.
+            PosixNetError::Socket(_) => LinkOpenError::Exhausted,
+            _ => LinkOpenError::Refused,
+        })
+    }
+}
+
+impl StreamSocket for PosixTcpSocket {
+    type Error = PosixNetError;
 
     fn local(&self) -> ([u8; 4], u16) {
         self.local

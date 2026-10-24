@@ -4,9 +4,10 @@
 //! The session's link over a byte stream (TCP), written once for every stack that has BSD-style
 //! sockets under a cooperative loop, as `udp_link` is for datagrams.
 //!
-//! A platform supplies a [`StreamSocket`]: connect, write, wait, read what is queued. Everything
-//! above the socket is here: [`StreamDriver`] is the session's outbound [`BoxedLinkDriver`] and
-//! the drive loop's [`SessionDatagramLink`] over one connection.
+//! A platform supplies a [`StreamDial`], which opens a connection, and the [`StreamSocket`] it
+//! yields: write, wait, read what is queued. Everything above the socket is here:
+//! [`StreamDriver`] is the session's outbound [`BoxedLinkDriver`] and the drive loop's
+//! [`SessionDatagramLink`] over one connection.
 //!
 //! ## The framing
 //!
@@ -47,22 +48,21 @@ use wz_session_core::reliability::Reliability;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::{TxLender, TxStore};
-use crate::session_drive::SessionDatagramLink;
+use crate::session_drive::{LinkOpenError, SessionDatagramLink};
 use crate::udp_link::SERVICE_WAIT_MS;
 
 /// The receive buffer of a link that takes the largest batch zenoh can negotiate: its length and
 /// the batch behind it.
 pub const STREAM_RX_CAPACITY: usize = u16::MAX as usize + STREAM_BATCH_LENGTH_BYTES;
 
-/// One connected IPv4 TCP socket of a platform's network stack. Only the one thread that drives
-/// the link touches it.
+/// One connected IPv4 byte stream: a platform's TCP socket, or a channel over one. Only the one
+/// thread that drives the link touches it. How the stream came to be connected is a
+/// [`StreamDial`]'s to say, so a stream that needs more than an address to open (a secure channel
+/// needs its identity and its peer's) is a stream like any other here.
 pub trait StreamSocket: Sized {
     /// Why a call failed, as the platform reports it. `Copy`, because the driver keeps the last
     /// failure for the deploy to report.
     type Error: Copy + Debug;
-
-    /// Connect to `addr:port`, blocking until the connection is made or refused.
-    fn connect(addr: [u8; 4], port: u16) -> Result<Self, Self::Error>;
 
     /// The `(address, port)` this end of the connection is bound to.
     fn local(&self) -> ([u8; 4], u16);
@@ -85,6 +85,19 @@ pub trait StreamSocket: Sized {
 
     /// End the connection in both directions. The peer reads the end of the stream.
     fn shutdown(&self);
+}
+
+/// How a stack opens the connected streams its `tcp/` links run over: a value the stack holds,
+/// so whatever a dial needs besides the address (a secure channel's identity, its context
+/// table) is the dial's, and the stack and the link stay written once.
+pub trait StreamDial {
+    /// The stream a dial yields.
+    type Stream: StreamSocket;
+
+    /// Connect to `addr:port`, blocking until the stream can carry a session or the dial has
+    /// failed: [`LinkOpenError::Refused`] when the other end did not take it,
+    /// [`LinkOpenError::Exhausted`] when the platform had no socket to give.
+    fn dial(&self, addr: [u8; 4], port: u16) -> Result<Self::Stream, LinkOpenError>;
 }
 
 /// `tcp/a.b.c.d:port`, zenoh's rendering of a TCP locator, written into fixed text: the longest
@@ -402,10 +415,6 @@ mod tests {
 
     impl StreamSocket for Pipe {
         type Error = Broken;
-
-        fn connect(_addr: [u8; 4], _port: u16) -> Result<Self, Broken> {
-            Ok(Pipe::default())
-        }
 
         fn local(&self) -> ([u8; 4], u16) {
             ([10, 0, 0, 2], 40_000)

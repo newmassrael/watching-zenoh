@@ -4,16 +4,18 @@
 //! The host's sockets as the session shell's links on the heap profile.
 //!
 //! [`PosixLinks`] is `wz_runtime_coop::ip_stack`'s `IpLinks` at [`PosixUdpSocket`] and
-//! [`PosixTcpSocket`]: a dial to `udp/...` opens the datagram link, a dial to `tcp/...` the stream
-//! link, and an accepting link is a datagram link. Each link allocates its buffers when it opens.
-//! It is the heap profile's twin of the slot profile's `PosixStack`, and what a program with an
-//! allocator (the pico C ABI over the cooperative engine) gives the session shell.
+//! [`PosixTcpDial`]: a dial to `udp/...` opens the datagram link, a dial to `tcp/...` the stream
+//! link over a [`PosixTcpSocket`], and an accepting link is a datagram link. Each link allocates
+//! its buffers when it opens. It is the heap profile's twin of the slot profile's `PosixStack`,
+//! and what a program with an allocator (the pico C ABI over the cooperative engine) gives the
+//! session shell.
 
 use crate::net::PosixUdpSocket;
-use crate::stream::PosixTcpSocket;
+use crate::stream::{PosixTcpDial, PosixTcpSocket};
 
-/// The host's sockets as the session shell's links, on the heap profile.
-pub type PosixLinks = wz_runtime_coop::ip_stack::IpLinks<PosixUdpSocket, PosixTcpSocket>;
+/// The host's sockets as the session shell's links, on the heap profile, made with
+/// `PosixLinks::new(local, PosixTcpDial)`.
+pub type PosixLinks = wz_runtime_coop::ip_stack::IpLinks<PosixUdpSocket, PosixTcpDial>;
 
 /// The driver [`PosixLinks`] opens: a datagram or a stream link, as the dial named.
 pub type PosixHeapDriver = wz_runtime_coop::ip_stack::HeapIpDriver<PosixUdpSocket, PosixTcpSocket>;
@@ -32,7 +34,7 @@ mod tests {
     fn a_dial_names_the_link_it_opens_over_the_hosts_sockets() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a listener");
         let port = listener.local_addr().expect("its port").port();
-        let links = PosixLinks::new(LOOPBACK);
+        let links = PosixLinks::new(LOOPBACK, PosixTcpDial);
         let tcp = links
             .open_initiator(Locator::tcp(IpEndpoint {
                 addr: LOOPBACK,
