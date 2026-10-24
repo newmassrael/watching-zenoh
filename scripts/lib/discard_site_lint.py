@@ -181,7 +181,7 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "let sparse = self.sparse.remove(&first_produced);",
+        "let sparse = self.sparse.remove(first_produced);",
         "Open-debt item 924, step 4b — the facts kept apart for the row the "
         "door is taking. The row was read again with them before this line; "
         "what reading the rest of its unit still needs of them is kept in the "
@@ -204,7 +204,7 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "self.chains.rows.remove(&first_produced);",
+        "self.chains.rows.remove(first_produced);",
         "Open-debt item 924, D9 — the chain fact of the row the door is "
         "taking: the row itself leaves in the `#[must_use] Discarded` receipt, "
         "and the fact is what the fold decided for that row and is read for no "
@@ -228,10 +228,98 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "self.sparse.remove(&key);",
+        "self.sparse.remove(key);",
         "Open-debt item 924, step 4b — a row turned from an entry into a frame "
         "kept whole: its facts are in the frame now, read from it, and the "
         "row itself stays in the list",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "let _ = self.fates.remove(key);",
+        "Open-debt item 924, step 5 — the fragment fate of a row turned from an "
+        "entry into a frame kept whole, which is the line above for the fate: the "
+        "frame carries what the fate said, and the row itself stays in the list",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "let fate = self.fates.remove(first_produced);",
+        "Open-debt item 924, step 5 — the fragment fate of the row the door is "
+        "taking, which is the facts' line above for the fate: the row was read "
+        "again with it before this line, the rest of its unit's reading keeps it "
+        "in the cut, and nothing else reads it",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "Some(match self.classes.remove(key)? {",
+        "Open-debt item 924, step 5 — `Fates::remove`, the storage under the two "
+        "sites above: it returns the fate it takes out, so the caller holds what "
+        "went and either keeps it (a unit still being read) or drops it with the "
+        "row the `Discarded` receipt hands back",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "FateClass::Joined => FragmentFate::Joined(self.joined.remove(key).unwrap_or_default()),",
+        "Open-debt item 924, step 5 — the joined message of a completed chain, "
+        "taken out with its class by `Fates::remove` and returned inside the "
+        "fate it belongs to, not dropped here",
+    ),
+    (
+        "wz-capture/digest_column.rs",
+        "DECLINED => self.remove(base + i as u64),",
+        "Open-debt item 924, step 5 — a row a document read as `declined` takes "
+        "out the digest an earlier document left for it. That is not a "
+        "correction (the row the consumer holds stays true), and a digest is a "
+        "change detector, so no capture evidence is in the column",
+    ),
+    (
+        "wz-capture/digest_column.rs",
+        "self.chunks.pop_front();",
+        "Open-debt item 924, step 5 — the storage under `retain`: a chunk none "
+        "of whose rows is held is given back, after `retain` dropped the digests "
+        "of rows the handle no longer holds (a change detector for each, "
+        "counted as lost by the handle when the row was taken)",
+    ),
+    (
+        "wz-capture/digest_column.rs",
+        "column.remove(*seq);",
+        "a test that drives the column and a reference map through the same "
+        "removals; no capture is in either",
+    ),
+    (
+        "wz-capture/digest_column.rs",
+        "map.remove(seq);",
+        "a test that drives the column and a reference map through the same "
+        "removals; no capture is in either",
+    ),
+    (
+        "wz-capture/digest_column.rs",
+        "column.retain(|seq| seq > 6_000);",
+        "a test that drives the column and a reference map through the same "
+        "trim; no capture is in either",
+    ),
+    (
+        "wz-capture/digest_column.rs",
+        "map.retain(|seq, _| *seq > 6_000);",
+        "a test that drives the column and a reference map through the same "
+        "trim; no capture is in either",
+    ),
+    (
+        "wz-capture/digest_column.rs",
+        "column.retain(|seq| seq > 2 * CHUNK as u64);",
+        "a test that trims the column to see its chunks given back; no capture "
+        "is in it",
+    ),
+    (
+        "wz-capture/digest_column.rs",
+        "column.retain(|_| false);",
+        "a test that empties the column to see it hold nothing; no capture is "
+        "in it",
+    ),
+    (
+        "wz-capture/word_column.rs",
+        "map.remove(&seq);",
+        "a test that drives the column and a reference map through the same "
+        "removals; no capture is in either",
     ),
     (
         "wz-session-core/passive_messages.rs",
@@ -508,7 +596,7 @@ ALLOWED = [
     ),
     (
         "wz-capture/fields_json.rs",
-        "memory.digests.retain(|seq, _| seq_in_ranges(&ranges, *seq));",
+        "memory.digests.retain(|seq| seq_in_ranges(&ranges, seq));",
         "the digests of rows the handle no longer HOLDS, given up so the memory "
         "follows the handle's size. A digest is a change detector for a row a "
         "consumer holds, and a row a ceiling took was counted as lost by the "

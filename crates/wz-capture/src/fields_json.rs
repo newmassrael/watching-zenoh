@@ -870,7 +870,7 @@ pub fn fields_json_since_remembering_progress(
                 memory.walk = WalkState::default();
                 return None;
             }
-            let (mut now, _) = probe.into_parts();
+            let (now, _) = probe.into_parts();
             for (seq, was) in memory.digests.iter() {
                 if seq > since.after_seq {
                     continue;
@@ -883,9 +883,10 @@ pub fn fields_json_since_remembering_progress(
             }
             // The rows still held are the ones the probe saw: a row a ceiling
             // trimmed has no digest to keep. A row the probe read as `declined`
-            // has none either, and the column's own cell for it goes.
-            now.retain(|_| true);
-            memory.digests = now;
+            // has none either: a memory's column is built from the probe's, which
+            // holds no cell for such a row.
+            memory.digests = crate::digest_column::DigestColumn::new();
+            memory.digests.extend_from(&now);
             memory.stats.compared += 1;
         }
     }
