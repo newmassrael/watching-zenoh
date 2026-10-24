@@ -29,7 +29,7 @@
 //!   ceiling that moved is a decision to be recorded where the measured value is,
 //!   not a number to be raised until the test passes;
 //! * the report against the allocator: the bytes per row the handle says it holds
-//!   agree with the ones the allocator counted within 6%. This is what makes the
+//!   agree with the ones the allocator counted within 3%. This is what makes the
 //!   report a measurement and not a belief, and it is what shows a structure that
 //!   grows with the rows and that no one reported;
 //! * the report's own figures per structure, which a failure prints, so a ceiling
@@ -53,9 +53,9 @@ use std::ffi::{c_char, c_int, CStr};
 use wz_capi_dissect::live::LiveDissection;
 use wz_capi_dissect::{
     wz_dissect_live_census, wz_dissect_live_close, wz_dissect_live_drain,
-    wz_dissect_live_fields_since_window, wz_dissect_live_memory, wz_dissect_pcap_replay,
-    wz_dissect_pcap_replay_lent, wz_dissect_string_free, WzDissectRecord, WZ_DISSECT_LIMITS_NONE,
-    WZ_DISSECT_OK,
+    wz_dissect_live_fields_since_window, wz_dissect_live_memory, wz_dissect_live_selection_since,
+    wz_dissect_pcap_replay, wz_dissect_pcap_replay_lent, wz_dissect_string_free, WzDissectRecord,
+    WZ_DISSECT_LIMITS_NONE, WZ_DISSECT_OK,
 };
 use wz_capture::fixtures::{push_run_capture, RunTransport};
 
@@ -109,9 +109,10 @@ const FIELD_WINDOW: u64 = 8192;
 const FLOOR_BOUND: isize = 64 * 1024;
 
 /// How far the handle's report of its bytes per row may be from the allocator's:
-/// the B-tree model is held to 3% (`wz-session-core`'s `btree_model` test), and
-/// what the report leaves out is fixed and spread over the rows.
-const REPORT_TOLERANCE: f64 = 0.06;
+/// the B-tree model is held to 3% (`wz-session-core`'s `btree_model` test) and
+/// what the report leaves out is fixed and spread over the rows. Measured at 0.4%
+/// at the largest.
+const REPORT_TOLERANCE: f64 = 0.03;
 
 /// Which replay door opens the capture.
 #[derive(Clone, Copy)]
@@ -128,21 +129,26 @@ enum Door {
 ///
 /// | case        | after replay | after reads |
 /// |-------------|--------------|-------------|
-/// | udp owned   | 82.0         | 183.1       |
-/// | udp lent    | 49.2         | 150.3       |
-/// | tcp owned   | 130.4        | 280.5       |
-/// | tcp lent    | 90.2         | 240.4       |
+/// | udp owned   | 82.0         | 95.9        |
+/// | udp lent    | 49.2         | 63.1        |
+/// | tcp owned   | 130.4        | 152.2       |
+/// | tcp lent    | 90.2         | 112.1       |
 ///
-/// The reads are every field window to the end of the capture, then the census.
-/// A stream capture holds 49 bytes per row more after them than after the first
-/// window alone (211 and 251 were measured that way): the field walk keeps a
-/// digest of every row it has written, which a datagram capture's walk does not,
-/// and which only paging to the end brings out.
+/// The reads are every field window to the end of the capture, the selection door
+/// from the start and again from where it ended, then the census. They add 14 to
+/// 22 bytes a row: 12 for what the census's selector said of the row (its
+/// coordinate and the number of its answer, `verdict_column`), half a byte for
+/// the word the selection door said (`word_column`) and, for a stream capture, 8
+/// for the digest of the row's text (`digest_column`). Before those three were
+/// columns the same reads cost 100 bytes a row (the verdict was a map entry
+/// holding its own vector), about 40 more for the selection door's word, and on a
+/// stream capture 49 for the digest, each a map entry. This gate first measured
+/// 183, 150, 280 and 240 that way, before the selection door was in the reads.
 ///
 /// The capture file is 90 (udp) and 104 (tcp) bytes per row, so the handle holds
-/// about 1.7 to 2.7 times the file after the reads on this fixture, whose packets
-/// are the smallest a Push makes. A capture of larger messages shrinks the
-/// multiple, because the per-row figures here do not grow with the payload.
+/// 0.7 to 1.5 times the file after the reads on this fixture, whose packets are
+/// the smallest a Push makes. A capture of larger messages shrinks the multiple,
+/// because the per-row figures here do not grow with the payload.
 struct Case {
     name: &'static str,
     transport: RunTransport,
@@ -303,6 +309,17 @@ fn measure(pushes: usize, transport: RunTransport, door: Door) -> Measured {
         );
     }
 
+    // The selection door, from the start and then from where that ended, so the
+    // word it said of each row is kept and then compared with the next.
+    let mut cursor = 0u64;
+    for _ in 0..2 {
+        let mut out: *mut c_char = core::ptr::null_mut();
+        let rc = unsafe {
+            wz_dissect_live_selection_since(handle, c"kind == put".as_ptr(), cursor, &mut out)
+        };
+        cursor = number_after(&take_string(rc, out, "selection"), "\"through_seq\":") as u64;
+    }
+
     let mut out: *mut c_char = core::ptr::null_mut();
     let rc = unsafe { wz_dissect_live_census(handle, c"".as_ptr(), &mut out) };
     {
@@ -423,7 +440,7 @@ fn a_datagram_capture_s_handle_holds_a_constant_per_row() {
         transport: RunTransport::Datagram,
         door: Door::Owned,
         after_replay_ceiling: 90.0,
-        after_reads_ceiling: 202.0,
+        after_reads_ceiling: 106.0,
     });
 }
 
@@ -434,7 +451,7 @@ fn a_lent_datagram_capture_s_handle_holds_a_constant_per_row() {
         transport: RunTransport::Datagram,
         door: Door::Lent,
         after_replay_ceiling: 54.0,
-        after_reads_ceiling: 166.0,
+        after_reads_ceiling: 70.0,
     });
 }
 
@@ -445,7 +462,7 @@ fn a_stream_capture_s_handle_holds_a_constant_per_row() {
         transport: RunTransport::Stream,
         door: Door::Owned,
         after_replay_ceiling: 144.0,
-        after_reads_ceiling: 310.0,
+        after_reads_ceiling: 168.0,
     });
 }
 
@@ -456,6 +473,6 @@ fn a_lent_stream_capture_s_handle_holds_a_constant_per_row() {
         transport: RunTransport::Stream,
         door: Door::Lent,
         after_replay_ceiling: 100.0,
-        after_reads_ceiling: 266.0,
+        after_reads_ceiling: 124.0,
     });
 }
