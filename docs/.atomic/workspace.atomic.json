@@ -281956,6 +281956,40 @@
         "The first 64 sessions of a process now send one extra KeepAlive at establishment; a test that counts a process's first KeepAlive frames sees it. Lesson: a figure compared against a constant recorded on another host must not contain the thing the model already accounts for (the wait for a core), or it counts it twice."
       ]
     },
+    "Round 3508": {
+      "decision_summary": "Step 3a of the pico C ABI over the cooperative engine stands: wz-capi-coop holds CoopEngine, one session-core client session the program steps, with no runtime thread of its own. It opens to the first endpoint that completes the handshake, implements the port's SessionEngine and SessionDrive over session-core's application layer (the observer keeps the subscribers, what the peer declared and the matching watches), and keeps its non-Send state behind one lock, handing samples and matching changes to C callbacks after the lock is released (D8), so a callback may re-enter its session as in zenoh-pico. A read task is a thread that steps the engine. Its session-core features are the tokio engine's session base less the local loop, which zenoh-pico's default build does not deliver either. Step 3b wires the pico ABI to it with a size-gate case and round trips.",
+      "changes_bullets": [
+        "New crate wz-capi-coop (workspace member): CoopEngine, CoopConfig, OpenError; SessionEngine (publish with every metadata field and the plain fast path, subscribers, key expression holds, matching listeners, write filters with refcounted Interests, batch, peer identities) and SessionDrive (close, read, spin, keep-alive, read task thread).",
+        "Tests: a router stand-in (acceptor session with entropy) on its own thread over UDP sockets.",
+        ".github/workflows/platform.yml: paths for wz-capi-coop and its workspace dependencies wz-session-mcu, wz-runtime-coop, wz-runtime-posix (platform_trigger_paths_gate).",
+        "docs/capi-pico-on-coop-engine.md: step 3 split into 3a and 3b, status."
+      ],
+      "verification_bullets": [
+        "On the build host after rebasing onto 43f9e4898: fmt, clippy -D warnings (all targets), rustdoc with -D warnings, and C1bz for wz-capi-coop (within its zero budget); the crate's two tests pass (2 ran), and 30 repeated runs passed with none failing. The tests assert, each with a control: the router learns the declared subscriber; a push the router sends is not delivered until the program steps the session; a put reaches the router; a write filter holds a put back (no Push reaches the wire) until the router declares a matching subscriber, then sends it; a closed session reads as closed. Three faults were found while building them: missing wildcard key expression features, a router stand-in without entropy, and a catch-all subscriber the router declared in answer to the Interest. Locally the hook's 110 round-fed static gates pass, the platform trigger paths gate among them."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next, step 3b: an engine feature in wz-capi-pico that builds the client without wz-capi-core and the tokio engine; z_open building the coop session from the C config (endpoints, zid, lease, batch size) over PosixLinks and PosixClock with critical-section's std implementation chosen by the library; z_session_drop and the read task through SessionDrive; a size-gate case beside pico-client; round trips against a pinned zenohd and against pico. Open for later steps: redial after a lost link (pico's auto-reconnect), the listening role, queries, liveliness, scouting, the advanced plane. Read the hosted CI of this push and of 54fdf995f."
+      ],
+      "publishable_decision_summary": "Step 3a of the pico C ABI over the cooperative engine stands: wz-capi-coop holds CoopEngine, one session-core client session the program steps, with no runtime thread of its own. It opens to the first endpoint that completes the handshake, implements the port's SessionEngine and SessionDrive over session-core's application layer (the observer keeps the subscribers, what the peer declared and the matching watches), and keeps its non-Send state behind one lock, handing samples and matching changes to C callbacks after the lock is released (D8), so a callback may re-enter its session as in zenoh-pico. A read task is a thread that steps the engine. Its session-core features are the tokio engine's session base less the local loop, which zenoh-pico's default build does not deliver either. Step 3b wires the pico ABI to it with a size-gate case and round trips.",
+      "publishable_changes_bullets": [
+        "New crate wz-capi-coop (workspace member): CoopEngine, CoopConfig, OpenError; SessionEngine (publish with every metadata field and the plain fast path, subscribers, key expression holds, matching listeners, write filters with refcounted Interests, batch, peer identities) and SessionDrive (close, read, spin, keep-alive, read task thread).",
+        "Tests: a router stand-in (acceptor session with entropy) on its own thread over UDP sockets.",
+        ".github/workflows/platform.yml: paths for wz-capi-coop and its workspace dependencies wz-session-mcu, wz-runtime-coop, wz-runtime-posix (platform_trigger_paths_gate).",
+        "docs/capi-pico-on-coop-engine.md: step 3 split into 3a and 3b, status."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host after rebasing onto 43f9e4898: fmt, clippy -D warnings (all targets), rustdoc with -D warnings, and C1bz for wz-capi-coop (within its zero budget); the crate's two tests pass (2 ran), and 30 repeated runs passed with none failing. The tests assert, each with a control: the router learns the declared subscriber; a push the router sends is not delivered until the program steps the session; a put reaches the router; a write filter holds a put back (no Push reaches the wire) until the router declares a matching subscriber, then sends it; a closed session reads as closed. Three faults were found while building them: missing wildcard key expression features, a router stand-in without entropy, and a catch-all subscriber the router declared in answer to the Interest. Locally the hook's 110 round-fed static gates pass, the platform trigger paths gate among them."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next, step 3b: an engine feature in wz-capi-pico that builds the client without wz-capi-core and the tokio engine; z_open building the coop session from the C config (endpoints, zid, lease, batch size) over PosixLinks and PosixClock with critical-section's std implementation chosen by the library; z_session_drop and the read task through SessionDrive; a size-gate case beside pico-client; round trips against a pinned zenohd and against pico. Open for later steps: redial after a lost link (pico's auto-reconnect), the listening role, queries, liveliness, scouting, the advanced plane. Read the hosted CI of this push and of 54fdf995f."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
