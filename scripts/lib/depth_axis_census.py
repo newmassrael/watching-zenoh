@@ -2771,7 +2771,11 @@ PIN_NO_SYMBOL = 0
 # (`switchboard.rs` re-counted, and the fixed-memory `SessionHost` the old
 # measurement predates). READ off the census's own FAIL lines, `wz citations: 18
 # against a pin of 0` and then `20 against a pin of 18`.
-PIN_WZ_CITATIONS = 22
+# R3500 -- 22 -> 24, one atom. `api-compat-rust`'s reason gains the key expression
+# tree slice and cites two files for it: `keyexpr_tree.rs` (the module the slice
+# built) and the differential test that holds the trees to upstream's. READ off
+# the census's own FAIL line, `wz citations: 24 against a pin of 22`.
+PIN_WZ_CITATIONS = 24
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

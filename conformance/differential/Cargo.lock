@@ -532,6 +532,8 @@ dependencies = [
 name = "zenoh-keyexpr"
 version = "1.10.1"
 dependencies = [
+ "hashbrown 0.16.1",
+ "keyed-set",
  "rand",
  "schemars",
  "serde",

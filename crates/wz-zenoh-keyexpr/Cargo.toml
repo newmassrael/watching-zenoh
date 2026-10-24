@@ -45,7 +45,11 @@ unstable = []
 # `JsonSchema`, and `KeyExprFuzzer` is generic over `rand::Rng`, so a caller that names those traits
 # meets the same crates, at the same semver line, upstream's would.
 [dependencies]
-rand = { version = "0.8.5", default-features = false, features = ["alloc", "getrandom"] }
+# `hashbrown` is `HashMapProvider`'s map without `std`, and `keyed-set` is the default storage of a
+# node's children (`KeyedSetProvider`), a type of the public API.
+hashbrown = "0.16.0"
+keyed-set = "1.1.0"
+rand ={ version = "0.8.5", default-features = false, features = ["alloc", "getrandom"] }
 schemars = { version = "1.1.0", features = ["either1"], optional = true }
 serde = { version = "1.0.225", default-features = false, features = ["alloc", "derive"] }
 zenoh-result = { path = "../wz-zenoh-result", default-features = false }

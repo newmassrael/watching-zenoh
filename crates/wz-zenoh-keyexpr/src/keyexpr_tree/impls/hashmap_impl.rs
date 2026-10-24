@@ -1,0 +1,162 @@
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! Children stored in a hash map keyed by chunk.
+
+use core::hash::Hasher;
+
+#[cfg(not(feature = "std"))]
+// `SipHasher` is deprecated in favour of a symbol that only exists in `std`
+#[allow(deprecated)]
+use core::hash::SipHasher as DefaultHasher;
+#[cfg(feature = "std")]
+use std::collections::{
+    hash_map::{DefaultHasher, Entry, Iter, IterMut, Values, ValuesMut},
+    HashMap,
+};
+
+#[cfg(not(feature = "std"))]
+use hashbrown::{
+    hash_map::{Entry, Iter, IterMut, Values, ValuesMut},
+    HashMap,
+};
+
+use crate::keyexpr_tree::*;
+
+/// Stores the children of a node in a [`HashMap`], with `Hash` as the hasher.
+#[cfg_attr(not(feature = "std"), allow(deprecated))]
+#[derive(Debug)]
+pub struct HashMapProvider<Hash: Hasher + Default + 'static = DefaultHasher>(
+    core::marker::PhantomData<Hash>,
+);
+
+impl<T: 'static, Hash: Hasher + Default + 'static> IChildrenProvider<T> for HashMapProvider<Hash> {
+    type Assoc = HashMap<OwnedKeyExpr, T, core::hash::BuildHasherDefault<Hash>>;
+}
+
+/// The entry of a chunk in a map of children: the map and the chunk, whose child is found or made.
+pub struct MapEntry<'a, 'b, T, S> {
+    map: &'a mut HashMap<OwnedKeyExpr, T, S>,
+    chunk: &'b keyexpr,
+}
+
+impl<'a: 'b, 'b, T: HasChunk, S: core::hash::BuildHasher> IEntry<'a, 'b, T>
+    for MapEntry<'a, 'b, T, S>
+{
+    fn get_or_insert_with<F: FnOnce(&'b keyexpr) -> T>(self, f: F) -> &'a mut T {
+        match self.map.entry(self.chunk.into()) {
+            Entry::Vacant(entry) => entry.insert(f(self.chunk)),
+            Entry::Occupied(entry) => entry.into_mut(),
+        }
+    }
+}
+
+impl<T: HasChunk + AsNode<T> + AsNodeMut<T> + 'static, S: core::hash::BuildHasher> IChildren<T>
+    for HashMap<OwnedKeyExpr, T, S>
+{
+    type Node = T;
+
+    fn child_at(&self, chunk: &keyexpr) -> Option<&T> {
+        self.get(chunk)
+    }
+
+    fn child_at_mut(&mut self, chunk: &keyexpr) -> Option<&mut T> {
+        self.get_mut(chunk)
+    }
+
+    fn remove(&mut self, chunk: &keyexpr) -> Option<Self::Node> {
+        self.remove(chunk)
+    }
+
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.is_empty()
+    }
+
+    type Entry<'a, 'b>
+        = MapEntry<'a, 'b, T, S>
+    where
+        Self: 'a,
+        'a: 'b,
+        T: 'b;
+
+    fn entry<'a, 'b>(&'a mut self, chunk: &'b keyexpr) -> Self::Entry<'a, 'b>
+    where
+        Self: 'a,
+        'a: 'b,
+        T: 'b,
+    {
+        MapEntry { map: self, chunk }
+    }
+
+    type Iter<'a>
+        = Values<'a, OwnedKeyExpr, T>
+    where
+        Self: 'a;
+
+    fn children<'a>(&'a self) -> Self::Iter<'a>
+    where
+        Self: 'a,
+    {
+        self.values()
+    }
+
+    type IterMut<'a>
+        = ValuesMut<'a, OwnedKeyExpr, T>
+    where
+        Self: 'a;
+
+    fn children_mut<'a>(&'a mut self) -> Self::IterMut<'a>
+    where
+        Self: 'a,
+    {
+        self.values_mut()
+    }
+
+    fn filter_out<F: FnMut(&mut T) -> bool>(&mut self, predicate: &mut F) {
+        self.retain(|_, v| predicate(v));
+    }
+
+    type Intersection<'a>
+        = super::FilterMap<Iter<'a, OwnedKeyExpr, T>, super::Intersection<'a>>
+    where
+        Self: 'a,
+        Self::Node: 'a;
+
+    fn intersection<'a>(&'a self, key: &'a keyexpr) -> Self::Intersection<'a> {
+        super::FilterMap::new(self.iter(), super::Intersection(key))
+    }
+
+    type IntersectionMut<'a>
+        = super::FilterMap<IterMut<'a, OwnedKeyExpr, T>, super::Intersection<'a>>
+    where
+        Self: 'a,
+        Self::Node: 'a;
+
+    fn intersection_mut<'a>(&'a mut self, key: &'a keyexpr) -> Self::IntersectionMut<'a> {
+        super::FilterMap::new(self.iter_mut(), super::Intersection(key))
+    }
+
+    type Inclusion<'a>
+        = super::FilterMap<Iter<'a, OwnedKeyExpr, T>, super::Inclusion<'a>>
+    where
+        Self: 'a,
+        Self::Node: 'a;
+
+    fn inclusion<'a>(&'a self, key: &'a keyexpr) -> Self::Inclusion<'a> {
+        super::FilterMap::new(self.iter(), super::Inclusion(key))
+    }
+
+    type InclusionMut<'a>
+        = super::FilterMap<IterMut<'a, OwnedKeyExpr, T>, super::Inclusion<'a>>
+    where
+        Self: 'a,
+        Self::Node: 'a;
+
+    fn inclusion_mut<'a>(&'a mut self, key: &'a keyexpr) -> Self::InclusionMut<'a> {
+        super::FilterMap::new(self.iter_mut(), super::Inclusion(key))
+    }
+}

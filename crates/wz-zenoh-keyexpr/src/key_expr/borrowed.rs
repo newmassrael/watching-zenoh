@@ -136,6 +136,11 @@ impl keyexpr {
     #[cfg(feature = "internal")]
     #[doc(hidden)]
     pub const fn chunks(&self) -> Chunks<'_> {
+        self.chunks_impl()
+    }
+
+    /// The chunks of the key expression.
+    pub(crate) const fn chunks_impl(&self) -> Chunks<'_> {
         Chunks {
             inner: self.as_str(),
         }

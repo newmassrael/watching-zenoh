@@ -275,7 +275,9 @@ pinned revision for the generation-time policy.
   uses a macro expands this text), the error messages, and the documentation of the public items.
   Nothing else is vendored and no upstream crate is a dependency of the product graph.
 - **What is original**: the algorithms behind that API are written here from the language's
-  definition (key expression validation, canonization, inclusion and intersection) or restructured
+  definition (key expression validation, canonization, inclusion and intersection, and the
+  relational iterators of the key expression trees, which are one walk driven by those relations)
+  or restructured
   (the runtime pool's shutdown; the format parser's search order, which IS its behaviour and is
   the documented greedy left-to-right one, is followed step by step because no other definition
   of which parse a format returns exists), and each is held to upstream's behaviour by
