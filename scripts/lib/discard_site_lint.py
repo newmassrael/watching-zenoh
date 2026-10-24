@@ -189,6 +189,14 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
+        "self.chains.rows.remove(&first_produced);",
+        "Open-debt item 924, D9 — the chain fact of the row the door is "
+        "taking: the row itself leaves in the `#[must_use] Discarded` receipt, "
+        "and the fact is what the fold decided for that row and is read for no "
+        "other",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
         "self.sparse.remove(&key);",
         "Open-debt item 924, step 4b — a row turned from an entry into a frame "
         "kept whole: its facts are in the frame now, read from it, and the "

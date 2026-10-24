@@ -158,6 +158,26 @@ pub struct MessageList {
     /// message would have.
     #[cfg(feature = "reassembly")]
     chain_prefix: ChainFold,
+    /// What the chain fold made of each row it moved, decided as the row was
+    /// appended (open-debt item 924, D9): a row's chain identity is a count of
+    /// the chains that began before it in its list, which no reading of the row
+    /// alone can recover, so it is a fact of the row like its SN verdict, kept
+    /// for the few rows that have one. A reader that begins anywhere reads it
+    /// here instead of folding the rows before.
+    #[cfg(feature = "reassembly")]
+    chains: ChainFacts,
+}
+
+/// The chain fold over every message a list was ever appended, and what it made
+/// of each row still held that it moved. See [`MessageList::chain_of`].
+#[cfg(feature = "reassembly")]
+#[derive(Debug, Default)]
+struct ChainFacts {
+    /// The fold as the last appended message left it.
+    fold: ChainFold,
+    /// By produced-index, the outcome and identity of every held row the fold
+    /// moved; a row it did not move (no fragment, or no outcome) has none.
+    rows: BTreeMap<u64, (IngestOutcome, Option<u64>)>,
 }
 
 /// The key a fragment chain is held under: the direction it travelled, whether
@@ -274,6 +294,26 @@ impl MessageList {
             produced: 0,
             #[cfg(feature = "reassembly")]
             chain_prefix: ChainFold::default(),
+            #[cfg(feature = "reassembly")]
+            chains: ChainFacts::default(),
+        }
+    }
+
+    /// What the chain fold made of the row at produced-index `produced`: the
+    /// router's outcome and the identity of the chain it touched, as a walk of
+    /// every message the list was ever appended would find them; `None` for a
+    /// row that is not a fragment or carries no outcome, and for one not held.
+    #[cfg(feature = "reassembly")]
+    pub fn chain_of(&self, produced: u64) -> Option<(IngestOutcome, Option<u64>)> {
+        self.chains.rows.get(&produced).copied()
+    }
+
+    /// Move the chain fold by the message about to be appended at `produced`.
+    #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
+    fn note_chain(&mut self, produced: u64, frame: &PassiveFrame) {
+        #[cfg(feature = "reassembly")]
+        if let Some(fact) = self.chains.fold.observe(frame) {
+            self.chains.rows.insert(produced, fact);
         }
     }
 
@@ -287,6 +327,7 @@ impl MessageList {
 
     /// Append one decoded message, kept whole.
     pub fn push(&mut self, frame: PassiveFrame) {
+        self.note_chain(self.produced, &frame);
         match &mut self.rows {
             Store::Held(log) => log.push_back(frame),
             Store::Indexed(index) => index.push_held(self.produced, frame),
@@ -330,6 +371,9 @@ impl MessageList {
             return;
         };
         let produced = self.produced;
+        for (k, frame) in frames.iter().enumerate() {
+            self.note_chain(produced + k as u64, frame);
+        }
         self.index()
             .push_unit(produced, start, &frames, Locus::Streamed);
         self.produced += frames.len() as u64;
@@ -363,6 +407,9 @@ impl MessageList {
             return;
         };
         let produced = self.produced;
+        for (k, frame) in frames.iter().enumerate() {
+            self.note_chain(produced + k as u64, frame);
+        }
         let index = self.index();
         let place = match in_container {
             Some(offset) => LogPlace::Container(offset),
@@ -433,6 +480,9 @@ impl MessageList {
         // front a ceiling has taken. See the field's doc.
         #[cfg(feature = "reassembly")]
         let _ = self.chain_prefix.observe(&frame);
+        // A row no longer held has no fact to be read.
+        #[cfg(feature = "reassembly")]
+        self.chains.rows.remove(&first_produced);
         Some(Discarded {
             // `produced` deliberately does NOT move here. It counts what was
             // ever appended, and a trim is the one event a consumer's watermark
@@ -1194,12 +1244,15 @@ impl Index {
         first_produced: u64,
         source: &dyn UnitBytes,
     ) -> Option<Row<'a>> {
+        let produced = first_produced + position as u64;
         match self.entry(position)? {
-            Entry::Held => self.held(position, first_produced).map(Row::held),
+            Entry::Held => self
+                .held(position, first_produced)
+                .map(|frame| Row::held(frame, produced)),
             Entry::Unit(_) => self
                 .read_unit(position, first_produced, source)
                 .take(position)
-                .map(Row::read),
+                .map(|frame| Row::read(frame, produced)),
         }
     }
 
@@ -1377,7 +1430,9 @@ impl<'a> Messages<'a> {
     pub fn get(&self, index: usize) -> Option<Row<'a>> {
         let list: &'a MessageList = self.list;
         match &list.rows {
-            Store::Held(log) => log.get(index).map(Row::held),
+            Store::Held(log) => log
+                .get(index)
+                .map(|frame| Row::held(frame, self.first_produced() + index as u64)),
             Store::Indexed(entries) => entries.row(index, self.first_produced(), self.source),
         }
     }
@@ -1444,6 +1499,8 @@ impl<'a> IntoIterator for Messages<'a> {
 #[derive(Debug)]
 pub struct Row<'a> {
     frame: RowFrame<'a>,
+    /// The row's produced-index: [`MessageList::produced`] when it was appended.
+    produced: u64,
 }
 
 /// Where a [`Row`]'s frame is.
@@ -1458,16 +1515,27 @@ enum RowFrame<'a> {
 
 impl<'a> Row<'a> {
     #[inline]
-    fn held(frame: &'a PassiveFrame) -> Self {
+    fn held(frame: &'a PassiveFrame, produced: u64) -> Self {
         Self {
             frame: RowFrame::Held(frame),
+            produced,
         }
     }
 
-    fn read(frame: PassiveFrame) -> Self {
+    fn read(frame: PassiveFrame, produced: u64) -> Self {
         Self {
             frame: RowFrame::Read(Box::new(frame)),
+            produced,
         }
+    }
+
+    /// The row's produced-index: how many messages its list had been appended
+    /// before it. Unique in its list and untouched by a front trim, so it is
+    /// what a table that names rows across calls keys them by (open-debt item
+    /// 924, D9), where a position moves with every trim.
+    #[inline]
+    pub fn produced(&self) -> u64 {
+        self.produced
     }
 }
 
@@ -1501,8 +1569,14 @@ pub struct RowIter<'a> {
 
 /// How a [`RowIter`] walks.
 enum Walk<'a> {
-    /// The chunks of a list that keeps its frames, as slices.
-    Held(Iter<'a, PassiveFrame>),
+    /// The chunks of a list that keeps its frames, as slices, and the
+    /// produced-indices of the next row from the front and of the one past the
+    /// next from the back.
+    Held {
+        rows: Iter<'a, PassiveFrame>,
+        front: u64,
+        back: u64,
+    },
     /// The entries of a list that keeps index entries, by position.
     Indexed {
         index: &'a Index,
@@ -1526,7 +1600,11 @@ impl core::fmt::Debug for RowIter<'_> {
 impl Clone for RowIter<'_> {
     fn clone(&self) -> Self {
         let walk = match &self.walk {
-            Walk::Held(rows) => Walk::Held(rows.clone()),
+            Walk::Held { rows, front, back } => Walk::Held {
+                rows: rows.clone(),
+                front: *front,
+                back: *back,
+            },
             // The unit read ahead is not copied: it is a saving, and the copy
             // reads the unit again when it reaches it.
             Walk::Indexed {
@@ -1558,16 +1636,19 @@ fn walk_row<'a>(
     position: usize,
     ahead: &mut Option<ReadAgain>,
 ) -> Option<Row<'a>> {
+    let produced = first_produced + position as u64;
     match index.entry(position)? {
-        Entry::Held => index.held(position, first_produced).map(Row::held),
+        Entry::Held => index
+            .held(position, first_produced)
+            .map(|frame| Row::held(frame, produced)),
         Entry::Unit(_) => {
             if let Some(frame) = ahead.as_mut().and_then(|unit| unit.take(position)) {
-                return Some(Row::read(frame));
+                return Some(Row::read(frame, produced));
             }
             let mut unit = index.read_unit(position, first_produced, source);
             let frame = unit.take(position);
             *ahead = Some(unit);
-            frame.map(Row::read)
+            frame.map(|frame| Row::read(frame, produced))
         }
     }
 }
@@ -1578,7 +1659,11 @@ impl<'a> Iterator for RowIter<'a> {
     #[inline]
     fn next(&mut self) -> Option<Row<'a>> {
         match &mut self.walk {
-            Walk::Held(rows) => rows.next().map(Row::held),
+            Walk::Held { rows, front, .. } => {
+                let frame = rows.next()?;
+                *front += 1;
+                Some(Row::held(frame, *front - 1))
+            }
             Walk::Indexed {
                 index,
                 first_produced,
@@ -1599,7 +1684,7 @@ impl<'a> Iterator for RowIter<'a> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         let left = match &self.walk {
-            Walk::Held(rows) => rows.len(),
+            Walk::Held { rows, .. } => rows.len(),
             Walk::Indexed { front, back, .. } => back - front,
         };
         (left, Some(left))
@@ -1615,7 +1700,13 @@ impl<'a> Iterator for RowIter<'a> {
 
     fn nth(&mut self, n: usize) -> Option<Row<'a>> {
         match &mut self.walk {
-            Walk::Held(rows) => rows.nth(n).map(Row::held),
+            Walk::Held { rows, front, back } => {
+                let skipped = (n as u64).min(*back - *front);
+                *front += skipped;
+                let frame = rows.nth(n)?;
+                *front += 1;
+                Some(Row::held(frame, *front - 1))
+            }
             Walk::Indexed { front, back, .. } => {
                 *front = front.saturating_add(n).min(*back);
                 self.next()
@@ -1627,7 +1718,11 @@ impl<'a> Iterator for RowIter<'a> {
 impl DoubleEndedIterator for RowIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         match &mut self.walk {
-            Walk::Held(rows) => rows.next_back().map(Row::held),
+            Walk::Held { rows, back, .. } => {
+                let frame = rows.next_back()?;
+                *back -= 1;
+                Some(Row::held(frame, *back))
+            }
             Walk::Indexed {
                 index,
                 first_produced,
@@ -1647,7 +1742,13 @@ impl DoubleEndedIterator for RowIter<'_> {
 
     fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
         match &mut self.walk {
-            Walk::Held(rows) => rows.nth_back(n).map(Row::held),
+            Walk::Held { rows, front, back } => {
+                let skipped = (n as u64).min(*back - *front);
+                *back -= skipped;
+                let frame = rows.nth_back(n)?;
+                *back -= 1;
+                Some(Row::held(frame, *back))
+            }
             Walk::Indexed { front, back, .. } => {
                 *back = back.saturating_sub(n).max(*front);
                 self.next_back()
@@ -1679,7 +1780,14 @@ impl<'a> Rows<'a> {
     pub fn iter(&self) -> RowIter<'a> {
         let list: &'a MessageList = self.messages.list;
         let walk = match &list.rows {
-            Store::Held(log) => Walk::Held(log.iter_from(self.from)),
+            Store::Held(log) => {
+                let first = self.messages.first_produced();
+                Walk::Held {
+                    rows: log.iter_from(self.from),
+                    front: first + self.from.min(log.len()) as u64,
+                    back: first + log.len() as u64,
+                }
+            }
             Store::Indexed(index) => {
                 let len = index.entries.len();
                 Walk::Indexed {
