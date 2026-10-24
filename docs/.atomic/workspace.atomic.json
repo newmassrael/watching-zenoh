@@ -281868,6 +281868,42 @@
         "Read the hosted run of this push per job, with the two new submodules in mind (checkout and the Windows build)."
       ]
     },
+    "Round 3506": {
+      "decision_summary": "The hosted Layer C1cn red of the push that carried the first slice of zenoh-keyexpr is paid by a leg for the crate in the nondefault tests table, not by a skip: the two tests behind its `internal` and `unstable` features are quick and need no network, so they run in front of every push. The cause was mine: the crate was added to the family without the census being run, and the census is a lane that the pre-push hook defers.",
+      "changes_bullets": [
+        "`scripts/lib/nondefault-tests-gate.sh`: a `hook` leg `zenoh-keyexpr` at the named features `internal` and `unstable` with an empty filter, so a test added to the crate under either feature is covered without touching the row; the two features are named one per line because the table refuses `--all-features`."
+      ],
+      "verification_bullets": [
+        "The census restricted to the member by the gate's own shard variables reads `zenoh-keyexpr 2 only-with-features -- 2 run by a leg` with exit 0 (the two tests are `key_expr::tests::chunks_come_from_both_ends` and `key_expr::tests::the_relation_is_ordered_by_how_much_is_shared`, which the all-features and default listings differ by); `--list` names the new leg.",
+        "A whole-tree census on pc2 at this tree exited 1 for another crate, `wz-session-core`, with 68 tests claimed by no leg; that is not this round's and is reported to the sessions that own that crate. It did not examine `zenoh-keyexpr`, whose verdict is the shard run above.",
+        "Not run here: the hosted run of the shard that holds `zenoh-keyexpr`."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Run the census for each new family crate before the push that adds it: `WZ_CENSUS_SHARDS=<members> WZ_CENSUS_SHARD=<index> bash scripts/lib/nondefault-tests-gate.sh --census`, the index being the member's line in `nondefault-features-gate.sh --list-members` minus one; zenoh-macros is next.",
+        "`wz-session-core` has 68 tests claimed by no leg at this tree (census on pc2); its owner is told.",
+        "Read the hosted runs of the pushes of rounds 3500, 3503 and this one per job, Layer E18 first."
+      ],
+      "publishable_decision_summary": "The hosted Layer C1cn red of the push that carried the first slice of zenoh-keyexpr is paid by a leg for the crate in the nondefault tests table, not by a skip: the two tests behind its `internal` and `unstable` features are quick and need no network, so they run in front of every push. The cause was mine: the crate was added to the family without the census being run, and the census is a lane that the pre-push hook defers.",
+      "publishable_changes_bullets": [
+        "`scripts/lib/nondefault-tests-gate.sh`: a `hook` leg `zenoh-keyexpr` at the named features `internal` and `unstable` with an empty filter, so a test added to the crate under either feature is covered without touching the row; the two features are named one per line because the table refuses `--all-features`."
+      ],
+      "publishable_verification_bullets": [
+        "The census restricted to the member by the gate's own shard variables reads `zenoh-keyexpr 2 only-with-features -- 2 run by a leg` with exit 0 (the two tests are `key_expr::tests::chunks_come_from_both_ends` and `key_expr::tests::the_relation_is_ordered_by_how_much_is_shared`, which the all-features and default listings differ by); `--list` names the new leg.",
+        "A whole-tree census on pc2 at this tree exited 1 for another crate, `wz-session-core`, with 68 tests claimed by no leg; that is not this round's and is reported to the sessions that own that crate. It did not examine `zenoh-keyexpr`, whose verdict is the shard run above.",
+        "Not run here: the hosted run of the shard that holds `zenoh-keyexpr`."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Run the census for each new family crate before the push that adds it: `WZ_CENSUS_SHARDS=<members> WZ_CENSUS_SHARD=<index> bash scripts/lib/nondefault-tests-gate.sh --census`, the index being the member's line in `nondefault-features-gate.sh --list-members` minus one; zenoh-macros is next.",
+        "`wz-session-core` has 68 tests claimed by no leg at this tree (census on pc2); its owner is told.",
+        "Read the hosted runs of the pushes of rounds 3500, 3503 and this one per job, Layer E18 first."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
