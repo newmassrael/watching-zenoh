@@ -441,9 +441,20 @@ from. So the order is now:
   ceilings, since no fixture's document shows it. Measured with the pick probe
   at 409,064 rows, cursor at the end: one-row windows at the first, middle and
   last row 159, 148 and 149 ms before, 0.0 to 0.1 ms after, TCP and UDP alike;
-  windows read in order and peak RSS unchanged. Left: (d), for a declaration
-  text with an end-to-end rule, whose windows still walk from where the last
-  one stopped.
+  windows read in order and peak RSS unchanged.
+  Landed (d): the end-to-end ledger keeps, per declaration text, the outcome
+  of every frame it judged by row (list, produced-index, place among the row's
+  judgments) and, per list, a frontier (the first row not judged, and the
+  largest capture-order key judged). A row behind the frontier is read back and
+  moves no counter; a window begins no later than the frontier, so every row
+  past it is judged in order. A walk that begins again keeps the ledger when the
+  capture only grew and every row not judged sorts after the frontier's key;
+  otherwise, and when a slot is judged from two lists, it judges afresh as
+  before. The gate's capture of end-to-end frames whose counters repeat, skip
+  past the profile's gap and go back (plain and under a frame ceiling) holds
+  every window to the document's rows and to its own rows visited, and a ledger
+  that judges again instead of reading back fails it. The cost is what the
+  reference design pays: one kept outcome per judged frame.
 
 ## 7. Open
 
