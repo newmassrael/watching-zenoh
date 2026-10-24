@@ -112,7 +112,17 @@ it behaves as pico behaves in both of pico's threading arms.
   shell's `SessionLinks` over a platform's datagram and stream sockets, written once
   (`wz_runtime_posix::links::PosixLinks` on the host). Until then a program with a heap had no
   links over the host's sockets at all.
-- Next: step 2, the engine port. What the ABI layer calls on the tokio engine is
+- 2026-10-24: step 2 begins by moving what is engine-neutral below both engines, the way
+  R311y617 moved the encoding id table: the VLE codec to `wz_codecs::vle`, the encoding hint
+  conversions and their dialect to `wz_session_core::encoding_hint` (`wz-capi-core` re-exports
+  both), and `PublishOptions`, `PlainPutParams` and `PublishError` to
+  `wz_session_core::publish_options` (`wz-runtime-tokio` re-exports them and keeps the loopback
+  leg, which is its own). The ABI layer now names `Reliability` and `WhatAmI` where they live too.
+- Next: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
+  calls on a session; the tokio engine implements it first, `session_state` returns the selected
+  engine's session, and the modules of capabilities the cooperative engine does not have yet
+  (query, liveliness, scouting, the advanced publisher) build with the tokio engine only.
+- Earlier plan note: step 2, the engine port. What the ABI layer calls on the tokio engine is
   `wz_capi_core::faces::SharedSession` (publish in six forms, key expression declarations,
   liveliness, the face registry) and `drive::SessionState`; the port is the subset the
   single-threaded client calls, and the tokio engine implements it first.
