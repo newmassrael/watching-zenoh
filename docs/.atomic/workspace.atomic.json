@@ -282304,6 +282304,50 @@
         "Open, each with its reason: (1) the hosted E7s jobs of the calibration and of the lateness table: runs are cancelled by later pushes, so read the first run that completes; (2) a face that stops reading against blocking publishers, to see whether the condition-variable wait of wait_for_room costs other faces their keepalives (needs a client that can be stopped and a publisher that blocks, neither of which the demo documents offer today); (3) a windowed lateness and an admission that follows it; (4) the owner's decision whether the lateness, the measured cost and the refusal counters get a wz key in upstream's admin space."
       ]
     },
+    "Round 3516": {
+      "decision_summary": "Open-debt item 924, step 4c, the serial line and the recovered QUIC datagrams (owner: long-term correct, cost not counted). The serial line kept, per decoded message, the decoded frame and a whole copy of the serial frame it came out of, payload included. Its messages are now entries read again from each frame's payload, which the list logs once per frame, and beside each message the line keeps only the frame's envelope (interface and control byte; the packet is the row's anchor). The recovered RFC 9221 datagrams' plaintext exists only in the call that hands it in, so their list logs it and reads its messages again from it, and the byte door hands those bytes back, since the capture's packet holds only ciphertext. A cleartext datagram message is still named as the caller's packet, as the C door's contract says. Left of step 4c: the recovered QUIC streams, WebSocket, TLS plaintext and scouting.",
+      "changes_bullets": [
+        "wz-session-core passive_messages.rs: Messages::unit_bytes, the bytes of the unit a message was read out of, from the list's log or its source",
+        "wz-capture serial.rs: SerialOrigin; lib.rs: the serial list keeps entries logged from each frame's payload and a SerialEnvelope per message, serial_messages yields SerialOrigin, the serial and recovered datagram byte answers read the log (logged_message_bytes); the recovered datagram list logs its plaintext",
+        "redecode_gate.rs: a two-wire serial line of batching frames and a run of batching recovered datagrams in both directions, each against the reading that kept them whole and their bytes against the payloads they were built from",
+        "docs/dissect-row-index.md: step 4c landings (2) and the datagram half of (3)"
+      ],
+      "verification_bullets": [
+        "cargo test wz-capture all features (the redecode gate's eleven among them), wz-session-core (dissect, alloc, reassembly), wz-capi-dissect, wz-capi-replay, wz-replay, wz-analyze all features",
+        "The C door's datagram refusal (the_byte_door_tells_retained_retired_and_no_source_apart, the_joined_buffer_comes_back_for_the_completing_record_only) is unchanged: a first cut that handed cleartext datagram bytes back failed both and was taken back",
+        "clippy -D warnings wz-capture all and no default features, wz-session-core all features; rustfmt; discard_site_lint, accessor_reach_census, analysis_surface_parity; rustdoc adds no warning in wz-capture",
+        "Not measured: no serial or recovered-QUIC capture of the consumer's size exists"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 4c's rest: the recovered QUIC streams (hand the plaintext sink the stream offset of its first byte instead of rewriting rows in place, keep the plaintext per direction, read the rows again from it), then WebSocket, TLS plaintext and scouting; then step 5, the memory gate",
+        "The hosted CI runs holding rounds 3485 to this one: the last completed CI (2ea53d076) was red only on other sessions' items, since fixed; read the first completed run that holds this round and tell the consumer session which pin to take if it is red"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 4c, the serial line and the recovered QUIC datagrams (owner: long-term correct, cost not counted). The serial line kept, per decoded message, the decoded frame and a whole copy of the serial frame it came out of, payload included. Its messages are now entries read again from each frame's payload, which the list logs once per frame, and beside each message the line keeps only the frame's envelope (interface and control byte; the packet is the row's anchor). The recovered RFC 9221 datagrams' plaintext exists only in the call that hands it in, so their list logs it and reads its messages again from it, and the byte door hands those bytes back, since the capture's packet holds only ciphertext. A cleartext datagram message is still named as the caller's packet, as the C door's contract says. Left of step 4c: the recovered QUIC streams, WebSocket, TLS plaintext and scouting.",
+      "publishable_changes_bullets": [
+        "wz-session-core passive_messages.rs: Messages::unit_bytes, the bytes of the unit a message was read out of, from the list's log or its source",
+        "wz-capture serial.rs: SerialOrigin; lib.rs: the serial list keeps entries logged from each frame's payload and a SerialEnvelope per message, serial_messages yields SerialOrigin, the serial and recovered datagram byte answers read the log (logged_message_bytes); the recovered datagram list logs its plaintext",
+        "redecode_gate.rs: a two-wire serial line of batching frames and a run of batching recovered datagrams in both directions, each against the reading that kept them whole and their bytes against the payloads they were built from",
+        "docs/dissect-row-index.md: step 4c landings (2) and the datagram half of (3)"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test wz-capture all features (the redecode gate's eleven among them), wz-session-core (dissect, alloc, reassembly), wz-capi-dissect, wz-capi-replay, wz-replay, wz-analyze all features",
+        "The C door's datagram refusal (the_byte_door_tells_retained_retired_and_no_source_apart, the_joined_buffer_comes_back_for_the_completing_record_only) is unchanged: a first cut that handed cleartext datagram bytes back failed both and was taken back",
+        "clippy -D warnings wz-capture all and no default features, wz-session-core all features; rustfmt; discard_site_lint, accessor_reach_census, analysis_surface_parity; rustdoc adds no warning in wz-capture",
+        "Not measured: no serial or recovered-QUIC capture of the consumer's size exists"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 4c's rest: the recovered QUIC streams (hand the plaintext sink the stream offset of its first byte instead of rewriting rows in place, keep the plaintext per direction, read the rows again from it), then WebSocket, TLS plaintext and scouting; then step 5, the memory gate",
+        "The hosted CI runs holding rounds 3485 to this one: the last completed CI (2ea53d076) was red only on other sessions' items, since fixed; read the first completed run that holds this round and tell the consumer session which pin to take if it is red"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
