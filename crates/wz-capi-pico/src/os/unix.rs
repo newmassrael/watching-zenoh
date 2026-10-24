@@ -151,6 +151,16 @@ pub fn wall_elapsed(time: &WallTime, unit: Unit) -> c_ulong {
     elapsed as c_ulong
 }
 
+#[cfg(not(target_os = "nto"))]
+use libc::strftime;
+
+// QNX: `libc` declares `localtime` for it and not `strftime`; the SDP's `<time.h>` has
+// `size_t strftime(char *, size_t, const char *, const struct tm *)`, which is this.
+#[cfg(target_os = "nto")]
+extern "C" {
+    fn strftime(s: *mut c_char, max: usize, format: *const c_char, tm: *const libc::tm) -> usize;
+}
+
 /// Render `time` as LOCAL time in `buf` as `%Y-%m-%dT%H:%M:%SZ`, and say whether it
 /// fit.
 ///
@@ -172,7 +182,7 @@ pub unsafe fn wall_render_local(time: &WallTime, buf: *mut c_char, buflen: usize
     let fmt = c"%Y-%m-%dT%H:%M:%SZ";
     // `strftime` returns 0 when the result did not fit and leaves the buffer's
     // contents unspecified.
-    libc::strftime(buf, buflen, fmt.as_ptr(), tm) != 0
+    strftime(buf, buflen, fmt.as_ptr(), tm) != 0
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +199,7 @@ pub unsafe fn wall_render_local(time: &WallTime, buf: *mut c_char, buflen: usize
 ///
 /// # Safety
 /// `buf` must point at `len` writable bytes.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "nto")))]
 pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
     let mut filled = 0usize;
     while filled < len {
@@ -204,6 +214,43 @@ pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
         // A negative return is EINTR / EAGAIN; upstream spins, and so does this,
         // because there is no error channel on the export.
     }
+}
+
+/// QNX: the `/dev/urandom` device, read until `len` bytes are in.
+///
+/// The SDP's headers declare neither `getrandom` nor `getentropy`, and pico has no QNX arm to copy.
+/// `/dev/urandom` is the source the `getrandom` crate uses for `*-nto-qnx*` (its table says so), and
+/// it is a service the board runs, not something a header guarantees, so a board without it has no
+/// entropy at all. The export has no error channel, and upstream's own loop would spin forever on a
+/// failure; a source of cryptographic randomness that cannot be read is not something to spin on or
+/// to continue past, so the process aborts. An interrupted read (`EINTR`) is retried and a short read
+/// advances the cursor, which is the contract of the `getrandom` arm above.
+///
+/// # Safety
+/// `buf` must point at `len` writable bytes.
+#[cfg(target_os = "nto")]
+pub unsafe fn random_fill(buf: *mut c_void, len: usize) {
+    let fd = libc::open(c"/dev/urandom".as_ptr(), libc::O_RDONLY);
+    if fd < 0 {
+        std::process::abort();
+    }
+    let mut filled = 0usize;
+    while filled < len {
+        let got = libc::read(
+            fd,
+            buf.cast::<u8>().add(filled).cast::<c_void>(),
+            len - filled,
+        );
+        if got > 0 {
+            filled += got as usize;
+        } else if got == 0
+            || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+        {
+            libc::close(fd);
+            std::process::abort();
+        }
+    }
+    libc::close(fd);
 }
 
 /// macOS: `arc4random_buf`, as pico's own macOS arm is (`system.c:95-96`).
@@ -235,7 +282,7 @@ mod threads {
     pub type RawMutex = libc::pthread_mutex_t;
     /// pico `_z_condvar_t`: `pthread_cond_t`, 48 B.
     pub type RawCondvar = libc::pthread_cond_t;
-    /// pico `_z_task_t`: `pthread_t`, 8 B.
+    /// pico `_z_task_t`: `pthread_t`, 8 B (4 B on QNX, where it is an `int`).
     pub type RawTask = libc::pthread_t;
     /// pico `z_task_attr_t`: `pthread_attr_t`. 56 B on x86_64 glibc and on Android's C library; 64 B
     /// on aarch64 glibc (measured with a Yocto kirkstone SDK's glibc 2.35 headers) and on macOS,
@@ -258,15 +305,37 @@ mod threads {
     const TASK_ATTR_BYTES: usize = 64;
     #[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"))]
     const TASK_ATTR_BYTES: usize = 64;
+    // QNX 7.1, aarch64le, measured with the SDP's compiler on both network stacks (the pthread
+    // types do not depend on the stack): `pthread_t` 4 B (align 4), `pthread_attr_t` 104 B (align
+    // 8), `pthread_mutex_t` 8 B (align 4), `pthread_cond_t` 8 B (align 4).
+    #[cfg(target_os = "nto")]
+    const TASK_ATTR_BYTES: usize = 104;
     #[cfg(not(any(
         target_os = "macos",
+        target_os = "nto",
         all(target_os = "linux", target_env = "gnu", target_arch = "aarch64")
     )))]
     const TASK_ATTR_BYTES: usize = 56;
 
+    /// What `sizeof(pthread_t)` is on this host: a pointer-sized value everywhere measured but QNX.
+    #[cfg(target_os = "nto")]
+    const TASK_BYTES: usize = 4;
+    #[cfg(not(target_os = "nto"))]
+    const TASK_BYTES: usize = 8;
+
     const _: () = {
-        assert!(std::mem::size_of::<RawTask>() == 8);
+        assert!(std::mem::size_of::<RawTask>() == TASK_BYTES);
         assert!(std::mem::size_of::<TaskAttr>() == TASK_ATTR_BYTES);
+    };
+
+    // The mutex and the condvar are pinned at build time where a size was measured on the SDK's
+    // own headers and not only on a host (the test below pins the others on the machine that runs
+    // it): a QNX build whose `libc` layout drifts from the SDP's fails here, not in a C program
+    // that stack-allocates a smaller object.
+    #[cfg(target_os = "nto")]
+    const _: () = {
+        assert!(std::mem::size_of::<RawMutex>() == 8);
+        assert!(std::mem::size_of::<RawCondvar>() == 8);
     };
 
     /// pico's `_Z_CHECK_SYS_ERR`: 0 is `Z_OK`, anything else is the system-error code.
@@ -572,9 +641,17 @@ mod tests {
     fn owned_sync_types_match_picos_measured_sizes() {
         // Linux: measured. macOS: `__sig` plus `__opaque[56]` for the mutex and
         // `__opaque[40]` for the condvar, read off Darwin's layout.
-        let mutex_bytes = if cfg!(target_os = "macos") { 64 } else { 40 };
+        // QNX: measured with the SDP's compiler, 8 B each.
+        let mutex_bytes = if cfg!(target_os = "macos") {
+            64
+        } else if cfg!(target_os = "nto") {
+            8
+        } else {
+            40
+        };
+        let condvar_bytes = if cfg!(target_os = "nto") { 8 } else { 48 };
         assert_eq!(std::mem::size_of::<RawMutex>(), mutex_bytes);
-        assert_eq!(std::mem::size_of::<RawCondvar>(), 48);
+        assert_eq!(std::mem::size_of::<RawCondvar>(), condvar_bytes);
     }
 
     // The constants above are a claim read off a header; this is the measurement.
