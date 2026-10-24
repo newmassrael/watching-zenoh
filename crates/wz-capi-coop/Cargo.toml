@@ -89,6 +89,23 @@ wz-session-mcu = { path = "../wz-session-mcu", default-features = false, feature
     "reassembly",
 ] }
 
+[features]
+# The answering end of a query: a queryable, its replies (with their source info, encoding and
+# attachment, and the error reply) and a query a C program keeps past its callback. What
+# `wz-capi-core`'s `queryable` names on its runtime, named on session-core.
+queryable = [
+    "wz-session-core/query-queryable",
+    "wz-session-core/reply-source-info",
+    "wz-session-core/query-reply-err",
+    "wz-session-core/query-source-info",
+    "wz-session-core/query-attachment",
+    "wz-session-core/query-selector-parameters",
+    "wz-session-core/query-value",
+    "wz-session-core/codec-request",
+    "wz-session-core/codec-response",
+    "wz-session-core/codec-response-final",
+]
+
 [dev-dependencies]
 # The tests run the engine against a router stand-in over the host's UDP sockets: a session that
 # accepts, which the engine itself never is.

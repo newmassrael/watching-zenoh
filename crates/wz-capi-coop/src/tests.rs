@@ -63,6 +63,9 @@ enum Command {
     Push(&'static str, &'static [u8]),
     /// Close the session and stop, as a router that goes away does.
     Close,
+    /// Ask a query of request id `.0` on the key.
+    #[cfg(feature = "queryable")]
+    Query(u64, &'static str),
 }
 
 /// What reached the router.
@@ -73,6 +76,10 @@ struct Seen {
     pushes: usize,
     /// What the router's catch-all subscriber received, when it holds one.
     samples: Vec<(String, Vec<u8>)>,
+    /// The answers to the router's queries, in the order they arrived: `reply` for a Response,
+    /// `final` for a ResponseFinal.
+    #[cfg(feature = "queryable")]
+    answers: Vec<&'static str>,
 }
 
 /// Whether the router holds a catch-all subscriber. It is a subscriber like any other: the router
@@ -198,6 +205,10 @@ fn run_router(
                         NetworkMessage::Declare(_) => seen.declares += 1,
                         NetworkMessage::Interest(_) => seen.interests += 1,
                         NetworkMessage::Push(_) => seen.pushes += 1,
+                        #[cfg(feature = "queryable")]
+                        NetworkMessage::Response(_) => seen.answers.push("reply"),
+                        #[cfg(feature = "queryable")]
+                        NetworkMessage::ResponseFinal(_) => seen.answers.push("final"),
                         _ => {}
                     }
                 }
@@ -218,6 +229,10 @@ fn run_router(
                 actions.send_close_with_reason(CloseReason::Generic);
                 local.run_until_idle();
                 return;
+            }
+            #[cfg(feature = "queryable")]
+            Ok(Command::Query(rid, key)) => {
+                let _ = actions.send_request_query(rid, 0, Some(key));
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => return,
@@ -592,3 +607,6 @@ fn a_session_that_redials_none_ends_with_its_link() {
     });
     assert!(SessionDrive::read(&*engine, false).is_err());
 }
+
+#[cfg(feature = "queryable")]
+mod queryable;

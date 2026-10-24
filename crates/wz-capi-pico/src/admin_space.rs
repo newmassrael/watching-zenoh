@@ -63,9 +63,9 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
-use wz_capi_core::faces::{FaceSnapshot, QueryableSink, SharedSession};
-use wz_capi_core::runtime::session::TokioQueryHolder;
+use wz_capi_core::faces::{FaceSnapshot, SharedSession};
 use wz_capi_core::runtime::session_glue::LinkKind;
+use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
 use wz_session_core::keyexpr_match::keyexpr_intersects_text;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::sample::EncodingHint;
@@ -150,11 +150,11 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
             session: Arc::downgrade(&state.shared),
             identity,
         });
-        let sink: QueryableSink = Arc::new(move |_face: &TokioQueryHolder| {
+        let sink: QueryableSink = Arc::new(move |_face: Arc<dyn QueryHolder>| {
             let answerer = Arc::clone(&answerer);
             Box::new(move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
                 answerer.answer(query, out)
-            }) as Box<_>
+            }) as QueryCallback
         });
         match PlainQueryable::declare(&PicoSession::of(handle), &key, None, false, sink) {
             Ok(queryable) => {

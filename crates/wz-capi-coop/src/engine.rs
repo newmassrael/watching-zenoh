@@ -66,8 +66,20 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{BoxedSink, SampleView};
 use wz_session_core::WhatAmI;
+#[cfg(not(feature = "queryable"))]
 use wz_session_mcu::app_layer::dispatch_to;
 use wz_session_mcu::dial::{parse_locator, McuActions};
+#[cfg(feature = "queryable")]
+use {
+    query::{CoopHolder, QueryPlane},
+    wz_capi_port::{QblId, QueryCallback, QueryableSink},
+    wz_session_core::query::QueryableId,
+    wz_session_core::query_sink::BoxedQuerySink,
+    wz_session_core::reply_stage::ReplyStage,
+};
+
+#[cfg(feature = "queryable")]
+mod query;
 
 /// How a session is opened: what the ABI's config says, which the engine turns into the
 /// session's parameters.
@@ -145,6 +157,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// [`Core`] so a delivery takes no session state, and a callback that undeclares another
     /// entity finds its target gone rather than the lock held.
     targets: Mutex<Vec<(u64, Target)>>,
+    /// The queries waiting for their callbacks and the Finals held for them (`query`).
+    #[cfg(feature = "queryable")]
+    plane: Arc<QueryPlane>,
     zid: [u8; 16],
     closed: AtomicBool,
     next_entity: AtomicU64,
@@ -194,10 +209,16 @@ impl Drop for Delivering {
 /// from the read task and one from the program's own `zp_read` never overlap.
 type SubscriberCallback = Arc<Mutex<Box<dyn FnMut(&dyn SampleView) + Send + 'static>>>;
 
+/// A queryable's callback, locked while it runs as a subscriber's is.
+#[cfg(feature = "queryable")]
+type QueryableCallback = Arc<Mutex<QueryCallback>>;
+
 /// Where a delivery goes.
 enum Target {
     Subscriber(SubscriberCallback),
     Matching(MatchingSink),
+    #[cfg(feature = "queryable")]
+    Queryable(QueryableCallback),
 }
 
 /// The read task: a thread that steps the session until it is told to stop.
@@ -230,6 +251,10 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     interests: Vec<InterestHold>,
     matches: Vec<MatchEntry>,
     next_match: MatchId,
+    #[cfg(feature = "queryable")]
+    queryables: Vec<QblEntry>,
+    #[cfg(feature = "queryable")]
+    plane: Arc<QueryPlane>,
 }
 
 /// The session's link: up, being dialled, or waiting to be.
@@ -253,6 +278,9 @@ struct Wire<C: ClockSource + 'static> {
     task: CoopLocalJoinHandle<DriverOutcome>,
     link: Rc<dyn SessionDatagramLink>,
     readiness: Option<Arc<dyn LinkReadiness>>,
+    /// The link's generation, which the queries it carries are answered under (`query`).
+    #[cfg(feature = "queryable")]
+    generation: u64,
 }
 
 /// What a read waits for before it steps the session, with nothing of the session held.
@@ -297,6 +325,44 @@ impl SubEntry {
                 self.wire.suffix.as_deref(),
             )
         };
+    }
+}
+
+/// One queryable: its registration with the observer and what its declaration says on the wire.
+#[cfg(feature = "queryable")]
+struct QblEntry {
+    id: QblId,
+    registration: QueryableId,
+    retraction: Option<RetractionKey>,
+    keyexpr: String,
+    wire: WireKey,
+    complete: bool,
+}
+
+#[cfg(feature = "queryable")]
+impl QblEntry {
+    /// Declare this queryable over `actions`.
+    fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
+        let _ = if self.wire.is_literal() {
+            actions.send_declare_queryable(self.id, 0, Some(&self.keyexpr), self.complete)
+        } else {
+            actions.send_declare_queryable(
+                self.id,
+                self.wire.mapping_id,
+                self.wire.suffix.as_deref(),
+                self.complete,
+            )
+        };
+    }
+
+    /// Retract this queryable over `actions`, naming its key when its declaration asked to.
+    fn retract<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
+        match &self.retraction {
+            Some(key) => {
+                actions.send_undeclare_queryable_naming(self.id, key.mapping_id, &key.suffix)
+            }
+            None => actions.send_undeclare_queryable(self.id),
+        }
     }
 }
 
@@ -376,12 +442,45 @@ fn leg(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
     }
 }
 
+/// The `on_event` of a link whose session answers queries outside its lock: the observer's
+/// dispatch, with the `ResponseFinal`s it owes held back for the queries a callback is still to
+/// answer (`query`). Everything else the dispatch staged (the replies of a queryable that answers
+/// in place, declare replies, get prunes) goes out at once, as `dispatch_to` sends it.
+#[cfg(feature = "queryable")]
+fn dispatch_holding_finals<C: ClockSource + 'static>(
+    observer: Rc<RefCell<ApplicationLayerObserver>>,
+    actions: Rc<McuActions<C>>,
+    plane: Arc<QueryPlane>,
+    generation: u64,
+) -> impl FnMut(wz_session_core::driver_loop::IterationEvent<'_>) + 'static {
+    move |event| {
+        let mut observer = observer.borrow_mut();
+        observer.dispatch_event(event);
+        observer.flush_pending_replies(&*actions);
+        for (rid, qos) in observer.take_pending_final_rids() {
+            if lock(&plane.holds).owe(generation, rid, qos) {
+                actions.send_response_final(rid, qos);
+            }
+        }
+    }
+}
+
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// The link's actions while it is up, which is what the session sends through. `None` while
     /// it is dialled or waits to be: what is declared then is declared when it comes up.
     fn up(&self) -> Option<&Rc<McuActions<C>>> {
         match &self.link {
             Link::Up(wire) => Some(&wire.actions),
+            _ => None,
+        }
+    }
+
+    /// The link's actions while it is up and is the link of `generation`: where an answer to a
+    /// query that came in on that link goes.
+    #[cfg(feature = "queryable")]
+    fn up_as(&self, generation: u64) -> Option<&Rc<McuActions<C>>> {
+        match &self.link {
+            Link::Up(wire) if wire.generation == generation => Some(&wire.actions),
             _ => None,
         }
     }
@@ -424,6 +523,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let actions = McuActions::<C>::new_generic(sink, params, CoopTime::new(&self.runtime));
             let readiness = pump.readiness().map(Arc::from);
             let link = Rc::new(pump);
+            #[cfg(feature = "queryable")]
+            let generation = self.plane.generation.fetch_add(1, Ordering::AcqRel) + 1;
+            #[cfg(feature = "queryable")]
+            let dispatch = dispatch_holding_finals(
+                self.observer.clone(),
+                actions.clone(),
+                self.plane.clone(),
+                generation,
+            );
+            #[cfg(not(feature = "queryable"))]
+            let dispatch = dispatch_to(self.observer.clone(), actions.clone());
             let task = spawn_session(
                 &self.local,
                 link.clone(),
@@ -434,7 +544,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     role: SessionRole::Initiator,
                     max_iters: None,
                 },
-                dispatch_to(self.observer.clone(), actions.clone()),
+                dispatch,
             );
             // The task's first step sends the InitSyn now, not after the wait of the next read.
             self.local.run_until_idle();
@@ -448,6 +558,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     task,
                     link,
                     readiness,
+                    #[cfg(feature = "queryable")]
+                    generation,
                 },
                 next: at + 1,
                 deadline_us,
@@ -558,6 +670,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         for hold in &self.interests {
             hold.send(actions);
         }
+        #[cfg(feature = "queryable")]
+        for entry in &self.queryables {
+            entry.declare(actions);
+        }
     }
 
     /// What a read waits for before it steps the session: the link's next input, for at most
@@ -635,7 +751,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             interests: Vec::new(),
             matches: Vec::new(),
             next_match: 1,
+            #[cfg(feature = "queryable")]
+            queryables: Vec::new(),
+            #[cfg(feature = "queryable")]
+            plane: Arc::new(QueryPlane::default()),
         };
+        #[cfg(feature = "queryable")]
+        let plane = core.plane.clone();
         core.link = core.dial_from(0, OpenError::NoEndpoint)?;
         while !matches!(core.link, Link::Up(_)) {
             core.idle_wait().wait();
@@ -647,6 +769,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             samples: Arc::new(Mutex::new(VecDeque::new())),
             matching: Arc::new(Mutex::new(VecDeque::new())),
             targets: Mutex::new(Vec::new()),
+            #[cfg(feature = "queryable")]
+            plane,
             zid,
             closed: AtomicBool::new(false),
             next_entity: AtomicU64::new(1),
@@ -708,6 +832,53 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 });
             if let Some(sink) = sink {
                 sink(matching);
+            }
+        }
+        #[cfg(feature = "queryable")]
+        loop {
+            let next = lock(&self.plane.queries).pop_front();
+            let Some((id, query, generation)) = next else {
+                break;
+            };
+            let callback = lock(&self.targets)
+                .iter()
+                .find_map(|(t, target)| match target {
+                    Target::Queryable(cb) if *t == id => Some(cb.clone()),
+                    _ => None,
+                });
+            let mut replies = ReplyStage::new();
+            if let Some(callback) = callback {
+                let _answering =
+                    query::Answering::enter(self as *const Self as usize, generation, query.rid());
+                let mut responder = query.responder(&mut replies);
+                (lock(&callback))(&query, &mut responder);
+            }
+            // The callback's replies go out, then its hold on the Final is let go; a queryable
+            // undeclared before its query was delivered lets go of the hold all the same.
+            self.answer(generation, query.rid(), replies, true);
+        }
+    }
+
+    /// Send `replies` to the query `rid` on the link of `generation` and, with `release`, let go
+    /// of one hold on its Final, sending the Final when it was owed and this was the last hold.
+    /// Nothing is sent on a link that is no longer the session's.
+    #[cfg(feature = "queryable")]
+    fn answer(&self, generation: u64, rid: u64, replies: ReplyStage, release: bool) {
+        let Some(core) = self.live() else {
+            return;
+        };
+        let actions = core.0.up_as(generation);
+        if let Some(actions) = actions {
+            for reply in replies {
+                if let Ok(response) = reply.into_response() {
+                    actions.send_response(response);
+                }
+            }
+        }
+        if release {
+            let due = lock(&self.plane.holds).release(generation, rid);
+            if let (Some(qos), Some(actions)) = (due, actions) {
+                actions.send_response_final(rid, qos);
             }
         }
     }
@@ -1204,6 +1375,71 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .map_or(0, |actions| usize::from(actions.batch_stop().is_ok()))
         })
     }
+
+    #[cfg(feature = "queryable")]
+    fn declare_queryable_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        complete: bool,
+        allowed_origin: Locality,
+        retraction: Option<RetractionKey>,
+        sink: QueryableSink,
+    ) -> Option<QblId> {
+        let id = self.next_entity_id();
+        let mut core = self.live()?;
+        let core = &mut core.0;
+        // The observer's queryable only copies a query out and holds its Final; the callback
+        // `sink` mints runs when the deliveries are handed out (`query`).
+        let plane = self.plane.clone();
+        let registration = core
+            .observer
+            .borrow_mut()
+            .queryables
+            .register_sink(
+                &keyexpr,
+                allowed_origin,
+                complete,
+                BoxedQuerySink::new(move |query, _in_place| plane.arrive(id, query)),
+            )
+            .ok()?;
+        let holder = Arc::new(CoopHolder {
+            engine: self.this.clone(),
+        });
+        lock(&self.targets).push((id, Target::Queryable(Arc::new(Mutex::new(sink(holder))))));
+        let entry = QblEntry {
+            id,
+            registration,
+            retraction,
+            keyexpr,
+            wire,
+            complete,
+        };
+        if let Some(actions) = core.up() {
+            entry.declare(actions);
+        }
+        core.queryables.push(entry);
+        Some(id)
+    }
+
+    #[cfg(feature = "queryable")]
+    fn undeclare_queryable(&self, id: QblId) {
+        let entry = self.live().and_then(|mut core| {
+            let core = &mut core.0;
+            let at = core.queryables.iter().position(|q| q.id == id)?;
+            let entry = core.queryables.remove(at);
+            core.observer
+                .borrow_mut()
+                .queryables
+                .unregister(entry.registration);
+            if let Some(actions) = core.up() {
+                entry.retract(actions);
+            }
+            Some(entry)
+        });
+        let callback = self.take_target(id);
+        drop((entry, callback));
+    }
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
@@ -1236,11 +1472,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         core.end_link();
         let subscribers: Vec<SubId> = core.subscribers.drain(..).map(|s| s.id).collect();
         let matches: Vec<MatchId> = core.matches.drain(..).map(|m| m.id).collect();
+        #[cfg(feature = "queryable")]
+        let queryables: Vec<QblId> = core.queryables.drain(..).map(|q| q.id).collect();
+        #[cfg(not(feature = "queryable"))]
+        let queryables: Vec<u64> = Vec::new();
         drop(guard);
-        // The callbacks' C contexts are dropped with no lock held.
+        // The queries no callback will now answer, and the callbacks' C contexts, are dropped
+        // with no lock held.
+        #[cfg(feature = "queryable")]
+        drop(std::mem::take(&mut *lock(&self.plane.queries)));
         let taken: Vec<_> = subscribers
             .into_iter()
             .chain(matches)
+            .chain(queryables)
             .filter_map(|id| self.take_target(id))
             .collect();
         drop(taken);

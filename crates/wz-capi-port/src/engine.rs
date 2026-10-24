@@ -10,17 +10,18 @@
 //! implements the trait; an ABI holds `Arc<dyn SessionEngine>` and reaches the engine through
 //! nothing else (`docs/capi-pico-on-coop-engine.md`, decision D1).
 //!
-//! A capability the client does not have (queries, liveliness, scouting, the connectivity and
-//! admin planes, the advanced publisher) is not here yet: an ABI module that needs one still
-//! names its engine, and joins this trait when a second engine implements it.
+//! The queryable joined when the cooperative engine answered queries; a capability no second
+//! engine has yet (the requesting end of a query, liveliness, scouting, the connectivity and admin
+//! planes, the advanced publisher) is not here: an ABI module that needs one still names its
+//! engine, and joins this trait when a second engine implements it.
 
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 
 use crate::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, SubId, SubscriberSink,
-    WireKey,
+    FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, QblId, QueryableSink,
+    SubId, SubscriberSink, WireKey,
 };
 
 /// The operations a C ABI's client surface makes on one session, whatever engine runs it.
@@ -140,4 +141,28 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// Close the batch windows, sending what they hold (zenoh-pico `zp_batch_stop`): how many
     /// closed.
     fn batch_stop_all(&self) -> usize;
+
+    /// Declare a queryable on `keyexpr`, announced as `wire` (`complete` as its declaration says),
+    /// answering the queries `allowed_origin` admits through callbacks `sink` mints. `retraction`
+    /// is the key its undeclaration names beside its id, when the declaring ABI's reference
+    /// library names one. `None` from an engine with no queryable in this build, which is the
+    /// provided answer.
+    fn declare_queryable_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        complete: bool,
+        allowed_origin: Locality,
+        retraction: Option<RetractionKey>,
+        sink: QueryableSink,
+    ) -> Option<QblId> {
+        let _ = (keyexpr, wire, complete, allowed_origin, retraction, sink);
+        None
+    }
+
+    /// Retract queryable `id`. Retracting one already retracted, or one never declared, does
+    /// nothing.
+    fn undeclare_queryable(&self, id: QblId) {
+        let _ = id;
+    }
 }

@@ -180,7 +180,7 @@ pub trait SessionDatagramLink {
 
     /// Whether the link holds input it has already taken from its stack: a whole batch read
     /// together with the one before it, a datagram read while the loop waited. The next step
-    /// reads it, and a wait on the stack would not see it ([`Self::readiness`]).
+    /// reads it, and a wait on the stack would not see it (`readiness`, the heap profile's).
     fn holds_input(&self) -> bool {
         false
     }

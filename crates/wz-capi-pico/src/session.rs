@@ -307,8 +307,8 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
 }
 
 /// The handle and the tokio engine's session behind a loaned session together, for a module that
-/// declares through the port and reaches the tokio engine for the rest (a queryable's key goes
-/// through the port, the queryable itself through the face registry).
+/// declares through the port and reaches the tokio engine for the rest (a liveliness token's key
+/// goes through the port, the token itself through the face registry).
 ///
 /// # Safety
 /// As [`session_handle`].
@@ -317,8 +317,7 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
     feature = "advanced",
     feature = "connectivity",
     feature = "liveliness",
-    feature = "query",
-    feature = "queryable"
+    feature = "query"
 ))]
 pub(crate) unsafe fn tokio_session<'a>(
     zs: *const z_loaned_session_t,

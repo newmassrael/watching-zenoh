@@ -314,6 +314,11 @@ transport-link-unixpipe,transport-link-ws|"
     # `reth/` locator of its MAC. `raweth-transport` is off by default, so that test was
     # compiled by no leg. The filter is the module path, so a test added there is covered.
     "wz-capi-core|hook|raweth-transport|faces::multicast::"
+    # The cooperative engine's queryable: a router stand-in on its own thread asks, the
+    # engine's queryable answers outside the session's lock, and a kept query holds its Final.
+    # Its tests are compiled only with `queryable`. MEASURED before adding: 9 passed (its
+    # 7 default tests and the 2 the feature reaches), 4 s.
+    "wz-capi-coop|hook|queryable|"
     # Open-debt item 913 -- the in-memory group every group test of the workspace runs over
     # (`multicast_bus`) holds a member's place while a send half of its link lives, as a socket
     # does, which the departure test of the group face depends on. The module exists only with

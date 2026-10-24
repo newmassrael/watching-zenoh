@@ -215,7 +215,28 @@ it behaves as pico behaves in both of pico's threading arms.
   reads or fewer in 600 ms (258 with the loop's wait), its read task wakes for a push in under
   60 ms, and a session waiting to dial makes 8 or fewer. pico-client-coop: 888,223 bytes, 2.20
   times the same pico.
-- Next: the capabilities in section 6, one step each.
+- 2026-10-25: queries, step Q1: the answering end on both engines. The queryable joins the port:
+  `declare_queryable_on_wire` / `undeclare_queryable` on `SessionEngine` (an engine without one
+  in its build answers `None`), and the vocabulary a queryable's callbacks are minted with:
+  `QueryHolder` (what the face's queries are held through, and whether its session is closed)
+  and `HeldQuery` (a query kept past its callback, answering on its own route, its Final owed
+  until it is dropped). The tokio engine translates them to its face sessions and held queries;
+  pico's `query.rs`, the admin space and the advanced cache declare through the port, and pico's
+  `queryable` forwards to whichever engine the build has. On the cooperative engine
+  (`wz-capi-coop`'s `queryable`) every query is held: a C callback never runs under the
+  session's lock (D8) and the observer calls a queryable inside its dispatch, so the engine's
+  queryable only copies the query out and holds its Final; the callback runs when the deliveries
+  are handed out, its replies go out on the query's link, then its hold is let go, and the
+  dispatch's Final waits for the last hold. Each link has a generation, so an answer to a query
+  from a lost link reaches no new router. Tests: the engine against a router stand-in (a reply
+  and then the Final, from a callback that steps the session from inside itself; a kept query
+  whose Final waits for its drop), and pico's `client_only_dials_a_listener` with the full
+  build's listener asking (`get <key>` on its input, no consolidation): a reply at once, a late
+  reply from the program's thread, and the end only when the copy is dropped, on the tokio
+  client and on the cooperative one in both arms. pico-client-coop 888,143 bytes (it has no
+  queryable).
+- Next: queries Q2, the requesting end (`z_get`, the querier) on the cooperative engine; then the
+  rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
   engine's session, and the modules of capabilities the cooperative engine does not have yet
@@ -227,6 +248,9 @@ it behaves as pico behaves in both of pico's threading arms.
 
 ## 6. Open
 
+- The requesting end of a query (`z_get`, the querier) and liveliness on the cooperative engine.
+- `client_only_dials_a_listener` runs in no CI lane: it needs the full build's example and a
+  client build, two invocations, and has been run by hand on each engine.
 - The listening role. pico's `z_open(listen)` holds several peers in one
   session; the cooperative session host holds sessions in slots, and whether
   one C session maps to several slots or to one multi-face session is a design

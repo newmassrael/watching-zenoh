@@ -22,9 +22,12 @@
 //! session, which an ABI reaches through `Arc<dyn SessionEngine>` and nothing else; and
 //! [`SessionDrive`], the session as a C handle holds it (its close, and how it is driven).
 //!
-//! What stays with an engine is everything that names its sessions: a callback factory that
-//! receives a face's session (the queryable's), the liveliness sample of the tokio runtime, and
-//! the registry itself.
+//! A queryable's callbacks are minted with what the face's queries are held through
+//! ([`QueryHolder`]), so a query a C program keeps past its handler ([`HeldQuery`]) answers on its
+//! own route whatever engine carried it.
+//!
+//! What stays with an engine is everything that names its sessions: the liveliness sample of the
+//! tokio runtime, and the registry itself.
 //!
 //! ## Why a factory, not a callback
 //!
@@ -40,8 +43,10 @@ use wz_session_core::sink::SampleView;
 
 mod drive;
 mod engine;
+mod query;
 pub use drive::{CalledFromReadTask, SessionClosed, SessionDrive};
 pub use engine::SessionEngine;
+pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink};
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries. It keys whatever an
 /// engine holds for the one C subscription (the per-face subscribers it spawned, on an engine

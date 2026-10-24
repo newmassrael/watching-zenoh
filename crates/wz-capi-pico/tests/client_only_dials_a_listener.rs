@@ -233,3 +233,155 @@ fn a_client_only_build_publishes_to_a_listener_and_hears_from_it() {
         );
     }
 }
+
+/// The answering end of a query in the build that cannot listen: the listener asks, the client's
+/// queryable answers at once and keeps the query, answers again later from the program's own
+/// thread, and the query ends only when the program lets go of the copy it kept. The CONTROL is
+/// the order the listener prints: the late reply before the end, and no end while the copy is kept.
+#[cfg(feature = "queryable")]
+mod answering {
+    use super::*;
+    use wz_capi_pico::{
+        z_closure_query, z_closure_query_move, z_declare_queryable, z_loaned_query_t,
+        z_owned_query_t, z_owned_queryable_t, z_query_clone, z_query_drop, z_query_keyexpr,
+        z_query_loan, z_query_move, z_query_reply, z_queryable_move, z_undeclare_queryable,
+    };
+
+    impl Listener {
+        /// Have the listener ask a query on `key`; it prints `reply <payload>` and `done <key>`.
+        fn ask(&mut self, key: &str) {
+            use std::io::Write;
+            let stdin = self.child.stdin.as_mut().expect("a piped stdin");
+            writeln!(stdin, "get {key}").expect("the listener reads its input");
+            stdin.flush().expect("the listener reads its input");
+        }
+    }
+
+    /// The copy of the query the callback kept, for the test to answer and drop later.
+    struct Kept(Mutex<Option<z_owned_query_t>>);
+
+    // SAFETY: the kept query is an owned handle this crate's ABI hands to any thread, as pico's
+    // `z_query_take_from_loaned` does; it is reached through the mutex alone.
+    unsafe impl Send for Kept {}
+    unsafe impl Sync for Kept {}
+
+    unsafe fn reply(query: *const z_loaned_query_t, payload: &CStr) {
+        let mut bytes = std::mem::zeroed();
+        assert_eq!(z_bytes_copy_from_str(&mut bytes, payload.as_ptr()), Z_OK);
+        assert_eq!(
+            z_query_reply(
+                query,
+                z_query_keyexpr(query),
+                z_bytes_move(&mut bytes),
+                std::ptr::null()
+            ),
+            Z_OK
+        );
+    }
+
+    unsafe extern "C" fn on_query(query: *const z_loaned_query_t, ctx: *mut c_void) {
+        let kept = &*(ctx as *const Kept);
+        reply(query, c"now");
+        let mut copy: z_owned_query_t = std::mem::zeroed();
+        assert_eq!(z_query_clone(&mut copy, query), Z_OK);
+        *kept.0.lock().unwrap() = Some(copy);
+    }
+
+    unsafe extern "C" fn on_query_drop(ctx: *mut c_void) {
+        drop(Arc::from_raw(ctx as *const Kept));
+    }
+
+    /// Step the session for `span`, in the single-threaded arm; the read task steps it otherwise.
+    unsafe fn step_for(session: &z_owned_session_t, span: Duration) {
+        #[cfg(feature = "multi-thread")]
+        let _ = session;
+        let end = Instant::now() + span;
+        while Instant::now() < end {
+            #[cfg(not(feature = "multi-thread"))]
+            assert_eq!(zp_read(z_session_loan(session), std::ptr::null()), Z_OK);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_client_only_build_answers_a_listeners_query_and_ends_it_when_let_go() {
+        let port = free_port();
+        let mut listener = Listener::start(port);
+        // SAFETY: a fresh config, session and queryable, all released before the function returns.
+        unsafe {
+            let mut cfg: z_owned_config_t = std::mem::zeroed();
+            assert_eq!(z_config_default(&mut cfg), Z_OK);
+            let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+            assert_eq!(
+                zp_config_insert(
+                    z_config_loan_mut(&mut cfg),
+                    Z_CONFIG_CONNECT_KEY,
+                    endpoint.as_ptr()
+                ),
+                Z_OK
+            );
+            let mut session: z_owned_session_t = std::mem::zeroed();
+            assert_eq!(
+                z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
+                Z_OK
+            );
+
+            let kept = Arc::new(Kept(Mutex::new(None)));
+            let mut closure = std::mem::zeroed();
+            assert_eq!(
+                z_closure_query(
+                    &mut closure,
+                    Some(on_query),
+                    Some(on_query_drop),
+                    Arc::into_raw(kept.clone()) as *mut c_void
+                ),
+                Z_OK
+            );
+            let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut ke, c"demo/q/**".as_ptr()),
+                Z_OK
+            );
+            let mut queryable: z_owned_queryable_t = std::mem::zeroed();
+            assert_eq!(
+                z_declare_queryable(
+                    z_session_loan(&session),
+                    &mut queryable,
+                    z_view_keyexpr_loan(&ke),
+                    z_closure_query_move(&mut closure),
+                    std::ptr::null(),
+                ),
+                Z_OK
+            );
+            // The declaration reaches the listener before it asks.
+            step_for(&session, Duration::from_millis(300));
+            listener.ask("demo/q/x");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while kept.0.lock().unwrap().is_none() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the query never reached the queryable"
+                );
+                step_for(&session, Duration::from_millis(20));
+            }
+            listener.wait_for("reply now");
+            step_for(&session, Duration::from_millis(300));
+            let printed: Vec<String> = listener.lines.try_iter().collect();
+            assert!(
+                printed.iter().all(|line| !line.starts_with("done")),
+                "CONTROL: the query does not end while the program keeps it; the listener \
+                 printed {printed:?}"
+            );
+
+            let mut copy = kept.0.lock().unwrap().take().expect("the kept query");
+            reply(z_query_loan(&copy), c"later");
+            listener.wait_for("reply later");
+            z_query_drop(z_query_move(&mut copy));
+            listener.wait_for("done demo/q/x");
+
+            z_undeclare_queryable(z_queryable_move(&mut queryable));
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+}

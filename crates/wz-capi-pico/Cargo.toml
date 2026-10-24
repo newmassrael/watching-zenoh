@@ -128,8 +128,9 @@ link-udp = ["wz-capi-core?/link-udp"]
 scout = ["engine-tokio", "link-udp", "wz-capi-core/scout"]
 # `query`: `z_get` and the querier, the requesting end of a query.
 query = ["engine-tokio", "wz-capi-core/query"]
-# `queryable`: `z_declare_queryable` and the replies, the answering end of a query.
-queryable = ["engine-tokio", "wz-capi-core/queryable"]
+# `queryable`: `z_declare_queryable` and the replies, the answering end of a query. Both engines
+# answer queries, so it selects neither: it turns the queryable on in the one the build has.
+queryable = ["wz-capi-core?/queryable", "wz-capi-coop?/queryable"]
 # `liveliness`: the token and the subscriber.
 liveliness = ["engine-tokio", "wz-capi-core/liveliness"]
 # `liveliness-get`: the snapshot get of the liveliness plane. It is a query, so it needs the
@@ -350,10 +351,10 @@ name = "serial_link_roundtrip"
 required-features = ["peer"]
 
 # The node that `client_only_dials_a_listener` dials: a build that cannot listen needs one of
-# the full build to talk to.
+# the full build to talk to. It asks queries, so the build has the requesting end of one.
 [[example]]
 name = "hold_a_listener"
-required-features = ["peer"]
+required-features = ["peer", "query"]
 
 [lints]
 workspace = true

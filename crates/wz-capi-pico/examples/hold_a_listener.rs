@@ -8,19 +8,26 @@
 //! dial. This is that node. It listens on `tcp/127.0.0.1:<port>`, subscribes to `demo/**` and
 //! prints the key of every sample it hears as `heard <key>`, and publishes `demo/from-listener`
 //! every 50 ms. It prints `READY` once it listens and runs until its standard input closes.
+//!
+//! A line `get <key>` on its standard input asks a query on `<key>`: it prints `reply <payload>`
+//! for each data reply and `done <key>` when the query has ended, which is what a test of the
+//! answering end of a query in the build that cannot listen reads.
 
 use std::ffi::{c_void, CStr, CString};
-use std::io::Read;
+use std::io::BufRead;
 use std::time::Duration;
 
 use wz_capi_pico::{
-    z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_sample, z_closure_sample_move,
-    z_config_default, z_config_loan_mut, z_config_move, z_declare_subscriber,
-    z_keyexpr_as_view_string, z_loaned_sample_t, z_open, z_owned_config_t, z_owned_session_t,
-    z_owned_subscriber_t, z_put, z_sample_keyexpr, z_session_drop, z_session_loan,
-    z_session_loan_mut, z_session_move, z_string_data, z_string_len, z_view_keyexpr_from_str,
-    z_view_keyexpr_loan, z_view_keyexpr_t, z_view_string_loan, z_view_string_t, zp_config_insert,
-    Z_CONFIG_LISTEN_KEY, Z_OK,
+    z_bytes_copy_from_str, z_bytes_move, z_bytes_to_slice, z_close, z_closure_reply,
+    z_closure_reply_move, z_closure_sample, z_closure_sample_move, z_config_default,
+    z_config_loan_mut, z_config_move, z_declare_subscriber, z_get, z_get_options_default,
+    z_get_options_t, z_keyexpr_as_view_string, z_loaned_reply_t, z_loaned_sample_t, z_open,
+    z_owned_closure_reply_t, z_owned_config_t, z_owned_session_t, z_owned_slice_t,
+    z_owned_subscriber_t, z_put, z_query_consolidation_none, z_reply_is_ok, z_reply_ok,
+    z_sample_keyexpr, z_sample_payload, z_session_drop, z_session_loan, z_session_loan_mut,
+    z_session_move, z_slice_data, z_slice_drop, z_slice_len, z_slice_loan, z_slice_move,
+    z_string_data, z_string_len, z_view_keyexpr_from_str, z_view_keyexpr_loan, z_view_keyexpr_t,
+    z_view_string_loan, z_view_string_t, zp_config_insert, Z_CONFIG_LISTEN_KEY, Z_OK,
 };
 
 unsafe extern "C" fn on_sample(sample: *const z_loaned_sample_t, _ctx: *mut c_void) {
@@ -50,6 +57,61 @@ unsafe fn put(session: &z_owned_session_t, key: &CStr, payload: &CStr) {
             z_view_keyexpr_loan(&ke),
             z_bytes_move(&mut buf),
             std::ptr::null(),
+        ),
+        Z_OK
+    );
+}
+
+/// Print a data reply's payload as `reply <payload>`.
+unsafe extern "C" fn on_reply(reply: *mut z_loaned_reply_t, _ctx: *mut c_void) {
+    if !z_reply_is_ok(reply) {
+        println!("reply-err");
+        return;
+    }
+    let sample = z_reply_ok(reply);
+    let mut slice: z_owned_slice_t = std::mem::zeroed();
+    if sample.is_null() || z_bytes_to_slice(z_sample_payload(sample), &mut slice) != Z_OK {
+        return;
+    }
+    let loaned = z_slice_loan(&slice);
+    let bytes = std::slice::from_raw_parts(z_slice_data(loaned), z_slice_len(loaned));
+    println!("reply {}", String::from_utf8_lossy(bytes));
+    z_slice_drop(z_slice_move(&mut slice));
+}
+
+/// Print `done <key>` when the query on the boxed key has ended.
+unsafe extern "C" fn on_reply_done(ctx: *mut c_void) {
+    let key = Box::from_raw(ctx as *mut String);
+    println!("done {key}");
+}
+
+/// Ask a query on `key`, which prints its replies and its end.
+unsafe fn get(session: &z_owned_session_t, key: &str) {
+    let Ok(text) = CString::new(key) else {
+        return;
+    };
+    let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+    if z_view_keyexpr_from_str(&mut ke, text.as_ptr()) != Z_OK {
+        return;
+    }
+    let ctx = Box::into_raw(Box::new(key.to_owned())) as *mut c_void;
+    let mut closure: z_owned_closure_reply_t = std::mem::zeroed();
+    assert_eq!(
+        z_closure_reply(&mut closure, Some(on_reply), Some(on_reply_done), ctx),
+        Z_OK
+    );
+    let mut opts: z_get_options_t = std::mem::zeroed();
+    z_get_options_default(&mut opts);
+    // Each reply as it arrives: the default consolidation keeps them until the query has ended,
+    // and the test reads when each one came.
+    opts.consolidation = z_query_consolidation_none();
+    assert_eq!(
+        z_get(
+            z_session_loan(session),
+            z_view_keyexpr_loan(&ke),
+            std::ptr::null(),
+            z_closure_reply_move(&mut closure),
+            &mut opts
         ),
         Z_OK
     );
@@ -99,14 +161,22 @@ fn main() {
         );
         println!("READY");
 
-        let (closed_tx, closed_rx) = std::sync::mpsc::channel::<()>();
+        // The keys of the `get` lines, and `None` once the standard input has closed.
+        let (lines_tx, lines_rx) = std::sync::mpsc::channel::<Option<String>>();
         std::thread::spawn(move || {
-            let mut sink = Vec::new();
-            let _ = std::io::stdin().read_to_end(&mut sink);
-            let _ = closed_tx.send(());
+            for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+                if let Some(key) = line.strip_prefix("get ") {
+                    let _ = lines_tx.send(Some(key.to_owned()));
+                }
+            }
+            let _ = lines_tx.send(None);
         });
-        while closed_rx.recv_timeout(Duration::from_millis(50)).is_err() {
-            put(&session, c"demo/from-listener", c"payload");
+        loop {
+            match lines_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(Some(key)) => get(&session, &key),
+                Ok(None) => break,
+                Err(_) => put(&session, c"demo/from-listener", c"payload"),
+            }
         }
 
         z_close(z_session_loan_mut(&mut session), std::ptr::null());

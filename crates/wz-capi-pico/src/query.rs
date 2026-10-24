@@ -67,9 +67,7 @@ use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::sync::Arc;
 
-#[cfg(doc)]
-use wz_capi_core::runtime::session::HeldQuery;
-use wz_capi_core::runtime::session::{TokioHeldQuery, TokioQueryHolder};
+use wz_capi_port::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
 
 use crate::abi::{
@@ -81,8 +79,7 @@ use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::result::{
     ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
-use crate::session::{tokio_session, z_loaned_session_t};
-use wz_capi_core::faces::{QblId, SharedSession};
+use crate::session::{session_handle, z_loaned_session_t, Engine};
 
 // The enum-typed option fields (`z_congestion_control_t`, `z_priority_t`) are in
 // `crate::qos`. Both are documented "Deprecated: ignored, taken from query" on the
@@ -179,19 +176,22 @@ enum PendingReply {
 /// until the escaped query is dropped (pico's `_z_query_clear`,
 /// `src/net/query.c:54-61`).
 ///
-/// R2953 (open-debt item 836) — both are the runtime's [`HeldQuery`], which
+/// R2953 (open-debt item 836) — both are the engine's [`HeldQuery`], which
 /// answers on the query's own route (the wire, or this session's own pending
 /// GET for a query it asked of itself) and releases the Final on drop. This ABI
 /// only formats the reply, through the same [`flush_one`] the in-dispatch flush
 /// uses. Until R2953 it carried its own wire-only responder.
 fn emit_held(
-    held: &TokioHeldQuery,
+    held: &dyn HeldQuery,
     reply: PendingReply,
     query_qos: wz_session_core::sample::QosLevel,
 ) {
-    held.reply(|out| {
-        let mut out = out;
-        flush_one(&mut out, reply, query_qos);
+    let mut reply = Some(reply);
+    held.reply(&mut |out| {
+        if let Some(reply) = reply.take() {
+            let mut out = out;
+            flush_one(&mut out, reply, query_qos);
+        }
     });
 }
 
@@ -309,11 +309,17 @@ struct QueryMarshal {
     /// has no pico accessor; it is carried only so the escaped responder can
     /// seed its replies from it.
     qos: wz_session_core::sample::QosLevel,
-    /// The FACE's session, on a marshal the dispatch built: a link's, the local
-    /// plane's or a group's. `None` on one built outside a dispatch (a test
-    /// fixture), which is exactly the case that cannot be escaped — see
-    /// [`clone_query_marshal`].
-    session: Option<TokioQueryHolder>,
+    /// What the FACE's queries are held through ([`QueryHolder`]), on a marshal the
+    /// dispatch built and on every copy escaped from it. `None` on one built outside
+    /// a dispatch (a test fixture), which is exactly the case that cannot be escaped —
+    /// see [`clone_query_marshal`].
+    ///
+    /// It also says whether the session has been closed: a reply on a query whose
+    /// session has been closed answers `_Z_ERR_SESSION_CLOSED`, as pico's
+    /// `z_query_reply*` do before anything else (`vendor/zenoh-pico/src/api/api.c`,
+    /// `_z_session_weak_upgrade_if_open`). Only an ESCAPED query can meet a closed
+    /// session: a callback's own query cannot outlive the session it runs on.
+    holder: Option<Arc<dyn QueryHolder>>,
     /// R2953 — whether the session asked this query of itself: the half of
     /// the query's route the rid alone does not name ([`HeldQuery`]).
     is_local: bool,
@@ -321,15 +327,9 @@ struct QueryMarshal {
     /// which a reply issued long after it goes through. `None` means this
     /// marshal is the ordinary borrowed one, whose replies are accumulated and
     /// flushed by the dispatch. Each escape is its own hold (pushing the same
-    /// query into two channels is legal), released on its own drop.
-    deferred: Option<TokioHeldQuery>,
-    /// The node's closed latch ([`SharedSession::closed_latch`]), on a marshal the dispatch
-    /// built and on every copy escaped from it. A reply on a query whose session has been
-    /// closed answers `_Z_ERR_SESSION_CLOSED`, as pico's `z_query_reply*` do before anything else
-    /// (`vendor/zenoh-pico/src/api/api.c`, `_z_session_weak_upgrade_if_open`). Only an ESCAPED
-    /// query can meet a closed session: a callback's own query cannot outlive the drive thread
-    /// `z_close` joins. `None` on a fixture built outside a dispatch.
-    closed: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// query into two channels is legal), released on its own drop; an escaped
+    /// marshal is the end of the chain and is not escaped again.
+    deferred: Option<Box<dyn HeldQuery>>,
     /// Reply accumulator.
     ///
     /// `UnsafeCell` because the accessors receive `*const z_loaned_query_t` and
@@ -396,32 +396,26 @@ impl QueryMarshal {
             },
             rid: view.rid(),
             qos: view.qos(),
-            session: None,
+            holder: None,
             is_local: view.is_local(),
             deferred: None,
-            closed: None,
             replies: UnsafeCell::new(Vec::new()),
         }
     }
 
-    /// Bind the FACE's session, so this marshal can be escaped. Called only by
-    /// the dispatch; a marshal without it is un-escapable by construction.
-    fn with_session(mut self, session: TokioQueryHolder) -> Self {
-        self.session = Some(session);
-        self
-    }
-
-    /// Bind the node's closed latch (see the `closed` field).
-    fn with_closed(mut self, closed: Arc<std::sync::atomic::AtomicBool>) -> Self {
-        self.closed = Some(closed);
+    /// Bind what the FACE's queries are held through, so this marshal can be
+    /// escaped. Called only by the dispatch; a marshal without it is un-escapable
+    /// by construction.
+    fn with_holder(mut self, holder: Arc<dyn QueryHolder>) -> Self {
+        self.holder = Some(holder);
         self
     }
 
     /// Whether the session this query arrived on has been closed.
     fn session_closed(&self) -> bool {
-        self.closed
+        self.holder
             .as_ref()
-            .is_some_and(|latch| latch.load(std::sync::atomic::Ordering::SeqCst))
+            .is_some_and(|holder| holder.session_closed())
     }
 
     /// An INDEPENDENT copy bound to a DEFERRED responder — what
@@ -434,7 +428,7 @@ impl QueryMarshal {
     /// created EMPTY rather than copied: replies the callback already asked for
     /// belong to the borrowed marshal's flush, and duplicating them here would
     /// send each one twice.
-    fn deep_copy_deferred(&self, held: TokioHeldQuery) -> Self {
+    fn deep_copy_deferred(&self, held: Box<dyn HeldQuery>) -> Self {
         Self {
             keyexpr: self.keyexpr.clone(),
             parameters: self.parameters.clone(),
@@ -458,13 +452,12 @@ impl QueryMarshal {
             },
             rid: self.rid,
             qos: self.qos,
-            // The COPY is the escaped end of the chain, so it carries the held
-            // query rather than the raw session: it must never be escaped
-            // again, and having no session is what makes that structural.
-            session: None,
+            // The COPY is the escaped end of the chain: it carries the held query,
+            // which is what makes it un-escapable ([`clone_query_marshal`]), and
+            // the holder only to say whether its session has since been closed.
+            holder: self.holder.clone(),
             is_local: self.is_local,
             deferred: Some(held),
-            closed: self.closed.clone(),
             replies: UnsafeCell::new(Vec::new()),
         }
     }
@@ -510,7 +503,7 @@ impl QueryMarshal {
         // returned long ago and the terminator is being held open on its
         // behalf. Emit on its own route instead of into an accumulator nobody
         // will drain.
-        if let Some(held) = self.deferred.as_ref() {
+        if let Some(held) = self.deferred.as_deref() {
             emit_held(held, reply, self.qos);
             return;
         }
@@ -528,7 +521,7 @@ impl QueryMarshal {
 }
 
 /// R2953 — the marshal IS the query the dispatch handed the callback, so it is
-/// what an escape holds ([`TokioQueryHolder::hold_query`]). Only what the hold
+/// what an escape holds ([`QueryHolder::hold_query`]). Only what the hold
 /// reads is answered from the marshal's own fields; an empty payload or
 /// attachment reads as absent, as the view it was built from would.
 impl QueryView for QueryMarshal {
@@ -649,17 +642,14 @@ unsafe impl Sync for CQueryClosure {}
 /// must copy anything it keeps.
 pub(crate) fn make_queryable_callback(
     closure: Arc<CQueryClosure>,
-    session: TokioQueryHolder,
-    closed: Arc<std::sync::atomic::AtomicBool>,
+    holder: Arc<dyn QueryHolder>,
 ) -> impl FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send + 'static {
     move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
         let call = match closure.call {
             Some(f) => f,
             None => return,
         };
-        let mut marshal = QueryMarshal::new(view)
-            .with_session(session.clone())
-            .with_closed(closed.clone());
+        let mut marshal = QueryMarshal::new(view).with_holder(holder.clone());
         // Bind AFTER the move out of `new` — the marshal is at its final
         // address only here. See `QueryMarshal::bind`.
         marshal.bind();
@@ -698,17 +688,21 @@ unsafe fn clone_query_marshal(src: *const z_loaned_query_t) -> *mut c_void {
         return std::ptr::null_mut();
     };
     // Only a marshal the DISPATCH built can be escaped: the session it must
-    // reply through comes from there. A marshal with no session is one this
+    // reply through comes from there. A marshal with no holder is one this
     // crate built outside a dispatch (a unit-test fixture), and escaping it
     // would produce an owned query with no way to answer — reported as a
-    // failure rather than silently handed back.
-    let Some(session) = marshal.session.as_ref() else {
+    // failure rather than silently handed back. An escaped copy is the end of
+    // the chain and is not escaped again.
+    if marshal.deferred.is_some() {
+        return std::ptr::null_mut();
+    }
+    let Some(holder) = marshal.holder.as_ref() else {
         return std::ptr::null_mut();
     };
     // R2953 — the hold is taken HERE, inside the C callback: the handler job
     // every terminator job of its drain batch runs after, which is what makes
     // the hold visible to the job it must suppress. One hold per escape.
-    let held = session.hold_query(marshal);
+    let held = holder.hold_query(marshal);
     let mut boxed = Box::new(marshal.deep_copy_deferred(held));
     boxed.bind();
     Box::into_raw(boxed).cast::<c_void>()
@@ -1041,7 +1035,7 @@ pub unsafe extern "C" fn z_query_reply_err_options_default(
 /// queryable, which emits each wire undeclare and releases the last closure
 /// reference (→ the C `drop(context)`).
 struct QueryableState {
-    shared: Arc<SharedSession>,
+    engine: Arc<Engine>,
     id: QblId,
     /// R2959 — the queryable's key with the non-wild-prefix declaration pico
     /// makes for it; dropped after the queryable, so the retraction follows.
@@ -1053,7 +1047,7 @@ struct QueryableState {
 
 impl Drop for QueryableState {
     fn drop(&mut self) {
-        self.shared.undeclare_queryable(self.id);
+        self.engine.undeclare_queryable(self.id);
     }
 }
 
@@ -1121,7 +1115,7 @@ unsafe fn declare_queryable_inner(
     keyexpr: *const z_loaned_keyexpr_t,
     callback: *mut z_moved_closure_query_t,
     options: *const z_queryable_options_t,
-) -> Result<(Arc<SharedSession>, QblId, DeclaredKeyexpr), ZResult> {
+) -> Result<(Arc<Engine>, QblId, DeclaredKeyexpr), ZResult> {
     if callback.is_null() {
         return Err(Z_ERR_NULL);
     }
@@ -1129,9 +1123,8 @@ unsafe fn declare_queryable_inner(
     let cclosure = CQueryClosure::new(owned.context, owned.call, owned.drop);
     *owned = z_owned_closure_query_t::null_value();
 
-    let (handle, state) = match tokio_session(zs) {
-        Some(s) => s,
-        None => return Err(Z_ERR_NULL),
+    let Some(handle) = session_handle(zs) else {
+        return Err(Z_ERR_NULL);
     };
     let ke = match keyexpr_str(keyexpr) {
         Some(k) => k.to_owned(),
@@ -1149,27 +1142,23 @@ unsafe fn declare_queryable_inner(
     } else {
         ((*options).complete, (*options).allowed_origin())
     };
+    let session = crate::write_filter::PicoSession::of(handle);
     let (id, key) = declare_queryable_on(
-        &crate::write_filter::PicoSession::of(handle),
+        &session,
         ke,
         declared_of(keyexpr),
         complete,
         allowed_origin,
         {
             // R311y498 — see the pubsub/liveliness twins: the shim mints, the
-            // registry calls the factory per face, the C drop(context) is unmoved.
+            // engine calls the factory per face, the C drop(context) is unmoved.
             let closure = Arc::new(cclosure);
-            let closed = state.shared.closed_latch();
-            Arc::new(move |session: &TokioQueryHolder| {
-                Box::new(make_queryable_callback(
-                    closure.clone(),
-                    session.clone(),
-                    closed.clone(),
-                )) as Box<_>
+            Arc::new(move |holder: Arc<dyn QueryHolder>| {
+                Box::new(make_queryable_callback(closure.clone(), holder)) as QueryCallback
             })
         },
     )?;
-    Ok((state.shared.clone(), id, key))
+    Ok((session.engine, id, key))
 }
 
 /// Declare a queryable the way pico's `z_declare_queryable` does, for whatever
@@ -1196,19 +1185,25 @@ pub(crate) fn declare_queryable_on(
     existing: Option<&DeclaredKeyexpr>,
     complete: bool,
     allowed_origin: wz_session_core::locality::Locality,
-    sink: wz_capi_core::faces::QueryableSink,
+    sink: QueryableSink,
 ) -> Result<(QblId, DeclaredKeyexpr), ZResult> {
     let key = DeclaredKeyexpr::declare_non_wild_prefix(&session.engine, &keyexpr, existing)?;
-    let id = session.shared.declare_queryable_on_wire(
-        keyexpr,
-        key.wire(&*session.engine),
-        complete,
-        allowed_origin,
-        // A peer or router-hat session retracts the queryable naming its key
-        // (`_z_undeclare_queryable`) — the announced one, for a queryable.
-        key.retraction_naming(session),
-        sink,
-    );
+    let id = session
+        .engine
+        .declare_queryable_on_wire(
+            keyexpr,
+            key.wire(&*session.engine),
+            complete,
+            allowed_origin,
+            // A peer or router-hat session retracts the queryable naming its key
+            // (`_z_undeclare_queryable`) — the announced one, for a queryable.
+            key.retraction_naming(session),
+            sink,
+        )
+        // Every engine this build opens a session on answers queries when the
+        // build has queryables; one that does not is a build defect, and C is told
+        // so rather than handed a queryable that answers nothing.
+        .ok_or(crate::result::Z_ERR_GENERIC)?;
     Ok((id, key))
 }
 
@@ -1217,7 +1212,7 @@ pub(crate) fn declare_queryable_on(
 /// than a C closure (an advanced publisher's cache, the admin space).
 #[cfg(any(feature = "advanced", feature = "admin-space"))]
 pub(crate) struct PlainQueryable {
-    shared: Arc<SharedSession>,
+    engine: Arc<Engine>,
     id: QblId,
     /// Dropped after the queryable, so the retraction follows.
     _key: DeclaredKeyexpr,
@@ -1231,7 +1226,7 @@ impl PlainQueryable {
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
         complete: bool,
-        sink: wz_capi_core::faces::QueryableSink,
+        sink: QueryableSink,
     ) -> Result<Self, ZResult> {
         // Declared as pico declares its own (`z_declare_queryable` with NULL options):
         // the default origin.
@@ -1244,7 +1239,7 @@ impl PlainQueryable {
             sink,
         )?;
         Ok(Self {
-            shared: session.shared.clone(),
+            engine: session.engine.clone(),
             id,
             _key: key,
         })
@@ -1254,7 +1249,7 @@ impl PlainQueryable {
 #[cfg(any(feature = "advanced", feature = "admin-space"))]
 impl Drop for PlainQueryable {
     fn drop(&mut self) {
-        self.shared.undeclare_queryable(self.id);
+        self.engine.undeclare_queryable(self.id);
     }
 }
 
@@ -1273,9 +1268,9 @@ pub unsafe extern "C" fn z_declare_queryable(
             return Z_ERR_NULL;
         }
         match declare_queryable_inner(zs, keyexpr, callback, options) {
-            Ok((shared, id, key)) => {
+            Ok((engine, id, key)) => {
                 let mut boxed = Box::new(QueryableState {
-                    shared,
+                    engine,
                     id,
                     key,
                     loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
@@ -1297,10 +1292,10 @@ pub unsafe extern "C" fn z_declare_queryable(
 /// declaration lives until the session is closed or dropped, with no handle
 /// handed back.
 ///
-/// The SSOT entry is simply never retracted by a handle drop — the registry
-/// holds it (and so the C closure) until the session's `SharedSession` is
-/// dropped, which is exactly pico's "until the corresponding session is closed
-/// or dropped" contract.
+/// The declaration is simply never retracted by a handle drop — the engine
+/// holds it (and so the C closure) until the session is closed or dropped,
+/// which is exactly pico's "until the corresponding session is closed or
+/// dropped" contract.
 #[no_mangle]
 pub unsafe extern "C" fn z_declare_background_queryable(
     zs: *const z_loaned_session_t,
@@ -1677,7 +1672,7 @@ pub(crate) unsafe fn queryable_identity(
     queryable: *const z_loaned_queryable_t,
 ) -> Option<([u8; 16], u64)> {
     handle_ref::<z_loaned_queryable_t, QueryableState>(queryable)
-        .map(|state| (state.shared.zid(), state.id))
+        .map(|state| (state.engine.zid(), state.id))
 }
 
 /// Borrow a query's source info, or NULL when it carried none (pico

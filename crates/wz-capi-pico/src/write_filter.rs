@@ -47,7 +47,7 @@
 
 use std::sync::Arc;
 
-#[cfg(any(feature = "queryable", feature = "liveliness", feature = "advanced"))]
+#[cfg(any(feature = "liveliness", feature = "advanced"))]
 use wz_capi_core::faces::SharedSession;
 #[cfg(feature = "advanced")]
 use wz_capi_core::runtime::node_clock::NodeHlc;
@@ -85,7 +85,7 @@ pub(crate) fn session_mode(handle: &PicoSessionHandle) -> WhatAmI {
 #[derive(Clone)]
 pub(crate) struct PicoSession {
     pub(crate) engine: Arc<Engine>,
-    #[cfg(any(feature = "queryable", feature = "liveliness", feature = "advanced"))]
+    #[cfg(any(feature = "liveliness", feature = "advanced"))]
     pub(crate) shared: Arc<SharedSession>,
     pub(crate) mode: WhatAmI,
     /// The session's clock — `NodeHlc::disabled()` for a session this ABI did
@@ -102,10 +102,10 @@ impl PicoSession {
             engine: engine_of(handle),
             // A build with these capabilities runs every session on the tokio engine: the
             // cooperative engine's build does not compile them (decision D4).
-            #[cfg(any(feature = "queryable", feature = "liveliness", feature = "advanced"))]
+            #[cfg(any(feature = "liveliness", feature = "advanced"))]
             shared: handle
                 .tokio()
-                .expect("a build with queryables, liveliness or the advanced plane opens every session on the tokio engine")
+                .expect("a build with liveliness or the advanced plane opens every session on the tokio engine")
                 .shared
                 .clone(),
             mode: session_mode(handle),

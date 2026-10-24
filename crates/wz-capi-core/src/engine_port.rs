@@ -247,4 +247,73 @@ impl SessionEngine for SharedSession {
     fn batch_stop_all(&self) -> usize {
         SharedSession::batch_stop_all(self)
     }
+
+    #[cfg(feature = "queryable")]
+    fn declare_queryable_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        complete: bool,
+        allowed_origin: Locality,
+        retraction: Option<RetractionKey>,
+        sink: wz_capi_port::QueryableSink,
+    ) -> Option<wz_capi_port::QblId> {
+        // The registry mints a callback per face with the face's own session; the port's
+        // callbacks are minted with that session as a `QueryHolder`, beside the node's closed
+        // latch, which is what a reply on a kept query checks first.
+        let closed = self.closed_latch();
+        Some(SharedSession::declare_queryable_on_wire(
+            self,
+            keyexpr,
+            wire,
+            complete,
+            allowed_origin,
+            retraction,
+            Arc::new(move |face: &wz_runtime_tokio::session::TokioQueryHolder| {
+                sink(Arc::new(FaceHolder {
+                    face: face.clone(),
+                    closed: closed.clone(),
+                }))
+            }),
+        ))
+    }
+
+    #[cfg(feature = "queryable")]
+    fn undeclare_queryable(&self, id: wz_capi_port::QblId) {
+        SharedSession::undeclare_queryable(self, id);
+    }
+}
+
+/// One face's session as the port's [`QueryHolder`](wz_capi_port::QueryHolder): a query held
+/// through it answers on that face, and the node's latch says whether its session is closed.
+#[cfg(feature = "queryable")]
+struct FaceHolder {
+    face: wz_runtime_tokio::session::TokioQueryHolder,
+    closed: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "queryable")]
+impl wz_capi_port::QueryHolder for FaceHolder {
+    fn hold_query(
+        &self,
+        view: &dyn wz_session_core::query_sink::QueryView,
+    ) -> Box<dyn wz_capi_port::HeldQuery> {
+        Box::new(FaceHeld(self.face.hold_query(view)))
+    }
+
+    fn session_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// The runtime's held query as the port's [`HeldQuery`](wz_capi_port::HeldQuery); dropping it
+/// releases the runtime's hold.
+#[cfg(feature = "queryable")]
+struct FaceHeld(wz_runtime_tokio::session::TokioHeldQuery);
+
+#[cfg(feature = "queryable")]
+impl wz_capi_port::HeldQuery for FaceHeld {
+    fn reply(&self, answer: &mut dyn FnMut(&mut dyn wz_session_core::query_sink::ReplyOut)) {
+        self.0.reply(|out| answer(out));
+    }
 }

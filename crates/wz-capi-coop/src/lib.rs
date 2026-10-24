@@ -19,8 +19,11 @@
 //! A session outlives its link: a lost link is dialled again and the session declares over the
 //! new one what it holds, as zenoh-pico's client reopens.
 //!
-//! What it does not do yet, each a later step of the note: the listening role, scouting, queries,
-//! liveliness and the advanced plane.
+//! With `queryable` it answers queries: its queryables' callbacks run outside its lock, as its
+//! subscribers' do, and a query a C program keeps holds its Final until it is let go.
+//!
+//! What it does not do yet, each a later step of the note: the listening role, scouting, the
+//! requesting end of a query, liveliness and the advanced plane.
 
 mod engine;
 #[cfg(test)]

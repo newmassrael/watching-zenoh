@@ -22,14 +22,13 @@
 
 use std::sync::Arc;
 
-use wz_capi_core::faces::QueryableSink;
 use wz_capi_core::runtime::advanced_cache::{CacheStore, Retained};
 use wz_capi_core::runtime::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherPlane, DeclaredPublisher,
 };
 use wz_capi_core::runtime::node_clock::NodeHlc;
 use wz_capi_core::runtime::runtime_impl::TokioTime;
-use wz_capi_core::runtime::session::TokioQueryHolder;
+use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
 use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
@@ -143,8 +142,9 @@ impl AdvancedPublisherPlane for PicoPlane {
         let store = store.clone();
         // One handler per face: each is a fresh closure over the same ring, and
         // none needs the face's session — a reply goes out on the query's own.
-        let sink: QueryableSink =
-            Arc::new(move |_face: &TokioQueryHolder| Box::new(store.query_handler()) as Box<_>);
+        let sink: QueryableSink = Arc::new(move |_face: Arc<dyn QueryHolder>| {
+            Box::new(store.query_handler()) as QueryCallback
+        });
         // INCOMPLETE, which is the only honest answer a bounded ring can give
         // (R2556, [`wz_capi_core::runtime::advanced_cache::AdvancedCache::declare`]).
         PlainQueryable::declare(&self.session, keyexpr, None, false, sink)
