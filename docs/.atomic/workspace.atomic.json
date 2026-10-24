@@ -283750,6 +283750,36 @@
         "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
       ]
     },
+    "Round 3549": {
+      "decision_summary": "The pico C ABI reaches the tokio runtime through its engine and no longer depends on it. Round 3528 had made wz-capi-pico's engine-tokio pull wz-runtime-tokio as an optional dependency, a second claim on that crate beside the facade's runtime-tokio; the catalog's derivation credits a crate to the one feature that alone pulls it, so the runtime-tokio atom lost its 2143 symbols and Layer A3 failed it as active owning nothing and COMPLETE with nothing tested. The runtime is the tokio engine's internal: wz-capi-core re-exports it as wz_capi_core::runtime, the pico modules that reach past the port name it there, and transport-fragmentation, which both drop-ins need, is in the engine's base feature list. pico's link features forward to the engine's alone, and its tests keep the runtime as a dev-dependency.",
+      "changes_bullets": [
+        "wz-capi-core: pub use wz_runtime_tokio as runtime; transport-fragmentation in the runtime's base features.",
+        "wz-capi-pico: no wz-runtime-tokio dependency (a dev-dependency for the tests); engine-tokio = wz-capi-core and tokio; the five link features forward to wz-capi-core's alone; fourteen modules name wz_capi_core::runtime."
+      ],
+      "verification_bullets": [
+        "Bisected by another session to 126871aa8 (round 3528) with hosted run 40090152149's Layer A3 step; reproduced locally (audit-catalog-status rc=1, runtime-tokio owning 0 symbols) and now rc=0 with runtime-tokio owning 2143 again. On the build host: fmt; clippy -D warnings for wz-capi-core, wz-capi-c, and wz-capi-pico in its default, tokio client, peer, TLS and cooperative builds; every wz-capi-pico test target passes; C1bz for wz-capi-pico and wz-capi-core; capability_cost_gate --check of pico-client (1,809,461), pico-client-coop (868,791, 441 exports), pico-default (802 exports) and capic-client, absent and present where they should be. Locally the hook's 111 static gates pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Rule for later changes: an ABI crate names its engines and never a runtime crate as a dependency of its own, or the runtime atom loses the crate it owns in the catalog (Layer A3). Next on the cooperative engine, one step each: redialling a lost link, the listening role, queries, liveliness, scouting, the advanced plane; a CI lane for client_only_dials_a_listener on both engines. Read the hosted CI of this push."
+      ],
+      "publishable_decision_summary": "The pico C ABI reaches the tokio runtime through its engine and no longer depends on it. Round 3528 had made wz-capi-pico's engine-tokio pull wz-runtime-tokio as an optional dependency, a second claim on that crate beside the facade's runtime-tokio; the catalog's derivation credits a crate to the one feature that alone pulls it, so the runtime-tokio atom lost its 2143 symbols and Layer A3 failed it as active owning nothing and COMPLETE with nothing tested. The runtime is the tokio engine's internal: wz-capi-core re-exports it as wz_capi_core::runtime, the pico modules that reach past the port name it there, and transport-fragmentation, which both drop-ins need, is in the engine's base feature list. pico's link features forward to the engine's alone, and its tests keep the runtime as a dev-dependency.",
+      "publishable_changes_bullets": [
+        "wz-capi-core: pub use wz_runtime_tokio as runtime; transport-fragmentation in the runtime's base features.",
+        "wz-capi-pico: no wz-runtime-tokio dependency (a dev-dependency for the tests); engine-tokio = wz-capi-core and tokio; the five link features forward to wz-capi-core's alone; fourteen modules name wz_capi_core::runtime."
+      ],
+      "publishable_verification_bullets": [
+        "Bisected by another session to 126871aa8 (round 3528) with hosted run 40090152149's Layer A3 step; reproduced locally (audit-catalog-status rc=1, runtime-tokio owning 0 symbols) and now rc=0 with runtime-tokio owning 2143 again. On the build host: fmt; clippy -D warnings for wz-capi-core, wz-capi-c, and wz-capi-pico in its default, tokio client, peer, TLS and cooperative builds; every wz-capi-pico test target passes; C1bz for wz-capi-pico and wz-capi-core; capability_cost_gate --check of pico-client (1,809,461), pico-client-coop (868,791, 441 exports), pico-default (802 exports) and capic-client, absent and present where they should be. Locally the hook's 111 static gates pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Rule for later changes: an ABI crate names its engines and never a runtime crate as a dependency of its own, or the runtime atom loses the crate it owns in the catalog (Layer A3). Next on the cooperative engine, one step each: redialling a lost link, the listening role, queries, liveliness, scouting, the advanced plane; a CI lane for client_only_dials_a_listener on both engines. Read the hosted CI of this push."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
