@@ -283466,6 +283466,50 @@
         "A publisher whose face is gated finds its own link full, waits its wait_before_close and closes its own session if the destination has not drained: upstream's behaviour for a parked receive task, measured as one 5.000 s wait of the publisher's put. Which of the two closes ended that wait was not read."
       ]
     },
+    "Round 3542": {
+      "decision_summary": "D4 is done: on AP, on the C ABI and on the fixed-memory host, a dial made for a node closes at an InitAck from another zid, before any OpenSyn and with INVALID. The C ABI's scouted open checked the peer after the handshake and then drained the session; it now installs the node's zid in the dial's staging, so the check is upstream's, at the InitAck, and the open is LinkFailed as before. The fixed-memory host's dial takes the node a dial is for and installs it between the open and the task's first run, which is before the InitSyn; lwIP's host takes it as a DialTarget, an address or an address with a zid, rather than an eighth argument. The rule that two spellings of one zid are one zid was in zid_hex, a module the fixed-memory profile does not build, while zid_from_wire restated it; it is now written once in credential_identity, which every profile builds, and zid_hex re-exports it. A zero zid now spells no node, as upstream's zid is a non-zero u128.",
+      "changes_bullets": [
+        "crates/wz-capi-core: open_scouted reads the expected zid with zid_from_wire and open_with installs it in the staging; a mismatch maps to LinkFailed; is_expected_peer and its unit test are gone, a peer test compares with same_zid; two scouted-open tests over one far end; wz-session-wire-fixtures is a dev-dependency.",
+        "crates/wz-session-mcu: SessionHost::dial takes expected_zid; slot_dial's configured endpoints pass None.",
+        "crates/wz-session-lwip: DialTarget (address, node); SessionHost::dial takes it; tests/session_dial_for_a_node.rs on the lwIP loopback; wz-session-wire-fixtures is a dev-dependency.",
+        "crates/wz-session-core: canonical_zid moves to credential_identity, zid_hex re-exports it; zid_from_wire is built on it and refuses a zero zid.",
+        "docs/session-lifecycle-intent.md: steps 2c and 2d, D4 done; docs/reason-review-pins.md: four rows, two of them the accept_loop.rs and session_actions.rs rows that the commits of Round 3541 moved without moving them (their claims read again; the sessions asked do not own those commits)."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): wz-capi-core --features scout, the two scouted-open tests pass (another node: LinkFailed, a Close carrying INVALID and no OpenSyn; the node itself: its OpenSyn). wz-session-lwip on the slot profile: session_dial_for_a_node (2) and session_dial_exhaustion (4) pass. wz-session-core --features storage-profile, credential_identity and zid_hex tests pass. cargo check --workspace --all-targets; clippy -D warnings of wz-session-core (default and no-default-features), wz-session-mcu, wz-session-lwip (default and the slot profile) and wz-capi-core (scout, peer); cargo fmt --check.",
+        "On pc2's kit tree, the four fixed-memory Zephyr client images built and stack_frame_gate --check passes for each: chains 6,928, 7,212, 7,704 and 7,040 B against committed 6,904, 7,204, 7,672 and 7,016, inside the 128-byte tolerance. reason_review_pin_gate, upstream_citation_anchor, prose_named_identifier, prose_feature, discard_site, discarded_evidence, test_discipline, lane_reach and accessor_reach_census pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "Next per the steps of docs/session-lifecycle-intent.md: D3, the locator directory and its three sources (build-time declaration, scouting Hello, link-state flood) with expiry.",
+        "The fixed-memory client chains moved up by 8 to 32 bytes across Rounds 3537 to this one, inside the tolerance; re-commit them with the next change that moves them.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
+      ],
+      "publishable_decision_summary": "D4 is done: on AP, on the C ABI and on the fixed-memory host, a dial made for a node closes at an InitAck from another zid, before any OpenSyn and with INVALID. The C ABI's scouted open checked the peer after the handshake and then drained the session; it now installs the node's zid in the dial's staging, so the check is upstream's, at the InitAck, and the open is LinkFailed as before. The fixed-memory host's dial takes the node a dial is for and installs it between the open and the task's first run, which is before the InitSyn; lwIP's host takes it as a DialTarget, an address or an address with a zid, rather than an eighth argument. The rule that two spellings of one zid are one zid was in zid_hex, a module the fixed-memory profile does not build, while zid_from_wire restated it; it is now written once in credential_identity, which every profile builds, and zid_hex re-exports it. A zero zid now spells no node, as upstream's zid is a non-zero u128.",
+      "publishable_changes_bullets": [
+        "crates/wz-capi-core: open_scouted reads the expected zid with zid_from_wire and open_with installs it in the staging; a mismatch maps to LinkFailed; is_expected_peer and its unit test are gone, a peer test compares with same_zid; two scouted-open tests over one far end; wz-session-wire-fixtures is a dev-dependency.",
+        "crates/wz-session-mcu: SessionHost::dial takes expected_zid; slot_dial's configured endpoints pass None.",
+        "crates/wz-session-lwip: DialTarget (address, node); SessionHost::dial takes it; tests/session_dial_for_a_node.rs on the lwIP loopback; wz-session-wire-fixtures is a dev-dependency.",
+        "crates/wz-session-core: canonical_zid moves to credential_identity, zid_hex re-exports it; zid_from_wire is built on it and refuses a zero zid.",
+        "docs/session-lifecycle-intent.md: steps 2c and 2d, D4 done; docs/reason-review-pins.md: four rows, two of them the accept_loop.rs and session_actions.rs rows that the commits of Round 3541 moved without moving them (their claims read again; the sessions asked do not own those commits)."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): wz-capi-core --features scout, the two scouted-open tests pass (another node: LinkFailed, a Close carrying INVALID and no OpenSyn; the node itself: its OpenSyn). wz-session-lwip on the slot profile: session_dial_for_a_node (2) and session_dial_exhaustion (4) pass. wz-session-core --features storage-profile, credential_identity and zid_hex tests pass. cargo check --workspace --all-targets; clippy -D warnings of wz-session-core (default and no-default-features), wz-session-mcu, wz-session-lwip (default and the slot profile) and wz-capi-core (scout, peer); cargo fmt --check.",
+        "On pc2's kit tree, the four fixed-memory Zephyr client images built and stack_frame_gate --check passes for each: chains 6,928, 7,212, 7,704 and 7,040 B against committed 6,904, 7,204, 7,672 and 7,016, inside the 128-byte tolerance. reason_review_pin_gate, upstream_citation_anchor, prose_named_identifier, prose_feature, discard_site, discarded_evidence, test_discipline, lane_reach and accessor_reach_census pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next per the steps of docs/session-lifecycle-intent.md: D3, the locator directory and its three sources (build-time declaration, scouting Hello, link-state flood) with expiry.",
+        "The fixed-memory client chains moved up by 8 to 32 bytes across Rounds 3537 to this one, inside the tolerance; re-commit them with the next change that moves them.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
