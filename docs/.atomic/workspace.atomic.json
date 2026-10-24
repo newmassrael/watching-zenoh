@@ -280586,6 +280586,56 @@
         "Key computation in the capture-order walk still reads each row; under 4b it must read the index fields only, or the walk decodes every row once per call"
       ]
     },
+    "Round 3480": {
+      "decision_summary": "The hosted CI run of tip 272750050, which holds round 3477, was read job by job. Its E7s job passes on the hosted runner, so the repair of the starved router is confirmed there, and the isolated-crate lanes (C1bz) pass too. The run is red in two jobs that are not that repair's, each read to the gate's own sentence and re-run on a build host. C1bnl: the accept test of wz-session-lwip fails under the slim receive pool, four slots, because it queued four datagrams at once; it queues two at a time and passes under both pools. Layer Q: one typed session slot measures 8 bytes more since the commit that fixed a datagram link's peer, shown by the check passing on its parent and failing on it; the record moves to 36752 and 36744. The carry corrects two statements of rounds 3473 and 3477.",
+      "changes_bullets": [
+        "crates/wz-session-lwip/src/session_drive.rs: the test an_accepting_lwip_link_is_bound_by_the_init_syn_and_lets_a_stranger_go sends two datagrams, services the link, reads the InitSyn, then sends two more and reads the peer's; the order and the counts it asserts (one stray, one refused) are as before.",
+        "deploy/session_slot_bytes.json: mcu-admin-node 36744 to 36752 and zephyr-admin-node 36736 to 36744, the size of one typed slot after the binding of a datagram link's peer.",
+        "docs/reason-review-pins.md: the row of session-close-ingress for the lwIP session_drive.rs moves to the file's new blob, after reading its three clauses on the file again (session_task and spawn_session, the test of the session as a task, run_session driving one session), which this test change leaves as they were.",
+        "docs/hosted-red-acks.md: one row for the CI run of 272750050."
+      ],
+      "verification_bullets": [
+        "The hosted run 39994401026 graded 272750050 and was read per job: 29 of its 31 jobs pass, including the router-hat scaling job (E7s, E7m) and validate; two fail, C1bnl and the cross-compile and QEMU job at Layer Q.",
+        "On a build host, the lwIP crate with the seventeen features of the C1bnl row failed one test of 32 before the change, passed 33 of 33 without buffer-pool-session-rx-slim, and passes 32 of 32 with it after the change.",
+        "On a build host, session_slot_bytes --check passes on the parent of 9334ea20a, fails on 9334ea20a with 36752 and 36744 measured, and passes on this tree with the new record.",
+        "A run of the same crate with --all-features executes no test, because the test is compiled out under session-slot; it returned 0 and is not a verdict.",
+        "Not run here: the rest of Layer Q (the footprint bands passed in the hosted run) and the full gate array before the push is run once by the push hook."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Correction of round 3477's carry: it says two gates are red on origin/main from commit 125217f45 (discard_site_lint, accessor_reach_census); they were repaired by 9e9775b61 and 271a052ae before that push landed, and the full gate array passed 110 of 110 on its tree.",
+        "Correction of round 3473: its decision gives a bound of 0.7 s for the turn from an assumed 2 us an event; the measured figure is 2.1 to 3.6 s (section 7.2 of docs/router-data-plane-scaling.md), which round 3477 already states.",
+        "Hosted E7s is read: it passes on 272750050. The latency of one request and reply with the yield in is still unmeasured.",
+        "Steps 2 to 4 of the router liveness structure the owner approved (2026-10-24) are not begun: a keepalive and lease executor of its own with strict priority over data, a capacity model with a stated CPU budget (configured or measured, the owner's to say), a stated drop policy with counters on the admin space, and a test that asserts the latest a timer was served and not the count of faces DOWN.",
+        "The lifecycle session holds an uncommitted write-end stamp in writer_queue.rs; step 2 touches the same area, so it is coordinated before it starts."
+      ],
+      "publishable_decision_summary": "The hosted CI run of tip 272750050, which holds round 3477, was read job by job. Its E7s job passes on the hosted runner, so the repair of the starved router is confirmed there, and the isolated-crate lanes (C1bz) pass too. The run is red in two jobs that are not that repair's, each read to the gate's own sentence and re-run on a build host. C1bnl: the accept test of wz-session-lwip fails under the slim receive pool, four slots, because it queued four datagrams at once; it queues two at a time and passes under both pools. Layer Q: one typed session slot measures 8 bytes more since the commit that fixed a datagram link's peer, shown by the check passing on its parent and failing on it; the record moves to 36752 and 36744. The carry corrects two statements of rounds 3473 and 3477.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-lwip/src/session_drive.rs: the test an_accepting_lwip_link_is_bound_by_the_init_syn_and_lets_a_stranger_go sends two datagrams, services the link, reads the InitSyn, then sends two more and reads the peer's; the order and the counts it asserts (one stray, one refused) are as before.",
+        "deploy/session_slot_bytes.json: mcu-admin-node 36744 to 36752 and zephyr-admin-node 36736 to 36744, the size of one typed slot after the binding of a datagram link's peer.",
+        "docs/reason-review-pins.md: the row of session-close-ingress for the lwIP session_drive.rs moves to the file's new blob, after reading its three clauses on the file again (session_task and spawn_session, the test of the session as a task, run_session driving one session), which this test change leaves as they were.",
+        "docs/hosted-red-acks.md: one row for the CI run of 272750050."
+      ],
+      "publishable_verification_bullets": [
+        "The hosted run 39994401026 graded 272750050 and was read per job: 29 of its 31 jobs pass, including the router-hat scaling job (E7s, E7m) and validate; two fail, C1bnl and the cross-compile and QEMU job at Layer Q.",
+        "On a build host, the lwIP crate with the seventeen features of the C1bnl row failed one test of 32 before the change, passed 33 of 33 without buffer-pool-session-rx-slim, and passes 32 of 32 with it after the change.",
+        "On a build host, session_slot_bytes --check passes on the parent of 9334ea20a, fails on 9334ea20a with 36752 and 36744 measured, and passes on this tree with the new record.",
+        "A run of the same crate with --all-features executes no test, because the test is compiled out under session-slot; it returned 0 and is not a verdict.",
+        "Not run here: the rest of Layer Q (the footprint bands passed in the hosted run) and the full gate array before the push is run once by the push hook."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Correction of round 3477's carry: it says two gates are red on origin/main from commit 125217f45 (discard_site_lint, accessor_reach_census); they were repaired by 9e9775b61 and 271a052ae before that push landed, and the full gate array passed 110 of 110 on its tree.",
+        "Correction of round 3473: its decision gives a bound of 0.7 s for the turn from an assumed 2 us an event; the measured figure is 2.1 to 3.6 s (section 7.2 of docs/router-data-plane-scaling.md), which round 3477 already states.",
+        "Hosted E7s is read: it passes on 272750050. The latency of one request and reply with the yield in is still unmeasured.",
+        "Steps 2 to 4 of the router liveness structure the owner approved (2026-10-24) are not begun: a keepalive and lease executor of its own with strict priority over data, a capacity model with a stated CPU budget (configured or measured, the owner's to say), a stated drop policy with counters on the admin space, and a test that asserts the latest a timer was served and not the count of faces DOWN.",
+        "The lifecycle session holds an uncommitted write-end stamp in writer_queue.rs; step 2 touches the same area, so it is coordinated before it starts."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
