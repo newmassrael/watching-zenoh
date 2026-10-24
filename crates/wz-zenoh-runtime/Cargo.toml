@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# zenoh-runtime -- the process-wide tokio runtimes of the zenoh family, over watching-zenoh
+# (inventory atom `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13).
+#
+# Named `zenoh-runtime` and versioned as the pinned zenoh, like every crate of the family (see
+# `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). This crate is the one with
+# PROCESS-GLOBAL state: one pool of runtimes, one per role, in a static. Cargo holds one crate per
+# package name in a graph, which is what makes it one pool per process; a second crate with the pool
+# in it, a private runtime inside `zenoh-core` for instance, would be a second pool and a program
+# whose application tasks run on two thread sets. That is why it is a member of the family and not
+# an implementation detail of the crates above it.
+#
+# `scripts/lib/rust_api_surface.py` holds the crate to upstream's surface, `conformance/differential`
+# holds its behaviour to upstream's.
+
+[package]
+name = "zenoh-runtime"
+version = "1.10.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The process-wide tokio runtimes of the zenoh family (1.10.1), as a drop-in over watching-zenoh."
+
+[lib]
+name = "zenoh_runtime"
+path = "src/lib.rs"
+
+# Upstream's one feature, by its name: a crate that depends on this one with `tracing-instrument`
+# (zenoh does, through `zenoh-core`) must find it. It makes `spawn` and `block_in_place` carry the
+# caller's tracing span onto the runtime they hand the future to.
+[features]
+tracing-instrument = []
+
+# The requirements are upstream's, because several of these are types of this crate's public API:
+# `ZRuntime` derefs to tokio's `Handle`, `spawn` returns tokio's `JoinHandle`, `RuntimeParam::build`
+# returns tokio's `Runtime`, and its `Deserialize` is serde's. A caller that names those meets the same
+# crates upstream's would, at the same semver line, and the configuration syntax is RON of the
+# version upstream reads it with (`ZENOH_RUNTIME` is parsed by it).
+[dependencies]
+lazy_static = "1.5.0"
+ron = "0.12.0"
+serde = { version = "1.0.225", default-features = false, features = ["derive"] }
+tokio = { version = "1.47.1", default-features = false, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
+tracing = "0.1.41"
+zenoh-result = { path = "../wz-zenoh-result", features = ["std"] }
+
+[lints]
+workspace = true

@@ -95,6 +95,7 @@ pub use wz_capi_pico as capi_pico;
 #[cfg(feature = "api-compat-rust")]
 pub mod zenoh_family {
     pub use zenoh_result;
+    pub use zenoh_runtime;
 }
 
 // §5.27 — THE TWO C ABIs ARE MUTUALLY EXCLUSIVE, and this is where that is

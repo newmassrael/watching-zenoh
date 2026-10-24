@@ -66,6 +66,7 @@ members = [
     # ecosystem imports, each under UPSTREAM'S package name (a `[patch.crates-io]` swaps by it).
     # `scripts/lib/rust_api_surface.py` lists them (`MEMBERS`) and holds each to upstream's surface.
     "wz-zenoh-result",
+    "wz-zenoh-runtime",
     # R311y578 (G1) — pcap ingest + link/IP/TCP decapsulation + TCP flow
     # reassembly, feeding `wz_session_core::passive`. Knows nothing about
     # zenoh; the seam is a byte stream plus a direction, so a live tap can

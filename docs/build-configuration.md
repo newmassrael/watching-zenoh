@@ -120,7 +120,9 @@ original reproduced by naming it. Three things follow from it:
   ratchet that a slice lowers in its own round. A function's line carries its signature
   (generics and bounds, parameter and return types, qualifiers, the `impl` block of a method),
   so a path with the wrong signature is a missing line and not a present one. Members so far:
-  `zenoh-result` (complete: 37 of 37 lines) and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
+  `zenoh-result` (complete: 37 of 37 lines), `zenoh-runtime` (complete: the process-wide pool, so
+  the one crate of the family that holds global state, and the reason it is a member and not a
+  detail of `zenoh-core`) and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each
   crate against upstream's, a graph in which an upstream crate and the wz crate meet one type once
@@ -358,8 +360,8 @@ Each step lands with its own done-when; sizes are not estimated here.
 11. **`wz-config`** (section 6, C9).
 12. **Rust API compatibility** (C13). Register `api-compat-rust`; derive the
     upstream surface from rustdoc JSON; the family of compatibility crates, lowest first
-    (`zenoh-result`, `zenoh-core`, `zenoh-keyexpr`, `zenoh-protocol`, `zenoh-config`,
-    `zenoh-util`, then `zenoh`); the surface gate over each; differential tests against
+    (`zenoh-result`, `zenoh-runtime`, `zenoh-core`, `zenoh-macros`, `zenoh-keyexpr`,
+    `zenoh-protocol`, `zenoh-config`, `zenoh-util`, then `zenoh`); the surface gate over each; differential tests against
     each; upstream's examples, tests and an ecosystem crate built against the patched graph.
 13. **Resource gates** (D5): stack peak and wire turnaround per registered profile,
     each a committed figure that a change moves visibly.

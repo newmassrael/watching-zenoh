@@ -267,7 +267,8 @@ UPSTREAM_UNCARRIED = frozenset(
         "ZC_LOCALITY_DEFAULT",
         "ZENOH_COMPILER_CLANG",
         "ZENOH_COMPILER_GCC",
-        "ZENOH_RUNTIME",
+        # R3487 — `ZENOH_RUNTIME` left this set: the `zenoh-runtime` crate of the family
+        # provides it (`ZENOH_RUNTIME_ENV`, the variable it reads), so the tree carries it.
         "Z_BATCH_MULTICAST_SIZE",
         "Z_CONFIG_MULTICAST_IPV4_ADDRESS_KEY",
         "Z_CONFIG_MULTICAST_LOCATOR_DEFAULT",

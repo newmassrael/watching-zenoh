@@ -23162,8 +23162,12 @@ layer_e17_stats_registry_writes_upstreams_document() {
 # enters `crates/`'s dependency graph. They are HERE with E16 and E17, the other two that link
 # upstream's crates, and need the registry and nothing else.
 layer_e18_zenoh_family_conformance() {
-    _runci_guarded_test "Layer E18 (differential)" 6 \
-        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh-result)" 6 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_result || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh-runtime)" 4 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_runtime || return 1
     _runci_guarded_test "Layer E18 (the patched graph)" 3 \
         cargo test --locked --manifest-path ../conformance/patch-scenario/Cargo.toml || return 1
     _runci_guarded_test "Layer E18 (the control graph)" 1 \
