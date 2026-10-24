@@ -412,6 +412,15 @@ from. So the order is now:
   19.1 MiB lent (the entries alone), peak RSS 307 to 150 MB handed and 117 MB
   lent; replay 180 to 137 ms, census 57 to about 145 ms and fields windows about
   2,030 to 2,300 ms (+13%), the price of reading rows again.
+  Landed (2): the serial line's messages are entries read again from each
+  frame's payload, logged once per frame; beside each message the line keeps
+  the frame's envelope (interface and control byte, `serial::SerialOrigin` with
+  the packet from the row's anchor) instead of a copy of the frame per message,
+  and a message's bytes are read from the log (`Messages::unit_bytes`). The gate
+  reads a two-wire line of frames batching one to three messages against the
+  reading that kept them whole, row, head and origin, and every message's bytes
+  against the payload the frame was built from. Not measured: no serial capture
+  of the consumer's size exists.
 - 5. The memory gate.
 - 6. Random access to a row's field document (D9), taken before 4c's remaining
   landings because it is what the consumer's budget waits on: (a) the tables
