@@ -155,7 +155,7 @@ fn reread(
 fn read_whole(what: &str, file: &[u8]) -> Dissection {
     let parsed = crate::pcap::parse(file).unwrap_or_else(|e| panic!("{what}: {e:?}"));
     let mut d = Dissection::new();
-    d.keep_stream_messages_whole();
+    d.keep_messages_whole();
     for packet in &parsed.packets {
         d.push_packet_at_nanos(
             parsed.link_type,
@@ -357,6 +357,28 @@ fn a_lent_container_reads_as_the_same_bytes_handed() {
     }
 }
 
+/// Open-debt item 924, step 4c — A LENT DATAGRAM IS READ WHERE IT SITS: a
+/// dissection lent a capture of UDP datagrams logs no copy of their payloads,
+/// so a flow whose container is taken away has nothing to read a row from. A
+/// list that had logged a copy would read on.
+#[test]
+#[should_panic(expected = "bytes of a datagram a list holds are not at Container")]
+fn a_lent_datagram_keeps_no_copy_of_its_payload() {
+    let (name, file) = tracked_captures()[2];
+    let mut lent = Dissection::new();
+    let container: alloc::sync::Arc<dyn crate::LentCapture> = alloc::sync::Arc::new(file.to_vec());
+    lent.follow_lent(&mut crate::CaptureCursor::new(), container)
+        .unwrap_or_else(|e| panic!("{name}: {e:?}"));
+    lent.finish();
+    let flow = lent
+        .datagram_flows
+        .iter_mut()
+        .find(|flow| !flow.frames().is_empty())
+        .unwrap_or_else(|| unreachable!("{name}: a UDP flow carries messages"));
+    flow.lent = None;
+    let _ = flow.frames().row(0);
+}
+
 /// Read every unit of every stream and datagram flow of `file` again. A stream
 /// flow's messages are compared twice: the first reading against each unit read
 /// again from its bytes ([`redecode_unit`]), and a dissection that keeps entries
@@ -365,8 +387,10 @@ fn reread_capture(what: &str, file: &[u8]) -> Reach {
     let indexed = Dissection::from_capture(file).unwrap_or_else(|e| panic!("{what}: {e:?}"));
     let d = read_whole(what, file);
     // Every message a flow read off its own reassembled stream is an entry, and
-    // nothing else is: a datagram, a WebSocket message and a decrypted record
-    // are kept whole.
+    // so is every cleartext datagram's that is admissible on its link (step
+    // 4c); nothing else is: a WebSocket message, a decrypted record, a
+    // recovered QUIC message and a message inadmissible on its link are kept
+    // whole.
     let read_from_bytes = assert_reads_as_whole(what, &indexed, &d);
     let stream_rows: usize = d
         .flows
@@ -374,8 +398,19 @@ fn reread_capture(what: &str, file: &[u8]) -> Reach {
         .filter(|flow| matches!(flow.framing(), crate::Framing::Stream))
         .map(|flow| flow.frames().len())
         .sum();
+    let datagram_rows: usize = d
+        .datagram_flows
+        .iter()
+        .map(|flow| {
+            flow.frames()
+                .heads_from(0)
+                .filter(|head| !head.inadmissible_on_link)
+                .count()
+        })
+        .sum();
     assert_eq!(
-        read_from_bytes, stream_rows,
+        read_from_bytes,
+        stream_rows + datagram_rows,
         "{what}: the messages kept as entries"
     );
     let packets = crate::pcap::parse(file).ok();
@@ -404,7 +439,7 @@ fn reread_capture(what: &str, file: &[u8]) -> Reach {
                     _ => return None,
                 };
             let handshake = link.handshake(&datagram);
-            Some((datagram.payload, handshake))
+            Some((datagram.payload.to_vec(), handshake))
         });
     }
     reach
@@ -515,7 +550,7 @@ fn a_list_of_entries_under_message_and_byte_ceilings_reads_as_the_reference() {
         let indexed = Dissection::from_pcap_declaring_bounded(&file, &[], &[], limits)
             .unwrap_or_else(|e| panic!("{what}: {e:?}"));
         let mut whole = Dissection::with_limits(limits);
-        whole.keep_stream_messages_whole();
+        whole.keep_messages_whole();
         for packet in &parsed.packets {
             whole.push_packet_at_nanos(
                 parsed.link_type,
@@ -542,6 +577,62 @@ fn a_list_of_entries_under_message_and_byte_ceilings_reads_as_the_reference() {
         converted > 0,
         "a byte ceiling released bytes under a message the list then kept whole"
     );
+}
+
+/// Open-debt item 924, step 4c — A LIST OF DATAGRAM ENTRIES UNDER THE
+/// CEILINGS. A message ceiling, per flow or over all of them, discards from the
+/// front of a list that logs its units, cutting a batched unit between its
+/// records and releasing a unit's logged bytes with its last row. Under every
+/// ceiling, every list, the drop counts and the census of what was discarded
+/// read as the reading that kept every message whole, and a dissection LENT the
+/// capture reads as one handed it.
+#[test]
+fn a_list_of_datagram_entries_under_message_ceilings_reads_as_the_reference() {
+    let mut ceilings: Vec<crate::DissectionLimits> = Vec::new();
+    for cap in [1, 2, 3, 5, 8] {
+        ceilings.push(crate::DissectionLimits {
+            frames_per_flow: Some(cap),
+            ..crate::DissectionLimits::default()
+        });
+        ceilings.push(crate::DissectionLimits {
+            frames_total: Some(cap),
+            ..crate::DissectionLimits::default()
+        });
+    }
+    let (mut read_from_bytes, mut discarded) = (0usize, 0usize);
+    for (name, file) in tracked_captures() {
+        let parsed = crate::pcap::parse(file).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        for limits in &ceilings {
+            let what = format!("{name}, {limits:?}");
+            let indexed = Dissection::from_pcap_declaring_bounded(file, &[], &[], *limits)
+                .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            let mut whole = Dissection::with_limits(*limits);
+            whole.keep_messages_whole();
+            for packet in &parsed.packets {
+                whole.push_packet_at_nanos(
+                    parsed.link_type,
+                    packet.index,
+                    Some(packet.ts_nanos(parsed.timestamp_unit)),
+                    &packet.data,
+                );
+            }
+            whole.finish();
+            read_from_bytes += assert_reads_as_whole(&what, &indexed, &whole);
+            discarded += indexed.drops().frames;
+            assert_eq!(indexed.drops(), whole.drops(), "{what}: drops");
+            assert_eq!(
+                indexed.dropped_frame_census(),
+                whole.dropped_frame_census(),
+                "{what}: what was discarded"
+            );
+            assert_lent_reads_as_handed(&what, file, *limits, &[file.len() / 2]);
+        }
+    }
+    assert!(
+        read_from_bytes > 0,
+        "a datagram row was read from its bytes"
+    );
+    assert!(discarded > 0, "a ceiling discarded a datagram row");
 }
 
 /// The ceilings the stream shapes are read under: a message ceiling of one to

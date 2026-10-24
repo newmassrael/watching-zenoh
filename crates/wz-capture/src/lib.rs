@@ -961,6 +961,13 @@ pub struct DatagramDissection {
     /// What the session table needs of this flow that no retention bound may
     /// take away. See [`session_table::LinkIngest`].
     ingest: session_table::LinkIngest,
+    /// How the cleartext messages are kept: as index entries read again from
+    /// the list's unit log, except in the redecode gate's reference reading.
+    keep: Keep,
+    /// The capture container the dissection is lent, when it is: a datagram
+    /// whose payload sits in it is logged by its place there and read from it
+    /// (open-debt item 924, step 4c).
+    lent: Option<alloc::sync::Arc<dyn LentCapture>>,
 }
 
 /// R311y918 (open-debt item 270's prerequisite) — WHAT A LIST'S
@@ -1522,17 +1529,60 @@ impl QuicStreamDissection {
     }
 }
 
+/// A datagram flow is the source of its own lists: it holds no stream, and
+/// lends the container it is lent.
+impl messages::UnitBytes for DatagramDissection {
+    fn stream_bytes(
+        &self,
+        _: Direction,
+        _: usize,
+        _: usize,
+    ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
+        None
+    }
+
+    fn container(&self) -> Option<&[u8]> {
+        self.lent.as_deref().map(LentCapture::bytes)
+    }
+}
+
 impl DatagramDissection {
     /// Decoded messages, in capture order, each anchored at the index of the
-    /// packet that carried it. Kept whole.
+    /// packet that carried it. Kept as index entries, each read again from its
+    /// datagram's bytes when it is asked for (open-debt item 924, step 4c).
     pub fn frames(&self) -> messages::Messages<'_> {
-        self.frames.read(&messages::NoBytes)
+        self.frames.read(self)
     }
 
     /// The RFC 9221 datagrams recovered on this flow, decoded, kept apart from
     /// [`Self::frames`] for the reason the field's doc gives. Kept whole.
     pub fn quic_datagrams(&self) -> messages::Messages<'_> {
-        self.quic_datagrams.read(&messages::NoBytes)
+        self.quic_datagrams.read(self)
+    }
+
+    /// The source a list of this flow reads its datagrams from, as a borrow
+    /// beside the lists, so a caller that changes a list can hand it in.
+    fn datagrams(lent: &Option<alloc::sync::Arc<dyn LentCapture>>) -> messages::Datagrams<'_> {
+        messages::Datagrams {
+            container: lent.as_deref().map(LentCapture::bytes),
+        }
+    }
+
+    /// Discard the oldest cleartext message of this flow, reading it from its
+    /// datagram's bytes if the list keeps it as an entry.
+    fn discard_oldest_frame(&mut self) -> Option<messages::Discarded> {
+        let Self { frames, lent, .. } = self;
+        frames.discard_oldest(&Self::datagrams(lent))
+    }
+
+    /// Discard the oldest recovered RFC 9221 datagram message of this flow.
+    fn discard_oldest_quic_datagram(&mut self) -> Option<messages::Discarded> {
+        let Self {
+            quic_datagrams,
+            lent,
+            ..
+        } = self;
+        quic_datagrams.discard_oldest(&Self::datagrams(lent))
     }
 
     /// What `direction` of this flow has been seen to do. A datagram link has
@@ -1549,7 +1599,12 @@ impl DatagramDissection {
         }
     }
 
-    fn new(flow: FlowKey, window_ms: Option<u64>) -> Self {
+    fn new(
+        flow: FlowKey,
+        window_ms: Option<u64>,
+        keep: Keep,
+        lent: Option<alloc::sync::Arc<dyn LentCapture>>,
+    ) -> Self {
         Self {
             flow,
             session: new_session(window_ms),
@@ -1564,6 +1619,8 @@ impl DatagramDissection {
             quic_datagrams: messages::MessageList::new(),
             carriers: link::Carriers::default(),
             ingest: session_table::LinkIngest::default(),
+            keep,
+            lent,
         }
     }
 
@@ -2322,6 +2379,17 @@ pub struct FlowDissection {
 /// A TCP flow's two reassembled streams, as the source its message list reads
 /// a unit's bytes from (open-debt item 924, `docs/dissect-row-index.md`).
 ///
+/// Where `payload`, a slice of `packet`, sits in the capture container a
+/// dissection is lent, when the packet sits there at `in_container`.
+///
+/// Open-debt item 924, steps 3 and 4c: a segment and a datagram borrow their
+/// payload from the packet, so its place is where the slice is, and what reads
+/// it keeps no copy. `None` for a payload outside the packet (one a reassembler
+/// rebuilt) and for a packet outside any container.
+fn lent_place(in_container: Option<usize>, packet: &[u8], payload: &[u8]) -> Option<usize> {
+    in_container.and_then(|at| link::offset_within(packet, payload).map(|offset| at + offset))
+}
+
 /// A pair of borrows rather than the flow, so a caller that changes the list
 /// can hand it the streams beside it.
 struct Streams<'a> {
@@ -3560,10 +3628,12 @@ impl FlowDissection {
     }
 }
 
-/// How a TCP flow keeps the messages it reads off its own reassembled stream.
+/// How a flow keeps the messages it reads off its own reassembled stream or out
+/// of its own datagrams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Keep {
-    /// As index entries, read again from the stream (open-debt item 924).
+    /// As index entries, read again from the stream or the list's unit log
+    /// (open-debt item 924).
     Entries,
     /// Whole, as the first reading produced them: the reference reading the
     /// redecode gate holds the entries equal to, and nothing else.
@@ -3930,7 +4000,7 @@ mod message_list_census {
             capture_reported_drops: _,
             scouts: _,
             gap_patience: _,
-            stream_keep: _,
+            keep: _,
             // The container the flows' bytes are read from, not a list.
             lent: _,
             capture_origin_ms: _,
@@ -4022,7 +4092,11 @@ mod message_list_census {
             carriers: _,
             // The session table's ingest facts, the twin of the stream flow's.
             ingest: _,
-        } = DatagramDissection::new(FlowKey::serial_line(), None);
+            // How `frames` keeps its messages, not a list of them.
+            keep: _,
+            // Where the datagrams' bytes are read from, not a list.
+            lent: _,
+        } = DatagramDissection::new(FlowKey::serial_line(), None, Keep::Entries, None);
     }
 
     /// Every field of [`QuicStreamDissection`], classified.
@@ -5140,10 +5214,10 @@ pub struct Dissection {
     /// default must be ENABLED, since a capture with a hole is not a policy
     /// choice a caller opts into.
     gap_patience: Option<usize>,
-    /// How a TCP flow created from here on keeps the messages it reads off its
-    /// own stream ([`FlowDissection`]'s `keep`): as index entries, except in the
-    /// reference reading the redecode gate builds.
-    stream_keep: Keep,
+    /// How a flow created from here on keeps the messages it reads off its own
+    /// stream or out of its own datagrams (the flows' `keep`): as index entries,
+    /// except in the reference reading the redecode gate builds.
+    keep: Keep,
     /// The capture container this dissection is lent ([`Self::follow_lent`]),
     /// which every TCP flow holds too and reads its stream's bytes from.
     lent: Option<alloc::sync::Arc<dyn LentCapture>>,
@@ -5263,7 +5337,7 @@ impl Default for Dissection {
             capture_reported_drops: None,
             scouts: ScoutingCorrelation::default(),
             gap_patience: Some(crate::tcp::DEFAULT_GAP_PATIENCE),
-            stream_keep: Keep::Entries,
+            keep: Keep::Entries,
             lent: None,
             capture_origin_ms: None,
             abandoned_chains: 0,
@@ -5302,15 +5376,16 @@ impl Dissection {
         self.gap_patience = patience;
     }
 
-    /// Keep whole every message a TCP flow created from here on reads off its
-    /// own stream, rather than as an index entry read again on demand.
+    /// Keep whole every message a flow created from here on reads off its own
+    /// stream or out of its own datagrams, rather than as an index entry read
+    /// again on demand.
     ///
     /// The reference reading of the redecode gate: a dissection that keeps its
     /// messages whole holds what the first reading produced, and one that keeps
     /// entries must read every message back equal to it.
     #[cfg(test)]
-    pub(crate) fn keep_stream_messages_whole(&mut self) {
-        self.stream_keep = Keep::Whole;
+    pub(crate) fn keep_messages_whole(&mut self) {
+        self.keep = Keep::Whole;
     }
 
     /// R311y609 — what the FRAMING lost, at both layers. See
@@ -5553,7 +5628,8 @@ impl Dissection {
                 // reassembled from pieces is positioned and timed by the one
                 // packet at which a reader could first have seen it whole.
                 Ok(Transport::Udp(d) | Transport::RawEth(d)) => {
-                    self.push_datagram(d, ts_nanos, DatagramLink::Udp);
+                    // Reassembled from pieces: no one packet holds the payload.
+                    self.push_datagram(d, ts_nanos, DatagramLink::Udp, None);
                     return;
                 }
                 Ok(Transport::Tcp(s)) => {
@@ -7281,11 +7357,13 @@ impl Dissection {
             // [`link_handshake`]), and its `Endpoint` is a MAC that no address
             // rule downstream can read.
             Ok(Transport::Udp(d)) => {
-                self.push_datagram(d, ts_nanos, DatagramLink::Udp);
+                let at = lent_place(in_container, bytes, d.payload);
+                self.push_datagram(d, ts_nanos, DatagramLink::Udp, at);
                 return;
             }
             Ok(Transport::RawEth(d)) => {
-                self.push_datagram(d, ts_nanos, DatagramLink::RawEth);
+                let at = lent_place(in_container, bytes, d.payload);
+                self.push_datagram(d, ts_nanos, DatagramLink::RawEth, at);
                 return;
             }
             // R311y603 — a vsock record is a piece of a BYTE STREAM, so it goes
@@ -7310,15 +7388,8 @@ impl Dissection {
                 return;
             }
         };
-        // Open-debt item 924, step 3 — a packet that sits in the lent container
-        // has its payload there too: the segment borrows it from the packet, so
-        // its place is where the slice is, and the assembler keeps no copy.
-        let at = in_container
-            .and_then(|packet| {
-                link::offset_within(bytes, segment.payload)
-                    .map(|payload| tcp::PayloadAt::Container(packet + payload))
-            })
-            .unwrap_or(tcp::PayloadAt::Here);
+        let at = lent_place(in_container, bytes, segment.payload)
+            .map_or(tcp::PayloadAt::Here, tcp::PayloadAt::Container);
         self.push_segment(segment, ts_nanos, at);
     }
 
@@ -7338,7 +7409,7 @@ impl Dissection {
                     segment.flow,
                     self.limits.reassembly_window_ms,
                     self.gap_patience,
-                    self.stream_keep,
+                    self.keep,
                 );
                 flow.lent = self.lent.clone();
                 self.flows.push(flow);
@@ -7545,10 +7616,7 @@ impl Dissection {
                     self.flows[i].release_stream_behind_held_messages();
                 }
                 TotalList::Datagram => {
-                    let Some(receipt) = self.datagram_flows[i]
-                        .frames
-                        .discard_oldest(&messages::NoBytes)
-                    else {
+                    let Some(receipt) = self.datagram_flows[i].discard_oldest_frame() else {
                         return;
                     };
                     self.dropped_frames.absorb(receipt);
@@ -7560,9 +7628,7 @@ impl Dissection {
                     }
                 }
                 TotalList::QuicDatagram => {
-                    let Some(receipt) = self.datagram_flows[i]
-                        .quic_datagrams
-                        .discard_oldest(&messages::NoBytes)
+                    let Some(receipt) = self.datagram_flows[i].discard_oldest_quic_datagram()
                     else {
                         return;
                     };
@@ -7629,7 +7695,7 @@ impl Dissection {
                     record.flow,
                     self.limits.reassembly_window_ms,
                     self.gap_patience,
-                    self.stream_keep,
+                    self.keep,
                 );
                 flow.lent = self.lent.clone();
                 self.flows.push(flow);
@@ -7710,7 +7776,16 @@ impl Dissection {
     ///
     /// No buffering and no reassembly, because there is nothing to reassemble
     /// — which is exactly why this is four lines and the TCP path is not.
-    fn push_datagram(&mut self, d: link::Datagram, ts_nanos: Option<u64>, link: DatagramLink) {
+    ///
+    /// `in_container` is where the payload sits in the capture container this
+    /// dissection is lent, when it sits there (open-debt item 924, step 4c).
+    fn push_datagram(
+        &mut self,
+        d: link::Datagram,
+        ts_nanos: Option<u64>,
+        link: DatagramLink,
+        in_container: Option<usize>,
+    ) {
         self.tally_checksums(&d.checksums);
         let idx = match self.datagram_flows.iter().position(|f| f.flow == d.flow) {
             Some(i) => i,
@@ -7718,6 +7793,8 @@ impl Dissection {
                 self.datagram_flows.push(DatagramDissection::new(
                     d.flow,
                     self.limits.reassembly_window_ms,
+                    self.keep,
+                    self.lent.clone(),
                 ));
                 self.datagram_flows.len() - 1
             }
@@ -7775,7 +7852,7 @@ impl Dissection {
         // does not produce.
         match &mut flow.quic {
             Some(census) => {
-                match quic::recognise_on_quic_flow(&d.payload) {
+                match quic::recognise_on_quic_flow(d.payload) {
                     Some(p) => census.add(p),
                     // Counted, not ignored. A QUIC flow carrying a datagram this
                     // reader cannot name is a fact, and absorbing it into the
@@ -7790,7 +7867,7 @@ impl Dissection {
                 // for what gets RECORDED rather than for what happens: a
                 // declared flow whose long header this reader can also read is
                 // evidence as well as premise, and the census should say so.
-                if let Some(p) = quic::recognise_long(&d.payload) {
+                if let Some(p) = quic::recognise_long(d.payload) {
                     let mut census = quic::QuicCensus::default();
                     census.add(p);
                     flow.quic = Some(census);
@@ -7814,7 +7891,7 @@ impl Dissection {
                         declared: true,
                         ..Default::default()
                     };
-                    match quic::recognise_on_quic_flow(&d.payload) {
+                    match quic::recognise_on_quic_flow(d.payload) {
                         Some(p) => census.add(p),
                         None => census.add_unrecognised(d.payload.len()),
                     }
@@ -7833,7 +7910,7 @@ impl Dissection {
             // are fed. A scouting datagram advances no session, which is a
             // different question from whether anything read it.
             flow.residue.fed += d.payload.len() as u64;
-            let read = parse_scouting_observed(&d.payload);
+            let read = parse_scouting_observed(d.payload);
             let whole = matches!(&read, Ok((_, n)) if *n == d.payload.len());
             let frame = read.map(|(frame, _)| frame);
             flow.ingest.observe_scouting(&frame, whole);
@@ -7861,14 +7938,23 @@ impl Dissection {
         }
         // R311y631 (§1.2b) — one datagram, every message it batched.
         flow.residue.fed += d.payload.len() as u64;
-        let batch = flow.session.next_datagram_on(
-            direction,
-            &d.payload,
-            d.packet_index,
-            link.handshake(&d),
-        );
-        flow.ingest.observe_frames(&batch);
-        flow.frames.append(batch);
+        let handshake = link.handshake(&d);
+        if let Some(unit) =
+            flow.session
+                .next_datagram_unit_on(direction, d.payload, d.packet_index, handshake)
+        {
+            flow.ingest.observe_frames(&unit.frames);
+            match flow.keep {
+                // Open-debt item 924, step 4c — read again from the list's log,
+                // or from the container where the payload sits in one.
+                Keep::Entries => {
+                    flow.frames
+                        .push_datagram(unit, d.payload, in_container, handshake)
+                }
+                #[cfg(test)]
+                Keep::Whole => flow.frames.append(unit.frames),
+            }
+        }
         self.enforce_datagram_message_cap(idx);
         self.evict_datagram_flows_beyond_cap();
     }
@@ -7949,15 +8035,14 @@ impl Dissection {
                     }
                 }
                 2 => {
-                    let Some(receipt) = flow.quic_datagrams.discard_oldest(&messages::NoBytes)
-                    else {
+                    let Some(receipt) = flow.discard_oldest_quic_datagram() else {
                         return;
                     };
                     self.dropped_frames.absorb(receipt);
                     self.drops.frames += 1;
                 }
                 _ => {
-                    let Some(receipt) = flow.frames.discard_oldest(&messages::NoBytes) else {
+                    let Some(receipt) = flow.discard_oldest_frame() else {
                         return;
                     };
                     self.dropped_frames.absorb(receipt);
@@ -8329,6 +8414,9 @@ impl Dissection {
         }
         self.lent = Some(capture.clone());
         for flow in self.flows.iter_mut() {
+            flow.lent = Some(capture.clone());
+        }
+        for flow in self.datagram_flows.iter_mut() {
             flow.lent = Some(capture.clone());
         }
     }

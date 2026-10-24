@@ -2492,7 +2492,7 @@ fn push_datagram_flow(
         }
         push_walk(
             RowWalk {
-                bytes: &read.payload,
+                bytes: read.payload,
                 space: MidSpace::Scouting,
                 direction: datagram.direction,
                 framed: &scouting_name(datagram),
@@ -2576,12 +2576,12 @@ fn datagram_message<'d>(
 /// depending on which list asked.
 ///
 /// `Err` is the disagreement's word, exactly as `note` records it.
-fn reread_datagram(
-    file: &Reread,
+fn reread_datagram<'a>(
+    file: &Reread<'a>,
     flow: &crate::DatagramDissection,
     direction: Direction,
     index: usize,
-) -> Result<crate::link::Datagram, &'static str> {
+) -> Result<crate::link::Datagram<'a>, &'static str> {
     let Some(packet) = file.packet(index) else {
         return Err("absent");
     };

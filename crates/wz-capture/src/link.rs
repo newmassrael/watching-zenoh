@@ -1187,15 +1187,20 @@ pub enum SkipReason {
 /// ignore would invite a reader to treat the two the same, and they are not
 /// the same — the framing differs, which is the whole reason UDP could not
 /// simply be routed into the existing TCP path.
+///
+/// Open-debt item 924, step 4c — it BORROWS its payload from the bytes it was
+/// lifted out of, as a [`Segment`] does and for the same reasons: a list that
+/// keeps a copy makes its own, and a borrowed payload says where in the packet
+/// it sits, which a list lent the capture container logs instead of the bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Datagram {
+pub struct Datagram<'a> {
     /// The two endpoints, sorted, exactly as for TCP so a consumer keys both
     /// transports the same way.
     pub flow: FlowKey,
     /// `true` when it travelled from [`FlowKey::low`] toward `high`.
     pub from_low: bool,
     /// The datagram body: one complete zenoh wire message.
-    pub payload: Vec<u8>,
+    pub payload: &'a [u8],
     /// Index of the packet this came out of.
     pub packet_index: usize,
     /// What this packet's checksums said. Reported, never acted on.
@@ -1205,7 +1210,7 @@ pub struct Datagram {
     pub tunnel: Tunnel,
 }
 
-impl Datagram {
+impl Datagram<'_> {
     /// R311y607 — where this datagram was ADDRESSED.
     ///
     /// [`FlowKey`] stores its two endpoints sorted so both directions produce
@@ -1265,7 +1270,7 @@ pub enum Transport<'a> {
     /// A TCP segment, to be fed to a stream reassembler.
     Tcp(Segment<'a>),
     /// A UDP datagram, already a whole message.
-    Udp(Datagram),
+    Udp(Datagram<'a>),
     /// R311y603 — the payload of one AF_VSOCK record.
     ///
     /// A distinct variant from [`Self::Tcp`] even though both feed a byte
@@ -1283,7 +1288,7 @@ pub enum Transport<'a> {
     /// a [`Datagram`], because the two are only alike in SHAPE: a raweth flow
     /// is keyed by MAC with no ports, so a consumer that reports "UDP flow"
     /// over it would be naming a transport that is not there.
-    RawEth(Datagram),
+    RawEth(Datagram<'a>),
     /// R311y606 — one piece of a fragmented IP datagram, v4 or v6.
     ///
     /// Reported rather than skipped. Reassembling needs a table and a deadline,
@@ -1496,7 +1501,7 @@ enum LinkBody<'a> {
     /// The frame carried an IP packet: its bytes, and whether they are v6.
     Ip { bytes: &'a [u8], is_v6: bool },
     /// The frame WAS a zenoh-pico raweth frame; there is no IP layer under it.
-    RawEth(Datagram),
+    RawEth(Datagram<'a>),
 }
 
 /// The ONE door onto a link-layer frame.
@@ -1615,16 +1620,12 @@ pub fn decapsulate(
 /// # Why a second walk and not a field on [`Segment`] / [`Datagram`]
 ///
 /// This is for a reader that holds the PACKET and no transport out of it (a
-/// field row's first byte). A reader that just decapsulated a TCP packet needs
-/// no walk: a [`Segment`] borrows its payload from the packet, so where it sat
-/// is where the slice is (`offset_within`). A [`Datagram`] owns its payload
-/// (`to_vec`), so the fact "these bytes sat at offset N of the packet" is gone
-/// by the time a caller holds one, and threading it out through every strip
-/// would give every constructor of the type a field meaningless for half of
-/// them. This walks the SAME doors instead (`enter_link`, `walk_ip_chain`) and
-/// reads the header lengths through the SAME rules the strips use
-/// (`tcp_header_len`, `UDP_HEADER_LEN`), so the two cannot disagree about where
-/// a body starts.
+/// field row's first byte). A reader that just decapsulated a packet needs no
+/// walk: a [`Segment`] and a [`Datagram`] borrow their payload from the packet,
+/// so where it sat is where the slice is (`offset_within`). This walks the SAME
+/// doors the decapsulation does (`enter_link`, `walk_ip_chain`) and reads the
+/// header lengths through the SAME rules the strips use (`tcp_header_len`,
+/// `UDP_HEADER_LEN`), so the two cannot disagree about where a body starts.
 ///
 /// # When it answers `None`, and why that is not a failure
 ///
@@ -1894,7 +1895,7 @@ fn fold_checksum(sofar: Option<bool>, this: Option<bool>) -> Option<bool> {
 /// the same sentence.
 enum ChainEnd<'a> {
     Ip(IpDatagram<'a>),
-    RawEth(Datagram),
+    RawEth(Datagram<'a>),
 }
 
 /// Everything one chain walk OBSERVED, not merely where it ended.
@@ -2241,7 +2242,7 @@ fn strip_udp(
     packet_index: usize,
     checksums: Checksums,
     tunnel: Tunnel,
-) -> Result<Datagram, SkipReason> {
+) -> Result<Datagram<'_>, SkipReason> {
     if bytes.len() < UDP_HEADER_LEN {
         return Err(SkipReason::Truncated);
     }
@@ -2263,7 +2264,7 @@ fn strip_udp(
     Ok(Datagram {
         flow,
         from_low,
-        payload: bytes[UDP_HEADER_LEN..UDP_HEADER_LEN + body_len].to_vec(),
+        payload: &bytes[UDP_HEADER_LEN..UDP_HEADER_LEN + body_len],
         packet_index,
         checksums,
         tunnel,
@@ -2396,7 +2397,7 @@ fn transport_checksum(
 /// endianness is not observable from the capture, so a reader that accepted
 /// only one spelling would be blind to half the deployments — for a property
 /// that is pico's, not this parser's, to normalise.
-fn strip_raweth(bytes: &[u8], packet_index: usize) -> Option<Datagram> {
+fn strip_raweth(bytes: &[u8], packet_index: usize) -> Option<Datagram<'_>> {
     use wz_session_core::raweth_link::{self, RawEthHeader, DEFAULT_ETHTYPE};
 
     let (header, _) = RawEthHeader::decode(bytes).ok()?;
@@ -2413,7 +2414,7 @@ fn strip_raweth(bytes: &[u8], packet_index: usize) -> Option<Datagram> {
     Some(Datagram {
         flow,
         from_low,
-        payload: payload.to_vec(),
+        payload,
         packet_index,
         // A raweth frame has NEITHER: no IP header to checksum and no
         // transport pseudo-header to build one over. `None`/`None` is the
