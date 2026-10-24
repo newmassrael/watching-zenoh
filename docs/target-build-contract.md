@@ -427,9 +427,20 @@ the owner approves each use; steps 5 and 6 begin there.
    headers declare for an API 36 device (not run on one). The `preset-ap-full` bindgen
    refusal of the probe is not exercised: the entry builds default features, and that
    preset is not an artifact. Nothing ran on a device.
-5. **The aarch64 glibc lane.** A build with the Yocto SDK, then `run`. Done when the
-   binary opens a session on the board and the `system_needed` list is checked
-   against the SDK's libraries.
+5. **The aarch64 glibc lane (landed at `build`; `run` is not).** On a build machine, with
+   the owner's approval and the glibc 2.35 SDK (Yocto 4.0.35) read-only from a copy the
+   consumer relocated, `scripts/yocto-toolchain-env.sh` turns the SDK's environment script
+   into the entry's variables and Layer C1sp packages all three artifacts twice (same
+   manifest bytes) and verifies. The first build failed, as an honest first build should:
+   `wz-capi-pico` pinned `sizeof(pthread_attr_t)` at 56 B for every non-macOS target, and
+   aarch64 glibc's is 64 B (measured with the SDK's headers); the pin now has a row per
+   measured target. Each artifact needs `libgcc_s`, `libm`, `libc` (and the loader), with a
+   measured floor of `GLIBC_2.34`, so the board's glibc 2.35 satisfies it; the same artifacts
+   built with the shared glibc 2.39 SDK would measure a higher floor and be visible as such.
+   `system_assumed` is those four names, read from this build; it is not yet compared with
+   the board's own libraries (the consumer checks each device), and the Cortex-A72 tune the
+   SDK's compiler adds is a property of the SDK, not recorded. Not done: `run` (a session
+   opened on the board) and `interop`, which need the board; the row's lane is `build`.
 6. **QNX.** The port first (the cooperative host profile on `nto`, entropy and errno
    behind the target; whether the tokio runtime builds for `nto`), then the two
    rows, then lanes. Done when each of the two rows has a lane at `build` and the

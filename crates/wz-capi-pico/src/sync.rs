@@ -321,11 +321,11 @@ pub type z_loaned_task_t = os::RawTask;
 /// Moved task — see [`z_owned_task_t`].
 pub type z_moved_task_t = os::RawTask;
 
-/// pico `z_task_attr_t` — `pthread_attr_t` on unix: 56 B on Linux, measured; 64 B
-/// on macOS, where Darwin's pthread types are a signature word plus an opaque
+/// pico `z_task_attr_t` — `pthread_attr_t` on unix: 56 B on x86_64 glibc and Android, 64 B on
+/// aarch64 glibc and on macOS, where Darwin's pthread types are a signature word plus an opaque
 /// block (`__sig` and `__opaque[56]`). On Windows it is `void *` and unused. The
-/// sizes are pinned in the host layer, so that a target whose layout is not the
-/// one a size was measured on fails the build instead of writing past the
+/// sizes are pinned in the host layer, one row per measured target, so that a target whose layout
+/// is not the one a size was measured on fails the build instead of writing past the
 /// caller's storage.
 pub type z_task_attr_t = os::TaskAttr;
 

@@ -399,8 +399,10 @@ def verify_dir(out: pathlib.Path, decl: dict, resolver=None) -> list[str]:
     if (sdk or {}).get("kind") != row.get("sdk_kind") and sdk is not None:
         findings.append(f"toolchain.sdk is a `{sdk.get('kind')}` and the platform row names "
                         f"`{row.get('sdk_kind')}`")
-    if sdk is not None and set(sdk) != {"kind", "revision"}:
-        findings.append(f"toolchain.sdk has the keys {sorted(sdk)}, the entry writes kind and revision")
+    sdk_keys = {"android-ndk": {"kind", "revision"}, "yocto": {"kind", "revision", "target_arch", "target_os"}}
+    if sdk is not None and set(sdk) != sdk_keys.get(sdk.get("kind"), set()):
+        findings.append(f"toolchain.sdk has the keys {sorted(sdk)}, the entry writes "
+                        f"{sorted(sdk_keys.get(sdk.get('kind'), set())) or 'a kind it knows'} for that kind")
     if "os_provides" not in row or "system_assumed" not in row:
         return findings + [f"platform {row['id']} is unassessed in the declaration"]
     listed = set()
@@ -512,6 +514,17 @@ def sdk_identity(platform: dict, cross: bool) -> dict | None:
     kind = platform.get("sdk_kind")
     if kind is None:
         raise Refusal(f"platform {platform['id']} is a cross build and names no sdk_kind")
+    if kind == "yocto":
+        # The values the SDK's environment script exports, never a path (T2).
+        values = {key: os.environ.get(var, "") for key, var in
+                  (("revision", "OECORE_SDK_VERSION"), ("target_arch", "OECORE_TARGET_ARCH"),
+                   ("target_os", "OECORE_TARGET_OS"))}
+        missing = [var for key, var in (("revision", "OECORE_SDK_VERSION"), ("target_arch", "OECORE_TARGET_ARCH"),
+                                        ("target_os", "OECORE_TARGET_OS")) if not values[key]]
+        if missing:
+            raise Refusal(f"platform {platform['id']} names a yocto SDK and {', '.join(missing)} is not set: "
+                          "source the SDK's environment script (scripts/yocto-toolchain-env.sh does)")
+        return {"kind": kind, **values}
     if kind != "android-ndk":
         raise Refusal(f"platform {platform['id']}: the entry cannot read a `{kind}` SDK yet")
     cc = os.environ.get(f"CC_{platform['triple'].replace('-', '_')}", "")
@@ -686,8 +699,12 @@ def _selftest() -> int:
 
     # The refusals before a build starts.
     refuses("an undeclared platform", "no platform", lambda: preflight(decl, "nowhere", ["capi-pico"]))
+    unassessed_decl = copy.deepcopy(decl)
+    for p in unassessed_decl["platforms"]:
+        if p["id"] == "linux-aarch64-glibc":
+            p.pop("os_provides", None)
     refuses("an unassessed platform", "unassessed",
-            lambda: preflight(decl, "linux-aarch64-glibc", ["capi-pico"]))
+            lambda: preflight(unassessed_decl, "linux-aarch64-glibc", ["capi-pico"]))
     refuses("an undeclared artifact", "no artifact", lambda: preflight(decl, host, ["nope"]))
     cross_platform = next(p for p in decl["platforms"] if p["id"] == "android-arm64")
     saved = {k: os.environ.pop(k) for k in wz_config.toolchain_env(cross_platform) if k in os.environ}
@@ -910,9 +927,14 @@ def _selftest() -> int:
            "linux-x86_64-glibc" not in ready_platforms(decl, "x86_64-unknown-linux-gnu", env_android))
     expect("an unassessed platform is never ready, whatever the environment",
            "linux-aarch64-glibc" not in ready_platforms(
-               decl, "x86_64-unknown-linux-gnu", {**env_android, "CC_aarch64_unknown_linux_gnu": "x",
-                                                  "AR_aarch64_unknown_linux_gnu": "x",
-                                                  "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER": "x"}))
+               unassessed_decl, "x86_64-unknown-linux-gnu",
+               {**env_android, "CC_aarch64_unknown_linux_gnu": "x", "AR_aarch64_unknown_linux_gnu": "x",
+                "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER": "x"}))
+    expect("an assessed platform with its variables set is ready",
+           "linux-aarch64-glibc" in ready_platforms(
+               decl, "x86_64-unknown-linux-gnu",
+               {"CC_aarch64_unknown_linux_gnu": "x", "AR_aarch64_unknown_linux_gnu": "x",
+                "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER": "x"}))
 
     # The SDK identity of a cross build (T2).
     with tempfile.TemporaryDirectory(prefix="wz-ndk-") as ndk:
@@ -944,8 +966,23 @@ def _selftest() -> int:
     expect("a native build has no SDK identity", sdk_identity(platform, False) is None)
     refuses("a cross platform that names no sdk kind", "names no sdk_kind",
             lambda: sdk_identity({"id": "x", "triple": "t-1"}, True))
-    refuses("an sdk kind the entry cannot read", "cannot read a `yocto` SDK",
-            lambda: sdk_identity({"id": "x", "triple": "t-1", "sdk_kind": "yocto"}, True))
+    refuses("an sdk kind the entry cannot read", "cannot read a `qnx-sdp` SDK",
+            lambda: sdk_identity({"id": "x", "triple": "t-1", "sdk_kind": "qnx-sdp"}, True))
+    yocto_vars = ("OECORE_SDK_VERSION", "OECORE_TARGET_ARCH", "OECORE_TARGET_OS")
+    saved_y = {v: os.environ.pop(v) for v in yocto_vars if v in os.environ}
+    try:
+        refuses("a yocto build with the SDK's variables unset", "OECORE_SDK_VERSION, OECORE_TARGET_ARCH, "
+                "OECORE_TARGET_OS is not set", lambda: sdk_identity({"id": "x", "triple": "t-1",
+                                                                     "sdk_kind": "yocto"}, True))
+        os.environ.update({"OECORE_SDK_VERSION": "4.0.35", "OECORE_TARGET_ARCH": "aarch64",
+                           "OECORE_TARGET_OS": "linux"})
+        expect("a yocto build records the SDK's values and no path",
+               sdk_identity({"id": "x", "triple": "t-1", "sdk_kind": "yocto"}, True)
+               == {"kind": "yocto", "revision": "4.0.35", "target_arch": "aarch64", "target_os": "linux"})
+    finally:
+        for v in yocto_vars:
+            os.environ.pop(v, None)
+        os.environ.update(saved_y)
 
     # The declaration and the stamp gate agree on which families exist.
     import abi_stamp_gate

@@ -56,4 +56,9 @@ targets = [
     "thumbv8m.main-none-eabi",
     "thumbv8m.main-none-eabihf",
     "riscv32imac-unknown-none-elf",
+    # The cross platforms the package entry builds for (docs/target-build-contract.md; Layer C1sp):
+    # they follow the pinned toolchain like the embedded ones above, so a machine that provisions a
+    # cross SDK gets the standard library for its triple with the compiler, not by a hand install.
+    "aarch64-unknown-linux-gnu",
+    "aarch64-linux-android",
 ]

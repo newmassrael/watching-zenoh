@@ -237,7 +237,8 @@ mod threads {
     pub type RawCondvar = libc::pthread_cond_t;
     /// pico `_z_task_t`: `pthread_t`, 8 B.
     pub type RawTask = libc::pthread_t;
-    /// pico `z_task_attr_t`: `pthread_attr_t`, 56 B on Linux, measured; 64 B on macOS,
+    /// pico `z_task_attr_t`: `pthread_attr_t`. 56 B on x86_64 glibc and on Android's C library; 64 B
+    /// on aarch64 glibc (measured with a Yocto kirkstone SDK's glibc 2.35 headers) and on macOS,
     /// where Darwin's pthread types are a signature word plus an opaque block
     /// (`__sig` and `__opaque[56]`).
     pub type TaskAttr = libc::pthread_attr_t;
@@ -248,10 +249,19 @@ mod threads {
     /// What `sizeof(pthread_attr_t)` is on this host. The pin exists so that a target
     /// whose layout is not the one a size was measured on fails the build instead of
     /// writing past the caller's storage, which is exactly what it did on macOS the first
-    /// time this crate was built there.
+    /// time this crate was built there, and what the first aarch64 Linux build tripped on
+    /// (the 56 below was measured on x86_64 only).
+    ///
+    /// One row per target a size was measured on; a target with no row takes the Linux default
+    /// and the assertion below says so if that is wrong, rather than a row being guessed.
     #[cfg(target_os = "macos")]
     const TASK_ATTR_BYTES: usize = 64;
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(target_os = "linux", target_env = "gnu", target_arch = "aarch64"))]
+    const TASK_ATTR_BYTES: usize = 64;
+    #[cfg(not(any(
+        target_os = "macos",
+        all(target_os = "linux", target_env = "gnu", target_arch = "aarch64")
+    )))]
     const TASK_ATTR_BYTES: usize = 56;
 
     const _: () = {
