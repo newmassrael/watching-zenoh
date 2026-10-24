@@ -220,18 +220,18 @@ pub fn census_json_where_resumable_progress(
     memory.for_filter(filter);
     let nodes = memory.node_census(d);
     let grouping = crate::node::SessionGrouping::of(&nodes);
-    let throughput = memory.keyexprs(d, &grouping, progress)?;
+    let folded = memory.planes(d, &grouping, progress)?;
     let document = census_document(
         d,
         filter,
         CensusPlanes {
             #[cfg(feature = "network-codecs")]
-            exchanges: memory.exchanges(d, &grouping, progress)?,
+            exchanges: folded.exchanges.table(),
             #[cfg(feature = "network-codecs")]
-            payloads: memory.payloads(d, &grouping, progress)?,
+            payloads: folded.payloads.census(),
             #[cfg(feature = "network-codecs")]
-            interests: memory.interests(d, &grouping, progress)?,
-            throughput,
+            interests: folded.interests.census(),
+            throughput: folded.keyexprs.table(),
             nodes,
         },
     );

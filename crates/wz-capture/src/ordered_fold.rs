@@ -53,6 +53,12 @@ use wz_session_core::passive::PassiveFrame;
 
 /// What a plane keeps while it folds a capture in capture order.
 pub(crate) trait OrderedFold: Clone {
+    /// How many planes one message feeds. A fold that is several planes fed by
+    /// one walk ([`CensusFold`]) counts each message once per plane, in the
+    /// progress it reports and in [`FoldStats`], which is what the planes counted
+    /// when each walked the capture on its own.
+    const PLANES: u64 = 1;
+
     /// Take one message. `list` is its position in
     /// [`Dissection::message_lists_with_origin`] and `packet` the capture packet
     /// it resolves to; `grouping` is the capture's session grouping.
@@ -179,39 +185,39 @@ impl<F: OrderedFold> Resumable<F> {
         match resumed {
             Some((frames, marks)) => {
                 if let Some(p) = progress {
-                    p.expect(frames.iter().len() as u64);
+                    p.expect(frames.iter().len() as u64 * F::PLANES);
                 }
                 let saved = self.saved.as_mut().expect("a resumed fold has a saved one");
                 let mut stopped = false;
                 for (flow, list, packet, frame) in frames {
-                    if !crate::progress::step(progress) {
+                    if !steps(progress, F::PLANES) {
                         stopped = true;
                         break;
                     }
                     saved.fold.feed(&flow, list, packet, &frame, grouping);
-                    stats.messages_folded += 1;
+                    stats.messages_folded += F::PLANES;
                 }
                 if stopped {
                     self.saved = None;
                     return None;
                 }
                 saved.marks = marks;
-                stats.resumes += 1;
+                stats.resumes += F::PLANES;
             }
             None => {
                 let (frames, marks) = dissection
                     .capture_order_since(None)
                     .expect("a walk with nothing remembered has nothing to disagree with");
                 if let Some(p) = progress {
-                    p.expect(frames.iter().len() as u64);
+                    p.expect(frames.iter().len() as u64 * F::PLANES);
                 }
                 let mut fold = begin();
                 for (flow, list, packet, frame) in frames {
-                    if !crate::progress::step(progress) {
+                    if !steps(progress, F::PLANES) {
                         return None;
                     }
                     fold.feed(&flow, list, packet, &frame, grouping);
-                    stats.messages_folded += 1;
+                    stats.messages_folded += F::PLANES;
                 }
                 self.saved = Some(Saved {
                     fold,
@@ -219,10 +225,80 @@ impl<F: OrderedFold> Resumable<F> {
                     origin_ms,
                     marks,
                 });
-                stats.restarts += 1;
+                stats.restarts += F::PLANES;
             }
         }
         self.saved.as_ref().map(|saved| &saved.fold)
+    }
+}
+
+/// `n` steps of an optional [`Progress`], each asked in turn; `false` at the
+/// first that says to stop.
+fn steps(progress: Option<&Progress<'_>>, n: u64) -> bool {
+    (0..n).all(|_| crate::progress::step(progress))
+}
+
+/// The selector-narrowed planes of a census document, folded by ONE walk.
+///
+/// Open-debt item 924 (`docs/dissect-row-index.md`, D6). Each plane was its own
+/// fold over the whole capture, so a census walked the capture once per plane,
+/// and once a list decodes a message each time it is read, that was each message
+/// decoded once per plane. They are always asked together and each takes the
+/// same messages in the same order, so one walk feeds them all: the tap model of
+/// the reference dissector, where one pass over the capture serves every
+/// listener. Each plane's fold is the one it always was.
+#[derive(Debug, Clone)]
+pub(crate) struct CensusFold {
+    pub(crate) keyexprs: crate::agg::AggFold,
+    #[cfg(feature = "network-codecs")]
+    pub(crate) exchanges: crate::exchange::ExchangeFold,
+    #[cfg(feature = "network-codecs")]
+    pub(crate) payloads: crate::payload::PayloadFold,
+    #[cfg(feature = "network-codecs")]
+    pub(crate) interests: crate::interest::InterestFold,
+}
+
+impl CensusFold {
+    /// Every plane empty, against `filter` and `grouping`.
+    fn begin(
+        dissection: &Dissection,
+        filter: &crate::filter::Filter,
+        grouping: &SessionGrouping,
+    ) -> Self {
+        Self {
+            keyexprs: crate::agg::AggFold::begin(dissection, filter, grouping),
+            #[cfg(feature = "network-codecs")]
+            exchanges: crate::exchange::ExchangeFold::begin(dissection, filter, grouping),
+            #[cfg(feature = "network-codecs")]
+            payloads: crate::payload::PayloadFold::begin(dissection, filter, grouping),
+            #[cfg(feature = "network-codecs")]
+            interests: crate::interest::InterestFold::begin(),
+        }
+    }
+}
+
+impl OrderedFold for CensusFold {
+    const PLANES: u64 = if cfg!(feature = "network-codecs") {
+        4
+    } else {
+        1
+    };
+
+    fn feed(
+        &mut self,
+        flow: &FlowKey,
+        list: usize,
+        packet: usize,
+        frame: &PassiveFrame,
+        grouping: &SessionGrouping,
+    ) {
+        self.keyexprs.feed(flow, list, packet, frame, grouping);
+        #[cfg(feature = "network-codecs")]
+        {
+            self.exchanges.feed(flow, list, packet, frame, grouping);
+            self.payloads.feed(flow, list, packet, frame, grouping);
+            self.interests.feed(flow, list, packet, frame, grouping);
+        }
     }
 }
 
@@ -232,13 +308,7 @@ impl<F: OrderedFold> Resumable<F> {
 /// it), so planes made under one selector are of no use under another.
 #[derive(Debug, Default)]
 struct SelectorPlanes {
-    keyexprs: Resumable<crate::agg::AggFold>,
-    #[cfg(feature = "network-codecs")]
-    exchanges: Resumable<crate::exchange::ExchangeFold>,
-    #[cfg(feature = "network-codecs")]
-    payloads: Resumable<crate::payload::PayloadFold>,
-    #[cfg(feature = "network-codecs")]
-    interests: Resumable<crate::interest::InterestFold>,
+    planes: Resumable<CensusFold>,
 }
 
 /// The planes of a census document, kept between calls for up to
@@ -328,86 +398,19 @@ impl CensusMemory {
         (filter.clone(), planes, stats)
     }
 
-    /// The keyexpr plane, brought up to `dissection`, or `None` when `progress`
-    /// stopped the fold.
-    pub(crate) fn keyexprs(
+    /// The selector-narrowed planes, brought up to `dissection` by one walk, or
+    /// `None` when `progress` stopped the fold.
+    pub(crate) fn planes(
         &mut self,
         dissection: &Dissection,
         grouping: &SessionGrouping,
         progress: Option<&Progress<'_>>,
-    ) -> Option<crate::agg::ThroughputTable> {
+    ) -> Option<&CensusFold> {
         let (filter, planes, stats) = self.current();
-        Some(
-            planes
-                .keyexprs
-                .advance(dissection, grouping, stats, progress, || {
-                    crate::agg::AggFold::begin(dissection, &filter, grouping)
-                })?
-                .table(),
-        )
-    }
-
-    /// The exchange plane, brought up to `dissection`, or `None` when `progress`
-    /// stopped the fold.
-    #[cfg(feature = "network-codecs")]
-    pub(crate) fn exchanges(
-        &mut self,
-        dissection: &Dissection,
-        grouping: &SessionGrouping,
-        progress: Option<&Progress<'_>>,
-    ) -> Option<crate::exchange::ExchangeTable> {
-        let (filter, planes, stats) = self.current();
-        Some(
-            planes
-                .exchanges
-                .advance(dissection, grouping, stats, progress, || {
-                    crate::exchange::ExchangeFold::begin(dissection, &filter, grouping)
-                })?
-                .table(),
-        )
-    }
-
-    /// The payload plane, brought up to `dissection`, or `None` when `progress`
-    /// stopped the fold.
-    #[cfg(feature = "network-codecs")]
-    pub(crate) fn payloads(
-        &mut self,
-        dissection: &Dissection,
-        grouping: &SessionGrouping,
-        progress: Option<&Progress<'_>>,
-    ) -> Option<crate::payload::PayloadCensus> {
-        let (filter, planes, stats) = self.current();
-        Some(
-            planes
-                .payloads
-                .advance(dissection, grouping, stats, progress, || {
-                    crate::payload::PayloadFold::begin(dissection, &filter, grouping)
-                })?
-                .census(),
-        )
-    }
-
-    /// The interest plane, brought up to `dissection`, or `None` when `progress`
-    /// stopped the fold.
-    #[cfg(feature = "network-codecs")]
-    pub(crate) fn interests(
-        &mut self,
-        dissection: &Dissection,
-        grouping: &SessionGrouping,
-        progress: Option<&Progress<'_>>,
-    ) -> Option<crate::interest::InterestCensus> {
-        let (_filter, planes, stats) = self.current();
-        Some(
-            planes
-                .interests
-                .advance(
-                    dissection,
-                    grouping,
-                    stats,
-                    progress,
-                    crate::interest::InterestFold::begin,
-                )?
-                .census(),
-        )
+        planes
+            .planes
+            .advance(dissection, grouping, stats, progress, || {
+                CensusFold::begin(dissection, &filter, grouping)
+            })
     }
 }
