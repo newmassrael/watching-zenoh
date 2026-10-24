@@ -621,10 +621,9 @@ does not say its `max_blocking_threads`, so a host with a cap below 32 must lowe
 not cover `wait_for_slot`, the wait for a pooled frame slot under `runtime-zero-copy`, which parks the same way
 and has no deadline to refuse at; and it is a bulkhead, not flow control: the structure that spends no thread
 at all on a stopped reader is credit-based, the forwarder holding a bounded queue per destination face and the
-publishing face's loop not reading while the queue is full. That needs the forwarder's fan-out and the link's
-`wait_for_room` (synchronous so that the MCU profile shares it) to change together, and is not built. Not
-measured: a router with real faces and `Block` publishers end to end (the demo's sessions document cannot
-publish with `Block`, so it needs that key first).
+publishing face's loop not reading while the queue is full. That is built for the router's data plane and is
+what 7.5 describes. What measuring it end to end showed is that the bulkhead above did not protect the router's
+other faces, because the router drives every face from one loop and the wait is inside it.
 
 **How it is held.** Clockless tests of the arithmetic (`capacity::tests`, and the config's effective bound
 from a declared share and a lease). The promise itself is
@@ -634,3 +633,65 @@ rest were refused, that no face went DOWN and that no admitted client session en
 at the first recorded costs (1222 admitted) and 3 of 3 at the recorded ones (1100), host load 13 to 30.
 It also asserts the keepalive timer lateness against `2T/3`. Not yet held: a loose bound for the hosted
 runner, and the lane that re-derives the tables.
+
+### 7.5 A face that stops reading, and the faces that have nothing to do with it
+
+7.4 read from the code that a `Block` put to a face that does not read waits for room inside the loop that
+forwards it, "which is the backpressure `Block` asks for". That was right for the publisher and wrong for
+everyone else, and it was not run end to end until 2026-10-24. The router drives every face from one loop task
+(`peer_loop` hands `face_drive_loop` no spawned faces) and calls `RouterForwarder::forward` inline from it.
+A message that waits for room on a destination's link waits for the whole loop. Upstream parks the receive
+task of the one link that publishes, because each link has a task of its own.
+
+**Measured before (pc3, one router, one subscriber stopped with SIGSTOP, one publisher putting 64 KiB to it
+as fast as it can, a live pair on another key putting every 10 ms).**
+
+| congestion control of the 64 KiB puts | longest wait of the live subscriber | live messages received |
+|---|---|---|
+| `Block` | 15.0 s | 272 of 2500 |
+| `Drop` | 13.5 ms (12.7 ms before the stop) | 2500 of 2500 |
+
+The 15.0 s is three waits of 5.000 s (`wait_before_close`): a frame holds several messages, each of them waits
+its whole deadline, and the close that ends it is raised by the loop, which is the thing that is waiting.
+Nothing about the live pair was slow: the router did not read it. A `Drop` put never did this, because it waits
+one millisecond once and is then dropped at once while the lane's congested mark stands.
+
+**The stage (`router_forward/egress.rs`).** A reliable `Push` whose congestion control may not drop it, routed
+for a face that can be gated, is sent with a probe (`SessionLinkActions::try_send_network_message_qos`): one ask
+for room with a wait of zero, on every fragment of the message, which returns the message whole and unsent
+when there is none. It is neither dropped, nor counted as a congestion drop, nor the reason for a close,
+because it did not wait out a deadline. The router holds it in a queue of the destination, in order:
+
+- a destination that holds messages takes every later credited message behind them, so one source's messages
+  to one destination keep their order;
+- a destination that holds `EGRESS_CREDIT` (64) messages gates the face whose message filled it
+  (`FaceForwarder::read_gate`, asked after every event by the drive of the face, in the loop's `after_dispatch`
+  stage that R2702/R2703 made for a slow consumer). The face is not read, and keeps its keepalives and its
+  lease check, until every destination it fed holds half the credit or less. What it had already read is
+  what the destination holds past the credit, at most one inbound frame for each gated face;
+- a destination whose oldest held message has waited its own `wait_before_close` is closed as unresponsive
+  (`request_congestion_close`), which is what a send that waited that long would have done, and what it held
+  is dropped with it and counted (`egress_abandoned`). The check is the router's tick and the gated face's
+  own recheck, every 2 ms while it waits.
+
+The publisher whose face is gated finds its own link full, waits its `wait_before_close` and closes its own
+session if the destination has not drained by then, which is upstream's behaviour for a router whose receive
+task is parked and not a new rule. **Measured after, same scenario:** `Block` 12.9 ms and 2500 of 2500 (12.9 ms
+before the stop), `Drop` 12.8 ms and 2500 of 2500; the publisher's put waited 5.000 s once and its later puts
+returned at once (which of the two, its own session closing or the router closing the stopped subscriber, ended
+the wait was not read). The two live-pair tests (`wz_router_hat_serves_a_live_pair_beside_a_subscriber_that_stopped_reading_*`,
+Layer E7m) hold a bound of one second, which is eighty times the reading and a tenth of the failure. The `Block`
+one was run with the stage switched off (the credit predicate answering false for every message) and failed: the
+live subscriber waited 10.0 s and received 280 of 1200; with the stage on it waited 12.7 ms and received all 1200.
+The `Drop` one is its control: it passes with the stage on and off, so the bound is not one the machine fails on
+its own.
+
+**What it does not cover.** A message that comes from no face (a multicast ingress, a local publish) cannot
+gate anything and waits inside its send as before. A message whose payload is in shared memory goes through
+the relay, whose mapping of the payload for the destination cannot be undone and tried again, and also waits
+as before. A declaration, a query and a reply are rare and are not held. The wait of a gated face is polled
+every 2 ms: the link's writer does not tell the router when a lane has room, which would replace the poll
+with a wake-up and needs a notification in the link seam (the MCU profile shares it, so it is a default no-op
+there). Counters are on the forwarder (`egress_held`, `egress_released`, `egress_abandoned`,
+`egress_destinations_closed`, `egress_gated_faces`) and not in the capacity report yet. `wait_for_slot`, the
+wait for a pooled frame slot under `runtime-zero-copy`, is not touched.

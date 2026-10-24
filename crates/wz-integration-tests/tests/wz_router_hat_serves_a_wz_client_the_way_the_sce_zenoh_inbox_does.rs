@@ -54,6 +54,12 @@
 //! again on the same port, the machines that reconnect are told their session ended, and one that
 //! left during the gap is never believed to be up.
 //!
+//! Two more hold what a client of that binding relies on without asking for it: a subscriber
+//! that stopped reading does not stop the router serving the clients that have nothing to do
+//! with it, whether the puts it is sent may be dropped or not (`Block` is what the binding
+//! asks for). A live pair of clients is read for the longest it waited for a message while one
+//! unrelated subscriber was stopped and published to as fast as a client can.
+//!
 //! ## What it does not hold
 //!
 //! A mobile build: nothing here builds `wz-mesh-client` for Android or iOS.
@@ -964,4 +970,180 @@ fn wz_router_hat_meets_wz_clients_across_two_federated_routers() {
         &WzHarness { port: first_port },
         &WzHarness { port: second_port },
     );
+}
+
+/// What a live pair of sessions saw while a subscriber that had stopped reading was published to.
+struct StallReading {
+    /// The longest the live subscriber waited between two messages, from the moment the
+    /// subscriber was stopped to the end of the run.
+    longest_gap: Duration,
+    /// Messages the live subscriber received.
+    received: usize,
+    /// Messages the live publisher sent.
+    sent: usize,
+}
+
+/// How many messages the live publisher sends, ten milliseconds apart.
+const LIVE_MESSAGES: usize = 1200;
+
+/// One router, one subscriber that is stopped (SIGSTOP, so its socket stays open and it reads
+/// nothing more), a publisher that puts 64 KiB to it as fast as it can with `congestion`, and a
+/// live pair, a subscriber and a publisher on another key, that has nothing to do with any of
+/// them. Returns what the live pair saw.
+///
+/// The router drives every face from one loop, and a put that may not be dropped used to wait
+/// for room on the stopped subscriber's link inside that loop, for as long as the link's
+/// `wait_before_close` (5 seconds), once for each message of the frame. Measured before the
+/// router held such messages back: the live subscriber waited 15.0 seconds for a message that
+/// took 13 ms before the subscriber was stopped, and received 272 of 2500.
+fn live_pair_beside_a_stopped_subscriber(congestion: CongestionControl) -> StallReading {
+    let demo = demo_binary();
+    assert_demo_binary_newer_than_sources(&demo);
+    let (_router, port) = start_router(&demo);
+    let dir = scratch("stall");
+    let mut stuck = start_machine(
+        &demo,
+        &dir,
+        "stuck",
+        0x71,
+        port,
+        "{ role: \"subscribe\", key: \"stall/stuck\" }",
+    );
+    assert!(
+        stuck.lines.wait_for(&["declared key=stall/stuck"], WITHIN),
+        "the stuck subscriber declared: {:#?}",
+        stuck.lines.all()
+    );
+    let arrivals: Arc<Mutex<Vec<Instant>>> = Arc::default();
+    let origin = Instant::now();
+    let live = {
+        let arrivals = Arc::clone(&arrivals);
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime");
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&runtime, async move {
+                let (l, _d1) = open_as_a_library(port, 0x11).await;
+                let _sub = l
+                    .declare_subscriber(
+                        "stall/live",
+                        SubscribeOptions::default(),
+                        move |_s: &dyn SampleView| {
+                            arrivals.lock().expect("arrivals").push(Instant::now())
+                        },
+                    )
+                    .expect("the live subscriber is declared");
+                let (b, _d2) = open_as_a_library(port, 0x12).await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                for _ in 0..LIVE_MESSAGES {
+                    let _ = b.publish("stall/live", b"x", PublishOptions::put());
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            });
+        })
+    };
+    let flood = thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async move {
+            let (a, _d) = open_as_a_library(port, 0x13).await;
+            tokio::time::sleep(Duration::from_millis(3500)).await;
+            let payload = vec![0xA5u8; 64 * 1024];
+            let started = Instant::now();
+            // A publisher that is refused or closed has nothing more to do, and the live pair
+            // is read for as long as it runs.
+            while started.elapsed() < Duration::from_secs(10) {
+                let put = a.publish(
+                    "stall/stuck",
+                    &payload,
+                    PublishOptions::put().with_congestion_control(congestion),
+                );
+                if put.is_err() {
+                    break;
+                }
+                // 64 KiB a millisecond fills the stopped subscriber's socket buffers within a
+                // fraction of a second, and leaves the cores to the router.
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+    });
+    thread::sleep(Duration::from_secs(3));
+    stuck.freeze();
+    let frozen_at = origin.elapsed();
+    flood.join().expect("the flood thread");
+    live.join().expect("the live thread");
+    let ended = Instant::now();
+    stuck.thaw();
+    let arrivals = arrivals.lock().expect("arrivals").clone();
+    // Every wait of the live subscriber that ended after the stop, the one still running when
+    // the pair finished included: a router that delivers nothing more would otherwise show no
+    // gap at all, for want of a second message to end it.
+    let after_stop = origin + frozen_at;
+    let mut longest_gap =
+        ended.saturating_duration_since(arrivals.last().copied().unwrap_or(origin));
+    for pair in arrivals.windows(2) {
+        if pair[1] >= after_stop {
+            longest_gap = longest_gap.max(pair[1].duration_since(pair[0]));
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+    StallReading {
+        longest_gap,
+        received: arrivals.len(),
+        sent: LIVE_MESSAGES,
+    }
+}
+
+/// The longest a live subscriber may wait for a message while an unrelated subscriber is stopped:
+/// about eighty times what it waited when it was not, and a fifteenth of what it waited when
+/// the router held a stopped subscriber's messages inside its one loop.
+const LIVE_GAP_BOUND: Duration = Duration::from_secs(1);
+
+/// A subscriber that stops reading, published to with a congestion control that may not drop,
+/// does not stop a router from serving the faces that have nothing to do with it. The router
+/// holds what the stopped subscriber cannot take, in order, stops reading the publisher that
+/// fills it and nothing else, and closes the stopped subscriber when it has not taken its oldest
+/// message in `wait_before_close`.
+#[test]
+#[ignore = "opt-in: needs wz-ap-demo built with preset-ap-client, router-hat-router and routing-token-tables"]
+fn wz_router_hat_serves_a_live_pair_beside_a_subscriber_that_stopped_reading_blocking_puts() {
+    let reading = live_pair_beside_a_stopped_subscriber(CongestionControl::Block);
+    eprintln!(
+        "longest live gap {:?}, {} of {} received",
+        reading.longest_gap, reading.received, reading.sent
+    );
+    assert!(
+        reading.longest_gap < LIVE_GAP_BOUND,
+        "the live subscriber waited {:?} for a message while an unrelated subscriber was stopped",
+        reading.longest_gap
+    );
+    assert_eq!(
+        reading.received, reading.sent,
+        "every message of the live pair arrived"
+    );
+}
+
+/// The control: with a congestion control that drops, the stopped subscriber never held the
+/// router (a droppable message waits a millisecond once and is then dropped at once, while the
+/// lane's mark stands), so the same bound holds before and after the router held anything back.
+/// It shows the bound above is not one the machine fails on its own.
+#[test]
+#[ignore = "opt-in: needs wz-ap-demo built with preset-ap-client, router-hat-router and routing-token-tables"]
+fn wz_router_hat_serves_a_live_pair_beside_a_subscriber_that_stopped_reading_droppable_puts() {
+    let reading = live_pair_beside_a_stopped_subscriber(CongestionControl::Drop);
+    eprintln!(
+        "longest live gap {:?}, {} of {} received",
+        reading.longest_gap, reading.received, reading.sent
+    );
+    assert!(
+        reading.longest_gap < LIVE_GAP_BOUND,
+        "the live subscriber waited {:?}",
+        reading.longest_gap
+    );
+    assert_eq!(reading.received, reading.sent);
 }

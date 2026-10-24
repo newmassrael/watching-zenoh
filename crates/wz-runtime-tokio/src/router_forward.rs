@@ -441,6 +441,11 @@ use wz_session_core::request_routing_context::{
 };
 use wz_session_core::wire::{PushOwned, PushOwnedVariant, RequestOwned, ResponseOwned};
 
+mod egress;
+#[cfg(test)]
+mod egress_tests;
+pub use egress::EGRESS_CREDIT;
+
 /// R2866 (open-debt item 751, step 2) — the router's faces, planes and tables
 /// are keyed by the pin's [`Region`] now. The 1.5.0 `FaceTier` classifier
 /// (Routers / LinkstatePeers / Client, from the remote's whatami) is gone. A
@@ -1396,6 +1401,10 @@ struct RouterFaceState {
     /// shape as [`LinkstateForwarder`]'s `FaceState.keyexpr_table`
     /// (`hashbrown` to match `resolve_wireexpr`'s table type).
     keyexpr_table: hashbrown::HashMap<u64, String>,
+    /// The messages this face, as a DESTINATION, has not taken yet: held in order until its link
+    /// has room, so that a face that stopped reading costs the faces that do not feed it
+    /// nothing (see [`egress`]).
+    held: RefCell<egress::EgressQueue>,
 }
 
 /// One EGRESS-only multicast group face — the wz analog of a zenoh
@@ -1854,6 +1863,9 @@ pub struct RouterForwarder {
     /// `South { 0, Client }` and `Local` — reached through
     /// [`broker_hat`](Self::broker_hat).
     hats: RegionMap<Hat>,
+    /// What the destinations hold back, and which faces are not read for it: the router's
+    /// credit-based flow control (see [`egress`]).
+    credit: egress::Credit,
     /// How this router's south is partitioned into subregions, and so which
     /// regions [`hats`](Self::hats) holds and which one each face lands in
     /// ([`RouterForwarder::with_south_partition`]). `Auto` is the pin's preset
@@ -2410,6 +2422,7 @@ impl RouterForwarder {
                 timestamping,
             ),
             faces: Rc::new(RefCell::new(HashMap::new())),
+            credit: egress::Credit::default(),
             #[cfg(feature = "session-close-ingress")]
             joined_links: Rc::new(RefCell::new(HashMap::new())),
             // R2639 — `disabled` seeds the empty matcher, so a router that never
@@ -3574,6 +3587,19 @@ impl RouterForwarder {
             return false;
         }
         let was_push = matches!(msg, NetworkMessage::Push(_));
+        // A message that may not be dropped does not wait for room inside the loop that serves
+        // every other face: it leaves now, or it is held for this destination and the face that
+        // fed it is not read until the destination has room (see [`egress`]).
+        if self.is_credited(&msg, reliable) {
+            return match self.credited_send(id, state, msg, reliable, express, priority) {
+                egress::Credited::Sent => {
+                    self.note_sent(was_push);
+                    true
+                }
+                egress::Credited::Held => true,
+                egress::Credited::Refused => false,
+            };
+        }
         let sent = self.send_to_face_actions(&state.actions, msg, reliable, express, priority);
         if sent {
             self.note_sent(was_push);
@@ -8118,6 +8144,7 @@ impl FaceForwarder for RouterForwarder {
                 peer_zid: peer_zid_routing(actions),
                 link: added.map(|(link, _, _)| link),
                 keyexpr_table: hashbrown::HashMap::new(),
+                held: RefCell::new(egress::EgressQueue::default()),
             },
         );
         // Self gained a routing link in this tier's net (its link-state changed):
@@ -8279,6 +8306,8 @@ impl FaceForwarder for RouterForwarder {
         let Some(state) = self.faces.borrow_mut().remove(&id) else {
             return;
         };
+        // What it held for its link goes with it, and no face waits on it or for it.
+        self.forget_egress_of(id, &state);
         let tier = state.tier;
         let Some(link) = state.link else {
             // A held-without-identity face (Client, or no routing zid) changed
@@ -8332,6 +8361,15 @@ impl FaceForwarder for RouterForwarder {
         // cadence (C5c) — a cheap empty sweep when nothing timed out, exactly as
         // the sibling forwarder's tick.
         self.reap_timed_out_queries();
+        // What destinations hold back: offered the room they have, and a destination that has
+        // not taken its oldest message in `wait_before_close` is closed, as a send that waited
+        // that long would have closed it.
+        self.drain_egress();
+        self.sweep_egress();
+    }
+
+    fn read_gate(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
+        self.gate_of(id)
     }
 
     /// `true`: both meshes key the self-edge on the peer zid (a
@@ -8565,6 +8603,11 @@ impl FaceForwarder for RouterForwarder {
         else {
             return;
         };
+        // Whatever a destination can take now goes first, so that what an earlier frame left
+        // held is ahead of what this one adds; and the destinations this frame fills gate THIS
+        // face, which is what `source` records until the guard drops.
+        self.drain_egress();
+        let _routing = self.credit.routing_from(id);
         // The inbound face's tier selects which net topology ingests into and
         // which faces a re-flood reaches; with the remote's mode it also
         // decides which way the interest protocol may flow ([`InterestFlow`]).

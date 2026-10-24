@@ -801,6 +801,24 @@ pub trait FaceForwarder {
     fn ingress(&self, _id: FaceId, _outcome: &mut wz_session_core::driver_loop::DriverLoopOutcome) {
     }
 
+    /// Whether face `id` must stop taking inbound frames until a destination it feeds has room
+    /// again: the forwarder's half of credit-based flow control.
+    ///
+    /// `Some(wake)` says the face is gated now. The face's drive, which asks after every event it
+    /// has dispatched ([`crate::session_glue::LoopStages::after_dispatch`], the one point of the
+    /// loop where waiting costs only this face's progress), waits for `wake` for a bounded time
+    /// and asks again, and goes on reading when the answer is `None`. A face that waits keeps
+    /// its keepalives and its lease check, as a face that waits on a slow consumer does
+    /// (`park_on_drain`); only its reading stops, so its peer's own sends queue behind the
+    /// socket, which is what upstream's parked receive task of a link does.
+    ///
+    /// The default is `None`: a forwarder that never holds a message back never gates a face.
+    /// The answer is read on the loop's own thread with the same borrow discipline as the other
+    /// hooks, and the `Arc` is what makes the wait `Send`, as [`Self::deadline_revised`]'s is.
+    fn read_gate(&self, _id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
+        None
+    }
+
     /// R3067 -- whether the forwarder ALREADY holds a face to the peer `zid`
     /// that this loop does not hold: a link the node's DIAL role made.
     ///
@@ -1603,13 +1621,28 @@ async fn drive_face<F: FaceForwarder + ?Sized>(
             ingress: |outcome: &mut wz_session_core::driver_loop::DriverLoopOutcome| {
                 forwarder.ingress(face.id, outcome)
             },
-            after_dispatch: || core::future::ready(()),
+            // The forwarder's credit gate: a face that fed a destination with no room left
+            // stops reading until the destination drains, and nothing else stops.
+            after_dispatch: || {
+                let (forwarder, id) = (forwarder, face.id);
+                async move {
+                    while let Some(wake) = forwarder.read_gate(id) {
+                        // Bounded, so that a drain whose notice was missed costs a recheck and
+                        // not a stalled face.
+                        let _ = tokio::time::timeout(READ_GATE_RECHECK, wake.notified()).await;
+                    }
+                }
+            },
         },
     )
     .await;
     opened.drain_to_close().await;
     (face, outcome)
 }
+
+/// How long a gated face waits for a notice that a destination has room before it asks the
+/// forwarder again.
+const READ_GATE_RECHECK: Duration = Duration::from_millis(2);
 
 /// R311y205 (transport-multilink) — drive an AGGREGATED secondary link to
 /// terminal. Like [`drive_face`], but the RX admits against the `joined` handle's
