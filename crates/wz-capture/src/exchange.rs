@@ -1233,6 +1233,17 @@ pub(crate) struct ExchangeFold {
 }
 
 impl ExchangeFold {
+    /// Bytes the fold holds that follow the row count: the verdict of every row
+    /// that is one end of an exchange, and the request each closing record
+    /// closed.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn memory(&self) -> usize {
+        self.table
+            .row_verdicts
+            .memory(crate::payload::RowVerdict::owned_bytes)
+            + self.table.closings.memory(|_| 0)
+    }
+
     /// A fold that has taken no message.
     pub(crate) fn begin(
         dissection: &crate::Dissection,

@@ -188,6 +188,8 @@ pub mod node;
 // built on it. Documented by its own `//!` text and carrying no outer `///`
 // here, for the reason the transport build modules give.
 pub(crate) mod ordered_fold;
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
+pub use ordered_fold::FoldMemory;
 pub use ordered_fold::{CensusMemory, FoldStats};
 // The few-values-by-key store both selector memories sit on. `pub(crate)` for the
 // reason the module above gives; only the bound is public, so a caller can read
@@ -1876,6 +1878,117 @@ pub struct ScoutingList {
     rows: wz_session_core::chunk_log::ChunkLog<ScoutingRow>,
     log: wz_session_core::byte_log::UnitLog,
     produced: u64,
+}
+
+/// What a [`Dissection`] holds on the heap, by structure (open-debt item 924,
+/// D7): the structures that follow the row count, as their owners count them.
+///
+/// It is a lower bound on the heap and says so: what is fixed, or follows the
+/// count of distinct things (flows, sessions, keyexprs), is not here, and a gate
+/// that compares the total with what the allocator counted is what shows the
+/// difference stayed small. A figure is bytes allocated, which is what the
+/// process holds, and not bytes used.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DissectionMemory {
+    /// Every message list's rows and what they read from, summed over the TCP
+    /// flows, the datagram flows (and the QUIC lists inside them) and the serial
+    /// line.
+    pub lists: messages::ListMemory,
+    /// The reassembled stream bytes the TCP assemblers keep for rows to read
+    /// again.
+    pub stream_kept: usize,
+    /// The TCP run maps.
+    pub stream_runs: usize,
+    /// Segments held behind a gap, their copies, and the splices not yet
+    /// reported.
+    pub stream_pending: usize,
+    /// Plaintext a layer below produced (TLS, QUIC streams) and the bytes a flow
+    /// holds for a unit still arriving.
+    pub plaintext: usize,
+    /// The scouting lists: their rows and their logged payloads.
+    pub scouting: usize,
+    /// Per-packet records outside any list: the packets skipped, and the serial
+    /// line's frames and envelopes.
+    pub packets: usize,
+}
+
+impl DissectionMemory {
+    /// Every structure's bytes together.
+    pub fn total(&self) -> usize {
+        self.lists.total()
+            + self.stream_kept
+            + self.stream_runs
+            + self.stream_pending
+            + self.plaintext
+            + self.scouting
+            + self.packets
+    }
+}
+
+impl ScoutingList {
+    /// Bytes the list holds allocated: its rows and its logged payloads.
+    fn memory(&self) -> usize {
+        self.rows.allocated_bytes() + self.log.allocated()
+    }
+}
+
+impl FlowDissection {
+    /// Add what this flow holds to `into`.
+    fn add_memory(&self, into: &mut DissectionMemory) {
+        into.lists = into.lists.plus(&self.frames.memory());
+        for assembler in [&self.low_to_high, &self.high_to_low] {
+            let stream = assembler.memory();
+            into.stream_kept += stream.kept;
+            into.stream_runs += stream.runs;
+            into.stream_pending += stream.pending;
+        }
+        for held in &self.held {
+            into.plaintext += wz_session_core::heap_account::vec_bytes(held);
+        }
+        for plaintext in self.plaintext.iter().flat_map(|pair| pair.iter()) {
+            into.plaintext += wz_session_core::heap_account::vec_bytes(&plaintext.bytes);
+        }
+    }
+}
+
+impl DatagramDissection {
+    /// Add what this flow holds to `into`.
+    fn add_memory(&self, into: &mut DissectionMemory) {
+        into.lists = into
+            .lists
+            .plus(&self.frames.memory())
+            .plus(&self.quic_datagrams.memory());
+        into.scouting += self.scouting.memory();
+        for stream in &self.quic_streams {
+            into.lists = into.lists.plus(&stream.frames.memory());
+            for plaintext in &stream.plaintext {
+                into.plaintext += wz_session_core::heap_account::vec_bytes(&plaintext.bytes);
+            }
+        }
+    }
+}
+
+impl Dissection {
+    /// What the dissection holds on the heap, by structure: the figure a program
+    /// that opens a capture budgets by, and the one the memory gate compares
+    /// with the allocator.
+    ///
+    /// It walks the flows and the maps' lengths, not the rows, so its cost
+    /// follows the number of flows.
+    pub fn memory(&self) -> DissectionMemory {
+        let mut memory = DissectionMemory::default();
+        for flow in self.flows() {
+            flow.add_memory(&mut memory);
+        }
+        for flow in self.datagram_flows() {
+            flow.add_memory(&mut memory);
+        }
+        memory.lists = memory.lists.plus(&self.serial_frames.memory());
+        memory.packets = wz_session_core::heap_account::vec_bytes(&self.skipped)
+            + wz_session_core::heap_account::vec_bytes(&self.serial_pending)
+            + self.serial_origins.allocated_bytes();
+        memory
+    }
 }
 
 /// What a [`ScoutingList`] keeps of one message beside its logged payload.

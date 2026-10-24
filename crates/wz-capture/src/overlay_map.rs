@@ -80,6 +80,22 @@ impl<K: Ord + Clone, V: Clone + Default> OverlayMap<K, V> {
         self.base.len() + fresh
     }
 
+    /// Bytes the two layers hold: a model of each map's nodes
+    /// ([`wz_session_core::heap_account::btree_bytes`]), and what `owned` says
+    /// each value holds beyond its slot. It reads every value, so its cost
+    /// follows the map; it is asked for on a report, not on a walk.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn memory(&self, owned: impl Fn(&V) -> usize) -> usize {
+        wz_session_core::heap_account::btree_bytes::<K, V>(self.base.len())
+            + wz_session_core::heap_account::btree_bytes::<K, V>(self.delta.len())
+            + self
+                .base
+                .values()
+                .chain(self.delta.values())
+                .map(owned)
+                .sum::<usize>()
+    }
+
     /// Fold `delta` into `base` when it has grown past a fraction of it, and when
     /// nothing else holds `base`, which is what keeps this from copying it.
     fn fold_into_base_if_due(&mut self) {

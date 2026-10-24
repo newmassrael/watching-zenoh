@@ -446,6 +446,22 @@ pub struct FieldsStats {
     pub messages_walked: u64,
 }
 
+#[cfg(feature = "network-codecs")]
+impl FieldsMemory {
+    /// What the memory holds that follows the row count: the pairing fold's
+    /// verdict for every row that ends an exchange, and the digest of every row
+    /// written. The payload plane is not folded here, so `payload_rows` is zero.
+    pub fn memory(&self) -> crate::FoldMemory {
+        crate::FoldMemory {
+            payload_rows: 0,
+            exchange_rows: self.pairing.fold().map_or(0, |fold| fold.memory()),
+            row_digests: wz_session_core::heap_account::btree_bytes::<u64, Option<u64>>(
+                self.digests.len(),
+            ),
+        }
+    }
+}
+
 impl FieldsMemory {
     /// A memory that has written nothing.
     pub fn new() -> Self {

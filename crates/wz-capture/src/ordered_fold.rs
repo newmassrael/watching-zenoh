@@ -403,6 +403,52 @@ pub struct CensusMemory {
     stats: FoldStats,
 }
 
+/// What the resumable memories of the folds hold that follows the row count
+/// (open-debt item 924, D7), by plane.
+///
+/// Only the planes that keep a verdict per row are named. The tables that follow
+/// the count of keyexprs or nodes are not, for the reason
+/// [`crate::DissectionMemory`] gives.
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FoldMemory {
+    /// The payload plane's verdict for every record it judged.
+    pub payload_rows: usize,
+    /// The exchange plane's verdict for every row that ends an exchange, and the
+    /// request each closing record closed.
+    pub exchange_rows: usize,
+    /// The digest the field walk keeps of every row it has written, by which a
+    /// later call tells a row it must write again from one that has not changed.
+    /// It grows with the rows a consumer has paged through, not with the window.
+    pub row_digests: usize,
+}
+
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
+impl FoldMemory {
+    /// Every plane's bytes together.
+    pub fn total(&self) -> usize {
+        self.payload_rows + self.exchange_rows + self.row_digests
+    }
+}
+
+#[cfg(all(feature = "dissect", feature = "network-codecs"))]
+impl CensusMemory {
+    /// What the memory holds that follows the row count, summed over the
+    /// selectors it keeps planes for.
+    pub fn memory(&self) -> FoldMemory {
+        let mut memory = FoldMemory::default();
+        for slot in self.planes.values() {
+            if let Some(fold) = slot.planes.fold() {
+                memory.payload_rows += fold.payloads.memory();
+                memory.exchange_rows += fold.exchanges.memory();
+                // A census keeps no digest of its rows: it is not a document of
+                // rows a later call writes again.
+            }
+        }
+        memory
+    }
+}
+
 impl CensusMemory {
     /// A memory that has folded nothing.
     pub fn new() -> Self {

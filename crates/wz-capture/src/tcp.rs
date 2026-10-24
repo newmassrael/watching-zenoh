@@ -308,6 +308,40 @@ pub struct StreamAssembler {
     splices: Vec<Splice>,
 }
 
+/// What one direction's assembler holds on the heap (open-debt item 924, D7),
+/// by structure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct StreamMemory {
+    /// The reassembled bytes kept for rows that read them again: what the owned
+    /// door copies, and nothing of a payload a lent container holds.
+    pub(crate) kept: usize,
+    /// The run map, one entry per run of bytes and where each came from.
+    pub(crate) runs: usize,
+    /// Segments held behind a gap, with the copies they hold, and the splices
+    /// not yet reported.
+    pub(crate) pending: usize,
+}
+
+impl StreamAssembler {
+    /// What this assembler holds on the heap.
+    pub(crate) fn memory(&self) -> StreamMemory {
+        StreamMemory {
+            kept: wz_session_core::heap_account::vec_bytes(&self.kept),
+            runs: self.runs.allocated_bytes(),
+            pending: wz_session_core::heap_account::vec_bytes(&self.pending)
+                + self
+                    .pending
+                    .iter()
+                    .map(|segment| match &segment.payload {
+                        HeldBytes::Copy(bytes) => bytes.capacity(),
+                        HeldBytes::Container { .. } => 0,
+                    })
+                    .sum::<usize>()
+                + wz_session_core::heap_account::vec_bytes(&self.splices),
+        }
+    }
+}
+
 /// R311y610 — one discontinuity in the reassembled stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Splice {

@@ -1069,6 +1069,12 @@ pub struct RowVerdict {
 
 #[cfg(feature = "network-codecs")]
 impl RowVerdict {
+    /// Bytes the verdict holds beyond the slot it sits in: its answers.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn owned_bytes(&self) -> usize {
+        wz_session_core::heap_account::vec_bytes(&self.records)
+    }
+
     /// Every record's answer, in walk order.
     ///
     /// The consumer asked for this beside the folded verdict, so a detail pane
@@ -1676,6 +1682,14 @@ impl PayloadFold {
     /// The census as it stands, for a caller that keeps folding.
     pub(crate) fn census(&self) -> PayloadCensus {
         self.census.clone()
+    }
+
+    /// Bytes the plane holds that follow the row count: the verdict it keeps for
+    /// every record it judged, which is what the census adds to a handle per row.
+    #[cfg(feature = "dissect")]
+    pub(crate) fn memory(&self) -> usize {
+        self.census.row_verdicts.memory(RowVerdict::owned_bytes)
+            + wz_session_core::heap_account::vec_bytes(&self.census.contradictions)
     }
 }
 

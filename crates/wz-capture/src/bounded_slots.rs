@@ -110,6 +110,12 @@ impl<K: PartialEq, V> BoundedSlots<K, V> {
             .1
     }
 
+    /// Every memory held, oldest first.
+    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
+        self.entries.iter().map(|(_, v)| v)
+    }
+
     /// The key and value last touched, if any.
     pub(crate) fn newest_mut(&mut self) -> Option<(&K, &mut V)> {
         self.entries.last_mut().map(|(k, v)| (&*k, v))
