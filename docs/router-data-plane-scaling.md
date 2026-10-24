@@ -348,10 +348,13 @@ a lease to a host that takes its CPU away, and a promise that does not name its 
 `N` the sessions, `q` the loop's turn quantum (8 units), `c_u` the cost of one loop event of one record,
 `c_k` the cost of one keepalive emission:
 
-- (A) Emission. All `N` keepalive timers can fall due together, and serving them takes `N c_k / s`. For the
-  emission to be late by less than `2T/3` (the invariant a keepalive sent every `T/3` needs, so that one
-  lost interval is still inside the lease) the burst has to finish within `T/3`:
-  `N <= s T / (3 c_k)`. With `c_k` = 4.5 us, `T` = 10 s and `s` = 1.3% this is about 9600 sessions.
+- (A) Emission. The keepalives are written by one thread (`ctl`), and the scheduler divides the process's
+  share among the threads that are runnable together, `b` of them, so that thread has about `s / b`. All
+  `N` keepalive timers can fall due together, and serving them takes `N c_k b / s`. For the emission to be
+  late by less than `2T/3` (the invariant a keepalive sent every `T/3` needs, so that one lost interval
+  is still inside the lease) the burst has to finish within `T/3`: `N <= s T / (3 b c_k)`. With
+  `c_k` = 4.5 us, `T` = 10 s, `b` = 4 and `s` = 1.32% (the router at 32 hogs) this is about 2440
+  sessions before the margin, and 3260 at 24 hogs (`s` = 1.76%).
 - (B) Service. The loop returns to a face after `R = N q c_u / s` (7.2), and a frame waits in its buffer
   that long. It does not cost a lease: before the loop judges a peer silent it reads what is waiting
   (`take_what_is_waiting`, `session_glue.rs`), and a frame decoded there stamps the peer's activity, so a
@@ -363,8 +366,16 @@ a lease to a host that takes its CPU away, and a promise that does not name its 
   sessions.
 
 The promise needs (A) alone: `N_max(s) = s T / (3 c_k)`. An operator who declares `L` as well gets
-`min(N_A, N_B(L))`; with no `L` declared there is no limit from (B), as there is none today. In the E7s run
-at 32 hogs (2048 sessions, `s` = 1.3%, (A) allows about 9600) no lease was lost, which is what (A) says.
+`min(N_A, N_B(L))`; with no `L` declared there is no limit from (B), as there is none today.
+
+**What (A) says about the runs.** 2048 sessions is far inside (A) at 24 hogs (3260) and just inside it at
+32 (2440), where the margin of safety is a fifth. The runs at 32 hogs: none of five lost a client
+session in the runs of 7.3, and one of two lost 189 of 2048 in another session's runs of the same test on
+the tip of ledger 3486. A loss in some runs and none in others at a population 17% under the line is what
+a bound with that little room predicts (2048 is 16% under 2440), and it is why the recorded costs carry a margin of 2, which at
+32 hogs puts the bound at 1220 and refuses that population. The model is a fit to these runs and not yet
+tested by them: the loss rate against `N` at 32 hogs, and `c_k` under starvation (the 4.5 us was read
+once on an unloaded host), are the measurements that would show whether it holds.
 
 **Evidence for the form of (B).** The router's longest silence from its peers in the E7s runs of 7.3 against `R`
 computed from the scheduler's weights (the router's threads at nice 10, weight 110, against the hogs at
@@ -390,10 +401,11 @@ time running, from the scheduler's own counters) is exported to the admin space 
 contract-violated flag when it stays below `s`: the promise is void and says so. With no `s` declared
 there is no cap, as upstream, and no promise.
 
-**The costs are recorded, with margin.** `c_u` and `c_k` are constants of the build, recorded in a file
-beside the slot sizes by a lane that measures them, and held by a gate in the same way. The recorded value
-is the measured upper bound times a margin of 2; the check of the margin is the table above, which a lane
-re-derives and which must stay within 25%.
+**The costs are recorded, with margin.** `c_u`, `c_k` and `b` are constants of the build, recorded as
+`RECORDED_HOST_MODEL` in `wz-session-core`'s `capacity` module (integers, so every profile computes the
+same number from the same inputs). The recorded costs are the measured upper bounds times a margin of 2,
+and `b` is the count that reproduces the table above. A lane that re-derives the table, and fails when it
+stops being within 25%, is not built.
 
 **What the router does at the number.** One value, the effective `max_sessions`, is the smaller of the
 configured `transport/unicast/max_sessions` (upstream's key, enforced in the accept loop already, default

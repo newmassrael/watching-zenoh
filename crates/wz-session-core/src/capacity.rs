@@ -15,21 +15,25 @@
 //! ## Two bounds
 //!
 //! With `T` the lease, a keepalive every `T / LEASE_EXPIRE_FACTOR`, `N` the sessions, `s` the share
-//! in cores, `c_k` the cost of one keepalive emission, `q` the loop's turn quantum in units and
-//! `c_u` the cost of one unit:
+//! of the process in cores, `b` the threads of the process that are runnable together under load,
+//! `c_k` the cost of one keepalive emission, `q` the loop's turn quantum in units and `c_u` the cost
+//! of one unit:
 //!
-//! - **Liveness** ([`liveness_bound`]). All `N` keepalive timers can fall due together, and serving
-//!   them takes `N c_k / s`. An emission late by less than `2T/3` still leaves a lease interval to
-//!   spare, so the burst has to finish within `T / LEASE_EXPIRE_FACTOR`: `N <= s T / (3 c_k)`.
-//! - **Service** ([`service_bound`]). The session loop returns to a face after `N q c_u / s`, and a
-//!   frame waits that long in its buffer. It costs no lease (the loop reads what is waiting before
-//!   it judges a peer silent) but it is how stale the data a face is given is, and how late a peer
-//!   that is really gone is found. For a frame to wait at most `L`: `N <= s L / (q c_u)`. Bound
-//!   only when the operator declares an `L` ([`CapacityContract::data_wait_ms`]).
+//! - **Liveness** ([`liveness_bound`]). The keepalives are written by ONE thread, and the scheduler
+//!   divides the process's share among its runnable threads, so that thread has about `s / b`.
+//!   All `N` timers can fall due together and serving them takes `N c_k b / s`. An emission late by
+//!   less than `2T/3` still leaves a lease interval to spare, so the burst has to finish within
+//!   `T / LEASE_EXPIRE_FACTOR`: `N <= s T / (3 b c_k)`.
+//! - **Service** ([`service_bound`]). The session loop runs on all the workers and returns to a
+//!   face after `N q c_u / s`, and a frame waits that long in its buffer. It costs no lease (the
+//!   loop reads what is waiting before it judges a peer silent) but it is how stale the data a face
+//!   is given is, and how late a peer that is really gone is found. For a frame to wait at most `L`:
+//!   `N <= s L / (q c_u)`. Bound only when the operator declares an `L`
+//!   ([`CapacityContract::data_wait_ms`]).
 //!
-//! The form of the second bound is checked against measurement
-//! (`docs/router-data-plane-scaling.md` section 7.4); the costs are measured on the host, and
-//! [`RECORDED_HOST_COSTS`] carries them with a margin.
+//! The form of both bounds is checked against measurement (`docs/router-data-plane-scaling.md`
+//! section 7.4); the costs are measured on the host, and [`RECORDED_HOST_MODEL`] carries them with a
+//! margin.
 //!
 //! ## Arithmetic
 //!
@@ -40,40 +44,48 @@
 
 use crate::lease::LEASE_EXPIRE_FACTOR;
 
-/// What one unit of the node's control work costs, in nanoseconds, on the host it runs on.
+/// What the node's control work costs on the host it runs on, and how many threads share the CPU
+/// it is promised.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ControlCosts {
-    /// One keepalive emission.
+pub struct ControlModel {
+    /// One keepalive emission, in nanoseconds.
     pub emission_ns: u64,
-    /// One unit of the session loop's turn: an event of one record.
+    /// One unit of the session loop's turn (an event of one record), in nanoseconds.
     pub loop_unit_ns: u64,
+    /// The threads of the process that are runnable at once when it is loaded. The keepalive thread
+    /// is one of them and has a `1 / busy_threads` part of the process's share; zero counts as one.
+    pub busy_threads: u32,
 }
 
-impl ControlCosts {
-    /// Costs of `emission_ns` and `loop_unit_ns`.
-    pub const fn new(emission_ns: u64, loop_unit_ns: u64) -> Self {
+impl ControlModel {
+    /// A model of `emission_ns`, `loop_unit_ns` and `busy_threads`.
+    pub const fn new(emission_ns: u64, loop_unit_ns: u64, busy_threads: u32) -> Self {
         Self {
             emission_ns,
             loop_unit_ns,
+            busy_threads,
         }
     }
 
-    /// These costs times `margin`: what a bound is computed from, so that a host slower than the one
-    /// the costs were read on, or a cache that is cold, does not turn a promise into a guess.
+    /// This model with its costs times `margin`: what a bound is computed from, so that a host
+    /// slower than the one the costs were read on, or a cache that is cold, does not turn a promise
+    /// into a guess. The thread count is a count and is not scaled.
     pub const fn with_margin(self, margin: u64) -> Self {
         Self {
             emission_ns: self.emission_ns.saturating_mul(margin),
             loop_unit_ns: self.loop_unit_ns.saturating_mul(margin),
+            busy_threads: self.busy_threads,
         }
     }
 }
 
-/// The costs measured on the build host for the tokio runtime (`wz-runtime-tokio`), release build:
-/// one keepalive emission 4.5 us, one loop event of one record 6.5 to 11 us (the upper end is the
-/// figure, an event of `k` records costing at most `k` times it, `a + k b <= k (a + b)`), times a
-/// margin of 2. Read in the Layer E7s runs of `docs/router-data-plane-scaling.md` sections 7.2 and
-/// 7.3; the lane that re-derives the bound from them is section 7.4's table.
-pub const RECORDED_HOST_COSTS: ControlCosts = ControlCosts::new(4_500, 11_000).with_margin(2);
+/// The model read on the build host for the tokio runtime (`wz-runtime-tokio`), release build: one
+/// keepalive emission 4.5 us, one loop event of one record 6.5 to 11 us (the upper end is the figure,
+/// an event of `k` records costing at most `k` times it, `a + k b <= k (a + b)`), four busy router
+/// threads (the count that makes the service bound reproduce the router's measured silence from its
+/// peers, section 7.4), times a margin of 2. Read in the Layer E7s runs of
+/// `docs/router-data-plane-scaling.md` sections 7.2 and 7.3.
+pub const RECORDED_HOST_MODEL: ControlModel = ControlModel::new(4_500, 11_000, 4).with_margin(2);
 
 /// What an operator declares about the CPU a node may count on, and how stale a frame may get.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,7 +157,7 @@ pub struct EffectiveBound {
     pub limiter: Limiter,
 }
 
-/// `numerator / (denominator)` over `u64`, where a zero denominator is no work and bounds nothing.
+/// `numerator / denominator` over `u64`, where a zero denominator is no work and bounds nothing.
 fn quotient(numerator: u64, denominator: u64) -> u64 {
     if denominator == 0 {
         u64::MAX
@@ -154,21 +166,23 @@ fn quotient(numerator: u64, denominator: u64) -> u64 {
     }
 }
 
-/// The sessions whose keepalive burst fits within one keepalive interval at share `share_ppm`:
-/// `s T / (3 c_k)`.
-pub fn liveness_bound(share_ppm: u32, lease_ms: u64, costs: ControlCosts) -> u64 {
+/// The sessions whose keepalive burst the keepalive thread serves within one keepalive interval at
+/// the process share `share_ppm`: `s T / (3 b c_k)`.
+pub fn liveness_bound(share_ppm: u32, lease_ms: u64, model: ControlModel) -> u64 {
     quotient(
         u64::from(share_ppm).saturating_mul(lease_ms),
-        LEASE_EXPIRE_FACTOR.saturating_mul(costs.emission_ns),
+        LEASE_EXPIRE_FACTOR
+            .saturating_mul(u64::from(model.busy_threads.max(1)))
+            .saturating_mul(model.emission_ns),
     )
 }
 
-/// The sessions for which the loop returns to a face within `wait_ms` at share `share_ppm`, with a
-/// turn of `quantum_units`: `s L / (q c_u)`.
-pub fn service_bound(share_ppm: u32, wait_ms: u32, quantum_units: u32, costs: ControlCosts) -> u64 {
+/// The sessions for which the loop returns to a face within `wait_ms` at the process share
+/// `share_ppm`, with a turn of `quantum_units`: `s L / (q c_u)`.
+pub fn service_bound(share_ppm: u32, wait_ms: u32, quantum_units: u32, model: ControlModel) -> u64 {
     quotient(
         u64::from(share_ppm).saturating_mul(u64::from(wait_ms)),
-        u64::from(quantum_units).saturating_mul(costs.loop_unit_ns),
+        u64::from(quantum_units).saturating_mul(model.loop_unit_ns),
     )
 }
 
@@ -182,7 +196,7 @@ pub fn effective_max_sessions(
     contract: Option<&CapacityContract>,
     lease_ms: u64,
     quantum_units: u32,
-    costs: ControlCosts,
+    model: ControlModel,
 ) -> EffectiveBound {
     let mut bound = EffectiveBound {
         limit: configured,
@@ -199,13 +213,13 @@ pub fn effective_max_sessions(
     };
     narrow(
         &mut bound,
-        liveness_bound(contract.share_ppm, lease_ms, costs),
+        liveness_bound(contract.share_ppm, lease_ms, model),
         Limiter::Liveness,
     );
     if let Some(wait_ms) = contract.data_wait_ms {
         narrow(
             &mut bound,
-            service_bound(contract.share_ppm, wait_ms, quantum_units, costs),
+            service_bound(contract.share_ppm, wait_ms, quantum_units, model),
             Limiter::Service,
         );
     }
@@ -217,27 +231,48 @@ mod tests {
     use super::*;
 
     /// The numbers of `docs/router-data-plane-scaling.md` section 7.4, before the margin.
-    const MEASURED: ControlCosts = ControlCosts::new(4_500, 11_000);
-    const SHARE_1_3_PERCENT: u32 = 13_000;
+    const MEASURED: ControlModel = ControlModel::new(4_500, 11_000, 4);
+    /// The router's share at 32 hogs in the E7s runs: four threads at nice 10 against hogs at 0.
+    const SHARE_32_HOGS: u32 = 13_200;
+    /// And at 24 hogs.
+    const SHARE_24_HOGS: u32 = 17_600;
     const LEASE_MS: u64 = 10_000;
 
     #[test]
     fn the_liveness_bound_is_the_documented_worked_example() {
-        // 0.013 * 10 s / (3 * 4.5 us) = 9629.6
-        assert_eq!(liveness_bound(SHARE_1_3_PERCENT, LEASE_MS, MEASURED), 9_629);
+        // 0.0132 * 10 s / (3 * 4 * 4.5 us) = 2444.4
+        assert_eq!(liveness_bound(SHARE_32_HOGS, LEASE_MS, MEASURED), 2_444);
     }
 
     #[test]
     fn the_service_bound_is_the_documented_worked_example() {
-        // 0.013 * 5 s / (8 * 11 us) = 738.6
-        assert_eq!(service_bound(SHARE_1_3_PERCENT, 5_000, 8, MEASURED), 738);
+        // 0.0132 * 5 s / (8 * 11 us) = 750
+        assert_eq!(service_bound(SHARE_32_HOGS, 5_000, 8, MEASURED), 750);
     }
 
     #[test]
     fn a_margin_halves_a_bound_it_doubles_the_costs_of() {
         let margined = MEASURED.with_margin(2);
-        assert_eq!(liveness_bound(SHARE_1_3_PERCENT, LEASE_MS, margined), 4_814);
-        assert_eq!(service_bound(SHARE_1_3_PERCENT, 5_000, 8, margined), 369);
+        assert_eq!(liveness_bound(SHARE_32_HOGS, LEASE_MS, margined), 1_222);
+        assert_eq!(service_bound(SHARE_32_HOGS, 5_000, 8, margined), 375);
+        assert_eq!(margined.busy_threads, 4, "a count of threads is not scaled");
+    }
+
+    #[test]
+    fn the_keepalive_thread_has_a_part_of_the_share_not_all_of_it() {
+        let alone = ControlModel::new(4_500, 11_000, 1);
+        let four = liveness_bound(SHARE_32_HOGS, LEASE_MS, MEASURED);
+        let one = liveness_bound(SHARE_32_HOGS, LEASE_MS, alone);
+        assert!(
+            one >= 4 * four && one < 4 * four + 4,
+            "one thread that has the whole share serves four times the sessions: {one} and {four}"
+        );
+        let zero = ControlModel::new(4_500, 11_000, 0);
+        assert_eq!(
+            liveness_bound(SHARE_32_HOGS, LEASE_MS, zero),
+            liveness_bound(SHARE_32_HOGS, LEASE_MS, alone),
+            "no threads is read as one, not as no work"
+        );
     }
 
     #[test]
@@ -253,20 +288,20 @@ mod tests {
 
     #[test]
     fn a_bound_falls_as_the_work_per_session_grows() {
-        let dear = ControlCosts::new(MEASURED.emission_ns * 4, MEASURED.loop_unit_ns * 4);
+        let dear = ControlModel::new(MEASURED.emission_ns * 4, MEASURED.loop_unit_ns * 4, 4);
         assert!(
-            liveness_bound(SHARE_1_3_PERCENT, LEASE_MS, dear)
-                < liveness_bound(SHARE_1_3_PERCENT, LEASE_MS, MEASURED)
+            liveness_bound(SHARE_32_HOGS, LEASE_MS, dear)
+                < liveness_bound(SHARE_32_HOGS, LEASE_MS, MEASURED)
         );
         assert!(
-            service_bound(SHARE_1_3_PERCENT, 5_000, 8, dear)
-                < service_bound(SHARE_1_3_PERCENT, 5_000, 8, MEASURED)
+            service_bound(SHARE_32_HOGS, 5_000, 8, dear)
+                < service_bound(SHARE_32_HOGS, 5_000, 8, MEASURED)
         );
     }
 
     #[test]
     fn a_node_with_no_contract_is_limited_by_its_configuration_alone() {
-        let bound = effective_max_sessions(1_000, None, LEASE_MS, 8, RECORDED_HOST_COSTS);
+        let bound = effective_max_sessions(1_000, None, LEASE_MS, 8, RECORDED_HOST_MODEL);
         assert_eq!(
             bound,
             EffectiveBound {
@@ -278,18 +313,18 @@ mod tests {
 
     #[test]
     fn the_smaller_of_the_configured_and_the_liveness_bound_is_the_limit() {
-        let contract = CapacityContract::new(SHARE_1_3_PERCENT).unwrap();
-        // 4814 with the margin: a larger configuration is cut down to it...
-        let cut = effective_max_sessions(10_000, Some(&contract), LEASE_MS, 8, RECORDED_HOST_COSTS);
+        let contract = CapacityContract::new(SHARE_32_HOGS).unwrap();
+        // 1222 with the margin: a larger configuration is cut down to it...
+        let cut = effective_max_sessions(10_000, Some(&contract), LEASE_MS, 8, RECORDED_HOST_MODEL);
         assert_eq!(
             cut,
             EffectiveBound {
-                limit: 4_814,
+                limit: 1_222,
                 limiter: Limiter::Liveness
             }
         );
         // ...and a smaller one stays, and says it was the configuration's.
-        let kept = effective_max_sessions(1_000, Some(&contract), LEASE_MS, 8, RECORDED_HOST_COSTS);
+        let kept = effective_max_sessions(1_000, Some(&contract), LEASE_MS, 8, RECORDED_HOST_MODEL);
         assert_eq!(
             kept,
             EffectiveBound {
@@ -301,16 +336,16 @@ mod tests {
 
     #[test]
     fn a_declared_data_wait_can_be_the_binding_bound() {
-        let contract = CapacityContract::new(SHARE_1_3_PERCENT)
+        let contract = CapacityContract::new(SHARE_32_HOGS)
             .unwrap()
             .with_data_wait_ms(5_000)
             .unwrap();
         let bound =
-            effective_max_sessions(10_000, Some(&contract), LEASE_MS, 8, RECORDED_HOST_COSTS);
+            effective_max_sessions(10_000, Some(&contract), LEASE_MS, 8, RECORDED_HOST_MODEL);
         assert_eq!(
             bound,
             EffectiveBound {
-                limit: 369,
+                limit: 375,
                 limiter: Limiter::Service
             }
         );
@@ -328,10 +363,10 @@ mod tests {
 
     #[test]
     fn a_cost_of_zero_bounds_nothing_and_extreme_inputs_do_not_overflow() {
-        let free = ControlCosts::new(0, 0);
+        let free = ControlModel::new(0, 0, 4);
         assert_eq!(liveness_bound(1, 1, free), u64::MAX);
         assert_eq!(service_bound(1, 1, 8, free), u64::MAX);
-        let huge = ControlCosts::new(u64::MAX, u64::MAX).with_margin(u64::MAX);
+        let huge = ControlModel::new(u64::MAX, u64::MAX, u32::MAX).with_margin(u64::MAX);
         // Both sides saturate: the answer is a number, and not a panic or a wrap to a large one.
         assert!(liveness_bound(u32::MAX, u64::MAX, huge) <= 1);
         assert!(service_bound(u32::MAX, u32::MAX, u32::MAX, huge) <= 1);
@@ -344,11 +379,16 @@ mod tests {
         assert_eq!(bound.limiter, Limiter::Configured);
     }
 
-    /// The model against the E7s run it was fitted to: 2048 sessions at 32 hogs leave the router
-    /// 1.3% of a core, and the liveness bound (about 9600 before the margin) admits them, which is
-    /// the run in which no lease was lost (section 7.3).
+    /// The model against the E7s population (2048 sessions): well inside the bound at 24 hogs, where no
+    /// lease was lost; just inside it, and so near it, at 32, where some runs lost some clients and
+    /// some did not (section 7.3 and 7.4); and over the margined bound at 32, which is a contract
+    /// that refuses that population.
     #[test]
-    fn the_e7s_population_is_inside_the_liveness_bound_at_the_share_it_ran_at() {
-        assert!(liveness_bound(13_200, LEASE_MS, RECORDED_HOST_COSTS) >= 2_048);
+    fn the_e7s_population_is_far_inside_the_bound_at_24_hogs_and_near_it_at_32() {
+        let population = 2_048;
+        assert!(liveness_bound(SHARE_24_HOGS, LEASE_MS, MEASURED) > population * 3 / 2);
+        let at_32 = liveness_bound(SHARE_32_HOGS, LEASE_MS, MEASURED);
+        assert!(at_32 > population && at_32 < population * 5 / 4);
+        assert!(liveness_bound(SHARE_32_HOGS, LEASE_MS, RECORDED_HOST_MODEL) < population);
     }
 }
