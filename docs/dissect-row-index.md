@@ -148,12 +148,33 @@ A differential gate decodes every row of the fixture captures both ways and
 requires them equal, field by field. It is built before anything stops
 keeping rows, because every later step depends on that equality.
 
-### D5. A bounded cache of decoded rows
+### D5. One walk per call, and no cache between calls
 
-Recently decoded rows are kept in a cache with a row ceiling, so the window a
-viewer shows and repeated field windows over the same rows do not decode twice.
-The ceiling is the caller's (a door), with a default; it bounds memory, not
-correctness.
+Decided after step 4b, on its measurement (owner, 2026-10-24: the long-term
+correct structure, cost not counted). Each reader that reads the same messages
+in the same order within one call reads them from ONE walk, and nothing decoded
+outlives the call that decoded it.
+
+- The repeated reads 4b measured are all SCANS: the exchange pairing, the
+  declaration absorption and the census planes each walk every new message in
+  capture order. A bounded cache of decoded rows gets no hit on a scan longer
+  than it is, whatever its policy (the sequential flooding a database buffer
+  pool meets under LRU or CLOCK), and one long enough to hold the scan holds the
+  capture decoded, which is what this design removes. The textbook answer to
+  repeated scans is a shared scan, which is the reference dissector's tap
+  model: one pass, every listener fed.
+- Shared where the readers already agree: the census planes are one fold
+  (`CensusFold`), and the field document's declaration absorption rides on the
+  exchange pairing's walk whenever that walk takes exactly the messages it wants
+  (`ordered_fold::Share`). Each reader keeps its own rule for when it continues
+  and when it begins again; a walk is shared only when both rules pick the same
+  messages, and otherwise each walks, as before.
+- Inside one document the renderer hands the rows its first pass decoded to its
+  second, up to a window (`ROWS_HANDED_ON`).
+- No cache between calls. A row is immutable, so a row read again is always the
+  row it was; a lookup by position decodes one unit; and a cache shared between
+  calls would put a lock in a `no_std` store, take `Sync` from `Dissection`, and
+  need a separate form for targets without atomics, for no hit on a scan.
 
 ### D6. Folds read re-decoded rows
 
@@ -251,7 +272,7 @@ from. So the order is now:
   177 MB and 1,364 to 590 MB; heap after census 348 to 117 MiB and 1,355 to 444
   MiB; replay 308 to 257 ms and 1,047 to 874 ms; census 210 to 166 ms and 803 to
   551 ms; fields windows 2,185 to 2,590 ms (+19%) and 7,699 to 9,368 ms (+22%),
-  the price section 5 states. The bounded cache (D5) is not built: see section 7.
+  the price section 5 states, and what D5 then took to +12% and +11% (section 7).
 - 3. The byte source, and the reassembled stream copy goes.
 - 4c. Datagram, serial and QUIC rows become index entries too, their bytes read
   from the source.
@@ -263,12 +284,10 @@ from. So the order is now:
   decided in step 5.
 - QUIC streams and the serial line produce rows outside the TCP segment map;
   their byte source is decided when step 3 reaches them.
-- The cache (D5). Measured after 4b: a field window reads each of its rows three
-  times (the declaration pre-pass, the exchange pairing fold and the renderer's
-  list-order pass; the renderer's capture-order pass takes the rows its first
-  pass read, up to 8,192), and that is the +19% above. A cache inside the list
-  needs interior mutability, which would make `Dissection` lose `Sync`, a
-  public auto trait; a cache the reader owns has to be carried through the
-  enumeration doors the three readers walk. Which of the two, or one walk that
-  feeds the three as the census planes are fed, is decided with that
-  measurement in hand.
+- Closed: D5 is decided (section 4). After the declaration absorption rode on
+  the pairing's walk, a capture read the way the consumer reads it decodes each
+  row three times: the census walk, the field document's shared walk and the
+  renderer. Measured with the section 2 instrument against 270780967 (median of
+  six at 409,064 rows, three at 1,386,564): fields windows 2,169 to 2,421 ms
+  (+12%) and 7,876 to 8,772 ms (+11%), census 207 to 155 ms and 795 to 562 ms,
+  peak RSS unchanged at 177 and 590 MB.
