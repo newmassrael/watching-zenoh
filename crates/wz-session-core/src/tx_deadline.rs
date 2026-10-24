@@ -69,6 +69,19 @@ impl PushDeadline {
         }
     }
 
+    /// The deadline of a sender that may not wait at all: every ask for room is made with a
+    /// wait of zero, and no fragment extends it. A router forwarding to many faces uses it so
+    /// that one face with a full queue costs the loop an answer and not a stall; the message
+    /// that found no room is the caller's to keep and send again.
+    pub fn probe(droppable: bool) -> Self {
+        Self {
+            droppable,
+            left_us: 0,
+            step_us: 0,
+            extend_left_us: 0,
+        }
+    }
+
     /// The ask for room this deadline makes now.
     pub fn ask(&self) -> RoomWait {
         if self.droppable {

@@ -2489,6 +2489,55 @@ enum DispatchStage {
     /// holding its slot, so it is pushed as it stands.
     #[cfg(feature = "alloc")]
     Scheduled,
+    /// A send that may not wait for room: every ask is made with a wait of zero, and a message
+    /// that finds none is neither dropped nor the reason for a close, it is reported as
+    /// `Dispatched::NoRoom` and stays the caller's.
+    #[cfg(feature = "alloc")]
+    Probe,
+}
+
+/// What [`SessionLinkActions::try_send_network_message_qos`] did not send, and whose it still is.
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-declare",
+    feature = "declare-interest",
+    feature = "codec-linkstate",
+    feature = "codec-response",
+    feature = "codec-response-final"
+))]
+#[cfg(feature = "alloc")]
+#[derive(Debug)]
+pub enum Unsent {
+    /// The link had no room, and the call did not wait for any. The message is returned whole,
+    /// as it was given: nothing was sent, counted as a drop, or closed.
+    NoRoom(crate::network_message::NetworkMessage),
+    /// The send failed for a reason that sending again will not change.
+    Failed(SendWireError),
+}
+
+/// How a pass through [`SessionLinkActions::dispatch_network_message_at`] ended, when it did not
+/// fail: the message left, or (only on `DispatchStage::Probe`) its conduit had no room for it
+/// and nothing was sent, counted or closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+enum Dispatched {
+    /// The message was handed to the link, or dropped by a rule that is not congestion.
+    Sent,
+    /// A probe found no room.
+    #[cfg(feature = "alloc")]
+    NoRoom,
 }
 
 /// How a message's encoder reaches [`SessionLinkActions::dispatch_network_message_at`].
@@ -8676,6 +8725,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.core.out_of_band.raise(|s| s.tx_congested = true);
     }
 
+    /// How long a message that may not be dropped waits for room on this session's link before
+    /// the session is closed as unresponsive (`transport/link/tx/queue/congestion_control/
+    /// wait_before_close`, R2924). A sender that holds such messages itself, in place of
+    /// waiting inside the send, owes the same deadline.
+    pub fn wait_before_close(&self) -> core::time::Duration {
+        core::time::Duration::from_micros(self.params.tx_queue.wait_before_close_us)
+    }
+
     /// R2923 — take the congestion close request, if one is standing.
     pub fn take_congestion_close(&self) -> bool {
         self.core
@@ -8859,6 +8916,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             stats_class,
             as_encoder(&encode_body),
         )
+        // Only a probe can end in `NoRoom`, and this is not one.
+        .map(|_| ())
     }
 
     /// R311y215 (transport-qos) / R3122 -- the EFFECTIVE priority a message is routed on: the
@@ -8925,7 +8984,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         worst_case_payload: usize,
         _stats_class: crate::stats::NetworkStatsClass,
         encode_body: &P,
-    ) -> Result<(), SendWireError>
+    ) -> Result<Dispatched, SendWireError>
     where
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
@@ -9060,7 +9119,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 });
                 if lent == Lend::Sent {
                     count_pushed();
-                    return Ok(());
+                    return Ok(Dispatched::Sent);
                 }
                 // Fixed-memory step S4 — no slot, or one the message does not
                 // fit, is a refusal under `tx-lend-only`: there is no heap
@@ -9082,7 +9141,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // pipeline to be full.
                 count_pushed();
                 self.send_wire(&wire, wire_reliability, priority);
-                return Ok(());
+                return Ok(Dispatched::Sent);
             }
         }
         // R2952 (open-debt item 835) — a `BlockFirst` message leaves the
@@ -9104,7 +9163,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 &encode_body,
             )
         {
-            return Ok(());
+            return Ok(Dispatched::Sent);
         }
         // Outbound MTU = the negotiated-min batch budget
         // ([`Self::negotiated_batch_mtu`]: min(own, peer) with `0` as the
@@ -9179,7 +9238,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         //
         // R2926 — held as ONE deadline for the message ([`PushDeadline`]):
         // this first ask spends from it, and a fragment chain spends the rest.
-        let deadline = core::cell::Cell::new(PushDeadline::new(droppable, &self.params.tx_queue));
+        #[cfg(feature = "alloc")]
+        let probing = stage == DispatchStage::Probe;
+        #[cfg(not(feature = "alloc"))]
+        let probing = false;
+        let deadline = core::cell::Cell::new(if probing {
+            PushDeadline::probe(droppable)
+        } else {
+            PushDeadline::new(droppable, &self.params.tx_queue)
+        });
         let congested = || {
             let mut left = deadline.get();
             let answer = self.with_conduit_link(wire_reliability, priority, |link| {
@@ -9536,7 +9603,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // sender returns rather than tearing the session down from under
             // its own conduit lock. Either way the put itself succeeded from
             // the caller's side, as upstream's does.
+            //
+            // A probe is not that decision: it asked once and without waiting, so it did not
+            // give up on a deadline. Nothing is counted and nothing is closed, and the message
+            // is the caller's to send again when the link has room.
             Ok(PushOutcome::Congested) => {
+                #[cfg(feature = "alloc")]
+                if probing {
+                    return Ok(Dispatched::NoRoom);
+                }
                 #[cfg(feature = "transport-stats")]
                 self.count_congestion_drop(
                     wire_reliability,
@@ -9547,7 +9622,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 if !droppable {
                     self.request_congestion_close();
                 }
-                Ok(())
+                Ok(Dispatched::Sent)
             }
             // Fixed-memory step S4 — a send the link lent no slot for was never
             // pushed: it is not an `n_msgs` message, as a congestion drop is not,
@@ -9558,7 +9633,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // the count it had before R2923: only a congestion drop leaves it.
             pushed => {
                 count_pushed();
-                pushed.map(|_| ())
+                pushed.map(|_| Dispatched::Sent)
             }
         }
     }
@@ -10202,6 +10277,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         )
     }
 
+    /// [`Self::dispatch_push`] at a given stage, borrowing the message: a probe that finds no
+    /// room has to give the message back, so it must not have been consumed by the send.
+    #[cfg(feature = "codec-push")]
+    #[cfg(feature = "alloc")]
+    fn dispatch_push_at(
+        &self,
+        stage: DispatchStage,
+        priority: Priority,
+        push: &crate::wire::PushOwned,
+        reliable: bool,
+    ) -> Result<Dispatched, SendWireError> {
+        let class = self.outbound_push_class(push);
+        let encode_body = crate::frame_encode::push_body(push);
+        self.dispatch_network_message_at(
+            stage,
+            priority,
+            reliable,
+            crate::declare_ext_qos::read_push_qos(push),
+            wz_codecs::push::Push::MAX_ENCODED_BYTES,
+            class,
+            as_encoder(&encode_body),
+        )
+    }
+
     /// R2371 (`transport-stats`) — classify an outbound `Push` for the network
     /// counters, resolving an aliased key expression through THIS session's own
     /// outbound mapping space.
@@ -10380,6 +10479,85 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
         }
         sent
+    }
+
+    /// [`Self::send_network_message_qos`] for a sender that may not wait: one that serves many
+    /// links from one thread, and cannot let a link with a full queue stall the rest.
+    ///
+    /// A `Push` asks its conduit for room once, with no wait. When there is none it is returned
+    /// as [`Unsent::NoRoom`], whole and unsent: it is not dropped, it is not counted as a
+    /// congestion drop, and the session is not asked to close, because none of those is a
+    /// decision this call makes. The caller keeps the message and sends it again when the link
+    /// has room, and owns what upstream's sender does with a message that waited its deadline
+    /// out (a droppable one is dropped, a blocking one closes the session as unresponsive).
+    ///
+    /// Any other message is sent as [`Self::send_network_message_qos`] sends it, which waits.
+    /// The data plane is where a full queue is the common case, and where one message is not
+    /// worth a stalled loop; a declaration or a reply to a queryable is rare, and is not made to
+    /// queue here.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-declare",
+        feature = "declare-interest",
+        feature = "codec-linkstate",
+        feature = "codec-response",
+        feature = "codec-response-final"
+    ))]
+    #[cfg(feature = "alloc")]
+    pub fn try_send_network_message_qos(
+        &self,
+        msg: crate::network_message::NetworkMessage,
+        reliable: bool,
+        express: bool,
+        priority: Priority,
+    ) -> Result<(), Unsent> {
+        #[cfg(feature = "codec-push")]
+        if matches!(msg, crate::network_message::NetworkMessage::Push(_)) {
+            // The handoff transaction is opened before the message is built and given back
+            // when it drops uncommitted, which is what a message that did not leave is owed.
+            #[cfg(all(
+                feature = "session-extshm",
+                any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response"
+                )
+            ))]
+            let transaction = self.open_shm_tx(&msg, reliable, priority);
+            let crate::network_message::NetworkMessage::Push(push) = msg else {
+                unreachable!("the message was matched as a Push on the line above");
+            };
+            let ended = self.dispatch_push_at(DispatchStage::Probe, priority, &push, reliable);
+            return match ended {
+                Ok(Dispatched::Sent) => {
+                    #[cfg(feature = "transport-batching")]
+                    if express {
+                        self.flush_open_batch();
+                    }
+                    #[cfg(not(feature = "transport-batching"))]
+                    let _ = express;
+                    #[cfg(all(
+                        feature = "session-extshm",
+                        any(
+                            feature = "codec-push",
+                            feature = "codec-request",
+                            feature = "codec-response"
+                        )
+                    ))]
+                    if let Some(transaction) = transaction {
+                        transaction.commit();
+                    }
+                    Ok(())
+                }
+                Ok(Dispatched::NoRoom) => Err(Unsent::NoRoom(
+                    crate::network_message::NetworkMessage::Push(push),
+                )),
+                Err(e) => Err(Unsent::Failed(e)),
+            };
+        }
+        self.send_network_message_qos(msg, reliable, express, priority)
+            .map_err(Unsent::Failed)
     }
 
     /// R3110 -- the sender's handoff transaction for `msg`, with every shared-memory slice of it
