@@ -64,7 +64,9 @@ excluded="wz-ap-demo"
 # without it the facade's cooperative runtime has no task pool to be built over.
 # `wz-runtime-posix` joined with its slot profile: its coop dependency names the session tier,
 # and its `alloc` default is what chose the pool, exactly as `wz-runtime-zephyr`'s does.
-profile_min="wz-session-mcu:session-slot wz-session-lwip:session-slot wz-mcu-session-acceptor:fixed-memory wz-runtime-zephyr:session-slot wz-mcu-multicast-e2e:fixed-memory wz-runtime-posix:session-slot"
+# `wz-capi-pico` joined when its session got two engines: a build that names neither is refused
+# (no `z_open` to give), and `engine-coop` is the smaller one, so it is the minimal profile.
+profile_min="wz-session-mcu:session-slot wz-session-lwip:session-slot wz-mcu-session-acceptor:fixed-memory wz-runtime-zephyr:session-slot wz-mcu-multicast-e2e:fixed-memory wz-runtime-posix:session-slot wz-capi-pico:engine-coop"
 
 # The minimal profile feature of $1, or nothing when the crate is not in tier 4.
 profile_of() {

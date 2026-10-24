@@ -85,7 +85,7 @@ default = [
 # A build runs its sessions on the tokio engine whenever that engine is in it, and on the
 # cooperative one otherwise: a build that names `engine-coop` and no capability the cooperative
 # engine lacks is the cooperative client. The selection reads features, not a config key, because
-# what an engine does not have is not linked.
+# what an engine does not have is not linked. A build that names neither engine is refused.
 engine-tokio = ["dep:wz-capi-core", "dep:tokio"]
 engine-coop = ["dep:wz-capi-coop", "dep:wz-runtime-posix"]
 # The capabilities pico's own CMake switches name (`Z_FEATURE_QUERY`, `Z_FEATURE_QUERYABLE`,

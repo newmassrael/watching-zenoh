@@ -67,6 +67,15 @@
 // doc records how each maps to its pico counterpart.
 #![allow(clippy::missing_safety_doc)]
 
+// A session runs on an engine (`docs/capi-pico-on-coop-engine.md`, decision D4), so a build
+// that names neither has no `z_open` to give; it is refused here, by name, rather than by the
+// unresolved crates of the engine the open would have reached.
+#[cfg(not(any(feature = "engine-tokio", feature = "engine-coop")))]
+compile_error!(
+    "wz-capi-pico: a build needs an engine to run its sessions: `engine-tokio` for the session \
+     on its own thread and runtime, `engine-coop` for the one the program steps"
+);
+
 pub mod abi;
 #[cfg(feature = "admin-space")]
 pub mod admin_space;

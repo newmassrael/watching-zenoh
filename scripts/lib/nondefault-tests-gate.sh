@@ -367,6 +367,7 @@ transport-link-unixpipe,transport-link-ws|"
         codec-init-body,\
         codec-keep-alive,\
         codec-open-body,\
+        host-lock,\
         keyexpr-dollar-star,\
         keyexpr-includes,\
         keyexpr-wildcard-double,\
