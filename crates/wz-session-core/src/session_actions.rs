@@ -1379,6 +1379,15 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// role-agnostic remote identity a face exposes once Established. Reset on
     /// re-handshake alongside the other captured slots.
     pub remote_peer_zid: R::Mutex<Option<SessionBytes<ZID_MAX>>>,
+    /// The zid of the node this session's dial was made for, or `None` for a
+    /// dial made to a locator alone (decision D4 of
+    /// `docs/session-lifecycle-intent.md`). Set by the opener before the
+    /// handshake ([`Self::expect_peer_zid`]); read once, at the InitAck
+    /// ([`Self::init_ack_zid_acceptable`]). An input of the dial, not a fact
+    /// learned on the wire, so a re-handshake does not reset it: the same
+    /// session dials again for the same node.
+    pub(crate) expected_peer_zid:
+        R::Mutex<Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]>>,
     /// R311td — the remote peer's WhatAmI role as the 2-bit INIT wire form
     /// (`InitBody::whatami()` = `cbyte & 0x03`: 0 Router, 1 Peer, 2 Client),
     /// captured at handshake from BOTH the inbound InitSyn (Accepting side) and
@@ -3119,6 +3128,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 clock,
                 inbound_peer_zid: R::new_mutex(None::<SessionBytes<ZID_MAX>>),
                 remote_peer_zid: R::new_mutex(None::<SessionBytes<ZID_MAX>>),
+                expected_peer_zid: R::new_mutex(None),
                 peer_whatami: R::new_mutex(None::<u8>),
                 inbound_opensyn_cookie: R::new_mutex(None::<SessionBytes<COOKIE_MAX>>),
                 // R311y813 — fail-closed until a host with an entropy source
@@ -8705,6 +8715,40 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             sn_res_byte,
             batch_size,
         )
+    }
+
+    /// Names the node this session's dial is for (decision D4 of
+    /// `docs/session-lifecycle-intent.md`): the InitAck must carry its zid, or
+    /// the session closes with `CloseReason::Invalid` before the OpenSyn, which
+    /// is where upstream checks it (`io/zenoh-transport/src/unicast/establishment/open.rs`
+    /// @ `// Check if the expected_zid matches the peer's ZID`). `wire_zid` is the
+    /// zid as the wire or a routing graph spells it, read by
+    /// [`crate::credential_identity::zid_from_wire`]. Returns `false`, and
+    /// expects nothing, for bytes that spell no zid.
+    ///
+    /// The opener calls it once, before the handshake starts.
+    pub fn expect_peer_zid(&self, wire_zid: &[u8]) -> bool {
+        let Some(zid) = crate::credential_identity::zid_from_wire(wire_zid) else {
+            return false;
+        };
+        R::with_mutex_mut(&self.expected_peer_zid, |slot| *slot = Some(zid));
+        true
+    }
+
+    /// Initiator-side InitAck identity admission, the dispatcher pre-classify
+    /// beside [`Self::init_ack_caps_acceptable`]: `false` when this session's
+    /// dial named a node ([`Self::expect_peer_zid`]) and the InitAck carries
+    /// another zid. A dial that named no node admits every zid. The dispatcher
+    /// then drives the FSM's `framing.error` arm, which closes with
+    /// `CloseReason::Invalid`, upstream's reason for this check.
+    #[cfg(feature = "codec-init-body")]
+    pub fn init_ack_zid_acceptable(&self, init_ack_zid: &[u8]) -> bool {
+        // A `match`, not `is_none_or`: that method is stable since 1.82 and
+        // this crate builds with 1.81.
+        match R::with_mutex_mut(&self.expected_peer_zid, |slot| *slot) {
+            None => true,
+            Some(expected) => crate::credential_identity::zid_is_bound(init_ack_zid, &expected),
+        }
     }
 
     /// R311ke — per-channel inbound Frame/Fragment SN admission, the

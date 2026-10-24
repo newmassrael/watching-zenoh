@@ -39,7 +39,7 @@ node stays interoperable with zenoh 1.10.1 and zenoh-pico 1.10.1 peers.
 - **The fixed-memory profile has the host an opener needs.**
   `wz_session_mcu::slot_host::SessionHost` opens sessions in `S` static slots
   (`pub fn dial<F>(`), and the lwIP host delegates to it. One slot is
-  36,736 B on `thumbv7m-none-eabi` (`deploy/session_slot_bytes.json`).
+  36,776 B on `thumbv7m-none-eabi` (`deploy/session_slot_bytes.json`).
   `wz-session-lwip` does not forward `session-close-ingress`.
 - **Upstream already holds most of this, internally.** In zenoh 1.10.1:
   - `Runtime::connect_peer` is idempotent: a peer already connected is
@@ -470,6 +470,23 @@ Each step lands with its own done-when; sizes are not estimated here.
 2. **D4.** The expected zid on every dial path. Done when a dial to a locator
    that answers with another zid closes at InitAck on AP, the C ABI and the MCU
    host.
+   - **2a, the check in the session, on every profile (Round 3537).** An
+     opener names the node with `SessionLinkActions::expect_peer_zid` before
+     the handshake. The dispatcher compares it with the InitAck's zid in
+     `SentInitSyn`, after the InitAck's extension checks and before the
+     OpenSyn's bound is decided, as upstream does. On a mismatch it drives
+     `framing.error`, so the session closes INVALID with no OpenSyn, and
+     returns `DriverLoopOutcome::InitAckPeerMismatch`. The tokio open loop
+     maps that to `OpenError::InitAckPeerMismatch`. Both spellings of one zid
+     (the wire's trimmed bytes and the sixteen-byte form) are the same zid
+     (`credential_identity::zid_from_wire`). A dial that names no node is
+     unchanged. The slot grew by 24 B (36,776 B on `thumbv7m-none-eabi`).
+     Witness: `crates/wz-runtime-tokio/tests/session_fsm_driver_loop.rs`, one
+     InitAck refused for a dial made for another node and admitted for a dial
+     made for it.
+   - Left of D4: the three openers name the node. That is the AP reconcile
+     path, the C ABI's scouted open (its after-the-handshake check moves
+     here) and the MCU opener.
 3. **D3.** The directory and its three sources, with expiry.
 4. **D5.** The peer machine in SCXML and the bounded peer table; the AP
    `ConnectReconcile` desired set is replaced by it.

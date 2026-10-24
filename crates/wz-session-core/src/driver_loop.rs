@@ -202,6 +202,21 @@ pub enum DriverLoopOutcome {
     /// `min()`, never refused.
     #[cfg(feature = "codec-init-body")]
     InitAckPatchRejected,
+    /// The dial named a node
+    /// ([`crate::session_actions::SessionLinkActions::expect_peer_zid`]) and the
+    /// InitAck came from another zid (decision D4 of
+    /// `docs/session-lifecycle-intent.md`). The dispatcher has injected
+    /// `FramingError`, so the session closes with `CloseReason::Invalid`
+    /// before any OpenSyn, as upstream closes a link whose InitAck does not
+    /// carry the expected zid (`io/zenoh-transport/src/unicast/establishment/open.rs`
+    /// @ `// Check if the expected_zid matches the peer's ZID`).
+    ///
+    /// Its own variant because the peer broke no rule of the protocol: it is
+    /// another node answering at the locator the dial used, and an opener
+    /// retries or reports that differently from a peer that sent bad
+    /// parameters.
+    #[cfg(feature = "codec-init-body")]
+    InitAckPeerMismatch,
     /// R2539 — the peer's `init::ext::RegionName` (`0x8`) was PRESENT and its
     /// value is not a region name: not UTF-8, empty, or over
     /// [`crate::extregion::MAX_REGION_NAME_LEN`] bytes.

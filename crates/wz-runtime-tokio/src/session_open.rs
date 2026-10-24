@@ -4290,6 +4290,12 @@ pub enum OpenError {
     /// the same in every build, and only the arm that PRODUCES it needs the
     /// codec.
     InitAckPatchRejected,
+    /// The dial named a node and the InitAck came from another zid (decision
+    /// D4 of `docs/session-lifecycle-intent.md`): another node answers at the
+    /// locator. The dispatcher took the `framing.error` arm (Closing with
+    /// `CloseReason::Invalid`, upstream's reason for this check) before any
+    /// OpenSyn. Ungated, like its siblings above.
+    InitAckPeerMismatch,
     /// R3b — a Z_EXT_AUTH method rejected the peer during the handshake (a bad
     /// usrpwd credential, unknown user, missing required sub-ext, or a malformed
     /// auth ext). The dispatcher took the `establishment.ext_rejected` arm
@@ -4531,6 +4537,12 @@ pub(crate) async fn drive_open_loop(
                     #[cfg(feature = "codec-init-body")]
                     DriverLoopOutcome::InitAckPatchRejected => {
                         return Err(OpenError::InitAckPatchRejected);
+                    }
+                    // Decision D4 — the InitAck came from a node the dial was
+                    // not made for; the FSM is already Closing(Invalid).
+                    #[cfg(feature = "codec-init-body")]
+                    DriverLoopOutcome::InitAckPeerMismatch => {
+                        return Err(OpenError::InitAckPeerMismatch);
                     }
                     // R3b — a usrpwd method rejected the peer; the FSM is already
                     // Closing(Invalid). Surface the typed reason (mirrors the

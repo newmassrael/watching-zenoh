@@ -1313,3 +1313,85 @@ async fn a_replayed_open_ack_after_established_is_not_admitted() {
         "because the admitted OpenAck ended the wait"
     );
 }
+
+// ── Decision D4: a dial made for a node closes at the InitAck of another.
+//
+// Upstream compares the expected zid with the InitAck's once every
+// extension handler has taken the InitAck, and on a mismatch closes the link
+// with INVALID before it builds the OpenSyn
+// (`io/zenoh-transport/src/unicast/establishment/open.rs`
+// @ `// Check if the expected_zid matches the peer's ZID`). The two tests are one discriminator:
+// the same InitAck (`FIXTURE_LISTENER_ZID`) is refused for a dial made for
+// another node and admitted for a dial made for it, so the refusal can only be
+// the zid's.
+
+/// Whether the session put an OpenSyn on the wire.
+fn sent_an_open(recorder: &LifecycleRecordingDriver) -> bool {
+    recorder.snapshot().sends.iter().any(|(bytes, _)| {
+        bytes.first().map(|h| h & 0x1f) == Some(wz_codecs::wire_const::T_MID_OPEN)
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_init_ack_from_another_node_than_the_dial_named_closes_invalid_before_the_open() {
+    use wz_runtime_tokio::session_glue::CloseReason;
+
+    let (recorder, actions, mut engine) = fresh_recording_setup();
+    assert!(actions.expect_peer_zid(&[0xB0, 0xB1, 0xB2, 0xB3]));
+    drive_to_sent_init_syn(&mut engine);
+
+    let wire = craft_initack_wire(&[0xC0, 0x01]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::InitAckPeerMismatch),
+        "an InitAck from another zid must surface InitAckPeerMismatch; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::Closing);
+    assert_eq!(actions.close_reason(), Some(CloseReason::Invalid));
+    assert_eq!(
+        sole_close_reason_byte(&recorder),
+        CloseReason::Invalid as u8,
+        "the peer reads INVALID, upstream's reason for this check"
+    );
+    assert!(
+        !sent_an_open(&recorder),
+        "no OpenSyn reaches a node the dial was not made for"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_init_ack_from_the_node_the_dial_named_is_admitted_whatever_its_spelling() {
+    use wz_session_wire_fixtures::FIXTURE_LISTENER_ZID;
+
+    let (recorder, actions, mut engine) = fresh_recording_setup();
+    // The same zid read back to sixteen bytes: the wire drops the high zero
+    // bytes, so this spelling and the InitAck's four bytes are one zid.
+    let mut padded = [0u8; 16];
+    padded[..FIXTURE_LISTENER_ZID.len()].copy_from_slice(&FIXTURE_LISTENER_ZID);
+    assert!(actions.expect_peer_zid(&padded));
+    drive_to_sent_init_syn(&mut engine);
+
+    let wire = craft_initack_wire(&[0xC0, 0x01]);
+    let mut driver = QueueDriver::with(vec![LinkEvent::Rx(RxFrame::new(wire))]);
+    let outcome = poll_and_dispatch_one(&mut driver, &actions, &mut engine).await;
+    assert!(
+        matches!(outcome, DriverLoopOutcome::AdvancedFsm),
+        "the InitAck of the node the dial named is admitted; got {outcome:?}"
+    );
+    assert_eq!(engine.get_current_state(), S::GotInitAck);
+    assert!(
+        sent_an_open(&recorder),
+        "the handshake goes on to the OpenSyn"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bytes_that_spell_no_zid_name_no_node() {
+    let (_recorder, actions, _engine) = fresh_recording_setup();
+    assert!(!actions.expect_peer_zid(&[]), "an empty zid names no node");
+    assert!(
+        !actions.expect_peer_zid(&[0x01; 17]),
+        "seventeen bytes are wider than any zid"
+    );
+}

@@ -862,6 +862,26 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
                     // when no dispatch / no key captured yet).
                     actions.capture_multilink_pubkey();
                 }
+                // Decision D4 — a dial made for a node closes on an InitAck
+                // from another one. Upstream's order: after the InitAck and
+                // every extension handler are taken, before the OpenSyn is
+                // built, with the INVALID reason, which `framing.error`
+                // closes on:
+                // `io/zenoh-transport/src/unicast/establishment/open.rs` @
+                // `// Check if the expected_zid matches the peer's ZID`
+                #[cfg(feature = "codec-init-body")]
+                if let InboundFrame::Init {
+                    is_ack: true, body, ..
+                } = &frame
+                {
+                    use crate::session_fsm_unicast::SessionFsmUnicastState as S;
+                    if engine.get_current_state() == S::SentInitSyn
+                        && !actions.init_ack_zid_acceptable(body.zid.as_slice())
+                    {
+                        engine.process_event(E::FramingError);
+                        return DriverLoopOutcome::InitAckPeerMismatch;
+                    }
+                }
                 // Item 751 — decide the bound this node announces for the peer
                 // on the Open the event below sends: the initiator's OpenSyn on
                 // the InitAck it is waiting for, the acceptor's OpenAck on the

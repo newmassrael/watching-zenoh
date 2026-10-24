@@ -37,27 +37,45 @@ pub fn zid_from_spki_der(spki_der: &[u8]) -> [u8; CREDENTIAL_ZID_BYTES] {
     zid
 }
 
-/// Whether the zid a peer claimed on the wire is the zid `credential_zid` names.
+/// The zid `wire_zid` spells, read back to sixteen bytes, or `None` for bytes
+/// that spell no zid (empty, or longer than sixteen).
 ///
 /// The wire form drops a zid's high zero bytes: zenoh writes the little-endian
 /// bytes of a non-zero `u128` up to its last non-zero byte
 /// (`commons/zenoh-codec/src/core/zenohid.rs` @
-/// `self.write(&mut *writer, &x.to_le_bytes()[..x.size()])`), so a derived zid
-/// whose last bytes are zero arrives shorter than sixteen bytes. The claim is therefore read back to sixteen bytes with zeros before
-/// it is compared. An empty claim, or one longer than sixteen bytes, names no
-/// zid and is never bound.
-pub fn zid_is_bound(claimed_wire_zid: &[u8], credential_zid: &[u8; CREDENTIAL_ZID_BYTES]) -> bool {
-    if claimed_wire_zid.is_empty() || claimed_wire_zid.len() > CREDENTIAL_ZID_BYTES {
-        return false;
+/// `self.write(&mut *writer, &x.to_le_bytes()[..x.size()])`), so a zid whose
+/// last bytes are zero arrives shorter than sixteen bytes, and two spellings of
+/// one zid differ only in those zeros. Upstream compares the `u128`s; this is
+/// the same comparison on bytes.
+pub fn zid_from_wire(wire_zid: &[u8]) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
+    if wire_zid.is_empty() || wire_zid.len() > CREDENTIAL_ZID_BYTES {
+        return None;
     }
     let mut padded = [0u8; CREDENTIAL_ZID_BYTES];
-    padded[..claimed_wire_zid.len()].copy_from_slice(claimed_wire_zid);
-    padded == *credential_zid
+    padded[..wire_zid.len()].copy_from_slice(wire_zid);
+    Some(padded)
+}
+
+/// Whether the zid a peer claimed on the wire is the zid `credential_zid` names,
+/// compared as [`zid_from_wire`] reads it. A claim that spells no zid is never
+/// bound.
+pub fn zid_is_bound(claimed_wire_zid: &[u8], credential_zid: &[u8; CREDENTIAL_ZID_BYTES]) -> bool {
+    zid_from_wire(claimed_wire_zid).is_some_and(|claimed| claimed == *credential_zid)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wire_zid_is_read_back_to_sixteen_bytes_and_one_that_spells_none_is_refused() {
+        let mut sixteen = [0u8; CREDENTIAL_ZID_BYTES];
+        sixteen[..2].copy_from_slice(&[0x0a, 0x0b]);
+        assert_eq!(zid_from_wire(&[0x0a, 0x0b]), Some(sixteen));
+        assert_eq!(zid_from_wire(&sixteen), Some(sixteen));
+        assert_eq!(zid_from_wire(&[]), None);
+        assert_eq!(zid_from_wire(&[0x01; CREDENTIAL_ZID_BYTES + 1]), None);
+    }
 
     // The oracle is FIPS 180-2's own SHA-256 vectors, not this module: the
     // digests of "" and "abc" are published, and the derivation must be their

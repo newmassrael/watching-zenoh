@@ -7,13 +7,13 @@
       "gate_image": "mcu-admin-node-fixed",
       "build": "mps2-fixed",
       "target": "thumbv7m-none-eabi",
-      "slot_bytes": 36752
+      "slot_bytes": 36776
     },
     "zephyr-admin-node": {
       "gate_image": "zephyr-admin-node-fixed",
       "build": "cyt4bf-lwip-fixed",
       "target": "thumbv7em-none-eabihf",
-      "slot_bytes": 36744
+      "slot_bytes": 36768
     }
   }
 }
