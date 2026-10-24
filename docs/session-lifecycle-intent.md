@@ -547,12 +547,30 @@ Each step lands with its own done-when; sizes are not estimated here.
      dial is now made for the node the intent names
      (`accept_loop::dial_decision`), as upstream's `connect_peer` dials each
      locator for its zid.
-   - Left of D3: the sources confirm into the directory and withdraw from it.
-     On AP the discovery planes reach the face loop through one channel of
-     dial intents, which carries no withdrawal; it becomes a channel of
-     found and lost nodes, the loop holds the directory, and the openers read
-     their candidates from it. The build-time declaration confirms on every
-     profile.
+   - **3c, the directory on AP (Round 3548).** The face loop holds one
+     (`accept_loop::LoopDirectory`, 512 rows). The loop dials a node by zid
+     at two points: a discovery intent and the lifecycle opener's `AddNode`.
+     Each first takes what it carries into the directory
+     (`learn_locators`):
+     - A Hello's locators are taken for `HELLO_LIFETIME_MS`, 42 s. That is
+       RSVP's soft-state rule, L >= (K + 0.5) * 1.5 * R with K = 3 (RFC 2205,
+       section 3.7), over upstream's longest scout period of 8 s.
+     - A link-state read replaces the graph's earlier set for the node.
+     Each then dials the node's candidates for its zid, so a node both
+     planes found is tried at either one's locators, newest first. A node
+     the graph lost is never dialled from a link-state hint it no longer
+     carries, because every read of a zid is preceded by a link-state read
+     for that zid. So the discovery channel carries no withdrawal, and no
+     plane needs to send one. `AddNode` carries the graph's text, since a
+     parsed locator cannot be spelled back. Witness:
+     `accept_loop::tests::the_loop_dials_a_node_at_the_hints_its_planes_gave_newest_first`.
+   - D3 is done for every source that has a producer. The declared source
+     is in the directory and has none yet. A declaration that names a node
+     by zid with its locators is D6's intent baseline, "the build-time
+     declaration" of the peers a node should hold, and D6 confirms it into
+     the directory as `Declared`. Upstream's `connect/endpoints` names
+     locators, not nodes, so it stays a plain `Add`. The fixed-memory
+     profile holds a directory when the MCU opener of step 6 reads one.
 4. **D5.** The peer machine in SCXML and the bounded peer table; the AP
    `ConnectReconcile` desired set is replaced by it.
 5. **D6.** Intent and status, `reset` with a generation, and the status GET.

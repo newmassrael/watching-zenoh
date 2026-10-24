@@ -49,7 +49,6 @@ use wz_session_core::drive::{LifecycleKey, SessionOpener};
 use wz_session_core::zid_hex::zenoh_hex_to_zid;
 
 use crate::accept_loop::{ConnectReconcile, ReconcileSender};
-use crate::locator::AnyLocator;
 use crate::session_open::plan_endpoint;
 
 /// Opens sessions by resolving the key's target through the link-state
@@ -104,10 +103,13 @@ impl SessionOpener for LinkstateOpener {
             }
         };
 
-        let planned: Vec<AnyLocator> = advertised
-            .iter()
-            .filter_map(|locator| match plan_endpoint(locator) {
-                Ok(parsed) => Some(parsed),
+        // The locators as the node advertised them: the loop takes them into its
+        // directory as link-state hints (decision D3), so the text is kept, and
+        // one that does not parse is dropped here, where the node is named.
+        let planned: Vec<String> = advertised
+            .into_iter()
+            .filter_map(|locator| match plan_endpoint(&locator) {
+                Ok(_) => Some(locator),
                 Err(why) => {
                     log::warn!(
                         "LinkstateOpener: `{}` advertises `{locator}`, which does not \

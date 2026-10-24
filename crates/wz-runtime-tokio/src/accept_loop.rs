@@ -125,6 +125,7 @@ use crate::session_open::{
 ))]
 use crate::session_open::MeshDialKey;
 use wz_session_core::locator::AnyLocator;
+use wz_session_core::locator_directory::{DirectoryZid, Lifetime, LocatorDirectory, LocatorSource};
 
 // R311y205 (transport-multilink) — the aggregation seam wired into the live
 // accept/dial path: when `WzConfig.max_links > 1` a face is opened via the
@@ -262,6 +263,73 @@ pub enum DialIntentOrigin {
     MulticastScout,
 }
 
+impl DialIntentOrigin {
+    /// The source whose hints a discovery from this plane is (decision D3).
+    pub fn locator_source(self) -> LocatorSource {
+        match self {
+            Self::Gossip => LocatorSource::Linkstate,
+            Self::MulticastScout => LocatorSource::Hello,
+        }
+    }
+}
+
+/// Decision D3 of `docs/session-lifecycle-intent.md` — how many hints the
+/// directory a face loop holds can keep: a mesh of hundreds of nodes, each with a
+/// few locators, and the soft-state rows that a full table displaces first.
+pub const LOOP_DIRECTORY_ROWS: usize = 512;
+
+/// Decision D3 — how long a Hello's confirmation of a locator lasts. Upstream
+/// scouts again at most every 8 s
+/// (`zenoh/src/net/runtime/orchestrator.rs`
+/// @ `const SCOUT_MAX_PERIOD: Duration = Duration::from_millis(8_000);`), so a live
+/// node's Hello arrives at least that often while the scouting runs. The lifetime
+/// is RSVP's soft-state rule over that refresh period R, L >= (K + 0.5) * 1.5 * R
+/// with K = 3 (RFC 2205, section 3.7): a hint survives K lost refreshes and a
+/// refresh period jittered by half again, so 5.25 * 8 s.
+pub const HELLO_LIFETIME_MS: u64 = 42_000;
+
+/// The directory a face loop holds (decision D3).
+pub type LoopDirectory = LocatorDirectory<LOOP_DIRECTORY_ROWS>;
+
+/// Take the locators a discovery plane read for `zid` into `directory`, as
+/// `source`'s hints at `now_ms`.
+///
+/// A link-state read is the graph's whole current set for the node, so that
+/// source's earlier hints for it are withdrawn first and a locator the graph no
+/// longer carries is not kept: the flood is event-driven and the graph drops what
+/// it no longer reaches, so its hints last until the next read replaces them. A
+/// Hello's hints last [`HELLO_LIFETIME_MS`], since nothing ever withdraws them.
+/// Every read of the directory for a zid is preceded by this for that zid, so a
+/// node the graph lost is never dialled from a link-state hint it no longer has.
+pub fn learn_locators(
+    directory: &mut LoopDirectory,
+    zid: &DirectoryZid,
+    locators: &[String],
+    source: LocatorSource,
+    now_ms: u64,
+) {
+    let lifetime = match source {
+        LocatorSource::Hello => Lifetime::Millis(HELLO_LIFETIME_MS),
+        LocatorSource::Linkstate | LocatorSource::Declared => Lifetime::Permanent,
+    };
+    if source == LocatorSource::Linkstate {
+        directory.withdraw(zid, LocatorSource::Linkstate);
+    }
+    for locator in locators {
+        if let Err(why) = directory.confirm(*zid, locator, source, now_ms, lifetime) {
+            log::debug!("directory: `{locator}` not taken for a node ({why:?})");
+        }
+    }
+}
+
+/// The candidate locators of `zid`, in the order to try them (decision D3).
+fn candidate_locators(directory: &LoopDirectory, zid: &DirectoryZid, now_ms: u64) -> Vec<String> {
+    directory
+        .candidates(zid, now_ms)
+        .map(|row| row.locator().to_owned())
+        .collect()
+}
+
 /// A request from a discovery plane to the accept loop: dial a peer it
 /// DISCOVERED and whose role + zid the autoconnect policy admitted. A discovery
 /// path cannot open an outbound link itself — the gossip one is a sync ingest,
@@ -381,16 +449,19 @@ pub enum ConnectReconcile {
     /// Add these to the desired connect-set, leaving every existing member —
     /// including the DNS-resolved startup seed — in place.
     Add(Vec<AnyLocator>),
-    /// Add a NODE: its locators, each dialled for its zid, as an [`Self::Add`]
-    /// does otherwise (decision D4 of `docs/session-lifecycle-intent.md`). A
-    /// session one of them opens closes at an InitAck from another zid, so a
-    /// node now answering at a locator the directory gave for this one is not
-    /// mistaken for it. Re-dials of these members carry the zid too.
+    /// Add a NODE: the locators the link-state graph holds for it, each dialled
+    /// for its zid, as an [`Self::Add`] does otherwise (decision D4 of
+    /// `docs/session-lifecycle-intent.md`). A session one of them opens closes at
+    /// an InitAck from another zid, so a node now answering at a locator the
+    /// graph gave for this one is not mistaken for it. Re-dials of these members
+    /// carry the zid too. The locators are the graph's text, taken into the
+    /// loop's directory as link-state hints, and the members are the node's
+    /// candidates there (decision D3), a Hello's among them.
     AddNode {
         /// The node's zid in its sixteen-byte form.
-        zid: [u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES],
-        /// The locators the node advertised.
-        locators: Vec<AnyLocator>,
+        zid: DirectoryZid,
+        /// The locators the graph holds for the node, as the node advertised them.
+        locators: Vec<String>,
     },
 }
 
@@ -444,13 +515,24 @@ pub trait ConnectEndpointsSink {
 #[cfg(feature = "router-connect-reconcile")]
 pub fn apply_connect_reconcile(
     desired: &mut std::collections::HashMap<MeshDialKey, MeshDialTarget>,
+    directory: &mut LoopDirectory,
+    now_ms: u64,
     request: ConnectReconcile,
     mut on_refused: impl FnMut(AnyLocator),
 ) {
     let (rows, replace, node) = match request {
         ConnectReconcile::Replace(rows) => (rows, true, None),
         ConnectReconcile::Add(rows) => (rows, false, None),
-        ConnectReconcile::AddNode { zid, locators } => (locators, false, Some(zid)),
+        ConnectReconcile::AddNode { zid, locators } => {
+            // Decision D3: the graph's locators are link-state hints, and the
+            // members are the node's candidates, a Hello's among them.
+            learn_locators(directory, &zid, &locators, LocatorSource::Linkstate, now_ms);
+            let planned = candidate_locators(directory, &zid, now_ms)
+                .iter()
+                .filter_map(|text| crate::session_open::plan_endpoint(text).ok())
+                .collect();
+            (planned, false, Some(zid))
+        }
     };
     // R2233 — fold each through the ONE classification and refuse a member with
     // no pre-handshake identity, exactly as the startup seed does. Keyed by the
@@ -2095,19 +2177,47 @@ fn holds_zid(faces: &BTreeMap<FaceId, Option<Vec<u8>>>, zid: &[u8]) -> bool {
 /// at its InitAck, as upstream's `connect_peer` dials each locator for the zid
 /// (`zenoh/src/net/runtime/orchestrator.rs`
 /// @ `match manager.open_transport_unicast_with_zid(endpoint, zid).await {`).
-fn dial_decision(faces: &BTreeMap<FaceId, Option<Vec<u8>>>, intent: &DialIntent) -> DialDecision {
+///
+/// The locators are the node's candidates in `directory` (decision D3), which
+/// [`learn_locators`] took the intent into first, so a node a Hello and the
+/// flood both found is tried at every locator either gave, in the directory's
+/// order.
+fn dial_decision(
+    faces: &BTreeMap<FaceId, Option<Vec<u8>>>,
+    intent: &DialIntent,
+    directory: &LoopDirectory,
+    now_ms: u64,
+) -> DialDecision {
     if holds_zid(faces, &intent.zid) {
         return DialDecision::AlreadyHeld;
     }
-    match first_dialable_locator(&intent.locators) {
-        Some(target) => DialDecision::Dial(
-            match wz_session_core::credential_identity::zid_from_wire(&intent.zid) {
-                Some(zid) => target.for_node(zid),
-                None => target,
-            },
-        ),
+    let Some(zid) = wz_session_core::credential_identity::zid_from_wire(&intent.zid) else {
+        return DialDecision::NoLocator;
+    };
+    match first_dialable_locator(&candidate_locators(directory, &zid, now_ms)) {
+        Some(target) => DialDecision::Dial(target.for_node(zid)),
         None => DialDecision::NoLocator,
     }
+}
+
+/// Take a discovery into `directory` and weigh it: [`learn_locators`] then
+/// [`dial_decision`], the two steps the [`Step::Dial`] arm takes.
+fn learn_and_decide(
+    faces: &BTreeMap<FaceId, Option<Vec<u8>>>,
+    intent: &DialIntent,
+    directory: &mut LoopDirectory,
+    now_ms: u64,
+) -> DialDecision {
+    if let Some(zid) = wz_session_core::credential_identity::zid_from_wire(&intent.zid) {
+        learn_locators(
+            directory,
+            &zid,
+            &intent.locators,
+            intent.origin.locator_source(),
+            now_ms,
+        );
+    }
+    dial_decision(faces, intent, directory, now_ms)
 }
 
 /// Where a face-drive node's faces come from: the inbound `listeners` it accepts
@@ -2585,6 +2695,11 @@ where
         .iter()
         .map(|t| (t.key.clone(), t.clone()))
         .collect();
+    // Decision D3 — where the nodes this loop dials by zid may be reached: the
+    // hints the discovery planes and the lifecycle opener give, read just after
+    // each gives them. Boxed, because a table of its rows is too large for the
+    // loop's future to carry inline.
+    let mut directory: Box<LoopDirectory> = Box::new(LoopDirectory::new());
     // R311y786 — the per-address re-dial waits, replacing the fixed
     // `RECONNECT_BACKOFF_MS`. Loop-local (not per-face) because the growth must
     // survive the FaceId churn of the retries it is pacing, and one instance for
@@ -3265,7 +3380,7 @@ where
                 // no locator is TCP-dialable. A dialed face flows through the SAME
                 // `opening` -> `Step::Opened` path as a static dial, so it is
                 // registered + held + zid-tracked identically.
-                match dial_decision(&faces, &intent) {
+                match learn_and_decide(&faces, &intent, &mut directory, clock.now_monotonic_ms()) {
                     DialDecision::Dial(target) => {
                         let id = FaceId(next_id);
                         next_id += 1;
@@ -3456,14 +3571,21 @@ where
                     // R2671 — the fold, the refusal and the replace/add decision
                     // all live in `apply_connect_reconcile` so a unit test can
                     // reach them; this arm keeps only the loop's own wording.
-                    apply_connect_reconcile(&mut desired, _desired_set, |rejected| {
-                        log::warn!(
-                            "reconcile: refusing connect endpoint {rejected:?} — a {} \
+                    let now_ms = clock.now_monotonic_ms();
+                    apply_connect_reconcile(
+                        &mut desired,
+                        &mut directory,
+                        now_ms,
+                        _desired_set,
+                        |rejected| {
+                            log::warn!(
+                                "reconcile: refusing connect endpoint {rejected:?} — a {} \
                              endpoint has no address to identify it by before the \
                              handshake",
-                            crate::session_open::locator_scheme(&rejected)
-                        );
-                    });
+                                crate::session_open::locator_scheme(&rejected)
+                            );
+                        },
+                    );
                     // The addresses already being dialed (in-flight or held) — dial
                     // only the desired endpoints NOT among them (the address dedup;
                     // `desired` is keyed by address, so there are no intra-request
@@ -3956,6 +4078,7 @@ mod tests {
     #[cfg(all(feature = "router-connect-reconcile", feature = "routing-peer"))]
     #[test]
     fn an_add_keeps_the_startup_seed_and_a_replace_does_not() {
+        let mut directory = Box::new(LoopDirectory::new());
         let ep: Vec<SocketAddr> = ["127.0.0.1:7001", "127.0.0.1:7002", "127.0.0.1:7003"]
             .iter()
             .map(|s| s.parse().expect("fixture addr"))
@@ -3984,6 +4107,8 @@ mod tests {
         let mut refused = 0usize;
         apply_connect_reconcile(
             &mut desired,
+            &mut directory,
+            0,
             ConnectReconcile::Add(vec![tcp_dial(ep[2])]),
             |_| refused += 1,
         );
@@ -4001,6 +4126,8 @@ mod tests {
         seed(&mut desired);
         apply_connect_reconcile(
             &mut desired,
+            &mut directory,
+            0,
             ConnectReconcile::Replace(vec![tcp_dial(ep[2])]),
             |_| refused += 1,
         );
@@ -4019,6 +4146,8 @@ mod tests {
             .expect("a NAMED locator parses; it is the dial plan that refuses it");
         apply_connect_reconcile(
             &mut desired,
+            &mut directory,
+            0,
             ConnectReconcile::Add(vec![named, tcp_dial(ep[2])]),
             |_| refused += 1,
         );
@@ -4036,6 +4165,7 @@ mod tests {
     #[cfg(all(feature = "router-connect-reconcile", feature = "routing-peer"))]
     #[test]
     fn an_added_node_is_dialled_for_its_zid_and_added_locators_for_none() {
+        let mut directory = Box::new(LoopDirectory::new());
         let addr: SocketAddr = "127.0.0.1:7004".parse().expect("fixture addr");
         let mut zid = [0u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES];
         zid[..2].copy_from_slice(&[0xab, 0x01]);
@@ -4044,6 +4174,8 @@ mod tests {
         let mut desired = std::collections::HashMap::new();
         apply_connect_reconcile(
             &mut desired,
+            &mut directory,
+            0,
             ConnectReconcile::Add(vec![tcp_dial(addr)]),
             |_| panic!("a tcp locator is mesh-dialable"),
         );
@@ -4051,9 +4183,11 @@ mod tests {
 
         apply_connect_reconcile(
             &mut desired,
+            &mut directory,
+            0,
             ConnectReconcile::AddNode {
                 zid,
-                locators: vec![tcp_dial(addr)],
+                locators: vec![format!("tcp/{addr}")],
             },
             |_| panic!("a tcp locator is mesh-dialable"),
         );
@@ -4321,6 +4455,59 @@ mod tests {
     /// the locator names its target WITHOUT a resolver. A peer that advertises
     /// only an address-less shape is dialed by its own key, as the pin's
     /// autoconnect dials whatever a discovered peer carries.
+    /// Decision D3 — the loop's directory joins what the two planes found for one
+    /// node: the newest hint is tried first, a link-state read replaces the
+    /// graph's earlier set for the node, and a Hello's hint expires after
+    /// `HELLO_LIFETIME_MS` while the flood's stays until the graph replaces it.
+    #[test]
+    fn the_loop_dials_a_node_at_the_hints_its_planes_gave_newest_first() {
+        fn addr_of(decision: DialDecision) -> SocketAddr {
+            match decision {
+                DialDecision::Dial(t) => t.ip_addr().expect("an IP target"),
+                _ => panic!("expected a dial"),
+            }
+        }
+        let empty: BTreeMap<FaceId, Option<Vec<u8>>> = BTreeMap::new();
+        let mut directory = Box::new(LoopDirectory::new());
+        let found = |locator: &str, origin| DialIntent {
+            zid: vec![0xAA; 4],
+            locators: vec![locator.into()],
+            origin,
+        };
+        let flood = found("tcp/127.0.0.1:7101", DialIntentOrigin::Gossip);
+        let hello = found("tcp/127.0.0.1:7102", DialIntentOrigin::MulticastScout);
+        assert_eq!(
+            addr_of(learn_and_decide(&empty, &flood, &mut directory, 0)),
+            "127.0.0.1:7101".parse().unwrap()
+        );
+        assert_eq!(
+            addr_of(learn_and_decide(&empty, &hello, &mut directory, 10)),
+            "127.0.0.1:7102".parse().unwrap(),
+            "the Hello's hint is the newest"
+        );
+        // The flood's set for the node moves: 7101 is no longer the graph's.
+        let moved = found("tcp/127.0.0.1:7103", DialIntentOrigin::Gossip);
+        learn_and_decide(&empty, &moved, &mut directory, 20);
+        let mut zid = [0u8; 16];
+        zid[..4].copy_from_slice(&[0xAA; 4]);
+        assert_eq!(
+            candidate_locators(&directory, &zid, 20),
+            ["tcp/127.0.0.1:7103", "tcp/127.0.0.1:7102"],
+            "the graph's earlier locator is withdrawn, the Hello's stays"
+        );
+        assert_eq!(
+            candidate_locators(&directory, &zid, 10 + HELLO_LIFETIME_MS),
+            ["tcp/127.0.0.1:7103"],
+            "the Hello's hint ends; the flood's lasts until the graph replaces it"
+        );
+    }
+
+    /// A discovery weighed by a loop whose directory has heard nothing else.
+    fn decide(faces: &BTreeMap<FaceId, Option<Vec<u8>>>, intent: &DialIntent) -> DialDecision {
+        let mut directory = Box::new(LoopDirectory::new());
+        learn_and_decide(faces, intent, &mut directory, 0)
+    }
+
     #[test]
     fn dial_decision_dedups_held_peers_and_requires_a_resolver_free_locator() {
         fn ip(t: &MeshDialTarget) -> &wz_session_core::locator::ParsedLocator {
@@ -4337,7 +4524,7 @@ mod tests {
         // No held face + a numeric locator -> dial that endpoint.
         let empty: BTreeMap<FaceId, Option<Vec<u8>>> = BTreeMap::new();
         assert!(matches!(
-            dial_decision(&empty, &acc()),
+            decide(&empty,&acc()),
             DialDecision::Dial(t)
                 if ip(&t).addr == "127.0.0.1:7447".parse().unwrap() && ip(&t).proto == Proto::Tcp
         ));
@@ -4345,7 +4532,7 @@ mod tests {
         let mut aa = [0u8; 16];
         aa[..4].copy_from_slice(&[0xAA; 4]);
         assert!(matches!(
-            dial_decision(&empty, &acc()),
+            decide(&empty,&acc()),
             DialDecision::Dial(t) if t.expected_zid == Some(aa)
         ));
         // A held face to the peer's zid -> skip (the dedup), even with a valid
@@ -4355,10 +4542,7 @@ mod tests {
         held.insert(FaceId(1), None);
         assert!(holds_zid(&held, &[0xAA; 4]));
         assert!(!holds_zid(&held, &[0xBB; 4]), "a different zid is not held");
-        assert!(matches!(
-            dial_decision(&held, &acc()),
-            DialDecision::AlreadyHeld
-        ));
+        assert!(matches!(decide(&held, &acc()), DialDecision::AlreadyHeld));
         // A NON-tcp numeric peer is dialed, and the SCHEME survives the decision —
         // this is the capability item 585 names, one plane over from the static
         // dial list.
@@ -4368,7 +4552,7 @@ mod tests {
             origin: DialIntentOrigin::Gossip,
         };
         assert!(matches!(
-            dial_decision(&empty, &tls_peer),
+            decide(&empty,&tls_peer),
             DialDecision::Dial(t) if ip(&t).proto == Proto::Tls
         ));
         let quic_peer = DialIntent {
@@ -4377,7 +4561,7 @@ mod tests {
             origin: DialIntentOrigin::Gossip,
         };
         assert!(matches!(
-            dial_decision(&empty, &quic_peer),
+            decide(&empty,&quic_peer),
             DialDecision::Dial(t) if ip(&t).proto == Proto::Quic
         ));
         // R2900 — a peer that advertises only a unix socket is dialed by the
@@ -4388,7 +4572,7 @@ mod tests {
             origin: DialIntentOrigin::Gossip,
         };
         assert!(matches!(
-            dial_decision(&empty, &unix_peer),
+            decide(&empty,&unix_peer),
             DialDecision::Dial(t)
                 if t.key == MeshDialKey::Unixsock(String::from("/tmp/wz-peer.sock"))
         ));
@@ -4400,7 +4584,7 @@ mod tests {
             origin: DialIntentOrigin::Gossip,
         };
         assert!(matches!(
-            dial_decision(&empty, &undialable),
+            decide(&empty, &undialable),
             DialDecision::NoLocator
         ));
         // `first_dialable_locator` takes the FIRST numeric IP locator, whatever

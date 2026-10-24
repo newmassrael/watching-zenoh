@@ -5447,7 +5447,10 @@ layer_c1v_cargo_test_ws() {
     # Round 3377 -- 10 -> 11: `local_faces_are_driven_one_at_a_time_on_one_thread`, the control
     # on the other side of that pair: the local entry keeps one thread, which the worker entry
     # gives up. Ungated, so C1y moves by the same +1.
-    _runci_guarded_test C1v 11 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
+    # Round 3548 -- 11 -> 12: `the_loop_dials_a_node_at_the_hints_its_planes_gave_newest_first`,
+    # decision D3's directory on the face loop. Ungated, so C1y moves by the same +1. Read off
+    # what guarded_count_gate PRINTED.
+    _runci_guarded_test C1v 12 cargo test -p wz-runtime-tokio --features routing-accept,transport-link-ws --lib accept_loop --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-runtime-tokio --all-targets --features transport-link-ws --quiet -- -D warnings \
@@ -9013,7 +9016,9 @@ layer_c1y_cargo_test_routing_peer() {
     # Round 3377 -- 13 -> 14: the local-faces control of C1v above, which is not feature-gated.
     # Round 3507 -- 14 -> 15: `a_moving_ceiling_refuses_the_peer_past_it_and_counts_it_apart`,
     # which is `routing-peer`-gated like R2761's. Read off what the command PRINTED.
-    _runci_guarded_test "C1y accept_loop" 15 \
+    # Round 3548 -- 15 -> 16: the C1v twin's same +1, D3's joined-hints test. Read off what the
+    # command PRINTED.
+    _runci_guarded_test "C1y accept_loop" 16 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
     # R311y509 — 200 -> 202: the peer's two liveliness-TOKEN tier tests. They land
     # in BOTH linkstate pins because the plane is ungated, so it compiles under bare
