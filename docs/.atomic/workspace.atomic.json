@@ -285078,6 +285078,52 @@
         "Next on this track: Q2d, the querier on the cooperative engine, and a CI lane for client_only_dials_a_listener."
       ]
     },
+    "Round 3582": {
+      "decision_summary": "The entry now builds a node from its declaration. A node is an input like a profile (--node), the artifact row says it is built from a declaration and names its own package, and the build runs there with the declaration's features and budgets. The file carries its node id and the digest of the declaration in a facts note; the manifest repeats both from the file and verify resolves the declaration again, so an edited declaration is a finding. The posix port is Linux only, so a platform of another operating system is refused by name before anything is built. The generator reads the image's own budgets as the baseline a declaration may say, so it and the build agree on the size of a table. Also repaid: the feature-gate probe workspace did not carry the workspace patches.",
+      "changes_bullets": [
+        "scripts/lib/wz_package.py: --node, node_input (a registered declaration, resolved before any build), node_of_file (the id and digest read from the file's facts note, held to the declaration now, and the features it asks for), node_requires (the base and the sockets its endpoint uses), the os refusal in preflight, the build in the package's own directory with WZ_DECLARED_RS and the stated budgets; role facts_lists beside facts_list; selftest cases for each refusal and a clean node directory that verifies and then fails when its declaration moves.",
+        "scripts/lib/wz_config.py and deploy/wz-config.toml: the artifact declared-node (input, manifest, bin, os, os_note) and its role; the vocabulary checks for them.",
+        "scripts/lib/wz_node.py: the declaration digest in the generated constants, resolve (validated, generated file current, features, budgets, facilities), and image_limits, the image's cargo config as the baseline of the budgets a declaration is held to.",
+        "deploy/host-slot-node: declared-node carries the ABI stamp (family declared-node, revision 1) and the facts note; scripts/lib/abi_stamp_gate.py pins the family; run-ci.sh Layer C1st builds it in both profiles and packages it twice and verifies; .gitignore covers its target.",
+        "scripts/lib/feature_gate_diagnostic.py: the probe workspace takes the workspace's patch section, read line by line (the python floor has no tomllib)."
+      ],
+      "verification_bullets": [
+        "The declared node was packaged natively twice from the same declaration: the two manifests are byte for byte the same, verify passes, the stamp and the facts note are read from the built file and survive strip, and the manifest repeats the node id and the digest. The no-allocator link gate is clean for declared-node with the new dependency. wz_package, wz_node, wz_config, abi_stamp_gate and elf_facts selftests, wz_node --check and every member of the pre-push round-fed array (113) exit 0 after the python floor lint finding (tomllib) was removed.",
+        "The feature-gate probe built 116 probes on the build host and each one said which feature was missing; before the change the hosted run failed on it with tokio not found.",
+        "Not run: Layer C1st as a whole and the rest of the hosted run, the secure-channel interop (Layer Z) and the kit lane, and a build for QNX or Android (the refusal is held by the selftest only; no port exists). Six other red jobs of the hosted run on the previous tip are in code this round did not touch (the lifecycle verbs feature requirement, EncodingHint, the router capacity test, E6h, Layer U) and were not repaired here."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha; the node lanes are the new C1st legs.",
+        "The entities the slot profile does not build (listen, multicast, publisher, subscriber, token, querier) are each a change to the profile first and a word the declaration accepts after; the budgets that are tuning constants of the library (task cells, receive and send storage) are not stated by a declaration yet; a declared node for QNX or Android needs a port of the runtime first.",
+        "The device requirement of a declared node is the base plus its sockets, conservative until the node's real facility use is measured."
+      ],
+      "publishable_decision_summary": "The entry now builds a node from its declaration. A node is an input like a profile (--node), the artifact row says it is built from a declaration and names its own package, and the build runs there with the declaration's features and budgets. The file carries its node id and the digest of the declaration in a facts note; the manifest repeats both from the file and verify resolves the declaration again, so an edited declaration is a finding. The posix port is Linux only, so a platform of another operating system is refused by name before anything is built. The generator reads the image's own budgets as the baseline a declaration may say, so it and the build agree on the size of a table. Also repaid: the feature-gate probe workspace did not carry the workspace patches.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_package.py: --node, node_input (a registered declaration, resolved before any build), node_of_file (the id and digest read from the file's facts note, held to the declaration now, and the features it asks for), node_requires (the base and the sockets its endpoint uses), the os refusal in preflight, the build in the package's own directory with WZ_DECLARED_RS and the stated budgets; role facts_lists beside facts_list; selftest cases for each refusal and a clean node directory that verifies and then fails when its declaration moves.",
+        "scripts/lib/wz_config.py and deploy/wz-config.toml: the artifact declared-node (input, manifest, bin, os, os_note) and its role; the vocabulary checks for them.",
+        "scripts/lib/wz_node.py: the declaration digest in the generated constants, resolve (validated, generated file current, features, budgets, facilities), and image_limits, the image's cargo config as the baseline of the budgets a declaration is held to.",
+        "deploy/host-slot-node: declared-node carries the ABI stamp (family declared-node, revision 1) and the facts note; scripts/lib/abi_stamp_gate.py pins the family; run-ci.sh Layer C1st builds it in both profiles and packages it twice and verifies; .gitignore covers its target.",
+        "scripts/lib/feature_gate_diagnostic.py: the probe workspace takes the workspace's patch section, read line by line (the python floor has no tomllib)."
+      ],
+      "publishable_verification_bullets": [
+        "The declared node was packaged natively twice from the same declaration: the two manifests are byte for byte the same, verify passes, the stamp and the facts note are read from the built file and survive strip, and the manifest repeats the node id and the digest. The no-allocator link gate is clean for declared-node with the new dependency. wz_package, wz_node, wz_config, abi_stamp_gate and elf_facts selftests, wz_node --check and every member of the pre-push round-fed array (113) exit 0 after the python floor lint finding (tomllib) was removed.",
+        "The feature-gate probe built 116 probes on the build host and each one said which feature was missing; before the change the hosted run failed on it with tokio not found.",
+        "Not run: Layer C1st as a whole and the rest of the hosted run, the secure-channel interop (Layer Z) and the kit lane, and a build for QNX or Android (the refusal is held by the selftest only; no port exists). Six other red jobs of the hosted run on the previous tip are in code this round did not touch (the lifecycle verbs feature requirement, EncodingHint, the router capacity test, E6h, Layer U) and were not repaired here."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha; the node lanes are the new C1st legs.",
+        "The entities the slot profile does not build (listen, multicast, publisher, subscriber, token, querier) are each a change to the profile first and a word the declaration accepts after; the budgets that are tuning constants of the library (task cells, receive and send storage) are not stated by a declaration yet; a declared node for QNX or Android needs a port of the runtime first.",
+        "The device requirement of a declared node is the base plus its sockets, conservative until the node's real facility use is measured."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
