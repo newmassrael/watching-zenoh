@@ -330,8 +330,18 @@ handshake derived, which is the binding D1 requires.
       certificate refuses the device. This answers, at the rustls level,
       the open question of whether upstream admits a pinned self-signed
       certificate. A zenohd process over the link is the next measurement.
-    - Not yet: the `tls/` locator kind and a stack that dials it, the
-      verified zid on the session, and the kit image over the crate.
+    - The locator kind, landed (Round 3505). `tls/a.b.c.d:port` names
+      `LinkProto::Tls`. A stack carries a secure channel only when it is
+      given one (`IpStack::with_tls`, `IpLinks::with_tls`); without one, a
+      `tls/` dial is unsupported before any buffer is claimed, so it is
+      never mistaken for a full table to retry. A stream names its own
+      protocol (`StreamSocket::PROTO`), so the link's two ends read `tls/`
+      over a channel. On the host, the posix links given the Mbed TLS
+      channel open a `tls/` link to the rustls router above, and the
+      router verifies the device.
+    - Not yet: the verified zid on the cooperative session, the verbs back
+      on that runtime, a zenohd process over the link, and the kit image
+      over the crate.
   - What this leaves open:
     - Mbed TLS 4.1 does not implement TLS 1.3 KeyUpdate. A KeyUpdate from
       the peer ends the session with an unexpected-message alert: the
