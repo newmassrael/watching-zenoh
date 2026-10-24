@@ -281990,6 +281990,52 @@
         "Next, step 3b: an engine feature in wz-capi-pico that builds the client without wz-capi-core and the tokio engine; z_open building the coop session from the C config (endpoints, zid, lease, batch size) over PosixLinks and PosixClock with critical-section's std implementation chosen by the library; z_session_drop and the read task through SessionDrive; a size-gate case beside pico-client; round trips against a pinned zenohd and against pico. Open for later steps: redial after a lost link (pico's auto-reconnect), the listening role, queries, liveliness, scouting, the advanced plane. Read the hosted CI of this push and of 54fdf995f."
       ]
     },
+    "Round 3509": {
+      "decision_summary": "Open-debt item 924, D9 decided and step 6 (a) to (c) landed (owner: long-term correct, cost not counted), on the consumer's measurement that a one-row field window cost about 160 ms wherever it stood against a 100 ms budget. Measured, the cost was the fold of the rows before the window, not the row. As the reference dissector's first pass does, a row's document now reads what the rows before it decided from facts kept by position: the chain identity is folded by the list as each row is appended, the keyexpr bindings and the requests a final can close are capture tables filled once and kept while the capture only grows, and a window finds its first row by its number and walks only its own. Checkpoints of the walk were rejected: they copy tables that grow with the capture and still refold. Left: windows under an end-to-end rule, step 6 (d).",
+      "changes_bullets": [
+        "wz-session-core passive_messages.rs: a list folds each appended row's chain identity and keeps it per row (MessageList::chain_of), dropped with the row; Row::produced",
+        "wz-capture fields_json.rs: CaptureTables (keyexpr bindings and per-list request index) filled once and kept, with the container's own walk, while the capture is a prefix-extension; ChainIds reads the row's fact; a since-window without an end-to-end rule, a revised row or a cap starts at its first row found by halving, and the packet a skipped row carried is read back from the rows before; agg.rs: KeyexprSpaces::absorb_in_order, the one spelling of the per-message step; ordered_fold.rs: the shared walk's tap is handed the row",
+        "wz-capi-dissect: the gate that every window of one and three rows, picked between the two ends, is the document's rows and visits only them; discard_site_lint.py: the chain fact's removal registered",
+        "docs/dissect-row-index.md: D9 and step 6, (a) to (c) recorded with the measurement"
+      ],
+      "verification_bullets": [
+        "Pick probe through the C ABI at 409,064 rows, cursor at the end, one-row windows at the first, middle and last row: 159, 148, 149 ms before and 0.0 to 0.1 ms after, on the TCP and the UDP capture; windows read in order (2,450 to 2,750 ms against 2,450 to 2,610), census and peak RSS unchanged, three runs each",
+        "The gate passes on interleaved flows (plain, byte ceiling, frame ceiling), an exchange and stream and datagram fragment chains; a shifted chain identity fails three existing tests and an empty request index one; the packet read back is compared with the walk's at every position under byte ceilings",
+        "cargo test wz-capture all features, wz-session-core (dissect, alloc, reassembly), wz-capi-dissect, wz-capi-replay, wz-replay, wz-analyze all features",
+        "clippy -D warnings wz-capture all and no default features, wz-session-core all features, wz-capi-dissect; rustfmt; discard_site_lint, accessor_reach_census, analysis_surface_parity; rustdoc adds no warning in the files touched"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 6 (d) of docs/dissect-row-index.md: end-to-end judgments kept per declaration text behind a forward frontier, so a window under an end-to-end rule also reads only its own rows; then step 4c landings 2 to 4 (serial, recovered QUIC, WebSocket, TLS plaintext and scouting) and step 5, the memory gate",
+        "The hosted CI runs holding rounds 3485, 3488, 3497, 3504 and this one: read the first completed run that holds them, and tell the consumer session which pin to take if it is red",
+        "Tell the consumer session the one-row window structure has landed, at this round's pin, so it can measure pick_first, pick_middle and pick_last again"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, D9 decided and step 6 (a) to (c) landed (owner: long-term correct, cost not counted), on the consumer's measurement that a one-row field window cost about 160 ms wherever it stood against a 100 ms budget. Measured, the cost was the fold of the rows before the window, not the row. As the reference dissector's first pass does, a row's document now reads what the rows before it decided from facts kept by position: the chain identity is folded by the list as each row is appended, the keyexpr bindings and the requests a final can close are capture tables filled once and kept while the capture only grows, and a window finds its first row by its number and walks only its own. Checkpoints of the walk were rejected: they copy tables that grow with the capture and still refold. Left: windows under an end-to-end rule, step 6 (d).",
+      "publishable_changes_bullets": [
+        "wz-session-core passive_messages.rs: a list folds each appended row's chain identity and keeps it per row (MessageList::chain_of), dropped with the row; Row::produced",
+        "wz-capture fields_json.rs: CaptureTables (keyexpr bindings and per-list request index) filled once and kept, with the container's own walk, while the capture is a prefix-extension; ChainIds reads the row's fact; a since-window without an end-to-end rule, a revised row or a cap starts at its first row found by halving, and the packet a skipped row carried is read back from the rows before; agg.rs: KeyexprSpaces::absorb_in_order, the one spelling of the per-message step; ordered_fold.rs: the shared walk's tap is handed the row",
+        "wz-capi-dissect: the gate that every window of one and three rows, picked between the two ends, is the document's rows and visits only them; discard_site_lint.py: the chain fact's removal registered",
+        "docs/dissect-row-index.md: D9 and step 6, (a) to (c) recorded with the measurement"
+      ],
+      "publishable_verification_bullets": [
+        "Pick probe through the C ABI at 409,064 rows, cursor at the end, one-row windows at the first, middle and last row: 159, 148, 149 ms before and 0.0 to 0.1 ms after, on the TCP and the UDP capture; windows read in order (2,450 to 2,750 ms against 2,450 to 2,610), census and peak RSS unchanged, three runs each",
+        "The gate passes on interleaved flows (plain, byte ceiling, frame ceiling), an exchange and stream and datagram fragment chains; a shifted chain identity fails three existing tests and an empty request index one; the packet read back is compared with the walk's at every position under byte ceilings",
+        "cargo test wz-capture all features, wz-session-core (dissect, alloc, reassembly), wz-capi-dissect, wz-capi-replay, wz-replay, wz-analyze all features",
+        "clippy -D warnings wz-capture all and no default features, wz-session-core all features, wz-capi-dissect; rustfmt; discard_site_lint, accessor_reach_census, analysis_surface_parity; rustdoc adds no warning in the files touched"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 6 (d) of docs/dissect-row-index.md: end-to-end judgments kept per declaration text behind a forward frontier, so a window under an end-to-end rule also reads only its own rows; then step 4c landings 2 to 4 (serial, recovered QUIC, WebSocket, TLS plaintext and scouting) and step 5, the memory gate",
+        "The hosted CI runs holding rounds 3485, 3488, 3497, 3504 and this one: read the first completed run that holds them, and tell the consumer session which pin to take if it is red",
+        "Tell the consumer session the one-row window structure has landed, at this round's pin, so it can measure pick_first, pick_middle and pick_last again"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
