@@ -282630,6 +282630,56 @@
         "Hosted CI: read the first completed run holding rounds 3504 to this one; the consumer session takes this round's pin, and its ws message bytes change from a stream slice to the payload"
       ]
     },
+    "Round 3523": {
+      "decision_summary": "Steps 2 to 4 of the owner-approved capacity report, landed together because the report is only checked by serving it. CapacityReport is one plain value in wz-session-core (17 fields, one JSON object of integers, strings and null in a fixed order, a schema version, counters apart from gauges, a figure the node cannot reach as null and not zero), the document lists each field and a test fails in both directions when document and report differ. The router-hat serves it per GET at wz/@/<zid>/capacity as application/json: under the root wz, outside upstream's admin space, so a query for @/** or the router's admin root cannot meet the key, and the verbatim @ chunk means a wildcard such as wz/** does not reach it either; gated by the same admin read permit as every admin leg and answering only the terminating Final when it is denied. The accept loop's two refusal counters are live on SessionCeiling because its summary exists only when the loop ends; the sessions held are read from the face table.",
+      "changes_bullets": [
+        "wz-session-core `capacity`: `CapacityReport`, `write_json`, `lease_at_risk`, `Limiter::label`, `CAPACITY_REPORT_SCHEMA_VERSION`; five tests including the document-lists-every-field test.",
+        "wz-session-core `adminspace`: `WZ_EXTENSION_ROOT`, `capacity_report_key`, `answer_capacity_query` (read-gated, intersection-checked, JSON-encoded reply); three tests (the bytes and encoding for the exact key and the wildcards that meet it, the keys of upstream's space and `wz/**` that do not, the denial).",
+        "wz-runtime-tokio: `SessionCeiling` carries the live refusal counters; `WzConfig::capacity_report`; the accept loop's ceiling test reads the counters from the host's handle.",
+        "wz-ap-demo: the router-hat hosts the report beside its admin legs, reading the live config, the face table and the counters.",
+        "wz-integration-tests `wz_router_hat_serves_its_capacity_report` (two tests, Layer E7g, wz to wz): served with the declared share and the derived limit, upstream's replies all under `@/` and none the report's, `wz/**` answered nothing, and a denied read permit answers nothing.",
+        "scripts/run-ci.sh: E7g builds the probe and runs the file under a guard of 2; eight `--lib adminspace` guards 50, 47, 55, 63, 42 move by 3 to what each printed.",
+        "docs/router-data-plane-scaling.md 7.4: the schema table (17 rows), how it is served and held, the stale not-built statements corrected."
+      ],
+      "verification_bullets": [
+        "29 capacity tests, 53 adminspace tests with adminspace-router-linkstate, and 15 accept_loop tests pass; clippy with warnings denied clean on wz-session-core, wz-runtime-tokio and wz-ap-demo (router-hat build).",
+        "The two end-to-end tests pass on a build host (router and probe, 0.3 s). With the read permit ignored in the handler (`read || true`) the denial test fails alone and the other passes; reverted. With the document's lateness_limit_ms row removed the document test fails alone, naming the field; restored.",
+        "Layer E7g's two commands (the pico read-deny step needs a foreign binary that is not built on this machine, so the new step was run as its own command, not through the lane).",
+        "Count guards: the gate named eight `--lib adminspace` guards at +3 and they were moved to what the commands printed; the gate was rerun on the moved tree.",
+        "C1bz over the whole lane failed only on wz-tls-mbedtls, another line's crate (the owner's repair, 84b64c8f2, landed after); gate array red only on lane_feature_membership (84b64c8f2 fixed it) and barrier_needle (dc8531567 fixed it), neither from this diff.",
+        "Not run: the E7g lane as a whole; a hosted run of anything after round 3507."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Approved structure: steps 1 to 4 landed. Left: (5) the admission that follows the windowed lateness (the gauge exists; needs a rule for how fast the ceiling rises again, to be measured); the stopped reading face against blocking publishers (the demo has neither a stoppable client nor a blocking publisher); hosted reads of E7s (rounds 3507 and later) and of the new E7g step: runs are cancelled by later pushes, read the first that completes. The report is served by the router-hat only; the peer host and the MCU admin node do not serve it. sessions_held counts the face table, so a router with a multicast group counts its unicast faces only."
+      ],
+      "publishable_decision_summary": "Steps 2 to 4 of the owner-approved capacity report, landed together because the report is only checked by serving it. CapacityReport is one plain value in wz-session-core (17 fields, one JSON object of integers, strings and null in a fixed order, a schema version, counters apart from gauges, a figure the node cannot reach as null and not zero), the document lists each field and a test fails in both directions when document and report differ. The router-hat serves it per GET at wz/@/<zid>/capacity as application/json: under the root wz, outside upstream's admin space, so a query for @/** or the router's admin root cannot meet the key, and the verbatim @ chunk means a wildcard such as wz/** does not reach it either; gated by the same admin read permit as every admin leg and answering only the terminating Final when it is denied. The accept loop's two refusal counters are live on SessionCeiling because its summary exists only when the loop ends; the sessions held are read from the face table.",
+      "publishable_changes_bullets": [
+        "wz-session-core `capacity`: `CapacityReport`, `write_json`, `lease_at_risk`, `Limiter::label`, `CAPACITY_REPORT_SCHEMA_VERSION`; five tests including the document-lists-every-field test.",
+        "wz-session-core `adminspace`: `WZ_EXTENSION_ROOT`, `capacity_report_key`, `answer_capacity_query` (read-gated, intersection-checked, JSON-encoded reply); three tests (the bytes and encoding for the exact key and the wildcards that meet it, the keys of upstream's space and `wz/**` that do not, the denial).",
+        "wz-runtime-tokio: `SessionCeiling` carries the live refusal counters; `WzConfig::capacity_report`; the accept loop's ceiling test reads the counters from the host's handle.",
+        "wz-ap-demo: the router-hat hosts the report beside its admin legs, reading the live config, the face table and the counters.",
+        "wz-integration-tests `wz_router_hat_serves_its_capacity_report` (two tests, Layer E7g, wz to wz): served with the declared share and the derived limit, upstream's replies all under `@/` and none the report's, `wz/**` answered nothing, and a denied read permit answers nothing.",
+        "scripts/run-ci.sh: E7g builds the probe and runs the file under a guard of 2; eight `--lib adminspace` guards 50, 47, 55, 63, 42 move by 3 to what each printed.",
+        "docs/router-data-plane-scaling.md 7.4: the schema table (17 rows), how it is served and held, the stale not-built statements corrected."
+      ],
+      "publishable_verification_bullets": [
+        "29 capacity tests, 53 adminspace tests with adminspace-router-linkstate, and 15 accept_loop tests pass; clippy with warnings denied clean on wz-session-core, wz-runtime-tokio and wz-ap-demo (router-hat build).",
+        "The two end-to-end tests pass on a build host (router and probe, 0.3 s). With the read permit ignored in the handler (`read || true`) the denial test fails alone and the other passes; reverted. With the document's lateness_limit_ms row removed the document test fails alone, naming the field; restored.",
+        "Layer E7g's two commands (the pico read-deny step needs a foreign binary that is not built on this machine, so the new step was run as its own command, not through the lane).",
+        "Count guards: the gate named eight `--lib adminspace` guards at +3 and they were moved to what the commands printed; the gate was rerun on the moved tree.",
+        "C1bz over the whole lane failed only on wz-tls-mbedtls, another line's crate (the owner's repair, 84b64c8f2, landed after); gate array red only on lane_feature_membership (84b64c8f2 fixed it) and barrier_needle (dc8531567 fixed it), neither from this diff.",
+        "Not run: the E7g lane as a whole; a hosted run of anything after round 3507."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Approved structure: steps 1 to 4 landed. Left: (5) the admission that follows the windowed lateness (the gauge exists; needs a rule for how fast the ceiling rises again, to be measured); the stopped reading face against blocking publishers (the demo has neither a stoppable client nor a blocking publisher); hosted reads of E7s (rounds 3507 and later) and of the new E7g step: runs are cancelled by later pushes, read the first that completes. The report is served by the router-hat only; the peer host and the MCU admin node do not serve it. sessions_held counts the face table, so a router with a multicast group counts its unicast faces only."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
