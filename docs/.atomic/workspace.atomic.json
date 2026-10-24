@@ -283634,6 +283634,42 @@
         "Read the hosted runs of the pushes of rounds 3500, 3503, 3506, 3512, 3517, 3525, 3538, 3540 and this one per job, Layer E18 first."
       ]
     },
+    "Round 3546": {
+      "decision_summary": "A correction to Round 3542, which recorded D4 done on AP, the C ABI and the fixed-memory host: AP's autoconnect was a fourth dial path, and it dialled a node a discovery plane found (the gossip flood or a Hello) at its first dialable locator for no node. The dial is now made for the node the intent names, as upstream's connect_peer dials each locator for its zid, so a node answering at a locator another advertised closes at its InitAck. And the directory's lifetime rule is corrected from a shape the sources do not have: a Hello's hint must expire, since nothing ever withdraws it, while the link-state flood is event-driven and the graph drops a node it no longer reaches, so its hint may last until withdrawn. Upstream scouts again at most every 8 s, which bounds how often a live node's Hello is confirmed. Left of D3: on AP the discovery planes reach the face loop through one channel of dial intents with no withdrawal, which becomes a channel of found and lost nodes.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio/src/accept_loop.rs: dial_decision plans the chosen locator for the intent's zid; its test holds the plan's expected_zid.",
+        "crates/wz-session-core/src/locator_directory.rs: a Hello must carry a lifetime and a declared hint must be permanent; a link-state hint may be either; one test more (8).",
+        "docs/session-lifecycle-intent.md: steps 3b and D4 on AP's autoconnect; docs/reason-review-pins.md: the accept_loop.rs row."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): cargo test -p wz-session-core --lib locator_directory, 8 passed; cargo test -p wz-runtime-tokio --lib with routing-peer, routing-accept, transport-link-tcp and transport-unicast, dial_decision passes with the plan carrying the intent's zid; clippy -D warnings of wz-session-core and wz-runtime-tokio; cargo fmt --check. guarded_count_gate --range from Round 3544's commit to the tip: 1 reached guard measured, none disagreeing (Round 3544's own run had measured before its tests existed).",
+        "reason_review_pin_gate failed on the moved accept_loop.rs and passes with the row; its claim (ConnectReconcile is the connect-set merge that ends in a dial) read again. upstream_citation_anchor (the SCOUT_MAX_PERIOD anchor found in the pinned source), prose_named_identifier, prose_feature, discard_site and count_guard_lint pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "D3c: the AP dial-intent channel becomes found and lost nodes (gossip_plane, linkstate_forward, router_forward withdraw on a node the graph removed; scouting_autoconnect confirms a Hello with a lifetime of three scout periods), the face loop holds the directory and dials its candidates, the lifecycle opener reads from it; then the build-time declaration on every profile.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
+      ],
+      "publishable_decision_summary": "A correction to Round 3542, which recorded D4 done on AP, the C ABI and the fixed-memory host: AP's autoconnect was a fourth dial path, and it dialled a node a discovery plane found (the gossip flood or a Hello) at its first dialable locator for no node. The dial is now made for the node the intent names, as upstream's connect_peer dials each locator for its zid, so a node answering at a locator another advertised closes at its InitAck. And the directory's lifetime rule is corrected from a shape the sources do not have: a Hello's hint must expire, since nothing ever withdraws it, while the link-state flood is event-driven and the graph drops a node it no longer reaches, so its hint may last until withdrawn. Upstream scouts again at most every 8 s, which bounds how often a live node's Hello is confirmed. Left of D3: on AP the discovery planes reach the face loop through one channel of dial intents with no withdrawal, which becomes a channel of found and lost nodes.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio/src/accept_loop.rs: dial_decision plans the chosen locator for the intent's zid; its test holds the plan's expected_zid.",
+        "crates/wz-session-core/src/locator_directory.rs: a Hello must carry a lifetime and a declared hint must be permanent; a link-state hint may be either; one test more (8).",
+        "docs/session-lifecycle-intent.md: steps 3b and D4 on AP's autoconnect; docs/reason-review-pins.md: the accept_loop.rs row."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): cargo test -p wz-session-core --lib locator_directory, 8 passed; cargo test -p wz-runtime-tokio --lib with routing-peer, routing-accept, transport-link-tcp and transport-unicast, dial_decision passes with the plan carrying the intent's zid; clippy -D warnings of wz-session-core and wz-runtime-tokio; cargo fmt --check. guarded_count_gate --range from Round 3544's commit to the tip: 1 reached guard measured, none disagreeing (Round 3544's own run had measured before its tests existed).",
+        "reason_review_pin_gate failed on the moved accept_loop.rs and passes with the row; its claim (ConnectReconcile is the connect-set merge that ends in a dial) read again. upstream_citation_anchor (the SCOUT_MAX_PERIOD anchor found in the pinned source), prose_named_identifier, prose_feature, discard_site and count_guard_lint pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "D3c: the AP dial-intent channel becomes found and lost nodes (gossip_plane, linkstate_forward, router_forward withdraw on a node the graph removed; scouting_autoconnect confirms a Hello with a lifetime of three scout periods), the face loop holds the directory and dials its candidates, the lifecycle opener reads from it; then the build-time declaration on every profile.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
