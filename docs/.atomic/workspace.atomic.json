@@ -281494,6 +281494,42 @@
         "Read the hosted runs of this push per job, Layer E18 first; it now links upstream's keyexpr, rand, serde and schemars."
       ]
     },
+    "Round 3499": {
+      "decision_summary": "The engine port of the pico C ABI over the cooperative engine stands: wz-capi-port, a crate under no engine, holds the vocabulary an ABI and its engine both name and SessionEngine, the twenty-two operations a zenoh-pico client makes on a session. wz-capi-core implements it; the pico ABI's key, publisher, subscriber, matching and write-filter state hold Arc<dyn SessionEngine>. Measured cost +6 KB on pico-client, +5 KB on pico-default. The first cut cost 35 KB, all a second copy of the registry's drop glue: release builds share no generics across crates, so the trait object is made in the engine's crate (as_engine, inline(never)) and the boxed session freed there (release). RetractionKey and InterestForm move to session-core. Repaired: moving PublishOptions left LinkRefused unmatched under tx-lend-only; it folds into TransportUnavailable or ExceedsCapacity.",
+      "changes_bullets": [
+        "New crate wz-capi-port (workspace member, Platform paths): SubId, MatchId, FilterId, SubscriberSink, MatchingSink, FilterPlane, FanoutError, FilteredPut, WireKey; engine::SessionEngine.",
+        "wz-capi-core: faces re-exports the vocabulary; engine_port implements SessionEngine for SharedSession and adds as_engine and engine_ref (inline(never)); drive::SessionState::release.",
+        "wz-capi-pico: session::Engine, engine_of, engine_ref; keyexpr, pubsub, matching, write_filter and zid on Arc<dyn SessionEngine> (declarations compared by address); PicoSession carries the engine, and the tokio registry only with queryable, liveliness or advanced; z_session_drop frees through release; the queryable, liveliness, querier, get and advanced modules take the engine the engine hands out.",
+        "wz-session-core: declare_form (RetractionKey, InterestForm), re-exported by wz-runtime-tokio; publish_options maps LinkRefused under tx-lend-only.",
+        "docs/capi-pico-on-coop-engine.md status."
+      ],
+      "verification_bullets": [
+        "On the build host: wz-capi-port tests and clippy; clippy -D warnings for wz-capi-core (default, no default), wz-capi-c, wz-capi-pico (default, pico-client, pico-client with peer), wz-session-core (default, alloc, with session-matching and declare-interest, every feature), wz-runtime-tokio (default, transport-unicast only); every wz-capi-pico test target (31 binaries), wz-capi-core and wz-capi-c lib tests; capability_cost_gate --check: ten cases within budget, exports unchanged (pico-client 1,804,297 against 1,798,269 on origin/main, pico-default 4,234,642 against 4,229,298). The duplicate drop glue was found with nm (the mangled names' instantiating-crate suffix) and objdump/readelf (the vtable that referenced it), and is gone in both builds. C1bz at budget for the touched crates; the public surface census, the platform trigger paths gate and the hook's 110 round-fed static gates pass. The lend-only repair answers a report from another session and builds with every session-core feature."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next: SessionDrive, the C session handle's half of the port (open, close, the read task, read, spin, keep-alive), then the cooperative engine over ClientNode and PosixLinks with a size-gate case beside pico-client. Rule for every later change: an ABI crate never coerces an engine type to the port's trait object nor drops a boxed engine session itself; the engine hands out as_engine/engine_ref and frees with release, or the registry's drop glue is linked twice (watch pico-client and pico-default text against origin)."
+      ],
+      "publishable_decision_summary": "The engine port of the pico C ABI over the cooperative engine stands: wz-capi-port, a crate under no engine, holds the vocabulary an ABI and its engine both name and SessionEngine, the twenty-two operations a zenoh-pico client makes on a session. wz-capi-core implements it; the pico ABI's key, publisher, subscriber, matching and write-filter state hold Arc<dyn SessionEngine>. Measured cost +6 KB on pico-client, +5 KB on pico-default. The first cut cost 35 KB, all a second copy of the registry's drop glue: release builds share no generics across crates, so the trait object is made in the engine's crate (as_engine, inline(never)) and the boxed session freed there (release). RetractionKey and InterestForm move to session-core. Repaired: moving PublishOptions left LinkRefused unmatched under tx-lend-only; it folds into TransportUnavailable or ExceedsCapacity.",
+      "publishable_changes_bullets": [
+        "New crate wz-capi-port (workspace member, Platform paths): SubId, MatchId, FilterId, SubscriberSink, MatchingSink, FilterPlane, FanoutError, FilteredPut, WireKey; engine::SessionEngine.",
+        "wz-capi-core: faces re-exports the vocabulary; engine_port implements SessionEngine for SharedSession and adds as_engine and engine_ref (inline(never)); drive::SessionState::release.",
+        "wz-capi-pico: session::Engine, engine_of, engine_ref; keyexpr, pubsub, matching, write_filter and zid on Arc<dyn SessionEngine> (declarations compared by address); PicoSession carries the engine, and the tokio registry only with queryable, liveliness or advanced; z_session_drop frees through release; the queryable, liveliness, querier, get and advanced modules take the engine the engine hands out.",
+        "wz-session-core: declare_form (RetractionKey, InterestForm), re-exported by wz-runtime-tokio; publish_options maps LinkRefused under tx-lend-only.",
+        "docs/capi-pico-on-coop-engine.md status."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: wz-capi-port tests and clippy; clippy -D warnings for wz-capi-core (default, no default), wz-capi-c, wz-capi-pico (default, pico-client, pico-client with peer), wz-session-core (default, alloc, with session-matching and declare-interest, every feature), wz-runtime-tokio (default, transport-unicast only); every wz-capi-pico test target (31 binaries), wz-capi-core and wz-capi-c lib tests; capability_cost_gate --check: ten cases within budget, exports unchanged (pico-client 1,804,297 against 1,798,269 on origin/main, pico-default 4,234,642 against 4,229,298). The duplicate drop glue was found with nm (the mangled names' instantiating-crate suffix) and objdump/readelf (the vtable that referenced it), and is gone in both builds. C1bz at budget for the touched crates; the public surface census, the platform trigger paths gate and the hook's 110 round-fed static gates pass. The lend-only repair answers a report from another session and builds with every session-core feature."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next: SessionDrive, the C session handle's half of the port (open, close, the read task, read, spin, keep-alive), then the cooperative engine over ClientNode and PosixLinks with a size-gate case beside pico-client. Rule for every later change: an ABI crate never coerces an engine type to the port's trait object nor drops a boxed engine session itself; the engine hands out as_engine/engine_ref and frees with release, or the registry's drop glue is linked twice (watch pico-client and pico-default text against origin)."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
