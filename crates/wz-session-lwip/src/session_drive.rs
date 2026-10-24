@@ -383,15 +383,20 @@ mod tests {
                 .send_to(ipv4_addr_loopback(), session_port, bytes)
                 .expect("a loopback send");
         };
+        // Two datagrams queued at a time: the slim receive pool has four slots,
+        // and four queued at once did not all reach the driver under it. What
+        // the queue cannot hold lwIP drops before the driver sees it.
         send(&stranger, b"stray");
         send(&speaker, syn);
-        send(&stranger, syn);
-        send(&speaker, b"peer");
 
         session_link.service();
         let frame = session_link.try_recv().expect("the InitSyn is handed over");
         std::assert_eq!(&frame.bytes[..], syn, "the stray before it was let go");
         std::assert_eq!(driver.peer(), Some((ipv4_addr_loopback(), speaker_port)));
+
+        send(&stranger, syn);
+        send(&speaker, b"peer");
+        session_link.service();
         let frame = session_link.try_recv().expect("the peer's next datagram");
         std::assert_eq!(
             &frame.bytes[..],
