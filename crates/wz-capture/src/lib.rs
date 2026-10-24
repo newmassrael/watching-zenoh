@@ -375,6 +375,12 @@ pub mod pcapng;
 /// bytes and its first reading's facts, must produce the same records.
 #[cfg(test)]
 mod redecode_gate;
+
+/// Open-debt item 924, step 5 -- the memory matrix: what a dissection holds per
+/// row for every kind of message list, against the report it makes of itself. See
+/// the module's docs for what it claims and the command that runs it.
+#[cfg(all(test, feature = "dissect", feature = "network-codecs"))]
+mod memory_matrix;
 // No outer docs on these, for the reason the `e2e_*` modules give: an outer
 // doc is merged with the module's own `//!` docs and their links would then be
 // resolved from this scope instead of from the module.
@@ -1917,6 +1923,9 @@ pub struct DissectionMemory {
     /// Plaintext a layer below produced (TLS, QUIC streams) and the bytes a flow
     /// holds for a unit still arriving.
     pub plaintext: usize,
+    /// The encrypted records an encrypted flow keeps for a decryptor, bounded per
+    /// flow (`tls::MAX_KEPT_RECORDS_PER_DIRECTION` a direction).
+    pub tls_records: usize,
     /// The scouting lists: their rows and their logged payloads.
     pub scouting: usize,
     /// Per-packet records outside any list: the packets skipped, and the serial
@@ -1932,6 +1941,7 @@ impl DissectionMemory {
             + self.stream_runs
             + self.stream_pending
             + self.plaintext
+            + self.tls_records
             + self.scouting
             + self.packets
     }
@@ -1956,6 +1966,9 @@ impl FlowDissection {
         }
         for held in &self.held {
             into.plaintext += wz_session_core::heap_account::vec_bytes(held);
+        }
+        if let Framing::Encrypted(state) = &self.framing {
+            into.tls_records += state.memory();
         }
         for plaintext in self.plaintext.iter().flat_map(|pair| pair.iter()) {
             into.plaintext += wz_session_core::heap_account::vec_bytes(&plaintext.bytes);

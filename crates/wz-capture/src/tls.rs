@@ -998,6 +998,28 @@ pub struct TlsFlowState {
 }
 
 impl TlsFlowState {
+    /// Bytes this flow holds on the heap that follow its record count: the
+    /// encrypted records kept for a decryptor, each with its own ciphertext, and
+    /// the bytes of a record still arriving.
+    ///
+    /// Bounded: [`MAX_KEPT_RECORDS_PER_DIRECTION`] a direction, so a flow holds at
+    /// most that many records however long it runs. It is reported because a
+    /// program that budgets by what a handle says it holds would otherwise be short
+    /// of it by up to that bound for every encrypted flow, which is the size of a
+    /// small capture.
+    pub(crate) fn memory(&self) -> usize {
+        let records = |records: &Vec<EncryptedRecord>| {
+            wz_session_core::heap_account::vec_bytes(records)
+                + records.iter().map(|r| r.bytes.capacity()).sum::<usize>()
+        };
+        self.kept.iter().map(records).sum::<usize>()
+            + self
+                .pending
+                .iter()
+                .map(wz_session_core::heap_account::vec_bytes)
+                .sum::<usize>()
+    }
+
     /// Fold one run of a direction's bytes, keeping whatever tail did not
     /// complete a record so the next run continues the chain rather than
     /// restarting it.

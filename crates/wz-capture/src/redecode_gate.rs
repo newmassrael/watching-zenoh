@@ -910,7 +910,7 @@ fn a_scouting_lists_rows_read_again_from_their_logged_payloads() {
 }
 
 /// Opens a record whose protected payload is `inner content type || plaintext`.
-struct PlainOpener;
+pub(crate) struct PlainOpener;
 
 impl crate::tls::RecordOpener for PlainOpener {
     fn begin_flow(
