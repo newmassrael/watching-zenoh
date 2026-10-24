@@ -134,6 +134,15 @@ ROSTER: frozenset[tuple[str, str]] = frozenset(
         ("EncryptedFlow", "totals"),
         ("FlowDissection", "chain_loss"),
         ("FlowDissection", "context"),
+        # Open-debt item 924 (step 5, exactness) -- a kept encrypted record became
+        # a VIEW of its stream (an offset and a length) instead of a copy of its
+        # bytes, so a library caller that holds the `EncryptedFlow` snapshot reads
+        # a record's bytes through this accessor, as `decrypt_with` hands them to
+        # an opener. Neither shipped surface reads a record: the command line and
+        # the C ABI decrypt through `decrypt_with`, which reads the stream itself,
+        # and report the census. Filed here, with the accessor, for the same reason
+        # `EncryptedFlow::totals` stands below.
+        ("FlowDissection", "encrypted_record_bytes"),
         # R2514 (open-debt item 713) — `FlowDissection::packet_for` and
         # `StreamAssembler::packet_for_offset` LEFT this roster by being asked,
         # which is the way out this comment describes. R2513 gave the keyexpr

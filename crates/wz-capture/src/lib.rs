@@ -3051,7 +3051,7 @@ impl FlowDissection {
     ///
     /// A kept record ([`tls::EncryptedFlow::kept_records`]) is a view of the
     /// stream and holds no bytes of its own; this reads them where the stream
-    /// keeps them, which is what [`Self::decrypt_with`] hands an opener. Borrowed
+    /// keeps them, which is what [`Dissection::decrypt_with`] hands an opener. Borrowed
     /// where the record sits in one segment, gathered into a copy where it spans
     /// two.
     pub fn encrypted_record_bytes(

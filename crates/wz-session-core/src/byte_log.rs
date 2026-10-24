@@ -28,7 +28,7 @@ const MAX_CHUNK: usize = 64 * 1024;
 /// every byte behind it. Here bytes go into chunks that are never reallocated:
 /// a run that does not fit in the last chunk's spare capacity starts a new
 /// chunk, each chunk twice the capacity of the one before it up to
-/// [`MAX_CHUNK`] (or the run's own length, for a run larger than that). So no
+/// `MAX_CHUNK`, 64 KiB (or the run's own length, for a run larger than that). So no
 /// byte is copied after it is logged, a log of a few runs costs a few runs'
 /// bytes, the most held unused is one chunk's tail, and releasing drops whole
 /// chunks. Every run lies in one chunk, so it reads as one slice and is never

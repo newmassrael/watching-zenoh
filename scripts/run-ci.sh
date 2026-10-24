@@ -14053,7 +14053,7 @@ layer_c1bt_capture_no_default_features() {
         tls_flow_tests::a_mid_session_flow_is_announced_with_no_identity \
         tls_flow_tests::a_second_decryption_pass_does_not_decode_the_same_records_twice \
         tls_flow_tests::the_report_states_what_the_decryption_pass_actually_found \
-        tls_flow_tests::a_record_after_a_hole_carries_the_offset_the_hole_put_it_at \
+        tls_flow_tests::a_record_after_a_hole_is_a_view_of_the_contiguous_stream \
         tls_flow_tests::a_capture_is_not_decrypted_while_one_of_its_flows_is_not \
         tls_flow_tests::a_capture_files_own_decryption_secrets_reach_the_dissection
     do
