@@ -354,8 +354,28 @@ handshake derived, which is the binding D1 requires.
       cooperative build with the verbs has the channel too. The guard gate
       builds the runtime with the verbs and no channel, which is refused,
       and the channel crate with the verbs, which builds.
-    - Not yet: a zenohd process over the link, and the kit image over the
-      crate, which is the witness step 1b names.
+    - The witness step 1b names, on the host (Round 3520). The image is
+      `deploy/host-slot-node` built with `tls`: the kit's session code as a
+      Linux process with no allocator, which generates its identity at start
+      and prints its certificate as PEM. The router is zenohd 1.10.1 with
+      mutual TLS on, pinning that certificate as its `root_ca_certificate`.
+      Three runs, each the control of another
+      (`crates/wz-integration-tests/tests/wz_fixed_memory_tls_zenohd_interop.rs`,
+      Layer Z):
+      - A router whose zid its key names is admitted, and the image reads it
+        as verified.
+      - A router claiming another zid is admitted over the same channel and
+        read as not verified, so the first verdict is the key binding, not
+        the channel alone.
+      - A router pinning another device admits no session, so the router did
+        verify the image.
+
+      The node's zid is the one its key names. Before `wz_tls_start` hands
+      Mbed TLS the arena, its allocator is one that refuses, so the image
+      references no C heap symbol and still names no Rust allocator (the
+      no-allocator gate's `linux-x86_64-tls` build).
+    - Not yet: the same witness on the kit, which needs a TCP stream socket on
+      the Zephyr profile and the kit image over the crate.
   - What this leaves open:
     - Mbed TLS 4.1 does not implement TLS 1.3 KeyUpdate. A KeyUpdate from
       the peer ends the session with an unexpected-message alert: the
@@ -415,8 +435,9 @@ Each step lands with its own done-when; sizes are not estimated here.
    - **1b, the channel on the fixed-memory profile (Rounds 3502 to 3513).**
      `wz-tls-mbedtls` behind the stream port, the `tls/` locator kind, the
      proven key read by the session on every profile, and the verbs offered
-     by the channel crate (D9 above). Left of 1b: a fixed-memory image and a
-     router verifying each other over the channel.
+     by the channel crate (D9 above). Done on the host (Round 3520): the
+     fixed-memory image `host-slot-node` and zenohd 1.10.1 verify each other
+     over the channel, with two controls. Left of 1b: the same on the kit.
 2. **D4.** The expected zid on every dial path. Done when a dial to a locator
    that answers with another zid closes at InitAck on AP, the C ABI and the MCU
    host.
