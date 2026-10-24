@@ -6484,6 +6484,9 @@ mod tests {
             .collect();
         let file = wz_capture::pcap::write(wz_capture::link::LINKTYPE_ETHERNET, &rows);
         let dissection = wz_capture::Dissection::from_capture(&file).expect("the capture reads");
+        // DATAGRAM-HALF-NOT-APPLICABLE: a WebSocket flow is a TCP flow, and this
+        // reads the stream half only to hold the fixture to being one; the
+        // samples below come from `samples()`, which walks both halves.
         assert!(
             dissection.flows()[0].framing().is_websocket(),
             "the fixture must be a ws flow"
