@@ -443,6 +443,22 @@ from. So the order is now:
   frame ceiling, against the reading that kept every message whole, every
   message's bytes against the stream, and the plaintext kept against what was
   fed; a release four bytes early fails it.
+  Landed (4), its WebSocket part: a ws message's payload is unmasked and joined
+  out of its frames by the deframer and stands nowhere in the TCP stream, so the
+  flow's list logs it as a datagram list logs a unit. Its rows are anchored at
+  the stream offset of the first frame's header and end where the last frame
+  does, an end the payload cannot say; the list keeps that end once per unit
+  beside the entries (a flag on the row, a table by locator, released with the
+  unit's last row), since the 48-byte row has no field to spare. The byte door
+  answered a ws message with a slice of the TCP stream at its anchor, which is
+  the frame header and a masked prefix; it now reads the logged payload, and
+  `FlowDissection::message_bytes` takes the row, whose place names that payload,
+  instead of a frame. The gate reads a capture with a batch in one message, a
+  masked message, a frame split across two segments and a message fragmented
+  into two frames, plain, under the stream ceilings and lent, against the
+  reading that kept every message whole, and every message's bytes against its
+  payload; dropping the end on reading again fails it, and so does releasing it
+  at a unit's first row.
 - 5. The memory gate.
 - 6. Random access to a row's field document (D9), taken before 4c's remaining
   landings because it is what the consumer's budget waits on: (a) the tables
