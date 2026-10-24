@@ -283544,6 +283544,44 @@
         "Next on the cooperative engine, one step each: redialling a lost link (pico's auto-reconnect), the listening role, queries, liveliness, scouting, the advanced plane; a CI lane for client_only_dials_a_listener on both engines, which no lane runs today. The MCU crates' own critical sections (wz-session-mcu's admin and group modules) still call critical_section::with on their own cells; they are not in a host library's graph. Read the hosted CI of this push and of b3b83b83c."
       ]
     },
+    "Round 3544": {
+      "decision_summary": "D3's first part lands: the locator directory, a zid's candidate locators held as soft state. Identity and location are separate, so a locator is a hint for reaching a zid, and since D4 a dial made from a hint closes at the InitAck if another node answers. The table is a fixed number of rows with no allocator, so every profile holds it. A row is a zid and a locator; each source (declared, Hello, link-state) confirms it with its own end, and a lookup never returns a hint whose every confirmation has ended. The lifetime is the source's to give, since only it knows its refresh period: the directory is the mechanism, the sources hold the policy. Declared hints are permanent and never evicted; a full table displaces the soft hint that ends first, and refuses, counted, when only declared hints are left. Candidates come declared first, then newest first. The round also repays the hosted C1cb count Round 3537 moved from 29 to 31.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/locator_directory.rs: LocatorDirectory, DirectoryRow, LocatorSource, Lifetime, DirectoryRefusal, with seven unit tests; registered ungated in lib.rs.",
+        "scripts/run-ci.sh: Layer C1cb counts 31, the two InitAck tests of Round 3537 included.",
+        "docs/session-lifecycle-intent.md: step 3a and what is left of D3."
+      ],
+      "verification_bullets": [
+        "Hosted run 40090152149, read per job at the round's start: C1cb failed on its count (\"expected exactly 29 passed\"), which Round 3537's two tests moved; A3 failed on runtime-tokio owning no cfg-necessary symbol, which git bisect run of audit-catalog-status.sh put at 126871aa8, reported to its session and not touched here; C1cf and E7s are other sessions' lanes.",
+        "On pc2 (bx): cargo test -p wz-session-core --lib locator_directory, 7 passed; clippy -D warnings of wz-session-core, default and no-default-features; guarded_count_gate --range from Round 3537 to the tip, 88 reached guards measured and none disagreeing, C1cb at 31 among them. cargo fmt --check; reason_review_pin_gate, upstream_citation_anchor, prose_named_identifier, prose_feature, discard_site, discarded_evidence, accessor_reach_census and count_guard_lint pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "D3b: the sources confirm into the directory with their lifetimes (the link-state ingest and a Hello on AP, the build-time declaration on every profile) and the AP opener and the C ABI's scouted open read their candidates from it.",
+        "The A3 red on runtime-tokio is with the session that landed 126871aa8; read it again before touching it.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
+      ],
+      "publishable_decision_summary": "D3's first part lands: the locator directory, a zid's candidate locators held as soft state. Identity and location are separate, so a locator is a hint for reaching a zid, and since D4 a dial made from a hint closes at the InitAck if another node answers. The table is a fixed number of rows with no allocator, so every profile holds it. A row is a zid and a locator; each source (declared, Hello, link-state) confirms it with its own end, and a lookup never returns a hint whose every confirmation has ended. The lifetime is the source's to give, since only it knows its refresh period: the directory is the mechanism, the sources hold the policy. Declared hints are permanent and never evicted; a full table displaces the soft hint that ends first, and refuses, counted, when only declared hints are left. Candidates come declared first, then newest first. The round also repays the hosted C1cb count Round 3537 moved from 29 to 31.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/locator_directory.rs: LocatorDirectory, DirectoryRow, LocatorSource, Lifetime, DirectoryRefusal, with seven unit tests; registered ungated in lib.rs.",
+        "scripts/run-ci.sh: Layer C1cb counts 31, the two InitAck tests of Round 3537 included.",
+        "docs/session-lifecycle-intent.md: step 3a and what is left of D3."
+      ],
+      "publishable_verification_bullets": [
+        "Hosted run 40090152149, read per job at the round's start: C1cb failed on its count (\"expected exactly 29 passed\"), which Round 3537's two tests moved; A3 failed on runtime-tokio owning no cfg-necessary symbol, which git bisect run of audit-catalog-status.sh put at 126871aa8, reported to its session and not touched here; C1cf and E7s are other sessions' lanes.",
+        "On pc2 (bx): cargo test -p wz-session-core --lib locator_directory, 7 passed; clippy -D warnings of wz-session-core, default and no-default-features; guarded_count_gate --range from Round 3537 to the tip, 88 reached guards measured and none disagreeing, C1cb at 31 among them. cargo fmt --check; reason_review_pin_gate, upstream_citation_anchor, prose_named_identifier, prose_feature, discard_site, discarded_evidence, accessor_reach_census and count_guard_lint pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "D3b: the sources confirm into the directory with their lifetimes (the link-state ingest and a Hello on AP, the build-time declaration on every profile) and the AP opener and the C ABI's scouted open read their candidates from it.",
+        "The A3 red on runtime-tokio is with the session that landed 126871aa8; read it again before touching it.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
