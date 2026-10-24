@@ -13835,9 +13835,12 @@ layer_c1st_abi_stamp() {
 # `CARGO_TARGET_<TRIPLE>_LINKER`, plus the SDK's own) is set in the environment. The toolchain is the
 # caller's (T2), so a platform whose variables are unset is "not provisioned on this machine": it is
 # listed by name, and a platform whose declared `lane` is not `none` and which is not provisioned
-# FAILS when `WZ_PLATFORM_REQUIRE=1`, because a lane that SKIPs where its claim says green is a claim
-# nobody is holding. Hosted CI has no cross toolchain provisioned, so there it reports and passes;
-# the result a platform's `lane` states was read where the toolchain is.
+# here is reported as a NOTE and does not fail. There is no arming flag that turns the note into a
+# failure: it would be read here and set by no job, because no hosted job provisions a cross
+# toolchain (the runner images carry other NDK releases than the one the Android row's lane was
+# read with), and a switch nothing can turn on is a verdict nobody can reach (armed_skip_guard.py).
+# So the result a platform's `lane` states was read where the toolchain is, and the row's help says
+# where; the hosted run reports it as not provisioned.
 #
 # Each ready platform is packaged twice for every declared artifact; the two manifests must be the
 # same bytes, then the first is verified against its files.
@@ -13848,12 +13851,7 @@ layer_c1sp_cross_platforms() {
     required="$(python3 scripts/lib/wz_package.py --required-platforms)" || return 1
     for id in $required; do
         if ! grep -qx "$id" <<<"$ready"; then
-            if [ "${WZ_PLATFORM_REQUIRE:-}" = "1" ]; then
-                echo "  C1sp FAIL: platform $id states a green lane and its toolchain is not provisioned here"
-                rc=1
-            else
-                echo "  C1sp NOTE: platform $id states a green lane; its toolchain is not provisioned here, so it was not run"
-            fi
+            echo "  C1sp NOTE: platform $id states a green lane; its toolchain is not provisioned here, so it was not run"
         fi
     done
     [ -z "$ready" ] && { echo "  C1sp: no cross platform is provisioned on this machine"; return "$rc"; }

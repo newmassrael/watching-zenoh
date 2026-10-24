@@ -401,10 +401,14 @@ the owner approves each use; steps 5 and 6 begin there.
    declared and provisioned, not by an edit to the lane. On the owner's workstation
    (NDK 30, API 36) `android-arm64` packages all three artifacts, including `capi-c`
    (which the probe had not tried), needing only `libdl.so`, `libm.so`, `libc.so`, and
-   its row is `lane = "build"`, `support = "verified"`. The lane discriminates: with the
-   toolchain unset and `WZ_PLATFORM_REQUIRE=1` it fails, and set it passes. What it is
-   not: hosted CI has no NDK, so there it reports the platform as not provisioned and
-   passes; the green was read here only. `os_provides` of the row is what the NDK 30
+   its row is `lane = "build"`, `support = "verified"`. What it is not: a hosted check.
+   No hosted job provisions the NDK the row's lane was read with (the runner images carry
+   other releases), so there the lane reports the platform as not provisioned and passes,
+   and nothing can turn that note into a failure: a switch for it was written first and
+   removed, because `armed_skip_guard.py` is right that a flag no job sets is a verdict
+   nobody can reach. The green was read on one machine, and the row's help says so; a
+   later change that breaks the Android build is seen only where the NDK is, until a
+   hosted job provisions that NDK and arms the lane. `os_provides` of the row is what the NDK 30
    headers declare for an API 36 device (not run on one). The `preset-ap-full` bindgen
    refusal of the probe is not exercised: the entry builds default features, and that
    preset is not an artifact. Nothing ran on a device.
