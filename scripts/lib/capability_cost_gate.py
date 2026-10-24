@@ -146,13 +146,13 @@ CASES: tuple[Case, ...] = (
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
-         exports=443,
+         exports=441,
          note="the single-threaded client of pico-client-udp on the cooperative engine: "
-              "865,723 measured against pico-client-udp's 1,867,697 (2.15 against 4.63 times "
-              "the same pico). Its exports are pico-client's 441 and two that are not the C "
-              "ABI's: `_critical_section_1_0_acquire` and `_release`, the std implementation "
-              "the cooperative runtime's critical sections need, which rustc exports from a "
-              "cdylib. The count drops to 441 when that runtime takes a hosted lock instead"),
+              "867,811 measured against pico-client-udp's 1,867,697 (2.15 against 4.63 times "
+              "the same pico). Its exports are pico-client's 441: the runtime's critical "
+              "sections are a lock of the process (`host-lock`), so no `critical-section` "
+              "implementation is linked, whose two symbols a cdylib exported beside the C ABI "
+              "(443 before)"),
     Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_946_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),

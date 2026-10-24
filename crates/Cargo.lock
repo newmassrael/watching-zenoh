@@ -3002,7 +3002,6 @@ dependencies = [
 name = "wz-capi-coop"
 version = "0.1.0"
 dependencies = [
- "critical-section",
  "wz-capi-port",
  "wz-runtime-coop",
  "wz-runtime-posix",
@@ -3042,7 +3041,6 @@ dependencies = [
 name = "wz-capi-pico"
 version = "0.1.0"
 dependencies = [
- "critical-section",
  "getrandom 0.2.17",
  "libc",
  "tokio",

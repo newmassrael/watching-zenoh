@@ -405,7 +405,7 @@ impl<C: ClockSource, const TASKS: usize, const TASK_BYTES: usize, const TIMERS: 
     /// Start the runtime over `clock`, or `None` when this cell has already been
     /// started: one cell is one runtime, because a second would share the tables.
     pub fn start(&'static self, clock: C) -> Option<CoopRuntime<C>> {
-        let first = critical_section::with(|cs| {
+        let first = crate::cs::with(|cs| {
             let started = self.started.borrow(cs);
             !started.replace(true)
         });
@@ -504,7 +504,7 @@ impl<C: ClockSource> Runtime for CoopRuntime<C> {
         // is honest about which event landed first.
         let wrapper = async move {
             let output = fut.await;
-            critical_section::with(|cs| {
+            crate::cs::with(|cs| {
                 let mut s = state_for_wrapper.borrow(cs).borrow_mut();
                 if s.result.is_none() {
                     s.result = Some(Ok(output));
@@ -530,7 +530,7 @@ impl<C: ClockSource> Runtime for CoopRuntime<C> {
     where
         T: Send + 'static,
     {
-        critical_section::with(|cs| {
+        crate::cs::with(|cs| {
             let mut borrow = mutex.borrow(cs).borrow_mut();
             f(&mut *borrow)
         })

@@ -150,7 +150,7 @@ impl<T> CoopJoinHandle<T> {
         // Synchronously surface JoinCancelled to any awaiting
         // handle. The is_none() guard makes this idempotent + race-
         // safe against natural completion (see module doc).
-        critical_section::with(|cs| {
+        crate::cs::with(|cs| {
             let mut s = self.state.borrow(cs).borrow_mut();
             if s.result.is_none() {
                 s.result = Some(Err(RuntimeError::JoinCancelled));
@@ -169,7 +169,7 @@ where
     type Output = Result<T, RuntimeError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        critical_section::with(|cs| {
+        crate::cs::with(|cs| {
             let mut state = self.state.borrow(cs).borrow_mut();
             if let Some(result) = state.result.take() {
                 // Drop any registered waker — the result is leaving.

@@ -80,7 +80,7 @@ impl TimerQueue {
     /// ([`Self::refusals`]) and nothing is registered, so the caller wakes itself
     /// instead.
     pub fn register(&self, deadline_us: u64, waker: Waker) -> bool {
-        critical_section::with(|cs| {
+        crate::cs::with(|cs| {
             let seq = {
                 let next = self.next_seq.borrow(cs);
                 let seq = next.get();
@@ -108,7 +108,7 @@ impl TimerQueue {
     /// outside the critical section, as the heap form's do.
     pub fn pop_expired(&self, now_us: u64) {
         loop {
-            let due = critical_section::with(|cs| {
+            let due = crate::cs::with(|cs| {
                 let mut best: Option<(usize, u64, u64)> = None;
                 for (index, slot) in self.slots.iter().enumerate() {
                     if let Some(entry) = slot.0.borrow(cs).borrow().as_ref() {
@@ -132,7 +132,7 @@ impl TimerQueue {
 
     /// Diagnostic: number of entries currently registered.
     pub fn pending_count(&self) -> usize {
-        critical_section::with(|cs| {
+        crate::cs::with(|cs| {
             self.slots
                 .iter()
                 .filter(|slot| slot.0.borrow(cs).borrow().is_some())
@@ -143,7 +143,7 @@ impl TimerQueue {
     /// Diagnostic: earliest deadline currently registered, or `None` if the table
     /// is empty.
     pub fn next_deadline_us(&self) -> Option<u64> {
-        critical_section::with(|cs| {
+        crate::cs::with(|cs| {
             self.slots
                 .iter()
                 .filter_map(|slot| slot.0.borrow(cs).borrow().as_ref().map(|e| e.deadline_us))
@@ -154,7 +154,7 @@ impl TimerQueue {
     /// How many sleeps were refused an entry (each woke itself for the next pass
     /// instead).
     pub fn refusals(&self) -> u32 {
-        critical_section::with(|cs| self.refused.borrow(cs).get())
+        crate::cs::with(|cs| self.refused.borrow(cs).get())
     }
 
     /// The entry count of the table.

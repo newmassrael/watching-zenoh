@@ -87,7 +87,7 @@ default = [
 # engine lacks is the cooperative client. The selection reads features, not a config key, because
 # what an engine does not have is not linked.
 engine-tokio = ["dep:wz-capi-core", "dep:wz-runtime-tokio", "dep:tokio"]
-engine-coop = ["dep:wz-capi-coop", "dep:wz-runtime-posix", "dep:critical-section"]
+engine-coop = ["dep:wz-capi-coop", "dep:wz-runtime-posix"]
 # The capabilities pico's own CMake switches name (`Z_FEATURE_QUERY`, `Z_FEATURE_QUERYABLE`,
 # `Z_FEATURE_LIVELINESS`, `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`), each one feature
 # of this crate: on in a default build, so the drop-in exports what the reference build does,
@@ -387,11 +387,11 @@ wz-abi-stamp = { path = "../wz-abi-stamp" }
 # duplicating it was the worse option.
 wz-capi-core = { path = "../wz-capi-core", default-features = false, optional = true }
 # The cooperative engine (`engine-coop`), over the host's sockets and clock
-# (`wz-runtime-posix`). Its runtime's `critical_section::Mutex` takes std's implementation,
-# which the image picks: this library is the image a C program links.
+# (`wz-runtime-posix`). Its runtime's critical sections are a lock of the process (the
+# engine selects the runtime's `host-lock`), so this library links no `critical-section`
+# implementation and exports nothing beside its C ABI.
 wz-capi-coop = { path = "../wz-capi-coop", optional = true }
 wz-runtime-posix = { path = "../wz-runtime-posix", optional = true }
-critical-section = { version = "1", features = ["std"], optional = true }
 # The session core's own types (key expression canon and matching, QoS, locality, samples, the
 # sinks), named where they live and not through the tokio engine's re-exports of them: the ABI
 # layer knows no engine, and the engine this crate drives is a selection

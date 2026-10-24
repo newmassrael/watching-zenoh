@@ -138,7 +138,7 @@ impl ExecutorState {
             wake_flag,
             cancel_flag,
         };
-        critical_section::with(|cs| {
+        crate::cs::with(|cs| {
             let mut inner = self.inner.borrow(cs).borrow_mut();
             inner.tasks.push(Some(entry));
         });
@@ -158,7 +158,7 @@ impl ExecutorState {
     /// pathological spawn-loops while keeping the single-pass
     /// fairness model.
     pub fn run_until_idle(&self) {
-        let task_count = critical_section::with(|cs| self.inner.borrow(cs).borrow().tasks.len());
+        let task_count = crate::cs::with(|cs| self.inner.borrow(cs).borrow().tasks.len());
         for idx in 0..task_count {
             // R311bd — cancel-first sweep. If a slot's
             // cancel_flag is set, take the slot (dropping the
@@ -169,7 +169,7 @@ impl ExecutorState {
             // synchronously, so the awaiting handle has already
             // resolved; the executor side here only needs to
             // free the task body.
-            let cancelled_slot = critical_section::with(|cs| {
+            let cancelled_slot = crate::cs::with(|cs| {
                 let mut inner = self.inner.borrow(cs).borrow_mut();
                 let slot = inner.tasks.get_mut(idx)?;
                 let is_cancelled = slot
@@ -194,7 +194,7 @@ impl ExecutorState {
 
             // Per-task ready snapshot + slot vacate. The combined
             // swap-and-take keeps the critical section short.
-            let entry = critical_section::with(|cs| {
+            let entry = crate::cs::with(|cs| {
                 let mut inner = self.inner.borrow(cs).borrow_mut();
                 let slot = inner.tasks.get_mut(idx)?;
                 let was_ready = slot
@@ -218,7 +218,7 @@ impl ExecutorState {
                         // time poll returns Ready.
                     }
                     Poll::Pending => {
-                        critical_section::with(|cs| {
+                        crate::cs::with(|cs| {
                             let mut inner = self.inner.borrow(cs).borrow_mut();
                             if let Some(slot) = inner.tasks.get_mut(idx) {
                                 *slot = Some(e);
@@ -232,7 +232,7 @@ impl ExecutorState {
 
     /// Diagnostic + test helper: count of live (Some) task slots.
     pub fn live_task_count(&self) -> usize {
-        critical_section::with(|cs| {
+        crate::cs::with(|cs| {
             self.inner
                 .borrow(cs)
                 .borrow()
@@ -247,7 +247,7 @@ impl ExecutorState {
     /// wake_flag set. Used by `CoopRuntime::block_on` to decide
     /// whether spinning makes progress.
     pub(crate) fn any_ready(&self) -> bool {
-        critical_section::with(|cs| {
+        crate::cs::with(|cs| {
             self.inner.borrow(cs).borrow().tasks.iter().any(|s| {
                 s.as_ref()
                     .map(|t| t.wake_flag.load(Ordering::Acquire))

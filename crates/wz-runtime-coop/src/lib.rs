@@ -160,6 +160,7 @@ compile_error!(
      task pool: `alloc` for the heap form, `session-slot` for the static one"
 );
 
+pub mod cs;
 pub mod sync;
 
 // R311bb — Arc + AtomicBool/U64 polyfill via portable-atomic{,-util}

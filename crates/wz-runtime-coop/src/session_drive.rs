@@ -1254,13 +1254,13 @@ impl<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> PumpSlots
     pub fn in_use(&self) -> usize {
         self.cells
             .iter()
-            .filter(|cell| critical_section::with(|cs| cell.taken.borrow(cs).get()))
+            .filter(|cell| crate::cs::with(|cs| cell.taken.borrow(cs).get()))
             .count()
     }
 
     /// How many claims were refused for want of a free cell.
     pub fn refused(&self) -> u32 {
-        critical_section::with(|cs| self.refused.borrow(cs).get())
+        crate::cs::with(|cs| self.refused.borrow(cs).get())
     }
 
     /// The bytes this table takes in the image's `.bss`, with each cell's pump (and,
@@ -1285,13 +1285,13 @@ impl<C: ClockSource, L: SessionDatagramLink + 'static, const N: usize> PumpSlots
         config: SessionDriveConfig,
     ) -> Result<PumpRef<C, L>, PumpsFull> {
         let cell = self.cells.iter().find(|cell| {
-            critical_section::with(|cs| {
+            crate::cs::with(|cs| {
                 let taken = cell.taken.borrow(cs);
                 !taken.replace(true)
             })
         });
         let Some(cell) = cell else {
-            critical_section::with(|cs| {
+            crate::cs::with(|cs| {
                 let refused = self.refused.borrow(cs);
                 refused.set(refused.get().saturating_add(1));
             });
@@ -1365,7 +1365,7 @@ impl<C: ClockSource, L: SessionDatagramLink + 'static> Drop for PumpRef<C, L> {
         // SAFETY: the cell holds this handle's pump, written by `claim` and dropped
         // only here; the flag is cleared after, so no claim can write over it first.
         unsafe { (*self.cell.pump.get()).assume_init_drop() };
-        critical_section::with(|cs| self.cell.taken.borrow(cs).set(false));
+        crate::cs::with(|cs| self.cell.taken.borrow(cs).set(false));
     }
 }
 

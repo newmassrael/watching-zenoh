@@ -251,6 +251,13 @@ keyexpr-includes = ["dep:wz-session-core", "wz-session-core/keyexpr-includes"]
 # split instead, so each profile sees exactly what it can have.
 switchboard = ["dep:wz-session-core", "wz-session-core/switchboard"]
 
+# The runtime's critical sections on a HOST: a lock of the process, reentrant on its thread,
+# which `cs::with` takes itself, in place of the `critical-section` implementation an image links
+# (src/cs.rs). A host program built with it links no such implementation, and a C library built
+# over the runtime exports no `_critical_section_1_0_*` symbol beside its C ABI. It needs `std`,
+# which a host has and an MCU image does not, so no MCU build selects it.
+host-lock = []
+
 # R311y22b — no [build-dependencies]: the reassembly buffer-pool codegen moved
 # to the committed out/wz-runtime-coop/reassembly_pool_mcu.rs via the `xtask`
 # codegen SSOT, so this crate has no build script and pulls no sce-codegen.

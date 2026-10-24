@@ -126,7 +126,7 @@ impl TimerQueue {
     /// (`session-slot`), whose table can be full, and is here so the callers are
     /// written once.
     pub fn register(&self, deadline_us: u64, waker: Waker) -> bool {
-        critical_section::with(|cs| {
+        crate::cs::with(|cs| {
             let mut q = self.inner.borrow(cs).borrow_mut();
             let seq = q.next_seq;
             q.next_seq = q.next_seq.wrapping_add(1);
@@ -145,7 +145,7 @@ impl TimerQueue {
     /// deadlock against the CS-mutex.
     pub fn pop_expired(&self, now_us: u64) {
         loop {
-            let entry = critical_section::with(|cs| {
+            let entry = crate::cs::with(|cs| {
                 let mut q = self.inner.borrow(cs).borrow_mut();
                 match q.heap.peek() {
                     Some(Reverse(top)) if top.deadline_us <= now_us => {
@@ -166,7 +166,7 @@ impl TimerQueue {
     /// future, no wake source" (panic) from "pending timer, clock
     /// will eventually advance" (legitimate wait state).
     pub fn pending_count(&self) -> usize {
-        critical_section::with(|cs| self.inner.borrow(cs).borrow().heap.len())
+        crate::cs::with(|cs| self.inner.borrow(cs).borrow().heap.len())
     }
 
     /// Diagnostic: earliest deadline currently registered, or `None`
@@ -174,7 +174,7 @@ impl TimerQueue {
     /// size its `wfi()`-sleep budget against a HAL timer; the
     /// runtime itself does not require the deploy to do so.
     pub fn next_deadline_us(&self) -> Option<u64> {
-        critical_section::with(|cs| {
+        crate::cs::with(|cs| {
             self.inner
                 .borrow(cs)
                 .borrow()

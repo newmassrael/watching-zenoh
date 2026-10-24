@@ -70,9 +70,12 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "keyexpr-dollar-star",
     "keyexpr-includes",
 ] }
+# `host-lock`: this engine runs on a host, so the runtime's critical sections are a lock of the
+# process and no `critical-section` implementation is linked (wz-runtime-coop's src/cs.rs).
 wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = [
     "alloc",
     "transport-batching",
+    "host-lock",
 ] }
 # The dialler's endpoint reader and the application layer's dispatch.
 wz-session-mcu = { path = "../wz-session-mcu", default-features = false, features = [
@@ -89,9 +92,6 @@ wz-runtime-posix = { path = "../wz-runtime-posix" }
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "session-unicast-accept",
 ] }
-# The cooperative runtime's `critical_section::Mutex` needs an implementation, which the image
-# picks, not a library: the C ABI's library on a host picks std's, and so does the test binary.
-critical-section = { version = "1", features = ["std"] }
 
 [lints]
 workspace = true

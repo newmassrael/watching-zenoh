@@ -139,7 +139,7 @@ impl TaskCell {
     }
 
     fn with_meta<R>(&self, f: impl FnOnce(&mut Meta) -> R) -> R {
-        critical_section::with(|cs| f(&mut self.meta.borrow(cs).borrow_mut()))
+        crate::cs::with(|cs| f(&mut self.meta.borrow(cs).borrow_mut()))
     }
 }
 
@@ -277,11 +277,11 @@ unsafe fn drop_erased<T>(ptr: *mut u8) {
 impl ExecutorState {
     /// Refusals made so far.
     pub fn refusals(&self) -> Refusals {
-        critical_section::with(|cs| self.refused.borrow(cs).get())
+        crate::cs::with(|cs| self.refused.borrow(cs).get())
     }
 
     fn refuse(&self, why: SpawnRefusal) {
-        critical_section::with(|cs| {
+        crate::cs::with(|cs| {
             let counts = self.refused.borrow(cs);
             let mut now = counts.get();
             match why {

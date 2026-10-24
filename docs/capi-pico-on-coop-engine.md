@@ -175,8 +175,17 @@ it behaves as pico behaves in both of pico's threading arms.
   full build's listener, publishing and hearing back) passes on the tokio client, the
   cooperative single-threaded client and the cooperative multi-threaded one; it now calls
   `zp_read` in the single-threaded arm, as pico's contract has the program do.
-- Next: the cooperative runtime's critical sections on a host (below), then the capabilities
-  in section 6, one step each.
+- 2026-10-24: the cooperative runtime's critical sections on a host. Every borrow of the
+  runtime's cells goes through one door, `wz_runtime_coop::cs::with`: by default the
+  `critical-section` implementation an image links (an MCU's interrupt mask), and with the
+  runtime's `host-lock` a lock of the process, reentrant on its thread, which the engine selects.
+  The cooperative pico client then links no `critical-section` implementation and exports its C
+  ABI alone, 441 symbols as pico-client (443 before: `_critical_section_1_0_acquire` and
+  `_release`, which rustc exported from the cdylib and neither a second version script nor
+  `--exclude-libs` could hide). The section holds nothing and enters and leaves out of line: one
+  that held the lock's guard put the guard's release at every call site, 16 KB of text; this
+  one costs 1.9 KB (867,811 bytes).
+- Next: the capabilities in section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
   engine's session, and the modules of capabilities the cooperative engine does not have yet
@@ -188,13 +197,6 @@ it behaves as pico behaves in both of pico's threading arms.
 
 ## 6. Open
 
-- The cooperative runtime's critical sections on a host. Its executor, timers and join handles
-  lock with `critical-section`, an MCU's interrupt mask, and a host build links the crate's std
-  implementation, whose two `#[no_mangle]` symbols (`_critical_section_1_0_acquire`,
-  `_release`) rustc exports from the C library beside the C ABI (443 exports against 441), where
-  another library's implementation can interpose them. Neither a second version script nor
-  `--exclude-libs` hides them: rustc's own version script lists them. The fix is in the runtime:
-  a hosted build takes a process lock of its own and no `critical-section` symbol.
 - Redialling a lost link (zenoh-pico's `Z_FEATURE_AUTO_RECONNECT`): the cooperative session
   reads as closed and the program opens a new one.
 - The listening role. pico's `z_open(listen)` holds several peers in one
