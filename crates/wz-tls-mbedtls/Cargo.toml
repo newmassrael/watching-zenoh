@@ -57,12 +57,16 @@ rcgen = "0.13"
 # `wz-runtime-coop`'s session tier needs a form of its task pool, and the two forms are mutually
 # exclusive selectors; the default is the heap form, as `wz-runtime-posix`'s is, so a
 # workspace-wide build finds this crate buildable. This crate has no heap code of its own.
-default = ["vendored", "alloc"]
+default = ["alloc"]
 alloc = ["wz-runtime-coop/alloc"]
 # The slot profile, for a program built with the defaults off.
 session-slot = ["wz-runtime-coop/session-slot"]
-# Build the pinned Mbed TLS and the channel's C side here. Off for an image whose platform
-# carries Mbed TLS and compiles `csrc/wz_tls.c` itself.
+# Build the pinned Mbed TLS and the channel's C side here, from the submodules `vendor/mbedtls`
+# and `vendor/tf-psa-crypto`. A choice of the final program, not a default, as `vendored` is
+# across the ecosystem: the host image and this crate's own tests (whose test leg names it) turn
+# it on, an image whose platform carries Mbed TLS (Zephyr) compiles `csrc/wz_tls.c` itself, and a
+# workspace-wide build that only checks the Rust needs neither the C toolchain nor the
+# submodules.
 vendored = []
 # The session lifecycle verbs on the cooperative runtime. Offered here, by the channel, because
 # they compile only beside one (decision D2): this crate always states `secure-channel`, so every

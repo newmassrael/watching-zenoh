@@ -30,5 +30,6 @@ mod ffi;
 pub mod channel;
 pub mod stream;
 
-#[cfg(test)]
+// The tests run the channel, so they link the library `vendored` builds.
+#[cfg(all(test, feature = "vendored"))]
 mod tests;

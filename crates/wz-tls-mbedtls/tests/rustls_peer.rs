@@ -12,6 +12,9 @@
 //! a device by certificate. The dial must complete, each end must name the other's key, and
 //! bytes must cross both ways through the stream the link would run over; a router that pins
 //! another certificate must refuse the device.
+//!
+//! The channel runs here, so this links the library `vendored` builds.
+#![cfg(feature = "vendored")]
 
 use std::io::{Read, Write};
 use std::net::TcpListener;

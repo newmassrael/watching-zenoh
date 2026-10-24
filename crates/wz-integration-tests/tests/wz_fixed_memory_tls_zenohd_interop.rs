@@ -214,7 +214,7 @@ fn report(outcome: &Outcome) -> String {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (host-slot-node --features tls + zenohd); runs via --ignored"]
+#[ignore = "binary-dep e2e (the tls build of deploy/host-slot-node, which Layer Z makes, + zenohd); runs via --ignored"]
 fn zenohd_and_a_fixed_memory_image_each_verify_the_other_over_mutual_tls() {
     let (seen, outcome) = run(
         Pin::TheImage,
@@ -237,7 +237,7 @@ fn zenohd_and_a_fixed_memory_image_each_verify_the_other_over_mutual_tls() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (host-slot-node --features tls + zenohd); runs via --ignored"]
+#[ignore = "binary-dep e2e (the tls build of deploy/host-slot-node, which Layer Z makes, + zenohd); runs via --ignored"]
 fn zenohd_claiming_a_zid_its_key_does_not_name_is_not_verified() {
     let (seen, outcome) = run(
         Pin::TheImage,
@@ -259,7 +259,7 @@ fn zenohd_claiming_a_zid_its_key_does_not_name_is_not_verified() {
 }
 
 #[test]
-#[ignore = "binary-dep e2e (host-slot-node --features tls + zenohd); runs via --ignored"]
+#[ignore = "binary-dep e2e (the tls build of deploy/host-slot-node, which Layer Z makes, + zenohd); runs via --ignored"]
 fn zenohd_pinning_another_device_admits_no_session() {
     let (seen, outcome) = run(
         Pin::Stranger,
