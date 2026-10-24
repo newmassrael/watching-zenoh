@@ -960,6 +960,10 @@ impl KeyexprSpaces {
     /// have held a declaration, and the ids that declaration would have bound
     /// stay unresolved — reported by whoever counts unresolved references,
     /// never guessed at here.
+    ///
+    /// The step [`absorb_every_declaration`] takes per message is
+    /// [`Self::absorb_in_order`], which a reader that keeps the table between
+    /// calls takes too.
     pub fn absorb_frame(&mut self, frame: &PassiveFrame) {
         let batch = match &frame.carried {
             Carried::Batch(batch) => batch,
@@ -1101,6 +1105,22 @@ impl KeyexprSpaces {
     pub fn at_packet(&mut self, packet: usize) {
         self.at = packet;
     }
+
+    /// Absorb one message of a capture-ordered walk: the message of list `list`
+    /// at packet `packet`, under the owners `grouping` gives that list. ONE
+    /// spelling of the step, for [`absorb_every_declaration`] and for a reader
+    /// that keeps the table and absorbs only what arrived since.
+    pub fn absorb_in_order(
+        &mut self,
+        grouping: &crate::node::SessionGrouping,
+        list: usize,
+        packet: usize,
+        frame: &PassiveFrame,
+    ) {
+        self.enter_flow(grouping.owners(list));
+        self.at_packet(packet);
+        self.absorb_frame(frame);
+    }
 }
 
 /// R2515 (open-debt item 713) — absorb every declaration of the capture, in
@@ -1144,9 +1164,7 @@ pub fn absorb_every_declaration(
     spaces: &mut KeyexprSpaces,
 ) {
     for (_flow, list, packet, frame) in d.message_frames_in_capture_order() {
-        spaces.enter_flow(grouping.owners(list));
-        spaces.at_packet(packet);
-        spaces.absorb_frame(&frame);
+        spaces.absorb_in_order(grouping, list, packet, &frame);
     }
 }
 

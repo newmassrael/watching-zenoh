@@ -654,6 +654,27 @@ pub fn fields_json_since_remembering_progress(
                     )
                 }
             };
+            // Open-debt item 924, D9 — from the window's first row when no row
+            // before it has to be visited, which is the producer's own rule
+            // (`RowTags::first_unpassed`; a continuing walk has no row to write
+            // again and no cap): the rows between are passed and ordered by
+            // nobody, and the order of the window's own rows is their keys'.
+            let window_start = match stream_lists.get(i).copied() {
+                Some(list) if !judges_e2e => first_unpassed_position(
+                    |produced| coordinates.row_seq(list, produced),
+                    first_held,
+                    start,
+                    flow.frames.len(),
+                    since.after_seq,
+                ),
+                _ => start,
+            };
+            let (start, packet, after) = if window_start > start {
+                let packet = inherited_order_packet(flow, start, window_start).unwrap_or(packet);
+                (window_start, packet, None)
+            } else {
+                (start, packet, after)
+            };
             // The order is made for the messages THIS document covers and no more, so
             // the cost of a window is the size of the window and not of the list
             // behind it. The walker finds the same end by the same rule.
@@ -702,7 +723,7 @@ pub fn fields_json_since_remembering_progress(
         memory.pairing = Default::default();
     }
     #[cfg(feature = "network-codecs")]
-    let mut absorbed_anew = crate::agg::KeyexprSpaces::default();
+    let mut absorbed_anew = CaptureTables::default();
     #[cfg(feature = "network-codecs")]
     let (pairing_table, absorbed) = {
         let FieldsMemory {
@@ -712,16 +733,17 @@ pub fn fields_json_since_remembering_progress(
             walk,
             ..
         } = &mut *memory;
-        let into: &mut crate::agg::KeyexprSpaces = if keep_table {
-            &mut walk.spaces
+        let into: &mut CaptureTables = if keep_table {
+            &mut walk.tables
         } else {
             &mut absorbed_anew
         };
         let mut absorb =
-            |_: &crate::link::FlowKey, list: usize, packet: usize, frame: &PassiveFrame| {
-                into.enter_flow(grouping.owners(list));
-                into.at_packet(packet);
-                into.absorb_frame(frame);
+            |_: &crate::link::FlowKey,
+             list: usize,
+             packet: usize,
+             row: &wz_session_core::passive_messages::Row<'_>| {
+                into.absorb(&grouping, list, packet, row)
             };
         let wanted = match saved.as_ref() {
             Some(saved) if keep_table => crate::ordered_fold::Wanted::Since(&saved.marks),
@@ -1275,12 +1297,6 @@ pub(crate) struct ListWalk {
     /// produced-index, so a trim does not move it.
     order_packet: usize,
     order_last: Option<(usize, u64)>,
-    /// The chain fold, which numbers a completing row by the identity its begun
-    /// row opened.
-    chains: ChainIds,
-    /// Where each request of the list was produced, for the rows of the finals
-    /// that close them.
-    requests: RequestIndex,
     /// Some row of the list had no sequence number. Such a row is written by
     /// every since-document (dropping one is not recoverable), so a walk that
     /// skipped the old rows would not write what a whole one does.
@@ -1440,15 +1456,67 @@ fn oldest_held_packet(d: &crate::Dissection) -> usize {
 /// What the field walker keeps of the capture between calls.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct WalkState {
-    /// The keyexpr table with every declaration of the capture absorbed.
-    spaces: crate::agg::KeyexprSpaces,
-    /// `spaces` holds every declaration of the capture the last walk saw: what
-    /// lets a walk that begins again keep it (open-debt item 924, D9). Only a
-    /// walk that filled it sets it, and a state made afresh has it clear.
+    /// The tables read by position, with every message of the capture absorbed.
+    tables: CaptureTables,
+    /// `tables` hold every message of the capture the last walk saw: what lets a
+    /// walk that begins again keep them (open-debt item 924, D9). Only a walk
+    /// that filled them sets it, and a state made afresh has it clear.
     table_whole: bool,
     stream: Vec<ListWalk>,
     datagram: Vec<ListWalk>,
     reread: Option<RereadResume>,
+}
+
+/// What a row's document reads that depends on the whole capture and not on a
+/// window, by position (open-debt item 924, `docs/dissect-row-index.md`, D9):
+/// filled once from every message, extended as messages arrive, and read at any
+/// row without a walk of the rows before it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CaptureTables {
+    /// The keyexpr bindings, each stamped with the packet it went past at, so a
+    /// row resolves at its own packet.
+    spaces: crate::agg::KeyexprSpaces,
+    /// Per list, by its place in `Dissection::message_lists_with_origin`, where
+    /// each request of the list was produced, for the rows of the finals that
+    /// close them.
+    requests: alloc::collections::BTreeMap<usize, RequestIndex>,
+}
+
+impl CaptureTables {
+    /// Take one message of the capture, in capture order: the message of list
+    /// `list` at packet `packet`.
+    fn absorb(
+        &mut self,
+        grouping: &crate::node::SessionGrouping,
+        list: usize,
+        packet: usize,
+        row: &wz_session_core::passive_messages::Row<'_>,
+    ) {
+        self.spaces.absorb_in_order(grouping, list, packet, row);
+        self.requests
+            .entry(list)
+            .or_default()
+            .note(row, row.produced());
+    }
+
+    /// Take every message of the capture, in capture order.
+    fn absorb_every(&mut self, d: &crate::Dissection, grouping: &crate::node::SessionGrouping) {
+        for (_flow, list, packet, row) in d.message_frames_in_capture_order() {
+            self.absorb(grouping, list, packet, &row);
+        }
+    }
+}
+
+/// The requests of the list at `list` among `requests`, having forgotten the ones
+/// older than `first_held`, the produced-index of the oldest message it holds.
+fn list_requests(
+    requests: &mut alloc::collections::BTreeMap<usize, RequestIndex>,
+    list: Option<usize>,
+    first_held: u64,
+) -> Option<&RequestIndex> {
+    let requests = requests.get_mut(&list?)?;
+    requests.forget_before(first_held);
+    Some(requests)
 }
 
 /// How a call uses a [`WalkState`].
@@ -1468,10 +1536,10 @@ pub(crate) struct WalkRun<'a> {
     /// absorbed into the kept table; `None` when there are none, or when another
     /// walk of the same call absorbed them already.
     new_frames: Option<crate::CaptureOrder<'a>>,
-    /// For a walk that begins: the table with every declaration absorbed, when
-    /// another walk of the same call filled it, so this one does not walk the
-    /// capture again to fill it.
-    absorbed: Option<crate::agg::KeyexprSpaces>,
+    /// For a walk that begins: the tables with every message absorbed, when
+    /// another walk of the same call filled them, so this one does not walk the
+    /// capture again to fill them.
+    absorbed: Option<CaptureTables>,
 }
 
 /// The order in which a stream flow's new messages are written, the running
@@ -1568,20 +1636,20 @@ fn fields_json_selected(
     };
     if !resume {
         // Open-debt item 924, D9 — what does not depend on where a walk stands
-        // outlives its beginning again: the capture's keyexpr table when the
-        // caller says it is still the capture's, and the container's own walk
-        // when the bytes are still the container it was walking. Only the lists'
+        // outlives its beginning again: the capture's tables when the caller
+        // says they are still the capture's, and the container's own walk when
+        // the bytes are still the container it was walking. Only the lists'
         // walks begin again.
-        let table = keep_table.then(|| core::mem::take(&mut state.spaces));
+        let tables = keep_table.then(|| core::mem::take(&mut state.tables));
         let reread = state.reread.take().filter(|kept| kept.reads(capture));
         *state = WalkState::default();
-        if let Some(table) = table {
-            state.spaces = table;
+        if let Some(tables) = tables {
+            state.tables = tables;
         }
         state.reread = reread;
     }
     let WalkState {
-        spaces,
+        tables,
         table_whole,
         stream: stream_walks,
         datagram: datagram_walks,
@@ -1603,18 +1671,20 @@ fn fields_json_selected(
     // begins again over the same capture keeps the table as well (D9): the table
     // is the capture's and not the window's.
     if keep_table {
-        for (_flow, list, packet, frame) in new_frames.iter().flatten() {
-            spaces.enter_flow(grouping.owners(list));
-            spaces.at_packet(packet);
-            spaces.absorb_frame(&frame);
+        for (_flow, list, packet, row) in new_frames.iter().flatten() {
+            tables.absorb(grouping, list, packet, &row);
         }
     } else {
         match absorbed {
-            Some(table) => *spaces = table,
-            None => absorb_every_declaration(d, grouping, spaces),
+            Some(absorbed) => *tables = absorbed,
+            None => tables.absorb_every(d, grouping),
         }
     }
     *table_whole = true;
+    let CaptureTables {
+        spaces,
+        requests: list_requests_of,
+    } = tables;
     // R2100 (open-debt item 509) — the document's own revision, first key. See
     // `doc_revision`; the census document opens the same way.
     let mut out = String::from("{");
@@ -1702,6 +1772,11 @@ fn fields_json_selected(
                 sink,
                 #[cfg(feature = "network-codecs")]
                 closings: RowClosings::of(closings, lists.stream.get(i).copied()),
+                requests: list_requests(
+                    list_requests_of,
+                    lists.stream.get(i).copied(),
+                    flow.frames.produced() - flow.frames.len() as u64,
+                ),
             },
             run,
             &mut out,
@@ -1750,6 +1825,11 @@ fn fields_json_selected(
                 sink,
                 #[cfg(feature = "network-codecs")]
                 closings: RowClosings::of(closings, lists.datagram.get(i).copied()),
+                requests: list_requests(
+                    list_requests_of,
+                    lists.datagram.get(i).copied(),
+                    flow.frames.produced() - flow.frames.len() as u64,
+                ),
             },
             run,
             &mut out,
@@ -1905,13 +1985,6 @@ impl RenderedLists {
     }
 }
 
-/// R2515 — the pass itself moved to [`crate::agg::absorb_every_declaration`],
-/// which is where the table it fills lives. It was private here for one round,
-/// and `wz-analyze`'s two listings need the same pass for the same reason: a
-/// second copy of it is the second spelling of one rule, which is the shape this
-/// crate has paid for more than once.
-use crate::agg::absorb_every_declaration;
-
 /// Begin one list, on the spaces it writes into.
 ///
 /// `Some(list)` is the ordinary path: the capture-wide instance, told whose
@@ -1942,6 +2015,54 @@ fn enter<'a>(
 /// time, so a windowed walk decodes each row once and a walk over a whole list
 /// holds no more of it decoded at once than a window does.
 const ROWS_HANDED_ON: usize = 8192;
+
+/// Open-debt item 924, D9 — the position, from `from` up to `len`, of the first
+/// row of a list whose sequence number is past `after_seq` or that has none, with
+/// `seq_of` a row's number by its produced-index and `first_produced` the
+/// produced-index of the list's oldest row. A list numbers its rows in order and
+/// leaves only its newest unnumbered, so the rows before the answer are exactly
+/// the ones the cursor passes, and it is found by halving.
+fn first_unpassed_position(
+    seq_of: impl Fn(u64) -> Option<u64>,
+    first_produced: u64,
+    from: usize,
+    len: usize,
+    after_seq: u64,
+) -> usize {
+    let (mut low, mut high) = (from, len.max(from));
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if seq_of(first_produced + mid as u64).is_some_and(|seq| seq <= after_seq) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    low
+}
+
+/// Open-debt item 924, D9 — the packet pass one carries into the row at `to`:
+/// the one the nearest row before it, from `from` on, names by its stream
+/// offset, which is what a walk over those rows would have left; `None` when
+/// none of them names one. Read off the rows' heads, so nothing is decoded, and
+/// only as far back as the first row that names a packet.
+fn inherited_packet(flow: &crate::FlowDissection, from: usize, to: usize) -> Option<usize> {
+    flow.frames()
+        .heads_from(from)
+        .take(to.saturating_sub(from))
+        .rev()
+        .find_map(|head| flow.packet_for(head.direction, head.stream_offset))
+}
+
+/// [`inherited_packet`] for the capture-order key, whose packet is named by a
+/// message's first byte (`FlowDissection::capture_order_from`).
+fn inherited_order_packet(flow: &crate::FlowDissection, from: usize, to: usize) -> Option<usize> {
+    flow.frames()
+        .heads_from(from)
+        .take(to.saturating_sub(from))
+        .rev()
+        .find_map(|head| flow.packet_for(head.direction, crate::FlowDissection::first_byte(&head)))
+}
 
 // Eight: the seven a flow producer always took and the walk it resumes.
 // Folding `run` into `RowTags` would put a `&mut` in a `Copy` struct.
@@ -1977,29 +2098,29 @@ fn push_stream_flow(
     // have taken messages this walk already saw, and the ones it saw that are
     // still held are the ones before `start`.
     let resumed = run.as_ref().is_some_and(|r| r.resume);
-    let start = match run.as_ref() {
+    let resumed_at = match run.as_ref() {
         Some(r) if r.resume => r.walk.resume_position(first_produced),
         _ => 0,
     };
-    // A restart numbers chains from what the discarded messages left, so a chain
-    // keeps its identity whether the walk went on or began again.
-    let mut chains = match run.as_mut() {
-        Some(r) if r.resume => core::mem::take(&mut r.walk.chains),
-        _ => ChainIds::after_discards(&flow.frames),
-    };
-    if resumed {
+    // Open-debt item 924, D9 — and from there, past every row the cursor passes,
+    // when no row before the window has to be visited (see
+    // `RowTags::first_unpassed`). The chain identity and the request a final
+    // closes are read by position, so nothing is folded over the rows skipped.
+    let start = tags
+        .first_unpassed(
+            first_produced,
+            resumed_at,
+            flow.frames.len(),
+            cap,
+            declarations,
+        )
+        .unwrap_or(resumed_at);
+    let jumped = start > resumed_at;
+    if start > 0 {
         if let Some(d) = declarations {
             d.note_unwalked_n(start);
         }
     }
-    let mut requests = match run.as_mut() {
-        Some(r) if r.resume => core::mem::take(&mut r.walk.requests),
-        _ => RequestIndex::default(),
-    };
-    // A request whose message a trim took can have no row to name: what the index
-    // keeps of it is only a map entry, and it would grow with every request the
-    // handle ever saw.
-    requests.forget_before(first_produced);
     let mut unnumbered = false;
     // R311y856 — folded in FRAME ORDER and before the cap bites, which is the
     // rule R311y701 settled for the same table: a keyexpr id resolves through
@@ -2015,9 +2136,16 @@ fn push_stream_flow(
     // one that went out LATER than this frame is still not applied to it. That
     // is the half a renderer could not have by walking, because its rows have to
     // come out grouped by flow.
-    let mut last_packet = match run.as_ref() {
+    let carried_packet = match run.as_ref() {
         Some(r) if r.resume => r.walk.last_packet,
         _ => 0usize,
+    };
+    // A walk that skipped rows inherits the packet the nearest of them that names
+    // one names, as the walk over them would have carried it.
+    let mut last_packet = if jumped {
+        inherited_packet(flow, resumed_at, start).unwrap_or(carried_packet)
+    } else {
+        carried_packet
     };
     // PASS ONE, in LIST order, which is the order the session decoded the
     // messages in and so the only order its folds are valid in: the chain fold
@@ -2068,15 +2196,13 @@ fn push_stream_flow(
         last_packet = flow
             .packet_for(frame.direction, frame.stream_offset)
             .unwrap_or(last_packet);
-        // Where a request stood, for the final that closes it to name; kept for
-        // every message this pass visits, whatever the cursor does to its row.
-        requests.note(frame, first_produced + position as u64);
-        let seq = tags.frame_seq(first_produced + position as u64);
+        let produced = first_produced + position as u64;
+        let seq = tags.frame_seq(produced);
         unnumbered |= seq.is_none();
         folded.push(FoldedRow {
             packet: last_packet,
-            // Folded ahead of the cap, for the reason `ChainIds` gives.
-            session: chains.observe(frame),
+            // The list's own fact, decided when the row was appended.
+            session: ChainIds::of(&flow.frames, produced, frame),
             seq,
         });
     }
@@ -2093,15 +2219,34 @@ fn push_stream_flow(
     // Only the messages inside the window are ordered, from where the walk began to
     // `end`, so the order, the running packet and the largest key it leaves are those
     // of the window's last message: where the next window continues from.
-    let (order, order_packet, order_last) = match run.as_mut().and_then(|r| r.plan.take()) {
+    //
+    // A walk that skipped rows orders the window's own: the order of two rows is
+    // their keys', whatever stands between them, and a skipped row is not
+    // written. The running packet is the one the skipped rows would have left.
+    //
+    // A continuing walk's caller made the order from the same first row, by the
+    // same rule, to know the walk may continue at all.
+    let plan = run.as_mut().and_then(|r| r.plan.take());
+    let (order, order_packet, order_last) = match plan {
         Some(plan) => plan,
+        None if jumped => {
+            let carried = match run.as_ref() {
+                Some(r) if r.resume => r.walk.order_packet,
+                _ => 0,
+            };
+            let packet = inherited_order_packet(flow, resumed_at, start).unwrap_or(carried);
+            flow.capture_order_from(start, packet, None, end)
+                .expect("an order with nothing before it to sort after")
+        }
         None => flow
             .capture_order_from(0, 0, None, end)
             .expect("an order from the first message has nothing before it"),
     };
     debug_assert!(
-        order.iter().all(|&position| position < end),
-        "an order made for one window holds a message past it"
+        order
+            .iter()
+            .all(|&position| (start..end).contains(&position)),
+        "an order made for one window holds a message outside the rows walked"
     );
     // Messages past the window were not examined: say so in the tally a payload
     // reader reads, as a cap does, and leave them to the next window.
@@ -2218,7 +2363,7 @@ fn push_stream_flow(
                     declarations,
                     carried: Some(&frame.carried),
                     e2e,
-                    closes: RowCloses::of(&tags, &requests, frame),
+                    closes: RowCloses::of(&tags, tags.requests, frame),
                 },
                 w,
             ),
@@ -2254,8 +2399,6 @@ fn push_stream_flow(
         r.walk.last_packet = last_packet;
         r.walk.order_packet = order_packet;
         r.walk.order_last = order_last;
-        r.walk.chains = chains;
-        r.walk.requests = requests;
         r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
     }
     let _ = write!(out, "],\"shown\":{shown},\"omitted\":{omitted}}}");
@@ -2292,23 +2435,26 @@ fn push_datagram_flow(
     // the front by the same ceiling and counts what it ever held.
     let scouting_first = flow.scouting.produced() - flow.scouting.len() as u64;
     let resumed = run.as_ref().is_some_and(|r| r.resume);
-    let (start, scouting_start) = match run.as_ref() {
+    let (resumed_at, scouting_start) = match run.as_ref() {
         Some(r) if r.resume => (
             r.walk.resume_position(first_produced),
             r.walk.scouting_resume_position(scouting_first),
         ),
         _ => (0, 0),
     };
-    let mut chains = match run.as_mut() {
-        Some(r) if r.resume => core::mem::take(&mut r.walk.chains),
-        _ => ChainIds::after_discards(&flow.frames),
-    };
-    let mut requests = match run.as_mut() {
-        Some(r) if r.resume => core::mem::take(&mut r.walk.requests),
-        _ => RequestIndex::default(),
-    };
-    requests.forget_before(first_produced);
-    if resumed {
+    // Open-debt item 924, D9 — past every row the cursor passes, when none of
+    // them has to be visited; see the stream producer. A datagram row inherits no
+    // packet (its anchor is its packet), so nothing is carried over the skip.
+    let start = tags
+        .first_unpassed(
+            first_produced,
+            resumed_at,
+            flow.frames.len(),
+            cap,
+            declarations,
+        )
+        .unwrap_or(resumed_at);
+    if start > 0 {
         if let Some(d) = declarations {
             d.note_unwalked_n(start);
         }
@@ -2343,18 +2489,13 @@ fn push_datagram_flow(
         // is.
         let index = frame.stream_offset;
         spaces.at_packet(index);
-        // Ahead of every reason this loop has for skipping a row, so
-        // a datagram the second read disagrees about still advances the chain
-        // fold exactly as the router was advanced by it.
-        let session_row = chains.observe(frame);
-        // Where a request stood, ahead of every skip, so a final that closes it
-        // can name its sequence number whether or not the request's own row is
-        // written by this call.
-        requests.note(frame, first_produced + position as u64);
-        // After the folds, and BEFORE the second read: a row the
-        // cursor passes over is not re-read from the container, which is most of
-        // what a datagram row costs.
-        let seq = tags.frame_seq(first_produced + position as u64);
+        // The chain identity is the list's own fact, decided when the row was
+        // appended, so a datagram the second read disagrees about keeps it.
+        let produced = first_produced + position as u64;
+        let session_row = ChainIds::of(&flow.frames, produced, frame);
+        // BEFORE the second read: a row the cursor passes over is not re-read
+        // from the container, which is most of what a datagram row costs.
+        let seq = tags.frame_seq(produced);
         unnumbered |= seq.is_none();
         let e2e = tags.e2e_source(frame.direction, frame.observed_at_ns);
         // See the stream producer: a passed row is skipped unless its text has
@@ -2446,7 +2587,7 @@ fn push_datagram_flow(
                 declarations,
                 carried: Some(&frame.carried),
                 e2e,
-                closes: RowCloses::of(&tags, &requests, frame),
+                closes: RowCloses::of(&tags, tags.requests, frame),
             },
             w,
         );
@@ -2590,8 +2731,6 @@ fn push_datagram_flow(
         // each list it did not visit.
         r.walk.visited = frames_end.saturating_sub(start);
         r.walk.produced = first_produced + frames_end as u64;
-        r.walk.chains = chains;
-        r.walk.requests = requests;
         r.walk.scouting_produced = scouting_first + scouting_end as u64;
         r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
     }
@@ -3831,46 +3970,39 @@ impl ChainReason {
 /// reason the keyexpr anchor is: an identity assigned only to printed rows
 /// would renumber when the cap moved.
 ///
-/// # What a front trim does to it
+/// # Where it is folded, and what a front trim does to it
 ///
-/// Nothing. The fold itself is `wz_session_core::passive_messages::ChainFold`,
-/// and the list keeps the fold of the messages it has DISCARDED
-/// ([`wz_session_core::passive_messages::MessageList::chain_prefix`]), so a walk
-/// that begins at the first message the list holds starts from that state
-/// ([`Self::after_discards`]) and numbers every chain as a walk that never missed
-/// a message would. An identity already handed out therefore names the same chain
-/// in every later document, which is what a consumer that keeps rows across calls
-/// needs, and `/chain/chain_id` is no longer a cell a trim can rewrite.
-#[cfg_attr(not(feature = "reassembly"), allow(dead_code))]
-#[derive(Clone, Debug, Default)]
-struct ChainIds {
-    #[cfg(feature = "reassembly")]
-    fold: wz_session_core::passive_messages::ChainFold,
-}
+/// The fold is `wz_session_core::passive_messages::ChainFold`, and the list runs
+/// it as each message is appended, keeping what it made of every row it moved
+/// (`MessageList::chain_of`; open-debt item 924, D9). A row's identity is a fact
+/// of the row from then on, read here wherever a walk begins, so a document of
+/// any window needs no fold of the rows before it. A trim takes a row's fact
+/// with the row and leaves the fold, so an identity already handed out names the
+/// same chain in every later document, which is what a consumer that keeps rows
+/// across calls needs, and `/chain/chain_id` is not a cell a trim can rewrite.
+struct ChainIds;
 
 impl ChainIds {
-    /// The fold at the first message `list` holds: whatever the messages it has
-    /// discarded left. For a list that never discarded, the empty fold.
-    #[cfg_attr(not(feature = "reassembly"), allow(unused_variables))]
-    fn after_discards(list: &wz_session_core::passive_messages::MessageList) -> Self {
-        Self {
-            #[cfg(feature = "reassembly")]
-            fold: list.chain_prefix().clone(),
-        }
-    }
-
-    /// The row's two session verdicts, advancing the chain fold by one frame.
-    fn observe(&mut self, frame: &PassiveFrame) -> SessionRow {
+    /// The row's two session verdicts: the row at produced-index `produced` of
+    /// `list`, which is `frame`.
+    fn of(
+        list: &wz_session_core::passive_messages::MessageList,
+        produced: u64,
+        frame: &PassiveFrame,
+    ) -> SessionRow {
         SessionRow {
             sn: sn_row(frame),
-            chain: self.chain_row(frame),
+            chain: Self::chain_row(list, produced),
         }
     }
 
     #[cfg(feature = "reassembly")]
-    fn chain_row(&mut self, frame: &PassiveFrame) -> Option<ChainRow> {
+    fn chain_row(
+        list: &wz_session_core::passive_messages::MessageList,
+        produced: u64,
+    ) -> Option<ChainRow> {
         use wz_session_core::reassembly_dispatch::IngestOutcome;
-        let (outcome, chain_id) = self.fold.observe(frame)?;
+        let (outcome, chain_id) = list.chain_of(produced)?;
         Some(match outcome {
             IngestOutcome::Begun => ChainRow {
                 outcome: ChainOutcome::Begun,
@@ -3903,7 +4035,10 @@ impl ChainIds {
     /// A build without `reassembly` routes no fragment, so no row touched a
     /// chain — the true answer, not a stub.
     #[cfg(not(feature = "reassembly"))]
-    fn chain_row(&mut self, _frame: &PassiveFrame) -> Option<ChainRow> {
+    fn chain_row(
+        _list: &wz_session_core::passive_messages::MessageList,
+        _produced: u64,
+    ) -> Option<ChainRow> {
         None
     }
 }
@@ -4397,6 +4532,10 @@ struct RowTags<'a> {
     /// than guessing.
     #[cfg(feature = "network-codecs")]
     closings: Option<RowClosings<'a>>,
+    /// Where each request of this flow's list was produced, from the capture's
+    /// tables ([`CaptureTables`]), for the finals that close them; `None` for a
+    /// list with no request.
+    requests: Option<&'a RequestIndex>,
 }
 
 /// The exchange plane's pairing, and the list it is read for.
@@ -4529,7 +4668,8 @@ impl RequestIndex {
 struct RowCloses<'a> {
     table: &'a crate::exchange::ExchangeTable,
     row: crate::payload::RowKey,
-    requests: &'a RequestIndex,
+    /// The requests of the row's list, or `None` for a list that has none.
+    requests: Option<&'a RequestIndex>,
     numbering: Option<RowNumbering<'a>>,
 }
 
@@ -4537,7 +4677,11 @@ struct RowCloses<'a> {
 impl<'a> RowCloses<'a> {
     /// The pairing for the row `frame` is, or `None` where the document has none
     /// for this list.
-    fn of(tags: &RowTags<'a>, requests: &'a RequestIndex, frame: &PassiveFrame) -> Option<Self> {
+    fn of(
+        tags: &RowTags<'a>,
+        requests: Option<&'a RequestIndex>,
+        frame: &PassiveFrame,
+    ) -> Option<Self> {
         let RowClosings { table, list } = tags.closings?;
         Some(Self {
             table,
@@ -4559,7 +4703,7 @@ impl<'a> RowCloses<'a> {
         };
         let seq = self
             .requests
-            .produced_of(&closing.request)
+            .and_then(|requests| requests.produced_of(&closing.request))
             .and_then(|produced| {
                 let n = self.numbering?;
                 n.coordinates.row_seq(n.list?, produced)
@@ -4587,7 +4731,7 @@ struct RowCloses<'a>(core::marker::PhantomData<&'a ()>);
 
 #[cfg(not(feature = "network-codecs"))]
 impl<'a> RowCloses<'a> {
-    fn of(_: &RowTags<'a>, _: &'a RequestIndex, _: &PassiveFrame) -> Option<Self> {
+    fn of(_: &RowTags<'a>, _: Option<&'a RequestIndex>, _: &PassiveFrame) -> Option<Self> {
         None
     }
 
@@ -4736,6 +4880,47 @@ impl RowTags<'_> {
             (Some(sink), Some(seq)) => sink.revised.contains(&seq),
             _ => false,
         }
+    }
+
+    /// Open-debt item 924, D9 — where the walk of a list may begin: the position
+    /// of its first row the cursor does not pass, when nothing before it has to
+    /// be visited, or `None` when something does.
+    ///
+    /// A row the cursor passes is not written, and since every fact a written
+    /// row reads of the rows before it is kept by position (the chain identity on
+    /// the row, a request in the capture's tables, the packet a row inherits read
+    /// back from the rows before it), such rows are not visited either. Three
+    /// things still need them visited, and then the walk takes them as before: an
+    /// end-to-end rule (its counters run over every row before), a row the cursor
+    /// passes that is written again because its text moved, and a cap (it counts
+    /// the rows written before). `from` is where the walk would begin without
+    /// this, and `len` the list's length.
+    ///
+    /// A list numbers its rows in order and leaves only its newest unnumbered,
+    /// so "passed by the cursor" is false from one position on and the position
+    /// is found by halving.
+    fn first_unpassed(
+        &self,
+        first_produced: u64,
+        from: usize,
+        len: usize,
+        cap: Option<usize>,
+        declarations: Option<&Declarations<'_>>,
+    ) -> Option<usize> {
+        let after_seq = self.after_seq?;
+        if cap.is_some()
+            || declarations.is_some_and(|d| d.has_e2e_rules())
+            || self.sink.is_some_and(|sink| !sink.revised.is_empty())
+        {
+            return None;
+        }
+        Some(first_unpassed_position(
+            |produced| self.frame_seq(produced),
+            first_produced,
+            from,
+            len,
+            after_seq,
+        ))
     }
 
     /// Remember a row the document wrote (or wrote again): its digest, or none
@@ -7137,6 +7322,49 @@ mod tests {
             )),
             "and the document says the revision the table declares: {doc}"
         );
+    }
+
+    /// Open-debt item 924, D9 — THE PACKET A WALK THAT SKIPPED ROWS INHERITS is
+    /// the one a walk over them would have carried: at every position of every
+    /// stream list, read back from the rows before it, for the row's own offset
+    /// (pass one) and for its first byte (the capture-order key). Under byte
+    /// ceilings, so that rows whose bytes went name no packet and the answer is
+    /// an inherited one; the count of such rows is the anti-vacuity.
+    #[test]
+    fn a_packet_read_back_from_the_rows_before_is_the_one_a_walk_carries() {
+        let file = crate::fixtures::stream_chain_sequence_capture(20);
+        let mut unnamed = 0usize;
+        for keep in [None, Some(9), Some(40), Some(120)] {
+            let limits = crate::DissectionLimits {
+                stream_bytes_per_direction: keep,
+                ..crate::DissectionLimits::default()
+            };
+            let d = Dissection::from_pcap_declaring_bounded(&file, &[], &[], limits)
+                .expect("the capture reads");
+            for flow in d.flows() {
+                let (mut carried, mut carried_order) = (0usize, 0usize);
+                for (position, head) in flow.frames().heads_from(0).enumerate() {
+                    assert_eq!(
+                        inherited_packet(flow, 0, position).unwrap_or(0),
+                        carried,
+                        "{keep:?}: pass one's packet at {position}"
+                    );
+                    assert_eq!(
+                        inherited_order_packet(flow, 0, position).unwrap_or(0),
+                        carried_order,
+                        "{keep:?}: the order key's packet at {position}"
+                    );
+                    match flow.packet_for(head.direction, head.stream_offset) {
+                        Some(packet) => carried = packet,
+                        None => unnamed += 1,
+                    }
+                    carried_order = flow
+                        .packet_for(head.direction, crate::FlowDissection::first_byte(&head))
+                        .unwrap_or(carried_order);
+                }
+            }
+        }
+        assert!(unnamed > 0, "no row lost the packet it names");
     }
 
     /// EVERY FRAGMENT ROW NAMES WHAT THE ROUTER DID WITH IT, and

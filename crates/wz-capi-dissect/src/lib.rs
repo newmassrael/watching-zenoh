@@ -16396,6 +16396,114 @@ mod tests {
         unsafe { wz_dissect_live_close(whole) };
     }
 
+    /// Open-debt item 924, D9 — A ROW READ ALONE IS THE ROW, AND COSTS ONE ROW.
+    ///
+    /// A viewer that picks a row asks a window of one row wherever the row stands,
+    /// in whatever order the picks come, of a handle whose cursor has already gone
+    /// to the end. Each such window must write the row the whole document writes
+    /// for that number (chain identities and the request a final names included,
+    /// which are what the rows before it decide), and visit no message but the
+    /// row's own: everything a row reads of the rows before it is kept by position.
+    ///
+    /// The reference is the document from cursor 0, which walks and folds every
+    /// row from the first. The picks alternate between the two ends and close in,
+    /// so most of them go backward from the last one, and every row is picked.
+    /// Windows of three rows are picked the same way, and must hold the
+    /// document's rows of their numbers in the document's order: the order of a
+    /// window that skipped rows is made from its own. Under a byte ceiling the
+    /// rows whose bytes went name no packet and inherit one from the rows before,
+    /// which the window reads back from them.
+    #[test]
+    fn a_window_of_one_row_in_any_order_is_the_documents_row_and_visits_one() {
+        use wz_session_core::json5::Json5Value as V;
+        let interleaved = pcap_prefix(&interleaved_packets(), interleaved_packets().len());
+        let byte_ceiling = wz_capture::DissectionLimits {
+            stream_bytes_per_direction: Some(9),
+            ..Default::default()
+        };
+        let frame_ceiling = wz_capture::DissectionLimits {
+            frames_per_flow: Some(4),
+            ..Default::default()
+        };
+        let captures = [
+            ("interleaved", interleaved.clone(), Default::default()),
+            ("interleaved, bytes", interleaved.clone(), byte_ceiling),
+            ("interleaved, frames", interleaved, frame_ceiling),
+            (
+                "exchange",
+                pcap_prefix(&exchange_packets(), exchange_packets().len()),
+                Default::default(),
+            ),
+            (
+                "stream chains",
+                wz_capture::fixtures::stream_chain_sequence_capture(20),
+                Default::default(),
+            ),
+            (
+                "datagram chains",
+                wz_capture::fixtures::chain_sequence_capture(20),
+                Default::default(),
+            ),
+        ];
+        let mut picked = 0usize;
+        for (name, file, limits) in captures {
+            for size in [1u64, 3] {
+                let handle = Box::into_raw(Box::new(live::LiveDissection::new(limits)));
+                unsafe { (*handle).follow(&file).expect("follows") };
+                let whole = live_fields_since(handle, &file, 0);
+                let issued = through_seq_of(&whole);
+                let document: Vec<(u64, V)> = rows_of(&parsed(&whole))
+                    .into_iter()
+                    .map(|row| (seq_of(row), row.clone()))
+                    .collect();
+                assert!(
+                    document.len() > 3,
+                    "{name}: {} rows prove little",
+                    document.len()
+                );
+                let (mut low, mut high) = (0u64, issued);
+                let mut order = Vec::new();
+                while low < high {
+                    order.push(low);
+                    high -= 1;
+                    if high > low {
+                        order.push(high);
+                    }
+                    low += 1;
+                }
+                for after in order {
+                    let before = unsafe { (*handle).fields_work() }.messages_walked;
+                    let doc = parsed(&live_fields_window(handle, &file, after, size));
+                    let walked = unsafe { (*handle).fields_work() }.messages_walked - before;
+                    let got: Vec<(u64, V)> = rows_of(&doc)
+                        .into_iter()
+                        .map(|row| (seq_of(row), row.clone()))
+                        .collect();
+                    let want: Vec<(u64, V)> = document
+                        .iter()
+                        .filter(|(seq, _)| (after + 1..=after + size).contains(seq))
+                        .cloned()
+                        .collect();
+                    assert_eq!(
+                        got, want,
+                        "{name}, size {size}: the window after {after} is not the document's rows"
+                    );
+                    assert!(
+                        walked <= size,
+                        "{name}, size {size}: the window after {after} visited {walked} messages"
+                    );
+                    assert!(
+                        matches!(member(&doc, "revised"), Some(V::Array(moved)) if moved.is_empty()),
+                        "{name}, size {size}: after {after}, a row was written again"
+                    );
+                    picked += 1;
+                }
+                unsafe { wz_dissect_live_close(handle) };
+            }
+        }
+        assert!(picked > 200, "{picked} picks prove little");
+    }
+
     /// THE WINDOWS OF A CAPTURE COST WHAT THEY COVER, AND WRITE WHAT THE WHOLE
     /// DOCUMENT WRITES.
     ///

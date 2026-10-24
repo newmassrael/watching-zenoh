@@ -2714,7 +2714,7 @@ impl FlowDissection {
     /// The stream byte a message's packet is named by, read off its head: its
     /// own first byte ([`Self::message_at`]), or, for a message read out of an
     /// lz4 batch, which has no byte of its own on the wire, its batch's first.
-    fn first_byte(head: &messages::RowHead) -> usize {
+    pub(crate) fn first_byte(head: &messages::RowHead) -> usize {
         if head.decompressed {
             head.stream_offset + head.prefix_width
         } else {

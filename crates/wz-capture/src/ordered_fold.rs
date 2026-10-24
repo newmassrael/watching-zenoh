@@ -295,8 +295,9 @@ pub(crate) enum Wanted<'m> {
 )]
 pub(crate) struct Share<'m, 't> {
     pub(crate) wanted: Wanted<'m>,
-    /// Takes one message: its flow, its list, the packet it resolves to.
-    pub(crate) tap: &'t mut dyn FnMut(&FlowKey, usize, usize, &PassiveFrame),
+    /// Takes one message: its flow, its list, the packet it resolves to, and
+    /// the row, which says its produced-index.
+    pub(crate) tap: &'t mut dyn FnMut(&FlowKey, usize, usize, &crate::messages::Row<'_>),
     /// Whether the walk fed the reader every message it wanted.
     pub(crate) fed: bool,
 }
