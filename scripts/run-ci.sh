@@ -19658,6 +19658,19 @@ layer_z_zenohd_interop() {
     # zenohd is the only foreign tls dialer. The demo is already built with `tls`.
     (cd crates && WZ_ZENOHD_BIN="$zenohd" cargo test -p wz-integration-tests \
         --test wz_tls_acceptor_zenohd_interop -- --ignored --quiet --test-threads=1) || return 1
+    # The fixed-memory profile's secure channel against the reference router: step
+    # 1b's witness (decision D9 of docs/session-lifecycle-intent.md). The kit's
+    # session code as a Linux process with no allocator (`deploy/host-slot-node`
+    # built with `tls`, over `wz-tls-mbedtls`) dials zenohd's mutual-TLS listener,
+    # which pins the certificate the image printed. Three legs, each the control
+    # of another: a router whose zid its key names is verified, one whose zid it
+    # does not name is not, and a router pinning another device admits nothing.
+    (cd deploy/host-slot-node && cargo build --release -p host-slot-node --features tls --quiet) \
+        || return 1
+    _runci_guarded_test Ztls 3 env WZ_ZENOHD_BIN="$zenohd" \
+        WZ_HOST_SLOT_NODE_TLS="$PWD/deploy/host-slot-node/target/release/host-slot-node" \
+        cargo test -p wz-integration-tests --test wz_fixed_memory_tls_zenohd_interop \
+        -- --ignored --quiet --test-threads=1 || return 1
     # R311y398 — wz UNIXSOCK ACCEPTOR cross-impl (transport-link-unixsock zenohd->wz):
     # the AF_UNIX-stream sibling of the ws/tls acceptor legs above. A real zenohd
     # DIALS the wz `--listen unixsock-stream/<path>` acceptor (the

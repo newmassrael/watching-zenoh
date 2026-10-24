@@ -1292,6 +1292,36 @@ pub fn localhost_cert_key_pem() -> (String, String) {
     (issued.cert.pem(), issued.key_pair.serialize_pem())
 }
 
+/// An identity as decision D1 of `docs/session-lifecycle-intent.md` reads one: a P-256 key, a
+/// certificate self-signed over it (SAN `localhost`), and the DER `SubjectPublicKeyInfo` of the
+/// key, from which `wz_session_core::credential_identity::zid_from_spki_der` derives the zid the
+/// key names. What a router's operator makes for a router whose zid a peer can bind to its key.
+#[cfg(feature = "tls-fixtures")]
+pub struct KeyNamedIdentity {
+    /// The certificate, PEM.
+    pub cert_pem: String,
+    /// The private key, PEM (PKCS#8).
+    pub key_pem: String,
+    /// The key's `SubjectPublicKeyInfo`, DER.
+    pub spki_der: Vec<u8>,
+}
+
+/// A fresh [`KeyNamedIdentity`].
+#[cfg(feature = "tls-fixtures")]
+pub fn key_named_identity() -> KeyNamedIdentity {
+    let key =
+        rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("generate a P-256 key");
+    let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+        .expect("certificate parameters")
+        .self_signed(&key)
+        .expect("self-sign the certificate");
+    KeyNamedIdentity {
+        cert_pem: cert.pem(),
+        key_pem: key.serialize_pem(),
+        spki_der: key.public_key_der(),
+    }
+}
+
 /// R311og — the loopback mutual-TLS (mTLS) PEM material, returned as PEM
 /// strings so a test feeds them through the PRODUCTION
 /// `wz_runtime_tokio::tls_config::{server_config_from_pem, client_config_from_pem}`
