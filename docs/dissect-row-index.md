@@ -429,10 +429,20 @@ from. So the order is now:
   contract says: the list's copy is its means of reading, not a second home of
   the bytes. The gate feeds batching plaintexts
   in both directions and holds the list to the reading that kept it whole and
-  every message's bytes to the plaintext. Left of (3): the recovered QUIC
-  streams, whose plaintext sink rewrites the rows' coordinates in place, which
-  only a row kept whole allows; the sink is handed the stream offset of the
-  plaintext's first byte instead.
+  every message's bytes to the plaintext.
+  Landed (3), its stream half: a recovered QUIC stream keeps each direction's
+  plaintext from the first byte a held message is read from, its messages are
+  entries read again from it, a frame ceiling's discard lets the plaintext before
+  the oldest held message go, and the byte door hands its messages' bytes back
+  (the structural `RecoveredPlaintextNotRetained` answer went with the reason for
+  it). The plaintext sink was handed rows rewritten into the offer's space for
+  the call and restored after it, which only a row kept whole allows; it is now
+  handed the stream offset of the offer's first byte (`DecryptedStream::base`,
+  `plaintext_offset`) and its consumers slice at the difference. The gate feeds
+  both directions in offers of odd lengths that split units, plain and under a
+  frame ceiling, against the reading that kept every message whole, every
+  message's bytes against the stream, and the plaintext kept against what was
+  fed; a release four bytes early fails it.
 - 5. The memory gate.
 - 6. Random access to a row's field document (D9), taken before 4c's remaining
   landings because it is what the consumer's budget waits on: (a) the tables
