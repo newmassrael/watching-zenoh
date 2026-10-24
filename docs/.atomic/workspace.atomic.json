@@ -281164,6 +281164,46 @@
         "Read the hosted C1cn run: it runs the new gate and the census over the changed rows for the first time."
       ]
     },
+    "Round 3492": {
+      "decision_summary": "Step 2 of the pico C ABI over the cooperative engine begins with what is engine-neutral, moved below both engines the way R311y617 moved the encoding id table: what a C ABI needs to describe a publish, encode a VLE length or convert an encoding label must be reachable without the tokio engine. The VLE codec moves to wz-codecs; the encoding hint conversions and their dialect to wz-session-core beside EncodingHint; PublishOptions, PlainPutParams and PublishError to wz-session-core, since every field and every derivation of a publish is a session-core type. The crates that held them re-export them, so no caller changed; the tokio engine keeps its loopback leg, which now reads the same gated metadata bundle as the wire leg. Next is the engine port proper: a SessionEngine trait the client surface calls, implemented first by the tokio engine.",
+      "changes_bullets": [
+        "wz-codecs: vle (zint_len, encode_zint, decode_zint, VLE_LEN) with its two tests; wz-capi-core codec re-exports it.",
+        "wz-session-core: encoding_hint (EncodingDialect, hint_from_parts, hint_from_str[_in], hint_to_string[_in], three tests); wz-capi-core encoding_ids re-exports it; wz-capi-core takes wz-session-core directly (alloc).",
+        "wz-session-core: publish_options (PublishOptions, PlainPutParams, PublishError, the metadata gates); priority_band, reliable_bool and push_metadata are public. wz-runtime-tokio publish_common re-exports them and keeps build_loopback_sample over push_metadata.",
+        "wz-capi-pico: wz-codecs dependency; codec, encoding, Reliability, WhatAmI and the publish types named where they live.",
+        "feature_gate_diagnostic: wz-session-core's pubsub-attachment, -encoding, -qos, -source-info, -timestamp leave NO_PUBLIC_PATH for impl-method (they now gate setters).",
+        "C1bz: wz-capi-pico 42 to 41 (a redundant target rewritten away), wz-runtime-tokio 475 to 474 (a link to the then pub(super) priority_band moved and resolves), both diffed.",
+        "docs/capi-pico-on-coop-engine.md status."
+      ],
+      "verification_bullets": [
+        "On the build host: fmt; clippy -D warnings for wz-codecs, wz-session-core (default, alloc only, alloc with codec-push and two metadata features, no_std check), wz-runtime-tokio (default and transport-unicast only), wz-capi-core (default and no default), wz-capi-c, wz-capi-pico (default and pico-client); tests: vle 2, encoding_hint 3, the tokio loopback tests 8, wz-capi-c lib 190, wz-capi-pico lib 102; Layer C1bj (the feature-off loopback gates, six legs) passes; capability_cost_gate --check: ten cases within budget, exports unchanged; C1bz for the touched crates at their budgets before the rebase. After rebasing on 2b1c19cec, clippy and the pico tests pass again; C1bz reads wz-session-core at 501 against 495 on origin/main itself, six links in capacity.rs from another session's commits, diffed against d74906f70 and reported to that session. The hook's 110 round-fed static gates pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next: the engine port (SessionEngine trait for the single-threaded client surface, implemented by the tokio engine; session_state returns the selected engine's session; the modules of capabilities the cooperative engine lacks build with the tokio engine only). The wz-session-core C1bz overrun (501 against 495, capacity.rs) belongs to the session that landed the capacity contract and is reported to it; do not lower the budget over it. Another session builds TlsStream over StreamSocket and will name the LinkProto variant before adding it."
+      ],
+      "publishable_decision_summary": "Step 2 of the pico C ABI over the cooperative engine begins with what is engine-neutral, moved below both engines the way R311y617 moved the encoding id table: what a C ABI needs to describe a publish, encode a VLE length or convert an encoding label must be reachable without the tokio engine. The VLE codec moves to wz-codecs; the encoding hint conversions and their dialect to wz-session-core beside EncodingHint; PublishOptions, PlainPutParams and PublishError to wz-session-core, since every field and every derivation of a publish is a session-core type. The crates that held them re-export them, so no caller changed; the tokio engine keeps its loopback leg, which now reads the same gated metadata bundle as the wire leg. Next is the engine port proper: a SessionEngine trait the client surface calls, implemented first by the tokio engine.",
+      "publishable_changes_bullets": [
+        "wz-codecs: vle (zint_len, encode_zint, decode_zint, VLE_LEN) with its two tests; wz-capi-core codec re-exports it.",
+        "wz-session-core: encoding_hint (EncodingDialect, hint_from_parts, hint_from_str[_in], hint_to_string[_in], three tests); wz-capi-core encoding_ids re-exports it; wz-capi-core takes wz-session-core directly (alloc).",
+        "wz-session-core: publish_options (PublishOptions, PlainPutParams, PublishError, the metadata gates); priority_band, reliable_bool and push_metadata are public. wz-runtime-tokio publish_common re-exports them and keeps build_loopback_sample over push_metadata.",
+        "wz-capi-pico: wz-codecs dependency; codec, encoding, Reliability, WhatAmI and the publish types named where they live.",
+        "feature_gate_diagnostic: wz-session-core's pubsub-attachment, -encoding, -qos, -source-info, -timestamp leave NO_PUBLIC_PATH for impl-method (they now gate setters).",
+        "C1bz: wz-capi-pico 42 to 41 (a redundant target rewritten away), wz-runtime-tokio 475 to 474 (a link to the then pub(super) priority_band moved and resolves), both diffed.",
+        "docs/capi-pico-on-coop-engine.md status."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: fmt; clippy -D warnings for wz-codecs, wz-session-core (default, alloc only, alloc with codec-push and two metadata features, no_std check), wz-runtime-tokio (default and transport-unicast only), wz-capi-core (default and no default), wz-capi-c, wz-capi-pico (default and pico-client); tests: vle 2, encoding_hint 3, the tokio loopback tests 8, wz-capi-c lib 190, wz-capi-pico lib 102; Layer C1bj (the feature-off loopback gates, six legs) passes; capability_cost_gate --check: ten cases within budget, exports unchanged; C1bz for the touched crates at their budgets before the rebase. After rebasing on 2b1c19cec, clippy and the pico tests pass again; C1bz reads wz-session-core at 501 against 495 on origin/main itself, six links in capacity.rs from another session's commits, diffed against d74906f70 and reported to that session. The hook's 110 round-fed static gates pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next: the engine port (SessionEngine trait for the single-threaded client surface, implemented by the tokio engine; session_state returns the selected engine's session; the modules of capabilities the cooperative engine lacks build with the tokio engine only). The wz-session-core C1bz overrun (501 against 495, capacity.rs) belongs to the session that landed the capacity contract and is reported to it; do not lower the budget over it. Another session builds TlsStream over StreamSocket and will name the LinkProto variant before adding it."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
