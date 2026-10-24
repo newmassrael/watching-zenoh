@@ -2885,6 +2885,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-abi-stamp"
+version = "0.1.0"
+
+[[package]]
 name = "wz-access-control"
 version = "0.1.0"
 dependencies = [
@@ -2915,6 +2919,7 @@ dependencies = [
  "tokio",
  "windows-sys 0.61.2",
  "wz",
+ "wz-abi-stamp",
  "wz-ap-demo-app",
  "wz-runtime-tokio-test-support",
 ]
@@ -2937,6 +2942,7 @@ dependencies = [
  "libc",
  "tempfile",
  "tokio",
+ "wz-abi-stamp",
  "wz-capi-core",
  "wz-capture",
  "wz-cdylib-build",
@@ -2992,6 +2998,7 @@ dependencies = [
  "libc",
  "tokio",
  "windows-sys 0.61.2",
+ "wz-abi-stamp",
  "wz-capi-core",
  "wz-capi-port",
  "wz-cdylib-build",

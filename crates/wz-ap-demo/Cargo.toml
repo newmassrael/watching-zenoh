@@ -73,6 +73,8 @@ path = "src/main.rs"
 # surface. The wz facade does not re-export tokio's runtime macros or
 # env_logger by design.
 [dependencies]
+# The ABI stamp this executable carries as an ELF note (`src/surface.rs`).
+wz-abi-stamp = { path = "../wz-abi-stamp" }
 # `default-features = false` here gives the R311a4 binary-size delta
 # measurement script (scripts/measure-codec-footprint.sh) a clean
 # `--no-default-features --features wz/foo,wz/bar,...` invocation that

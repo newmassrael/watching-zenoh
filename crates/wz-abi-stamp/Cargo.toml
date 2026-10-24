@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-abi-stamp — the ABI stamp every shipped artifact carries.
+#
+# `docs/target-build-contract.md` T6: a tool that describes an artifact for a device it is not
+# built on cannot call the artifact, so the family, the revision and the layout arm are put in
+# the artifact's bytes where a reader finds them without running anything. One macro renders
+# them, so the three families (the pico C ABI, the zenoh-c drop-in, the session-node
+# executable) cannot disagree about the format, on the `wz-cdylib-build` precedent of one crate
+# for what would otherwise be copied into every artifact crate.
+
+[package]
+name = "wz-abi-stamp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The ABI stamp an artifact carries as an ELF note: family, revision and layout arm, readable without running the artifact."
+
+[lib]
+name = "wz_abi_stamp"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

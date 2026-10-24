@@ -13770,6 +13770,43 @@ layer_c1so_cdylib_soname() {
     return 0
 }
 
+# ─── Layer C1st — every shipped artifact carries its ABI stamp ───────────────
+#
+# `docs/target-build-contract.md` T6. A tool that describes an artifact for a device it cannot run
+# on reads the family, the revision and the layout arm from the artifact's BYTES: an ELF note that
+# `wz-abi-stamp` writes into the pico C ABI library, the zenoh-c drop-in and the session-node
+# executable. `abi_stamp_gate.py` reads it out of the built file and holds it to a pin.
+#
+# BOTH profiles, and a stripped copy of each: `lto = "thin"` runs in release only, and a consumer
+# ships a stripped binary. The selftest runs first and drives every FAIL path through a synthetic
+# ELF plus a clean control, so a gate that had started passing everything cannot be mistaken for
+# artifacts that are in order.
+#
+# Each crate is built ALONE (one `-p` per call): cargo unifies features across the packages of a
+# single invocation, and the pin is a claim about the DEFAULT build of each family.
+layer_c1st_abi_stamp() {
+    local tool
+    for tool in python3 strip; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            echo "  C1st FAIL: $tool is absent, so the stamp cannot be read or its survival through"
+            echo "             stripping judged -- a gate that cannot reach its input must not report green"
+            return 1
+        }
+    done
+    python3 scripts/lib/abi_stamp_gate.py --selftest >/dev/null || return 1
+    local crate
+    for crate in wz-capi-pico wz-capi-c wz-ap-demo; do
+        (cd crates && cargo build -p "$crate" --quiet) || return 1
+        (cd crates && cargo build -p "$crate" --release --quiet) || return 1
+    done
+    local t=crates/target
+    python3 scripts/lib/abi_stamp_gate.py --call-doors \
+        capi-pico=$t/debug/libwz_capi_pico.so capi-pico=$t/release/libwz_capi_pico.so \
+        capi-c=$t/debug/libwz_capi_c.so capi-c=$t/release/libwz_capi_c.so \
+        ap-demo-surface=$t/debug/wz-ap-demo ap-demo-surface=$t/release/wz-ap-demo || return 1
+    return 0
+}
+
 # R311y612 (§5.11) — wz-capture at `--no-default-features`, which NO lane had.
 #
 # The gap was not hypothetical. R311y609 found that `wz-capture` did not
@@ -23777,6 +23814,7 @@ run_layer C1bnl layer_c1bnl_all_nondefault_test_legs || overall=1
 run_layer C1bo layer_c1bo_dissect_c_abi || overall=1
 run_layer C1cj layer_c1cj_replay_c_abi || overall=1
 run_layer C1so layer_c1so_cdylib_soname || overall=1
+run_layer C1st layer_c1st_abi_stamp || overall=1
 run_layer C1bt layer_c1bt_capture_no_default_features || overall=1
 run_layer C1bq layer_c1bq_zero_copy_arena || overall=1
 run_layer C1br layer_c1br_uring_fixed_buffers || overall=1

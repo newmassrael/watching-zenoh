@@ -5802,6 +5802,14 @@ jobs:
           WZ_C1CE_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer C1ce
 
+      - name: Layer C1st — every shipped artifact carries its ABI stamp
+        # `docs/target-build-contract.md` T6. In THIS job because it builds the release profile
+        # of the zenoh-c drop-in, which the C1cc legs above already warmed; the pico C ABI library
+        # and the session-node executable are the two builds it adds, and what it costs on a
+        # hosted runner is not measured when this step lands, so it is read from the first run
+        # rather than stated here. It needs no oracle: the stamp is read from the built files.
+        run: bash scripts/run-ci.sh --layer C1st
+
       - name: Layer P — throughput differential against the real libzenohc
         # In THIS job because it needs what this job already provisions: the zenoh-c
         # oracle (the same cache key as the steps above) and its upstream examples,

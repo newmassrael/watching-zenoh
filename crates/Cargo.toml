@@ -136,6 +136,10 @@ members = [
     # (which target platforms take `-Wl,-soname`) would otherwise be duplicated
     # across FIVE build scripts and corrected in fewer than five.
     "wz-cdylib-build",
+    # The ABI stamp every shipped artifact carries as an ELF note (family, revision, layout arm),
+    # so a tool describing an artifact for a device it cannot run on reads the number from the
+    # bytes. One macro for the three families, on the `wz-cdylib-build` precedent above.
+    "wz-abi-stamp",
     "wz-runtime-core",
     "wz-session-core",
     "wz-session-core-test-support",

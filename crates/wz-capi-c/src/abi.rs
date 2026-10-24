@@ -1594,6 +1594,19 @@ pub extern "C" fn wz_capi_c_abi_version() -> i32 {
 /// (`WZ_CAPI_C_E_VALUE_TOO_LARGE`, which was `Z_EINVAL` before).
 pub const WZ_CAPI_C_ABI_REVISION: i32 = 6;
 
+// The same revision, carried as an ELF note for a tool that describes this library for a device it
+// cannot run on and so cannot call `wz_capi_c_abi_version` (`wz-abi-stamp`;
+// `docs/target-build-contract.md` T6). The layout arm is the two switches that move the C types a
+// program allocates; `unstable_api` is the inverse of the feature that removes it.
+wz_abi_stamp::stamp!(
+    family = "capi-c",
+    revision = WZ_CAPI_C_ABI_REVISION as u32,
+    layout = [
+        ("unstable_api", !cfg!(feature = "zenoh-c-no-unstable-api")),
+        ("shared_memory", cfg!(feature = "zenoh-c-shared-memory")),
+    ],
+);
+
 /// Report this build's footprints — the drop-in's half of the layout gate.
 ///
 /// Writes at most `cap` entries through `out` (ignored when null) and returns

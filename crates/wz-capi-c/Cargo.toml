@@ -373,6 +373,8 @@ auth_usrpwd = ["wz-capi-core/auth_usrpwd"]
 interceptors = ["wz-capi-core/interceptors"]
 
 [dependencies]
+# The ABI stamp this artifact carries as an ELF note (beside `WZ_CAPI_C_ABI_REVISION` in `abi.rs`).
+wz-abi-stamp = { path = "../wz-abi-stamp" }
 # The ABI-neutral session model, shared with wz-capi-pico.
 #
 # R2970 — `transport-qos` so its transport snapshot reports what a zenoh-c

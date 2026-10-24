@@ -77,6 +77,7 @@ mod advanced_forms;
 #[cfg(feature = "advanced")]
 mod advanced_plane;
 pub mod bytes;
+pub mod revision;
 // pico implements the token only with both the unstable API and the query plane: its
 // `vendor/zenoh-pico/src/api/api.c` @ `_Z_OWNED_FUNCTIONS_RC_IMPL(cancellation_token)` sits
 // inside `#ifdef Z_FEATURE_UNSTABLE_API` and `#if Z_FEATURE_QUERY == 1`.

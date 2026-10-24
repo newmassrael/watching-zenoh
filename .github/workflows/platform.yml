@@ -66,6 +66,7 @@ on:
       - "crates/wz-tls-record/**"
       - "crates/wz-capture/**"
       - "crates/wz-cdylib-build/**"
+      - "crates/wz-abi-stamp/**"
       - "crates/wz-codecs/**"
       - "crates/wz-codecs-test-support/**"
       - "crates/wz-codegen-build/**"

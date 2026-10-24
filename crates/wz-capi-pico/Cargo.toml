@@ -335,6 +335,8 @@ required-features = ["peer"]
 workspace = true
 
 [dependencies]
+# The ABI stamp this artifact carries as an ELF note (`src/revision.rs`).
+wz-abi-stamp = { path = "../wz-abi-stamp" }
 # R311y498 — the ABI-neutral session model (face registry + declaration SSOT +
 # drive thread) this crate used to OWN. It moved out when the zenoh-c ABI
 # arrived: two ABIs, one session model. See wz-capi-core's manifest for why
