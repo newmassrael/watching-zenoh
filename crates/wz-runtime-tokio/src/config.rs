@@ -1409,21 +1409,26 @@ impl WzConfig {
         self
     }
 
+    /// The lease the capacity bounds are computed for: this node's own when it set one, upstream's
+    /// default (10 s) when it adopts the peer's at the handshake.
+    pub fn effective_lease_ms(&self) -> u64 {
+        const UPSTREAM_DEFAULT_LEASE_MS: u64 = 10_000;
+        if self.lease_ms == 0 {
+            UPSTREAM_DEFAULT_LEASE_MS
+        } else {
+            self.lease_ms
+        }
+    }
+
     /// The sessions the accept loop may hold at once: [`Self::max_sessions`], or less when the
     /// declared [`Self::capacity`] says the node cannot keep that many leases at its share. The
     /// lease the bound is computed for is this node's own when it set one, upstream's default
     /// (10 s) when it adopts the peer's at the handshake.
     pub fn effective_max_sessions(&self) -> wz_session_core::capacity::EffectiveBound {
-        const UPSTREAM_DEFAULT_LEASE_MS: u64 = 10_000;
-        let lease_ms = if self.lease_ms == 0 {
-            UPSTREAM_DEFAULT_LEASE_MS
-        } else {
-            self.lease_ms
-        };
         wz_session_core::capacity::effective_max_sessions(
             self.max_sessions,
             self.capacity.as_ref(),
-            lease_ms,
+            self.effective_lease_ms(),
             wz_session_core::capacity::LOOP_TURN_UNITS,
             wz_session_core::capacity::RECORDED_HOST_MODEL,
         )

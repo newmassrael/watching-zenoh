@@ -116,6 +116,29 @@ fn step(weak: &Weak<SessionLinkActions>, clock: &TokioTime, generation: u64) -> 
 
 async fn pace(weak: Weak<SessionLinkActions>, clock: TokioTime, generation: u64) {
     while let Some(wait_ms) = step(&weak, &clock, generation) {
+        let planned = clock.now_monotonic_ms().saturating_add(wait_ms);
         tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+        note_wake_lateness(clock.now_monotonic_ms().saturating_sub(planned));
     }
+}
+
+/// The longest any pacer of this process woke after the time it had planned to wake, in
+/// milliseconds, since the process started or the figure was last taken.
+static WAKE_LATENESS_MAX_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn note_wake_lateness(late_ms: u64) {
+    WAKE_LATENESS_MAX_MS.fetch_max(late_ms, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The longest a keepalive timer of this process was served after its time, in milliseconds,
+/// since the process started: the quantity the lease depends on, read where it is made. A
+/// session is lost when a keepalive is later than `2T/3`
+/// ([`wz_session_core::capacity::keepalive_lateness_limit_ms`]), whatever the share of the CPU
+/// the operator declared and however many sessions the node holds, so this is both the
+/// assertion of the capacity promise and the monitor that tells an operator the promise no
+/// longer holds. The control runtime's timers are served on one thread, so it is the lateness of
+/// the thread's own wake, which on a host short of CPU is its wait for a core
+/// (`docs/router-data-plane-scaling.md` section 7.4).
+pub fn keepalive_timer_lateness_max_ms() -> u64 {
+    WAKE_LATENESS_MAX_MS.load(std::sync::atomic::Ordering::Relaxed)
 }

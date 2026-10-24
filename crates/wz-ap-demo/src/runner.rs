@@ -7327,6 +7327,9 @@ async fn run_router_hat_until(
     let mut last_announced_routers = 1usize;
     let mut last_data_seen = 0usize;
     let mut last_data_sent = 0usize;
+    // The longest a keepalive timer of this router was served after its time, as last logged.
+    let mut last_lateness_ms = 0u64;
+    let mut lateness_violation_logged = false;
     let mut last_queries_seen = 0usize;
     let mut last_deferred_client = 0usize;
     let mut announced_queryable = false;
@@ -7515,6 +7518,31 @@ async fn run_router_hat_until(
                 if seen > last_data_seen {
                     last_data_seen = seen;
                     log::info!("wz-ap-demo router-hat: forwarded mesh data ({seen} push(es))");
+                }
+                // The keepalive timer's lateness, the number the lease depends on
+                // (`docs/router-data-plane-scaling.md` section 7.4). Logged when the longest
+                // so far grows by a tenth of a second, so a quiet router logs nothing and a
+                // starved one leaves a monotone trail whose last line is the run's maximum.
+                // Past `2T/3` a peer's lease is spent and the capacity promise, if one was
+                // declared, no longer holds: said once, at warn.
+                {
+                    const LATENESS_LOG_STEP_MS: u64 = 100;
+                    let late = wz::runtime_tokio::keepalive_timer_lateness_max_ms();
+                    if late >= last_lateness_ms + LATENESS_LOG_STEP_MS {
+                        last_lateness_ms = late;
+                        log::info!("wz-ap-demo router-hat: keepalive timer lateness max ({late} ms)");
+                    }
+                    let limit = wz::runtime_tokio::capacity::keepalive_lateness_limit_ms(
+                        host_cfg.borrow().effective_lease_ms(),
+                    );
+                    if !lateness_violation_logged && late > limit {
+                        lateness_violation_logged = true;
+                        log::warn!(
+                            "wz-ap-demo router-hat: a keepalive timer was served {late} ms late, over \
+                             the {limit} ms a lease allows: the sessions of this router are at risk, \
+                             and a declared CPU share is not being met"
+                        );
+                    }
                 }
                 // R2904 — the RELAY witness: a Push LEFT this router. `forwarded
                 // mesh data` above counts what arrived, and since R2901 a wz peer

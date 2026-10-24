@@ -105,6 +105,11 @@ pub mod session_glue;
 #[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
 pub(crate) mod keepalive_pacer;
 
+/// The longest a keepalive timer of this process was served after its time: what the
+/// lease depends on, read where it is made (see the function's own doc).
+#[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
+pub use keepalive_pacer::keepalive_timer_lateness_max_ms;
+
 /// SCE-generated AP reassembly buffer-pool config. The emit comes from
 /// `sources/network/reassembly_pool_ap.scxml` (an `sce:kind="buffer-pool"`
 /// document, the SSOT). R311y22b: COMMITTED at

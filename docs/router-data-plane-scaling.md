@@ -341,7 +341,8 @@ once instead of refusing the one that does not fit. This section states the prom
 the router does at the number. Built: the bound (`wz-session-core`, `capacity`), the declaration
 (`WzConfig::with_capacity_contract`, the demo's `--cpu-share` and `--max-data-wait`), the refusal at the
 bound (the existing `max_sessions` refusal, now fed the smaller number) and the test of the promise.
-Not built: the separate refusal counter, the admin-space export of the measured share, the drop policy.
+Also built: the keepalive timer lateness meter and its assertion. Not built: the separate refusal counter,
+the admin-space export of the lateness, the drop policy.
 
 **The promise.** While the process receives at least the CPU share `s` that its operator declared, each
 session of up to `N_max(s)` keeps its lease. It is conditional on `s` on purpose: a router cannot promise
@@ -409,13 +410,35 @@ Four threads is a fit: three or five busy threads miss by 15% to 40%. So the tab
 the bound, `R` inversely proportional to the share and proportional to the sessions, and not an absolute
 number that holds on another host.
 
-**The share is declared, and measured only to be reported.** The operator states `s`, the CPU share the
-process may count on. A share measured while running is not an input to admission: admitting by an
+**The share is declared, and what is measured is the lateness.** The operator states `s`, the CPU share
+the process may count on. A share measured while running is not an input to admission: admitting by an
 observed share admits more sessions when the host is idle and refuses when it is not, which is the
-feedback that makes the number swing. What the process measures (its time waiting for a core against its
-time running, from the scheduler's own counters) is exported to the admin space and raises a
-contract-violated flag when it stays below `s`: the promise is void and says so. With no `s` declared
-there is no cap, as upstream, and no promise.
+feedback that makes the number swing. With no `s` declared there is no cap, as upstream, and no promise.
+
+What the process can measure of the promise is not its share. Reading the router's threads at 32 hogs
+with 1100 sessions (`/proc/<pid>/task/*/schedstat`, two runs of the test of the promise, the 20 s window):
+
+| thread | CPU in the window | waited for a core | wakes | wait per wake | run per wake |
+|---|---|---|---|---|---|
+| `wz-ctl` (keepalive timers) | 24 and 26 ms (0.12% and 0.13% of a core) | 7.2 and 8.2 s | 49 and 60 | 147 and 136 ms | 489 and 426 us |
+| `wz-tx` (link writers) | 29 ms | 9.1 and 9.2 s | 20 and 23 | 461 and 396 ms | 1.2 to 1.4 ms |
+| the process | 0.84% and 3.0% of a core | | | | |
+
+Three things follow. A thread's CPU time is its demand, not its entitlement: `wz-ctl` used about two fifths of the
+0.33% the scheduler's weights allow it, so `s / b` is not what limits it and the model of (A) is a fit
+to the measured loss and not a mechanism. What the scheduler decides is how long a woken thread waits
+for a core, 140 ms here for the keepalive thread, and a keepalive is late by that wait plus the wait of
+whatever it needs after it (the writer waits 400 ms). And the whole quantity the lease depends on can be
+read inside the process, without the scheduler's counters: how long after its time each keepalive timer
+was served.
+
+That is what the router measures and reports. `keepalive_timer_lateness_max_ms` (the pacer, per wake: now
+minus the time it planned to wake) is the longest so far in the process; the router-hat loop logs it when
+it grows by 100 ms, and warns once when it passes `2T/3`
+(`capacity::keepalive_lateness_limit_ms`), saying that the sessions are at risk and that the declared
+share is not being met. The test of the promise asserts it: in three runs at 32 hogs with 1100 admitted
+it was 775 to 1060 ms against the 6667 ms a 10 s lease allows, a margin of about six. An export of it to
+the admin space is not built.
 
 **The costs are recorded, against the measured loss.** `c_u`, `c_k` and `b` are constants of the build,
 recorded as `RECORDED_HOST_MODEL` in `wz-session-core`'s `capacity` module (integers, so every profile
@@ -445,5 +468,5 @@ from a declared share and a lease). The promise itself is
 32 hogs, 2048 sessions knocking; it asserts that no more than the model's number were admitted, that the
 rest were refused, that no face went DOWN and that no admitted client session ended. Measured: 8 of 8 runs
 at the first recorded costs (1222 admitted) and 3 of 3 at the recorded ones (1100), host load 13 to 30.
-Not yet held: an assertion of the keepalive's lateness against `2T/3` itself (the clients' ending stands in
-for it), a loose bound for the hosted runner, and the lane that re-derives the tables.
+It also asserts the keepalive timer lateness against `2T/3`. Not yet held: a loose bound for the hosted
+runner, and the lane that re-derives the tables.

@@ -6,7 +6,8 @@
 //! ## What is promised
 //!
 //! While the process receives at least the CPU share its operator declared
-//! ([`CapacityContract::share_ppm`]), each session of up to [`liveness_bound`] keeps its lease.
+//! ([`crate::capacity::CapacityContract::share_ppm`]), each session of up to
+//! [`crate::capacity::liveness_bound`] keeps its lease.
 //! The promise is conditional on the share on purpose: a node cannot promise a lease to a host
 //! that takes its CPU away, and a promise that does not name its condition cannot be tested. A
 //! node with no declared share promises nothing and is limited by nothing but its configured
@@ -19,20 +20,20 @@
 //! `c_k` the cost of one keepalive emission, `q` the loop's turn quantum in units and `c_u` the cost
 //! of one unit:
 //!
-//! - **Liveness** ([`liveness_bound`]). The keepalives are written by ONE thread, and the scheduler
+//! - **Liveness** ([`crate::capacity::liveness_bound`]). The keepalives are written by ONE thread, and the scheduler
 //!   divides the process's share among its runnable threads, so that thread has about `s / b`.
 //!   All `N` timers can fall due together and serving them takes `N c_k b / s`. An emission late by
 //!   less than `2T/3` still leaves a lease interval to spare, so the burst has to finish within
 //!   `T / LEASE_EXPIRE_FACTOR`: `N <= s T / (3 b c_k)`.
-//! - **Service** ([`service_bound`]). The session loop runs on all the workers and returns to a
+//! - **Service** ([`crate::capacity::service_bound`]). The session loop runs on all the workers and returns to a
 //!   face after `N q c_u / s`, and a frame waits that long in its buffer. It costs no lease (the
 //!   loop reads what is waiting before it judges a peer silent) but it is how stale the data a face
 //!   is given is, and how late a peer that is really gone is found. For a frame to wait at most `L`:
 //!   `N <= s L / (q c_u)`. Bound only when the operator declares an `L`
-//!   ([`CapacityContract::data_wait_ms`]).
+//!   ([`crate::capacity::CapacityContract::data_wait_ms`]).
 //!
 //! The form of both bounds is checked against measurement (`docs/router-data-plane-scaling.md`
-//! section 7.4); the costs are measured on the host, and [`RECORDED_HOST_MODEL`] carries them with a
+//! section 7.4); the costs are measured on the host, and [`crate::capacity::RECORDED_HOST_MODEL`] carries them with a
 //! margin.
 //!
 //! ## Arithmetic
@@ -193,6 +194,13 @@ pub fn service_bound(share_ppm: u32, wait_ms: u32, quantum_units: u32, model: Co
         u64::from(share_ppm).saturating_mul(u64::from(wait_ms)),
         u64::from(quantum_units).saturating_mul(model.loop_unit_ns),
     )
+}
+
+/// The latest a keepalive may be served and still leave a peer its lease: `2T/3`. A keepalive is due
+/// every `T / LEASE_EXPIRE_FACTOR`, so one that is a further `2T/3` late has spent the interval it
+/// was owed and the one before it; the next is the last the peer will wait for.
+pub const fn keepalive_lateness_limit_ms(lease_ms: u64) -> u64 {
+    lease_ms - lease_ms / LEASE_EXPIRE_FACTOR
 }
 
 /// The sessions a node admits at once: the configured `max_sessions`, or less when the declared
@@ -358,6 +366,13 @@ mod tests {
                 limiter: Limiter::Service
             }
         );
+    }
+
+    #[test]
+    fn a_keepalive_may_be_two_thirds_of_a_lease_late() {
+        assert_eq!(keepalive_lateness_limit_ms(10_000), 6_667);
+        assert_eq!(keepalive_lateness_limit_ms(30_000), 20_000);
+        assert_eq!(keepalive_lateness_limit_ms(0), 0);
     }
 
     #[test]

@@ -100,6 +100,9 @@ struct Router {
     down_lines: Arc<Mutex<Vec<String>>>,
     refused: Arc<AtomicUsize>,
     pushes: Arc<AtomicU64>,
+    /// The longest a keepalive timer of the router was served after its time, in milliseconds, as
+    /// the router last said it (a monotone figure, so the last line is the run's maximum).
+    lateness_ms: Arc<AtomicU64>,
 }
 
 /// Run `demo` with `args` under a shell that raises the soft open-files limit to the hard one first
@@ -164,6 +167,13 @@ fn forwarded_pushes(line: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+/// The longest keepalive timer lateness so far, in `keepalive timer lateness max (N ms)`.
+fn keepalive_lateness_ms(line: &str) -> Option<u64> {
+    let rest = line.split("keepalive timer lateness max (").nth(1)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
 fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Router {
     let max_sessions = ROUTER_MAX_SESSIONS.to_string();
     let mut args = vec![
@@ -189,14 +199,16 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
     let down_lines = Arc::new(Mutex::new(Vec::new()));
     let refused = Arc::new(AtomicUsize::new(0));
     let pushes = Arc::new(AtomicU64::new(0));
+    let lateness_ms = Arc::new(AtomicU64::new(0));
     let (port_tx, port_rx) = mpsc::channel();
     {
-        let (up, down, down_lines, refused, pushes) = (
+        let (up, down, down_lines, refused, pushes, lateness_ms) = (
             Arc::clone(&up),
             Arc::clone(&down),
             Arc::clone(&down_lines),
             Arc::clone(&refused),
             Arc::clone(&pushes),
+            Arc::clone(&lateness_ms),
         );
         thread::spawn(move || {
             let mut port_tx = Some(port_tx);
@@ -223,6 +235,8 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
                     refused.fetch_add(1, Ordering::Relaxed);
                 } else if let Some(total) = forwarded_pushes(&line) {
                     pushes.store(total, Ordering::Relaxed);
+                } else if let Some(late) = keepalive_lateness_ms(&line) {
+                    lateness_ms.store(late, Ordering::Relaxed);
                 }
             }
         });
@@ -239,6 +253,7 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
         down_lines,
         refused,
         pushes,
+        lateness_ms,
     }
 }
 
@@ -394,6 +409,9 @@ struct Window {
     attempted: usize,
     /// Steady client sessions that ended on their own in the window ([`SESSION_ENDED`]).
     ended: usize,
+    /// The longest a keepalive timer of the router was served after its time, over the run up to
+    /// the end of the window, in milliseconds: the number a lease depends on.
+    keepalive_late_ms: u64,
 }
 
 impl Window {
@@ -526,6 +544,7 @@ fn measure(scenario: Scenario) -> Window {
         admitted: router.up.load(Ordering::Relaxed) - up_before,
         attempted: generation * CHURN_SESSIONS,
         ended: ended.load(Ordering::Relaxed) - ended_before,
+        keepalive_late_ms: router.lateness_ms.load(Ordering::Relaxed),
     };
     drop(waves);
     drop(clients);
@@ -576,6 +595,19 @@ fn measure(scenario: Scenario) -> Window {
             "{} client sessions ended on their own in a steady window: their lease for the router \
              ran out",
             window.ended
+        );
+    }
+    // The promise from the router's own side: a router that was told its CPU share serves every
+    // keepalive timer within `2T/3`, which is what leaves each admitted peer its lease. The clients'
+    // endings above are this seen from the far end; this is the cause itself, and it names the
+    // margin: how much room was left under the limit.
+    if cpu_share.is_some() {
+        let limit = wz_session_core::capacity::keepalive_lateness_limit_ms(SESSION_LEASE_MS);
+        assert!(
+            window.keepalive_late_ms <= limit,
+            "a keepalive timer was served {} ms late, over the {limit} ms a {SESSION_LEASE_MS} ms \
+             lease allows, in a router that was told its CPU share",
+            window.keepalive_late_ms
         );
     }
     // A starved router is overloaded on purpose, so how much it forwards is the answer there and
@@ -645,11 +677,12 @@ fn wz_router_hat_keeps_its_links_when_overloaded_and_short_of_cpu() {
     eprintln!(
         "\nstarved router (one shared core, lower priority), 2048 subscribers, offered {offered} messages/s: \
          forwarded {:.0} messages/s ({:.0}% of offered), {} faces went DOWN, {} client sessions ended \
-         on their own",
+         on their own, the longest a keepalive timer was served late {} ms",
         w.messages_per_second(),
         100.0 * w.delivered_share(),
         w.down,
         w.ended,
+        w.keepalive_late_ms,
     );
 }
 
@@ -695,9 +728,11 @@ fn wz_router_hat_keeps_every_lease_it_admits_at_its_declared_share() {
     });
     eprintln!(
         "\nrouter told 1.32% of a core, 32 hogs, 2048 sessions knocking, offered {offered} messages/s: \
-         forwarded {:.0} messages/s, {} faces went DOWN, {} admitted client sessions ended on their own",
+         forwarded {:.0} messages/s, {} faces went DOWN, {} admitted client sessions ended on their own, \
+         the longest a keepalive timer was served late {} ms",
         w.messages_per_second(),
         w.down,
         w.ended,
+        w.keepalive_late_ms,
     );
 }
