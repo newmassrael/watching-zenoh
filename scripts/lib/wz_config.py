@@ -246,6 +246,7 @@ def decl_of(data: dict) -> dict:
         "platforms": list(data["platform"]),
         "artifacts": list(data["artifact"]),
         "roles": list(data["role"]),
+        "runtime_features": list(data["runtime_feature"]),
     }
 
 
@@ -255,12 +256,13 @@ def validate_decl(data: dict) -> list[str]:
         out.append(f"schema_version is {data.get('schema_version')!r}, this reader is {SCHEMA_VERSION}")
     if not isinstance(data.get("catalog_version"), int):
         out.append("catalog_version is not an integer")
-    for kind in ("base", "capability", "limit", "os", "platform", "artifact", "role"):
+    for kind in ("base", "capability", "limit", "os", "platform", "artifact", "role", "runtime_feature"):
         if kind not in data:
             out.append(f"the declaration has no `{kind}`")
     if out:
         return out
     out += validate_os(data)
+    out += validate_runtime_features(data)
     out += validate_caps(data)
     out += validate_platforms(data)
     out += validate_artifacts(data)
@@ -436,7 +438,14 @@ OS_FACILITIES = (
     "filesystem",
     "entropy",
     "wall-clock",
+    "interface-list",
 )
+# The packages whose features are assessed for the facilities they ask of the operating system
+# (`[[runtime_feature]]`): the runtime that owns every socket, thread and file read. The core and
+# the codecs take no facility of their own (they are `no_std`-capable and are handed time, entropy
+# and a link), and a third-party crate's needs are the runtime's, which names the crate it pulls.
+ASSESSED_PACKAGES = ("wz-runtime-tokio",)
+RUNTIME_FEATURE_KEYS = {"package", "feature", "os_needs", "help"}
 PLATFORM_KEYS = {
     "id", "triple", "os", "libc", "network_stack", "std", "toolchain_env_extra",
     "os_provides", "system_assumed", "lane", "support", "help",
@@ -602,6 +611,60 @@ def validate_artifacts(data: dict) -> list[str]:
         if not any(r.get("artifact") == aid for r in roles):
             out.append(f"artifact {aid!r} provides no role")
     return out
+
+
+def validate_runtime_features(data: dict) -> list[str]:
+    out: list[str] = []
+    seen = set()
+    for r in data["runtime_feature"]:
+        who = f"runtime_feature {r.get('package')!r}/{r.get('feature')!r}"
+        for key in sorted(set(r) - RUNTIME_FEATURE_KEYS):
+            out.append(f"{who} has the unknown key `{key}`")
+        for key in sorted(RUNTIME_FEATURE_KEYS - set(r)):
+            out.append(f"{who} has no `{key}`")
+        if r.get("package") not in ASSESSED_PACKAGES:
+            out.append(f"{who}: the package is not one that is assessed ({', '.join(ASSESSED_PACKAGES)})")
+        if (r.get("package"), r.get("feature")) in seen:
+            out.append(f"{who} is declared twice")
+        seen.add((r.get("package"), r.get("feature")))
+        if "os_needs" in r:
+            out += facility_findings(who, r["os_needs"], "os_needs")
+    return out
+
+
+def runtime_feature_findings(decl: dict, features_of) -> list[str]:
+    """Each assessed feature against the package's real `[features]`: a row for a feature that
+    no longer exists is a finding, so an assessment cannot outlive what it assessed.
+
+    `features_of(package)` returns the package's feature names, passed in so a test can drive it.
+    """
+    out = []
+    for r in decl["runtime_features"]:
+        if r["feature"] not in features_of(r["package"]):
+            out.append(f"runtime_feature {r['package']}/{r['feature']} is not a feature of {r['package']}")
+    return out
+
+
+def resolve_runtime_needs(decl: dict, resolved: dict[str, list[str]]) -> tuple[list[str] | None, list[str]]:
+    """The facilities the resolved runtime features may ask for, and the enabled ones nobody assessed.
+
+    `resolved` maps a package to the features cargo enabled in it. The answer is `None` (UNKNOWN,
+    never a pass) when any enabled feature of an assessed package has no row; otherwise the sorted
+    union of the base and of each feature's facilities. The second value lists the unassessed
+    features as `package/feature`, so a reader sees which part of the answer is missing.
+    """
+    rows = {(r["package"], r["feature"]): r["os_needs"] for r in decl["runtime_features"]}
+    unassessed: list[str] = []
+    needs = set(decl["os_base"])
+    for package in ASSESSED_PACKAGES:
+        for feature in sorted(resolved.get(package, [])):
+            if feature == "default":
+                continue
+            if (package, feature) in rows:
+                needs |= set(rows[(package, feature)])
+            else:
+                unassessed.append(f"{package}/{feature}")
+    return (None if unassessed else sorted(needs)), unassessed
 
 
 def os_needs_of(decl: dict, on: set[str]) -> dict[str, list[str]]:
@@ -1654,6 +1717,15 @@ def cmd_check() -> int:
         findings += check_manifest(decl, abi, feats)
     # The platform rows against the compiler that builds for them. A compiler that is absent is a
     # finding and not a skip: a gate that cannot reach its input must not report green.
+    for package in ASSESSED_PACKAGES:
+        try:
+            manifest_names = set(manifest_features(ROOT / "crates" / package / "Cargo.toml"))
+        except (KeyError, OSError) as exc:
+            findings.append(f"{package}: {exc}")
+            continue
+        findings += runtime_feature_findings(
+            {"runtime_features": [r for r in decl["runtime_features"] if r["package"] == package]},
+            lambda _p, names=manifest_names: names)
     if shutil.which("rustc") is None:
         findings.append("rustc is absent, so the platform triples cannot be checked against it")
     else:
@@ -1716,6 +1788,12 @@ lane = "none"
 support = "built"
 os_provides = ["threads", "sockets-tcp", "sockets-udp", "entropy"]
 help = "A sample platform."
+
+[[runtime_feature]]
+package = "wz-runtime-tokio"
+feature = "f1"
+os_needs = ["sockets-udp"]
+help = "A sample feature."
 
 [[artifact]]
 id = "lib-a"
@@ -2108,6 +2186,35 @@ def cmd_selftest() -> int:
     expect("a pair nobody classified is a finding, not a pass",
            any("does not classify" in f for f in platform_rustc_findings(
                [row], {"t-1"}, lambda t: {"target_os": "linux", "target_env": "musl"})))
+    # The assessed runtime features (docs/target-build-contract.md T9).
+    expect("a runtime feature of a package nobody assesses is refused",
+           caps_refused('package = "wz-runtime-tokio"', 'package = "tokio"', "not one that is assessed"))
+    expect("a runtime feature naming a facility outside the vocabulary is refused",
+           caps_refused('feature = "f1"\nos_needs = ["sockets-udp"]', 'feature = "f1"\nos_needs = ["gpu"]',
+                        "not a facility"))
+    expect("a runtime feature with no os_needs is refused",
+           caps_refused('os_needs = ["sockets-udp"]\nhelp = "A sample feature."', 'help = "A sample feature."',
+                        "has no `os_needs`"))
+    expect("a runtime feature declared twice is refused",
+           any("declared twice" in p for p in validate_decl(read_decl_toml(
+               SAMPLE + SAMPLE[SAMPLE.index("[[runtime_feature]]"):SAMPLE.index("[[artifact]]")]))))
+    expect("a declaration with no runtime feature is refused",
+           any("no `runtime_feature`" in p for p in validate_decl(read_decl_toml(
+               SAMPLE[: SAMPLE.index("[[runtime_feature]]")] + SAMPLE[SAMPLE.index("[[artifact]]"):]))))
+    rdecl = decl_of(read_decl_toml(SAMPLE))
+    expect("an assessed feature adds its facilities to the base",
+           resolve_runtime_needs(rdecl, {"wz-runtime-tokio": ["f1"]})
+           == (["entropy", "sockets-tcp", "sockets-udp", "threads"], []))
+    expect("an enabled feature nobody assessed makes the answer unknown and is named",
+           resolve_runtime_needs(rdecl, {"wz-runtime-tokio": ["f1", "f2"]}) == (None, ["wz-runtime-tokio/f2"]))
+    expect("the default feature is not a facility and is skipped",
+           resolve_runtime_needs(rdecl, {"wz-runtime-tokio": ["default", "f1"]})[0] is not None)
+    expect("a package that is not assessed does not make the answer unknown",
+           resolve_runtime_needs(rdecl, {"tokio": ["rt"], "wz-runtime-tokio": ["f1"]})[1] == [])
+    expect("a row for a feature the package lost is a finding",
+           any("not a feature of" in f for f in runtime_feature_findings(rdecl, lambda p: {"other"})))
+    expect("a row for a feature the package has is clean",
+           runtime_feature_findings(rdecl, lambda p: {"f1"}) == [])
     # The artifacts and their roles (docs/target-build-contract.md T8).
     expect("a role naming an artifact nobody declared is refused",
            caps_refused('artifact = "lib-a"', 'artifact = "nope"', "the artifact is not declared"))

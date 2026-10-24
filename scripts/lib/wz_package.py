@@ -59,7 +59,7 @@ BUILT_FROM_KEYS = ["commit", "tree_clean"]
 PLATFORM_KEYS = ["id", "triple", "os", "libc", "network_stack", "support", "strongest_green_lane"]
 TOOLCHAIN_KEYS = ["rustc", "cc", "sdk"]
 ARTIFACT_KEYS = ["id", "name", "kind", "path", "sha256", "size", "elf", "abi", "provides", "features",
-                 "device_requires"]
+                 "resolved_features", "device_requires", "unassessed_features"]
 ELF_KEYS = ["class", "machine", "linking", "interpreter", "soname", "runpath", "rpath", "needed", "os_floor"]
 FLOOR_KEYS = ["glibc", "android_api_note", "symbol_version_tags"]
 
@@ -128,11 +128,32 @@ def provides_of(decl: dict, row: dict, features: list[str], measured: dict) -> l
     return out
 
 
+def runtime_requires(decl: dict, platform: dict, row: dict,
+                     resolved: dict[str, list[str]]) -> tuple[list[str] | None, list[str]]:
+    """An executable's facilities from the runtime features cargo resolved for it.
+
+    `None` is UNKNOWN (an enabled feature nobody assessed), with those features named beside it.
+    A facility the platform lacks is a refusal naming the features that ask for it.
+    """
+    needs, unassessed = wz_config.resolve_runtime_needs(decl, resolved)
+    provided = set(platform["os_provides"])
+    rows = {(r["package"], r["feature"]): set(r["os_needs"]) for r in decl["runtime_features"]}
+    for facility in sorted(set(decl["os_base"]) | {f for s in rows.values() for f in s}):
+        if facility in provided:
+            continue
+        asking = [f"{p}/{f}" for (p, f), s in sorted(rows.items())
+                  if facility in s and f in resolved.get(p, [])]
+        if facility in decl["os_base"]:
+            asking.insert(0, "base")
+        if asking:
+            raise Refusal(f"{row['id']} may ask for {facility}, which platform {platform['id']} does not "
+                          f"provide (asked by {', '.join(asking)})")
+    return needs, unassessed
+
+
 def device_requires(decl: dict, platform: dict, row: dict, features: list[str]) -> list[str] | None:
-    """The facilities a library's capabilities may ask for; None for an executable, which has no
-    capability mapping. A facility the platform lacks is a refusal naming the capability."""
-    if row["kind"] != "shared-library":
-        return None
+    """The facilities a library's capabilities may ask for. A facility the platform lacks is a
+    refusal naming the capability. (An executable's come from `runtime_requires`.)"""
     on = {f for f in features if f in decl["caps"]}
     gaps = wz_config.platform_gaps(decl, platform["id"], on)
     if gaps:
@@ -141,14 +162,24 @@ def device_requires(decl: dict, platform: dict, row: dict, features: list[str]) 
     return sorted(wz_config.os_needs_of(decl, on))
 
 
-def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: bytes, features: list[str]) -> dict:
+def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: bytes, features: list[str],
+                   resolved: dict[str, list[str]] | None = None) -> dict:
     """The manifest's entry for one built file, from its bytes: the same call serves `package`
-    (which writes it) and `--verify` (which compares it)."""
+    (which writes it) and `--verify` (which compares it).
+
+    `resolved` is the features cargo enabled in each package of the build (a build fact, recorded
+    in the manifest for the assessed packages only, so a re-measurement can recompute from it).
+    """
     measured = elf_facts.describe(blob)
     stamp = measured["abi_stamp"]
     if stamp["family"] != row["family"]:
         raise Refusal(f"{row['id']}'s stamp says family {stamp['family']!r}, not {row['family']!r}")
     features = sorted(features)
+    kept = {p: sorted(set((resolved or {}).get(p, []))) for p in wz_config.ASSESSED_PACKAGES}
+    if row["kind"] == "executable":
+        requires, unassessed = runtime_requires(decl, platform, row, kept)
+    else:
+        requires, unassessed = device_requires(decl, platform, row, features), []
     return {
         "id": row["id"],
         "name": pathlib.PurePosixPath(relpath).name,
@@ -160,7 +191,9 @@ def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: by
         "abi": {"family": stamp["family"], "revision": stamp["revision"], "layout": stamp["layout"]},
         "provides": provides_of(decl, row, features, measured),
         "features": features,
-        "device_requires": device_requires(decl, platform, row, features),
+        "resolved_features": kept,
+        "device_requires": requires,
+        "unassessed_features": unassessed,
     }
 
 
@@ -304,7 +337,7 @@ def verify_dir(out: pathlib.Path, decl: dict) -> list[str]:
             continue
         blob = file.read_bytes()
         try:
-            again = artifact_entry(decl, row, arow, art["path"], blob, art["features"])
+            again = artifact_entry(decl, row, arow, art["path"], blob, art["features"], art["resolved_features"])
         except (Refusal, elf_facts.ElfError) as err:
             findings.append(f"{who}: re-measuring {art['path']}: {err}")
             continue
@@ -370,8 +403,19 @@ def git_state() -> dict:
     return {"commit": commit or None, "tree_clean": dirty is not None and dirty.strip() == ""}
 
 
-def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str) -> tuple[pathlib.Path, list[str]]:
-    """Build one artifact; the file and the features cargo built it with."""
+def package_name(package_id: str) -> str:
+    """The package a cargo `package_id` names: `path+file:///x/crates/NAME#0.1.0`,
+    `path+file:///x/DIR#NAME@0.1.0` and the older `NAME 0.1.0 (path+...)` forms."""
+    if "#" in package_id:
+        head, tail = package_id.split("#", 1)
+        return tail.split("@", 1)[0] if "@" in tail else head.rstrip("/").rsplit("/", 1)[-1]
+    return package_id.split(" ", 1)[0]
+
+
+def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str
+                ) -> tuple[pathlib.Path, list[str], dict[str, list[str]]]:
+    """Build one artifact; the file, the features cargo built it with, and the features it
+    enabled in every package of the build (the union over that package's units)."""
     argv = ["cargo", "build", "-p", row["package"], "--message-format=json-render-diagnostics"]
     if cargo_profile == "release":
         argv.append("--release")
@@ -381,6 +425,7 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str) -> t
     if run.returncode != 0:
         raise RuntimeError(f"cargo build -p {row['package']} failed ({run.returncode})")
     found = None
+    resolved: dict[str, set[str]] = {}
     kind = "cdylib" if row["kind"] == "shared-library" else "bin"
     for line in run.stdout.splitlines():
         try:
@@ -390,7 +435,8 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str) -> t
         if msg.get("reason") != "compiler-artifact":
             continue
         pid = msg.get("package_id", "")
-        if f"/{row['package']}#" not in pid and not pid.startswith(f"{row['package']} "):
+        resolved.setdefault(package_name(pid), set()).update(msg.get("features", []))
+        if package_name(pid) != row["package"]:
             continue
         if kind not in msg["target"]["kind"]:
             continue
@@ -399,7 +445,7 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str) -> t
             found = (pathlib.Path(files[0]), list(msg["features"]))
     if found is None:
         raise RuntimeError(f"cargo built nothing that is the {row['kind']} of {row['package']}")
-    return found
+    return found[0], found[1], {p: sorted(f) for p, f in resolved.items()}
 
 
 def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.Path, cargo_profile: str) -> int:
@@ -415,7 +461,7 @@ def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.
         toolchain = {"rustc": rustc, "cc": cc_identity(platform, cross), "sdk": None}
         entries = []
         for row in rows:
-            built, features = cargo_build(platform, cross, row, cargo_profile)
+            built, features, resolved = cargo_build(platform, cross, row, cargo_profile)
             want = f"lib{row['file']}.so" if row["kind"] == "shared-library" else row["file"]
             if built.name != want:
                 raise RuntimeError(f"cargo built {built.name} for {row['id']}, the declaration says {want}")
@@ -423,7 +469,7 @@ def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.
             (out / sub).mkdir(exist_ok=True)
             shutil.copyfile(built, out / sub / want)
             blob = (out / sub / want).read_bytes()
-            entries.append(artifact_entry(decl, platform, row, f"{sub}/{want}", blob, features))
+            entries.append(artifact_entry(decl, platform, row, f"{sub}/{want}", blob, features, resolved))
         manifest = assemble(decl, platform, git_state(), toolchain, entries)
         (out / MANIFEST_NAME).write_text(render(manifest), encoding="utf-8")
         findings = verify_dir(out, decl)
@@ -508,6 +554,8 @@ def _selftest() -> int:
     demo_blob = _synthetic(demo, needs, roles=["publish", "subscribe"])
     pico_features = ["peer", "scout", "link-udp", "multi-thread"]
     demo_features = ["zenoh-config", "other"]
+    # What cargo enabled in the runtime for the default build: every feature the declaration assessed.
+    demo_resolved = {"wz-runtime-tokio": sorted(r["feature"] for r in decl["runtime_features"])}
     with tempfile.TemporaryDirectory(prefix="wz-package-") as work:
         out = pathlib.Path(work) / "out"
         (out / "lib").mkdir(parents=True)
@@ -516,7 +564,7 @@ def _selftest() -> int:
         (out / "bin" / "wz-ap-demo").write_bytes(demo_blob)
         entries = [
             artifact_entry(decl, platform, pico, "lib/libwz_capi_pico.so", pico_blob, pico_features),
-            artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, demo_features),
+            artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, demo_features, demo_resolved),
         ]
         manifest = assemble(decl, platform, {"commit": "0" * 40, "tree_clean": True},
                             {"rustc": "rustc 0", "cc": None, "sdk": None}, entries)
@@ -530,11 +578,23 @@ def _selftest() -> int:
                [p["role"] for p in demo_entry["provides"]] == ["session-node", "traffic-driver"])
         expect("the driver roles are the facts note's, in the manifest",
                demo_entry["provides"][1]["driver_roles"] == ["publish", "subscribe"])
-        expect("an executable has no device_requires and a library's is the union of what it may ask",
-               demo_entry["device_requires"] is None
-               and entries[0]["device_requires"] == ["entropy", "multicast", "sockets-tcp", "sockets-udp", "threads"])
+        expect("a library's device_requires is the union of what its capabilities may ask",
+               entries[0]["device_requires"]
+               == ["entropy", "interface-list", "multicast", "sockets-tcp", "sockets-udp", "threads"])
+        expect("an executable's is the base and what its assessed runtime features may ask",
+               demo_entry["device_requires"]
+               == ["entropy", "interface-list", "multicast", "sockets-tcp", "sockets-udp", "threads"]
+               and demo_entry["unassessed_features"] == [])
+        unknown = artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, demo_features,
+                                 {"wz-runtime-tokio": [*demo_resolved["wz-runtime-tokio"], "transport-link-ws"]})
+        expect("an enabled runtime feature nobody assessed makes it unknown and is named",
+               unknown["device_requires"] is None
+               and unknown["unassessed_features"] == ["wz-runtime-tokio/transport-link-ws"])
+        bare = artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, demo_features)
+        expect("an executable with no resolved runtime features asks only for the base",
+               bare["device_requires"] == sorted(decl["os_base"]))
         expect("the glibc floor is measured", entries[0]["elf"]["os_floor"]["glibc"] == "GLIBC_2.34")
-        no_config = artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, ["other"])
+        no_config = artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, ["other"], demo_resolved)
         expect("the session node is absent when its feature is off",
                [p["role"] for p in no_config["provides"]] == ["traffic-driver"])
 
@@ -608,6 +668,18 @@ def _selftest() -> int:
     refuses("a capability asking for a facility the platform lacks", "multicast (asked by multicast-transport",
             lambda: artifact_entry(lacking, lack_platform, pico, "lib/libwz_capi_pico.so", pico_blob,
                                    ["multicast-transport"]))
+    refuses("a runtime feature asking for a facility the platform lacks",
+            "multicast, which platform linux-x86_64-glibc does not provide (asked by wz-runtime-tokio/scouting-active, "
+            "wz-runtime-tokio/transport-multicast)",
+            lambda: artifact_entry(lacking, lack_platform, demo, "bin/wz-ap-demo", demo_blob, demo_features,
+                                   demo_resolved))
+    no_iface = copy.deepcopy(decl)
+    for p in no_iface["platforms"]:
+        if p["id"] == host:
+            p["os_provides"] = [f for f in p["os_provides"] if f != "interface-list"]
+    refuses("a platform with no interface listing cannot take a host build at all", "(asked by base",
+            lambda: artifact_entry(no_iface, next(p for p in no_iface["platforms"] if p["id"] == host), demo,
+                                   "bin/wz-ap-demo", demo_blob, demo_features, demo_resolved))
     expect("the same build is accepted where the platform gives the facility",
            artifact_entry(decl, platform, pico, "lib/libwz_capi_pico.so", pico_blob, ["multicast-transport"])
            ["device_requires"] is not None)

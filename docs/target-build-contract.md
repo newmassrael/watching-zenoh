@@ -215,17 +215,26 @@ answer is "unknown", not "none". They are not measured because measuring them me
 running the artifact. Memory and stack figures are not in schema 1: they are the
 resource gates of step 13 and the manifest names the profile they belong to.
 
-An executable's `device_requires` is `null`, and `null` means UNKNOWN, never "asks for
-nothing" and never a pass: a consumer that needs to know what the session node asks of
-a device is told that wz has not said. It is unknown because the facilities that matter
-there (a UDP link, multicast, a certificate file) are switched by features of the wz
-runtime the executable links, which cargo resolves and the executable's own four
-features do not list; its facility needs are therefore not a union over capabilities.
-What would make it derived is the same discipline applied one level down: the resolved
-features of the runtime package, each assessed for the facilities it may ask for, the
-way the 31 capabilities were, and a build's manifest listing the enabled features that
-are not assessed yet, so a consumer sees which part of the answer is missing instead of
-a flat unknown. That is a per-feature assessment of a large manifest and is not done.
+An executable's facilities are not a union over capabilities: the ones that matter there (a
+UDP link, multicast, a certificate file) are switched by features of the wz runtime the
+executable links, which cargo resolves and the executable's own four features do not list.
+So the same discipline is applied one level down. Each feature of `wz-runtime-tokio` is
+assessed in `[[runtime_feature]]` for the facilities it may ask for, `--check` holds every
+row to a feature the package still declares, and the entry records the features cargo
+enabled in that package (`resolved_features`, a build fact, kept so a re-measurement can
+recompute) and derives `device_requires` as the base plus those rows. A feature that is
+enabled and has no row makes `device_requires` `null`, which means UNKNOWN (never "asks
+for nothing", never a pass), and the features nobody assessed are listed in
+`unassessed_features`, so a consumer sees which part of the answer is missing. The
+core, the codecs and the switchboard schema take no facility of their own (their
+sources mention `std::net` and `SystemTime` only in documentation), so only the runtime
+package is assessed; a third-party crate's needs are the runtime's, which names the crate
+it pulls. The default `wz-ap-demo` enables 54 runtime features, all assessed, and is
+`entropy`, `interface-list`, `multicast`, `sockets-tcp`, `sockets-udp`, `threads`. Not
+assessed: any runtime feature outside those 54 (the TLS, QUIC, WebSocket, serial,
+storage and access-control planes), whose first use in an executable's build is an
+`unassessed_features` entry until its row is written. A row is an upper bound read from
+the feature's declaration and the modules it gates, not a measurement of a run.
 
 **T10. A refusal writes no manifest.** The entry exits non-zero with the reason on
 stderr and removes a partial output directory. The consumer's tool never meets a
@@ -314,7 +323,9 @@ keys, their order and their values are the entry's own output.
           "driver_roles": ["publish", "put", "delete", "subscribe", "get", "answer", "..."] }
       ],
       "features": ["..."],
-      "device_requires": null
+      "resolved_features": { "wz-runtime-tokio": ["codec-close", "...", "transport-unicast"] },
+      "device_requires": ["entropy", "interface-list", "multicast", "sockets-tcp", "sockets-udp", "threads"],
+      "unassessed_features": []
     }
   ]
 }
@@ -324,7 +335,8 @@ What the example shows about this build, and does not: the default `wz-ap-demo` 
 `session-node` role because `zenoh-config` is off in `preset-ap-client`, and its driver
 roles are the ones its table marks available, read from the file (its facts note). A
 library's `device_requires` is the union of what the capabilities its features turn on
-may ask for; an executable's is `null` because no capability mapping reaches it. The
+may ask for; an executable's is the base plus what the runtime features cargo resolved
+for it may ask for, or `null` with the unassessed ones named (see T9). The
 glibc floor `GLIBC_2.39` is the host's own, which is the measured reason a library built
 on this host does not run on an older glibc: the manifest of a cross build records the
 SDK's. The entry does not bundle yet, so a NEEDED nobody assumed is a refusal and `provided_by`
