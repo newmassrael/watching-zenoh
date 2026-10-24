@@ -247,6 +247,7 @@ def decl_of(data: dict) -> dict:
         "artifacts": list(data["artifact"]),
         "roles": list(data["role"]),
         "runtime_features": list(data["runtime_feature"]),
+        "parity": list(data["parity"]),
     }
 
 
@@ -256,13 +257,15 @@ def validate_decl(data: dict) -> list[str]:
         out.append(f"schema_version is {data.get('schema_version')!r}, this reader is {SCHEMA_VERSION}")
     if not isinstance(data.get("catalog_version"), int):
         out.append("catalog_version is not an integer")
-    for kind in ("base", "capability", "limit", "os", "platform", "artifact", "role", "runtime_feature"):
+    for kind in ("base", "capability", "limit", "os", "platform", "artifact", "role", "runtime_feature",
+                 "parity"):
         if kind not in data:
             out.append(f"the declaration has no `{kind}`")
     if out:
         return out
     out += validate_os(data)
     out += validate_runtime_features(data)
+    out += validate_parity(data)
     out += validate_caps(data)
     out += validate_platforms(data)
     out += validate_artifacts(data)
@@ -446,6 +449,10 @@ OS_FACILITIES = (
 # and a link), and a third-party crate's needs are the runtime's, which names the crate it pulls.
 ASSESSED_PACKAGES = ("wz-runtime-tokio",)
 RUNTIME_FEATURE_KEYS = {"package", "feature", "os_needs", "help"}
+# What a consumer's placing path says it supports (`[[parity]]`), each held to what wz declares for it:
+# the capabilities of the graph and the assessed runtime features. A need that names neither is a row
+# that holds nothing; one that names a capability or feature wz no longer declares is a finding.
+PARITY_KEYS = {"need", "capabilities", "runtime_features", "help"}
 PLATFORM_KEYS = {
     "id", "triple", "os", "libc", "network_stack", "std", "toolchain_env_extra",
     "os_provides", "system_assumed", "lane", "support", "sdk_kind", "help",
@@ -634,6 +641,35 @@ def validate_runtime_features(data: dict) -> list[str]:
         seen.add((r.get("package"), r.get("feature")))
         if "os_needs" in r:
             out += facility_findings(who, r["os_needs"], "os_needs")
+    return out
+
+
+def validate_parity(data: dict) -> list[str]:
+    out: list[str] = []
+    caps = {c["id"] for c in data["capability"]}
+    rows = {(r["package"], r["feature"]) for r in data["runtime_feature"] if "package" in r and "feature" in r}
+    seen = set()
+    for r in data["parity"]:
+        who = f"parity {r.get('need')!r}"
+        for key in sorted(set(r) - PARITY_KEYS):
+            out.append(f"{who} has the unknown key `{key}`")
+        for key in sorted(PARITY_KEYS - set(r)):
+            out.append(f"{who} has no `{key}`")
+        if r.get("need") in seen:
+            out.append(f"{who} is declared twice")
+        seen.add(r.get("need"))
+        for key in ("capabilities", "runtime_features"):
+            if key in r and (not isinstance(r[key], list) or not all(isinstance(x, str) for x in r[key])):
+                out.append(f"{who}: `{key}` is not a list of names")
+        if isinstance(r.get("capabilities"), list) and isinstance(r.get("runtime_features"), list):
+            if not r["capabilities"] and not r["runtime_features"]:
+                out.append(f"{who} names no capability and no runtime feature, so it holds nothing")
+            for cid in r["capabilities"]:
+                if cid not in caps:
+                    out.append(f"{who} names the capability `{cid}`, which is not declared")
+            for feature in r["runtime_features"]:
+                if ("wz-runtime-tokio", feature) not in rows:
+                    out.append(f"{who} names the runtime feature `{feature}`, which has no [[runtime_feature]] row")
     return out
 
 
@@ -1803,6 +1839,12 @@ feature = "f1"
 os_needs = ["sockets-udp"]
 help = "A sample feature."
 
+[[parity]]
+need = "sample-need"
+capabilities = ["a"]
+runtime_features = ["f1"]
+help = "A sample need."
+
 [[artifact]]
 id = "lib-a"
 package = "pkg-a"
@@ -2213,6 +2255,24 @@ def cmd_selftest() -> int:
     expect("a declaration with no runtime feature is refused",
            any("no `runtime_feature`" in p for p in validate_decl(read_decl_toml(
                SAMPLE[: SAMPLE.index("[[runtime_feature]]")] + SAMPLE[SAMPLE.index("[[artifact]]"):]))))
+    # A consumer's placing path held to what wz declares.
+    expect("a need naming a capability wz does not declare is refused",
+           caps_refused('capabilities = ["a"]\nruntime_features = ["f1"]', 'capabilities = ["zz"]\nruntime_features = ["f1"]',
+                        "which is not declared"))
+    expect("a need naming a runtime feature nobody assessed is refused",
+           caps_refused('capabilities = ["a"]\nruntime_features = ["f1"]', 'capabilities = ["a"]\nruntime_features = ["f9"]',
+                        "has no [[runtime_feature]] row"))
+    expect("a need that names nothing holds nothing and is refused",
+           caps_refused('capabilities = ["a"]\nruntime_features = ["f1"]', "capabilities = []\nruntime_features = []",
+                        "holds nothing"))
+    expect("a need with an unknown key is refused",
+           caps_refused('need = "sample-need"', 'need = "sample-need"\nwho = "x"', "unknown key `who`"))
+    expect("a need declared twice is refused",
+           any("declared twice" in p for p in validate_decl(read_decl_toml(
+               SAMPLE + SAMPLE[SAMPLE.index("[[parity]]"):SAMPLE.index("[[artifact]]")]))))
+    expect("a declaration with no parity row is refused",
+           any("no `parity`" in p for p in validate_decl(read_decl_toml(
+               SAMPLE[: SAMPLE.index("[[parity]]")] + SAMPLE[SAMPLE.index("[[artifact]]"):]))))
     rdecl = decl_of(read_decl_toml(SAMPLE))
     expect("an assessed feature adds its facilities to the base",
            resolve_runtime_needs(rdecl, {"wz-runtime-tokio": ["f1"]})

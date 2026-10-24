@@ -540,6 +540,56 @@ feature = "transport-link-udp"
 os_needs = ["sockets-udp", "interface-list"]
 help = "The udp/ link: a UDP socket, with the interface list for a locator's #iface=."
 
+# ─── What a consumer's placing path says it supports (docs/target-build-contract.md section 5a) ──
+#
+# The lab's node-placing path (a consumer's deployment tool; not named here) reported the node
+# behaviours it supports, and the owner's directive is that wz supports every one of them. Each is
+# held to what wz declares for it: the capabilities of the graph and the assessed runtime features.
+# `--check` fails when a row names one wz no longer declares, so a need cannot lose its support
+# without this file saying so. The reverse (what wz has that the path does not place) needs no row.
+# The path does not place a router, scouting or the admin keys, and those are not needs.
+[[parity]]
+need = "client-mode"
+capabilities = []
+runtime_features = ["session-unicast-open"]
+help = "A node that opens a session to a router: the default role, with no capability to turn on."
+
+[[parity]]
+need = "peer-links-over-tcp"
+capabilities = ["peer"]
+runtime_features = ["transport-link-tcp", "session-unicast-open", "session-unicast-accept"]
+help = "A TCP link dialled and a TCP link listened on."
+
+[[parity]]
+need = "udp-multicast-group-join"
+capabilities = ["multicast-transport"]
+runtime_features = ["transport-multicast"]
+help = "A UDP multicast group a node joins."
+
+[[parity]]
+need = "publish-subscribe"
+capabilities = []
+runtime_features = ["pubsub-put", "declare-subscriber"]
+help = "Publishers and subscribers: part of every build, with no capability to turn on."
+
+[[parity]]
+need = "liveliness"
+capabilities = ["liveliness"]
+runtime_features = ["liveliness-token", "liveliness-subscriber"]
+help = "Liveliness tokens and their subscribers."
+
+[[parity]]
+need = "queryable-and-querier"
+capabilities = ["query", "queryable"]
+runtime_features = ["query-get", "query-queryable"]
+help = "Queryables that answer and queriers that ask."
+
+[[parity]]
+need = "fragmented-messages"
+capabilities = []
+runtime_features = ["transport-fragmentation", "reassembly"]
+help = "Messages larger than one batch, split and put back together."
+
 # ─── Artifacts and roles (docs/target-build-contract.md T8) ───────────────────────────────────
 #
 # The three files the entry packages. A library names the ABI whose capability graph resolves what

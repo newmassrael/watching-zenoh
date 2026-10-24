@@ -13823,6 +13823,21 @@ layer_c1st_abi_stamp() {
     [ "$rc" -eq 0 ] && { cmp "$work/a/wz-target-manifest.json" "$work/b/wz-target-manifest.json" \
         || { echo "  C1st FAIL: two packagings of one input wrote different manifests"; rc=1; }; }
     [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/a" || rc=1; }
+    # A registered profile as the input (T13): the two libraries built from a profile's capabilities,
+    # twice, the same manifest bytes, then verified, which resolves the profile again and holds each
+    # library to what it turns on and leaves off. The interpreter is provisioned here (the script is
+    # idempotent and hash-pinned) rather than skipped for: a leg that declined without it would be a
+    # verdict nobody could reach.
+    if [ "$rc" -eq 0 ]; then
+        bash scripts/provision-kconfiglib.sh >/dev/null || rc=1
+    fi
+    local prof=(python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc
+        --artifact capi-pico --artifact capi-c --profile host-client-tcp-query)
+    [ "$rc" -eq 0 ] && { "${prof[@]}" --out "$work/pa" || rc=1; }
+    [ "$rc" -eq 0 ] && { "${prof[@]}" --out "$work/pb" || rc=1; }
+    [ "$rc" -eq 0 ] && { cmp "$work/pa/wz-target-manifest.json" "$work/pb/wz-target-manifest.json" \
+        || { echo "  C1st FAIL: two packagings of one profile wrote different manifests"; rc=1; }; }
+    [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/pa" || rc=1; }
     rm -rf "$work"
     return "$rc"
 }

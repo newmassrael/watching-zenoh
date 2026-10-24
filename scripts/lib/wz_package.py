@@ -55,7 +55,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 MANIFEST_NAME = "wz-target-manifest.json"
 MANIFEST_SCHEMA = 1
 
-TOP_KEYS = ["schema", "catalog_version", "built_from", "platform", "toolchain", "system_assumed", "artifacts"]
+TOP_KEYS = ["schema", "catalog_version", "built_from", "platform", "profile", "toolchain", "system_assumed",
+            "artifacts"]
+PROFILE_KEYS = ["id", "base", "capabilities", "limits"]
+PROFILES_DIR = ROOT / "configs" / "profiles"
 BUILT_FROM_KEYS = ["commit", "tree_clean"]
 PLATFORM_KEYS = ["id", "triple", "os", "libc", "network_stack", "support", "strongest_green_lane"]
 TOOLCHAIN_KEYS = ["rustc", "cc", "sdk"]
@@ -220,7 +223,74 @@ def preflight(decl: dict, platform_id: str, artifact_ids: list[str]) -> tuple[di
     return platform, sorted(rows, key=lambda r: order[r["id"]])
 
 
-def assemble(decl: dict, platform: dict, built_from: dict, toolchain: dict, entries: list[dict]) -> dict:
+# ---------------------------------------------------------------------------
+# A registered profile as an input (docs/target-build-contract.md T13)
+# ---------------------------------------------------------------------------
+
+
+def resolve_profile(decl: dict, profile_id: str) -> dict:
+    """What a registered profile (`configs/profiles/<id>.conf`) asks of a build: its base original,
+    the capabilities that are on once the original's defaults and the profile are merged, and the
+    limits it sets off their defaults. Resolved strictly by the pinned Kconfig interpreter (C9)."""
+    if not wz_config.PLATFORM_ID_RE.match(profile_id):
+        raise Refusal(f"`{profile_id}` is not the name of a registered profile")
+    path = PROFILES_DIR / f"{profile_id}.conf"
+    if not path.is_file():
+        known = sorted(p.stem for p in PROFILES_DIR.glob("*.conf"))
+        raise Refusal(f"no registered profile `{profile_id}` (known: {', '.join(known)}); the entry takes a "
+                      "name, not a path, so a profile is a versioned contract and not a file anyone wrote")
+    if wz_config.kconfiglib_module() is None:
+        raise Refusal("a profile is resolved by the pinned Kconfig interpreter, which is not installed: "
+                      "run scripts/provision-kconfiglib.sh")
+    try:
+        kconf = wz_config.resolve([path])
+    except wz_config.PresetError as err:
+        raise Refusal(f"profile {profile_id} does not resolve: {err}") from err
+    limits = {}
+    for line in wz_config.resolved_limit_env(decl, kconf):
+        key, _, value = line.partition("=")
+        limits[key] = int(value)
+    return {
+        "id": profile_id,
+        "base": wz_config.preset_header(path.read_text(encoding="utf-8")).get("base"),
+        "capabilities": sorted(wz_config.resolved_caps(decl, kconf)),
+        "limits": dict(sorted(limits.items())),
+    }
+
+
+def profile_cargo_args(decl: dict, row: dict, view: dict) -> list[str]:
+    """The cargo arguments a library artifact is built with under a profile: no default features
+    and exactly the features the capability graph gives its ABI for the profile's capabilities."""
+    if row["kind"] != "shared-library":
+        raise Refusal(f"profile {view['id']} cannot apply to {row['id']}: a profile resolves to the "
+                      "features of an ABI library, and an executable has no such mapping")
+    return wz_config.cargo_args(decl, row["abi"], set(view["capabilities"])).split()
+
+
+def profile_findings(decl: dict, view: dict, entries: list[dict]) -> list[str]:
+    """What is wrong with the artifacts a profile built: a capability the profile turns on that a
+    library lacks, or one it leaves off that the library has."""
+    out = []
+    on = set(view["capabilities"])
+    for art in entries:
+        row = next((a for a in decl["artifacts"] if a["id"] == art["id"]), None)
+        if row is None or row["kind"] != "shared-library":
+            out.append(f"artifact {art['id']!r}: a profile does not apply to it")
+            continue
+        abi = row["abi"]
+        built = set(art["features"])
+        want = set(wz_config.features_for(decl, abi, on))
+        for feature in sorted(want - built):
+            out.append(f"artifact {art['id']!r} lacks the feature `{feature}` profile {view['id']} asks for")
+        closed = wz_config.closure(decl["caps"], on)
+        for cid in sorted(c for c in built
+                          if c in decl["caps"] and abi in decl["caps"][c]["abis"] and c not in closed):
+            out.append(f"artifact {art['id']!r} has the capability `{cid}`, which profile {view['id']} leaves off")
+    return out
+
+
+def assemble(decl: dict, platform: dict, built_from: dict, toolchain: dict, entries: list[dict],
+             profile: dict | None = None) -> dict:
     return {
         "schema": MANIFEST_SCHEMA,
         "catalog_version": decl["catalog_version"],
@@ -234,6 +304,7 @@ def assemble(decl: dict, platform: dict, built_from: dict, toolchain: dict, entr
             "support": platform["support"],
             "strongest_green_lane": platform["lane"],
         },
+        "profile": profile,
         "toolchain": toolchain,
         "system_assumed": list(platform["system_assumed"]),
         "artifacts": entries,
@@ -268,6 +339,8 @@ def shape_findings(manifest: object) -> list[str]:
         return out
     keys("built_from", manifest["built_from"], BUILT_FROM_KEYS)
     keys("platform", manifest["platform"], PLATFORM_KEYS)
+    if manifest["profile"] is not None:
+        keys("profile", manifest["profile"], PROFILE_KEYS)
     keys("toolchain", manifest["toolchain"], TOOLCHAIN_KEYS)
     if not isinstance(manifest["artifacts"], list) or not manifest["artifacts"]:
         out.append("artifacts is not a non-empty list")
@@ -286,13 +359,14 @@ def safe_relpath(path: str) -> bool:
     return bool(path) and not path.startswith("/") and ".." not in path.split("/") and "\\" not in path
 
 
-def verify_dir(out: pathlib.Path, decl: dict) -> list[str]:
+def verify_dir(out: pathlib.Path, decl: dict, resolver=None) -> list[str]:
     """What is wrong with a packaged directory, from its files and the declaration.
 
     Every measured field is read again from the file and compared with the manifest, so a file
     replaced after packaging, a manifest edited by hand and a declaration that moved are each a
     finding, and a file the manifest does not mention is one too.
     """
+    resolver = resolver or resolve_profile
     path = out / MANIFEST_NAME
     if not path.is_file():
         return [f"{path} is missing"]
@@ -354,6 +428,19 @@ def verify_dir(out: pathlib.Path, decl: dict) -> list[str]:
             if again[key] != art[key]:
                 findings.append(f"{who}: {key} is {art[key]!r} in the manifest and {again[key]!r} "
                                 f"read from {art['path']} now")
+    profile = manifest["profile"]
+    if profile is not None:
+        # A profile is a registered contract, so it is resolved again from its file: a manifest that
+        # names a profile the tree no longer resolves the same way, or artifacts that no longer
+        # hold what the profile turns on and off, are findings.
+        try:
+            want = resolver(decl, profile["id"])
+        except Refusal as err:
+            findings.append(f"profile {profile['id']!r}: {err}")
+        else:
+            if profile != want:
+                findings.append(f"profile {profile} differs from what {profile['id']} resolves to now {want}")
+            findings += profile_findings(decl, want, manifest["artifacts"])
     extra = sorted(str(p.relative_to(out)) for p in out.rglob("*")
                    if p.is_file() and p.name != MANIFEST_NAME and str(p.relative_to(out)) not in listed)
     for name in extra:
@@ -459,16 +546,22 @@ def package_name(package_id: str) -> str:
     return package_id.split(" ", 1)[0]
 
 
-def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str
+def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
+                extra_args: list[str] | None = None, extra_env: dict[str, str] | None = None
                 ) -> tuple[pathlib.Path, list[str], dict[str, list[str]]]:
     """Build one artifact; the file, the features cargo built it with, and the features it
-    enabled in every package of the build (the union over that package's units)."""
+    enabled in every package of the build (the union over that package's units).
+
+    `extra_args` and `extra_env` are what a profile adds: the feature selection and the limits.
+    """
     argv = ["cargo", "build", "-p", row["package"], "--message-format=json-render-diagnostics"]
     if cargo_profile == "release":
         argv.append("--release")
     if cross:
         argv += ["--target", platform["triple"]]
-    run = subprocess.run(argv, cwd=ROOT / "crates", stdout=subprocess.PIPE, text=True, check=False)
+    argv += extra_args or []
+    run = subprocess.run(argv, cwd=ROOT / "crates", stdout=subprocess.PIPE, text=True, check=False,
+                         env={**os.environ, **(extra_env or {})})
     if run.returncode != 0:
         raise RuntimeError(f"cargo build -p {row['package']} failed ({run.returncode})")
     found = None
@@ -495,8 +588,15 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str
     return found[0], found[1], {p: sorted(f) for p, f in resolved.items()}
 
 
-def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.Path, cargo_profile: str) -> int:
+def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.Path, cargo_profile: str,
+            profile_id: str | None = None) -> int:
     platform, rows = preflight(decl, platform_id, artifact_ids)
+    view = None
+    if profile_id is not None:
+        # Resolved and applied-or-refused before anything is built or created.
+        view = resolve_profile(decl, profile_id)
+        for row in rows:
+            profile_cargo_args(decl, row, view)
     rustc, host = rustc_identity()
     cross = platform["triple"] != host
     check_toolchain_env(platform, cross)
@@ -508,7 +608,10 @@ def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.
         toolchain = {"rustc": rustc, "cc": cc_identity(platform, cross), "sdk": sdk_identity(platform, cross)}
         entries = []
         for row in rows:
-            built, features, resolved = cargo_build(platform, cross, row, cargo_profile)
+            built, features, resolved = cargo_build(
+                platform, cross, row, cargo_profile,
+                profile_cargo_args(decl, row, view) if view else None,
+                {k: str(v) for k, v in view["limits"].items()} if view else None)
             want = f"lib{row['file']}.so" if row["kind"] == "shared-library" else row["file"]
             if built.name != want:
                 raise RuntimeError(f"cargo built {built.name} for {row['id']}, the declaration says {want}")
@@ -517,7 +620,7 @@ def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.
             shutil.copyfile(built, out / sub / want)
             blob = (out / sub / want).read_bytes()
             entries.append(artifact_entry(decl, platform, row, f"{sub}/{want}", blob, features, resolved))
-        manifest = assemble(decl, platform, git_state(), toolchain, entries)
+        manifest = assemble(decl, platform, git_state(), toolchain, entries, view)
         (out / MANIFEST_NAME).write_text(render(manifest), encoding="utf-8")
         findings = verify_dir(out, decl)
         if findings:
@@ -732,6 +835,68 @@ def _selftest() -> int:
            artifact_entry(decl, platform, pico, "lib/libwz_capi_pico.so", pico_blob, ["multicast-transport"])
            ["device_requires"] is not None)
 
+    # A registered profile as an input (T13).
+    view = {"id": "p-query", "base": "zenoh-c", "capabilities": ["query"], "limits": {"WZ_LIMIT_X": 7}}
+    pico_args = profile_cargo_args(decl, pico, view)
+    expect("a profile gives a library no default features and the graph's features for it",
+           pico_args[:2] == ["--no-default-features", "--features"] and "query" in pico_args[2].split(","))
+    refuses("a profile on an executable", "an executable has no such mapping",
+            lambda: profile_cargo_args(decl, demo, view))
+    wanted = sorted(wz_config.features_for(decl, "pico", {"query"}))
+    on_view = artifact_entry(decl, platform, pico, "lib/libwz_capi_pico.so", pico_blob, wanted)
+    expect("a library built with what the profile asks has no profile finding",
+           profile_findings(decl, view, [on_view]) == [])
+    short = artifact_entry(decl, platform, pico, "lib/libwz_capi_pico.so", pico_blob,
+                           [f for f in wanted if f != "query"])
+    expect("a library lacking a feature the profile asks for is a finding",
+           any("lacks the feature `query`" in f for f in profile_findings(decl, view, [short])))
+    extra = artifact_entry(decl, platform, pico, "lib/libwz_capi_pico.so", pico_blob, [*wanted, "peer"])
+    expect("a library with a capability the profile leaves off is a finding",
+           any("has the capability `peer`" in f for f in profile_findings(decl, view, [extra])))
+    expect("a profile does not apply to an executable's entry",
+           any("does not apply" in f for f in profile_findings(
+               decl, view, [artifact_entry(decl, platform, demo, "bin/wz-ap-demo", demo_blob, demo_features,
+                                           demo_resolved)])))
+    with tempfile.TemporaryDirectory(prefix="wz-package-profile-") as work:
+        pdir = pathlib.Path(work) / "out"
+        (pdir / "lib").mkdir(parents=True)
+        (pdir / "lib" / "libwz_capi_pico.so").write_bytes(pico_blob)
+        pmanifest = assemble(decl, platform, {"commit": "0" * 40, "tree_clean": True},
+                             {"rustc": "rustc 0", "cc": None, "sdk": None}, [on_view], view)
+        expect("a manifest that names a profile has the profile's keys", shape_findings(pmanifest) == [])
+        (pdir / MANIFEST_NAME).write_text(render(pmanifest), encoding="utf-8")
+        same = lambda _d, _i: copy.deepcopy(view)  # noqa: E731
+        expect("a directory built under a profile verifies against its resolution",
+               verify_dir(pdir, decl, same) == [])
+        moved = lambda _d, _i: {**view, "capabilities": ["query", "queryable"]}  # noqa: E731
+        expect("a profile that now resolves differently is a finding",
+               any("differs from what" in f for f in verify_dir(pdir, decl, moved)))
+
+        def gone(_d, _i):
+            raise Refusal("no registered profile")
+
+        expect("a profile the tree no longer has is a finding",
+               any("profile 'p-query'" in f for f in verify_dir(pdir, decl, gone)))
+        data = json.loads((pdir / MANIFEST_NAME).read_text())
+        data["profile"]["extra"] = 1
+        (pdir / MANIFEST_NAME).write_text(json.dumps(data))
+        expect("a profile with an extra key is a shape finding",
+               any("profile has the keys" in f for f in verify_dir(pdir, decl, same)))
+    if wz_config.kconfiglib_module() is not None:
+        real = resolve_profile(decl, "host-client-tcp-query")
+        expect("a registered profile resolves strictly to its capabilities",
+               "query" in real["capabilities"] and "peer" not in real["capabilities"]
+               and real["base"] == "zenoh-c" and real["id"] == "host-client-tcp-query")
+        refuses("a profile named by a path", "not the name of a registered profile",
+                lambda: resolve_profile(decl, "../configs/profiles/host-client-tcp-query"))
+        refuses("a profile nobody registered", "no registered profile", lambda: resolve_profile(decl, "nope"))
+        expect("a resolved profile builds the libraries it can",
+               profile_cargo_args(decl, next(a for a in decl["artifacts"] if a["id"] == "capi-c"), real)[0]
+               == "--no-default-features")
+    else:
+        print("wz-package selftest: the real-profile arms SKIP, kconfiglib is absent "
+              "(scripts/provision-kconfiglib.sh)")
+
     # Which cross platforms a machine can package.
     env_android = {name: "x" for name in wz_config.toolchain_env(
         next(p for p in decl["platforms"] if p["id"] == "android-arm64"))}
@@ -834,7 +999,7 @@ def main(argv: list[str]) -> int:
         if not findings:
             print(f"  wz-package: {argv[1]} verifies")
         return 1 if findings else 0
-    platform_id = out = None
+    platform_id = out = profile_id = None
     artifact_ids: list[str] = []
     cargo_profile = "release"
     it = iter(argv)
@@ -847,6 +1012,8 @@ def main(argv: list[str]) -> int:
             out = next(it, None)
         elif arg == "--cargo-profile":
             cargo_profile = next(it, "")
+        elif arg == "--profile":
+            profile_id = next(it, None)
         else:
             print(f"wz-package: unknown argument {arg}", file=sys.stderr)
             return 2
@@ -854,7 +1021,7 @@ def main(argv: list[str]) -> int:
         print(__doc__.split("\n\n")[0], file=sys.stderr)
         return 2
     try:
-        return package(decl, platform_id, artifact_ids, pathlib.Path(out), cargo_profile)
+        return package(decl, platform_id, artifact_ids, pathlib.Path(out), cargo_profile, profile_id)
     except Refusal as err:
         print(f"wz-package: REFUSED -- {err}", file=sys.stderr)
         return 2
