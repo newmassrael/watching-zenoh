@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""Facts read from an ELF file's bytes, without running it.
+"""R3521 (no register item) -- facts read from an ELF file's bytes, without running it.
 
 `docs/target-build-contract.md` T4: a tool that describes an artifact for a device it is not built
 on cannot call the artifact, so every fact it reports is read from the file. This module is that

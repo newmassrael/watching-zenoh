@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""The ABI stamp of every shipped artifact, read from the BUILT artifact and held to a pin.
+"""R3521 (no register item) -- the ABI stamp of every shipped artifact, read from the BUILT artifact
+and held to a pin.
 
 `docs/target-build-contract.md` T6: each artifact carries `{family, revision, layout}` as an ELF
 note (`wz-abi-stamp`), so a tool describing it for a device it cannot run on reads the number from

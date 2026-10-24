@@ -6,8 +6,8 @@
 //!
 //! # Why a note, and why this form
 //!
-//! A tool that describes an artifact for a device it is not built on (`docs/target-build-contract.md`)
-//! cannot call a door of it: an artifact built for another operating system does not run here.
+//! A tool that describes an artifact for a device unlike its own host (`docs/target-build-contract.md`)
+//! cannot call a door of it: an artifact compiled for another operating system does not run here.
 //! The number a consumer needs has to be in the bytes. An ELF note is the form every ELF reader
 //! already has a place for, it is not a symbol (so stripping a binary does not remove it, and an
 //! executable does not have to export it), and it is a section of its own that a reader finds by

@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""The entry of `docs/target-build-contract.md`: build for a platform, describe what was built.
+"""R3521 (no register item) -- the entry of `docs/target-build-contract.md`: build for a platform,
+describe what was built.
 
     wz_package.py --platform ID --artifact ID... --out DIR [--cargo-profile release|debug]
     wz_package.py --verify DIR
@@ -279,8 +280,10 @@ def shape_findings(manifest: object) -> list[str]:
 
 
 def safe_relpath(path: str) -> bool:
-    p = pathlib.PurePosixPath(path)
-    return bool(path) and not p.is_absolute() and ".." not in p.parts and "\\" not in path
+    """A manifest path is a relative, `/`-separated string that stays inside the directory. It is
+    judged as text (a manifest's path is not a place on this machine's filesystem), so no walked
+    root's position can change the answer."""
+    return bool(path) and not path.startswith("/") and ".." not in path.split("/") and "\\" not in path
 
 
 def verify_dir(out: pathlib.Path, decl: dict) -> list[str]:
