@@ -281626,6 +281626,42 @@
         "Read the hosted runs of this push per job, Layer E18 first; it now links upstream's keyexpr with `keyed-set` and `hashbrown`."
       ]
     },
+    "Round 3501": {
+      "decision_summary": "The pico C session handle is the ABI's own and holds the engine's session behind the port (design note D7): z_open stores a PicoSessionHandle holding a Box<dyn SessionDrive> (close, the read task, read, spin, keep-alive, the zid) beside the ABI's per-session state (role, clock, connectivity listeners, admin space), which no longer rides in the engine as an untyped extension. The tokio engine makes the drive in its own crate (into_drive, inline(never)) and frees the session through it, so SessionState::release goes. Modules of capabilities the port does not carry yet reach the tokio session by downcast. Measured cost on top of the engine port: pico-client +2.5 KB, pico-default +1.9 KB. D8 is recorded: the cooperative engine earns Send + Sync with one session lock and runs C callbacks with it released. zp_read now hands single_read to the engine, so its unread reason moves to the tokio engine's read.",
+      "changes_bullets": [
+        "wz-capi-port: drive::SessionDrive, CalledFromReadTask, SessionClosed.",
+        "wz-capi-core: SessionDrive for SessionState and into_drive (inline(never)); CalledFromReadTask is the port's; SessionState::release removed.",
+        "wz-capi-pico: session::PicoSessionHandle (drive plus PicoSessionExt), session_handle, tokio_session; z_open, z_close, z_session_drop, zp_read, zp_spin_once, zp_send_keep_alive, the read task, zid and batch calls go through the drive; admin_space and connectivity read the handle's extension; engine_of, engine_ref and PicoSession::of take the handle.",
+        "scripts/lib/pico_option_field_reader_gate.py: zp_read_options_t.single_read struck from the unread list (now read).",
+        "docs/capi-pico-on-coop-engine.md: D7, D8, status."
+      ],
+      "verification_bullets": [
+        "On the build host: fmt; clippy -D warnings for wz-capi-port (all targets), wz-capi-core (all targets), wz-capi-c (all targets), wz-capi-pico (all targets, pico-client, pico-client with peer); wz-capi-pico tests (31 targets, 158 passed) and wz-capi-core lib tests (91 passed); C1bz for wz-capi-port, wz-capi-pico, wz-capi-core and wz-capi-c within budget (the first run found two new links from public session_state docs to the private session_handle, removed); capability_cost_gate --check: every case within budget, exports unchanged (pico-client 1,806,821 against 1,804,297 before, pico-default 4,236,550 against 4,234,642). Locally the hook's 110 round-fed static gates pass; the first run failed pico_option_field_reader_gate (single_read listed but now read), fixed in the same commit."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next: the cooperative engine (D8) over ClientNode and PosixLinks as a second SessionDrive and SessionEngine, selectable beside the tokio one, with a size-gate case beside pico-client and round trips against a pinned zenohd and pico. Rule kept: an ABI crate never coerces an engine type to a port trait object nor drops a boxed engine session; the engine crate hands out as_engine, engine_ref and into_drive (watch pico-client and pico-default text against origin). Read the hosted CI of d06e38645 and of this push."
+      ],
+      "publishable_decision_summary": "The pico C session handle is the ABI's own and holds the engine's session behind the port (design note D7): z_open stores a PicoSessionHandle holding a Box<dyn SessionDrive> (close, the read task, read, spin, keep-alive, the zid) beside the ABI's per-session state (role, clock, connectivity listeners, admin space), which no longer rides in the engine as an untyped extension. The tokio engine makes the drive in its own crate (into_drive, inline(never)) and frees the session through it, so SessionState::release goes. Modules of capabilities the port does not carry yet reach the tokio session by downcast. Measured cost on top of the engine port: pico-client +2.5 KB, pico-default +1.9 KB. D8 is recorded: the cooperative engine earns Send + Sync with one session lock and runs C callbacks with it released. zp_read now hands single_read to the engine, so its unread reason moves to the tokio engine's read.",
+      "publishable_changes_bullets": [
+        "wz-capi-port: drive::SessionDrive, CalledFromReadTask, SessionClosed.",
+        "wz-capi-core: SessionDrive for SessionState and into_drive (inline(never)); CalledFromReadTask is the port's; SessionState::release removed.",
+        "wz-capi-pico: session::PicoSessionHandle (drive plus PicoSessionExt), session_handle, tokio_session; z_open, z_close, z_session_drop, zp_read, zp_spin_once, zp_send_keep_alive, the read task, zid and batch calls go through the drive; admin_space and connectivity read the handle's extension; engine_of, engine_ref and PicoSession::of take the handle.",
+        "scripts/lib/pico_option_field_reader_gate.py: zp_read_options_t.single_read struck from the unread list (now read).",
+        "docs/capi-pico-on-coop-engine.md: D7, D8, status."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: fmt; clippy -D warnings for wz-capi-port (all targets), wz-capi-core (all targets), wz-capi-c (all targets), wz-capi-pico (all targets, pico-client, pico-client with peer); wz-capi-pico tests (31 targets, 158 passed) and wz-capi-core lib tests (91 passed); C1bz for wz-capi-port, wz-capi-pico, wz-capi-core and wz-capi-c within budget (the first run found two new links from public session_state docs to the private session_handle, removed); capability_cost_gate --check: every case within budget, exports unchanged (pico-client 1,806,821 against 1,804,297 before, pico-default 4,236,550 against 4,234,642). Locally the hook's 110 round-fed static gates pass; the first run failed pico_option_field_reader_gate (single_read listed but now read), fixed in the same commit."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next: the cooperative engine (D8) over ClientNode and PosixLinks as a second SessionDrive and SessionEngine, selectable beside the tokio one, with a size-gate case beside pico-client and round trips against a pinned zenohd and pico. Rule kept: an ABI crate never coerces an engine type to a port trait object nor drops a boxed engine session; the engine crate hands out as_engine, engine_ref and into_drive (watch pico-client and pico-default text against origin). Read the hosted CI of d06e38645 and of this push."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
