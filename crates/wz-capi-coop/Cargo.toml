@@ -42,8 +42,12 @@ wz-capi-port = { path = "../wz-capi-port" }
 # set is the tokio engine's session base (`wz-capi-core`'s `wz-runtime-tokio`
 # features) less the local loop, which this engine does not have: zenoh-pico's
 # default build delivers nothing locally (`Z_FEATURE_LOCAL_SUBSCRIBER` 0).
+# The KeepAlive and Close codecs are named here because nothing below brings them, and without
+# them the session's keep-alive and close are sent as nothing and a router's Close is not read.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = [
     "alloc",
+    "codec-keep-alive",
+    "codec-close",
     "codec-push",
     "codec-declare",
     "transport-fragmentation",

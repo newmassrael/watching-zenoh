@@ -695,8 +695,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
 /// (`Z_TRANSPORT_LEASE`, 10000 ms) and pico's transmit model ([`TxQueueConf::pico`]). The zid is
 /// minted, as this ABI's tokio open mints it: pico's `Z_CONFIG_SESSION_ZID_KEY` is not read yet.
 ///
-/// A lost link is not redialled yet (zenoh-pico's `Z_FEATURE_AUTO_RECONNECT`): the session reads
-/// as closed and the program opens a new one.
+/// A lost link is dialled again, and the session declares again over it what it holds, as
+/// zenoh-pico's client reopens by default (`Z_FEATURE_AUTO_RECONNECT`) and as this ABI's tokio
+/// open does.
 ///
 /// # Safety
 /// `zs` is a valid, null-initialised `z_owned_session_t`.
@@ -720,6 +721,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             tx_queue: TxQueueConf::pico(),
             timeouts: wz_session_core::session_timeouts::SessionTimeouts::spec_defaults(),
             open_timeout_ms: 10_000,
+            // pico tries again every 1000 ms while the reopen fails
+            // (`vendor/zenoh-pico/src/net/session.c` @
+            // `return _z_fut_fn_result_wake_up_after(1000);`).
+            redial_ms: Some(1000),
         },
     );
     let engine = match opened {

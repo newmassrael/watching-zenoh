@@ -16,8 +16,11 @@
 //! layer's observer keeps the subscribers, what the peer declared and the matching watches, and
 //! the session's actions send what the program asks.
 //!
+//! A session outlives its link: a lost link is dialled again and the session declares over the
+//! new one what it holds, as zenoh-pico's client reopens.
+//!
 //! What it does not do yet, each a later step of the note: the listening role, scouting, queries,
-//! liveliness, the advanced plane, and a session that redials after its link is lost.
+//! liveliness and the advanced plane.
 
 mod engine;
 #[cfg(test)]

@@ -185,6 +185,21 @@ it behaves as pico behaves in both of pico's threading arms.
   `--exclude-libs` could hide). The section holds nothing and enters and leaves out of line: one
   that held the lock's guard put the guard's release at every call site, 16 KB of text; this
   one costs 1.9 KB (867,811 bytes).
+- 2026-10-24: a lost link is dialled again (pico's `Z_FEATURE_AUTO_RECONNECT`). The engine's
+  link is up, being dialled, or waiting to be, and each step moves it on: a link that ended,
+  whatever ended it, takes what its peer declared with it (the observer's link-loss flush, so a
+  write filter or matching status that counted on the peer reads false again), and the endpoints
+  are dialled at once and then every `redial_ms` (pico's ABI: 1000) while none answers. When a
+  handshake completes, the session declares its key expressions, subscribers and Interests again
+  under the ids it holds them by, as pico sends its declaration cache again. What is declared
+  while the link is down is recorded and sent then. An open no endpoint answers still fails. The
+  engine also gained the KeepAlive and Close codecs, which nothing in its feature set had
+  brought: without them its keep-alive and close were sent as nothing, a router expired an idle
+  session after one lease, and a router's Close was not read. Tests: the session survives a
+  router that closes and comes back (the filter shuts, the declarations reach the new router,
+  a push arrives), a session that redials none ends with its link, and a session stepped for
+  three leases keeps its lease (red without the KeepAlive codec). pico-client-coop: 881,043
+  bytes, 2.19 times the same pico.
 - Next: the capabilities in section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
@@ -197,8 +212,8 @@ it behaves as pico behaves in both of pico's threading arms.
 
 ## 6. Open
 
-- Redialling a lost link (zenoh-pico's `Z_FEATURE_AUTO_RECONNECT`): the cooperative session
-  reads as closed and the program opens a new one.
+- The read task steps its session in a loop with no idle wait; pico's read task sleeps
+  `Z_RUNTIME_IDLE_READ_TASK_SLEEP` when nothing was read.
 - The listening role. pico's `z_open(listen)` holds several peers in one
   session; the cooperative session host holds sessions in slots, and whether
   one C session maps to several slots or to one multi-face session is a design

@@ -17,6 +17,16 @@
 //! its session mutex before it calls (`vendor/zenoh-pico/src/session/subscription.c` @
 //! `_z_trigger_subscriptions_impl`). The C program's `drop(context)` is reached the same way: an
 //! undeclaration takes the callback out under the lock and drops it after.
+//!
+//! ## A session outlives its link
+//!
+//! The session is the C program's; a link is one connection of it to a router. When the link is
+//! lost, whatever ended it, the session dials its endpoints again, at once and then every
+//! [`CoopConfig::redial_ms`] while none answers, and declares over the new link what it holds
+//! under the ids it holds it by, as zenoh-pico's client reopens its session
+//! (`Z_FEATURE_AUTO_RECONNECT`). What the lost peer declared goes with the link. The dial is
+//! stepped like everything else: a step moves the handshake on and returns, so a program that
+//! steps its session, or its read task, is what brings the link back.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -80,6 +90,10 @@ pub struct CoopConfig {
     pub timeouts: SessionTimeouts,
     /// How long one endpoint is given to complete the handshake, in milliseconds.
     pub open_timeout_ms: u64,
+    /// How long a session whose link was lost waits to dial its endpoints again after a round of
+    /// them failed, in milliseconds; the first round is dialled as soon as the loss is seen.
+    /// `None` for a session that ends with its link.
+    pub redial_ms: Option<u64>,
 }
 
 /// Why no session was opened.
@@ -101,7 +115,7 @@ fn wire_zid(zid: &[u8]) -> Vec<u8> {
 }
 
 /// Sixteen random bytes, not all zero (an id of zero bytes names nothing).
-fn fresh_zid(entropy: &mut impl EntropySource) -> Result<Vec<u8>, OpenError> {
+fn fresh_zid(entropy: &mut dyn EntropySource) -> Result<Vec<u8>, OpenError> {
     let mut zid = [0u8; 16];
     entropy
         .try_fill_bytes(&mut zid)
@@ -189,11 +203,19 @@ struct ReadTask {
 
 struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     local: CoopLocalSet<C>,
+    runtime: CoopRuntime<C>,
+    clock: C,
+    /// What the application holds and what the peer declared. It is the session's, so it
+    /// outlives each link: a new link is dispatched to the same observer.
     observer: Rc<RefCell<ApplicationLayerObserver>>,
-    actions: Rc<McuActions<C>>,
-    task: CoopLocalJoinHandle<DriverOutcome>,
-    /// The network the session's link was opened on; it outlives the link.
-    _links: Rc<L>,
+    link: Link<C>,
+    /// The network the session's links are opened on; it outlives them.
+    links: L,
+    /// Each handshake's cookie key comes from here.
+    entropy: Box<dyn EntropySource>,
+    config: CoopConfig,
+    /// The zid in its wire form, which every handshake of the session announces.
+    wire_zid: Vec<u8>,
     subscribers: Vec<SubEntry>,
     keyexprs: Vec<KexprEntry>,
     next_mapping: u64,
@@ -204,12 +226,49 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     next_match: MatchId,
 }
 
+/// The session's link: up, being dialled, or waiting to be.
+enum Link<C: ClockSource + 'static> {
+    /// Established: the session's sends go through it.
+    Up(Wire<C>),
+    /// A handshake under way with the endpoint before `next`, given up at `deadline_us`.
+    Dialing {
+        wire: Wire<C>,
+        next: usize,
+        deadline_us: u64,
+    },
+    /// Lost, or no endpoint answered: the endpoints are dialled again at `at_us`.
+    Waiting { at_us: u64 },
+}
+
+/// One link's half of the session: the actions that send over it and the task that runs it.
+struct Wire<C: ClockSource + 'static> {
+    actions: Rc<McuActions<C>>,
+    task: CoopLocalJoinHandle<DriverOutcome>,
+}
+
 struct SubEntry {
     id: SubId,
     registration: SubscriptionId,
     retraction: Option<RetractionKey>,
-    /// Kept for what its key holds alive while the declaration stands.
-    _wire: WireKey,
+    keyexpr: String,
+    /// The key the declaration names, kept to declare it again over a new link; holding it also
+    /// keeps alive what it holds.
+    wire: WireKey,
+}
+
+impl SubEntry {
+    /// Declare this subscriber over `actions`.
+    fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
+        let _ = if self.wire.is_literal() {
+            actions.send_declare_subscriber(self.id, 0, Some(&self.keyexpr))
+        } else {
+            actions.send_declare_subscriber(
+                self.id,
+                self.wire.mapping_id,
+                self.wire.suffix.as_deref(),
+            )
+        };
+    }
 }
 
 struct KexprEntry {
@@ -230,7 +289,23 @@ struct InterestHold {
     plane: FilterPlane,
     keyexpr: String,
     interest_id: u64,
+    form: InterestForm,
     holds: usize,
+}
+
+impl InterestHold {
+    /// Send this Interest over `actions`, for what is declared now and what is declared later.
+    fn send<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
+        let _ = actions.send_interest_kinds(
+            self.interest_id,
+            kinds(self.plane),
+            /* current */ true,
+            /* future */ true,
+            self.form.aggregate,
+            self.form.mapping_id,
+            self.form.suffix.as_deref(),
+        );
+    }
 }
 
 struct MatchEntry {
@@ -272,29 +347,21 @@ fn leg(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
-    /// Open a session over `links` to the first endpoint of `config` that completes the
-    /// handshake, stepping it on this thread until it does. `entropy` mints the zid the config
-    /// does not state and each attempt's cookie key.
-    pub fn open(
-        links: L,
-        clock: C,
-        mut entropy: impl EntropySource,
-        config: CoopConfig,
-    ) -> Result<Arc<Self>, OpenError> {
-        let wire = match &config.zid {
-            Some(zid) => wire_zid(zid),
-            None => fresh_zid(&mut entropy)?,
-        };
-        let mut zid = [0u8; 16];
-        let n = wire.len().min(16);
-        zid[..n].copy_from_slice(&wire[..n]);
-        let links = Rc::new(links);
-        let runtime = CoopRuntime::new(clock.clone());
-        let local = CoopLocalSet::new(&runtime);
-        let observer = Rc::new(RefCell::new(ApplicationLayerObserver::new()));
-        let mut last = OpenError::NoEndpoint;
-        for endpoint in &config.endpoints {
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
+    /// The link's actions while it is up, which is what the session sends through. `None` while
+    /// it is dialled or waits to be: what is declared then is declared when it comes up.
+    fn up(&self) -> Option<&Rc<McuActions<C>>> {
+        match &self.link {
+            Link::Up(wire) => Some(&wire.actions),
+            _ => None,
+        }
+    }
+
+    /// Start a handshake with the first endpoint, from index `from` on, that a link opens to.
+    /// `Err` with the reason the last endpoint tried gave (`last` when none is), or with
+    /// [`OpenError::EntropyUnavailable`] when the platform gives no cookie key for the attempt.
+    fn dial_from(&mut self, from: usize, mut last: OpenError) -> Result<Link<C>, OpenError> {
+        for (at, endpoint) in self.config.endpoints.iter().enumerate().skip(from) {
             let to = match parse_locator(endpoint) {
                 Ok(to) => to,
                 Err(refused) => {
@@ -302,7 +369,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     continue;
                 }
             };
-            let OpenedLink { sink, pump } = match links.open_initiator(to) {
+            let OpenedLink { sink, pump } = match self.links.open_initiator(to) {
                 Ok(opened) => opened,
                 Err(refused) => {
                     last = OpenError::Unreachable(format!("{endpoint}: {refused:?}"));
@@ -312,77 +379,218 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // The parameters the tokio engine gives a session (`wz-capi-core`'s `init_params`),
             // with a cookie key of its own per attempt.
             let params = SessionInitParams {
-                whatami: config.whatami,
-                zid: wire.clone(),
+                whatami: self.config.whatami,
+                zid: self.wire_zid.clone(),
                 seq_num_res: 2,
                 req_id_res: 2,
-                batch_size: config.batch_size,
-                lease_ms: config.lease_ms,
+                batch_size: self.config.batch_size,
+                lease_ms: self.config.lease_ms,
                 initial_sn: 0,
                 cookie: Vec::new(),
-                tx_queue: config.tx_queue,
+                tx_queue: self.config.tx_queue,
                 link_rx: LinkRxConf::default(),
-                cookie_signing_key: SigningKey::from_entropy(&mut entropy)
+                cookie_signing_key: SigningKey::from_entropy(&mut *self.entropy)
                     .map_err(|_| OpenError::EntropyUnavailable)?,
             };
-            let actions = McuActions::<C>::new_generic(sink, params, CoopTime::new(&runtime));
+            let actions = McuActions::<C>::new_generic(sink, params, CoopTime::new(&self.runtime));
             let task = spawn_session(
-                &local,
+                &self.local,
                 pump,
                 actions.clone(),
-                CoopTime::new(&runtime),
+                CoopTime::new(&self.runtime),
                 SessionDriveConfig {
-                    timeouts: config.timeouts,
+                    timeouts: self.config.timeouts,
                     role: SessionRole::Initiator,
                     max_iters: None,
                 },
-                dispatch_to(observer.clone(), actions.clone()),
+                dispatch_to(self.observer.clone(), actions.clone()),
             );
-            let deadline = clock
+            let deadline_us = self
+                .clock
                 .now_us()
-                .saturating_add(config.open_timeout_ms.saturating_mul(1000));
-            while !actions.is_established() && !task.is_finished() && clock.now_us() < deadline {
-                local.run_until_idle();
-            }
-            if !actions.is_established() {
-                let why = match (actions.close_reason(), task.is_finished()) {
-                    (Some(reason), _) => format!("the handshake ended: {reason:?}"),
-                    (None, true) => String::from("the handshake ended"),
-                    (None, false) => String::from("no answer in time"),
-                };
-                task.abort();
-                local.run_until_idle();
-                last = OpenError::Unreachable(format!("{endpoint}: {why}"));
-                continue;
-            }
-            let core = Core {
-                local,
-                observer,
-                actions,
-                task,
-                _links: links,
-                subscribers: Vec::new(),
-                keyexprs: Vec::new(),
-                next_mapping: 1,
-                filters: Vec::new(),
-                next_filter: 1,
-                interests: Vec::new(),
-                matches: Vec::new(),
-                next_match: 1,
-            };
-            return Ok(Arc::new_cyclic(|this| Self {
-                core: Mutex::new(Confined(core)),
-                samples: Arc::new(Mutex::new(VecDeque::new())),
-                matching: Arc::new(Mutex::new(VecDeque::new())),
-                targets: Mutex::new(Vec::new()),
-                zid,
-                closed: AtomicBool::new(false),
-                next_entity: AtomicU64::new(1),
-                reader: Mutex::new(None),
-                this: this.clone(),
-            }));
+                .saturating_add(self.config.open_timeout_ms.saturating_mul(1000));
+            return Ok(Link::Dialing {
+                wire: Wire { actions, task },
+                next: at + 1,
+                deadline_us,
+            });
         }
         Err(last)
+    }
+
+    /// Dial from endpoint `from` on; when none answers, wait `redial_ms` to dial them all again,
+    /// or end with the last endpoint's reason when the session redials none.
+    fn dial_or_wait(
+        &mut self,
+        from: usize,
+        last: OpenError,
+        now_us: u64,
+        redial_ms: Option<u64>,
+    ) -> Result<Link<C>, OpenError> {
+        match (self.dial_from(from, last), redial_ms) {
+            (Ok(link), _) => Ok(link),
+            (Err(OpenError::EntropyUnavailable), _) => Err(OpenError::EntropyUnavailable),
+            (Err(last), None) => Err(last),
+            (Err(_), Some(ms)) => Ok(Link::Waiting {
+                at_us: now_us.saturating_add(ms.saturating_mul(1000)),
+            }),
+        }
+    }
+
+    /// Move the link on, after the session was stepped. A handshake that completed brings the
+    /// link up and declares over it what the session holds; one that ended or ran out of time
+    /// gives way to the next endpoint; a lost link takes what its peer declared with it and is
+    /// dialled again. `Err` when the session ends: its link was lost, or no endpoint answered,
+    /// and `redial_ms` is `None`; or the platform gave no entropy.
+    fn poll_link(&mut self, redial_ms: Option<u64>) -> Result<(), OpenError> {
+        let now_us = self.clock.now_us();
+        let link = std::mem::replace(&mut self.link, Link::Waiting { at_us: now_us });
+        self.link = match link {
+            // zenoh-pico's client reopens whatever ended its link: a lease that ran out, a read
+            // that failed, a Close from the router (`vendor/zenoh-pico/src/transport/unicast/read.c` @
+            // `return _zp_unicast_failed_result(ztu, executor);`).
+            Link::Up(wire) if wire.task.is_finished() => {
+                drop(wire);
+                self.lose_link();
+                if redial_ms.is_none() {
+                    return Err(OpenError::Unreachable(String::from("the link was lost")));
+                }
+                self.dial_or_wait(0, OpenError::NoEndpoint, now_us, redial_ms)?
+            }
+            Link::Dialing {
+                wire,
+                next,
+                deadline_us,
+            } => {
+                if wire.actions.is_established() {
+                    self.redeclare(&wire.actions);
+                    Link::Up(wire)
+                } else if wire.task.is_finished() || now_us >= deadline_us {
+                    let why = match (wire.actions.close_reason(), wire.task.is_finished()) {
+                        (Some(reason), _) => format!("the handshake ended: {reason:?}"),
+                        (None, true) => String::from("the handshake ended"),
+                        (None, false) => String::from("no answer in time"),
+                    };
+                    let last = OpenError::Unreachable(format!(
+                        "{}: {why}",
+                        self.config.endpoints[next - 1]
+                    ));
+                    wire.task.abort();
+                    self.local.run_until_idle();
+                    drop(wire);
+                    self.dial_or_wait(next, last, now_us, redial_ms)?
+                } else {
+                    Link::Dialing {
+                        wire,
+                        next,
+                        deadline_us,
+                    }
+                }
+            }
+            Link::Waiting { at_us } if now_us >= at_us => {
+                self.dial_or_wait(0, OpenError::NoEndpoint, now_us, redial_ms)?
+            }
+            link => link,
+        };
+        Ok(())
+    }
+
+    /// What a lost link takes with it: every subscriber and queryable its peer declared, so a
+    /// matching status or a write filter that counted on one reads the session as it now is.
+    /// zenoh-pico drops a peer's targets from every write filter when its connection drops
+    /// (`vendor/zenoh-pico/src/net/filtering.c` @ `case _Z_INTEREST_MSG_TYPE_CONNECTION_DROPPED: {`).
+    fn lose_link(&mut self) {
+        let mut observer = self.observer.borrow_mut();
+        observer.flush_declarations_on_link_loss();
+        observer.flush_liveliness_on_link_loss();
+    }
+
+    /// Declare again, over a link that has just come up, what the session holds, under the ids it
+    /// was declared with: its key expressions first, since a subscriber or an Interest may name
+    /// one, then its subscribers and its Interests. zenoh-pico sends its declaration cache again
+    /// once a reopen succeeds (`vendor/zenoh-pico/src/net/session.c` @
+    /// `_z_fut_fn_result_t _z_client_reopen_task_fn(void *ztc_arg, _z_executor_t *executor) {`).
+    fn redeclare(&self, actions: &McuActions<C>) {
+        for entry in &self.keyexprs {
+            let _ = actions.send_declare_keyexpr(entry.id, &entry.keyexpr);
+        }
+        for entry in &self.subscribers {
+            entry.declare(actions);
+        }
+        for hold in &self.interests {
+            hold.send(actions);
+        }
+    }
+
+    /// End the link, whatever it is doing, telling an established peer so.
+    fn end_link(&mut self) {
+        let link = std::mem::replace(&mut self.link, Link::Waiting { at_us: u64::MAX });
+        if let Link::Up(wire) | Link::Dialing { wire, .. } = link {
+            if wire.actions.is_established() {
+                wire.actions.send_close_with_reason(CloseReason::Generic);
+            }
+            wire.task.abort();
+        }
+        self.local.run_until_idle();
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+    /// Open a session over `links` to the first endpoint of `config` that completes the
+    /// handshake, stepping it on this thread until it does. `entropy` mints the zid the config
+    /// does not state and each attempt's cookie key, for this open and every redial after it.
+    /// An open that no endpoint answers fails: the session redials only a link it had.
+    pub fn open(
+        links: L,
+        clock: C,
+        entropy: impl EntropySource + 'static,
+        config: CoopConfig,
+    ) -> Result<Arc<Self>, OpenError> {
+        let mut entropy: Box<dyn EntropySource> = Box::new(entropy);
+        let wire = match &config.zid {
+            Some(zid) => wire_zid(zid),
+            None => fresh_zid(&mut *entropy)?,
+        };
+        let mut zid = [0u8; 16];
+        let n = wire.len().min(16);
+        zid[..n].copy_from_slice(&wire[..n]);
+        let runtime = CoopRuntime::new(clock.clone());
+        let local = CoopLocalSet::new(&runtime);
+        let mut core = Core {
+            local,
+            runtime,
+            clock,
+            observer: Rc::new(RefCell::new(ApplicationLayerObserver::new())),
+            link: Link::Waiting { at_us: u64::MAX },
+            links,
+            entropy,
+            config,
+            wire_zid: wire,
+            subscribers: Vec::new(),
+            keyexprs: Vec::new(),
+            next_mapping: 1,
+            filters: Vec::new(),
+            next_filter: 1,
+            interests: Vec::new(),
+            matches: Vec::new(),
+            next_match: 1,
+        };
+        core.link = core.dial_from(0, OpenError::NoEndpoint)?;
+        while !matches!(core.link, Link::Up(_)) {
+            core.local.run_until_idle();
+            core.poll_link(None)?;
+        }
+        Ok(Arc::new_cyclic(|this| Self {
+            core: Mutex::new(Confined(core)),
+            samples: Arc::new(Mutex::new(VecDeque::new())),
+            matching: Arc::new(Mutex::new(VecDeque::new())),
+            targets: Mutex::new(Vec::new()),
+            zid,
+            closed: AtomicBool::new(false),
+            next_entity: AtomicU64::new(1),
+            reader: Mutex::new(None),
+            this: this.clone(),
+        }))
     }
 
     /// The session's state, for one operation. `None` once the session is closed.
@@ -450,10 +658,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         Some(targets.remove(at).1)
     }
 
-    /// Step the session until it has nothing more to do, and notice a session that ended.
+    /// Step the session until it has nothing more to do, move its link on, and notice a session
+    /// that ended.
     fn step(&self, core: &mut Core<L, C>) -> bool {
         core.local.run_until_idle();
-        if core.task.is_finished() {
+        let redial_ms = core.config.redial_ms;
+        if core.poll_link(redial_ms).is_err() {
             self.closed.store(true, Ordering::Release);
             return false;
         }
@@ -478,22 +688,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
         // zenoh-pico's Interest takes the session's next entity id
         // (`vendor/zenoh-pico/src/net/primitives.c` @ `intr._id = _z_get_entity_id(zn);`).
-        let interest_id = self.next_entity_id();
-        let _ = core.actions.send_interest_kinds(
-            interest_id,
-            kinds(plane),
-            /* current */ true,
-            /* future */ true,
-            form.aggregate,
-            form.mapping_id,
-            form.suffix.as_deref(),
-        );
-        core.interests.push(InterestHold {
+        let hold = InterestHold {
             plane,
             keyexpr: keyexpr.to_owned(),
-            interest_id,
+            interest_id: self.next_entity_id(),
+            form: form.clone(),
             holds: 1,
-        });
+        };
+        if let Some(actions) = core.up() {
+            hold.send(actions);
+        }
+        core.interests.push(hold);
     }
 
     /// Let go of one hold on the Interest for `keyexpr` on `plane`; the last one ends it.
@@ -508,7 +713,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         core.interests[at].holds -= 1;
         if core.interests[at].holds == 0 {
             let hold = core.interests.remove(at);
-            core.actions.send_interest_final(hold.interest_id);
+            if let Some(actions) = core.up() {
+                actions.send_interest_final(hold.interest_id);
+            }
         }
     }
 
@@ -568,10 +775,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(core) = self.live() else {
             return Vec::new();
         };
-        let actions = &core.0.actions;
-        if !actions.is_established() {
+        let Some(actions) = core.0.up().filter(|actions| actions.is_established()) else {
             return Vec::new();
-        }
+        };
         match (actions.peer_zid(), actions.peer_whatami_wire()) {
             (Some(zid), Some(role)) => vec![(zid, role)],
             _ => Vec::new(),
@@ -579,8 +785,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     fn has_router_peer(&self) -> bool {
-        self.live()
-            .is_some_and(|core| core.0.actions.peer_whatami_wire() == Some(0))
+        self.live().is_some_and(|core| {
+            core.0
+                .up()
+                .is_some_and(|actions| actions.peer_whatami_wire() == Some(0))
+        })
     }
 
     fn publish_on_wire_all(
@@ -596,7 +805,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(core) = self.live() else {
             return Ok(0);
         };
-        let actions = &core.0.actions;
+        // A link that is down skips the publish, as a send over it would.
+        let Some(actions) = core.0.up() else {
+            return Ok(0);
+        };
         let meta = opts.push_metadata();
         let reliable = opts.reliable_bool();
         let express = meta.is_express();
@@ -661,18 +873,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return id;
         };
         lock(&self.targets).push((id, Target::Subscriber(Arc::new(Mutex::new(sink())))));
-        let _ = if wire.is_literal() {
-            core.actions.send_declare_subscriber(id, 0, Some(&keyexpr))
-        } else {
-            core.actions
-                .send_declare_subscriber(id, wire.mapping_id, wire.suffix.as_deref())
-        };
-        core.subscribers.push(SubEntry {
+        let entry = SubEntry {
             id,
             registration,
             retraction,
-            _wire: wire,
-        });
+            keyexpr,
+            wire,
+        };
+        if let Some(actions) = core.up() {
+            entry.declare(actions);
+        }
+        core.subscribers.push(entry);
         id
     }
 
@@ -685,12 +896,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 .borrow_mut()
                 .subscribers
                 .unregister(entry.registration);
-            match &entry.retraction {
-                Some(key) => {
-                    core.actions
-                        .send_undeclare_subscriber_naming(id, key.mapping_id, &key.suffix)
+            match (core.up(), &entry.retraction) {
+                (Some(actions), Some(key)) => {
+                    actions.send_undeclare_subscriber_naming(id, key.mapping_id, &key.suffix)
                 }
-                None => core.actions.send_undeclare_subscriber(id),
+                (Some(actions), None) => actions.send_undeclare_subscriber(id),
+                (None, _) => {}
             }
             Some(entry)
         });
@@ -706,7 +917,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Some(entry.id);
         }
         let id = core.next_mapping;
-        core.actions.send_declare_keyexpr(id, &keyexpr).ok()?;
+        // A declaration the link refuses is not made; one made while the link is down is sent
+        // when it comes up.
+        if let Some(actions) = core.up() {
+            actions.send_declare_keyexpr(id, &keyexpr).ok()?;
+        }
         core.next_mapping += 1;
         core.keyexprs.push(KexprEntry {
             id,
@@ -727,7 +942,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         core.keyexprs[at].holds -= 1;
         if core.keyexprs[at].holds == 0 {
             core.keyexprs.remove(at);
-            core.actions.send_undeclare_kexpr(mapping_id);
+            if let Some(actions) = core.up() {
+                actions.send_undeclare_kexpr(mapping_id);
+            }
         }
     }
 
@@ -887,8 +1104,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let Some(core) = self.live() else {
             return FilteredPut::Sent(Ok(0));
         };
+        let Some(actions) = core.0.up() else {
+            return FilteredPut::Sent(Ok(0));
+        };
         let suffix = (mapping_id == 0).then_some(keyexpr);
-        FilteredPut::Sent(leg(core.0.actions.send_plain_put_qos(
+        FilteredPut::Sent(leg(actions.send_plain_put_qos(
             mapping_id,
             suffix,
             payload,
@@ -900,18 +1120,27 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     fn batch_start_all(&self) -> usize {
-        self.live()
-            .map_or(0, |core| usize::from(core.0.actions.batch_start().is_ok()))
+        self.live().map_or(0, |core| {
+            core.0
+                .up()
+                .map_or(0, |actions| usize::from(actions.batch_start().is_ok()))
+        })
     }
 
     fn batch_flush_all(&self) -> usize {
-        self.live()
-            .map_or(0, |core| usize::from(core.0.actions.batch_flush().is_ok()))
+        self.live().map_or(0, |core| {
+            core.0
+                .up()
+                .map_or(0, |actions| usize::from(actions.batch_flush().is_ok()))
+        })
     }
 
     fn batch_stop_all(&self) -> usize {
-        self.live()
-            .map_or(0, |core| usize::from(core.0.actions.batch_stop().is_ok()))
+        self.live().map_or(0, |core| {
+            core.0
+                .up()
+                .map_or(0, |actions| usize::from(actions.batch_stop().is_ok()))
+        })
     }
 }
 
@@ -942,11 +1171,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             return;
         }
         let core = &mut guard.0;
-        if core.actions.is_established() {
-            core.actions.send_close_with_reason(CloseReason::Generic);
-        }
-        core.task.abort();
-        core.local.run_until_idle();
+        core.end_link();
         let subscribers: Vec<SubId> = core.subscribers.drain(..).map(|s| s.id).collect();
         let matches: Vec<MatchId> = core.matches.drain(..).map(|m| m.id).collect();
         drop(guard);
@@ -1011,7 +1236,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
 
     fn send_keep_alive(&self) -> Result<(), SessionClosed> {
         let core = self.live().ok_or(SessionClosed)?;
-        core.0.actions.send_keep_alive();
+        // A link that is down has no lease to keep; the session is not closed.
+        if let Some(actions) = core.0.up() {
+            actions.send_keep_alive();
+        }
         Ok(())
     }
 
@@ -1100,15 +1328,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for Drive
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngine<L, C> {
     fn drop(&mut self) {
         // The last handle is gone, so no read task holds one: it has stopped, or is about to
-        // drop the handle it held. A session never closed is closed now.
-        let core = &mut self
-            .core
+        // drop the handle it held. A session never closed is closed now; a closed one has no
+        // link left to end.
+        self.core
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
-            .0;
-        if !self.closed.load(Ordering::Acquire) && core.actions.is_established() {
-            core.actions.send_close_with_reason(CloseReason::Generic);
-        }
-        core.task.abort();
+            .0
+            .end_link();
     }
 }

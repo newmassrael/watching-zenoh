@@ -21,6 +21,7 @@ use wz_runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime};
 use wz_runtime_posix::links::PosixLinks;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
+use wz_session_core::close_reason::CloseReason;
 use wz_session_core::declare_form::InterestForm;
 use wz_session_core::driver_loop::{DriverLoopOutcome, IterationEvent};
 use wz_session_core::locality::Locality;
@@ -60,6 +61,8 @@ fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
 enum Command {
     DeclareSubscriber(u64, &'static str),
     Push(&'static str, &'static [u8]),
+    /// Close the session and stop, as a router that goes away does.
+    Close,
 }
 
 /// What reached the router.
@@ -94,6 +97,11 @@ impl Router {
             .and_then(|s| s.local_addr())
             .expect("a free port")
             .port();
+        Self::start_on(port, catch_all)
+    }
+
+    /// A router on `port`, which a router before it may have held.
+    fn start_on(port: u16, catch_all: CatchAll) -> Self {
         let (commands, inbox) = channel();
         let (ready, bound) = channel();
         let seen = Arc::new(Mutex::new(Seen::default()));
@@ -206,27 +214,42 @@ fn run_router(
             Ok(Command::Push(key, value)) => {
                 let _ = actions.send_push_literal(key, value, true);
             }
+            Ok(Command::Close) => {
+                actions.send_close_with_reason(CloseReason::Generic);
+                local.run_until_idle();
+                return;
+            }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => return,
         }
     }
 }
 
+/// A client's config for `router`, which redials none.
+fn config(router: &Router) -> CoopConfig {
+    CoopConfig {
+        endpoints: vec![router.endpoint()],
+        whatami: WhatAmI::Client,
+        zid: Some(vec![0xb1; 4]),
+        batch_size: 1024,
+        lease_ms: 10_000,
+        tx_queue: TxQueueConf::pico(),
+        timeouts: SessionTimeouts::spec_defaults(),
+        open_timeout_ms: 5_000,
+        redial_ms: None,
+    }
+}
+
 fn open(router: &Router) -> Arc<Engine> {
+    open_with(config(router))
+}
+
+fn open_with(config: CoopConfig) -> Arc<Engine> {
     Engine::open(
         PosixLinks::new(LOOPBACK, PosixTcpDial),
         PosixClock,
         PosixEntropy,
-        CoopConfig {
-            endpoints: vec![router.endpoint()],
-            whatami: WhatAmI::Client,
-            zid: Some(vec![0xb1; 4]),
-            batch_size: 1024,
-            lease_ms: 10_000,
-            tx_queue: TxQueueConf::pico(),
-            timeouts: SessionTimeouts::spec_defaults(),
-            open_timeout_ms: 5_000,
-        },
+        config,
     )
     .expect("the session opens")
 }
@@ -357,5 +380,128 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
 
     SessionDrive::close(&*engine);
     assert!(SessionDrive::is_closed(&*engine));
+    assert!(SessionDrive::read(&*engine, false).is_err());
+}
+
+/// A session whose router goes away outlives the link: what that router declared goes with it,
+/// the session dials again, declares over the new link what it holds, and its subscriber receives
+/// as before. The CONTROL is the write filter, which the first router's subscriber opened and
+/// which is shut again once that router is gone.
+#[test]
+fn a_lost_link_is_dialled_again_and_the_session_declares_again() {
+    let router = Router::start(CatchAll::None);
+    let port = router.port;
+    // A short handshake deadline, so an attempt made while no router is there gives way soon.
+    let engine = open_with(CoopConfig {
+        redial_ms: Some(50),
+        open_timeout_ms: 300,
+        ..config(&router)
+    });
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    engine.declare_subscriber_on_wire(
+        "demo/**".to_owned(),
+        WireKey::literal(),
+        Locality::Any,
+        None,
+        Arc::new(move || {
+            let count = count.clone();
+            Box::new(move |_: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    );
+    let filter = engine.declare_write_filter(
+        FilterPlane::Subscribers,
+        "demo/x".to_owned(),
+        &WireKey::literal(),
+        Some(InterestForm {
+            mapping_id: 0,
+            suffix: Some("demo/x".to_owned()),
+            aggregate: false,
+        }),
+        false,
+    );
+    until(
+        &engine,
+        "the router to see the subscriber and the Interest",
+        || router.seen(|s| s.declares >= 1 && s.interests >= 1),
+    );
+    router.send(Command::DeclareSubscriber(1, "demo/**"));
+    until(&engine, "the filter to open", || {
+        !engine.write_filter_active(filter)
+    });
+
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the link to be lost", || {
+        engine.peer_identities().is_empty()
+    });
+    assert!(
+        !SessionDrive::is_closed(&*engine),
+        "the session outlives its link"
+    );
+    assert!(
+        engine.write_filter_active(filter),
+        "CONTROL: the lost router's subscriber went with its link"
+    );
+
+    let router = Router::start_on(port, CatchAll::None);
+    until(&engine, "the session to declare again", || {
+        router.seen(|s| s.declares >= 1 && s.interests >= 1)
+    });
+    assert_eq!(engine.peer_identities(), vec![(vec![0xc3; 4], 0)]);
+    router.send(Command::Push("demo/a", b"again"));
+    until(&engine, "the push over the new link", || {
+        received.load(Ordering::SeqCst) == 1
+    });
+}
+
+/// A session keeps its lease while the program steps it: over three of its own leases with
+/// nothing published, the router keeps it and still reaches its subscriber. A session that sent
+/// no keep-alive would be expired by the router after one lease.
+#[test]
+fn a_stepped_session_keeps_its_lease() {
+    let router = Router::start(CatchAll::None);
+    let lease_ms = 600;
+    let engine = open_with(CoopConfig {
+        lease_ms,
+        ..config(&router)
+    });
+    let received = Arc::new(AtomicUsize::new(0));
+    let count = received.clone();
+    engine.declare_subscriber_on_wire(
+        "demo/**".to_owned(),
+        WireKey::literal(),
+        Locality::Any,
+        None,
+        Arc::new(move || {
+            let count = count.clone();
+            Box::new(move |_: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        }),
+    );
+    let quiet = Instant::now() + Duration::from_millis(3 * lease_ms);
+    while Instant::now() < quiet {
+        SessionDrive::read(&*engine, false).expect("the session stays open");
+    }
+    assert_eq!(engine.peer_identities(), vec![(vec![0xc3; 4], 0)]);
+    router.send(Command::Push("demo/a", b"still"));
+    until(&engine, "the push after three leases", || {
+        received.load(Ordering::SeqCst) == 1
+    });
+}
+
+/// A session that redials none ends with its link, and reads as closed from then on.
+#[test]
+fn a_session_that_redials_none_ends_with_its_link() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the session to end", || {
+        SessionDrive::is_closed(&*engine)
+    });
     assert!(SessionDrive::read(&*engine, false).is_err());
 }
