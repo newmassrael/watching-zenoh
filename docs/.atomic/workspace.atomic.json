@@ -284104,6 +284104,44 @@
         "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
       ]
     },
+    "Round 3558": {
+      "decision_summary": "The cooperative C engine now redials a lost link, as zenoh-pico's client does by default (Z_FEATURE_AUTO_RECONNECT). A session outlives its link: the link is up, being dialled, or waiting to be, and each step of the session moves it on, so a stepped program or its read task brings the link back without blocking a caller. Whatever ended the link (pico reopens on any read failure, a router's Close included), what the peer declared goes with it through the observer's link-loss flush, and the endpoints are dialled at once, then every redial_ms (pico's ABI: 1000) while none answers. On a completed handshake the session declares again its key expressions, subscribers and Interests under their ids, as pico resends its declaration cache; the entity tables are the record, so what is declared while the link is down is sent then. An open no endpoint answers still fails. The engine also gains the KeepAlive and Close codecs it lacked since step 3a.",
+      "changes_bullets": [
+        "wz-capi-coop engine.rs: Link (Up / Dialing / Waiting) and Wire; Core keeps the runtime, clock, entropy, config and wire zid; dial_from / dial_or_wait / poll_link / lose_link / redeclare / end_link; every send goes through the up link; CoopConfig.redial_ms.",
+        "wz-capi-coop Cargo.toml: session-core codec-keep-alive and codec-close.",
+        "wz-capi-coop tests.rs: router Close command and start_on; tests for a redialled link, a session that redials none, and a kept lease.",
+        "wz-capi-pico session.rs: the cooperative open redials every 1000 ms.",
+        "capability_cost_gate.py: pico-client-coop budget 895,000 with the measurement stated.",
+        "docs/capi-pico-on-coop-engine.md: log entry; the open item now names the read task's idle wait."
+      ],
+      "verification_bullets": [
+        "On the build host: wz-capi-coop clippy all targets -D warnings clean; its 5 tests pass, among them a router that closes and comes back on the same port (the write filter shuts with the lost peer, the subscriber and the Interest reach the new router, its push arrives), a session that redials none ending with its link, and a session stepped for three of its leases keeping it. The lease test is red without the KeepAlive codec (the session reads closed), measured before restoring it. wz-capi-pico at engine-coop,link-udp: clippy clean, 57 tests pass; default clippy clean. Size gate: pico-client-coop 881,043 (was 867,811), 2.19 times the same pico; pico-client 1,810,073. The hook's round_fed_gates array: 112 run, 0 failed; audit-catalog-status rc=0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read this push's hosted CI at the start of the next round. Open on the cooperative engine: the read task's idle wait (pico sleeps Z_RUNTIME_IDLE_READ_TASK_SLEEP; this one steps in a loop over non-blocking reads), the listening role, scouting, queries, liveliness and the advanced plane. The heap observer keeps the peer's key expression aliases across a lost link, as the tokio reconnect does; whether a new link should start them empty is unmeasured."
+      ],
+      "publishable_decision_summary": "The cooperative C engine now redials a lost link, as zenoh-pico's client does by default (Z_FEATURE_AUTO_RECONNECT). A session outlives its link: the link is up, being dialled, or waiting to be, and each step of the session moves it on, so a stepped program or its read task brings the link back without blocking a caller. Whatever ended the link (pico reopens on any read failure, a router's Close included), what the peer declared goes with it through the observer's link-loss flush, and the endpoints are dialled at once, then every redial_ms (pico's ABI: 1000) while none answers. On a completed handshake the session declares again its key expressions, subscribers and Interests under their ids, as pico resends its declaration cache; the entity tables are the record, so what is declared while the link is down is sent then. An open no endpoint answers still fails. The engine also gains the KeepAlive and Close codecs it lacked since step 3a.",
+      "publishable_changes_bullets": [
+        "wz-capi-coop engine.rs: Link (Up / Dialing / Waiting) and Wire; Core keeps the runtime, clock, entropy, config and wire zid; dial_from / dial_or_wait / poll_link / lose_link / redeclare / end_link; every send goes through the up link; CoopConfig.redial_ms.",
+        "wz-capi-coop Cargo.toml: session-core codec-keep-alive and codec-close.",
+        "wz-capi-coop tests.rs: router Close command and start_on; tests for a redialled link, a session that redials none, and a kept lease.",
+        "wz-capi-pico session.rs: the cooperative open redials every 1000 ms.",
+        "capability_cost_gate.py: pico-client-coop budget 895,000 with the measurement stated.",
+        "docs/capi-pico-on-coop-engine.md: log entry; the open item now names the read task's idle wait."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: wz-capi-coop clippy all targets -D warnings clean; its 5 tests pass, among them a router that closes and comes back on the same port (the write filter shuts with the lost peer, the subscriber and the Interest reach the new router, its push arrives), a session that redials none ending with its link, and a session stepped for three of its leases keeping it. The lease test is red without the KeepAlive codec (the session reads closed), measured before restoring it. wz-capi-pico at engine-coop,link-udp: clippy clean, 57 tests pass; default clippy clean. Size gate: pico-client-coop 881,043 (was 867,811), 2.19 times the same pico; pico-client 1,810,073. The hook's round_fed_gates array: 112 run, 0 failed; audit-catalog-status rc=0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read this push's hosted CI at the start of the next round. Open on the cooperative engine: the read task's idle wait (pico sleeps Z_RUNTIME_IDLE_READ_TASK_SLEEP; this one steps in a loop over non-blocking reads), the listening role, scouting, queries, liveliness and the advanced plane. The heap observer keeps the peer's key expression aliases across a lost link, as the tokio reconnect does; whether a new link should start them empty is unmeasured."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
