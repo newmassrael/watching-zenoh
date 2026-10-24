@@ -285040,6 +285040,44 @@
         "The reds that are not this debt's (C1bnl, C1cn, C1bj, E7g, E7s, Layer U) belong to the sessions that moved those files"
       ]
     },
+    "Round 3581": {
+      "decision_summary": "Repays the Layer C1bj red that round 3571 caused. Moving QueryOptions down to session-core left EncodingHint and SourceInfo with one library consumer in wz-runtime-tokio's session module, the queryable's owned query event, so 3571 gated their import on query-queryable; the pubsub metadata tests named the two types through super::* and stopped compiling in every test build without query-queryable, which is what C1bj builds. R3580 listed that red as other work. Each test now imports the hints it names, so a test's own cfg decides the import and no library gate can take it away. The hosted run read for this push also showed that Layer C1bn's feature-gate diagnostic fails for another reason, not the unused_mut R3580 repaid: its throwaway probe workspace copies the lock but not the workspace's [patch.crates-io] table, so every wz-runtime-tokio probe fails offline on the patched tokio. That belongs to the QNX copies' work and is recorded, not repaired.",
+      "changes_bullets": [
+        "wz-runtime-tokio session/tests.rs: the seven tests that name EncodingHint or SourceInfo import them in their own body.",
+        "wz-runtime-tokio session/mod.rs: the two comments that said the tests reach the names through super::* now say the tests import their own.",
+        "docs/hosted-red-acks.md: row R3581 for run 40128010267 (graded 8cb253099), read before this push."
+      ],
+      "verification_bullets": [
+        "On the build host: run-ci Layer C1bj pass (its five loopback_drops_ legs, two counts and the clippy leg) and Layer C1bk pass; clippy -D warnings of wz-runtime-tokio with all targets, default and all features, exits 0; the seven named tests pass with all features.",
+        "rustfmt clean; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed.",
+        "Hosted run 40128010267 read job by job from each log: C1bj (this round's), C1bn (feature-gate diagnostic offline on the patched tokio), C1bnl and C1cn (lifecycle), E6h, E7s, Layer U."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "C1bn's feature-gate diagnostic needs its probe workspace to carry the workspace's [patch.crates-io] table; owned by the work that added the QNX copies.",
+        "Next on this track: Q2d, the querier on the cooperative engine, and a CI lane for client_only_dials_a_listener."
+      ],
+      "publishable_decision_summary": "Repays the Layer C1bj red that round 3571 caused. Moving QueryOptions down to session-core left EncodingHint and SourceInfo with one library consumer in wz-runtime-tokio's session module, the queryable's owned query event, so 3571 gated their import on query-queryable; the pubsub metadata tests named the two types through super::* and stopped compiling in every test build without query-queryable, which is what C1bj builds. R3580 listed that red as other work. Each test now imports the hints it names, so a test's own cfg decides the import and no library gate can take it away. The hosted run read for this push also showed that Layer C1bn's feature-gate diagnostic fails for another reason, not the unused_mut R3580 repaid: its throwaway probe workspace copies the lock but not the workspace's [patch.crates-io] table, so every wz-runtime-tokio probe fails offline on the patched tokio. That belongs to the QNX copies' work and is recorded, not repaired.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio session/tests.rs: the seven tests that name EncodingHint or SourceInfo import them in their own body.",
+        "wz-runtime-tokio session/mod.rs: the two comments that said the tests reach the names through super::* now say the tests import their own.",
+        "docs/hosted-red-acks.md: row R3581 for run 40128010267 (graded 8cb253099), read before this push."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: run-ci Layer C1bj pass (its five loopback_drops_ legs, two counts and the clippy leg) and Layer C1bk pass; clippy -D warnings of wz-runtime-tokio with all targets, default and all features, exits 0; the seven named tests pass with all features.",
+        "rustfmt clean; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed.",
+        "Hosted run 40128010267 read job by job from each log: C1bj (this round's), C1bn (feature-gate diagnostic offline on the patched tokio), C1bnl and C1cn (lifecycle), E6h, E7s, Layer U."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "C1bn's feature-gate diagnostic needs its probe workspace to carry the workspace's [patch.crates-io] table; owned by the work that added the QNX copies.",
+        "Next on this track: Q2d, the querier on the cooperative engine, and a CI lane for client_only_dials_a_listener."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
