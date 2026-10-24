@@ -656,6 +656,79 @@ fn chains_after(mut rows: Vec<(bool, Vec<u8>)>, chains: usize) -> Vec<u8> {
     crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs)
 }
 
+/// Which transport a run of pushes rides, for [`push_run_capture`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunTransport {
+    /// One UDP datagram per message: every row's anchor is a packet.
+    Datagram,
+    /// One TCP segment per message, each behind its two-byte length: every row's
+    /// anchor is a range of the direction's byte stream.
+    Stream,
+}
+
+/// ONE unicast session that carries `pushes` messages, one `Frame` each, as the
+/// pcap FILE: the capture a memory gate measures a handle's cost per row on.
+///
+/// Every message is the same `Push` (a 16-byte payload under one literal), built
+/// by the session core's own builders so a reader decodes it: a hand-laid record
+/// whose header byte is not a Push's halts the batch, and a capture of halted
+/// batches has rows that are not messages. The frames are reliable and carry
+/// consecutive sequence numbers, so a reader that counts a sequence gap finds none.
+///
+/// The handshake is the whole four-message one, so the session is established
+/// before the first push and the count a reader reports is the pushes plus those
+/// four.
+pub fn push_run_capture(pushes: usize, transport: RunTransport) -> Vec<u8> {
+    const ISN: u32 = 1000;
+    const PORT: u16 = 43210;
+    let mut units = full_handshake();
+    for i in 0..pushes {
+        let record = wz_session_core::push_build::build_push_literal("gate/row", &[0xA5u8; 16])
+            .expect("a literal put builds");
+        // Reliable, numbered from the OPEN's initial number: every frame is one
+        // step after the one before, so the SN verdict of each is `Continuous`.
+        units.push((
+            true,
+            wz_session_core::frame_encode::encode_frame_with_push_qos(i as u64, record, true, None),
+        ));
+    }
+    let packets: Vec<Vec<u8>> = match transport {
+        RunTransport::Datagram => units
+            .iter()
+            .map(|(from_low, wire)| {
+                if *from_low {
+                    udp_packet(LOW, PORT, HIGH, 7447, wire)
+                } else {
+                    udp_packet(HIGH, 7447, LOW, PORT, wire)
+                }
+            })
+            .collect(),
+        RunTransport::Stream => {
+            let (mut low, mut high) = (ISN, ISN);
+            units
+                .iter()
+                .map(|(from_low, wire)| {
+                    let unit = stream_unit(wire);
+                    let next = if *from_low { &mut low } else { &mut high };
+                    let seq = *next;
+                    *next += unit.len() as u32;
+                    if *from_low {
+                        tcp_segment(LOW, PORT, HIGH, 7447, seq, &unit)
+                    } else {
+                        tcp_segment(HIGH, 7447, LOW, PORT, seq, &unit)
+                    }
+                })
+                .collect()
+        }
+    };
+    let refs: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (0u32, (i as u32) * 1_000, p.as_slice()))
+        .collect();
+    crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &refs)
+}
+
 /// The SHAPE both fixtures above claim, asserted rather than assumed.
 ///
 /// A fixture that stopped building two flows, or two links, or one session,
