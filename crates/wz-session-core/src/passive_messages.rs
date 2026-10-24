@@ -744,6 +744,15 @@ pub struct ListMemory {
     pub sparse: usize,
     /// Where units a layer below framed end, a model of their map.
     pub wire_ends: usize,
+    /// The messages that completed a fragment chain, joined: the only copy of those
+    /// bytes anywhere, kept so a consumer can read the joined message back. It
+    /// follows the chains' content and not the row count, and it is read off every
+    /// fact the list keeps for a row, so asking costs the number of those.
+    pub joined: usize,
+    /// The chain each fragment row belongs to and what became of it, by row (a
+    /// model of the map), and the chains still open. Kept by every list that has
+    /// seen a fragment, whether it keeps its rows as entries or whole.
+    pub chains: usize,
     /// The rest of the index, which does not follow the row count.
     pub small: usize,
 }
@@ -751,7 +760,14 @@ pub struct ListMemory {
 impl ListMemory {
     /// Every structure's bytes together.
     pub fn total(&self) -> usize {
-        self.rows + self.unit_log + self.whole_rows + self.sparse + self.wire_ends + self.small
+        self.rows
+            + self.unit_log
+            + self.whole_rows
+            + self.sparse
+            + self.wire_ends
+            + self.joined
+            + self.chains
+            + self.small
     }
 
     /// This report and `other` added field by field, for a holder of many lists.
@@ -762,12 +778,32 @@ impl ListMemory {
             whole_rows: self.whole_rows + other.whole_rows,
             sparse: self.sparse + other.sparse,
             wire_ends: self.wire_ends + other.wire_ends,
+            joined: self.joined + other.joined,
+            chains: self.chains + other.chains,
             small: self.small + other.small,
         }
     }
 }
 
 impl Index {
+    /// Bytes the joined messages of completed fragment chains hold.
+    #[cfg(feature = "reassembly")]
+    fn joined_bytes(&self) -> usize {
+        self.sparse
+            .values()
+            .map(|facts| match &facts.fragment {
+                Some(FragmentFate::Joined(bytes)) => bytes.capacity(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Without reassembly no row has a fate to hold.
+    #[cfg(not(feature = "reassembly"))]
+    fn joined_bytes(&self) -> usize {
+        0
+    }
+
     /// What the index holds on the heap.
     fn memory(&self) -> ListMemory {
         ListMemory {
@@ -776,6 +812,9 @@ impl Index {
             whole_rows: crate::heap_account::btree_bytes::<u64, PassiveFrame>(self.held.len()),
             sparse: crate::heap_account::btree_bytes::<u64, Sparse>(self.sparse.len()),
             wire_ends: crate::heap_account::btree_bytes::<(u16, u64), u64>(self.wire_ends.len()),
+            joined: self.joined_bytes(),
+            // The list's, which owns the chain facts and adds them.
+            chains: 0,
             small: crate::heap_account::vec_bytes(&self.contexts)
                 + crate::heap_account::vec_bytes(&self.cut),
         }
@@ -783,14 +822,35 @@ impl Index {
 }
 
 impl MessageList {
+    /// What the chain facts of the list hold: the outcome and identity of every
+    /// fragment row (a model of the map), and the chains still open and the ones
+    /// the discarded rows left counted.
+    #[cfg(feature = "reassembly")]
+    fn chain_bytes(&self) -> usize {
+        crate::heap_account::btree_bytes::<u64, (IngestOutcome, Option<u64>)>(
+            self.chains.rows.len(),
+        ) + crate::heap_account::vec_bytes(&self.chains.fold.open)
+            + crate::heap_account::vec_bytes(&self.chain_prefix.open)
+    }
+
+    /// Without reassembly no fragment is read and no chain is counted.
+    #[cfg(not(feature = "reassembly"))]
+    fn chain_bytes(&self) -> usize {
+        0
+    }
+
     /// What the list holds on the heap, by structure.
     pub fn memory(&self) -> ListMemory {
-        match &self.rows {
+        let held = match &self.rows {
             Store::Held(frames) => ListMemory {
                 rows: frames.allocated_bytes(),
                 ..ListMemory::default()
             },
             Store::Indexed(index) => index.memory(),
+        };
+        ListMemory {
+            chains: self.chain_bytes(),
+            ..held
         }
     }
 }
@@ -851,9 +911,8 @@ const OVER_BATCH: u16 = 1 << 2;
 const AFTER_RESYNC: u16 = 1 << 3;
 /// The row was read out of an lz4 batch ([`PassiveFrame::decompressed`]).
 const DECOMPRESSED: u16 = 1 << 4;
-/// The row's SN verdict is [`SnVerdict::Continuous`], the common one, which is
-/// kept here rather than in [`Index::sparse`].
-const CONTINUOUS: u16 = 1 << 5;
+// Bit 5 is unused: it was the flag for a `SnVerdict::Continuous` row, which the SN
+// class (`SN_SHIFT`) now holds with every other verdict that carries no number.
 /// [`Index::sparse`] holds facts for this row.
 const SPARSE: u16 = 1 << 6;
 /// The row is kept whole, in [`Index::held`]; no other field means anything.
@@ -894,10 +953,52 @@ enum Locus {
     },
 }
 
+/// Where in [`UnitRow::flags`] the row's SN verdict class is kept: three bits.
+///
+/// Open-debt item 924, step 5. A verdict used to be in [`Index::sparse`] unless it
+/// was `Continuous`, on the argument that most rows are. A capture that began
+/// after the handshake has no ring to measure a step against, so EVERY frame of
+/// it is [`SnVerdict::WithoutResolution`] (and a tap that attaches to a running
+/// session is exactly that capture), and every row was in the map, at about 90
+/// bytes. Five of the six verdicts carry no number, so they are a class here;
+/// only a `Gap`, which says how many frames it skipped, is kept in the map.
+const SN_SHIFT: u16 = 11;
+/// The bits of [`UnitRow::flags`] that hold the SN class.
+const SN_MASK: u16 = 0b111 << SN_SHIFT;
+
+/// The class of a frame's SN verdict, and the part of it that does not fit in the
+/// class: `None` for the rows with no verdict (a handshake message is not
+/// numbered).
+fn sn_class(verdict: Option<SnVerdict>) -> (u16, Option<SnVerdict>) {
+    match verdict {
+        None => (0, None),
+        Some(SnVerdict::Continuous) => (1, None),
+        Some(SnVerdict::WithoutResolution) => (2, None),
+        Some(SnVerdict::Baseline) => (3, None),
+        Some(SnVerdict::Duplicate) => (4, None),
+        Some(SnVerdict::OutOfWindow) => (5, None),
+        Some(gap @ SnVerdict::Gap { .. }) => (6, Some(gap)),
+    }
+}
+
+/// The verdict a class stands for: `gap` is the map's, read for the one class
+/// whose verdict has a number.
+fn sn_verdict_of(class: u16, gap: Option<SnVerdict>) -> Option<SnVerdict> {
+    match class {
+        0 => None,
+        1 => Some(SnVerdict::Continuous),
+        2 => Some(SnVerdict::WithoutResolution),
+        3 => Some(SnVerdict::Baseline),
+        4 => Some(SnVerdict::Duplicate),
+        5 => Some(SnVerdict::OutOfWindow),
+        _ => gap,
+    }
+}
+
 /// The facts few rows have.
 #[derive(Debug, Clone, Default)]
 struct Sparse {
-    /// An SN verdict that is not [`SnVerdict::Continuous`].
+    /// An SN verdict that has a number to keep: a [`SnVerdict::Gap`].
     sn_verdict: Option<SnVerdict>,
     /// What a `Fragment` came to.
     #[cfg(feature = "reassembly")]
@@ -1021,10 +1122,9 @@ impl UnitRow {
             fragment: facts.fragment,
             ..Sparse::default()
         };
-        match facts.sn_verdict {
-            Some(SnVerdict::Continuous) => flags |= CONTINUOUS,
-            other => sparse.sn_verdict = other,
-        }
+        let (class, gap) = sn_class(facts.sn_verdict);
+        flags |= class << SN_SHIFT;
+        sparse.sn_verdict = gap;
         if sparse.has_any() {
             flags |= SPARSE;
         }
@@ -1111,11 +1211,10 @@ impl UnitRow {
         MessageFacts {
             unit_offset: self.unit_offset as usize,
             observed_at_ns: self.observed_at_ns(),
-            sn_verdict: if self.flags & CONTINUOUS != 0 {
-                Some(SnVerdict::Continuous)
-            } else {
-                sparse.and_then(|s| s.sn_verdict)
-            },
+            sn_verdict: sn_verdict_of(
+                (self.flags & SN_MASK) >> SN_SHIFT,
+                sparse.and_then(|s| s.sn_verdict),
+            ),
             #[cfg(feature = "reassembly")]
             fragment: sparse.and_then(|s| s.fragment.clone()),
         }
@@ -2299,6 +2398,68 @@ fn out_of_range(index: usize, len: usize) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Open-debt item 924, step 5 -- EVERY SN VERDICT SURVIVES THE CLASS IT IS KEPT
+    /// IN, and the class sits in bits no other flag uses.
+    ///
+    /// The redecode gate reads the verdicts its captures happen to produce back
+    /// through the row, and a capture that never duplicates a frame says nothing of
+    /// `Duplicate`. This walks the type: the match below has no wildcard, so a
+    /// variant added to [`SnVerdict`] does not compile until it is given a class.
+    #[test]
+    fn every_sn_verdict_survives_the_class_it_is_kept_in() {
+        let every = [
+            None,
+            Some(SnVerdict::Continuous),
+            Some(SnVerdict::WithoutResolution),
+            Some(SnVerdict::Baseline),
+            Some(SnVerdict::Gap { missing: 7 }),
+            Some(SnVerdict::Gap { missing: u64::MAX }),
+            Some(SnVerdict::Duplicate),
+            Some(SnVerdict::OutOfWindow),
+        ];
+        for verdict in every {
+            if let Some(v) = verdict {
+                // Exhaustive on purpose.
+                match v {
+                    SnVerdict::WithoutResolution
+                    | SnVerdict::Baseline
+                    | SnVerdict::Continuous
+                    | SnVerdict::Gap { .. }
+                    | SnVerdict::Duplicate
+                    | SnVerdict::OutOfWindow => {}
+                }
+            }
+            let (class, gap) = sn_class(verdict);
+            assert_eq!(
+                class << SN_SHIFT & !SN_MASK,
+                0,
+                "{verdict:?}: class {class} does not fit its bits"
+            );
+            assert_eq!(sn_verdict_of(class, gap), verdict, "{verdict:?}");
+            // Only a verdict with a number keeps anything beside the class.
+            assert_eq!(
+                gap.is_some(),
+                matches!(verdict, Some(SnVerdict::Gap { .. })),
+                "{verdict:?}"
+            );
+        }
+        // And no other flag is in the class's bits.
+        for (name, flag) in [
+            ("SIDE_B", SIDE_B),
+            ("TIMED", TIMED),
+            ("OVER_BATCH", OVER_BATCH),
+            ("AFTER_RESYNC", AFTER_RESYNC),
+            ("DECOMPRESSED", DECOMPRESSED),
+            ("SPARSE", SPARSE),
+            ("HELD", HELD),
+            ("LOGGED", LOGGED),
+            ("NO_HANDSHAKE", NO_HANDSHAKE),
+            ("WIRE_END", WIRE_END),
+        ] {
+            assert_eq!(flag & SN_MASK, 0, "{name} is in the SN class's bits");
+        }
+    }
     use crate::chunk_log::CHUNK_ITEMS;
 
     /// One decoded message, built through the passive observer's own decoder
