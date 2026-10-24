@@ -283510,6 +283510,40 @@
         "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
       ]
     },
+    "Round 3543": {
+      "decision_summary": "The cooperative runtime's critical sections have a platform door: every borrow of wz-runtime-coop's cells goes through cs::with, which is critical_section::with by default (the implementation an MCU image links, its interrupt mask) and, with the new host-lock feature, a lock of the process, reentrant on its thread, taken by the runtime itself. The cooperative engine selects host-lock, so the cooperative pico client links no critical-section implementation and exports its C ABI alone: 441 symbols, as pico-client, where it exported 443 with critical-section's std implementation, whose two no_mangle symbols rustc put beside the C ABI and neither a second version script nor --exclude-libs could hide. The section is a zero-sized mark whose entry and exit are out of line: one that held the lock's guard put the guard's release at every call site, 16 KB of text; this one costs 1.9 KB (867,811). No MCU build selects host-lock, and its default is unchanged.",
+      "changes_bullets": [
+        "wz-runtime-coop: src/cs.rs (cs::with, the host lock and its nesting and contention test); executor, timer, join_handle, runtime_impl, session_drive, static_executor and static_timer enter critical sections through it; feature host-lock.",
+        "wz-capi-coop selects host-lock; wz-capi-coop's dev-dependencies and wz-capi-pico's engine-coop drop critical-section. capability_cost_gate: pico-client-coop pins 441 exports.",
+        "docs/capi-pico-on-coop-engine.md: status, the open item closed. docs/reason-review-pins.md: session-close-ingress re-read against session_drive.rs (SessionPump::step still raises check_out_of_band at the head of every step).",
+        "reason_citation_gate.py reads the paths wz dropped from HEAD's history, not git log --all, which took other sessions' unpushed branches and stashes, and skips third-party/ copies."
+      ],
+      "verification_bullets": [
+        "On the build host: fmt; clippy -D warnings for wz-runtime-coop by default, with host-lock and on the slot profile, for wz-capi-coop and for wz-capi-pico's cooperative builds (single- and multi-threaded); tests of wz-runtime-coop (with host-lock: eight threads add a thousand each under nested sections and none is lost), wz-session-mcu, wz-session-lwip and wz-capi-coop pass; client_only_dials_a_listener passes on both cooperative arms; C1bz for the three crates; capability_cost_gate --check of the four pico cases: pico-client-coop 867,811 with 441 exports, the tokio cases unchanged. The 16 KB first cut was attributed by diffing the text symbols against a clean origin build. Locally the hook's 111 static gates pass. The reason citation gate's red at this push (open.rs, core.rs named as dropped) came from a local unpushed branch read through git log --all; narrowed to HEAD it passes: 931 citations, 496 foreign."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next on the cooperative engine, one step each: redialling a lost link (pico's auto-reconnect), the listening role, queries, liveliness, scouting, the advanced plane; a CI lane for client_only_dials_a_listener on both engines, which no lane runs today. The MCU crates' own critical sections (wz-session-mcu's admin and group modules) still call critical_section::with on their own cells; they are not in a host library's graph. Read the hosted CI of this push and of b3b83b83c."
+      ],
+      "publishable_decision_summary": "The cooperative runtime's critical sections have a platform door: every borrow of wz-runtime-coop's cells goes through cs::with, which is critical_section::with by default (the implementation an MCU image links, its interrupt mask) and, with the new host-lock feature, a lock of the process, reentrant on its thread, taken by the runtime itself. The cooperative engine selects host-lock, so the cooperative pico client links no critical-section implementation and exports its C ABI alone: 441 symbols, as pico-client, where it exported 443 with critical-section's std implementation, whose two no_mangle symbols rustc put beside the C ABI and neither a second version script nor --exclude-libs could hide. The section is a zero-sized mark whose entry and exit are out of line: one that held the lock's guard put the guard's release at every call site, 16 KB of text; this one costs 1.9 KB (867,811). No MCU build selects host-lock, and its default is unchanged.",
+      "publishable_changes_bullets": [
+        "wz-runtime-coop: src/cs.rs (cs::with, the host lock and its nesting and contention test); executor, timer, join_handle, runtime_impl, session_drive, static_executor and static_timer enter critical sections through it; feature host-lock.",
+        "wz-capi-coop selects host-lock; wz-capi-coop's dev-dependencies and wz-capi-pico's engine-coop drop critical-section. capability_cost_gate: pico-client-coop pins 441 exports.",
+        "docs/capi-pico-on-coop-engine.md: status, the open item closed. docs/reason-review-pins.md: session-close-ingress re-read against session_drive.rs (SessionPump::step still raises check_out_of_band at the head of every step).",
+        "reason_citation_gate.py reads the paths wz dropped from HEAD's history, not git log --all, which took other sessions' unpushed branches and stashes, and skips third-party/ copies."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: fmt; clippy -D warnings for wz-runtime-coop by default, with host-lock and on the slot profile, for wz-capi-coop and for wz-capi-pico's cooperative builds (single- and multi-threaded); tests of wz-runtime-coop (with host-lock: eight threads add a thousand each under nested sections and none is lost), wz-session-mcu, wz-session-lwip and wz-capi-coop pass; client_only_dials_a_listener passes on both cooperative arms; C1bz for the three crates; capability_cost_gate --check of the four pico cases: pico-client-coop 867,811 with 441 exports, the tokio cases unchanged. The 16 KB first cut was attributed by diffing the text symbols against a clean origin build. Locally the hook's 111 static gates pass. The reason citation gate's red at this push (open.rs, core.rs named as dropped) came from a local unpushed branch read through git log --all; narrowed to HEAD it passes: 931 citations, 496 foreign."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next on the cooperative engine, one step each: redialling a lost link (pico's auto-reconnect), the listening role, queries, liveliness, scouting, the advanced plane; a CI lane for client_only_dials_a_listener on both engines, which no lane runs today. The MCU crates' own critical sections (wz-session-mcu's admin and group modules) still call critical_section::with on their own cells; they are not in a host library's graph. Read the hosted CI of this push and of b3b83b83c."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
