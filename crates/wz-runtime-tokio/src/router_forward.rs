@@ -8372,6 +8372,15 @@ impl FaceForwarder for RouterForwarder {
         self.gate_of(id)
     }
 
+    fn wake_signal(&self) -> Option<Arc<tokio::sync::Notify>> {
+        Some(self.wake_signal_of())
+    }
+
+    /// A link the router holds messages for has room: offer it what is held now, in order.
+    fn woken(&self) {
+        self.drain_egress();
+    }
+
     /// `true`: both meshes key the self-edge on the peer zid (a
     /// [`LinkstateNetwork`] property), so the router must hold AT MOST ONE face
     /// per zid — two faces to one peer would give a net two links for one zid,

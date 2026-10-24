@@ -819,6 +819,21 @@ pub trait FaceForwarder {
         None
     }
 
+    /// The signal that raises [`woken`](Self::woken) on the loop: for a forwarder that holds
+    /// messages for a full link and must send them when the link has room, however quiet the
+    /// loop is otherwise. Signal with `notify_one`, which stores a permit, so a notice raised
+    /// while the loop is not parked on it is honoured at its next arm and not lost.
+    ///
+    /// `None` (the default) is a forwarder with nothing to be woken for, which costs the loop a
+    /// pending arm and no timer, as [`tick_period`](Self::tick_period) does.
+    fn wake_signal(&self) -> Option<Arc<tokio::sync::Notify>> {
+        None
+    }
+
+    /// The loop was woken by [`wake_signal`](Self::wake_signal). Runs on the loop's own thread
+    /// with the same borrow discipline as the other hooks. The default does nothing.
+    fn woken(&self) {}
+
     /// R3067 -- whether the forwarder ALREADY holds a face to the peer `zid`
     /// that this loop does not hold: a link the node's DIAL role made.
     ///
@@ -1627,9 +1642,19 @@ async fn drive_face<F: FaceForwarder + ?Sized>(
                 let (forwarder, id) = (forwarder, face.id);
                 async move {
                     while let Some(wake) = forwarder.read_gate(id) {
-                        // Bounded, so that a drain whose notice was missed costs a recheck and
-                        // not a stalled face.
-                        let _ = tokio::time::timeout(READ_GATE_RECHECK, wake.notified()).await;
+                        // Registered as a waiter BEFORE the gate is asked again, so a notice
+                        // raised between the two is not lost: either the second answer sees
+                        // the room, or the notice finds this waiter.
+                        let notified = wake.notified();
+                        tokio::pin!(notified);
+                        notified.as_mut().enable();
+                        if forwarder.read_gate(id).is_none() {
+                            break;
+                        }
+                        // Bounded, so that a link that does not notify (a driver that was
+                        // not asked, or one whose waker was cleared) costs a recheck and not
+                        // a stalled face.
+                        let _ = tokio::time::timeout(READ_GATE_BACKSTOP, notified).await;
                     }
                 }
             },
@@ -1640,9 +1665,10 @@ async fn drive_face<F: FaceForwarder + ?Sized>(
     (face, outcome)
 }
 
-/// How long a gated face waits for a notice that a destination has room before it asks the
-/// forwarder again.
-const READ_GATE_RECHECK: Duration = Duration::from_millis(2);
+/// The longest a gated face waits for a notice that a destination has room before it asks the
+/// forwarder again. The notice is what ends the wait (`BoxedLinkDriver::watch_room`); this is
+/// for the link that never gives one, and is not the cadence of a healthy gate.
+const READ_GATE_BACKSTOP: Duration = Duration::from_millis(25);
 
 /// R311y205 (transport-multilink) — drive an AGGREGATED secondary link to
 /// terminal. Like [`drive_face`], but the RX admits against the `joined` handle's
@@ -1789,6 +1815,9 @@ enum Step {
     /// cadence) — call [`FaceForwarder::tick`]. Only ever produced when a timer
     /// is armed (a forwarder that returned `Some` from `tick_period`).
     Tick,
+    /// The forwarder's wake signal ([`FaceForwarder::wake_signal`]) was raised — call
+    /// [`FaceForwarder::woken`]. Only ever produced by a forwarder that returned a signal.
+    Woken,
     /// A gossip-autoconnect [`DialIntent`] arrived on the dial-intent channel —
     /// dial the discovered peer unless a face to it is already held. Only ever
     /// produced when [`FaceSources::dial_intents`] is `Some`.
@@ -1832,6 +1861,16 @@ async fn forwarder_tick(timer: &mut Option<tokio::time::Interval>) {
         Some(interval) => {
             interval.tick().await;
         }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Await the forwarder's wake signal ([`FaceForwarder::wake_signal`]), or park forever when it
+/// has none: the arm of [`face_drive_loop`]'s `select!` that lets a forwarder holding messages
+/// for a full link send them as soon as the link has room.
+async fn forwarder_woken(signal: &Option<Arc<tokio::sync::Notify>>) {
+    match signal {
+        Some(signal) => signal.notified().await,
         None => std::future::pending::<()>().await,
     }
 }
@@ -2615,6 +2654,9 @@ where
     // created and the tick arm parks forever — the accept-only and hold-only
     // loops keep their exact prior behaviour (no extra wakeups).
     let mut tick_timer = forwarder.tick_period().map(tokio::time::interval);
+    // The forwarder's wake signal: a forwarder that holds messages for a full link is told when
+    // the link has room, and sends them then and not at the next tick.
+    let wake_signal = forwarder.wake_signal();
 
     // Seed the outbound dial faces (peer-mesh mode). Each configured target is
     // dialed concurrently and, once Established, held in the SAME face set as
@@ -2691,6 +2733,7 @@ where
             // R2099 (item 512) — over EVERY bound listener, not the first one.
             accepted = accept_any(&mut listeners) => Step::Accepted(accepted),
             _ = forwarder_tick(&mut tick_timer) => Step::Tick,
+            _ = forwarder_woken(&wake_signal) => Step::Woken,
             intent = recv_dial_intent(&mut dial_intents) => Step::Dial(intent),
             item = recv_mcast_ingress(&mut mcast_ingress) => Step::McastIngress(Box::new(item)),
             members = recv_mcast_members(&mut mcast_members) => Step::McastMembers(members),
@@ -3539,6 +3582,9 @@ where
             // time-driven control-plane work (the linkstate peer floods its own
             // link-state). A no-timer forwarder never reaches here.
             Step::Tick => forwarder.tick(),
+
+            // The forwarder was told a link it holds messages for has room.
+            Step::Woken => forwarder.woken(),
         }
     }
 

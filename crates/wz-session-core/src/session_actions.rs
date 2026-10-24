@@ -3369,6 +3369,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.link_driver().link_subject()
     }
 
+    /// Have this session's link call `waker` whenever room is made on its outbound queue, or stop
+    /// calling the one it has when given `None` ([`BoxedLinkDriver::watch_room`]): the notice a
+    /// sender that holds messages for a full link needs, in place of a timer. A session whose
+    /// link has no queue never calls it.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    pub fn watch_link_room(&self, waker: Option<alloc::sync::Arc<dyn Fn() + Send + Sync>>) {
+        self.link_driver().watch_room(waker);
+    }
+
     /// R311y473 — this session's links as the adminspace renders them: the
     /// session-centric mirror of the array zenoh's `transport_unicast_to_json`
     /// builds from `transport.get_links()` (`net/runtime/adminspace.rs:607-637`).

@@ -505,6 +505,15 @@ where
         R::link_driver(&sink).wait_for_room(priority, wait)
     }
 
+    // The notice of room, forwarded to the live link as the room wait is. A swap replaces the
+    // link and with it the waker: the sender that holds messages is told nothing by the new
+    // link until it asks again, and its own recheck covers the interval.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    fn watch_room(&self, waker: Option<alloc::sync::Arc<dyn Fn() + Send + Sync>>) {
+        let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+        R::link_driver(&sink).watch_room(waker)
+    }
+
     // R2952 — the block-first slot, forwarded on a clone like the room wait
     // above (the acquire may wait `wait_before_drop`). A swap between acquire
     // and release lands the release on the new link, whose slot was not taken:
@@ -692,6 +701,13 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
         // `RefCell` borrow conflict.
         let sink = self.inner.borrow().clone();
         R::link_driver(&sink).wait_for_room(priority, wait)
+    }
+
+    // The notice of room, forwarded as in the twin.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    fn watch_room(&self, waker: Option<alloc::sync::Arc<dyn Fn() + Send + Sync>>) {
+        let sink = self.inner.borrow().clone();
+        R::link_driver(&sink).watch_room(waker)
     }
 
     // R2952 — the block-first slot, forwarded as in the twin.

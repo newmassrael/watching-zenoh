@@ -672,7 +672,20 @@ because it did not wait out a deadline. The router holds it in a queue of the de
 - a destination whose oldest held message has waited its own `wait_before_close` is closed as unresponsive
   (`request_congestion_close`), which is what a send that waited that long would have done, and what it held
   is dropped with it and counted (`egress_abandoned`). The check is the router's tick and the gated face's
-  own recheck, every 2 ms while it waits.
+  own recheck.
+
+**How the router learns there is room (the write-queue notice).** A destination that holds a message asks its
+link to say when it has room (`BoxedLinkDriver::watch_room`, a default no-op for a driver with no queue, so the
+MCU sockets are untouched; the five unicast drivers of the tokio runtime answer it from their outbound queue's
+`RoomSignal`), and withdraws the request when it holds nothing, so a queue nobody watches pays the writer one
+atomic read per notice. The link calls the router's waker on the thread that made the room, and the waker only
+wakes tasks: it raises the loop's wake signal with a stored permit (`FaceForwarder::wake_signal`, the loop's
+`woken` step offers what is held, in order) and every face gated on a destination. The gated face registers as a
+waiter before it asks the gate a second time, so a notice raised between the two is not lost. Room made
+between the probe that found none and the request for notice cannot be told, so the loop is woken once when a
+destination starts to hold. A gated face still rechecks every 25 ms, for a link that gives no notice and not as
+its cadence. Before this, the wait was a poll every 2 ms and a held message with no gated face waited for the
+router's next tick or the next frame on any face.
 
 The publisher whose face is gated finds its own link full, waits its `wait_before_close` and closes its own
 session if the destination has not drained by then, which is upstream's behaviour for a router whose receive
@@ -689,9 +702,8 @@ its own.
 **What it does not cover.** A message that comes from no face (a multicast ingress, a local publish) cannot
 gate anything and waits inside its send as before. A message whose payload is in shared memory goes through
 the relay, whose mapping of the payload for the destination cannot be undone and tried again, and also waits
-as before. A declaration, a query and a reply are rare and are not held. The wait of a gated face is polled
-every 2 ms: the link's writer does not tell the router when a lane has room, which would replace the poll
-with a wake-up and needs a notification in the link seam (the MCU profile shares it, so it is a default no-op
-there). Counters are on the forwarder (`egress_held`, `egress_released`, `egress_abandoned`,
+as before. A declaration, a query and a reply are rare and are not held. A link behind the reconnect wrapper
+(`reconnect.rs`) forwards the notice to its live link, as it forwards `wait_for_room`; a swap replaces the link
+and the waker with it, and the gated face's 25 ms recheck covers the interval. Counters are on the forwarder (`egress_held`, `egress_released`, `egress_abandoned`,
 `egress_destinations_closed`, `egress_gated_faces`) and not in the capacity report yet. `wait_for_slot`, the
 wait for a pooled frame slot under `runtime-zero-copy`, is not touched.

@@ -707,6 +707,25 @@ pub trait BoxedLinkDriver {
         false
     }
 
+    /// Have the link call `waker` whenever room is made on its outbound queue (its writer took a
+    /// frame, or the queue was reshaped or closed), or stop calling the one it has when given
+    /// `None`: the notice a sender that HOLDS messages for a full link, in place of waiting
+    /// inside the send, needs to go on at once and not on a timer.
+    ///
+    /// The waker is called on whatever thread made the room, holding nothing the caller can
+    /// wait on, so it must do no more than wake a task. A link has one waker: a second call
+    /// replaces the first. A driver that is not asked costs the writer one atomic read per
+    /// notice and nothing else, so a sender sets the waker while it holds messages and clears
+    /// it when it holds none.
+    ///
+    /// The default is a driver with no queue to fill (the MCU sockets), whose `wait_for_room`
+    /// always says there is room and which has nothing to notify. A driver that WRAPS another
+    /// must forward this.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    fn watch_room(&self, waker: Option<alloc::sync::Arc<dyn Fn() + Send + Sync>>) {
+        let _ = waker;
+    }
+
     /// The session has staged frames for this link that no write carries yet: wake the writer so
     /// it reaches the hook above. Called after a send that left a frame open, so it must cost
     /// next to nothing when the writer is already awake; the default is the driver that has no

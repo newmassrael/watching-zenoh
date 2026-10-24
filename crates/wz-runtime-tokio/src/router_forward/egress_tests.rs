@@ -29,6 +29,9 @@ struct RoomLink {
     full: AtomicBool,
     frames: Mutex<Vec<Vec<u8>>>,
     sent: AtomicUsize,
+    /// What the router asked to be called when the link makes room, as a real writer's queue
+    /// keeps it.
+    waker: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl RoomLink {
@@ -37,7 +40,23 @@ impl RoomLink {
             full: AtomicBool::new(full),
             frames: Mutex::new(Vec::new()),
             sent: AtomicUsize::new(0),
+            waker: Mutex::new(None),
         })
+    }
+
+    /// Whether the router is waiting to be told of room on this link.
+    fn is_watched(&self) -> bool {
+        self.waker.lock().expect("waker").is_some()
+    }
+
+    /// The link makes room, as its writer does when it takes a frame: the queue is no longer full
+    /// and whoever asked is called.
+    fn make_room(&self) {
+        self.set_full(false);
+        let waker = self.waker.lock().expect("waker").clone();
+        if let Some(waker) = waker {
+            waker();
+        }
     }
 
     fn set_full(&self, full: bool) {
@@ -68,6 +87,9 @@ impl BoxedLinkDriver for RoomLink {
     }
     fn open_blocking(&self) {}
     fn close_blocking(&self) {}
+    fn watch_room(&self, waker: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *self.waker.lock().expect("waker") = waker;
+    }
     fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
         RoomAnswer::at_once(if self.full.load(Ordering::SeqCst) {
             LinkRoom::Congested
@@ -357,5 +379,170 @@ fn only_a_reliable_blocking_put_from_a_face_goes_through_the_credit_stage() {
     assert!(
         !rig.fwd.is_credited(&drop, true),
         "so is congestion control Drop"
+    );
+}
+
+/// A link over a REAL outbound queue, the one every unicast driver of the runtime writes
+/// through: its room answer, its notice and its frames are the queue's.
+struct QueueLink {
+    tx: crate::writer_queue::OutboundTx,
+}
+
+impl BoxedLinkDriver for QueueLink {
+    fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+        match self.tx.send(Priority::DEFAULT, bytes.to_vec()) {
+            Ok(()) => LinkSendOutcome::Sent,
+            Err(_) => LinkSendOutcome::Dropped(wz_session_core::link::LinkDropCause::WriterGone),
+        }
+    }
+    fn open_blocking(&self) {}
+    fn close_blocking(&self) {}
+    fn wait_for_room(&self, priority: Priority, wait: RoomWait) -> RoomAnswer {
+        self.tx.link_room(priority, wait)
+    }
+    fn watch_room(&self, waker: Option<Arc<dyn Fn() + Send + Sync>>) {
+        self.tx.watch_room(waker)
+    }
+}
+
+/// The whole path, with nothing standing in for the writer's queue: a message that finds the
+/// queue full is held, the queue's writer taking a frame is what tells the router, and the router
+/// then sends what it held, in the queue.
+#[tokio::test(flavor = "current_thread")]
+async fn a_real_write_queue_tells_the_router_when_its_writer_makes_room() {
+    // A lane that holds one frame: any frame fills it.
+    let (tx, mut rx) = crate::writer_queue::outbound_channel_with_capacity([1; Priority::NUM], 4);
+    let link = Arc::new(QueueLink { tx });
+    let dest = new_session_actions(link, fixture_session_init_params(), TokioTime::new());
+    TokioRuntime::with_mutex_mut(&dest.remote_peer_zid, |s| {
+        *s = Some(zid(0xCC).as_slice().to_vec())
+    });
+    TokioRuntime::with_mutex_mut(&dest.peer_whatami, |s| *s = Some(0b10));
+    let fwd = RouterForwarder::new(zid(0x01));
+    let quiet = RoomLink::new(false);
+    fwd.register(SOURCE, &client_over(&quiet, zid(0xAA)));
+    fwd.register(DEST, &dest);
+    forward_frame(
+        &fwd,
+        DEST,
+        vec![NetworkMessage::Declare(Box::new(
+            build_declare_subscriber(7, 0, Some("demo/x")).expect("declare subscriber"),
+        ))],
+    );
+    // Whatever the router said to the destination while it was set up is read off the queue,
+    // so that what follows is the puts.
+    while rx.try_recv().is_some() {}
+
+    forward_frame(&fwd, SOURCE, vec![blocking_put(b"first-put")]);
+    forward_frame(&fwd, SOURCE, vec![blocking_put(b"second-put")]);
+    assert_eq!(
+        fwd.egress_held(),
+        1,
+        "the first fills the queue and the second is held"
+    );
+    let loop_wake = fwd.wake_signal().expect("the router asks to be woken");
+    // The permit raised when the second was held, which the link did not give.
+    tokio::time::timeout(Duration::from_secs(1), loop_wake.notified())
+        .await
+        .expect("holding woke the loop once");
+
+    // The writer takes the first frame, and asks for the next: that is room.
+    assert!(rx.try_recv().is_some(), "the writer takes the first put");
+    assert!(rx.try_recv().is_none(), "and finds nothing more queued");
+    tokio::time::timeout(Duration::from_secs(1), loop_wake.notified())
+        .await
+        .expect("the queue told the router, with nothing but its own notice");
+
+    fwd.woken();
+    assert_eq!(fwd.egress_held(), 0, "what was held left");
+    let frame = rx.try_recv().expect("the held put is in the queue now");
+    assert!(
+        frame
+            .windows(b"second-put".len())
+            .any(|w| w == b"second-put"),
+        "and it is the second put"
+    );
+}
+
+/// A destination asks its link to tell the router of room for exactly as long as it holds
+/// something, so that a writer whose queue nobody waits on pays nothing for the notice.
+#[test]
+fn a_destination_asks_its_link_for_room_while_it_holds_and_not_after() {
+    let rig = Rig::new(true);
+    assert!(
+        !rig.link.is_watched(),
+        "nothing is held, so nothing is asked"
+    );
+
+    forward_frame(&rig.fwd, SOURCE, vec![blocking_put(b"held")]);
+    assert!(
+        rig.link.is_watched(),
+        "a held message asks the link to say when it has room"
+    );
+
+    rig.link.set_full(false);
+    rig.fwd.drain_egress();
+    assert_eq!(rig.fwd.egress_held(), 0);
+    assert!(
+        !rig.link.is_watched(),
+        "and the request is withdrawn when nothing is held"
+    );
+
+    // The control: a destination whose held messages are dropped with it withdraws it too.
+    rig.link.set_full(true);
+    forward_frame(&rig.fwd, SOURCE, vec![blocking_put(b"again")]);
+    assert!(rig.link.is_watched());
+    rig.advance(rig.dest.wait_before_close() + Duration::from_millis(1));
+    rig.fwd.tick();
+    assert!(
+        !rig.link.is_watched(),
+        "a destination that was closed for not taking its messages asks for nothing"
+    );
+}
+
+/// The notice a link gives when it makes room reaches both who waits for it: a face gated on the
+/// destination, which is told at once and asks again, and the loop, which is woken (with a
+/// permit, so that a notice raised while it is busy is not lost) and sends what is held.
+#[tokio::test(flavor = "current_thread")]
+async fn a_links_room_wakes_the_gated_face_and_the_loop_and_what_is_held_leaves() {
+    let rig = Rig::new(true);
+    let frame: Vec<NetworkMessage> = (0..EGRESS_CREDIT)
+        .map(|i| blocking_put(format!("m-{i}").as_bytes()))
+        .collect();
+    forward_frame(&rig.fwd, SOURCE, frame);
+    let gate = rig.fwd.read_gate(SOURCE).expect("the face is gated");
+
+    // Holding the first message woke the loop once, for room made between the probe and the
+    // request for notice. That permit is taken here, so that what follows is the link's.
+    let loop_wake = rig.fwd.wake_signal().expect("the router asks to be woken");
+    tokio::time::timeout(Duration::from_secs(1), loop_wake.notified())
+        .await
+        .expect("holding woke the loop once");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), loop_wake.notified())
+            .await
+            .is_err(),
+        "and once only: nothing else woke it"
+    );
+
+    // The face registers as a waiter, as the drive does, and the link then makes room.
+    let notified = gate.notified();
+    tokio::pin!(notified);
+    notified.as_mut().enable();
+    rig.link.make_room();
+    tokio::time::timeout(Duration::from_secs(1), notified)
+        .await
+        .expect("the gated face was told, and did not have to wait for a timer");
+
+    tokio::time::timeout(Duration::from_secs(1), loop_wake.notified())
+        .await
+        .expect("the loop was woken by the link, and the permit was kept for it");
+
+    rig.fwd.woken();
+    assert_eq!(rig.fwd.egress_held(), 0, "what was held left");
+    assert_eq!(rig.link.sent(), rig.baseline + EGRESS_CREDIT);
+    assert!(
+        rig.fwd.read_gate(SOURCE).is_none(),
+        "and the face is read again"
     );
 }

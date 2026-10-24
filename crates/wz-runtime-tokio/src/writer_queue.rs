@@ -598,9 +598,17 @@ const NEVER_FLUSHED: u64 = u64::MAX;
 /// gives the lock up; a notifier changed the state under that same lock before
 /// it asks. So either the waiter's check saw the change, or the count the
 /// notifier reads includes the waiter: a wake-up cannot be lost.
+///
+/// A sender that does not wait on a thread but HOLDS its messages for a full lane and goes on
+/// when there is room (the router's credit stage) leaves a `watcher`, which is called on the
+/// notifying thread. It is read behind its own flag, so a queue nobody watches pays one atomic
+/// read per notice, which is what the waiter count costs.
 struct RoomSignal {
     cv: Condvar,
     waiters: AtomicUsize,
+    /// Whether a watcher is set. Read before the watcher's lock is taken.
+    watched: AtomicBool,
+    watcher: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl RoomSignal {
@@ -608,7 +616,17 @@ impl RoomSignal {
         Self {
             cv: Condvar::new(),
             waiters: AtomicUsize::new(0),
+            watched: AtomicBool::new(false),
+            watcher: Mutex::new(None),
         }
+    }
+
+    /// Call `watcher` at every notice from now on, or stop calling the one there is. One
+    /// watcher at a time: a second replaces the first.
+    fn watch(&self, watcher: Option<Arc<dyn Fn() + Send + Sync>>) {
+        let on = watcher.is_some();
+        *self.watcher.lock().unwrap_or_else(|e| e.into_inner()) = watcher;
+        self.watched.store(on, Ordering::SeqCst);
     }
 
     /// Only the pooled queue waits without a bound (for a free slot).
@@ -636,6 +654,17 @@ impl RoomSignal {
     fn notify_all(&self) {
         if self.waiters.load(Ordering::SeqCst) > 0 {
             self.cv.notify_all();
+        }
+        if self.watched.load(Ordering::SeqCst) {
+            // Cloned out of the lock, so that the call is made holding nothing of this queue's.
+            let watcher = self
+                .watcher
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if let Some(watcher) = watcher {
+                watcher();
+            }
         }
     }
 }
@@ -1659,6 +1688,14 @@ impl OutboundTx {
             room,
             waited_us: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
         }
+    }
+
+    /// Have `waker` called whenever room is made on this queue (the writer took a frame, or the
+    /// queue was reshaped or closed), or stop calling the one there is when given `None`
+    /// (`BoxedLinkDriver::watch_room`, which every write driver over this queue answers with).
+    /// The call is made on the thread that made the room, holding nothing of the queue's.
+    pub fn watch_room(&self, waker: Option<Arc<dyn Fn() + Send + Sync>>) {
+        self.shared.room.watch(waker);
     }
 
     /// R2924 — give the queue the shape its established session needs
@@ -4119,6 +4156,49 @@ mod tests {
         assert_eq!(
             tx.wait_for_room(Priority::Data, block(Duration::ZERO)),
             Room::Free
+        );
+    }
+
+    /// A sender that holds its messages for a full lane, in place of waiting on a thread, is told
+    /// when room is made: the watcher is called when the writer takes a frame and again when it
+    /// asks for the next (which is when the lane is free), not before and not after it was
+    /// cleared. A queue nobody watches calls nothing.
+    #[test]
+    fn a_watcher_is_called_when_room_is_made_and_only_while_it_is_set() {
+        let (tx, mut rx) = outbound_channel_with_capacity([1; Priority::NUM], 4);
+        let called = Arc::new(AtomicUsize::new(0));
+        let waker: Arc<dyn Fn() + Send + Sync> = {
+            let called = Arc::clone(&called);
+            Arc::new(move || {
+                called.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        tx.send(Priority::Data, vec![1u8; 4]).expect("enqueue");
+        tx.send(Priority::Data, vec![2u8; 4]).expect("enqueue");
+
+        // Not set yet: the writer taking a frame calls nobody.
+        assert!(rx.try_recv().is_some());
+        assert_eq!(called.load(Ordering::SeqCst), 0, "nothing was watching");
+
+        tx.watch_room(Some(Arc::clone(&waker)));
+        assert!(
+            rx.try_recv().is_some(),
+            "the writer asks for the next frame"
+        );
+        assert!(
+            called.load(Ordering::SeqCst) >= 1,
+            "the lane's first frame was written, which is room, and the watcher was told"
+        );
+
+        let before = called.load(Ordering::SeqCst);
+        tx.watch_room(None);
+        tx.send(Priority::Data, vec![3u8; 4]).expect("enqueue");
+        assert!(rx.try_recv().is_some());
+        assert!(rx.try_recv().is_none());
+        assert_eq!(
+            called.load(Ordering::SeqCst),
+            before,
+            "a cleared watcher is not called"
         );
     }
 

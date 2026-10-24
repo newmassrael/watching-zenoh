@@ -961,6 +961,10 @@ impl BoxedLinkDriver for StreamWriteDriver {
         self.tx.reshape(shape)
     }
 
+    fn watch_room(&self, waker: Option<std::sync::Arc<dyn Fn() + Send + Sync>>) {
+        self.tx.watch_room(waker)
+    }
+
     // The writer task is the consumer of this queue, and it is the one that runs the
     // hook: when it has nothing to write it flushes what the session staged, which is
     // the pull zenoh's transmission pipeline has (R3367).

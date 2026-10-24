@@ -106,7 +106,6 @@ impl EgressQueue {
 
 /// The forwarder's flow-control state: which face is being routed from, which faces are gated
 /// on which destinations, and what is held.
-#[derive(Default)]
 pub(super) struct Credit {
     /// The face whose inbound frame is being routed now, so that a destination that fills up
     /// knows whom to gate. `None` outside a `forward`, and for a message with no face behind it.
@@ -127,6 +126,39 @@ pub(super) struct Credit {
     closed: Cell<usize>,
     /// Told when a destination took messages, so that a gated face asks again at once.
     wake: Arc<tokio::sync::Notify>,
+    /// Told, with a stored permit, when a link the router holds messages for has room, so that
+    /// the loop sends them then and not at its next tick ([`FaceForwarder::wake_signal`]).
+    loop_wake: Arc<tokio::sync::Notify>,
+    /// What a link calls when it makes room, set on a destination while it holds messages and
+    /// cleared when it holds none: it wakes the loop, and every face gated on a destination.
+    /// Runs on the link's writer thread, so it does no more than wake tasks.
+    room_waker: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Default for Credit {
+    fn default() -> Self {
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let loop_wake = Arc::new(tokio::sync::Notify::new());
+        let room_waker: Arc<dyn Fn() + Send + Sync> = {
+            let (wake, loop_wake) = (Arc::clone(&wake), Arc::clone(&loop_wake));
+            Arc::new(move || {
+                loop_wake.notify_one();
+                wake.notify_waiters();
+            })
+        };
+        Self {
+            source: Cell::default(),
+            gated: RefCell::default(),
+            holding: RefCell::default(),
+            held: Cell::default(),
+            released: Cell::default(),
+            abandoned: Cell::default(),
+            closed: Cell::default(),
+            wake,
+            loop_wake,
+            room_waker,
+        }
+    }
 }
 
 /// Ends the routing of a source face's frame when it drops, on every way out of `forward`.
@@ -216,6 +248,7 @@ impl RouterForwarder {
         priority: Priority,
     ) {
         let mut queue = state.held.borrow_mut();
+        let first = queue.is_empty();
         queue.items.push_back(Held {
             msg,
             reliable,
@@ -224,6 +257,15 @@ impl RouterForwarder {
             since: (self.clock)(),
         });
         self.credit.held.set(self.credit.held.get() + 1);
+        if first {
+            // The link tells the router when it has room, for as long as it holds something.
+            // Room may have been made between the probe that found none and this call, which
+            // the link cannot have told it of, so the loop is woken once to look.
+            state
+                .actions
+                .watch_link_room(Some(Arc::clone(&self.credit.room_waker)));
+            self.credit.loop_wake.notify_one();
+        }
         self.credit.holding.borrow_mut().insert(dest);
         if queue.len() >= EGRESS_CREDIT {
             if let Some(source) = self.credit.source.get().filter(|source| *source != dest) {
@@ -288,6 +330,8 @@ impl RouterForwarder {
             }
             if queue.is_empty() {
                 self.credit.holding.borrow_mut().remove(&id);
+                // Nothing held, so nothing to be told: the writer stops paying for the call.
+                state.actions.watch_link_room(None);
             }
         }
         drop(faces);
@@ -326,6 +370,7 @@ impl RouterForwarder {
                 .set(self.credit.abandoned.get() + dropped);
             self.credit.closed.set(self.credit.closed.get() + 1);
             self.credit.holding.borrow_mut().remove(&id);
+            state.actions.watch_link_room(None);
             state.actions.request_congestion_close();
             closed_any = true;
         }
@@ -362,6 +407,11 @@ impl RouterForwarder {
         } else {
             None
         }
+    }
+
+    /// The signal a link's room raises on the loop ([`FaceForwarder::wake_signal`]).
+    pub(super) fn wake_signal_of(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.credit.loop_wake)
     }
 
     /// A face left: what it held is gone with it, and no face waits on it or for it.
