@@ -281768,6 +281768,52 @@
         "Read the hosted runs of the pushes of rounds 3500 and 3501 per job, Layer E18 first; it links upstream's keyexpr with `keyed-set`, `hashbrown` and now `token-cell`."
       ]
     },
+    "Round 3504": {
+      "decision_summary": "Open-debt item 924, D8 decided and step 4c's first landing (owner: long-term correct, cost not counted). Every list reads its units from a byte source, and a row names its bytes by a locator kept apart from its anchor: a stream range, or a place in a unit log. A list of datagrams logs each unit's payload once, in a chunked byte log that never reallocates, or remembers its place in a lent container and keeps no copy; a discard that takes a unit's last row releases its bytes. One 48-byte row layout serves every list, a row kept whole being a flag on it. A UDP or raweth datagram borrows its payload from its packet. Steps left: the serial line, recovered QUIC, WebSocket and TLS plaintext and the scouting rows, then the memory gate. On a UDP capture of 409,064 rows the handle's heap after replay fell from 204.9 to 52.1 MiB handed and 19.1 MiB lent.",
+      "changes_bullets": [
+        "wz-session-core byte_log.rs: the unit log, byte runs in chunks that double to 64 KiB and are never reallocated, each run one slice, released from the front by position",
+        "wz-session-core passive_messages.rs: one 48-byte UnitRow (anchor, locator, held and logged flags) for every list; MessageList::push_datagram logs a unit or its lent place; a list holding rows whole turns into an index when a unit can be an entry; UnitBytes::container and the Datagrams source; passive.rs: next_datagram_unit_on and _at hand a datagram out with the context it was read in",
+        "wz-capture link.rs: Datagram borrows its payload; lib.rs: datagram flows keep entries and are lent the container, lent_place shared with the TCP path, keep_messages_whole covers every flow; redecode_gate.rs: datagram rows counted as entries, datagram lists under per-flow and total ceilings against the whole reading and lent against handed, and a lent datagram keeps no copy",
+        "docs/dissect-row-index.md: D8, step 4c in four landings, the first recorded with its measurement"
+      ],
+      "verification_bullets": [
+        "Section 2 instrument through the C ABI on a UDP capture of the consumer's generator (409,064 rows, file 55.4 MiB), base against this build, three runs each and every run equal: heap after replay 204.9 to 52.1 MiB handed and 19.1 MiB lent, peak RSS 307 to 150 MB handed and 117 MB lent; replay 180 to 137 ms, census 57 to about 145 ms, fields windows about 2,030 to 2,300 ms",
+        "cargo test wz-capture all features (1562, the gate's nine among them), wz-session-core (dissect, alloc, reassembly; 1215), wz-analyze all features, wz-capi-dissect, wz-capi-replay, wz-replay, wz-tls-record, wz-packet-fixtures, wz-packet-socket, wz-runtime-tokio pcap_dissect_e2e; the integration tests that use datagrams compiled",
+        "Mutations: a release one row early is caught by the list's every-discard test; dropping the no-handshake flag survives, as no reachable state reads it differently, which the flag's doc states",
+        "clippy -D warnings wz-session-core all features, wz-capture all and no default features; rustfmt; discard_site_lint, accessor_reach_census, analysis_surface_parity; rustdoc adds no warning in the files touched"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 4c landings 2 to 4 of docs/dissect-row-index.md: the serial line and its origins, recovered QUIC datagrams and streams, WebSocket messages, TLS plaintext and the scouting rows; then step 5, the memory gate",
+        "The hosted CI runs holding rounds 3485, 3488, 3497 and this one: read the first completed run that holds them, and tell the consumer session which pin to take if it is red",
+        "The consumer session asked whether one row's field document can be produced at about one row's decode instead of the 160 ms a one-row window costs; answer it with the measured source of that cost"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, D8 decided and step 4c's first landing (owner: long-term correct, cost not counted). Every list reads its units from a byte source, and a row names its bytes by a locator kept apart from its anchor: a stream range, or a place in a unit log. A list of datagrams logs each unit's payload once, in a chunked byte log that never reallocates, or remembers its place in a lent container and keeps no copy; a discard that takes a unit's last row releases its bytes. One 48-byte row layout serves every list, a row kept whole being a flag on it. A UDP or raweth datagram borrows its payload from its packet. Steps left: the serial line, recovered QUIC, WebSocket and TLS plaintext and the scouting rows, then the memory gate. On a UDP capture of 409,064 rows the handle's heap after replay fell from 204.9 to 52.1 MiB handed and 19.1 MiB lent.",
+      "publishable_changes_bullets": [
+        "wz-session-core byte_log.rs: the unit log, byte runs in chunks that double to 64 KiB and are never reallocated, each run one slice, released from the front by position",
+        "wz-session-core passive_messages.rs: one 48-byte UnitRow (anchor, locator, held and logged flags) for every list; MessageList::push_datagram logs a unit or its lent place; a list holding rows whole turns into an index when a unit can be an entry; UnitBytes::container and the Datagrams source; passive.rs: next_datagram_unit_on and _at hand a datagram out with the context it was read in",
+        "wz-capture link.rs: Datagram borrows its payload; lib.rs: datagram flows keep entries and are lent the container, lent_place shared with the TCP path, keep_messages_whole covers every flow; redecode_gate.rs: datagram rows counted as entries, datagram lists under per-flow and total ceilings against the whole reading and lent against handed, and a lent datagram keeps no copy",
+        "docs/dissect-row-index.md: D8, step 4c in four landings, the first recorded with its measurement"
+      ],
+      "publishable_verification_bullets": [
+        "Section 2 instrument through the C ABI on a UDP capture of the consumer's generator (409,064 rows, file 55.4 MiB), base against this build, three runs each and every run equal: heap after replay 204.9 to 52.1 MiB handed and 19.1 MiB lent, peak RSS 307 to 150 MB handed and 117 MB lent; replay 180 to 137 ms, census 57 to about 145 ms, fields windows about 2,030 to 2,300 ms",
+        "cargo test wz-capture all features (1562, the gate's nine among them), wz-session-core (dissect, alloc, reassembly; 1215), wz-analyze all features, wz-capi-dissect, wz-capi-replay, wz-replay, wz-tls-record, wz-packet-fixtures, wz-packet-socket, wz-runtime-tokio pcap_dissect_e2e; the integration tests that use datagrams compiled",
+        "Mutations: a release one row early is caught by the list's every-discard test; dropping the no-handshake flag survives, as no reachable state reads it differently, which the flag's doc states",
+        "clippy -D warnings wz-session-core all features, wz-capture all and no default features; rustfmt; discard_site_lint, accessor_reach_census, analysis_surface_parity; rustdoc adds no warning in the files touched"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 4c landings 2 to 4 of docs/dissect-row-index.md: the serial line and its origins, recovered QUIC datagrams and streams, WebSocket messages, TLS plaintext and the scouting rows; then step 5, the memory gate",
+        "The hosted CI runs holding rounds 3485, 3488, 3497 and this one: read the first completed run that holds them, and tell the consumer session which pin to take if it is red",
+        "The consumer session asked whether one row's field document can be produced at about one row's decode instead of the 160 ms a one-row window costs; answer it with the measured source of that cost"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
