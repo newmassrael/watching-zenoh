@@ -209,6 +209,45 @@ A gate opens the generator's capture through the C ABI and fails when the
 handle's heap per row, after replay, exceeds a ceiling set from the measured
 value with stated slack. It is what keeps the structure from drifting back.
 
+### D8. Every list reads its units from a byte source; a datagram list's is a unit log
+
+Decided before step 4c (owner, 2026-10-24: the long-term correct structure,
+cost not counted). After step 3 only a TCP flow's messages are index entries;
+every other list keeps each message decoded, because its units' bytes were in
+no place the list could read them again. D8 gives each of them that place.
+
+- A row names its bytes by a LOCATOR in its list's source, kept apart from its
+  anchor. A stream row's locator is a range of its direction's stream, which is
+  where its anchor already points. A datagram row's anchor is the index of the
+  packet that carried it, a coordinate no bytes can be read by, so its locator
+  is the place its unit was logged. One row layout carries both, with a flag
+  for which space, and a row kept whole is a flag on the same layout rather
+  than an enum around it.
+- A list whose units arrive whole (a UDP or raweth datagram, a serial frame, a
+  recovered QUIC datagram, a WebSocket message) reads them from a UNIT LOG:
+  the units' payloads in arrival order, each logged once. A unit whose payload
+  sits in a container the caller lends is logged by its place there and keeps
+  no copy, as a TCP run is. This is the reference design's frame table (each
+  frame's file offset and length), holding the payload rather than the frame
+  for the reason D1's correction gives.
+- A discard that takes the last row of a logged unit releases that unit's
+  bytes in the same call, so a list and its log cannot come apart and no
+  holder has to remember to do it.
+- A stream a layer below produced (a recovered QUIC stream, TLS plaintext) is
+  in no container: what the handle keeps of it is the plaintext stream, behind
+  the same run map a TCP stream uses, which is the smallest form of it the
+  handle can own. The reference dissector keeps decrypted data for the same
+  reason (it stores the plaintext of a record on its first visit).
+- The per-message origins the serial line keeps beside its rows, and the
+  scouting rows, follow the same rule: what one unit's bytes decide is read
+  again from the log, and only what they cannot decide is stored.
+
+Why: the alternative, a second arena of whole packets for these lists, is the
+form D1's correction already rejected (it holds headers too), and a decoded
+message per row is what this design removes. The locator is the one field the
+datagram space lacks, and making it explicit lets one re-decoder and one gate
+serve every list.
+
 ## 5. Expected cost, not yet measured
 
 Per row: the index entry (about 64 B), one segment-map entry per packet (about
@@ -312,8 +351,26 @@ from. So the order is now:
   the file, against 6.6x at 270780967. Instructions at 40,064 rows (replay,
   drain, census): handed 612.9 to 604.5 M, lent 632.9 to 603.0 M once the
   segment borrowed its payload.
-- 4c. Datagram, serial and QUIC rows become index entries too, their bytes read
-  from the source.
+- 4c. Every other list's rows become index entries too, their bytes read from
+  the source (D8). Four landings, each with the gate extended to the lists it
+  moves: (1) the row layout with its locator, the unit log, and the UDP and
+  raweth datagram lists, handed and lent; (2) the serial line and its origins;
+  (3) recovered QUIC datagrams and streams; (4) WebSocket messages, TLS
+  plaintext and the scouting rows.
+  Landed (1): one 48-byte row layout (the step-4b entry and its enum tag took
+  48 bytes too) with a locator and a held flag; the unit log is a chunked byte
+  log in the message list (chunks double to 64 KiB and are never reallocated,
+  so a unit reads as one slice), and a discard that takes a unit's last row
+  releases its bytes; a `Datagram` borrows its payload, so a lent one is logged
+  by its place. The gate holds every datagram list equal to the reading that
+  kept it whole, under per-flow and total message ceilings and lent against
+  handed; a list's own tests read every row after every discard, which caught a
+  release made one row early. Measured with the section 2 instrument on a UDP
+  capture of the same generator (409,064 rows, file 55.4 MiB, three runs each,
+  every run equal): the handle's heap after replay 204.9 to 52.1 MiB handed and
+  19.1 MiB lent (the entries alone), peak RSS 307 to 150 MB handed and 117 MB
+  lent; replay 180 to 137 ms, census 57 to about 145 ms and fields windows about
+  2,030 to 2,300 ms (+13%), the price of reading rows again.
 - 5. The memory gate.
 
 ## 7. Open
@@ -322,7 +379,7 @@ from. So the order is now:
   replay, because what the caller promises differs (bytes read during the call
   against bytes kept for the life of the handle). Decided and landed in step 3.
 - QUIC streams and the serial line produce rows outside the TCP segment map;
-  step 3 did not reach them, and their byte source is decided in step 4c.
+  step 3 did not reach them. Closed: D8 decides their byte source.
 - Closed: D5 is decided (section 4). After the declaration absorption rode on
   the pairing's walk, a capture read the way the consumer reads it decodes each
   row three times: the census walk, the field document's shared walk and the
