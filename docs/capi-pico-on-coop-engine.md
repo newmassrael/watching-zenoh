@@ -82,6 +82,20 @@ it behaves as pico behaves in both of pico's threading arms.
   (`deploy/Kconfig*`, `configs/profiles/`, the `wz-config.toml` generator)
   belongs to the session that owns it; the feature maps onto that axis when
   that session agrees the shape.
+- **D7. The C session handle is the ABI's, and holds the engine's session as a port.** It points
+  at a `PicoSessionHandle`: the engine's session behind the port's `SessionDrive` (open, close,
+  the read task, read, spin, keep-alive) and the ABI's own per-session state (role, clock,
+  connectivity listeners, admin space), which the ABI keeps itself rather than parking it in
+  the engine as an untyped extension. A module of a capability the port does not carry yet
+  reaches the tokio engine's session by downcast, which a build without that capability does
+  not compile.
+- **D8. Both ports are `Send + Sync`, and the cooperative engine earns it with one lock.** A C
+  program may call into a session from any thread in pico's multi-threaded arm, and in its
+  single-threaded arm promises one thread. The cooperative engine's state (single-threaded
+  types, `Rc` among them) lives behind one session lock and never escapes it; a C callback
+  runs with the lock released (deliveries are queued under it and handed out after), so a
+  callback may call back into its session, as zenoh-pico's may. That is the one `unsafe`
+  claim the engine makes, stated where its lock is.
 - **D6. The compile profile is orthogonal.** A `panic = "abort"` profile for the
   C ABI (`capi-small`) composes with either engine and is measured on its own.
 
@@ -126,10 +140,14 @@ it behaves as pico behaves in both of pico's threading arms.
   pico-default +5 KB. The first cut cost 35 KB, all of it a second copy of the registry's drop
   glue: a release build does not share generics across crates, so the trait object must be made
   in the engine's crate (`SharedSession::as_engine`, `#[inline(never)]`) and the boxed session
-  freed there (`SessionState::release`); an implicit coercion in the ABI crate brings the copy
-  back.
-- Next: `SessionDrive`, the C session handle's half of the port (open, close, the read task, read,
-  spin, keep-alive), then the cooperative engine.
+  freed there; an implicit coercion in the ABI crate brings the copy back.
+- 2026-10-24: `SessionDrive`, the C session handle's half of the port (close, the read task,
+  read, spin, keep-alive, the zid), and the handle the ABI owns (D7): `z_open` stores a
+  `PicoSessionHandle` holding the drive (`SessionState::into_drive`, made in the engine's crate,
+  which also frees the session through it) and the ABI's per-session state, which no longer
+  rides in the engine as an untyped extension. Measured cost on top of the engine port:
+  pico-client +2.5 KB, pico-default +1.9 KB.
+- Next: the cooperative engine (D8), selectable beside the tokio one, with its size-gate case.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
   engine's session, and the modules of capabilities the cooperative engine does not have yet

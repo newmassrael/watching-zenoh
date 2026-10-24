@@ -48,7 +48,7 @@ use crate::option_fields::unstable_option_fields;
 use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
-use crate::session::{engine_of, engine_ref, session_state, z_loaned_session_t, Engine};
+use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
 use wz_capi_port::{FilterPlane, FilteredPut, MatchId, SubId, WireKey};
 
@@ -659,13 +659,15 @@ pub unsafe extern "C" fn z_timestamp_new(
         if ts.is_null() {
             return Z_ERR_NULL;
         }
-        let state = match session_state(zs) {
+        let state = match session_handle(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
         *ts = z_timestamp_t {
             valid: true,
-            id: crate::zid::z_id_t { id: state.zid() },
+            id: crate::zid::z_id_t {
+                id: state.drive.zid(),
+            },
             // R311y569 — the WALL CLOCK, through wz's own NTP64 SSOT.
             //
             // This was `ntp64_from_millis(shared.now_monotonic_ms())`, the same
@@ -1687,7 +1689,7 @@ pub unsafe extern "C" fn z_put(
             Some(b) => b,
             None => return Z_ERR_NULL,
         };
-        let state = match session_state(zs) {
+        let state = match session_handle(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
@@ -1736,7 +1738,7 @@ pub unsafe extern "C" fn z_delete(
     options: *const z_delete_options_t,
 ) -> ZResult {
     guarded(|| {
-        let state = match session_state(zs) {
+        let state = match session_handle(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
@@ -1877,7 +1879,7 @@ pub unsafe extern "C" fn z_declare_publisher(
         }
         // FIRST, before any early return could skip it: the moved encoding.
         let declared = PublisherQos::declared_by(options);
-        let state = match session_state(zs) {
+        let state = match session_handle(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
@@ -2105,7 +2107,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
         let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
         *owned = z_owned_closure_sample_t::null_value();
 
-        let state = match session_state(zs) {
+        let state = match session_handle(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
@@ -2211,7 +2213,7 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
         *owned = z_owned_closure_sample_t::null_value();
 
-        let state = match session_state(zs) {
+        let state = match session_handle(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };

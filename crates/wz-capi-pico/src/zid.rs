@@ -45,7 +45,7 @@ use crate::abi::z_owned_string_t;
 use crate::bytes::store_owned_string;
 use crate::pubsub::z_closure_drop_callback_t;
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
-use crate::session::{session_state, z_loaned_session_t};
+use crate::session::{session_handle, z_loaned_session_t};
 
 /// pico's `ZENOH_ID_SIZE` (`protocol/core.h:59-62`).
 pub const Z_ID_SIZE: usize = 16;
@@ -227,8 +227,10 @@ unsafe fn guarded_null2<A, B>(a: *mut A, b: *mut B, body: impl FnOnce() -> ZResu
 /// unset) rather than a crash.
 #[no_mangle]
 pub unsafe extern "C" fn z_info_zid(zs: *const z_loaned_session_t) -> z_id_t {
-    match session_state(zs) {
-        Some(state) => z_id_t { id: state.zid() },
+    match session_handle(zs) {
+        Some(handle) => z_id_t {
+            id: handle.drive.zid(),
+        },
         None => z_id_t::empty(),
     }
 }
@@ -280,7 +282,7 @@ unsafe fn enumerate_peers(
         // From here every return path must release `taken`, so the body runs
         // inside a closure and the release is unconditional below.
         let rc = (|| {
-            let state = match session_state(zs) {
+            let state = match session_handle(zs) {
                 Some(s) => s,
                 None => return Z_ERR_NULL,
             };
@@ -304,7 +306,11 @@ unsafe fn enumerate_peers(
             #[cfg(feature = "multicast-transport")]
             if !routers {
                 // The group is the tokio engine's alone so far: the port carries no multicast.
-                for zid in state.shared.group_member_zids() {
+                for zid in state
+                    .tokio()
+                    .into_iter()
+                    .flat_map(|s| s.shared.group_member_zids())
+                {
                     let id = z_id_t::from_wire(&zid);
                     call(&id, taken.context);
                 }

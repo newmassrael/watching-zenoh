@@ -142,7 +142,7 @@ use crate::pubsub::{
 };
 use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t, ANYKE_PARAM, PARAM_SEPARATOR};
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
-use crate::session::{session_state, z_loaned_session_t};
+use crate::session::{tokio_session, z_loaned_session_t};
 use wz_capi_core::faces::SharedSession;
 use wz_capi_port::WireKey;
 
@@ -1157,7 +1157,7 @@ unsafe fn get_inner(
     // also correctly reports "this get is over".
     let cclosure = adopt_reply_closure(callback);
 
-    let state = match session_state(zs) {
+    let (handle, state) = match tokio_session(zs) {
         Some(s) => s,
         None => return Z_ERR_NULL,
     };
@@ -1204,7 +1204,7 @@ unsafe fn get_inner(
     };
     // R2959 — the query names the caller's key in its own wire form, as pico's
     // `_z_query` does (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)`).
-    let Some(wire) = wire_key_of(keyexpr, crate::session::engine_ref(state)) else {
+    let Some(wire) = wire_key_of(keyexpr, crate::session::engine_ref(handle)) else {
         return Z_ERR_INVALID;
     };
 

@@ -74,9 +74,8 @@ use wz_session_core::WhatAmI;
 use crate::ffi::guarded;
 use crate::link_properties::pico_link_properties;
 use crate::query::PlainQueryable;
-use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_OK};
-use crate::session::{session_state, z_loaned_session_t};
-use crate::session_ext::PicoSessionExt;
+use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
+use crate::session::{session_handle, tokio_session, z_loaned_session_t, PicoSessionHandle};
 use crate::write_filter::PicoSession;
 use crate::zid::zid_hex;
 
@@ -106,16 +105,13 @@ impl AdminSpaceSlot {
     }
 }
 
-/// The slot of the session behind `zs`: `Err(Z_ERR_NULL)` for a null or spent
-/// handle, `Err(Z_ERR_GENERIC)` for a session this ABI did not open.
+/// The session behind `zs` and its tokio engine, whose session the admin
+/// space's queryable is declared on: `Err(Z_ERR_NULL)` for a null or spent
+/// handle.
 unsafe fn slot_of<'a>(
     zs: *const z_loaned_session_t,
-) -> Result<(&'a wz_capi_core::drive::SessionState, &'a PicoSessionExt), ZResult> {
-    let state = session_state(zs).ok_or(Z_ERR_NULL)?;
-    let ext = state
-        .abi_extension::<PicoSessionExt>()
-        .ok_or(Z_ERR_GENERIC)?;
-    Ok((state, ext))
+) -> Result<(&'a PicoSessionHandle, &'a wz_capi_core::drive::SessionState), ZResult> {
+    tokio_session(zs).ok_or(Z_ERR_NULL)
 }
 
 /// Start the session's admin space (pico `zp_start_admin_space`).
@@ -126,10 +122,11 @@ unsafe fn slot_of<'a>(
 #[no_mangle]
 pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZResult {
     guarded(|| {
-        let (state, ext) = match slot_of(zs) {
+        let (handle, state) = match slot_of(zs) {
             Ok(found) => found,
             Err(code) => return code,
         };
+        let ext = &handle.ext;
         // Held across the declaration, as pico holds its admin-space mutex, so
         // two starts at once declare one queryable.
         let mut running = ext.admin_space.running();
@@ -159,7 +156,7 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
                 answerer.answer(query, out)
             }) as Box<_>
         });
-        match PlainQueryable::declare(&PicoSession::of(state), &key, None, false, sink) {
+        match PlainQueryable::declare(&PicoSession::of(handle), &key, None, false, sink) {
             Ok(queryable) => {
                 *running = Some(queryable);
                 Z_OK
@@ -175,12 +172,11 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
 #[no_mangle]
 pub unsafe extern "C" fn zp_stop_admin_space(zs: *mut z_loaned_session_t) -> ZResult {
     guarded(|| {
-        let (_, ext) = match slot_of(zs) {
-            Ok(found) => found,
-            Err(code) => return code,
+        let Some(handle) = session_handle(zs) else {
+            return Z_ERR_NULL;
         };
         // Taken out under the lock and undeclared after it is released.
-        let stopped = ext.admin_space.running().take();
+        let stopped = handle.ext.admin_space.running().take();
         drop(stopped);
         Z_OK
     })

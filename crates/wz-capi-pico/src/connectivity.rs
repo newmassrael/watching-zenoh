@@ -84,8 +84,7 @@ use crate::pubsub::{
     z_closure_drop_callback_t, z_sample_kind_t, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
 use crate::result::{ZResult, Z_EINVAL, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
-use crate::session::{session_state, z_loaned_session_t};
-use crate::session_ext::PicoSessionExt;
+use crate::session::{session_state, tokio_session, z_loaned_session_t};
 use crate::string_array::z_owned_string_array_t;
 use crate::whatami::z_whatami_t;
 use crate::zid::z_id_t;
@@ -1344,9 +1343,8 @@ pub unsafe extern "C" fn z_link_event_link_mut(
 unsafe fn hub_of<'a>(
     zs: *const z_loaned_session_t,
 ) -> Option<(&'a wz_capi_core::drive::SessionState, &'a Arc<Connectivity>)> {
-    let state = session_state(zs)?;
-    let ext = state.abi_extension::<PicoSessionExt>()?;
-    Some((state, &ext.connectivity))
+    let (handle, state) = tokio_session(zs)?;
+    Some((state, &handle.ext.connectivity))
 }
 
 /// Call `closure` once per connected transport (pico `z_info_transports`).

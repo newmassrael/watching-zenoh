@@ -47,7 +47,6 @@
 
 use std::sync::Arc;
 
-use wz_capi_core::drive::SessionState;
 #[cfg(any(feature = "queryable", feature = "liveliness", feature = "advanced"))]
 use wz_capi_core::faces::SharedSession;
 use wz_capi_port::{FilterId, FilterPlane, FilteredPut, WireKey};
@@ -57,26 +56,19 @@ use wz_session_core::declare_form::InterestForm;
 use wz_session_core::WhatAmI;
 
 use crate::keyexpr::DeclaredKeyexpr;
-use crate::session::{engine_of, Engine};
-use crate::session_ext::PicoSessionExt;
+use crate::session::{engine_of, Engine, PicoSessionHandle};
 
-/// This session's own role, [`WhatAmI::Client`] when none was recorded (a
-/// session this ABI did not open, which no C entry point can hand it).
-///
-/// The role is pico's `zn->_mode`, attached to the session at open
+/// This session's own role: pico's `zn->_mode`, kept in the handle at open
 /// ([`crate::session_ext::PicoSessionExt`]) because nothing downstream of the
 /// open can recover it.
-pub(crate) fn session_mode(state: &SessionState) -> WhatAmI {
-    state
-        .abi_extension::<PicoSessionExt>()
-        .map(|ext| ext.mode)
-        .unwrap_or(WhatAmI::Client)
+pub(crate) fn session_mode(handle: &PicoSessionHandle) -> WhatAmI {
+    handle.ext.mode
 }
 
 /// What an entity needs of the session it is declared on, OWNED: the key table
 /// and the role.
 ///
-/// A declaring entry point borrows a [`SessionState`] out of the C handle for
+/// A declaring entry point borrows the session handle out of the C handle for
 /// the length of its call, and that is all it needs. A composite that declares
 /// more entities later — an advanced publisher beaconing from a task, say — has
 /// to keep what it declares them with, and the borrowed state cannot be kept. So
@@ -104,18 +96,21 @@ pub(crate) struct PicoSession {
 }
 
 impl PicoSession {
-    /// The session behind a borrowed state.
-    pub(crate) fn of(state: &SessionState) -> Self {
+    /// The session behind a borrowed handle.
+    pub(crate) fn of(handle: &PicoSessionHandle) -> Self {
         Self {
-            engine: engine_of(state),
+            engine: engine_of(handle),
+            // A build with these capabilities runs every session on the tokio engine: the
+            // cooperative engine's build does not compile them (decision D4).
             #[cfg(any(feature = "queryable", feature = "liveliness", feature = "advanced"))]
-            shared: state.shared.clone(),
-            mode: session_mode(state),
+            shared: handle
+                .tokio()
+                .expect("a build with queryables, liveliness or the advanced plane opens every session on the tokio engine")
+                .shared
+                .clone(),
+            mode: session_mode(handle),
             #[cfg(feature = "advanced")]
-            hlc: state
-                .abi_extension::<PicoSessionExt>()
-                .map(|ext| ext.hlc.clone())
-                .unwrap_or_default(),
+            hlc: handle.ext.hlc.clone(),
         }
     }
 }

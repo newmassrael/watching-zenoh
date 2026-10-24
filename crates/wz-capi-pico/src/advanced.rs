@@ -70,7 +70,7 @@ use crate::pubsub::{
     z_owned_subscriber_t, CClosure, SubscriberState,
 };
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
-use crate::session::{session_state, z_loaned_session_t};
+use crate::session::z_loaned_session_t;
 use crate::write_filter::PicoSession;
 use crate::zid::z_id_t;
 use wz_capi_core::faces::{AdvSubId, SharedSession};
@@ -542,7 +542,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             return Z_ERR_NULL;
         }
         *pub_ = ze_owned_advanced_publisher_t::null_value();
-        let state = match session_state(zs) {
+        let (handle, state) = match crate::session::tokio_session(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
@@ -576,7 +576,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_ERR_INVALID;
         }
-        let session = PicoSession::of(state);
+        let session = PicoSession::of(handle);
         // The publisher's source identity is the session's own zid, the one its
         // peers see in the handshake.
         let zid = session.shared.zid().to_vec();
@@ -966,7 +966,7 @@ pub unsafe extern "C" fn ze_declare_advanced_subscriber(
         let cclosure = Arc::new(CClosure::new(owned.context, owned.call, owned.drop));
         *owned = z_owned_closure_sample_t::null_value();
 
-        let state = match session_state(zs) {
+        let (handle, state) = match crate::session::tokio_session(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
@@ -985,7 +985,7 @@ pub unsafe extern "C" fn ze_declare_advanced_subscriber(
         // naming its key the way its own entry point does — see
         // `crate::advanced_forms`. The caller's key is what they derive from.
         let forms = Arc::new(PicoSubscriberForms::new(
-            &PicoSession::of(state),
+            &PicoSession::of(handle),
             declared_of(keyexpr)
                 .map(DeclaredKeyexpr::share)
                 .unwrap_or_else(|| DeclaredKeyexpr::literal_only(ke.clone())),

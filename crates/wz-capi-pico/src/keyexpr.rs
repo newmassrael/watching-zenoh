@@ -25,7 +25,7 @@ use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION, Z_ERR_NULL,
     Z_OK,
 };
-use crate::session::{engine_of, engine_ref, session_state, z_loaned_session_t, Engine};
+use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 
 /// Resolve a loaned keyexpr to its borrowed UTF-8 string, or `None` if null /
@@ -553,7 +553,7 @@ pub unsafe extern "C" fn z_declare_keyexpr(
         if declared.is_null() {
             return Z_ERR_NULL;
         }
-        let state = match session_state(zs) {
+        let state = match session_handle(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
@@ -598,7 +598,7 @@ pub unsafe extern "C" fn z_undeclare_keyexpr(
             return Z_ERR_INVALID;
         }
         let key = Box::from_raw(handle as *mut DeclaredKeyexpr);
-        let Some(state) = session_state(zs) else {
+        let Some(state) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
         if key.declaration.is_none() {

@@ -60,7 +60,7 @@ use crate::matching::{
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
-use crate::session::{session_state, z_loaned_session_t};
+use crate::session::{tokio_session, z_loaned_session_t};
 use crate::write_filter::{PicoSession, WriteFilter};
 
 // --- options ---------------------------------------------------------------
@@ -391,7 +391,7 @@ pub unsafe extern "C" fn z_declare_querier(
         } else {
             crate::encoding::take_moved_encoding((*options).encoding)
         };
-        let state = match session_state(zs) {
+        let (handle, state) = match tokio_session(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
@@ -432,7 +432,7 @@ pub unsafe extern "C" fn z_declare_querier(
         // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &querier->_key, keyexpr), _z_undeclare_querier(querier));`)
         // and its gets are issued on that declaration.
         let key = match DeclaredKeyexpr::declare(
-            &crate::session::engine_of(state),
+            &crate::session::engine_of(handle),
             &ke,
             declared_of(keyexpr),
         ) {
@@ -450,7 +450,7 @@ pub unsafe extern "C" fn z_declare_querier(
         // (`vendor/zenoh-pico/src/api/api.c` @
         // `querier->_val._target == Z_QUERY_TARGET_ALL_COMPLETE`).
         let filter = WriteFilter::declare(
-            &PicoSession::of(state),
+            &PicoSession::of(handle),
             FilterPlane::Queryables {
                 complete_required: target == crate::get::Z_QUERY_TARGET_ALL_COMPLETE,
             },

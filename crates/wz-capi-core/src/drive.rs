@@ -386,9 +386,9 @@ thread_local! {
 }
 
 /// A start or a stop was made from inside the session's own callbacks. pico
-/// answers `_Z_ERR_INVALID` and does nothing, and so does this ABI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CalledFromReadTask;
+/// answers `_Z_ERR_INVALID` and does nothing, and so does this ABI. The port's
+/// type (`wz-capi-port`), which every engine's read task answers with.
+pub use wz_capi_port::CalledFromReadTask;
 
 impl ReadGate {
     /// A gate whose task runs from the start when `running`, and that otherwise
@@ -975,20 +975,6 @@ impl SessionState {
     /// Whether the read task is running (pico `zp_read_task_is_running`).
     pub fn read_task_is_running(&self) -> bool {
         self.read_gate.is_running()
-    }
-
-    /// Close and free a session an ABI holds boxed behind its C handle (pico
-    /// `z_session_drop`): the drop runs [`Self::close`], which is idempotent.
-    ///
-    /// Freed HERE rather than by the ABI dropping the box itself. Dropping a
-    /// `Box<SessionState>` instantiates the drop glue of everything the session owns
-    /// (the face registry's maps, its subscribers, its tokens) in the crate that
-    /// drops it, and this crate holds that glue already, for the engine's trait
-    /// object (`SharedSession::as_engine`). A drop in the ABI crate is a second copy:
-    /// measured on the pico client build, 35 KB of text, every function of it a
-    /// duplicate.
-    pub fn release(self: Box<Self>) {
-        drop(self);
     }
 
     /// Attach this ABI's per-session state. Once: a second call is refused and

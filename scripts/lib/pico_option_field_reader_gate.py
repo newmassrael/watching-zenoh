@@ -113,11 +113,6 @@ UNREAD_WITH_REASON = {
     "zp_task_lease_options_t.task_attributes": (
         f"thread attributes of pico's lease task, itself a no-op in pico {REASONS_READ_AT}"
     ),
-    "zp_read_options_t.single_read": (
-        "bounds how much ONE zp_read call processes (one message or the whole batch); the wz "
-        "session reads continuously on its own runtime, so zp_read processes nothing and only "
-        "answers for a live session, and there is no per-call read to bound"
-    ),
     "z_query_reply_options_t.congestion_control": (
         "documented ignored by pico itself: a reply's congestion control is the query's"
     ),

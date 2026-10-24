@@ -3,8 +3,10 @@
 
 //! What a pico C session carries that the ABI-neutral core has no place for.
 //!
-//! [`SessionState::set_abi_extension`] takes ONE value, once, right after the
-//! open, so everything this ABI keeps per session lives in this one struct:
+//! The C handle (`PicoSessionHandle`) holds the engine's session beside ONE
+//! value of this ABI's own, built at the open, so everything this ABI keeps per
+//! session lives in this one struct (`docs/capi-pico-on-coop-engine.md`,
+//! decision D7):
 //!
 //! - the session's ROLE, which is decided by the C config (`Z_CONFIG_MODE_KEY`,
 //!   and a `listen` config forces peer) and which nothing downstream of the open

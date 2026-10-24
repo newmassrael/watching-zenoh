@@ -5,9 +5,11 @@
 //! an ABI that holds `Arc<dyn SessionEngine>` gets exactly what it got by naming
 //! [`SharedSession`] (`docs/capi-pico-on-coop-engine.md`, step 2).
 
+use std::any::Any;
+
 use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, SessionEngine, SubId,
-    SubscriberSink, WireKey,
+    CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
+    SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey,
 };
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::locality::Locality;
@@ -15,6 +17,7 @@ use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 
 use std::sync::Arc;
 
+use crate::drive::SessionState;
 use crate::faces::SharedSession;
 
 /// This registry as the port's engine, made HERE and handed out.
@@ -39,6 +42,85 @@ impl SharedSession {
     #[inline(never)]
     pub fn engine_ref(&self) -> &dyn SessionEngine {
         self
+    }
+}
+
+/// The session a C handle holds, as the port's [`SessionDrive`]. This engine drives itself on a
+/// thread of its own, so pico's single-threaded calls find the work already done and answer as
+/// for a live session: the one-directional divergence `docs/capi-pico-on-coop-engine.md`
+/// describes, which the cooperative engine removes.
+impl SessionDrive for SessionState {
+    fn engine(&self) -> Arc<dyn SessionEngine> {
+        self.shared.as_engine()
+    }
+
+    fn engine_ref(&self) -> &dyn SessionEngine {
+        self.shared.engine_ref()
+    }
+
+    fn zid(&self) -> [u8; 16] {
+        SessionState::zid(self)
+    }
+
+    fn close(&self) {
+        SessionState::close(self)
+    }
+
+    fn is_closed(&self) -> bool {
+        SessionState::is_closed(self)
+    }
+
+    fn start_read_task(&self) -> Result<(), CalledFromReadTask> {
+        SessionState::start_read_task(self)
+    }
+
+    fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
+        SessionState::stop_read_task(self)
+    }
+
+    fn read_task_is_running(&self) -> bool {
+        SessionState::read_task_is_running(self)
+    }
+
+    fn read(&self, _single: bool) -> Result<(), SessionClosed> {
+        // This engine reads continuously on its own runtime: a call processes nothing, so
+        // there is no per-call read for `single` to bound.
+        self.live()
+    }
+
+    fn send_keep_alive(&self) -> Result<(), SessionClosed> {
+        self.live()
+    }
+
+    fn spin_once(&self) -> bool {
+        // pico answers `false` only for a closed session or an idle task queue; this engine
+        // has no queue to be empty.
+        !SessionState::is_closed(self)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+impl SessionState {
+    /// This session as the port's drive, made HERE (out of line) for the reason
+    /// [`SharedSession::as_engine`] is: a trait object made in an ABI crate brings the session's
+    /// drop glue there a second time. The ABI then frees the session through the drive's vtable
+    /// (pico `z_session_drop`), whose drop is this crate's; a `Box<SessionState>` dropped in the
+    /// ABI crate measured 35 KB of duplicate text on the pico client build.
+    #[inline(never)]
+    pub fn into_drive(self) -> Box<dyn SessionDrive> {
+        Box::new(self)
+    }
+
+    /// What a single-threaded entry point answers: done, for a live session.
+    fn live(&self) -> Result<(), SessionClosed> {
+        if SessionState::is_closed(self) {
+            Err(SessionClosed)
+        } else {
+            Ok(())
+        }
     }
 }
 

@@ -81,7 +81,7 @@ use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::result::{
     ZResult, Z_ERR_INVALID, Z_ERR_KEYEXPR_NOT_MATCH, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
-use crate::session::{session_state, z_loaned_session_t};
+use crate::session::{tokio_session, z_loaned_session_t};
 use wz_capi_core::faces::{QblId, SharedSession};
 
 // The enum-typed option fields (`z_congestion_control_t`, `z_priority_t`) are in
@@ -1129,7 +1129,7 @@ unsafe fn declare_queryable_inner(
     let cclosure = CQueryClosure::new(owned.context, owned.call, owned.drop);
     *owned = z_owned_closure_query_t::null_value();
 
-    let state = match session_state(zs) {
+    let (handle, state) = match tokio_session(zs) {
         Some(s) => s,
         None => return Err(Z_ERR_NULL),
     };
@@ -1150,7 +1150,7 @@ unsafe fn declare_queryable_inner(
         ((*options).complete, (*options).allowed_origin())
     };
     let (id, key) = declare_queryable_on(
-        &crate::write_filter::PicoSession::of(state),
+        &crate::write_filter::PicoSession::of(handle),
         ke,
         declared_of(keyexpr),
         complete,

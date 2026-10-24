@@ -196,14 +196,14 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         if token.is_null() {
             return Z_ERR_NULL;
         }
-        let state = match session_state(zs) {
+        let handle = match crate::session::session_handle(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
-        let boxed = match TokenState::declare(&PicoSession::of(state), ke, declared_of(keyexpr)) {
+        let boxed = match TokenState::declare(&PicoSession::of(handle), ke, declared_of(keyexpr)) {
             Ok(token) => Box::new(token),
             Err(rc) => return rc,
         };
@@ -329,7 +329,7 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
         *owned = z_owned_closure_sample_t::null_value();
 
-        let state = match session_state(zs) {
+        let (handle, state) = match crate::session::tokio_session(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
@@ -354,14 +354,14 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &s._key, keyexpr), _z_subscription_clear(&s));`
         // and the `_z_make_interest(&wireexpr, ...)` on `sp_s->_key` below it).
         let key = match DeclaredKeyexpr::declare(
-            &crate::session::engine_of(state),
+            &crate::session::engine_of(handle),
             &ke,
             declared_of(keyexpr),
         ) {
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let wire = key.wire(crate::session::engine_ref(state));
+        let wire = key.wire(crate::session::engine_ref(handle));
         let id = state
             .shared
             .declare_liveliness_subscriber_on_wire(ke, wire, opts, {
@@ -375,7 +375,7 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
                 })
             });
         let mut boxed = Box::new(SubscriberState {
-            shared: crate::session::engine_of(state),
+            shared: crate::session::engine_of(handle),
             id,
             key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),

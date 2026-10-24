@@ -211,7 +211,7 @@ fn resolve_tls_config(_cfg: &ConfigState) -> Result<CapiTlsConfig, ZResult> {
 // --- ABI structs (session owned = pico rc `{ void* _val; void* _cnt }`) ----
 
 /// Owned session (pico `z_owned_session_t`, 16 B rc). `_val` carries our
-/// `Box<SessionState>` handle; `_cnt` is unused.
+/// `Box<PicoSessionHandle>`; `_cnt` is unused.
 #[repr(C)]
 pub struct z_owned_session_t {
     pub(crate) _val: *mut c_void,
@@ -241,18 +241,33 @@ impl z_owned_session_t {
     }
 }
 
-/// Read the [`SessionState`] behind a loaned session, or `None` if the pointer
-/// or its handle slot is null.
-///
-/// Lives here, beside BOTH types it touches ([`SessionState`] and
-/// [`z_loaned_session_t`]), because every module that reaches a session needs
-/// it: `pubsub` and `query` each carried a byte-identical private copy until
-/// R311y294 folded them into this one.
+/// What a C session handle points at: the engine's session, behind the port, and what this ABI
+/// keeps per session itself (`docs/capi-pico-on-coop-engine.md`, decision D7).
+pub(crate) struct PicoSessionHandle {
+    /// The session as the engine runs it. Made by the engine (`into_drive`), so its drop glue is
+    /// the engine crate's and not a second copy here.
+    pub(crate) drive: Box<dyn wz_capi_port::SessionDrive>,
+    /// The session's role, clock, connectivity listeners and admin space.
+    pub(crate) ext: crate::session_ext::PicoSessionExt,
+}
+
+impl PicoSessionHandle {
+    /// The tokio engine's session, for a capability the port does not carry yet; `None` when
+    /// another engine runs it.
+    pub(crate) fn tokio(&self) -> Option<&SessionState> {
+        self.drive.as_any().downcast_ref::<SessionState>()
+    }
+}
+
+/// Read the [`PicoSessionHandle`] behind a loaned session, or `None` if the pointer or its
+/// handle slot is null.
 ///
 /// # Safety
-/// `zs` must be null, or a valid `z_loaned_session_t` whose `_val` slot is a
-/// live `Box::into_raw::<SessionState>` pointer (what [`z_open`] installs).
-pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a SessionState> {
+/// `zs` must be null, or a valid `z_loaned_session_t` whose `_val` slot is a live
+/// `Box::into_raw::<PicoSessionHandle>` pointer (what [`z_open`] installs).
+pub(crate) unsafe fn session_handle<'a>(
+    zs: *const z_loaned_session_t,
+) -> Option<&'a PicoSessionHandle> {
     if zs.is_null() {
         return None;
     }
@@ -260,7 +275,47 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
     if val.is_null() {
         return None;
     }
-    Some(&*(val as *const SessionState))
+    Some(&*(val as *const PicoSessionHandle))
+}
+
+/// Read the tokio engine's [`SessionState`] behind a loaned session, or `None` if the pointer or
+/// its handle slot is null, or another engine runs the session.
+///
+/// For the modules of the capabilities the port does not carry yet (queries, liveliness,
+/// scouting, the connectivity and admin planes, the advanced plane); the client surface goes
+/// through the session's handle and the port.
+///
+/// Lives here, beside BOTH types it touches ([`SessionState`] and
+/// [`z_loaned_session_t`]), because every module that reaches a session needs
+/// it: `pubsub` and `query` each carried a byte-identical private copy until
+/// R311y294 folded them into this one.
+///
+/// # Safety
+/// `zs` must be null, or a valid `z_loaned_session_t` whose `_val` slot is null or the live
+/// handle [`z_open`] installed.
+pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a SessionState> {
+    session_handle(zs)?.tokio()
+}
+
+/// The handle and the tokio engine's session behind a loaned session together, for a module that
+/// declares through the port and reaches the tokio engine for the rest (a queryable's key goes
+/// through the port, the queryable itself through the face registry).
+///
+/// # Safety
+/// As [`session_handle`].
+#[cfg(any(
+    feature = "admin-space",
+    feature = "advanced",
+    feature = "connectivity",
+    feature = "liveliness",
+    feature = "query",
+    feature = "queryable"
+))]
+pub(crate) unsafe fn tokio_session<'a>(
+    zs: *const z_loaned_session_t,
+) -> Option<(&'a PicoSessionHandle, &'a SessionState)> {
+    let handle = session_handle(zs)?;
+    Some((handle, handle.tokio()?))
 }
 
 /// The engine a session's client surface goes through: the port's [`SessionEngine`], so the
@@ -270,19 +325,17 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
 /// [`SessionEngine`]: wz_capi_port::SessionEngine
 pub(crate) type Engine = dyn wz_capi_port::SessionEngine;
 
-/// The engine behind a borrowed session state, to keep: what an entity declared on the session
-/// holds for its own life.
-///
-/// The engine hands itself out (`as_engine`): this crate never turns the engine's own type into
+/// The engine behind a session handle, to keep: what an entity declared on the session holds for
+/// its own life. The engine hands itself out, so this crate never turns an engine's own type into
 /// the port's, which would instantiate the engine's drop glue a second time here.
-pub(crate) fn engine_of(state: &SessionState) -> std::sync::Arc<Engine> {
-    state.shared.as_engine()
+pub(crate) fn engine_of(handle: &PicoSessionHandle) -> std::sync::Arc<Engine> {
+    handle.drive.engine()
 }
 
-/// The engine behind a borrowed session state, for the length of one call: a put or a delete
-/// reaches the engine without touching its reference count.
-pub(crate) fn engine_ref(state: &SessionState) -> &Engine {
-    state.shared.engine_ref()
+/// The engine behind a session handle, for the length of one call: a put or a delete reaches the
+/// engine without touching its reference count.
+pub(crate) fn engine_ref(handle: &PicoSessionHandle) -> &Engine {
+    handle.drive.engine_ref()
 }
 
 // --- z_open / z_close ------------------------------------------------------
@@ -535,10 +588,10 @@ pub unsafe extern "C" fn z_open(
                 // publishers and queriers create: a client asks its peers
                 // differently from a peer (see `crate::write_filter`), and a
                 // `listen` config is a peer whatever `Z_CONFIG_MODE_KEY` says.
-                // Set once, right after the open, as the other ABI's shared
-                // memory state is. It carries the session's connectivity
-                // listeners too (`crate::connectivity`), and watches the face
-                // registry for them from here on.
+                // Kept beside the engine's session in the handle (decision D7). It
+                // carries the session's connectivity listeners too
+                // (`crate::connectivity`), and watches the face registry for them
+                // from here on.
                 let ext = crate::session_ext::PicoSessionExt::new(
                     session_mode,
                     &state.zid(),
@@ -546,9 +599,12 @@ pub unsafe extern "C" fn z_open(
                 );
                 #[cfg(feature = "admin-space")]
                 let ext = ext.with_transport_endpoint(transport_endpoint);
-                let _ = state.set_abi_extension(ext);
+                let handle = PicoSessionHandle {
+                    drive: state.into_drive(),
+                    ext,
+                };
                 *zs = z_owned_session_t {
-                    _val: Box::into_raw(Box::new(state)) as *mut c_void,
+                    _val: Box::into_raw(Box::new(handle)) as *mut c_void,
                     _cnt: std::ptr::null_mut(),
                 };
                 #[cfg(feature = "admin-space")]
@@ -579,8 +635,8 @@ pub unsafe extern "C" fn z_close(zs: *mut z_loaned_session_t, _options: *const c
         if zs.is_null() || (*zs)._val.is_null() {
             return Z_ERR_NULL;
         }
-        let state = &*((*zs)._val as *const SessionState);
-        state.close();
+        let handle = &*((*zs)._val as *const PicoSessionHandle);
+        handle.drive.close();
         Z_OK
     })
 }
@@ -645,10 +701,9 @@ pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
         }
         let val = (*obj)._this._val;
         if !val.is_null() {
-            // SessionState::drop runs close() (idempotent). Released by the engine's
-            // own crate, so this one does not instantiate the session's drop glue
-            // a second time (see `SessionState::release`).
-            Box::from_raw(val as *mut SessionState).release();
+            // The engine's session closes as it drops (idempotent), through the
+            // drop glue its own crate holds: the drive is the engine's trait object.
+            drop(Box::from_raw(val as *mut PicoSessionHandle));
             (*obj)._this = z_owned_session_t::null_value();
         }
         Z_OK
@@ -683,8 +738,8 @@ pub unsafe extern "C" fn zp_start_read_task(
     zs: *mut z_loaned_session_t,
     _options: *const c_void,
 ) -> ZResult {
-    match session_state(zs) {
-        Some(state) => match state.start_read_task() {
+    match session_handle(zs) {
+        Some(handle) => match handle.drive.start_read_task() {
             Ok(()) => Z_OK,
             Err(_) => Z_EINVAL,
         },
@@ -701,8 +756,8 @@ pub unsafe extern "C" fn zp_start_read_task(
 #[cfg(feature = "multi-thread")]
 #[no_mangle]
 pub unsafe extern "C" fn zp_stop_read_task(zs: *mut z_loaned_session_t) -> ZResult {
-    match session_state(zs) {
-        Some(state) => match state.stop_read_task() {
+    match session_handle(zs) {
+        Some(handle) => match handle.drive.stop_read_task() {
             Ok(()) => Z_OK,
             Err(_) => Z_EINVAL,
         },
@@ -783,9 +838,10 @@ pub unsafe extern "C" fn zp_stop_lease_task(_zs: *mut z_loaned_session_t) -> ZRe
 #[no_mangle]
 pub unsafe extern "C" fn zp_spin_once(zs: *const z_loaned_session_t) -> bool {
     // Upstream: `if (!z_session_is_closed(zs)) { return _z_runtime_spin_once(..); } return
-    // false;`, so a closed session answers `false` like a null one.
+    // false;`, so a closed session answers `false` like a null one. The engine answers the
+    // rest: one that drives itself answers "alive", one the program steps runs the turn.
     guard_val(false, || {
-        session_state(zs).is_some_and(|state| !state.is_closed())
+        session_handle(zs).is_some_and(|handle| handle.drive.spin_once())
     })
 }
 
@@ -834,16 +890,23 @@ pub unsafe extern "C" fn zp_read_options_default(options: *mut zp_read_options_t
     }
 }
 
-/// pico `zp_read`: read and process what the session's link holds. The wz session
-/// reads continuously on its own runtime, so a live session answers `Z_OK`; a null
-/// one answers `_Z_ERR_SESSION_CLOSED`, the code pico's session check uses.
+/// pico `zp_read`: read and process what the session's link holds (one message with
+/// `single_read`). An engine that reads continuously on its own runtime answers `Z_OK` for a
+/// live session; one the program steps reads here. A null or closed session answers
+/// `_Z_ERR_SESSION_CLOSED`, the code pico's session check uses.
 #[cfg(not(feature = "multi-thread"))]
 #[no_mangle]
 pub unsafe extern "C" fn zp_read(
     zs: *const z_loaned_session_t,
-    _options: *const zp_read_options_t,
+    options: *const zp_read_options_t,
 ) -> ZResult {
-    guarded(|| live_session_result(zs))
+    guarded(|| {
+        let single = !options.is_null() && (*options).single_read;
+        match session_handle(zs).map(|handle| handle.drive.read(single)) {
+            Some(Ok(())) => Z_OK,
+            _ => Z_ERR_SESSION_CLOSED,
+        }
+    })
 }
 
 /// pico `zp_send_keep_alive_options_default`.
@@ -857,15 +920,20 @@ pub unsafe extern "C" fn zp_send_keep_alive_options_default(
     }
 }
 
-/// pico `zp_send_keep_alive`: send a KeepAlive now. The wz session keeps its lease
-/// with keep-alives on its own schedule, so a live session answers `Z_OK`.
+/// pico `zp_send_keep_alive`: send a KeepAlive now. An engine that keeps its lease on its own
+/// schedule answers `Z_OK` for a live session; one the program steps sends it here.
 #[cfg(not(feature = "multi-thread"))]
 #[no_mangle]
 pub unsafe extern "C" fn zp_send_keep_alive(
     zs: *const z_loaned_session_t,
     _options: *const zp_send_keep_alive_options_t,
 ) -> ZResult {
-    guarded(|| live_session_result(zs))
+    guarded(
+        || match session_handle(zs).map(|handle| handle.drive.send_keep_alive()) {
+            Some(Ok(())) => Z_OK,
+            _ => Z_ERR_SESSION_CLOSED,
+        },
+    )
 }
 
 /// pico `zp_send_join_options_default`.
@@ -900,12 +968,12 @@ pub unsafe extern "C" fn zp_send_join(
     })
 }
 
-/// What the three single-threaded entry points answer for `zs`: `Z_OK` for an open
-/// session, `_Z_ERR_SESSION_CLOSED` for a null or closed one.
+/// What `zp_send_join` answers for `zs`: `Z_OK` for an open session,
+/// `_Z_ERR_SESSION_CLOSED` for a null or closed one.
 #[cfg(not(feature = "multi-thread"))]
 unsafe fn live_session_result(zs: *const z_loaned_session_t) -> ZResult {
-    match session_state(zs) {
-        Some(state) if !state.is_closed() => Z_OK,
+    match session_handle(zs) {
+        Some(handle) if !handle.drive.is_closed() => Z_OK,
         _ => Z_ERR_SESSION_CLOSED,
     }
 }
@@ -922,9 +990,9 @@ unsafe fn live_session_result(zs: *const z_loaned_session_t) -> ZResult {
 /// a THROUGHPUT benchmark rather than a publish loop.
 #[no_mangle]
 pub unsafe extern "C" fn zp_batch_start(zs: *const z_loaned_session_t) -> ZResult {
-    guarded(|| match session_state(zs) {
-        Some(state) => {
-            state.shared.batch_start_all();
+    guarded(|| match session_handle(zs) {
+        Some(handle) => {
+            engine_ref(handle).batch_start_all();
             Z_OK
         }
         // pico: `if (_Z_RC_IS_NULL(zs)) _Z_ERROR_RETURN(_Z_ERR_SESSION_CLOSED);` -- a null
@@ -941,9 +1009,9 @@ pub unsafe extern "C" fn zp_batch_start(zs: *const z_loaned_session_t) -> ZResul
 /// `z_put_options_default`.
 #[no_mangle]
 pub unsafe extern "C" fn zp_batch_flush(zs: *const z_loaned_session_t) -> ZResult {
-    guarded(|| match session_state(zs) {
-        Some(state) => {
-            state.shared.batch_flush_all();
+    guarded(|| match session_handle(zs) {
+        Some(handle) => {
+            engine_ref(handle).batch_flush_all();
             Z_OK
         }
         None => Z_ERR_SESSION_CLOSED,
@@ -953,9 +1021,9 @@ pub unsafe extern "C" fn zp_batch_flush(zs: *const z_loaned_session_t) -> ZResul
 /// Close every batch window, draining what it holds (pico `zp_batch_stop`).
 #[no_mangle]
 pub unsafe extern "C" fn zp_batch_stop(zs: *const z_loaned_session_t) -> ZResult {
-    guarded(|| match session_state(zs) {
-        Some(state) => {
-            state.shared.batch_stop_all();
+    guarded(|| match session_handle(zs) {
+        Some(handle) => {
+            engine_ref(handle).batch_stop_all();
             Z_OK
         }
         None => Z_ERR_SESSION_CLOSED,
@@ -979,11 +1047,11 @@ pub unsafe extern "C" fn zp_batch_stop(zs: *const z_loaned_session_t) -> ZResult
 /// the zid per-handle would be a second source for a fact that has one.
 #[cfg(feature = "unstable-api")]
 pub(crate) unsafe fn entity_global_id(
-    zs: &SessionState,
+    zs: &PicoSessionHandle,
     eid: u64,
 ) -> crate::entity::z_entity_global_id_t {
     crate::entity::z_entity_global_id_t {
-        zid: crate::zid::z_id_t { id: zs.zid() },
+        zid: crate::zid::z_id_t { id: zs.drive.zid() },
         // TRUNCATING, and that is upstream's width rather than a loss: zenoh's
         // `_z_entity_global_id_t.eid` is a `uint32_t`, so the wire cannot carry
         // more. A session declaring 2^32 entities would wrap, which is the same
@@ -1007,8 +1075,8 @@ pub unsafe extern "C" fn z_session_id(
             zid: crate::zid::z_id_t::empty(),
             eid: 0,
         },
-        || match session_state(zs) {
-            Some(state) => entity_global_id(state, 0),
+        || match session_handle(zs) {
+            Some(handle) => entity_global_id(handle, 0),
             None => crate::entity::z_entity_global_id_t {
                 zid: crate::zid::z_id_t::empty(),
                 eid: 0,
@@ -1028,8 +1096,8 @@ pub unsafe extern "C" fn z_session_id(
 /// `zs` must be null or a live loaned session.
 #[no_mangle]
 pub unsafe extern "C" fn z_session_is_closed(zs: *const z_loaned_session_t) -> bool {
-    crate::ffi::guard_val(true, || match session_state(zs) {
-        Some(state) => state.is_closed(),
+    crate::ffi::guard_val(true, || match session_handle(zs) {
+        Some(handle) => handle.drive.is_closed(),
         None => true,
     })
 }
@@ -1449,7 +1517,7 @@ pub unsafe extern "C" fn zp_task_lease_options_default(options: *mut zp_task_lea
 #[cfg(feature = "multi-thread")]
 #[no_mangle]
 pub unsafe extern "C" fn zp_read_task_is_running(zs: *const z_loaned_session_t) -> bool {
-    session_state(zs).is_some_and(SessionState::read_task_is_running)
+    session_handle(zs).is_some_and(|handle| handle.drive.read_task_is_running())
 }
 
 /// Whether the session's LEASE task is running (pico
