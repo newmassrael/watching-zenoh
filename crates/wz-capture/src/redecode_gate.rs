@@ -625,11 +625,11 @@ fn a_recovered_quic_stream_reads_again_from_its_kept_plaintext() {
 }
 
 /// Open-debt item 924, step 4c — A WEBSOCKET FLOW'S ENTRIES. A ws message that
-/// is one unmasked frame has its payload in the TCP stream, where the list keeps
-/// where it stands and reads it from; a masked one, or one joined out of
-/// fragments, is unmasked or joined by the deframer and stands nowhere in the
-/// stream, so the list logs it. Either way the end of the message's last frame is
-/// kept apart. On a capture with a batch in one message, a masked message, a
+/// is one frame has its payload in the TCP stream, as it is or, for a masked
+/// frame, under the four-byte key that stands before it, and the list keeps where
+/// it stands and reads it from there (unmasking as it reads); one joined out of
+/// fragments stands nowhere in the stream, so the list logs it. Either way the end
+/// of the message's last frame is kept apart. On a capture with a batch in one message, a masked message, a
 /// frame split across two segments and a message fragmented into two frames,
 /// every list reads as the reading that kept every message whole, plain, under
 /// message and byte ceilings and lent; every message's bytes are its payload's
@@ -672,15 +672,26 @@ fn a_websocket_flows_entries_read_again_from_their_payloads() {
             );
         } else {
             assert_eq!(read_from_bytes, held, "{what}: every message is an entry");
-            // The unmasked single-frame messages stand in the stream and are
-            // read from it: a direction of the capture has one the list reads
-            // from the stream, which only a place in the stream says.
+            // The single-frame messages stand in the stream and are read from it
+            // (the masked ones with their keys): a direction of the capture has
+            // one the list reads from the stream, which only a place in the
+            // stream says.
             assert!(
                 [Direction::A, Direction::B]
                     .into_iter()
                     .any(|d| flow.frames.oldest_source_offset(d, usize::MAX).is_some()),
                 "{what}: no message is read from the stream"
             );
+            // The one message joined out of two frames stands nowhere in it, and
+            // is the only thing the list logs (a message ceiling that has
+            // discarded it releases its bytes, so it is asked of the plain run).
+            if limits.frames_per_flow.is_none() && limits.frames_total.is_none() {
+                let logged = indexed.memory().lists.unit_log;
+                assert!(
+                    logged > 0 && logged < 4096,
+                    "{what}: {logged} bytes logged, for one fragmented message"
+                );
+            }
         }
         assert_eq!(indexed.drops(), whole.drops(), "{what}: drops");
         assert_eq!(

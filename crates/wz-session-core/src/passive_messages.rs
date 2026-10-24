@@ -75,7 +75,7 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use crate::byte_log::{LogPlace, UnitLog};
+use crate::byte_log::{LogPlace, UnitLog, MASK_KEY_LEN};
 use crate::chunk_log::{ChunkLog, Iter};
 use crate::inbound::InboundFrame;
 #[cfg(feature = "reassembly")]
@@ -417,16 +417,25 @@ impl MessageList {
     /// holds. The list reads it back through its source
     /// ([`UnitBytes::stream_bytes`]) and, as it does a streamed unit, is told
     /// before the stream lets go of those bytes ([`Self::keep_whole_before`]).
-    /// A message whose payload is not the stream's (masked, or joined out of
-    /// fragments) is [`Self::push_datagram`]'s.
+    /// A masked frame (every one a client sends) is the same with `masked`: its
+    /// bytes in the stream are XORed with the four that stand just before them
+    /// (the masking key is the last of the frame's header), and the list unmasks
+    /// them as it reads. A message joined out of fragments stands nowhere in the
+    /// stream and is [`Self::push_datagram`]'s.
     pub fn push_datagram_in_stream(
         &mut self,
         unit: ReadUnit,
         at: usize,
         len: usize,
+        masked: bool,
         handshake: LinkHandshake,
     ) {
-        self.push_logged(unit, len, |_| LogPlace::Stream(at), handshake);
+        let place = if masked {
+            LogPlace::StreamMasked(at)
+        } else {
+            LogPlace::Stream(at)
+        };
+        self.push_logged(unit, len, |_| place, handshake);
     }
 
     /// The body of both: the unit's `len` bytes are at the place `place` gives
@@ -1285,7 +1294,8 @@ impl UnitRow {
 
     /// Where in its direction's stream the bytes this row's unit is read from
     /// begin, when they are the stream's: a streamed unit's body, or a logged
-    /// unit whose place is the stream ([`LogPlace::Stream`]). `None` for a unit
+    /// unit whose place is the stream ([`LogPlace::Stream`]; a masked one needs
+    /// the key that stands before it too, so it begins there). `None` for a unit
     /// the list's own log or the capture container holds, which no release of the
     /// stream can take from under it.
     fn stream_dependence(&self) -> Option<usize> {
@@ -1294,6 +1304,7 @@ impl UnitRow {
         }
         match LogPlace::of(self.locator) {
             LogPlace::Stream(at) => Some(at),
+            LogPlace::StreamMasked(at) => Some(at.saturating_sub(MASK_KEY_LEN)),
             LogPlace::Kept(_) | LogPlace::Container(_) => None,
         }
     }
@@ -1656,6 +1667,20 @@ impl Index {
         match LogPlace::of(row.locator) {
             // The unit is the stream's own bytes: the holder's source reads it.
             LogPlace::Stream(at) => source.stream_bytes(row.direction(), at, at + len),
+            // The unit is the stream's bytes under a mask whose key stands just
+            // before them: read both and unmask, a copy that lives for this read.
+            LogPlace::StreamMasked(at) => {
+                let from = at.checked_sub(MASK_KEY_LEN)?;
+                let wire = source.stream_bytes(row.direction(), from, at + len)?;
+                let (key, masked) = wire.split_at(MASK_KEY_LEN);
+                Some(Cow::Owned(
+                    masked
+                        .iter()
+                        .enumerate()
+                        .map(|(i, byte)| byte ^ key[i % MASK_KEY_LEN])
+                        .collect(),
+                ))
+            }
             place => self
                 .log
                 .get(place, len, source.container())
@@ -3099,10 +3124,13 @@ mod tests {
     /// `units` read as [`logged_and_whole`] reads them (a unit of packet `k` goes
     /// to direction B when `k` is a multiple of three, to A otherwise), but the
     /// logging list keeps each by its place in the stream of its direction, which
-    /// holds them back to back. Returns both lists and the two streams.
+    /// holds them back to back. With `masked`, the stream holds each as a masked
+    /// frame's tail does: a four-byte key (a different one for each unit) and the
+    /// unit XORed with it. Returns both lists and the two streams.
     fn streamed_and_whole(
         units: &[Vec<u8>],
         handshake: LinkHandshake,
+        masked: bool,
     ) -> (MessageList, MessageList, TwoStreams) {
         let mut logging = crate::passive::PassiveSession::new();
         let mut keeping = crate::passive::PassiveSession::new();
@@ -3117,10 +3145,23 @@ mod tests {
             let seat = usize::from(direction == Direction::B);
             let _ = logging.observe_at_nanos(1_000 * packet as u64);
             let _ = keeping.observe_at_nanos(1_000 * packet as u64);
+            if masked {
+                let key = [packet as u8 | 1, 0x5A, 0xC3 ^ packet as u8, 0x0F];
+                streams[seat].extend_from_slice(&key);
+                let at = streams[seat].len();
+                streams[seat].extend(unit.iter().zip(key.iter().cycle()).map(|(b, k)| b ^ k));
+                if let Some(read) =
+                    logging.next_datagram_unit_on(direction, unit, packet, handshake)
+                {
+                    streamed.push_datagram_in_stream(read, at, unit.len(), true, handshake);
+                }
+                whole.append(keeping.next_datagram_on(direction, unit, packet, handshake));
+                continue;
+            }
             let at = streams[seat].len();
             streams[seat].extend_from_slice(unit);
             if let Some(read) = logging.next_datagram_unit_on(direction, unit, packet, handshake) {
-                streamed.push_datagram_in_stream(read, at, unit.len(), handshake);
+                streamed.push_datagram_in_stream(read, at, unit.len(), false, handshake);
             }
             whole.append(keeping.next_datagram_on(direction, unit, packet, handshake));
         }
@@ -3131,11 +3172,21 @@ mod tests {
     /// nothing, and reads as one kept whole; the stream's release of the bytes
     /// before an offset keeps whole the units that stand there first, so every row
     /// still reads as it did from a stream that no longer holds those bytes.
+    ///
+    /// A masked unit is the same with its key: the four bytes before it are part
+    /// of what the stream must hold, so the unit counts as standing from the key,
+    /// and one whose key is released with its payload still held is kept whole
+    /// rather than read with a key that is gone.
     #[test]
     fn a_unit_in_the_stream_logs_nothing_and_is_kept_whole_before_the_stream_lets_go() {
         let units = datagrams(96);
-        for handshake in [LinkHandshake::Present, LinkHandshake::Absent] {
-            let (mut streamed, whole, source) = streamed_and_whole(&units, handshake);
+        for (handshake, masked) in [
+            (LinkHandshake::Present, false),
+            (LinkHandshake::Absent, false),
+            (LinkHandshake::Present, true),
+            (LinkHandshake::Absent, true),
+        ] {
+            let (mut streamed, whole, source) = streamed_and_whole(&units, handshake, masked);
             assert!(
                 matches!(streamed.rows, Store::Indexed(_)),
                 "the units became entries"

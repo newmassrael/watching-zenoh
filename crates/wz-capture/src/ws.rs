@@ -444,10 +444,11 @@ pub struct WsDeframer {
     /// Stream offset of the FIRST frame of `partial`, or `None` when no
     /// message is in progress.
     partial_offset: Option<usize>,
-    /// Where the payload of `partial` stands in the stream, when it is the
-    /// stream's own bytes there: the message so far is one frame and that frame
-    /// is not masked. `None` once a continuation joins it or when it was masked.
-    partial_in_stream: Option<usize>,
+    /// Where the payload of `partial` stands in the stream, and whether it stands
+    /// there masked, when the message so far is one frame: the stream holds the
+    /// payload, or the payload XORed with the four bytes before it. `None` once
+    /// a continuation joins it, because a joined payload stands nowhere in it.
+    partial_in_stream: Option<(usize, bool)>,
     /// R311y612 — `Some` while this direction is looking for its framing.
     ///
     /// Was a terminal `bool` until R311y612 (§4.2): a deframer that had lost
@@ -795,7 +796,7 @@ impl WsDeframer {
                     }
                     self.partial = frame.payload;
                     self.partial_offset = Some(frame_start);
-                    self.partial_in_stream = (!frame.masked).then_some(frame.payload_at);
+                    self.partial_in_stream = Some((frame.payload_at, frame.masked));
                     if frame.fin {
                         return Some(self.take_partial());
                     }
@@ -832,10 +833,12 @@ impl WsDeframer {
     /// offset that frame ended at.
     fn take_partial(&mut self) -> Option<WsMessage> {
         let offset = self.partial_offset.take()?;
+        let in_stream = self.partial_in_stream.take();
         Some(WsMessage {
             offset,
             end: self.base,
-            payload_at: self.partial_in_stream.take(),
+            payload_at: in_stream.map(|(at, _)| at),
+            masked: in_stream.is_some_and(|(_, masked)| masked),
             payload: core::mem::take(&mut self.partial),
         })
     }
@@ -954,12 +957,15 @@ pub struct WsMessage {
     /// Stream offset just past its last frame, exclusive. Control frames
     /// interleaved inside a fragmented message lie between the two.
     pub end: usize,
-    /// Stream offset of [`Self::payload`]'s first byte when the payload is the
-    /// stream's own bytes there: the message is one frame and that frame is not
-    /// masked, so `payload.len()` bytes from here are exactly the payload.
-    /// `None` for a masked frame (its bytes in the stream are XORed) and for a
-    /// message joined out of fragments, whose payload stands nowhere in it.
+    /// Stream offset of [`Self::payload`]'s first byte when the message is one
+    /// frame, so that `payload.len()` bytes from here are the payload (as
+    /// [`Self::masked`] says: as they are, or XORed with the four bytes that
+    /// stand just before them). `None` for a message joined out of fragments,
+    /// whose payload stands nowhere in the stream.
     pub payload_at: Option<usize>,
+    /// Whether the bytes at [`Self::payload_at`] are masked. `false` when
+    /// there is no `payload_at`.
+    pub masked: bool,
     /// The message's payload, every frame's unmasked and joined.
     pub payload: Vec<u8>,
 }

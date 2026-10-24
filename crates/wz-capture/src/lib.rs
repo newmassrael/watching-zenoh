@@ -3994,6 +3994,7 @@ impl FlowDissection {
             offset,
             end,
             payload_at,
+            masked,
             payload,
         } in ready
         {
@@ -4028,21 +4029,32 @@ impl FlowDissection {
             }
             self.ingest.observe_frames(&unit.frames);
             match self.keep {
-                // Open-debt item 924, step 4c — a payload that was unmasked or
-                // joined out of its frames in this call stands nowhere in the
-                // stream, so the list logs a copy of it, as it does a recovered
-                // datagram's, and keeps the end apart. One that is the stream's
-                // own bytes (a single frame, not masked) is not copied: the list
-                // keeps where it stands and reads it from the stream, on the
-                // handed door and the lent one alike.
+                // Open-debt item 924, step 4c — a payload joined out of its
+                // frames in this call stands nowhere in the stream, so the list
+                // logs a copy of it, as it does a recovered datagram's, and keeps
+                // the end apart. One that is a single frame is the stream's own
+                // bytes (or those bytes under the four-byte key that stands
+                // before them, for a masked frame) and is not copied: the list
+                // keeps where it stands and reads it from the stream, unmasking
+                // it as it reads, on the handed door and the lent one alike. The
+                // key is part of what the stream must still hold.
                 Keep::Entries => {
-                    let in_stream = payload_at
-                        .filter(|&at| self.assembler(direction).holds(at, at + payload.len()));
+                    let in_stream = payload_at.filter(|&at| {
+                        let from = if masked {
+                            at.saturating_sub(wz_session_core::byte_log::MASK_KEY_LEN)
+                        } else {
+                            at
+                        };
+                        self.assembler(direction).holds(from, at + payload.len())
+                    });
                     match in_stream {
-                        Some(at) => {
-                            self.frames
-                                .push_datagram_in_stream(unit, at, payload.len(), handshake)
-                        }
+                        Some(at) => self.frames.push_datagram_in_stream(
+                            unit,
+                            at,
+                            payload.len(),
+                            masked,
+                            handshake,
+                        ),
                         None => self.frames.push_datagram(unit, &payload, None, handshake),
                     }
                 }

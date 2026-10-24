@@ -591,10 +591,13 @@ from. So the order is now:
   streamed unit, and a byte ceiling that releases the stream under it keeps the
   message whole first, as for a TCP row (its bytes then answer that they are
   gone, where the log's copy used to outlive the stream). A masked frame (every
-  client frame) is XORed on the wire and a fragmented message is joined, so
-  their payloads stand nowhere in the stream and are logged. An unmasked row on the
-  lent door costs the same at 16 and 4096 bytes (139.4 bytes), and the matrix now
-  measures a masked kind beside it. The deframer's offsets were the stream's own
+  client frame) is the same with its key: the four bytes that end the frame's
+  header stand just before the payload, so the place is `LogPlace::StreamMasked`,
+  the dependence reaches back over the key, and the list unmasks as it reads (a
+  copy that lives for the read, not for the row). Only a message joined out of
+  fragments stands nowhere in the stream and is logged. A row on the lent door
+  costs the same at 16 and 4096 bytes (139.4 bytes), masked or not, and the matrix
+  measures both kinds. The deframer's offsets were the stream's own
   across a hole (the TLS keeper's were not, above), which is what lets a place in
   the stream be trusted.
 - 6. Random access to a row's field document (D9), taken before 4c's remaining

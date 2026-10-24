@@ -146,6 +146,10 @@ const IN_CONTAINER: u64 = 1 << 63;
 /// offset of it.
 const IN_STREAM: u64 = 1 << 62;
 
+/// With [`IN_STREAM`]: the unit's bytes in the stream are XORed with the four
+/// bytes that stand just before them.
+const MASKED: u64 = 1 << 61;
+
 /// Where a logged unit's bytes are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogPlace {
@@ -161,7 +165,18 @@ pub enum LogPlace {
     /// ([`crate::passive_messages::UnitBytes::stream_bytes`]), and a stream that
     /// lets go of it keeps the units that stand there whole first.
     Stream(usize),
+    /// At this offset of a direction's reassembled stream, XORed with the four
+    /// bytes that stand just before it: a WebSocket message that is one masked
+    /// frame (every frame a client sends), whose masking key is the last four
+    /// bytes of the frame's header and so is in the stream beside the payload.
+    /// The list keeps where it stands and unmasks it as it reads it, which is a
+    /// copy that lives for the read, not one held for as long as the row is.
+    StreamMasked(usize),
 }
+
+/// The width of a WebSocket masking key, which stands in the stream right
+/// before the payload it masks ([`LogPlace::StreamMasked`]).
+pub const MASK_KEY_LEN: usize = 4;
 
 impl LogPlace {
     /// The place as one word, which a row keeps.
@@ -170,6 +185,7 @@ impl LogPlace {
             LogPlace::Kept(at) => at,
             LogPlace::Container(offset) => offset as u64 | IN_CONTAINER,
             LogPlace::Stream(offset) => offset as u64 | IN_STREAM,
+            LogPlace::StreamMasked(offset) => offset as u64 | IN_STREAM | MASKED,
         }
     }
 
@@ -178,7 +194,12 @@ impl LogPlace {
         if locator & IN_CONTAINER != 0 {
             LogPlace::Container((locator & !IN_CONTAINER) as usize)
         } else if locator & IN_STREAM != 0 {
-            LogPlace::Stream((locator & !IN_STREAM) as usize)
+            let at = (locator & !(IN_STREAM | MASKED)) as usize;
+            if locator & MASKED != 0 {
+                LogPlace::StreamMasked(at)
+            } else {
+                LogPlace::Stream(at)
+            }
         } else {
             LogPlace::Kept(locator)
         }
@@ -221,7 +242,7 @@ impl UnitLog {
         match place {
             LogPlace::Kept(at) => self.copies.get(at, len),
             LogPlace::Container(offset) => container?.get(offset..offset.checked_add(len)?),
-            LogPlace::Stream(_) => None,
+            LogPlace::Stream(_) | LogPlace::StreamMasked(_) => None,
         }
     }
 
@@ -273,6 +294,8 @@ mod tests {
             LogPlace::Container(123_456),
             LogPlace::Stream(0),
             LogPlace::Stream(987_654_321),
+            LogPlace::StreamMasked(0),
+            LogPlace::StreamMasked(987_654_321),
         ] {
             assert_eq!(LogPlace::of(place.locator()), place);
         }

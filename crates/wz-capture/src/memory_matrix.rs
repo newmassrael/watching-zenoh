@@ -45,9 +45,10 @@
 //! log of chunks, a chunk's tail over). A TCP stream's kept bytes were one
 //! growable buffer, which held 1.4 times its bytes at 4096-byte units and up to
 //! twice in general; they are a log of chunks now. A WebSocket message that is one
-//! unmasked frame is the stream's own bytes and costs nothing beyond it; a masked
-//! one (every client frame) is XORed on the wire, so its unmasked copy is logged on
-//! both doors, and the bounds say which is which.
+//! frame is the stream's own bytes (under the four-byte key before them, for a
+//! masked frame, which is every one a client sends) and costs nothing beyond it;
+//! one joined out of fragments stands nowhere in the stream and is logged, which
+//! the capture the redecode gate reads carries and this sweep does not.
 //!
 //! # The population is derived
 //!
@@ -953,9 +954,10 @@ fn sized_kinds() -> [Sized; 4] {
             name: "websocket (masked)",
             build: websocket_masked_of,
             expect: Expect::List(is_stream),
-            // A masked payload is XORed on the wire and stands nowhere in the
-            // stream, so the list logs the unmasked copy, on both doors.
-            lent_copies: 1.1,
+            // A masked payload is XORed in the stream under a key that stands
+            // before it: the list keeps where it stands and unmasks it as it
+            // reads, so it costs nothing beyond the stream either.
+            lent_copies: 0.0,
             handed_copies: 1.1,
         },
     ]
