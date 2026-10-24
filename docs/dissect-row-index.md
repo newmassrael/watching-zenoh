@@ -248,6 +248,47 @@ message per row is what this design removes. The locator is the one field the
 datagram space lacks, and making it explicit lets one re-decoder and one gate
 serve every list.
 
+### D9. A row's field document is read from the row and from tables by position
+
+Decided after step 4c's first landing (owner, 2026-10-24: the long-term correct
+structure, cost not counted), on the consumer's measurement: a window of one
+row costs about 160 ms at 409,064 rows wherever it stands, against a 100 ms
+budget for showing the row a viewer picked.
+
+Measured (callgrind, three one-row windows at 40,064 rows): the cost is the
+fold of the rows before the window, not the row. A window behind the walk's
+position begins the walk again and absorbs every declaration of the capture
+(40%); a window ahead of it walks every row between the two to carry the chain
+fold, the request index and the running packet (33%); the capture-order keys of
+the whole capture are sorted on the way (9%). Writing the row is a small part.
+
+The reference design has no such fold: its first pass stores, per frame, what
+the frame's stateful analysis concluded, and a later look at one frame dissects
+that frame with the stored data. D9 applies that to the field document:
+
+- Everything a row's document says that its unit's bytes do not is a FACT of
+  the row, decided once on the first pass and kept with its entry (D3's side
+  tables): the identity of the fragment chain a row touched, and the row of the
+  request a final closes.
+- What depends on the whole capture and not on a window is a TABLE read by
+  position: the keyexpr bindings, each stamped with the packet it went past at
+  (already position-independent since R2513), and the order of rows by packet.
+  It is extended as the capture grows and never rebuilt because a window moved.
+- What depends on the caller's declaration text (an end-to-end verdict, whose
+  counters run over the frames before a row) is a judgment kept per text for
+  every row it has judged, with a frontier that only moves forward: a window
+  behind the frontier reads it, and one ahead of it walks only from the
+  frontier.
+- A window finds its first row by its sequence number and reads its own rows
+  and no others.
+
+Why not checkpoints of the walk every K rows: the walk's state includes tables
+that grow with the capture (the request index, the pairing), so a snapshot per
+K rows copies them each time, or needs persistent maps to share them; and a
+checkpoint still refolds up to K rows per look. Facts on the row are what the
+reference design keeps, cost one look per row, and add nothing to a row that
+has none (most rows touch no chain and close no request).
+
 ## 5. Expected cost, not yet measured
 
 Per row: the index entry (about 64 B), one segment-map entry per packet (about
@@ -372,6 +413,37 @@ from. So the order is now:
   lent; replay 180 to 137 ms, census 57 to about 145 ms and fields windows about
   2,030 to 2,300 ms (+13%), the price of reading rows again.
 - 5. The memory gate.
+- 6. Random access to a row's field document (D9), taken before 4c's remaining
+  landings because it is what the consumer's budget waits on: (a) the tables
+  that do not depend on a window survive a walk that begins again; (b) the
+  chain identity and the request a final closes become row facts; (c) a window
+  finds its first row by number and walks only its own rows; (d) end-to-end
+  judgments kept per declaration text behind a forward frontier; with a gate
+  that every one-row window, asked in any order, writes the row the whole
+  document writes, and a work counter that a one-row window reads one unit.
+  Landed (a) to (c): the keyexpr table and the request index are one set of
+  capture tables (`CaptureTables`), filled from every message once (by the
+  exchange pairing's walk where it takes the same messages) and kept while the
+  capture is a prefix-extension; the container's own walk is kept while the
+  bytes are its container; a list folds the chain identity of each row as it is
+  appended (`MessageList::chain_of`) and a row knows its produced-index
+  (`Row::produced`); a since-window without an end-to-end rule, a revised row or
+  a cap finds its first row by halving on the sequence numbers and walks only
+  its own, with the packet a skipped row would have carried read back from the
+  rows before it. The gate picks every row, alternating between the two ends,
+  in windows of one and three rows, on interleaved flows (plain, under a byte
+  ceiling, under a frame ceiling), an exchange, and stream and datagram fragment
+  chains, against the document from cursor 0, and holds each window to at most
+  its own rows visited. The chain identity and the request a final names are
+  held by the tests that already name them (a shifted identity and an empty
+  request index each fail three and one of them); the packet read back is held
+  by a test that compares it with the walk's at every position under byte
+  ceilings, since no fixture's document shows it. Measured with the pick probe
+  at 409,064 rows, cursor at the end: one-row windows at the first, middle and
+  last row 159, 148 and 149 ms before, 0.0 to 0.1 ms after, TCP and UDP alike;
+  windows read in order and peak RSS unchanged. Left: (d), for a declaration
+  text with an end-to-end rule, whose windows still walk from where the last
+  one stopped.
 
 ## 7. Open
 
