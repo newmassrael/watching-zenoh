@@ -525,6 +525,33 @@ that follows the lateness, so that the quantity is defined once. Four unit tests
 the window it replaced, and a read earlier than a record); the second was run against a slot that keeps the old
 maximum and went red.
 
+**The capacity report (schema version 1; the value is built, no endpoint serves it yet).** One plain value,
+`wz_session_core::capacity::CapacityReport`, written as one JSON object by `write_json` (integers, strings and
+`null`; fields in this order; the same state is the same bytes). A figure the node cannot reach is `null` and
+not zero. Counters only rise; everything else is a gauge. The report is meant to be served under a wz-owned
+root outside upstream's admin space, so that upstream's `@/**` answers do not move; the endpoint is the next
+step. A test fails when this table and the fields the report writes differ in either direction.
+
+| field | kind | unit | meaning |
+|---|---|---|---|
+| `schema_version` | report | count | the shape of this object |
+| `lease_ms` | report | ms | the lease the bounds are computed for |
+| `share_ppm` | report | ppm of a core | the declared CPU share, `null` when none was declared |
+| `data_wait_ms` | report | ms | the declared longest wait of a frame, `null` when none |
+| `configured_max_sessions` | report | sessions | the configured `max_sessions` |
+| `limit` | report | sessions | the sessions admitted at once now |
+| `limiter` | report | name | what set it: `configured`, `liveness` or `service` |
+| `sessions_held` | report | sessions | the sessions held now |
+| `emission_floor_ns` | report | ns | the lower decile of the node's timed keepalive emissions, `null` before enough were timed |
+| `emission_median_ns` | report | ns | their median, same condition |
+| `lateness_current_ms` | report | ms | the longest keepalive timer lateness in the current ten seconds |
+| `lateness_last_minute_ms` | report | ms | the longest in the last minute |
+| `lateness_since_start_ms` | report | ms | the longest since the process started |
+| `lateness_limit_ms` | report | ms | `2T/3`, the latest a keepalive may be served |
+| `lease_at_risk` | report | bool | the last minute passed `lateness_limit_ms`: the promise is not being kept now |
+| `refused_over_max_sessions` | report | sessions | counter: refused because `max_sessions` was reached |
+| `refused_over_capacity` | report | sessions | counter: refused because the measured capacity was reached |
+
 **What the router does at the number.** One value, the effective `max_sessions`, is the smaller of the
 configured `transport/unicast/max_sessions` (upstream's key, enforced in the accept loop already, default
 1000) and `N_max(s)` (`WzConfig::effective_max_sessions`, read by the accept loop in place of the bare

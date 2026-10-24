@@ -206,6 +206,17 @@ pub enum Limiter {
     Service,
 }
 
+impl Limiter {
+    /// The name the capacity report carries.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Limiter::Configured => "configured",
+            Limiter::Liveness => "liveness",
+            Limiter::Service => "service",
+        }
+    }
+}
+
 /// The number of sessions a node admits, and what set it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EffectiveBound {
@@ -373,6 +384,107 @@ pub fn effective_max_sessions(
         );
     }
     bound
+}
+
+/// The version of the capacity report's shape. Moves when a field is removed or changes meaning;
+/// a field added at the end does not move it.
+pub const CAPACITY_REPORT_SCHEMA_VERSION: u32 = 1;
+
+/// What a node says about its capacity, at one moment: the promise it was given, the limit it
+/// derived and who set it, what it holds, what it measured of its own host, how late its keepalive
+/// timers were, and why it refused. A plain value, so the same report is the monitor's, the
+/// tests' and the endpoint's, and a node that cannot reach a figure says `None` for it and not
+/// zero.
+///
+/// Every field is an integer in the unit its name says, or an absent value. Counters only rise
+/// (`refused_*`); every other figure is a gauge, a reading of now. The shape is the report's
+/// schema ([`CAPACITY_REPORT_SCHEMA_VERSION`]); `docs/router-data-plane-scaling.md` section 7.4
+/// lists the fields and a test fails when it does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CapacityReport {
+    /// The lease the bounds are computed for, in milliseconds.
+    pub lease_ms: u64,
+    /// The declared CPU share in parts per million of one core; `None` when the operator declared
+    /// none and the node promises nothing.
+    pub share_ppm: Option<u32>,
+    /// The declared longest wait of a frame in milliseconds, when one was declared.
+    pub data_wait_ms: Option<u32>,
+    /// The configured `max_sessions`.
+    pub configured_max_sessions: usize,
+    /// The sessions admitted at once now, and what set it.
+    pub bound: EffectiveBound,
+    /// The sessions held now.
+    pub sessions_held: usize,
+    /// The cost of a keepalive emission the node measured on its own host, lower decile and
+    /// median, in nanoseconds; `None` before enough emissions were timed.
+    pub emission_floor_ns: Option<u64>,
+    /// See `emission_floor_ns`.
+    pub emission_median_ns: Option<u64>,
+    /// The longest keepalive timer lateness in the current window, in milliseconds.
+    pub lateness_current_ms: u64,
+    /// The longest in the last minute.
+    pub lateness_last_minute_ms: u64,
+    /// The longest since the process started.
+    pub lateness_since_start_ms: u64,
+    /// Sessions refused because `max_sessions` was reached (counter).
+    pub refused_over_max_sessions: u64,
+    /// Sessions refused because the measured capacity was reached (counter).
+    pub refused_over_capacity: u64,
+}
+
+impl CapacityReport {
+    /// The latest a keepalive may be served and still leave a peer its lease, in milliseconds.
+    pub const fn lateness_limit_ms(&self) -> u64 {
+        keepalive_lateness_limit_ms(self.lease_ms)
+    }
+
+    /// Whether a keepalive was served later than a lease allows in the last minute: the
+    /// promise, if one was declared, is not being kept now.
+    pub const fn lease_at_risk(&self) -> bool {
+        self.lateness_last_minute_ms > self.lateness_limit_ms()
+    }
+
+    /// Write the report as one JSON object: integers, strings and `null` only, fields in the order
+    /// the schema lists them, so that two reports of one state are the same bytes.
+    pub fn write_json<W: core::fmt::Write>(&self, w: &mut W) -> core::fmt::Result {
+        fn opt<W: core::fmt::Write, T: core::fmt::Display>(
+            w: &mut W,
+            name: &str,
+            v: Option<T>,
+        ) -> core::fmt::Result {
+            match v {
+                Some(v) => write!(w, "\"{name}\":{v},"),
+                None => write!(w, "\"{name}\":null,"),
+            }
+        }
+        write!(w, "{{\"schema_version\":{CAPACITY_REPORT_SCHEMA_VERSION},")?;
+        write!(w, "\"lease_ms\":{},", self.lease_ms)?;
+        opt(w, "share_ppm", self.share_ppm)?;
+        opt(w, "data_wait_ms", self.data_wait_ms)?;
+        write!(
+            w,
+            "\"configured_max_sessions\":{},\"limit\":{},\"limiter\":\"{}\",\"sessions_held\":{},",
+            self.configured_max_sessions,
+            self.bound.limit,
+            self.bound.limiter.label(),
+            self.sessions_held
+        )?;
+        opt(w, "emission_floor_ns", self.emission_floor_ns)?;
+        opt(w, "emission_median_ns", self.emission_median_ns)?;
+        write!(
+            w,
+            "\"lateness_current_ms\":{},\"lateness_last_minute_ms\":{},\
+             \"lateness_since_start_ms\":{},\"lateness_limit_ms\":{},\"lease_at_risk\":{},\
+             \"refused_over_max_sessions\":{},\"refused_over_capacity\":{}}}",
+            self.lateness_current_ms,
+            self.lateness_last_minute_ms,
+            self.lateness_since_start_ms,
+            self.lateness_limit_ms(),
+            self.lease_at_risk(),
+            self.refused_over_max_sessions,
+            self.refused_over_capacity
+        )
+    }
 }
 
 #[cfg(test)]
@@ -597,6 +709,103 @@ mod tests {
             late.last_minute(0),
             0,
             "a window from the future is not in the last minute"
+        );
+    }
+
+    fn a_report() -> CapacityReport {
+        CapacityReport {
+            lease_ms: 10_000,
+            share_ppm: Some(13_200),
+            data_wait_ms: None,
+            configured_max_sessions: 20_000,
+            bound: EffectiveBound {
+                limit: 1_100,
+                limiter: Limiter::Liveness,
+            },
+            sessions_held: 1_093,
+            emission_floor_ns: Some(4_500),
+            emission_median_ns: None,
+            lateness_current_ms: 880,
+            lateness_last_minute_ms: 1_263,
+            lateness_since_start_ms: 1_263,
+            refused_over_max_sessions: 0,
+            refused_over_capacity: 948,
+        }
+    }
+
+    #[test]
+    fn the_report_is_one_json_object_in_the_schemas_order() {
+        let mut out = std::string::String::new();
+        a_report().write_json(&mut out).unwrap();
+        assert_eq!(
+            out,
+            "{\"schema_version\":1,\"lease_ms\":10000,\"share_ppm\":13200,\"data_wait_ms\":null,\
+             \"configured_max_sessions\":20000,\"limit\":1100,\"limiter\":\"liveness\",\
+             \"sessions_held\":1093,\"emission_floor_ns\":4500,\"emission_median_ns\":null,\
+             \"lateness_current_ms\":880,\"lateness_last_minute_ms\":1263,\
+             \"lateness_since_start_ms\":1263,\"lateness_limit_ms\":6667,\"lease_at_risk\":false,\
+             \"refused_over_max_sessions\":0,\"refused_over_capacity\":948}"
+        );
+    }
+
+    #[test]
+    fn a_figure_the_node_cannot_reach_is_null_and_not_zero() {
+        let mut r = a_report();
+        r.share_ppm = None;
+        r.emission_floor_ns = None;
+        let mut out = std::string::String::new();
+        r.write_json(&mut out).unwrap();
+        assert!(out.contains("\"share_ppm\":null,"));
+        assert!(out.contains("\"emission_floor_ns\":null,"));
+        assert!(!out.contains("\"share_ppm\":0"));
+    }
+
+    #[test]
+    fn the_lease_is_at_risk_when_the_last_minute_passed_two_thirds_of_it() {
+        let mut r = a_report();
+        r.lateness_last_minute_ms = 6_667;
+        assert!(!r.lease_at_risk(), "at the limit is within it");
+        r.lateness_last_minute_ms = 6_668;
+        assert!(r.lease_at_risk());
+        // The since-start figure alone, with a calm last minute, is history and not a risk now.
+        r.lateness_last_minute_ms = 500;
+        r.lateness_since_start_ms = 20_000;
+        assert!(!r.lease_at_risk());
+    }
+
+    /// Every field of the schema is listed in the document with its unit, and the document lists
+    /// no field the report does not write: read off the JSON the report writes.
+    #[test]
+    fn the_document_lists_every_field_of_the_report_and_no_other() {
+        let doc = scaling_document();
+        let mut out = std::string::String::new();
+        a_report().write_json(&mut out).unwrap();
+        // A string token followed by a colon is a key; one followed by a comma or brace is a value.
+        let tokens: std::vec::Vec<&str> = out.split('"').collect();
+        let fields: std::vec::Vec<&str> = (1..tokens.len())
+            .step_by(2)
+            .filter(|&i| tokens.get(i + 1).is_some_and(|t| t.starts_with(':')))
+            .map(|i| tokens[i])
+            .collect();
+        assert_eq!(
+            fields.len(),
+            17,
+            "the schema has seventeen fields: {fields:?}"
+        );
+        for f in &fields {
+            assert!(
+                doc.contains(&std::format!("| `{f}` |")),
+                "docs/router-data-plane-scaling.md does not list the report field `{f}`"
+            );
+        }
+        let rows = doc
+            .lines()
+            .filter(|l| l.starts_with("| `") && l.contains("` | report |"))
+            .count();
+        assert_eq!(
+            rows,
+            fields.len(),
+            "the document lists a field the report does not write"
         );
     }
 
