@@ -526,6 +526,15 @@ pub mod ext_admit;
 /// address, so it needs neither a codec feature nor the `alloc` storage profile.
 pub mod datagram_peer;
 
+/// For how many sessions a node's control work fits the CPU it was promised: the
+/// liveness bound (the keepalives of `N` sessions fit the declared share), the
+/// service bound (the loop returns to a face within a declared wait), and the
+/// effective `max_sessions` as the smaller of those and the configured one.
+///
+/// UNCONDITIONAL for [`datagram_peer`]'s reason: integers only, no codec feature
+/// and no `alloc`, so every profile computes the same number from the same inputs.
+pub mod capacity;
+
 /// SSOT for the transport-message extension CHAIN codec (the Z-flag-gated
 /// `ExtEntry` list). Shared by `handshake_encode` (outbound), `inbound`
 /// (inbound), and `auth_dispatch` (the Z_EXT_AUTH inner method chain).
