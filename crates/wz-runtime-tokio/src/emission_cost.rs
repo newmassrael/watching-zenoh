@@ -97,7 +97,7 @@ const PROBE_FRAMES: usize = 128;
 /// a KeepAlive, which is what an emission writes.
 const PROBE_FRAME: [u8; 3] = [1, 0, 0x04];
 
-/// Time [`PROBE_FRAMES`] KeepAlive-sized writes on a private loopback socket, and keep them as the
+/// Time `PROBE_FRAMES` KeepAlive-sized writes on a private loopback socket, and keep them as the
 /// first samples of the meter, so that the figure the capacity bound is calibrated with exists
 /// before the first session does.
 ///
