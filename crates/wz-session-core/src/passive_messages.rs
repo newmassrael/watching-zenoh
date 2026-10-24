@@ -399,13 +399,52 @@ impl MessageList {
         in_container: Option<usize>,
         handshake: LinkHandshake,
     ) {
+        self.push_logged(
+            unit,
+            bytes.len(),
+            |log| log.place(bytes, in_container),
+            handshake,
+        );
+    }
+
+    /// [`Self::push_datagram`] for a unit whose bytes are the stream's own: they
+    /// stand at `at` of its direction's reassembled stream, `len` of them, and the
+    /// list keeps no copy (a [`LogPlace::Stream`]).
+    ///
+    /// A WebSocket message that is one unmasked frame is such a unit: its payload
+    /// is the frame's bytes after the header, in the stream where the holder keeps
+    /// them (or lends them), and a copy of it is a second copy of what the stream
+    /// holds. The list reads it back through its source
+    /// ([`UnitBytes::stream_bytes`]) and, as it does a streamed unit, is told
+    /// before the stream lets go of those bytes ([`Self::keep_whole_before`]).
+    /// A message whose payload is not the stream's (masked, or joined out of
+    /// fragments) is [`Self::push_datagram`]'s.
+    pub fn push_datagram_in_stream(
+        &mut self,
+        unit: ReadUnit,
+        at: usize,
+        len: usize,
+        handshake: LinkHandshake,
+    ) {
+        self.push_logged(unit, len, |_| LogPlace::Stream(at), handshake);
+    }
+
+    /// The body of both: the unit's `len` bytes are at the place `place` gives
+    /// the log, and its records are read again from there.
+    fn push_logged(
+        &mut self,
+        unit: ReadUnit,
+        len: usize,
+        place: impl FnOnce(&mut UnitLog) -> LogPlace,
+        handshake: LinkHandshake,
+    ) {
         let ReadUnit { start, frames } = unit;
         // A unit a layer below framed (a WebSocket message) says where its bytes
         // end in the stream it was carried in, which its own bytes cannot say;
         // every record of it says the same, and the entries keep it once.
         let wire_end = frames.first().and_then(|first| first.wire_end);
         let readable = start.filter(|_| {
-            u32::try_from(bytes.len()).is_ok()
+            u32::try_from(len).is_ok()
                 && frames
                     .iter()
                     .all(|frame| UnitRow::can_hold_logged(frame) && frame.wire_end == wire_end)
@@ -419,14 +458,14 @@ impl MessageList {
             self.note_chain(produced + k as u64, frame);
         }
         let index = self.index();
-        let place = index.log.place(bytes, in_container);
+        let place = place(&mut index.log);
         index.push_unit(
             produced,
             start,
             &frames,
             Locus::Logged {
                 place,
-                len: bytes.len(),
+                len,
                 handshake,
                 wire_end,
             },
@@ -563,9 +602,7 @@ impl MessageList {
             .iter_from(0)
             .take(within)
             .filter_map(|entry| match entry.entry() {
-                Entry::Unit(row) if !row.logged() && row.direction() == direction => {
-                    Some(row.body().0)
-                }
+                Entry::Unit(row) if row.direction() == direction => row.stream_dependence(),
                 _ => None,
             })
             .next()
@@ -1246,6 +1283,21 @@ impl UnitRow {
         self.flags & LOGGED != 0
     }
 
+    /// Where in its direction's stream the bytes this row's unit is read from
+    /// begin, when they are the stream's: a streamed unit's body, or a logged
+    /// unit whose place is the stream ([`LogPlace::Stream`]). `None` for a unit
+    /// the list's own log or the capture container holds, which no release of the
+    /// stream can take from under it.
+    fn stream_dependence(&self) -> Option<usize> {
+        if !self.logged() {
+            return Some(self.body().0);
+        }
+        match LogPlace::of(self.locator) {
+            LogPlace::Stream(at) => Some(at),
+            LogPlace::Kept(_) | LogPlace::Container(_) => None,
+        }
+    }
+
     /// The key of the row's unit in [`Index::wire_ends`]: its locator, which
     /// names one unit among the logged ones and one among each direction's
     /// streamed ones.
@@ -1414,13 +1466,16 @@ impl Index {
                 position += 1;
                 continue;
             };
-            // A logged unit's bytes are the list's own, and no stream releases
-            // them.
-            if row.logged() || row.direction() != direction {
+            // A unit the list's own log or the capture container holds is read
+            // from no stream, and no stream releases it.
+            let Some(at) = row
+                .stream_dependence()
+                .filter(|_| row.direction() == direction)
+            else {
                 position += 1;
                 continue;
-            }
-            if row.body().0 >= offset {
+            };
+            if at >= offset {
                 break;
             }
             // Every row of the unit from here on, read once.
@@ -1598,9 +1653,14 @@ impl Index {
             let (body, end) = row.body();
             return source.stream_bytes(row.direction(), body, end);
         }
-        self.log
-            .get(LogPlace::of(row.locator), len, source.container())
-            .map(Cow::Borrowed)
+        match LogPlace::of(row.locator) {
+            // The unit is the stream's own bytes: the holder's source reads it.
+            LogPlace::Stream(at) => source.stream_bytes(row.direction(), at, at + len),
+            place => self
+                .log
+                .get(place, len, source.container())
+                .map(Cow::Borrowed),
+        }
     }
 
     /// The row at `position` as a reader is handed it.
@@ -3033,6 +3093,82 @@ mod tests {
                 container: Some(&container),
             };
             assert_reads_as_whole(&lent, &whole, &source);
+        }
+    }
+
+    /// `units` read as [`logged_and_whole`] reads them (a unit of packet `k` goes
+    /// to direction B when `k` is a multiple of three, to A otherwise), but the
+    /// logging list keeps each by its place in the stream of its direction, which
+    /// holds them back to back. Returns both lists and the two streams.
+    fn streamed_and_whole(
+        units: &[Vec<u8>],
+        handshake: LinkHandshake,
+    ) -> (MessageList, MessageList, TwoStreams) {
+        let mut logging = crate::passive::PassiveSession::new();
+        let mut keeping = crate::passive::PassiveSession::new();
+        let (mut streamed, mut whole) = (MessageList::new(), MessageList::new());
+        let mut streams = [Vec::new(), Vec::new()];
+        for (packet, unit) in units.iter().enumerate() {
+            let direction = if packet % 3 == 0 {
+                Direction::B
+            } else {
+                Direction::A
+            };
+            let seat = usize::from(direction == Direction::B);
+            let _ = logging.observe_at_nanos(1_000 * packet as u64);
+            let _ = keeping.observe_at_nanos(1_000 * packet as u64);
+            let at = streams[seat].len();
+            streams[seat].extend_from_slice(unit);
+            if let Some(read) = logging.next_datagram_unit_on(direction, unit, packet, handshake) {
+                streamed.push_datagram_in_stream(read, at, unit.len(), handshake);
+            }
+            whole.append(keeping.next_datagram_on(direction, unit, packet, handshake));
+        }
+        (streamed, whole, TwoStreams(streams))
+    }
+
+    /// A unit whose bytes are the stream's own is kept by where it stands, logs
+    /// nothing, and reads as one kept whole; the stream's release of the bytes
+    /// before an offset keeps whole the units that stand there first, so every row
+    /// still reads as it did from a stream that no longer holds those bytes.
+    #[test]
+    fn a_unit_in_the_stream_logs_nothing_and_is_kept_whole_before_the_stream_lets_go() {
+        let units = datagrams(96);
+        for handshake in [LinkHandshake::Present, LinkHandshake::Absent] {
+            let (mut streamed, whole, source) = streamed_and_whole(&units, handshake);
+            assert!(
+                matches!(streamed.rows, Store::Indexed(_)),
+                "the units became entries"
+            );
+            assert_eq!(
+                logged_allocation(&streamed),
+                0,
+                "a unit in the stream is not copied"
+            );
+            assert_reads_as_whole(&streamed, &whole, &source);
+
+            let oldest = |list: &MessageList| {
+                [Direction::A, Direction::B].map(|d| list.oldest_source_offset(d, usize::MAX))
+            };
+            assert_eq!(
+                oldest(&streamed),
+                [Some(0), Some(0)],
+                "both directions read the stream"
+            );
+
+            // Direction A lets go of its first 60 bytes: the units standing there
+            // are kept whole first, and the stream then holds nothing of them.
+            let cut = 60;
+            streamed.keep_whole_before(Direction::A, cut, &source);
+            let [oldest_a, oldest_b] = oldest(&streamed);
+            assert!(
+                oldest_a.is_some_and(|at| at >= cut),
+                "A reads from {oldest_a:?}"
+            );
+            assert_eq!(oldest_b, Some(0), "B was not released");
+            let mut released = TwoStreams(source.0.clone());
+            released.0[0][..cut].fill(0);
+            assert_reads_as_whole(&streamed, &whole, &released);
         }
     }
 

@@ -139,8 +139,12 @@ impl ByteLog {
 
 /// The bit of a [`LogPlace`]'s locator that says the unit is in a container,
 /// at an offset there rather than a position of the log's copy. No container
-/// or log reaches 2^63 bytes.
+/// or log reaches 2^62 bytes.
 const IN_CONTAINER: u64 = 1 << 63;
+
+/// The bit that says the unit is in the stream its holder reassembled, at an
+/// offset of it.
+const IN_STREAM: u64 = 1 << 62;
 
 /// Where a logged unit's bytes are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,6 +154,13 @@ pub enum LogPlace {
     /// At this offset of the capture container the log's holder lends, which
     /// the log keeps no copy of.
     Container(usize),
+    /// At this offset of a direction's reassembled stream, which the log's
+    /// holder keeps (or lends) and the log keeps no copy of: a unit a layer below
+    /// framed (a WebSocket message that is one unmasked frame) whose bytes are
+    /// the stream's own. The log cannot read it; the holder's source can
+    /// ([`crate::passive_messages::UnitBytes::stream_bytes`]), and a stream that
+    /// lets go of it keeps the units that stand there whole first.
+    Stream(usize),
 }
 
 impl LogPlace {
@@ -158,6 +169,7 @@ impl LogPlace {
         match self {
             LogPlace::Kept(at) => at,
             LogPlace::Container(offset) => offset as u64 | IN_CONTAINER,
+            LogPlace::Stream(offset) => offset as u64 | IN_STREAM,
         }
     }
 
@@ -165,6 +177,8 @@ impl LogPlace {
     pub fn of(locator: u64) -> Self {
         if locator & IN_CONTAINER != 0 {
             LogPlace::Container((locator & !IN_CONTAINER) as usize)
+        } else if locator & IN_STREAM != 0 {
+            LogPlace::Stream((locator & !IN_STREAM) as usize)
         } else {
             LogPlace::Kept(locator)
         }
@@ -196,7 +210,8 @@ impl UnitLog {
 
     /// The `len` bytes of the unit at `place`, read from the log's copy or
     /// from `container`; `None` when they are not held (released, or in a
-    /// container the reader does not hand in).
+    /// container the reader does not hand in), and for a [`LogPlace::Stream`]
+    /// unit, whose bytes are the holder's stream's and not this log's.
     pub fn get<'a>(
         &'a self,
         place: LogPlace,
@@ -206,6 +221,7 @@ impl UnitLog {
         match place {
             LogPlace::Kept(at) => self.copies.get(at, len),
             LogPlace::Container(offset) => container?.get(offset..offset.checked_add(len)?),
+            LogPlace::Stream(_) => None,
         }
     }
 
@@ -246,6 +262,27 @@ mod tests {
         assert_eq!(log.get(large_at, large.len()), Some(large.as_slice()));
         // Past what was logged reads nothing.
         assert_eq!(log.get(large_at, large.len() + 1), None);
+    }
+
+    #[test]
+    fn a_place_survives_its_locator_word_and_a_stream_place_is_not_the_logs() {
+        for place in [
+            LogPlace::Kept(0),
+            LogPlace::Kept((1 << 62) - 1),
+            LogPlace::Container(0),
+            LogPlace::Container(123_456),
+            LogPlace::Stream(0),
+            LogPlace::Stream(987_654_321),
+        ] {
+            assert_eq!(LogPlace::of(place.locator()), place);
+        }
+        // The log holds a copy of nothing at a stream place, and releasing one
+        // touches no copy.
+        let mut log = UnitLog::default();
+        let copy = log.place(b"copied", None);
+        assert_eq!(log.get(LogPlace::Stream(0), 4, Some(b"container")), None);
+        log.release_through(LogPlace::Stream(0), 4);
+        assert_eq!(log.get(copy, 6, None), Some(b"copied".as_slice()));
     }
 
     #[test]

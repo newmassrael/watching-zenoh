@@ -44,8 +44,10 @@
 //! one copy of the unit and no more than the kind's structure is built to hold (a
 //! log of chunks, a chunk's tail over). A TCP stream's kept bytes were one
 //! growable buffer, which held 1.4 times its bytes at 4096-byte units and up to
-//! twice in general; they are a log of chunks now. A WebSocket flow copies its
-//! unmasked payload on both doors; the bound says so.
+//! twice in general; they are a log of chunks now. A WebSocket message that is one
+//! unmasked frame is the stream's own bytes and costs nothing beyond it; a masked
+//! one (every client frame) is XORed on the wire, so its unmasked copy is logged on
+//! both doors, and the bounds say which is which.
 //!
 //! # The population is derived
 //!
@@ -324,6 +326,16 @@ fn websocket(n: usize, lent: bool) -> Run {
 }
 
 fn websocket_of(n: usize, lent: bool, payload: Option<usize>) -> Run {
+    websocket_with(n, lent, payload, None)
+}
+
+/// The same flow with every message's frame masked, as a client sends it: the
+/// payload on the wire is XORed, so it stands nowhere in the stream.
+fn websocket_masked_of(n: usize, lent: bool, payload: Option<usize>) -> Run {
+    websocket_with(n, lent, payload, Some([0x37, 0xFA, 0x21, 0x3D]))
+}
+
+fn websocket_with(n: usize, lent: bool, payload: Option<usize>, mask: Option<[u8; 4]>) -> Run {
     use crate::ws::tests::frame;
     let unframed = |framed: Vec<u8>| framed[2..].to_vec();
     let upgrade = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n".to_vec();
@@ -344,7 +356,7 @@ fn websocket_of(n: usize, lent: bool, payload: Option<usize>) -> Run {
         high += f.len() as u32;
     }
     for k in 0..n {
-        let f = frame(true, 0x2, &unframed(unit_of(k, payload)), None);
+        let f = frame(true, 0x2, &unframed(unit_of(k, payload)), mask);
         packets.push(tcp_packet_on(1111, low, &f));
         low += f.len() as u32;
     }
@@ -571,15 +583,15 @@ fn is_stream(o: &MessageListOrigin) -> bool {
 /// | kind                | handed | lent   | what its rows are                    |
 /// |---------------------|--------|--------|--------------------------------------|
 /// | udp                 |  60.1  |  49.2  | one Push a datagram                  |
-/// | tcp                 | 102.5  |  90.2  | one Frame a segment                  |
+/// | tcp                 | 101.1  |  90.2  | one Frame a segment                  |
 /// | serial              |  68.4  |  68.4  | batches of one to three              |
-/// | websocket           | 158.2  | 150.2  | one message a frame                  |
-/// | tls                 | 128.7  | (none) | records of 9 to 27 bytes             |
+/// | websocket           | 150.3  | 139.4  | one message a frame                  |
+/// | tls                 | 121.9  | (none) | records of 9 to 27 bytes             |
 /// | scouting            |  57.3  |  41.0  | a SCOUT, a HELLO, a SCOUT with tail  |
 /// | quic datagram       |  60.1  | (none) | recovered plaintext                  |
 /// | quic stream         |  79.1  | (none) | recovered plaintext                  |
 /// | udp fragment chains | 134.9  | 113.0  | two fragments a chain                |
-/// | tcp fragment chains | 178.6  | 154.0  | two fragments a chain                |
+/// | tcp fragment chains | 175.9  | 154.0  | two fragments a chain                |
 ///
 /// The handshake is a fixed cost and is not in a slope. Each of these includes the
 /// SN verdict class a row carries in its flags: before that class, a capture that
@@ -610,7 +622,7 @@ fn cases() -> Vec<Case> {
             build: tcp,
             lendable: true,
             expect: Expect::List(is_stream),
-            ceiling: 113.0,
+            ceiling: 112.0,
             ceiling_lent: 100.0,
         },
         Case {
@@ -626,16 +638,16 @@ fn cases() -> Vec<Case> {
             build: websocket,
             lendable: true,
             expect: Expect::List(is_stream),
-            ceiling: 175.0,
-            ceiling_lent: 166.0,
+            ceiling: 166.0,
+            ceiling_lent: 154.0,
         },
         Case {
             name: "tls",
             build: tls,
             lendable: false,
             expect: Expect::List(is_stream),
-            ceiling: 142.0,
-            ceiling_lent: 142.0,
+            ceiling: 135.0,
+            ceiling_lent: 135.0,
         },
         Case {
             name: "scouting",
@@ -677,7 +689,7 @@ fn cases() -> Vec<Case> {
             build: tcp_chains,
             lendable: true,
             expect: Expect::List(is_stream),
-            ceiling: 200.0,
+            ceiling: 194.0,
             ceiling_lent: 173.0,
         },
     ]);
@@ -912,7 +924,7 @@ struct Sized {
     handed_copies: f64,
 }
 
-fn sized_kinds() -> [Sized; 3] {
+fn sized_kinds() -> [Sized; 4] {
     [
         Sized {
             name: "udp",
@@ -932,7 +944,17 @@ fn sized_kinds() -> [Sized; 3] {
             name: "websocket",
             build: websocket_of,
             expect: Expect::List(is_stream),
-            // The unmasked payload is a log of its own on both doors.
+            // An unmasked single-frame payload is the stream's own bytes: the
+            // list keeps where it stands and reads it from the stream.
+            lent_copies: 0.0,
+            handed_copies: 1.1,
+        },
+        Sized {
+            name: "websocket (masked)",
+            build: websocket_masked_of,
+            expect: Expect::List(is_stream),
+            // A masked payload is XORed on the wire and stands nowhere in the
+            // stream, so the list logs the unmasked copy, on both doors.
             lent_copies: 1.1,
             handed_copies: 1.1,
         },

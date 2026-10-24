@@ -624,16 +624,20 @@ fn a_recovered_quic_stream_reads_again_from_its_kept_plaintext() {
     }
 }
 
-/// Open-debt item 924, step 4c — A WEBSOCKET FLOW'S ENTRIES. A ws message's
-/// payload is unmasked and joined out of its frames by the deframer and stands
-/// nowhere in the TCP stream, so the flow's list logs it and keeps the end of
-/// the message's last frame apart. On a capture with a batch in one message, a
-/// masked message, a frame split across two segments and a message fragmented
-/// into two frames, every list reads as the reading that kept every message
-/// whole, plain, under message and byte ceilings and lent; every message's bytes
-/// are its payload's from the message's first byte to the end of its unit.
+/// Open-debt item 924, step 4c — A WEBSOCKET FLOW'S ENTRIES. A ws message that
+/// is one unmasked frame has its payload in the TCP stream, where the list keeps
+/// where it stands and reads it from; a masked one, or one joined out of
+/// fragments, is unmasked or joined by the deframer and stands nowhere in the
+/// stream, so the list logs it. Either way the end of the message's last frame is
+/// kept apart. On a capture with a batch in one message, a masked message, a
+/// frame split across two segments and a message fragmented into two frames,
+/// every list reads as the reading that kept every message whole, plain, under
+/// message and byte ceilings and lent; every message's bytes are its payload's
+/// from the message's first byte to the end of its unit, until a byte ceiling
+/// releases the stream under a message that stands in it, which the list keeps
+/// whole first (and whose bytes then answer that they are gone).
 #[test]
-fn a_websocket_flows_entries_read_again_from_their_logged_payloads() {
+fn a_websocket_flows_entries_read_again_from_their_payloads() {
     let (file, payloads) = websocket_capture();
     let parsed = crate::pcap::parse(&file).expect("the capture reads");
     let mut limits = alloc::vec![crate::DissectionLimits::default()];
@@ -658,13 +662,33 @@ fn a_websocket_flows_entries_read_again_from_their_logged_payloads() {
         let read_from_bytes = assert_reads_as_whole(&what, &indexed, &whole);
         let held = flow.frames().len();
         assert!(held > 0, "{what}: messages held");
-        assert_eq!(read_from_bytes, held, "{what}: every message is an entry");
+        let released = limits.stream_bytes_per_direction.is_some();
+        if released {
+            // A ceiling on the stream releases bytes a message stands on, which
+            // the list keeps whole before they go.
+            assert!(
+                read_from_bytes <= held,
+                "{what}: {read_from_bytes} of {held}"
+            );
+        } else {
+            assert_eq!(read_from_bytes, held, "{what}: every message is an entry");
+            // The unmasked single-frame messages stand in the stream and are
+            // read from it: a direction of the capture has one the list reads
+            // from the stream, which only a place in the stream says.
+            assert!(
+                [Direction::A, Direction::B]
+                    .into_iter()
+                    .any(|d| flow.frames.oldest_source_offset(d, usize::MAX).is_some()),
+                "{what}: no message is read from the stream"
+            );
+        }
         assert_eq!(indexed.drops(), whole.drops(), "{what}: drops");
         assert_eq!(
             indexed.dropped_frame_census(),
             whole.dropped_frame_census(),
             "{what}: what was discarded"
         );
+        let mut gone = 0usize;
         for (index, row) in flow.frames().iter().enumerate() {
             let message = payloads
                 .iter()
@@ -675,8 +699,14 @@ fn a_websocket_flows_entries_read_again_from_their_logged_payloads() {
                 crate::MessageBytes::Retained(bytes) => {
                     assert_eq!(&bytes[..], want, "{what}: message {index}")
                 }
+                // The stream gave up the bytes the message stood on, and the
+                // list kept the message whole over it: a ceiling on the stream.
+                crate::MessageBytes::Retired(_) if released => gone += 1,
                 other => panic!("{what}: message {index}: {other:?}"),
             }
+        }
+        if !released {
+            assert_eq!(gone, 0, "{what}: nothing released the stream");
         }
         assert_lent_reads_as_handed(&what, &file, limits, &[file.len() / 2]);
     }

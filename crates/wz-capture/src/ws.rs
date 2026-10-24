@@ -444,6 +444,10 @@ pub struct WsDeframer {
     /// Stream offset of the FIRST frame of `partial`, or `None` when no
     /// message is in progress.
     partial_offset: Option<usize>,
+    /// Where the payload of `partial` stands in the stream, when it is the
+    /// stream's own bytes there: the message so far is one frame and that frame
+    /// is not masked. `None` once a continuation joins it or when it was masked.
+    partial_in_stream: Option<usize>,
     /// R311y612 — `Some` while this direction is looking for its framing.
     ///
     /// Was a terminal `bool` until R311y612 (§4.2): a deframer that had lost
@@ -480,6 +484,7 @@ impl Default for WsDeframer {
             preamble_done: false,
             partial: Vec::new(),
             partial_offset: None,
+            partial_in_stream: None,
             desync: None,
             pending_resync: VecDeque::new(),
             accounting: WsResyncAccounting::default(),
@@ -564,6 +569,7 @@ impl WsDeframer {
         // is the one outcome worse than reporting none.
         self.partial = Vec::new();
         self.partial_offset = None;
+        self.partial_in_stream = None;
         if self.desync.is_none() {
             self.accounting.desyncs += 1;
             self.desync = Some(WsDesyncState {
@@ -789,6 +795,7 @@ impl WsDeframer {
                     }
                     self.partial = frame.payload;
                     self.partial_offset = Some(frame_start);
+                    self.partial_in_stream = (!frame.masked).then_some(frame.payload_at);
                     if frame.fin {
                         return Some(self.take_partial());
                     }
@@ -803,6 +810,8 @@ impl WsDeframer {
                         return None;
                     }
                     self.partial.extend_from_slice(&frame.payload);
+                    // Joined out of frames, the payload stands nowhere in the stream.
+                    self.partial_in_stream = None;
                     if frame.fin {
                         return Some(self.take_partial());
                     }
@@ -826,6 +835,7 @@ impl WsDeframer {
         Some(WsMessage {
             offset,
             end: self.base,
+            payload_at: self.partial_in_stream.take(),
             payload: core::mem::take(&mut self.partial),
         })
     }
@@ -920,11 +930,16 @@ impl WsDeframer {
                 *byte ^= key[i & 3];
             }
         }
+        // Where the payload stands in the stream: past the header (and the mask,
+        // which is part of it), counted from where this frame began.
+        let payload_at = self.base + cursor;
         self.buf.drain(..total);
         self.base += total;
         Frame::Got(ParsedFrame {
             fin,
             opcode,
+            masked,
+            payload_at,
             payload,
         })
     }
@@ -939,6 +954,12 @@ pub struct WsMessage {
     /// Stream offset just past its last frame, exclusive. Control frames
     /// interleaved inside a fragmented message lie between the two.
     pub end: usize,
+    /// Stream offset of [`Self::payload`]'s first byte when the payload is the
+    /// stream's own bytes there: the message is one frame and that frame is not
+    /// masked, so `payload.len()` bytes from here are exactly the payload.
+    /// `None` for a masked frame (its bytes in the stream are XORed) and for a
+    /// message joined out of fragments, whose payload stands nowhere in it.
+    pub payload_at: Option<usize>,
     /// The message's payload, every frame's unmasked and joined.
     pub payload: Vec<u8>,
 }
@@ -947,6 +968,10 @@ pub struct WsMessage {
 struct ParsedFrame {
     fin: bool,
     opcode: u8,
+    /// Whether the payload was masked on the wire.
+    masked: bool,
+    /// Stream offset of the payload's first byte.
+    payload_at: usize,
     payload: Vec<u8>,
 }
 

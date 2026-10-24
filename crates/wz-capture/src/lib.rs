@@ -3993,6 +3993,7 @@ impl FlowDissection {
         for ws::WsMessage {
             offset,
             end,
+            payload_at,
             payload,
         } in ready
         {
@@ -4027,11 +4028,24 @@ impl FlowDissection {
             }
             self.ingest.observe_frames(&unit.frames);
             match self.keep {
-                // Open-debt item 924, step 4c — the payload is unmasked and
-                // joined out of its frames in this call and stands nowhere in
-                // the stream, so the list logs a copy of it, as it does a
-                // recovered datagram's, and keeps the end apart.
-                Keep::Entries => self.frames.push_datagram(unit, &payload, None, handshake),
+                // Open-debt item 924, step 4c — a payload that was unmasked or
+                // joined out of its frames in this call stands nowhere in the
+                // stream, so the list logs a copy of it, as it does a recovered
+                // datagram's, and keeps the end apart. One that is the stream's
+                // own bytes (a single frame, not masked) is not copied: the list
+                // keeps where it stands and reads it from the stream, on the
+                // handed door and the lent one alike.
+                Keep::Entries => {
+                    let in_stream = payload_at
+                        .filter(|&at| self.assembler(direction).holds(at, at + payload.len()));
+                    match in_stream {
+                        Some(at) => {
+                            self.frames
+                                .push_datagram_in_stream(unit, at, payload.len(), handshake)
+                        }
+                        None => self.frames.push_datagram(unit, &payload, None, handshake),
+                    }
+                }
                 #[cfg(test)]
                 Keep::Whole => self.frames.append(unit.frames),
             }

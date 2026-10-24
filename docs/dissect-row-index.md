@@ -584,6 +584,19 @@ from. So the order is now:
   copied after it is logged, and a trim gives back whole chunks. A TCP row at 4 KiB
   went from 5710 to 4462 bytes (1.07 times the stream), and a trimmed stream
   keeps at most the chunk its position falls in.
+  The same sweep found a WebSocket message's payload logged as a copy on both
+  doors, though a message that is one unmasked frame has its payload in the
+  stream. Such a unit is a `LogPlace::Stream` now: the list keeps where it stands
+  (a locator with a bit of its own) and reads it through its source as it does a
+  streamed unit, and a byte ceiling that releases the stream under it keeps the
+  message whole first, as for a TCP row (its bytes then answer that they are
+  gone, where the log's copy used to outlive the stream). A masked frame (every
+  client frame) is XORed on the wire and a fragmented message is joined, so
+  their payloads stand nowhere in the stream and are logged. An unmasked row on the
+  lent door costs the same at 16 and 4096 bytes (139.4 bytes), and the matrix now
+  measures a masked kind beside it. The deframer's offsets were the stream's own
+  across a hole (the TLS keeper's were not, above), which is what lets a place in
+  the stream be trusted.
 - 6. Random access to a row's field document (D9), taken before 4c's remaining
   landings because it is what the consumer's budget waits on: (a) the tables
   that do not depend on a window survive a walk that begins again; (b) the

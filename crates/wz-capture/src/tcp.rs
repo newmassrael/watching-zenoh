@@ -523,6 +523,13 @@ impl StreamAssembler {
         }
     }
 
+    /// Whether the stream still holds the bytes `from..to`: they have arrived and
+    /// have not been trimmed. A cheap answer to what [`Self::bytes`] answers by
+    /// reading them, for a caller that is about to remember where they stand.
+    pub fn holds(&self, from: usize, to: usize) -> bool {
+        from >= self.discarded && from <= to && to <= self.end
+    }
+
     /// Absolute offset of the first retained byte.
     pub fn retained_from(&self) -> usize {
         self.discarded
