@@ -749,9 +749,9 @@ pub trait BoxedLinkDriver {
     /// keepalive exactly when the peer is hearing nothing. zenoh-pico sets its `_transmitted`
     /// flag where the bytes are written (`src/transport/common/tx.c`), and zenoh resets its
     /// keepalive tracker after `send_batch(..).await` has returned
-    /// (`io/zenoh-transport/src/unicast/universal/link.rs`, `write_loop`); this is that point
-    /// for a driver with a queue. The answer is an elapsed time and not a timestamp, so the driver's clock and the
-    /// session's never have to agree on an epoch.
+    /// (`io/zenoh-transport/src/unicast/universal/link.rs` @ `fn write_loop`); this is that
+    /// point for a driver with a queue. The answer is an elapsed time and not a timestamp, so
+    /// the driver's clock and the session's never have to agree on an epoch.
     ///
     /// A driver that WRAPS another must forward both methods, or the session behind it keeps
     /// the hand-over stamp that overstates the line's activity.
