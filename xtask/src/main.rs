@@ -224,7 +224,8 @@ fn regen_codecs(root: &Path) {
 /// Emits the FULL superset (every feature-gated statechart/pool), one
 /// directory per consuming crate, mirroring each build.rs's emits:
 ///   wz-session-core  : reassembly_slot, scouting, session_fsm_unicast,
-///                      session_fsm_multicast, multicast_peer (statecharts)
+///                      session_fsm_multicast, multicast_peer,
+///                      peer_connection (statecharts)
 ///   wz-runtime-tokio : reassembly_pool_ap, session_rx_pool_ap,
 ///                      session_rx_pool_ap_small, session_tx_pool_ap,
 ///                      session_tx_pool_ap_small (buffer-pools)
@@ -253,6 +254,9 @@ fn regen_statecharts_and_pools(root: &Path) {
         "session_fsm_unicast",
         "session_fsm_multicast",
         "multicast_peer",
+        // Decision D5 of docs/session-lifecycle-intent.md — the per-peer
+        // connection machine the lifecycle verbs drive.
+        "peer_connection",
     ] {
         codegen.emit_statechart(stem, &session, &sc_out);
     }
@@ -297,7 +301,7 @@ fn regen_statecharts_and_pools(root: &Path) {
     }
 
     println!(
-        "xtask: regenerated 5 statecharts + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
+        "xtask: regenerated 6 statecharts + {} buffer-pools into out/{{wz-session-core,wz-runtime-tokio,wz-runtime-coop,wz-link-lwip}}",
         pools.len()
     );
 }

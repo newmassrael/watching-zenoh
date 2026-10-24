@@ -573,6 +573,32 @@ Each step lands with its own done-when; sizes are not estimated here.
      profile holds a directory when the MCU opener of step 6 reads one.
 4. **D5.** The peer machine in SCXML and the bounded peer table; the AP
    `ConnectReconcile` desired set is replaced by it.
+   - **5a, the machine and the table (Round 3550).**
+     `sources/session/peer_connection.scxml` is the machine. SCE generates
+     it into `out/wz-session-core/peer_connection_sm.rs`.
+     - Its states are Idle, Resolving, Connecting, Established and Backoff,
+       plus Refused, whose child names the cause: `NoLocator`, `NoSlot`,
+       `IdentityMismatch` or `AuthorityRefused`. A refusal is therefore
+       read as a state, and it holds until the next `open`.
+     - `open` is `manual.start` (or `manual.refused` when the authority
+       says no) and `close` is `manual.stop`. A second `open` or a second
+       `close` has no transition and changes nothing, so D6's idempotency
+       is the machine's shape.
+     - No transition has a cond: the host classifies each outcome and
+       raises the event that names it.
+     - Each effect is a duty the host performs after the event: resolve,
+       dial, arm or cancel the retry, abandon an attempt, close a session,
+       and reset the retry schedule once a session is up.
+     `wz_session_core::peer_table::PeerTable<N>` holds one machine per peer
+     zid, with no allocator. It reuses an `Idle` entry when it is full, and
+     refuses and counts only when every entry holds a peer the node is told
+     to hold. The duty record the multicast machines kept privately is now
+     `duty_outbox`, shared with this machine. Witness: the table's seven
+     unit tests.
+   - Left of D5: AP's face loop holds a `PeerTable` in place of the
+     `ConnectReconcile` desired set. It performs the duties against its
+     directory, its dials and `RetryPeriod`, and the lifecycle opener drives
+     `open` and `close` through it.
 5. **D6.** Intent and status, `reset` with a generation, and the status GET.
 6. **The MCU opener** over `SessionHost`, `wz-session-lwip` forwarding the
    feature, and a witness on the fixed-memory image.

@@ -1948,6 +1948,47 @@ pub mod multicast_peer {
     ));
 }
 
+/// SCE-generated per-peer connection statechart (decision D5 of
+/// `docs/session-lifecycle-intent.md`), from
+/// `sources/session/peer_connection.scxml`, COMMITTED at
+/// `out/wz-session-core/peer_connection_sm.rs` and `include!`-ed from there.
+/// Exposes `PeerConnectionState` / `PeerConnectionEvent`, the
+/// `PeerConnectionActions` host trait and the `PeerConnectionPolicy<A>`
+/// policy, driven one instance per peer by [`peer_table`]. Engine-free and
+/// allocation-free, so every profile that holds peers holds the same machine;
+/// gated on `session-unicast`, since a peer is held by a unicast session and
+/// that feature brings the SCE runtime in. The lint allows are restored as
+/// outer attributes, as for the other generated machines.
+#[cfg(feature = "session-unicast")]
+#[allow(non_snake_case)]
+#[allow(unused_imports)]
+#[allow(dead_code)]
+#[allow(unused_variables)]
+#[allow(unused_mut)]
+#[allow(unused_labels)]
+#[allow(unreachable_patterns)]
+#[allow(unreachable_code)]
+#[allow(clippy::all)]
+pub mod peer_connection {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../out/wz-session-core",
+        "/peer_connection_sm.rs"
+    ));
+}
+
+/// The duties a generated machine's action bodies record for its host to
+/// perform after the event (the multicast machines and the peer connection
+/// machine). Gated on the features whose modules build such a machine.
+#[cfg(any(feature = "session-unicast", feature = "session-multicast"))]
+pub mod duty_outbox;
+
+/// The peers a node is told to hold, each with its [`peer_connection`]
+/// machine, in a table of fixed capacity (decision D5). Gated as the machine
+/// is.
+#[cfg(feature = "session-unicast")]
+pub mod peer_table;
+
 /// SCE-generated session-slot table config (Round 3278): how many sessions a
 /// fixed-memory machine holds at once (`SLOT_COUNT`, MAX_SESSIONS) and the byte
 /// ceiling of ONE session slot (`SLOT_SIZE`), so the RAM of every session of

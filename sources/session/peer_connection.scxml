@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  Per-peer connection FSM — decision D5 of docs/session-lifecycle-intent.md.
+
+  One instance per peer a node is told to hold, keyed by the peer's zid, in a
+  table of fixed capacity (`wz_session_core::peer_table`). The model is the BGP
+  peer state machine (RFC 4271, section 8): a configured neighbour, the
+  administrative events ManualStart and ManualStop, a connect-retry timer, and
+  damping of a peer that oscillates. The lifecycle verbs are its administrative
+  events: `open` is `manual.start` and `close` is `manual.stop`.
+
+  States:
+    Idle        — no intent to hold the peer (the initial state).
+    Resolving   — find the peer's candidate locators (decision D3's directory).
+    Connecting  — a session slot is taken and the candidates are dialled for the
+                  peer's zid (decision D4).
+    Established — a session to the peer is up.
+    Backoff     — the last attempt failed or the session was lost; a retry is
+                  armed on upstream's `connect/retry` schedule, which grows with
+                  each failure so an oscillating peer is damped.
+    Refused     — the peer cannot be held as asked; the child state names why
+                  (no locator, no session slot, another node answered, the
+                  authority refused). It holds until the next `manual.start`.
+
+  Idempotency (decision D6) is structural: a `manual.start` while the peer is
+  being or already is held has no transition and changes nothing, and a
+  `manual.stop` in Idle has none either.
+
+  Division of labour with the host (mirrors multicast_peer.scxml):
+    - Classification — the host. Whether the directory holds a candidate,
+      whether a slot is free, which way a dial ended and whether the authority
+      admits the open depend on host state, so the host evaluates them and
+      raises the one event that names the outcome. No transition has a cond.
+    - Timers and arithmetic — the host. The retry schedule and the damping are
+      stored-state arithmetic (`RetryPeriod`); the host arms the timer the
+      `arm_retry` duty asks for and raises `retry.due` when it fires.
+    - The lifecycle and its duties — this FSM. Each `<sce:action>` is a no-arg
+      native host call that records a duty the host performs right after the
+      event that ran it, so the generated `PeerConnectionPolicy<A>` carries no
+      script engine and compiles `#![no_std]`.
+
+  Host duties (the generated `PeerConnectionActions` trait):
+    resolve       — Resolving.onentry: read the peer's candidates, then raise
+                    `resolve.found` or `resolve.empty`.
+    dial          — Connecting.onentry: take a session slot and dial the
+                    candidates for the peer's zid, then raise one `dial.*` event.
+    arm_retry     — Backoff.onentry: arm the retry timer at the schedule's next
+                    wait.
+    cancel_retry  — leaving Backoff on `manual.stop`: disarm the timer.
+    abandon_dial  — leaving Resolving or Connecting on `manual.stop`: drop the
+                    attempt and give back what it took.
+    close_session — leaving Established on `manual.stop`: close the session and
+                    give back its slot.
+    reset_retry   — Established.onentry: a session came up, so the retry
+                    schedule starts over (the host keeps it damped while the
+                    peer oscillates).
+
+  Events raised by the host:
+    manual.start    — `open`: the authority admitted it.
+    manual.refused  — `open`: the authority refused it.
+    manual.stop     — `close`.
+    resolve.found   — the directory holds at least one candidate.
+    resolve.empty   — it holds none.
+    dial.established — a session to the peer is up.
+    dial.failed     — no candidate opened a session (unreachable, timed out).
+    dial.no_slot    — no session slot was free.
+    dial.mismatch   — a candidate was answered by another node (decision D4).
+    session.lost    — the established session ended without a `manual.stop`.
+    retry.due       — the retry timer fired.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="statechart"
+       name="peer_connection"
+       version="1.0"
+       initial="Idle">
+
+  <state id="Idle">
+    <transition event="manual.start" target="Resolving"/>
+    <transition event="manual.refused" target="AuthorityRefused"/>
+  </state>
+
+  <state id="Resolving">
+    <onentry>
+      <sce:action name="resolve" effect="duty"/>
+    </onentry>
+    <transition event="resolve.found" target="Connecting"/>
+    <transition event="resolve.empty" target="NoLocator"/>
+    <transition event="manual.stop" target="Idle">
+      <sce:action name="abandon_dial" effect="duty"/>
+    </transition>
+  </state>
+
+  <state id="Connecting">
+    <onentry>
+      <sce:action name="dial" effect="duty"/>
+    </onentry>
+    <transition event="dial.established" target="Established"/>
+    <transition event="dial.failed" target="Backoff"/>
+    <transition event="dial.no_slot" target="NoSlot"/>
+    <transition event="dial.mismatch" target="IdentityMismatch"/>
+    <transition event="manual.stop" target="Idle">
+      <sce:action name="abandon_dial" effect="duty"/>
+    </transition>
+  </state>
+
+  <state id="Established">
+    <onentry>
+      <sce:action name="reset_retry" effect="duty"/>
+    </onentry>
+    <transition event="session.lost" target="Backoff"/>
+    <transition event="manual.stop" target="Idle">
+      <sce:action name="close_session" effect="duty"/>
+    </transition>
+  </state>
+
+  <state id="Backoff">
+    <onentry>
+      <sce:action name="arm_retry" effect="duty"/>
+    </onentry>
+    <transition event="retry.due" target="Resolving"/>
+    <transition event="manual.stop" target="Idle">
+      <sce:action name="cancel_retry" effect="duty"/>
+    </transition>
+  </state>
+
+  <!-- The peer cannot be held as asked. The child names why; the operator's
+       next `manual.start` tries again, and `manual.stop` drops the intent. -->
+  <state id="Refused" initial="NoLocator">
+    <state id="NoLocator"/>
+    <state id="NoSlot"/>
+    <state id="IdentityMismatch"/>
+    <state id="AuthorityRefused"/>
+    <transition event="manual.start" target="Resolving"/>
+    <transition event="manual.refused" target="AuthorityRefused"/>
+    <transition event="manual.stop" target="Idle"/>
+  </state>
+</scxml>

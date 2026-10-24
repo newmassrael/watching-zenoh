@@ -114,6 +114,7 @@ use crate::multicast_peer::{
 // module is not, so the original import through it was an E0432 on the
 // no-alloc MCU profile (run-ci Layer G.12).
 use crate::constant_session_id::built_under_constant_id;
+use crate::duty_outbox::{Duties, DutyOutbox};
 use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLost, MulticastPeerLostReason};
 #[cfg(all(feature = "reassembly", feature = "storage-profile"))]
 use crate::reassembly_dispatch::Fragment as ReassemblyFragment;
@@ -125,7 +126,6 @@ use crate::session_fsm_multicast::{
 };
 use crate::sn;
 use core::net::SocketAddr;
-use core::sync::atomic::{AtomicU8, Ordering};
 use sce_rust_runtime::Engine;
 
 /// The ids the multicast machines are built under (SCE ADR 0045: the host gives a machine its
@@ -419,39 +419,6 @@ impl SessionFsmMulticastActions for SessionBinding {
 
     fn release_multicast_link(&mut self) {
         self.duties.record(Self::RELEASE_LINK);
-    }
-}
-
-/// The duties a machine's action bodies recorded and the Router has not yet
-/// performed, one bit per duty.
-///
-/// A body writes it through `&mut self`; the Router reads it through the
-/// shared reference the generated policy lends (`actions()`), so the byte is
-/// atomic. Taken as a load then a store rather than a swap: a Cortex-M0 has no
-/// compare-and-swap, and nothing runs between the two, since the machine and
-/// the Router that drives it are one thread.
-#[derive(Default)]
-struct DutyOutbox(AtomicU8);
-
-impl DutyOutbox {
-    fn record(&mut self, duty: u8) {
-        *self.0.get_mut() |= duty;
-    }
-
-    fn take(&self) -> Duties {
-        let recorded = self.0.load(Ordering::Relaxed);
-        self.0.store(0, Ordering::Relaxed);
-        Duties(recorded)
-    }
-}
-
-/// What one [`DutyOutbox::take`] found.
-#[derive(Clone, Copy)]
-struct Duties(u8);
-
-impl Duties {
-    fn has(self, duty: u8) -> bool {
-        self.0 & duty != 0
     }
 }
 
