@@ -283328,6 +283328,46 @@
         "Read the hosted runs of the pushes of rounds 3500, 3503, 3506, 3512, 3517, 3525 and this one per job, Layer E18 first."
       ]
     },
+    "Round 3539": {
+      "decision_summary": "D4 2b on AP: the lifecycle open verb now dials for the node it names. LinkstateOpener resolved the key's zid to locators and then dropped the zid, so the dial reached whatever node answered there. It now sends ConnectReconcile::AddNode, the zid with the locators, and each becomes a dial plan that carries the zid; the face template's staging installs it on the session of every dial and re-dial of that plan, so the check of Round 3537 closes the session at an InitAck from another node. This is upstream's shape: connect dials each scouted locator for its zid. A plain Add and the startup seed still name no node. expect_peer_zid now takes the sixteen-byte zid and leaves parsing to zid_from_wire, so a caller holding a zid has no failure to handle. The round also repaid the pin red Round 3537 left: three files the session-close-ingress reason cites moved without their rows, which stopped other sessions' pushes; the rows moved in 496a61c6c after the reason was read again.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio: ConnectReconcile::AddNode and its arm in apply_connect_reconcile; MeshDialTarget::expected_zid and for_node; FaceTemplate::into_parts takes the plan's zid and its staging installs it; LinkstateOpener sends AddNode.",
+        "crates/wz-session-core: expect_peer_zid takes the sixteen-byte zid.",
+        "Tests: an AddNode plans for its zid and an Add for none (accept_loop); the opener's request carries the key's zid (session_lifecycle_open); over a socket, a dial for another node closes INVALID with no OpenSyn and a dial for the answering node sends its OpenSyn (connect_and_open_session).",
+        "docs/reason-review-pins.md: five session-close-ingress rows; docs/session-lifecycle-intent.md: step 2b."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): connect_and_open_session (4 passed, the two new among them) and session_fsm_driver_loop (31 passed); the lib tests of accept_loop and session_lifecycle_open with session-close-ingress, transport-link-tls, routing-peer, routing-accept, router-connect-reconcile, transport-link-tcp and transport-unicast (7 passed). cargo check --workspace --all-targets; clippy -D warnings of wz-runtime-tokio (default and that feature set) and of wz-session-core; cargo fmt --check.",
+        "reason_review_pin_gate --check failed on the five moved files and passes with the new rows. upstream_citation_anchor_gate --check and --resolve, prose_named_identifier, prose_feature, discard_site, discarded_evidence, test_discipline and lane_reach pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "D4 2c: the C ABI's scouted open names the node and its after-the-handshake check moves to the InitAck; D4 2d: the MCU opener names the node. Ask the C ABI's owning session before touching wz-capi-core.",
+        "Run reason_review_pin_gate --check before every push that changes a file an atom's reason cites.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
+      ],
+      "publishable_decision_summary": "D4 2b on AP: the lifecycle open verb now dials for the node it names. LinkstateOpener resolved the key's zid to locators and then dropped the zid, so the dial reached whatever node answered there. It now sends ConnectReconcile::AddNode, the zid with the locators, and each becomes a dial plan that carries the zid; the face template's staging installs it on the session of every dial and re-dial of that plan, so the check of Round 3537 closes the session at an InitAck from another node. This is upstream's shape: connect dials each scouted locator for its zid. A plain Add and the startup seed still name no node. expect_peer_zid now takes the sixteen-byte zid and leaves parsing to zid_from_wire, so a caller holding a zid has no failure to handle. The round also repaid the pin red Round 3537 left: three files the session-close-ingress reason cites moved without their rows, which stopped other sessions' pushes; the rows moved in 496a61c6c after the reason was read again.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio: ConnectReconcile::AddNode and its arm in apply_connect_reconcile; MeshDialTarget::expected_zid and for_node; FaceTemplate::into_parts takes the plan's zid and its staging installs it; LinkstateOpener sends AddNode.",
+        "crates/wz-session-core: expect_peer_zid takes the sixteen-byte zid.",
+        "Tests: an AddNode plans for its zid and an Add for none (accept_loop); the opener's request carries the key's zid (session_lifecycle_open); over a socket, a dial for another node closes INVALID with no OpenSyn and a dial for the answering node sends its OpenSyn (connect_and_open_session).",
+        "docs/reason-review-pins.md: five session-close-ingress rows; docs/session-lifecycle-intent.md: step 2b."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): connect_and_open_session (4 passed, the two new among them) and session_fsm_driver_loop (31 passed); the lib tests of accept_loop and session_lifecycle_open with session-close-ingress, transport-link-tls, routing-peer, routing-accept, router-connect-reconcile, transport-link-tcp and transport-unicast (7 passed). cargo check --workspace --all-targets; clippy -D warnings of wz-runtime-tokio (default and that feature set) and of wz-session-core; cargo fmt --check.",
+        "reason_review_pin_gate --check failed on the five moved files and passes with the new rows. upstream_citation_anchor_gate --check and --resolve, prose_named_identifier, prose_feature, discard_site, discarded_evidence, test_discipline and lane_reach pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "D4 2c: the C ABI's scouted open names the node and its after-the-handshake check moves to the InitAck; D4 2d: the MCU opener names the node. Ask the C ABI's owning session before touching wz-capi-core.",
+        "Run reason_review_pin_gate --check before every push that changes a file an atom's reason cites.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
