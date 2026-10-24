@@ -354,8 +354,9 @@ bound (the existing `max_sessions` refusal, now fed the smaller number) and the 
 Also built: the keepalive timer lateness meter and its assertion, the router's own measurement of what a
 keepalive costs on its host and the bound calibrated with it, the separate refusal counter, and two tests that
 re-derive this section's numbers from the model. The drop policy is upstream's and was already built (read
-below). Not built: the admin-space export of the lateness and of the cost, which waits on the owner's decision
-about a wz key in upstream's admin space.
+below). The lateness, the measured cost and the refusals are served as the capacity report under a wz-owned root
+(`wz/@/<zid>/capacity`, below), approved by the owner on 2026-10-24 as an extension kept apart from upstream's
+admin space.
 
 **The promise.** While the process receives at least the CPU share `s` that its operator declared, each
 session of up to `N_max(s)` keeps its lease. It is conditional on `s` on purpose: a router cannot promise
@@ -525,12 +526,24 @@ that follows the lateness, so that the quantity is defined once. Four unit tests
 the window it replaced, and a read earlier than a record); the second was run against a slot that keeps the old
 maximum and went red.
 
-**The capacity report (schema version 1; the value is built, no endpoint serves it yet).** One plain value,
+**The capacity report (schema version 1; served by the router-hat at `wz/@/<zid>/capacity`).** One plain value,
 `wz_session_core::capacity::CapacityReport`, written as one JSON object by `write_json` (integers, strings and
 `null`; fields in this order; the same state is the same bytes). A figure the node cannot reach is `null` and
-not zero. Counters only rise; everything else is a gauge. The report is meant to be served under a wz-owned
-root outside upstream's admin space, so that upstream's `@/**` answers do not move; the endpoint is the next
-step. A test fails when this table and the fields the report writes differ in either direction.
+not zero. Counters only rise; everything else is a gauge. A test fails when this table and the fields the
+report writes differ in either direction.
+
+The router serves it per GET (`adminspace::answer_capacity_query`), as `application/json`, under the root `wz`,
+which is outside upstream's admin space: a query for `@/**` or for the router's admin root cannot meet the key,
+so upstream's answers are the bytes they were. The `@` chunk is verbatim, as upstream's admin root is, so a
+wildcard such as `wz/**` does not reach it and a client has to ask for the `@` space on purpose (`wz/@/<zid>/capacity`,
+`wz/@/*/capacity`, `wz/@/**`). It is gated by the same admin read permit as every admin leg and answers nothing,
+only the terminating Final, when the permit is denied. The sessions held are read from the face table and the two
+refusal counters from the accept loop while it runs (`SessionCeiling` carries them, because the loop's summary
+exists only when the loop ends). Held by unit tests of the answerer (the bytes, the encoding, the keys a query for
+upstream's space does and does not meet, the denial) and by a wz-to-wz end-to-end test in Layer E7g
+(`wz_router_hat_serves_its_capacity_report`): the report is served with the share the router was told and the limit
+the model derives, upstream's admin replies are all keyed under `@/` and none is the report's, and a router with the
+read permit denied answers nothing; the second was run with the permit ignored in the handler and failed alone.
 
 | field | kind | unit | meaning |
 |---|---|---|---|
@@ -559,8 +572,8 @@ configured number). A session past it is refused at accept and the sessions alre
 refuse the new one, not degrade the old. The router says once at startup that it admits fewer than
 configured and which bound did it. The refusal by the configured number is counted as it was
 (`refused_over_max_sessions`) and the refusal by the calibrated one apart from it
-(`refused_over_capacity`), so an operator can tell whether the limit was theirs or the model's; the demo does
-not yet print either in its shutdown summary.
+(`refused_over_capacity`), so an operator can tell whether the limit was theirs or the model's; both are in the
+capacity report while the router runs.
 
 **What the router sheds.** Read in the code on 2026-10-24, and not new: the shedding policy is upstream's and
 is built. Each face's outbound queue is bounded per priority lane at upstream's defaults (two batches,

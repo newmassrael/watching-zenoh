@@ -2076,18 +2076,42 @@ pub enum McastIngressBody {
 /// that it can follow something the loop does not own (what the node has measured of itself).
 /// A face already held is not closed by a lower ceiling: the ceiling decides who is admitted, not
 /// who stays.
+///
+/// It also carries the loop's refusals, live: [`AcceptLoopSummary`] reports its counts only when
+/// the loop ends, and a monitor asks while it runs. Clones share the counters, so the host that
+/// hands the ceiling to the loop reads what the loop counted.
 #[derive(Clone)]
-pub struct SessionCeiling(Arc<dyn Fn() -> usize + Send + Sync>);
+pub struct SessionCeiling {
+    limit: Arc<dyn Fn() -> usize + Send + Sync>,
+    refused_over_max_sessions: Arc<std::sync::atomic::AtomicU64>,
+    refused_over_capacity: Arc<std::sync::atomic::AtomicU64>,
+}
 
 impl SessionCeiling {
     /// A ceiling that is `limit()` faces at the moment of each admission.
     pub fn new(limit: impl Fn() -> usize + Send + Sync + 'static) -> Self {
-        Self(Arc::new(limit))
+        Self {
+            limit: Arc::new(limit),
+            refused_over_max_sessions: Arc::default(),
+            refused_over_capacity: Arc::default(),
+        }
     }
 
     /// The faces the loop may hold now.
     pub fn get(&self) -> usize {
-        (self.0)()
+        (self.limit)()
+    }
+
+    /// Faces the loop refused because `max_sessions` was reached, since it started.
+    pub fn refused_over_max_sessions(&self) -> u64 {
+        self.refused_over_max_sessions
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Faces the loop refused because this ceiling was reached, since it started.
+    pub fn refused_over_capacity(&self) -> u64 {
+        self.refused_over_capacity
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -2831,6 +2855,11 @@ where
                             #[cfg(feature = "router-connect-reconcile")]
                             dialed_targets.remove(&id);
                             summary.refused_over_max_sessions += 1;
+                            if let Some(ceiling) = ceiling.as_ref() {
+                                ceiling
+                                    .refused_over_max_sessions
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
                             on_event(&AcceptEvent::FaceRefused {
                                 id,
                                 peer_zid: face.peer_zid.clone(),
@@ -2841,16 +2870,20 @@ where
                         // The host's moving ceiling, read at the same moment and for the same
                         // reason: the capacity the node has measured is a bound on admission,
                         // and a bound applied after the face is held is not one.
-                        if let Some(ceiling) = ceiling.as_ref().map(SessionCeiling::get) {
-                            if faces.len() >= ceiling {
+                        if let Some((host_ceiling, limit)) = ceiling.as_ref().map(|c| (c, c.get()))
+                        {
+                            if faces.len() >= limit {
                                 log::debug!(
                                     "refusing face {} — measured capacity {} reached",
                                     id.0,
-                                    ceiling
+                                    limit
                                 );
                                 #[cfg(feature = "router-connect-reconcile")]
                                 dialed_targets.remove(&id);
                                 summary.refused_over_capacity += 1;
+                                host_ceiling
+                                    .refused_over_capacity
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 on_event(&AcceptEvent::FaceRefused {
                                     id,
                                     peer_zid: face.peer_zid.clone(),
@@ -4946,6 +4979,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_moving_ceiling_refuses_the_peer_past_it_and_counts_it_apart() {
         let (listener, addr) = bind_loopback().await;
+        // The host's handle: what the loop counts while it runs is what this reads.
+        let live = SessionCeiling::new(|| 1);
 
         let (go_tx, go_rx) = watch::channel(false);
         let up = Arc::new(AtomicUsize::new(0));
@@ -4984,7 +5019,7 @@ mod tests {
                 max_links: 1,
                 max_sessions: usize::MAX,
                 // THE SUBJECT.
-                ceiling: Some(SessionCeiling::new(|| 1)),
+                ceiling: Some(live.clone()),
                 offer: SessionOffer::universal(),
                 retry: RetryPolicy::ZENOH_DEFAULT,
                 stats: None,
@@ -5014,6 +5049,9 @@ mod tests {
             summary.refused_over_max_sessions, 0,
             "the configured bound had room and refused nobody"
         );
+        // The same counts, read from the host's handle and not from the end-of-run summary.
+        assert_eq!(live.refused_over_capacity(), 1);
+        assert_eq!(live.refused_over_max_sessions(), 0);
     }
 
     /// R2844 — the face loop is the node's transport manager, so the node's

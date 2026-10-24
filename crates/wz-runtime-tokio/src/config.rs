@@ -1438,6 +1438,44 @@ impl WzConfig {
         )
     }
 
+    /// What this node says about its capacity now ([`wz_session_core::capacity::CapacityReport`]):
+    /// the declared contract and lease, the limit [`Self::effective_max_sessions`] derives, what
+    /// the process has measured of its own keepalives and how late their timers were, with the
+    /// sessions held and the refusals the caller counted. The caller owns those three because the
+    /// face table and the accept loop do.
+    pub fn capacity_report(
+        &self,
+        sessions_held: usize,
+        refused_over_max_sessions: u64,
+        refused_over_capacity: u64,
+    ) -> wz_session_core::capacity::CapacityReport {
+        #[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
+        let (floor, median, late) = (
+            crate::emission_cost::keepalive_emission_cost_floor_ns(),
+            crate::emission_cost::keepalive_emission_cost_median_ns(),
+            crate::keepalive_pacer::keepalive_timer_lateness(),
+        );
+        #[cfg(not(all(feature = "transport-unicast", feature = "transport-keepalive")))]
+        let (floor, median, late) = (None, None, (0, 0, 0));
+        #[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
+        let late = (late.current_ms, late.last_minute_ms, late.since_start_ms);
+        wz_session_core::capacity::CapacityReport {
+            lease_ms: self.effective_lease_ms(),
+            share_ppm: self.capacity.as_ref().map(|c| c.share_ppm()),
+            data_wait_ms: self.capacity.as_ref().and_then(|c| c.data_wait_ms()),
+            configured_max_sessions: self.max_sessions,
+            bound: self.effective_max_sessions(),
+            sessions_held,
+            emission_floor_ns: floor,
+            emission_median_ns: median,
+            lateness_current_ms: late.0,
+            lateness_last_minute_ms: late.1,
+            lateness_since_start_ms: late.2,
+            refused_over_max_sessions,
+            refused_over_capacity,
+        }
+    }
+
     /// [`Self::effective_max_sessions`] for the costs `model` states.
     pub fn effective_max_sessions_under(
         &self,

@@ -2839,6 +2839,52 @@ pub fn answer_router_admin_query(
     answer_router_admin_query_in(&mut key, &mut body, view, out, ctx).outcome
 }
 
+/// The root of the keys wz serves that upstream does not. Outside `@/`, so a query for upstream's
+/// admin space (`@/**`) cannot intersect any key under it and upstream's answers are the bytes
+/// they were before wz added one.
+pub const WZ_EXTENSION_ROOT: &str = "wz";
+
+/// The key the capacity report is served at: `wz/@/<zid>/capacity`.
+#[cfg(feature = "alloc")]
+pub fn capacity_report_key(zid_hex: &str) -> String {
+    let mut key = String::from(WZ_EXTENSION_ROOT);
+    key.push_str("/@/");
+    key.push_str(zid_hex);
+    key.push_str("/capacity");
+    key
+}
+
+/// Answer a GET with the capacity report ([`crate::capacity::CapacityReport`]) as
+/// `application/json` under [`capacity_report_key`], when the GET intersects that key and `read`
+/// (the node's admin read permission, the same gate upstream's admin answers pass) permits.
+///
+/// `read = false` answers nothing, as every admin leg does: the querier receives only the
+/// terminating Final, and the outcome is [`AdminAnswerOutcome::DeniedRead`] so the host says so.
+/// A GET that does not intersect the key is served nothing and is not a denial.
+#[cfg(feature = "alloc")]
+pub fn answer_capacity_query(
+    view: &dyn crate::query_sink::QueryView,
+    out: &mut dyn crate::query_sink::ReplyOut,
+    zid_hex: &str,
+    read: bool,
+    report: &crate::capacity::CapacityReport,
+) -> AdminAnswerOutcome {
+    let key = capacity_report_key(zid_hex);
+    if !key_intersects_query(view.keyexpr(), &key) {
+        return AdminAnswerOutcome::Served;
+    }
+    if !read {
+        return AdminAnswerOutcome::DeniedRead;
+    }
+    let mut body = String::new();
+    // Writing into a `String` cannot fail.
+    let _ = report.write_json(&mut body);
+    let (packed_id, schema) = AdminLegEncoding::Json.parts();
+    // A refusal here is the fixed backing's, which a router does not have; the sink counts it.
+    let _ = out.reply_keyed_encoded_parts(&key, body.as_bytes(), packed_id, schema);
+    AdminAnswerOutcome::Served
+}
+
 /// [`answer_router_admin_query`] written into buffers its caller supplies, with
 /// the refusals reported as [`answer_admin_query_in`] reports them.
 #[cfg(feature = "alloc")]
@@ -6897,6 +6943,101 @@ mod tests {
             .replies
             .iter()
             .any(|(k, v)| k == "@/a1b2/router/linkstate/peers" && v == b"graph { P }"));
+    }
+
+    fn a_capacity_report() -> crate::capacity::CapacityReport {
+        use crate::capacity::{CapacityReport, EffectiveBound, Limiter};
+        CapacityReport {
+            lease_ms: 10_000,
+            share_ppm: Some(13_200),
+            data_wait_ms: None,
+            configured_max_sessions: 20_000,
+            bound: EffectiveBound {
+                limit: 1_100,
+                limiter: Limiter::Liveness,
+            },
+            sessions_held: 12,
+            emission_floor_ns: Some(4_500),
+            emission_median_ns: Some(6_000),
+            lateness_current_ms: 0,
+            lateness_last_minute_ms: 880,
+            lateness_since_start_ms: 1_263,
+            refused_over_max_sessions: 0,
+            refused_over_capacity: 3,
+        }
+    }
+
+    #[test]
+    fn the_capacity_report_is_served_as_json_under_the_wz_root() {
+        let report = a_capacity_report();
+        let mut expected = String::new();
+        report.write_json(&mut expected).unwrap();
+        // The exact key and the wildcards that meet it. The `@` chunk is verbatim, as upstream's
+        // admin root is: a wildcard never stands for it, so `wz/**` does not reach the report and
+        // a client has to ask for the `@` space on purpose (see the next test).
+        for query in [
+            "wz/@/a1b2/capacity",
+            "wz/@/*/capacity",
+            "wz/@/a1b2/*",
+            "wz/@/**",
+        ] {
+            let mut out = RecordingReply::default();
+            let outcome =
+                answer_capacity_query(&admin_view(query), &mut out, "a1b2", true, &report);
+            assert_eq!(outcome, AdminAnswerOutcome::Served, "{query}");
+            assert_eq!(out.replies.len(), 1, "{query}: one reply");
+            assert_eq!(out.replies[0].0, "wz/@/a1b2/capacity");
+            assert_eq!(out.replies[0].1, expected.as_bytes());
+            let json = AdminLegEncoding::Json.parts().0;
+            assert_eq!(
+                out.encodings[0].as_ref().map(|e| e.packed_id),
+                Some(json),
+                "{query}: application/json"
+            );
+        }
+    }
+
+    /// The property the extension root exists for: nothing upstream's admin space is asked for
+    /// meets the key, so upstream's answers are the bytes they were.
+    #[test]
+    fn a_query_for_upstreams_admin_space_does_not_meet_the_capacity_key() {
+        let report = a_capacity_report();
+        for query in [
+            "@/**",
+            "@/a1b2/**",
+            "@/a1b2/router/**",
+            "@/*/router",
+            "@/a1b2/router/capacity",
+            "wz/@/other/capacity",
+            "wz/**",
+            "**",
+            "wz",
+            "demo/**",
+        ] {
+            let mut out = RecordingReply::default();
+            let outcome =
+                answer_capacity_query(&admin_view(query), &mut out, "a1b2", true, &report);
+            assert_eq!(
+                outcome,
+                AdminAnswerOutcome::Served,
+                "{query} is not a denial"
+            );
+            assert!(out.replies.is_empty(), "{query} must not be answered");
+        }
+    }
+
+    #[test]
+    fn a_denied_read_answers_nothing_and_says_so() {
+        let mut out = RecordingReply::default();
+        let outcome = answer_capacity_query(
+            &admin_view("wz/@/a1b2/capacity"),
+            &mut out,
+            "a1b2",
+            false,
+            &a_capacity_report(),
+        );
+        assert_eq!(outcome, AdminAnswerOutcome::DeniedRead);
+        assert!(out.replies.is_empty());
     }
 
     #[cfg(feature = "adminspace-router-linkstate")]

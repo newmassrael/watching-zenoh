@@ -6755,6 +6755,17 @@ async fn run_router_hat_until(
     // deferral the code beneath it has already closed reads as the current
     // contract, which is how this atom's reason kept re-counting residuals.
     //
+    // The sessions this router admits, worked out at each admission from the config as it stands
+    // here and from what the node has timed of its own keepalives: a host dearer than the one the
+    // costs were recorded on admits fewer, and the bound a burst meets is the calibrated one once
+    // the first sessions of it are up. Taken before the admin host below because the capacity
+    // report reads the refusals the accept loop counts on this handle.
+    let session_ceiling = {
+        let cfg = host_cfg.borrow().clone();
+        wz::runtime_tokio::accept_loop::SessionCeiling::new(move || {
+            cfg.effective_max_sessions().limit
+        })
+    };
     #[cfg(feature = "adminspace-router-linkstate")]
     {
         use wz::runtime_tokio::adminspace::{
@@ -6963,6 +6974,39 @@ async fn run_router_hat_until(
             "wz-ap-demo router-hat: adminspace router legs hosted at {queryable_key} \
              (linkstate/routers, linkstate/peers, route/successor)"
         );
+
+        // The capacity report, under the wz-owned root and not inside upstream's admin space:
+        // a GET for `@/**` cannot meet it, so upstream's answers are the bytes they were. Read
+        // per GET off the live config, the face table and the accept loop's own counters, and
+        // gated by the same admin read permit as every admin leg.
+        {
+            use wz::runtime_tokio::adminspace::{answer_capacity_query, capacity_report_key};
+            let capacity_zid = zid_to_zenoh_hex(&params.zid);
+            let capacity_key = capacity_report_key(&capacity_zid);
+            let capacity_cfg = std::rc::Rc::clone(&host_cfg);
+            let capacity_sessions = forwarder.sessions_view();
+            let capacity_counters = session_ceiling.clone();
+            let capacity_handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                let read = wz::runtime_tokio::admin_read_permit(
+                    &capacity_cfg.borrow().admin_permissions(),
+                );
+                let report = capacity_cfg.borrow().capacity_report(
+                    capacity_sessions.admin_sessions().len(),
+                    capacity_counters.refused_over_max_sessions(),
+                    capacity_counters.refused_over_capacity(),
+                );
+                if answer_capacity_query(view, out, &capacity_zid, read, &report)
+                    == AdminAnswerOutcome::DeniedRead
+                {
+                    log::error!(
+                        "{}",
+                        wz::runtime_tokio::adminspace::denied_read_diagnostic(view.keyexpr())
+                    );
+                }
+            };
+            forwarder.register_local_queryable(&capacity_key, true, Box::new(capacity_handler));
+            log::info!("wz-ap-demo router-hat: capacity report hosted at {capacity_key}");
+        }
     }
 
     // `--session-lifecycle` on the router host: the same two queries the peer
@@ -7226,16 +7270,6 @@ async fn run_router_hat_until(
         log::info!("wz-ap-demo router-hat: adminspace config WRITE at {write_key}");
     }
 
-    // The sessions this router admits, worked out at each admission from the config as it stands
-    // here and from what the node has timed of its own keepalives: a host dearer than the one the
-    // costs were recorded on admits fewer, and the bound a burst meets is the calibrated one once
-    // the first sessions of it are up.
-    let session_ceiling = {
-        let cfg = host_cfg.borrow().clone();
-        wz::runtime_tokio::accept_loop::SessionCeiling::new(move || {
-            cfg.effective_max_sessions().limit
-        })
-    };
     let loop_fut = peer_loop(
         FaceSources {
             // R2099 (item 512) — EVERY bound `listen/endpoints` member.

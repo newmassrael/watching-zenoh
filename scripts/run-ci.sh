@@ -21384,6 +21384,17 @@ layer_e7g_router_adminspace_read_deny() {
     else
         _pico_cli_unavailable "Layer E7g (pico router adminspace read-deny z_get)" || return 1
     fi
+    # The router's capacity report (R3523; docs/router-data-plane-scaling.md section 7.4), served
+    # at `wz/@/<zid>/capacity` outside upstream's admin space and behind the same read permit:
+    # served to its own key, absent from upstream's answers, denied with the permit. Both ends are
+    # wz, so no foreign-binary guard. The probe is built in its own invocation, as Layer E6j does:
+    # cargo unifies features across packages built in one command, and the probe pins its own
+    # minimal subset. The count is 2 so that a dropped `#[ignore]` (selecting none) or a renamed
+    # test reddens.
+    (cd crates && cargo build -p wz-e2e-admin-probe --quiet) || return 1
+    _runci_guarded_test "E7g capacity report" 2 \
+        cargo test -p wz-integration-tests \
+        --test wz_router_hat_serves_its_capacity_report -- --ignored --test-threads=1 --quiet || return 1
 }
 
 # ─── Layer E7u — router-hat (TRUE Router) forwarding OVER UNIXPIPE (R311y396) ──
