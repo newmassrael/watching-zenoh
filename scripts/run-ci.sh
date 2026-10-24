@@ -23134,6 +23134,32 @@ layer_e17_stats_registry_writes_upstreams_document() {
         -- --exact || return 1
 }
 
+# ─── Layer E18 — the zenoh family's crates, against upstream's ───
+#
+# R3483 (open-debt item 910, inventory atom `api-compat-rust`). A Rust user replaces zenoh by a
+# `[patch.crates-io]` entry per crate of the family (docs/build-configuration.md C13), so each
+# crate wz carries has upstream's package name, and three things have to hold of it that the
+# surface gate (`rust_api_surface.py`, Layer C0 and Z) cannot say:
+#
+#   1. DIFFERENTIAL: the same input to upstream's crate and to wz's gives equal outputs
+#      (`conformance/differential`).
+#   2. THE SWAP: with the patch, an UPSTREAM crate that depends on the family crate and this
+#      graph's own crate meet one type (`conformance/patch-scenario`).
+#   3. ITS CONTROL: the same graph without the patch holds two, so the probe of 2 is not blind
+#      (`conformance/patch-control`).
+#
+# Each is a standalone workspace with its own lock, because each links upstream and upstream never
+# enters `crates/`'s dependency graph. They are HERE with E16 and E17, the other two that link
+# upstream's crates, and need the registry and nothing else.
+layer_e18_zenoh_family_conformance() {
+    _runci_guarded_test "Layer E18 (differential)" 6 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml || return 1
+    _runci_guarded_test "Layer E18 (the patched graph)" 3 \
+        cargo test --locked --manifest-path ../conformance/patch-scenario/Cargo.toml || return 1
+    _runci_guarded_test "Layer E18 (the control graph)" 1 \
+        cargo test --locked --manifest-path ../conformance/patch-control/Cargo.toml || return 1
+}
+
 # ─── Layer Qa — a stock zenohd reconfigures a wz MCU under QEMU ───
 #
 # R2839 (§5.23). The one lane where the canonical implementation
@@ -23780,6 +23806,7 @@ run_layer E14 layer_e14_apfull_dynamic_volume_pico || overall=1
 run_layer E15 layer_e15_apfull_reconcile_federation_pico || overall=1
 run_layer E16 layer_e16_fs_backend_shares_a_directory_with_upstream || overall=1
 run_layer E17 layer_e17_stats_registry_writes_upstreams_document || overall=1
+run_layer E18 layer_e18_zenoh_family_conformance || overall=1
 run_layer F layer_f_codec_footprint || overall=1
 run_layer G layer_g_cross_compile_cortex_m || overall=1
 run_layer Q layer_q_qemu_mcu_e2e || overall=1

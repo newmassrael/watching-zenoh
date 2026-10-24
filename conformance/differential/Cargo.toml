@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# Differential tests of the family: the same input to upstream's crate and to wz's, and the outputs
+# held equal (inventory atom `api-compat-rust`, docs/build-configuration.md C13). The surface gate
+# (`scripts/lib/rust_api_surface.py`) says the two crates have the same names and signatures; this
+# says they do the same thing.
+#
+# The two crates have one package name, so each is taken under a local name: `up` is upstream's, from
+# the registry at the pinned version, and `wz` is this tree's, by path. There is no `[patch]` here, on
+# purpose: both must be in the graph at once, and the swap is `../patch-scenario`'s subject.
+#
+# NOT a member of wz's workspace, like every package that links upstream.
+[workspace]
+
+[package]
+name = "wz-family-differential"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+up = { package = "zenoh-result", version = "=1.10.1" }
+wz = { package = "zenoh-result", path = "../../crates/wz-zenoh-result" }
+anyhow = { version = "1", default-features = false, features = ["std"] }

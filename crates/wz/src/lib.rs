@@ -86,6 +86,17 @@ pub use wz_rest as rest;
 #[cfg(feature = "api-compat-pico")]
 pub use wz_capi_pico as capi_pico;
 
+// §5.27 api-compat-rust — the zenoh family's compatibility crates, re-exported under
+// `wz::zenoh_family` so a program that builds with the feature carries them and one that does not
+// carries none (the audit-catalog-status.sh A3 active-site). The facade is where the family is
+// named in wz's own terms; the crates themselves carry upstream's package names and nothing
+// wz-only (C10), which is why the door lives here and not in them. Each member joins this module
+// with its slice.
+#[cfg(feature = "api-compat-rust")]
+pub mod zenoh_family {
+    pub use zenoh_result;
+}
+
 // §5.27 — THE TWO C ABIs ARE MUTUALLY EXCLUSIVE, and this is where that is
 // enforced rather than discovered.
 //

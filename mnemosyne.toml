@@ -62,8 +62,12 @@ entry_id_prefix = "Round "
 # false, and would be the silencing this file's own rule forbids. Adding it here
 # RAISES coverage rather than lowering it: measured, the new root arrived as
 # `1 unscanned` and a rc=1 validate, and lands as 0 unscanned under the gate.
+# R3483 — `conformance` joins `paths` for the same reason and by the same rule: it holds
+# wz-AUTHORED tests that link upstream's crates (the zenoh family's differential tests and the
+# `[patch]` graph that proves the swap), so it is what this validator exists to scan. The
+# new root arrived as `6 unscanned` and a rc=1 validate.
 [plugins.set_equality_validator]
-paths = ["crates", "deploy", "oracles", "xtask"]
+paths = ["conformance", "crates", "deploy", "oracles", "xtask"]
 scan_exclusions = ["vendor", "out"]
 
 # R311y462 — WHICH Mnemosyne build is allowed to interpret this workspace.

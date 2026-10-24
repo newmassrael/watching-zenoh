@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The CONTROL of `../patch-scenario`: the same graph, upstream's `zenoh-keyexpr` and wz's
+# `zenoh-result`, with no `[patch]`. Without it Cargo keeps upstream's `zenoh-result` for
+# `zenoh-keyexpr` and takes wz's only for this package, which is a graph with two `zenoh_result`s: the
+# failure the patch exists to prevent. The test asserts that the downcast the scenario needs answers
+# nothing here, so a scenario that passed for a reason other than the swap (the probe was blind) is
+# caught by this one failing to fail.
+[workspace]
+
+[package]
+name = "wz-family-patch-control"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# wz's crate under another LOCAL name, because two packages of one name cannot both be named in a
+# manifest; the package is the same one the scenario patches in.
+wz_result = { package = "zenoh-result", path = "../../crates/wz-zenoh-result" }
+zenoh-keyexpr = "1.10.1"

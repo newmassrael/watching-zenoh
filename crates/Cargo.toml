@@ -62,6 +62,10 @@ members = [
     # zenoh crate's public Rust API at the pin, its library named `zenoh` and versioned as the
     # pinned zenoh, so a Rust user replaces zenoh by changing one dependency line.
     "wz-zenoh",
+    # Inventory atom `api-compat-rust`: the crates under `zenoh` that its public API names and the
+    # ecosystem imports, each under UPSTREAM'S package name (a `[patch.crates-io]` swaps by it).
+    # `scripts/lib/rust_api_surface.py` lists them (`MEMBERS`) and holds each to upstream's surface.
+    "wz-zenoh-result",
     # R311y578 (G1) — pcap ingest + link/IP/TCP decapsulation + TCP flow
     # reassembly, feeding `wz_session_core::passive`. Knows nothing about
     # zenoh; the seam is a byte stream plus a direction, so a live tap can

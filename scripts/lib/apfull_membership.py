@@ -128,13 +128,10 @@ EXCLUSIONS = {
     # exclusion for it would now be false. It was not re-categorised or
     # re-worded: an `unbuilt` exclusion expires by being built, and this is what
     # that expiry looks like.
-    # R3416 — `api-compat-rust` (open-debt item 910): the zenoh crate's public Rust
-    # API as a drop-in over wz, declared as a reserved feature in R3410 with an
-    # UNBUILT reason and nothing behind it. R3459 made the crate (`wz-zenoh`, empty)
-    # and both halves of its surface gate, and the API is still not built, so the
-    # atom stays UNBUILT and out of the preset until its first slice; it comes in the
-    # way the two above did.
-    "api-compat-rust": ("unbuilt", "none of the Rust API is built yet"),
+    # R3483 REMOVED the `api-compat-rust` entry (open-debt item 910) the way the two above
+    # left: by being built. R3416 had it here, an UNBUILT reserved feature with nothing behind
+    # it, and said it would come in with its first slice; `zenoh-result`, the first crate of
+    # the family, is that slice, so the atom is a MEMBER of the preset with the crate behind it.
 }
 
 

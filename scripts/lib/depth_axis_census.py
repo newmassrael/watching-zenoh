@@ -1222,7 +1222,13 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # covered, the R2697 move again. It arrives already reached (its crate tests name
 # its symbols), so UNREACHED and NO_SYMBOL hold at 0 and 0. READ off the
 # census's own FAIL line, `reached: 1 against a pin of 0`.
-PIN_REACHED = 1
+# R3483 -- REACHED 1 -> 2, an ARRIVAL, and WZ_CITATIONS 20 -> 21. `api-compat-rust` leaves
+# `reserved` for `active` and PARTIAL with its first slice (`zenoh-result`, the first crate
+# of the zenoh family), and arrives already reached: its reason's one test citation names
+# `an_upstream_crates_error_is_the_zerror_of_the_patched_crate`, which a lane runs (Layer E18).
+# UNREACHED and NO_SYMBOL hold at 0 and 0. READ off the census's own FAIL line, `reached: 2
+# against a pin of 1` and `wz citations: 21 against a pin of 20`.
+PIN_REACHED = 2
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 0
 # R2534 — 346 -> 347. The atom is `adminspace-metrics` and the citation is the
@@ -2760,7 +2766,7 @@ PIN_NO_SYMBOL = 0
 # (`switchboard.rs` re-counted, and the fixed-memory `SessionHost` the old
 # measurement predates). READ off the census's own FAIL lines, `wz citations: 18
 # against a pin of 0` and then `20 against a pin of 18`.
-PIN_WZ_CITATIONS = 20
+PIN_WZ_CITATIONS = 21
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

@@ -78,6 +78,9 @@ wz-capi-pico = { path = "../wz-capi-pico", optional = true, default-features = f
 # R311y498 (§5.27 api-compat-c) — the zenoh-c-compatible C ABI, the sibling of
 # wz-capi-pico over the same session model. Optional + gated exactly as its twin.
 wz-capi-c = { path = "../wz-capi-c", optional = true, default-features = false }
+# §5.27 api-compat-rust — the zenoh family's compatibility crates under UPSTREAM'S package names
+# (a `[patch.crates-io]` swaps by name). Optional, pulled only by `api-compat-rust`.
+zenoh-result = { path = "../wz-zenoh-result", optional = true }
 wz-runtime-core = { path = "../wz-runtime-core", optional = true, default-features = false }
 # R311ax — wz-runtime-coop enters the facade as an optional dep.
 # The `runtime-coop` feature pulls this crate with its `alloc`
@@ -1185,11 +1188,11 @@ rest-http-bridge = [
 # subscriber + Put/Del receive features it calls through).
 rest-sse-subscribe = ["rest-http-bridge", "wz-rest?/rest-sse-subscribe"]
 
-# ----- §5.27 api-compat (3 atomic: 2 active, 1 reserved) -----
-# api-compat-rust is reserved: the zenoh crate's public Rust API as a drop-in over wz
-# (open-debt item 910). A reserved atom is a feature that gates nothing yet; it becomes
-# the dependency on the compatibility crate when that crate exists.
-api-compat-rust = []
+# ----- §5.27 api-compat (3 atomic: 3 active) -----
+# api-compat-rust (open-debt item 910): the zenoh family's public Rust API as a drop-in over wz.
+# It carries the compatibility crates built so far, each under upstream's package name; a member
+# joins this edge with its slice. The facade re-exports them as `wz::zenoh_family`.
+api-compat-rust = ["dep:zenoh-result"]
 # R311y498 — api-compat-c BUILT (slice 1: upstream's own z_put.c links and runs
 # against the wz cdylib). Pulls the wz-capi-c cdylib and the tokio runtime it
 # wraps, rather than the no-op `= []` facade it was — the
@@ -2240,6 +2243,10 @@ preset-ap-full = [
     # omission: the two C ABIs share the `z_*` symbol namespace, so a binary can
     # offer one or the other. The facade turns enabling both into a compile_error.
     "api-compat-pico",
+    # `api-compat-rust` is the Rust drop-in family, which shares no symbol namespace with either C
+    # ABI (it is Rust crates under upstream's package names), so a kitchen-sink AP deploy offers it
+    # beside whichever C ABI it picks.
+    "api-compat-rust",
     "switchboard",
     "time-system-clock",
     "time-ntp64",

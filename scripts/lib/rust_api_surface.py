@@ -2,21 +2,31 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-"""R3406 (no register item) — the public Rust API of the pinned `zenoh` crate, derived
-from rustdoc JSON and committed as the surface wz's compatibility crate must equal.
+"""R3406 (no register item) — the public Rust API of the pinned `zenoh` crate and of the
+crates under it, derived from rustdoc JSON and committed as the surface wz's compatibility
+crates must equal.
 
 Open-debt item 910 (inventory atom `api-compat-rust`, `docs/build-configuration.md`
-C13): a Rust user replaces zenoh by changing one dependency line, so wz owes the
-upstream crate's public paths, kinds and trait relations. This script is the
-DENOMINATOR of that claim. It is the first of the gate's two halves; the other, the
-same normaliser run over the compatibility crate and diffed against these files,
-lands with that crate.
+C13): a Rust user replaces zenoh, so wz owes the upstream crates' public paths, kinds and
+trait relations. This script is the DENOMINATOR of that claim, and the same normaliser run
+over each compatibility crate and diffed against these files is the other half.
+
+## The family
+
+`zenoh` is not alone in a user's dependency graph: its public API names types of
+`zenoh-core`, `zenoh-result`, `zenoh-keyexpr`, `zenoh-protocol` and others (a `reexport`
+line carries the crate it comes from), and the ecosystem crates (`zenoh-ext`, the
+plugins) import those crates directly. A Cargo graph holds one crate per package name, and
+`[patch]` swaps by that name, so a replacement that is to meet an ecosystem crate on the
+SAME types is a crate of upstream's name. `MEMBERS` lists the crates of that family; each
+is held to its own upstream surface, with its own ratchet.
 
 ## Where the numbers come from
 
-rustdoc JSON, emitted for upstream `zenoh` at the pin (`upstream_root()`, the one
-resolver), once per feature ARM: the default features, `unstable`, and `unstable`
-with `shared-memory`. The compiler is the dated nightly of `scripts/rustdoc-json.pin`,
+rustdoc JSON, emitted for each upstream member at the pin (`upstream_root()`, the one
+resolver), once per feature ARM: for `zenoh` the default features, `unstable`, and
+`unstable` with `shared-memory`; for a crate no feature splits, the default. The compiler
+is the dated nightly of `scripts/rustdoc-json.pin`,
 and a JSON whose `format_version` is not the pinned one is refused rather than read
 with a layout it was not written for. No list here is typed by hand.
 
@@ -83,6 +93,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -93,31 +104,50 @@ import upstream_feature_census as census  # noqa: E402
 PIN_FILE = ROOT / "scripts" / "rustdoc-json.pin"
 SURFACE_DIR = ROOT / "deploy" / "upstream-api"
 TARGET_DIR = ROOT / "target" / "rust-api-surface"
-CRATE = "zenoh"
 
-# The compatibility crate (inventory atom `api-compat-rust`): its library is named `zenoh`, so the
-# same normaliser reads it under the same root. It declares none of upstream's arm features yet,
-# so its one surface is held to every arm; a per-arm surface comes with the feature that splits it.
-WZ_PACKAGE = "wz-zenoh"
-WZ_TARGET_DIR = TARGET_DIR / "wz-zenoh"
-
-# The count of upstream lines the compatibility crate does not yet have, per arm: a RATCHET. A
-# slice that lands lowers it in the same round; a count that rises is a regression and a count
-# that falls without moving it is progress the record has not taken. Either way the gate fails
-# until this table is the measurement.
-WZ_MISSING: dict[str, int] = {
-    "default": 709,
-    "unstable": 965,
-    "unstable-shared-memory": 1025,
-}
-
-# The arms, by name and the features each passes. `internal` and `plugins` are not arms:
-# they widen visibility for zenoh's own crates (the census excludes `internal` on that
+# The arms of `zenoh`, by name and the features each passes. `internal` and `plugins` are not
+# arms: they widen visibility for zenoh's own crates (the census excludes `internal` on that
 # ground), and a user replacing zenoh does not build with them.
 ARMS: tuple[tuple[str, str], ...] = (
     ("default", ""),
     ("unstable", "unstable"),
     ("unstable-shared-memory", "unstable,shared-memory"),
+)
+
+# A crate of upstream's own that no feature splits has the one arm.
+DEFAULT_ARM: tuple[tuple[str, str], ...] = (("default", ""),)
+
+
+@dataclass(frozen=True)
+class Member:
+    """One crate of the family wz replaces (inventory atom `api-compat-rust`, C13).
+
+    A Rust user replaces zenoh by a `[patch.crates-io]` entry per crate, and Cargo swaps by PACKAGE
+    NAME: a patch whose package is named otherwise is not used and the graph keeps upstream's crate,
+    which a program that also links an ecosystem crate (`zenoh-ext`) then sees as a second, different
+    `zenoh_core`. So a family crate carries upstream's package name, its library name (the root of
+    every path of its surface) and its version, and this table is the list of them: the gate holds
+    each to the surface rustdoc JSON gives for upstream's.
+
+    `wz_package` is the package of the wz crate. It equals `package` for every member except `zenoh`,
+    which keeps its first name until the slice that makes it patchable renames it.
+
+    `missing` is the RATCHET of the member: the count of upstream lines per arm the wz crate does
+    not yet have. A slice that lands lowers it in the same round; a count that rises is a regression
+    and a count that falls without moving it is progress the record has not taken. Either way the
+    gate fails until this table is the measurement."""
+
+    package: str
+    lib: str
+    wz_package: str
+    arms: tuple[tuple[str, str], ...]
+    missing: dict[str, int]
+
+
+MEMBERS: tuple[Member, ...] = (
+    Member("zenoh", "zenoh", "wz-zenoh", ARMS,
+           {"default": 709, "unstable": 965, "unstable-shared-memory": 1025}),
+    Member("zenoh-result", "zenoh_result", "zenoh-result", DEFAULT_ARM, {"default": 0}),
 )
 
 ITEM_KINDS = {
@@ -396,8 +426,9 @@ def render_function(names: _Names, path: str, item: dict, impl: dict | None = No
     return _canonical_lifetimes(line)
 
 
-def normalise(doc: dict, fmt: int) -> list[str]:
-    """The surface lines of one rustdoc JSON document, sorted and unique."""
+def normalise(doc: dict, fmt: int, lib: str = "zenoh") -> list[str]:
+    """The surface lines of one rustdoc JSON document, sorted and unique. `lib` is the library name
+    the paths of the crate are rooted at."""
     got = doc.get("format_version")
     if got != fmt:
         raise InputError(
@@ -467,7 +498,7 @@ def normalise(doc: dict, fmt: int) -> list[str]:
                 if kind in ("struct", "enum", "union"):
                     types.append((path, item))
 
-    visit_module(root, CRATE)
+    visit_module(root, lib)
 
     for path, item in types:
         inner = next(iter(item["inner"].values()))
@@ -510,10 +541,10 @@ def upstream_root() -> Path:
     return Path(root)
 
 
-def emit(toolchain: str, features: str) -> dict:
-    """rustdoc JSON of upstream `zenoh` with one feature set, from the pinned source."""
+def emit(toolchain: str, member: Member, features: str) -> dict:
+    """rustdoc JSON of one upstream crate of the family with one feature set, from the pinned source."""
     source = upstream_root()
-    cmd = ["cargo", f"+{toolchain}", "rustdoc", "-p", CRATE, "--lib", "--locked",
+    cmd = ["cargo", f"+{toolchain}", "rustdoc", "-p", member.package, "--lib", "--locked",
            "--target-dir", str(TARGET_DIR)]
     if features:
         cmd += ["--features", features]
@@ -524,17 +555,18 @@ def emit(toolchain: str, features: str) -> dict:
             f"`{' '.join(cmd)}` in the pinned source failed (rc={proc.returncode}): "
             f"{proc.stderr.strip()[-2000:] or '<no stderr>'}"
         )
-    out = TARGET_DIR / "doc" / f"{CRATE}.json"
+    out = TARGET_DIR / "doc" / f"{member.lib}.json"
     try:
         return json.loads(out.read_text())
     except (OSError, json.JSONDecodeError) as e:
         raise InputError(f"rustdoc wrote no readable JSON at {out} ({e})") from e
 
 
-def emit_wz(toolchain: str) -> dict:
-    """rustdoc JSON of the compatibility crate, from this tree."""
-    cmd = ["cargo", f"+{toolchain}", "rustdoc", "-p", WZ_PACKAGE, "--lib", "--locked",
-           "--target-dir", str(WZ_TARGET_DIR), "--", "-Z", "unstable-options",
+def emit_wz(toolchain: str, member: Member) -> dict:
+    """rustdoc JSON of the wz crate of one member, from this tree."""
+    target_dir = TARGET_DIR / member.wz_package
+    cmd = ["cargo", f"+{toolchain}", "rustdoc", "-p", member.wz_package, "--lib", "--locked",
+           "--target-dir", str(target_dir), "--", "-Z", "unstable-options",
            "--output-format", "json"]
     proc = subprocess.run(cmd, cwd=ROOT / "crates", capture_output=True, text=True, check=False)
     if proc.returncode != 0:
@@ -542,33 +574,33 @@ def emit_wz(toolchain: str) -> dict:
             f"`{' '.join(cmd)}` in crates/ failed (rc={proc.returncode}): "
             f"{proc.stderr.strip()[-2000:] or '<no stderr>'}"
         )
-    out = WZ_TARGET_DIR / "doc" / f"{CRATE}.json"
+    out = target_dir / "doc" / f"{member.lib}.json"
     try:
         return json.loads(out.read_text())
     except (OSError, json.JSONDecodeError) as e:
         raise InputError(f"rustdoc wrote no readable JSON at {out} ({e})") from e
 
 
-def wz_surface_file() -> Path:
-    return SURFACE_DIR / f"{WZ_PACKAGE}-{census.UPSTREAM_VERSION}.surface"
+def wz_surface_file(member: Member) -> Path:
+    return SURFACE_DIR / f"{member.wz_package}-{census.UPSTREAM_VERSION}.surface"
 
 
-def wz_header(toolchain: str, fmt: int) -> list[str]:
+def wz_header(toolchain: str, fmt: int, member: Member) -> list[str]:
     return [
         "# Generated by scripts/lib/rust_api_surface.py --write. Do not edit.",
-        f"# compatibility crate: {WZ_PACKAGE} {census.UPSTREAM_VERSION}",
+        f"# compatibility crate: {member.wz_package} {census.UPSTREAM_VERSION}",
         f"# toolchain: {toolchain}",
         f"# format_version: {fmt}",
     ]
 
 
-def compatibility_arm(toolchain: str, fmt: int) -> list[str]:
-    """Does the committed surface of the compatibility crate hold to every upstream arm?
+def compatibility_arm(toolchain: str, fmt: int, member: Member) -> list[str]:
+    """Does the committed surface of a wz crate hold to every upstream arm of its member?
 
     It may carry no line upstream does not (C10: a wz-only door is in `wz::ext`), and the lines
-    of each arm it does not carry yet must number exactly `WZ_MISSING[arm]`."""
+    of each arm it does not carry yet must number exactly `member.missing[arm]`."""
     failures: list[str] = []
-    path = wz_surface_file()
+    path = wz_surface_file(member)
     if not path.is_file():
         return [f"{path.relative_to(ROOT)} is missing -- emit it with --write"]
     meta, wz = read_surface(path)
@@ -578,38 +610,42 @@ def compatibility_arm(toolchain: str, fmt: int) -> list[str]:
                             f"`{value}` -- re-emit it")
     if wz != sorted(set(wz)):
         failures.append(f"{path.relative_to(ROOT)} is not sorted and unique -- not this script's output")
-    upstream = {arm: read_surface(surface_file(arm))[1] for arm, _features in ARMS}
-    return failures + compatibility_check(wz, upstream, WZ_MISSING)
+    upstream = {arm: read_surface(surface_file(member, arm))[1] for arm, _features in member.arms}
+    if set(member.missing) != set(upstream):
+        failures.append(f"{member.package}: the ratchet names arm(s) {sorted(member.missing)} and the "
+                        f"member has {sorted(upstream)}")
+        return failures
+    return failures + compatibility_check(wz, upstream, member.missing, member.wz_package)
 
 
 def compatibility_check(wz: list[str], upstream: dict[str, list[str]],
-                        pin: dict[str, int]) -> list[str]:
-    """The compatibility crate's surface against each upstream arm: no extra line, and exactly the
-    pinned number of missing ones."""
+                        pin: dict[str, int], who: str = "wz-zenoh") -> list[str]:
+    """A wz crate's surface against each upstream arm: no extra line, and exactly the pinned number
+    of missing ones."""
     failures: list[str] = []
     for arm, lines in upstream.items():
         extra = sorted(set(wz) - set(lines))
         missing = len(set(lines) - set(wz))
-        failures += [f"{arm}: the compatibility crate has `{line}`, which upstream does not "
+        failures += [f"{who} {arm}: the crate has `{line}`, which upstream does not "
                      f"(a wz-only door belongs in wz::ext)" for line in extra[:40]]
         if missing != pin[arm]:
             way = "fell" if missing < pin[arm] else "ROSE"
-            failures.append(f"{arm}: {missing} upstream line(s) are missing from the compatibility "
-                            f"crate and WZ_MISSING says {pin[arm]}: the count {way}; move the pin "
-                            f"in this round if a slice landed, never to absorb a loss")
-        print(f"  rust-api-surface: {WZ_PACKAGE} against {arm}: {len(lines) - missing} of "
+            failures.append(f"{who} {arm}: {missing} upstream line(s) are missing from the crate "
+                            f"and the ratchet (`Member.missing`) says {pin[arm]}: the count {way}; "
+                            f"move the pin in this round if a slice landed, never to absorb a loss")
+        print(f"  rust-api-surface: {who} against {arm}: {len(lines) - missing} of "
               f"{len(lines)} line(s), {missing} missing, {len(extra)} extra")
     return failures
 
 
-def surface_file(arm: str) -> Path:
-    return SURFACE_DIR / f"{CRATE}-{census.UPSTREAM_VERSION}-{arm}.surface"
+def surface_file(member: Member, arm: str) -> Path:
+    return SURFACE_DIR / f"{member.package}-{census.UPSTREAM_VERSION}-{arm}.surface"
 
 
-def header(toolchain: str, fmt: int, arm: str, features: str) -> list[str]:
+def header(toolchain: str, fmt: int, member: Member, arm: str, features: str) -> list[str]:
     return [
         "# Generated by scripts/lib/rust_api_surface.py --write. Do not edit.",
-        f"# upstream: {CRATE} {census.UPSTREAM_VERSION}",
+        f"# upstream: {member.package} {census.UPSTREAM_VERSION}",
         f"# arm: {arm} (features: {features or 'default'})",
         f"# toolchain: {toolchain}",
         f"# format_version: {fmt}",
@@ -635,30 +671,32 @@ def read_surface(path: Path) -> tuple[dict[str, str], list[str]]:
 def committed_arm(toolchain: str, fmt: int) -> list[str]:
     """Are the committed surfaces present, current and well formed?"""
     failures: list[str] = []
-    for arm, features in ARMS:
-        path = surface_file(arm)
-        if not path.is_file():
-            failures.append(f"{path.relative_to(ROOT)} is missing -- emit it with --write")
-            continue
-        meta, body = read_surface(path)
-        want = dict(line[2:].partition(": ")[::2] for line in header(toolchain, fmt, arm, features)[1:])
-        for key, value in want.items():
-            if meta.get(key) != value:
-                failures.append(
-                    f"{path.relative_to(ROOT)} says {key} `{meta.get(key)}`, the pin says `{value}` -- "
-                    f"re-emit it in the round that moved the pin"
-                )
-        if not body:
-            failures.append(f"{path.relative_to(ROOT)} has no surface lines -- a population of zero")
-        if body != sorted(set(body)):
-            failures.append(f"{path.relative_to(ROOT)} is not sorted and unique -- not this script's output")
-        kinds: dict[str, int] = {}
-        for line in body:
-            kinds[line.split(" ", 1)[0]] = kinds.get(line.split(" ", 1)[0], 0) + 1
-        print(
-            f"  rust-api-surface: {arm}: {len(body)} line(s) -- "
-            + ", ".join(f"{n} {k}" for k, n in sorted(kinds.items()))
-        )
+    for member in MEMBERS:
+        for arm, features in member.arms:
+            path = surface_file(member, arm)
+            if not path.is_file():
+                failures.append(f"{path.relative_to(ROOT)} is missing -- emit it with --write")
+                continue
+            meta, body = read_surface(path)
+            want = dict(line[2:].partition(": ")[::2]
+                        for line in header(toolchain, fmt, member, arm, features)[1:])
+            for key, value in want.items():
+                if meta.get(key) != value:
+                    failures.append(
+                        f"{path.relative_to(ROOT)} says {key} `{meta.get(key)}`, the pin says `{value}` -- "
+                        f"re-emit it in the round that moved the pin"
+                    )
+            if not body:
+                failures.append(f"{path.relative_to(ROOT)} has no surface lines -- a population of zero")
+            if body != sorted(set(body)):
+                failures.append(f"{path.relative_to(ROOT)} is not sorted and unique -- not this script's output")
+            kinds: dict[str, int] = {}
+            for line in body:
+                kinds[line.split(" ", 1)[0]] = kinds.get(line.split(" ", 1)[0], 0) + 1
+            print(
+                f"  rust-api-surface: {member.package} {arm}: {len(body)} line(s) -- "
+                + ", ".join(f"{n} {k}" for k, n in sorted(kinds.items()))
+            )
     return failures
 
 
@@ -864,63 +902,87 @@ def selftest() -> int:
         if (words is None) != (got == []) or (words is not None and not any(words in f for f in got)):
             print(f"  selftest FAIL [{label}]: {got}", file=sys.stderr)
             return 1
+    # The root of a path is the library name of the crate it describes, so one normaliser reads
+    # every member of the family: the same document rooted as `zenoh_core` says `zenoh_core::...`.
+    rooted = normalise(doc, 57, "zenoh_core")
+    if "mod zenoh_core::session" not in rooted or any(line.startswith("mod zenoh::") for line in rooted):
+        print("  selftest FAIL [the library name roots every path]", file=sys.stderr)
+        return 1
+    # The table of members is the population the gate guards: a package listed twice, a library
+    # name that is not the package's with `_` for `-` (what Cargo makes of it), or a ratchet that
+    # names other arms than the member has would each leave a crate unguarded without a failure.
+    packages = [m.package for m in MEMBERS]
+    if len(set(packages)) != len(packages) or not MEMBERS:
+        print(f"  selftest FAIL [the members are not a non-empty set of packages]: {packages}",
+              file=sys.stderr)
+        return 1
+    for m in MEMBERS:
+        if m.lib != m.package.replace("-", "_") or set(m.missing) != {a for a, _f in m.arms}:
+            print(f"  selftest FAIL [member {m.package} is inconsistent with its own arms]", file=sys.stderr)
+            return 1
     print(f"  rust-api-surface: selftest -- the normaliser over {len(want)} lines, {len(type_cases)} "
           f"type shapes, the generics, qualifiers and refusals, and the comparison pass")
     return 0
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="the pinned zenoh crate's public Rust API surface")
+    ap = argparse.ArgumentParser(description="the pinned zenoh family's public Rust API surfaces")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--upstream", action="store_true", help="re-emit every arm and compare")
     mode.add_argument("--write", action="store_true", help="re-emit every arm and overwrite")
     mode.add_argument("--selftest", action="store_true", help="drive the normaliser on a fixture")
+    ap.add_argument("--member", choices=[m.package for m in MEMBERS],
+                    help="with --upstream or --write, re-emit this crate of the family only")
     args = ap.parse_args()
     if args.selftest:
         return selftest()
+    members = tuple(m for m in MEMBERS if args.member in (None, m.package))
 
     try:
         toolchain, fmt = read_pin()
         if args.write or args.upstream:
             failures: list[str] = []
-            for arm, features in ARMS:
-                lines = normalise(emit(toolchain, features), fmt)
-                path = surface_file(arm)
+            for member in members:
+                for arm, features in member.arms:
+                    lines = normalise(emit(toolchain, member, features), fmt, member.lib)
+                    path = surface_file(member, arm)
+                    if args.write:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text("\n".join(header(toolchain, fmt, member, arm, features) + lines) + "\n")
+                        print(f"  rust-api-surface: wrote {path.relative_to(ROOT)} ({len(lines)} lines)")
+                    else:
+                        _, old = read_surface(path)
+                        diff = compare(old, lines)
+                        failures += [f"{member.package} {arm}: {d}" for d in diff]
+                        print(f"  rust-api-surface: {member.package} {arm}: re-emitted {len(lines)} "
+                              f"line(s), {len(diff)} difference(s)")
+                wz_lines = normalise(emit_wz(toolchain, member), fmt, member.lib)
+                path = wz_surface_file(member)
                 if args.write:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text("\n".join(header(toolchain, fmt, arm, features) + lines) + "\n")
-                    print(f"  rust-api-surface: wrote {path.relative_to(ROOT)} ({len(lines)} lines)")
+                    path.write_text("\n".join(wz_header(toolchain, fmt, member) + wz_lines) + "\n")
+                    print(f"  rust-api-surface: wrote {path.relative_to(ROOT)} ({len(wz_lines)} lines)")
                 else:
                     _, old = read_surface(path)
-                    diff = compare(old, lines)
-                    failures += [f"{arm}: {d}" for d in diff]
-                    print(f"  rust-api-surface: {arm}: re-emitted {len(lines)} line(s), {len(diff)} difference(s)")
-            wz_lines = normalise(emit_wz(toolchain), fmt)
-            path = wz_surface_file()
-            if args.write:
-                path.write_text("\n".join(wz_header(toolchain, fmt) + wz_lines) + "\n")
-                print(f"  rust-api-surface: wrote {path.relative_to(ROOT)} ({len(wz_lines)} lines)")
-            else:
-                _, old = read_surface(path)
-                diff = compare(old, wz_lines)
-                failures += [f"{WZ_PACKAGE}: {d}" for d in diff]
-                print(f"  rust-api-surface: {WZ_PACKAGE}: re-emitted {len(wz_lines)} line(s), "
-                      f"{len(diff)} difference(s)")
-                failures += compatibility_arm(toolchain, fmt)
+                    diff = compare(old, wz_lines)
+                    failures += [f"{member.wz_package}: {d}" for d in diff]
+                    print(f"  rust-api-surface: {member.wz_package}: re-emitted {len(wz_lines)} line(s), "
+                          f"{len(diff)} difference(s)")
+                    failures += compatibility_arm(toolchain, fmt, member)
             if failures:
                 for f in failures:
                     print(f"  rust-api-surface: FAIL -- {f}", file=sys.stderr)
                 return 1
             return 0
         failures = committed_arm(toolchain, fmt)
-        failures += compatibility_arm(toolchain, fmt)
+        for member in MEMBERS:
+            failures += compatibility_arm(toolchain, fmt, member)
     except InputError as e:
         print(f"  rust-api-surface: INPUT -- {e}", file=sys.stderr)
         return 2
     print(
         "    -- upstream arm DEFERRED: run with --upstream where the pinned zenoh source and the "
-        f"{toolchain} toolchain are provisioned (Layer Z); it re-emits both surfaces, upstream's "
-        f"and {WZ_PACKAGE}'s, and holds the committed files to them."
+        f"{toolchain} toolchain are provisioned (Layer Z); it re-emits both surfaces of every member, "
+        "upstream's and the wz crate's, and holds the committed files to them."
     )
     if failures:
         for f in failures:

@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The family's replacement, as a user does it: one `[patch.crates-io]` entry per crate, and a graph
+# that holds an UPSTREAM crate depending on a patched one (inventory atom `api-compat-rust`,
+# docs/build-configuration.md C13).
+#
+# The probe is a type that only exists once. The upstream crate here is taken from the registry and
+# is built against a `zenoh_result`; when it rejects a key expression it raises a `ZError` of the
+# `zenoh_result` it was built against. The test below asks for that error as the `ZError` of the
+# crate THIS package depends on. If `[patch]` swapped the family crate the two are one type and the
+# downcast answers; if it did not (a replacement under another package name is not used by Cargo),
+# the graph holds two `zenoh_result`s and the downcast answers nothing. Both answers are asserted,
+# the second by the control package beside this one (`../patch-control`), which is this same
+# graph without the patch.
+#
+# NOT a member of wz's workspace, like every package that links upstream: upstream never enters
+# `crates/`'s dependency graph. Its own workspace root keeps its own lock and its own `[patch]`.
+[workspace]
+
+[package]
+name = "wz-family-patch-scenario"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+zenoh-result = "1.10.1"
+zenoh-keyexpr = "1.10.1"
+
+[patch.crates-io]
+zenoh-result = { path = "../../crates/wz-zenoh-result" }

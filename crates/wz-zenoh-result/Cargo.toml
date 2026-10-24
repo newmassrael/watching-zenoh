@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# zenoh-result -- the result and error types of the zenoh family, over watching-zenoh (inventory
+# atom `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13).
+#
+# This package is NAMED `zenoh-result`, like upstream's, and versioned as the pinned zenoh. That is
+# the whole design of the family: Cargo's `[patch.crates-io]` swaps a crate by its package name, so a
+# replacement under another name is not used and the graph keeps upstream's crate, which an ecosystem
+# crate (`zenoh-ext`, a plugin) then sees as a second, different `zenoh_result`. Under the same name
+# one entry per crate replaces the family and every crate in the graph meets the same types.
+# `scripts/lib/rust_api_surface.py` holds the crate to upstream's surface, `conformance/differential`
+# holds its behaviour to upstream's, and `conformance/patch-scenario` builds a graph that proves the swap.
+#
+# The package is not published: the name belongs to upstream's registry entry, so it is reached
+# by a path or git dependency in a `[patch.crates-io]` table.
+
+[package]
+name = "zenoh-result"
+version = "1.10.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The result and error types of the zenoh family (1.10.1), as a drop-in over watching-zenoh."
+
+[lib]
+name = "zenoh_result"
+path = "src/lib.rs"
+
+# Upstream's own two features, by their own names: a crate that depends on this one with `std` or
+# without it (the `no_std` crates of the family do) must find the feature it asks for. `std` is the
+# default and puts `std::error::Error` under the name `IError`; without it the crate carries its own
+# error trait.
+[features]
+default = ["std"]
+std = ["anyhow/std"]
+
+[dependencies]
+# `anyhow` is a type of this crate's public API: `ZError::new` takes anything that becomes an
+# `anyhow::Error`, and `anyhow!` is re-exported. A caller that names those meets upstream's `anyhow`,
+# so it is the same crate at the same requirement (`default-features = false`: the `no_std` build).
+anyhow = { version = "1.0.99", default-features = false }
+
+[lints]
+workspace = true

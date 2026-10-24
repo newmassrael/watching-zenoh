@@ -106,16 +106,26 @@ original reproduced by naming it. Three things follow from it:
   its ABIs reach, whether that original's default build has it (`upstream_on` /
   `upstream_off`); the switch map holds zenoh-pico's to its CMakeLists and zenoh-c's to
   its default features. The capability's `default` stays the drop-in's own.
-- **The Rust API compatibility crate, empty and held** (step 12): `api-compat-rust` stays
-  reserved and UNBUILT until its first slice. `crates/wz-zenoh` names its library `zenoh` and carries the pinned
-  version, so a Rust user's one changed line is `zenoh = { package = "wz-zenoh", version
-  = "1.10.1" }`. `rust_api_surface.py` emits its rustdoc surface with the same normaliser
-  as upstream's and holds it to every upstream arm: no line upstream lacks (C10), and the
-  missing count as a ratchet that a slice lowers in its own round (709 of 709 default
-  lines today). A function's line carries its signature (generics and bounds, parameter
-  and return types, qualifiers, the `impl` block of a method), so a path with the wrong
-  signature is a missing line and not a present one. The crate carries none of
-  upstream's API yet.
+- **The Rust API compatibility family** (step 12): `api-compat-rust` replaces zenoh's Rust
+  crates by a family of crates under UPSTREAM'S package names, versioned as the pin, that a
+  user swaps in with one `[patch.crates-io]` entry per crate. The name is the mechanism:
+  Cargo swaps by package name, and a patch whose package is named otherwise is not used (measured: the
+  graph kept upstream's crate, and an ecosystem crate then met a second, different type). A
+  program that depends on `zenoh` and on an ecosystem crate (`zenoh-ext`, a plugin) must meet
+  one `zenoh_core` and one `zenoh_result`, so the family is every crate the public API names
+  and the ecosystem imports, not `zenoh` alone, and a one-line `package = "wz-zenoh"` rename,
+  which cannot reach the crates under it, is not offered. `rust_api_surface.py` lists the family
+  (`MEMBERS`), emits each member's rustdoc surface with the same normaliser as upstream's and
+  holds it to every upstream arm: no line upstream lacks (C10), and the missing count as a
+  ratchet that a slice lowers in its own round. A function's line carries its signature
+  (generics and bounds, parameter and return types, qualifiers, the `impl` block of a method),
+  so a path with the wrong signature is a missing line and not a present one. Members so far:
+  `zenoh-result` (complete: 37 of 37 lines) and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
+  default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
+  Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each
+  crate against upstream's, a graph in which an upstream crate and the wz crate meet one type once
+  patched, and the same graph unpatched as its control. The packages are not published (the
+  names are upstream's); a deployer reaches them by path or git in the `[patch]` table.
 - **One pinned Kconfig interpreter on the host** (step 1, C11): `kconfiglib` 14.1.0, the
   version Zephyr bundles, pinned by hash (`scripts/requirements-kconfig.txt`) and provisioned
   into `target/kconfig-venv` by `scripts/provision-kconfiglib.sh`. `wz_config.py
@@ -221,9 +231,15 @@ that bind one definition to one driver. The header generator is chosen by whethe
 it reproduces today's headers byte for byte, with every difference explained.
 
 **C13. `family = zenoh` includes the Rust public API.** Replacing zenoh for a Rust
-user means changing a dependency and nothing else; wire, behaviour and API must all
-match. A compatibility crate exposes the pinned zenoh's public API over wz, held by
-a surface gate derived from the upstream crate's rustdoc JSON.
+user means changing the dependency graph and nothing in the program; wire, behaviour and
+API must all match. The replacement is a family of compatibility crates that carry
+upstream's package names and the pinned version, so that one `[patch.crates-io]` entry per
+crate swaps them in and every crate of the graph, an ecosystem crate included, meets the same
+types. It exposes the pinned crates' public APIs over wz, each held by a surface gate derived
+from the upstream crate's rustdoc JSON and by differential tests against it. (Refined
+2026-10-24 from "changing one dependency line": the swap is by package name, which a
+`package = ` rename on the dependency line does not reach, so the unit of replacement is a
+`[patch]` block and not a line.)
 
 **C14. Profiles are contracts.** A registered profile is a named, semver-versioned
 defconfig fragment that CI builds and tests; its name describes its axes (for
@@ -341,8 +357,10 @@ Each step lands with its own done-when; sizes are not estimated here.
 10. **Platforms and packaging**: FreeRTOS+TCP, QNX, an installable SDK.
 11. **`wz-config`** (section 6, C9).
 12. **Rust API compatibility** (C13). Register `api-compat-rust`; derive the
-    upstream surface from rustdoc JSON; the compatibility crate; the surface gate;
-    upstream's examples and public API tests built against it.
+    upstream surface from rustdoc JSON; the family of compatibility crates, lowest first
+    (`zenoh-result`, `zenoh-core`, `zenoh-keyexpr`, `zenoh-protocol`, `zenoh-config`,
+    `zenoh-util`, then `zenoh`); the surface gate over each; differential tests against
+    each; upstream's examples, tests and an ecosystem crate built against the patched graph.
 13. **Resource gates** (D5): stack peak and wire turnaround per registered profile,
     each a committed figure that a change moves visibly.
 14. **SCE as a configuration axis**: the state machine's feature gates

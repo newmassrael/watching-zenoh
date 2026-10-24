@@ -2712,6 +2712,7 @@ dependencies = [
  "wz-runtime-tokio",
  "wz-runtime-zephyr",
  "wz-session-lwip",
+ "zenoh-result",
 ]
 
 [[package]]
@@ -3435,6 +3436,13 @@ dependencies = [
  "cc",
  "cmake",
  "dunce",
+]
+
+[[package]]
+name = "zenoh-result"
+version = "1.10.1"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

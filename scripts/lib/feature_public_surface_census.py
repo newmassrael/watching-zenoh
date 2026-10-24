@@ -265,6 +265,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
             {
                 "api-compat-c",
                 "api-compat-pico",
+                "api-compat-rust",
                 "platform-freertos",
                 "platform-zephyr",
                 "platform-zephyr-fixed",
@@ -1013,6 +1014,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
         {
             "api-compat-c",
             "api-compat-pico",
+            "api-compat-rust",
             "platform-freertos",
             "platform-zephyr",
             "platform-zephyr-fixed",

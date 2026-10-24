@@ -3142,6 +3142,16 @@ jobs:
         # registry to write that golden. HERE for the oracle cache, as E16.
         run: bash scripts/run-ci.sh --layer E17
 
+      - name: Layer E18 — the zenoh family's crates against upstream's
+        # R3483 (open-debt item 910). A Rust user replaces zenoh by one `[patch.crates-io]`
+        # entry per crate of the family, so each crate wz carries has upstream's package
+        # name. Three standalone workspaces under `conformance/`: the same input to
+        # upstream's crate and wz's with equal outputs, a graph in which an UPSTREAM crate
+        # and this one meet one type once patched, and that graph without the patch,
+        # where they do not. HERE with E16 and E17, the other layers that link upstream's
+        # crates; the layer needs the registry and nothing built.
+        run: bash scripts/run-ci.sh --layer E18
+
       - name: Layer C1bp — §5.22 dynamic plugin loading, end to end
         # R311y495 — MOVED here from `validate + verify + test`, where R311y492
         # first wired it and where it SKIP-passed on its very first hosted run:
