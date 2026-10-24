@@ -11,8 +11,8 @@
 //! programs, which is exactly how this plane was measured as missing.
 //!
 //! Nothing here is new protocol. wz already owns the mechanism
-//! ([`wz_runtime_tokio::advanced_publisher::AdvancedPublisher`] +
-//! [`wz_runtime_tokio::advanced_subscriber::AdvancedSubscriber`], graded
+//! ([`wz_capi_core::runtime::advanced_publisher::AdvancedPublisher`] +
+//! [`wz_capi_core::runtime::advanced_subscriber::AdvancedSubscriber`], graded
 //! against zenoh-ext); this module is the C binding plus the per-face fan-out
 //! every declaration in this crate applies, which for the advanced plane is
 //! load-bearing rather than uniform: an advanced publisher declares its OWN
@@ -48,12 +48,12 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use std::time::Duration;
 
-use wz_runtime_tokio::advanced_cache::{CacheConfig, RepliesConfig};
-use wz_runtime_tokio::advanced_publisher::{
+use wz_capi_core::runtime::advanced_cache::{CacheConfig, RepliesConfig};
+use wz_capi_core::runtime::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherOn, AdvancedPublisherOptions, AdvancedPutOptions,
     MissDetectionConfig, Sequencing,
 };
-use wz_runtime_tokio::advanced_subscriber::{
+use wz_capi_core::runtime::advanced_subscriber::{
     AdvancedSubscriberOptions, HistoryConfig, Miss, RecoveryConfig, SubscriberDetection,
 };
 use wz_session_core::sample::Sample;
@@ -1372,7 +1372,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         } else {
             (*options).history
         };
-        let mut opts = wz_runtime_tokio::session::LivelinessSubscriberOptions::default();
+        let mut opts = wz_capi_core::runtime::session::LivelinessSubscriberOptions::default();
         opts.history = history;
         // R2959 — upstream builds this listener with the plain
         // `z_liveliness_declare_subscriber`
@@ -1804,7 +1804,7 @@ mod tests {
     fn miss_listeners_join_the_set_and_leave_it_one_at_a_time() {
         let shared = Arc::new(
             SharedSession::new(
-                wz_runtime_tokio::runtime_impl::TokioTime::new(),
+                wz_capi_core::runtime::runtime_impl::TokioTime::new(),
                 vec![0x11; 16],
             )
             .expect("test host entropy"),

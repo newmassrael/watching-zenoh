@@ -64,8 +64,8 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use wz_capi_core::faces::{FaceSnapshot, QueryableSink, SharedSession};
-use wz_runtime_tokio::session::TokioQueryHolder;
-use wz_runtime_tokio::session_glue::LinkKind;
+use wz_capi_core::runtime::session::TokioQueryHolder;
+use wz_capi_core::runtime::session_glue::LinkKind;
 use wz_session_core::keyexpr_match::keyexpr_intersects_text;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::sample::EncodingHint;

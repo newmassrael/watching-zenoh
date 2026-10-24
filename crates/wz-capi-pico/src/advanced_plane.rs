@@ -18,18 +18,18 @@
 //! same function the plain C entry point of that entity calls, so the two cannot
 //! describe one entity two ways.
 //!
-//! [`AdvancedPublisherOn`]: wz_runtime_tokio::advanced_publisher::AdvancedPublisherOn
+//! [`AdvancedPublisherOn`]: wz_capi_core::runtime::advanced_publisher::AdvancedPublisherOn
 
 use std::sync::Arc;
 
 use wz_capi_core::faces::QueryableSink;
-use wz_runtime_tokio::advanced_cache::{CacheStore, Retained};
-use wz_runtime_tokio::advanced_publisher::{
+use wz_capi_core::runtime::advanced_cache::{CacheStore, Retained};
+use wz_capi_core::runtime::advanced_publisher::{
     AdvancedPublisherError, AdvancedPublisherPlane, DeclaredPublisher,
 };
-use wz_runtime_tokio::node_clock::NodeHlc;
-use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::session::TokioQueryHolder;
+use wz_capi_core::runtime::node_clock::NodeHlc;
+use wz_capi_core::runtime::runtime_impl::TokioTime;
+use wz_capi_core::runtime::session::TokioQueryHolder;
 use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
@@ -146,7 +146,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         let sink: QueryableSink =
             Arc::new(move |_face: &TokioQueryHolder| Box::new(store.query_handler()) as Box<_>);
         // INCOMPLETE, which is the only honest answer a bounded ring can give
-        // (R2556, [`wz_runtime_tokio::advanced_cache::AdvancedCache::declare`]).
+        // (R2556, [`wz_capi_core::runtime::advanced_cache::AdvancedCache::declare`]).
         PlainQueryable::declare(&self.session, keyexpr, None, false, sink)
             .map_err(|code| Self::refusal("cache queryable", code))
     }

@@ -73,3 +73,9 @@ pub mod scouting;
 pub mod scouting_node;
 #[cfg(feature = "peer")]
 pub mod scouting_responder;
+
+/// The runtime this engine runs its sessions on, for an ABI's modules that reach past the port
+/// (queries, liveliness, the advanced plane, ...): they name the runtime through the engine they
+/// selected, so an ABI depends on its engines and never on a runtime of its own
+/// (`docs/capi-pico-on-coop-engine.md`, decision D1).
+pub use wz_runtime_tokio as runtime;

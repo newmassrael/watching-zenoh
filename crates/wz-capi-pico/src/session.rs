@@ -133,12 +133,12 @@ fn resolve_pem(
     base64_key: u8,
 ) -> Result<Option<Vec<u8>>, ZResult> {
     if let Some(path) = cfg.get(path_key) {
-        return wz_runtime_tokio::tls_config::read_pem_file(path)
+        return wz_capi_core::runtime::tls_config::read_pem_file(path)
             .map(Some)
             .map_err(|_| crate::result::Z_ERR_INVALID);
     }
     if let Some(b64) = cfg.get(base64_key) {
-        return wz_runtime_tokio::tls_config::decode_base64_pem(b64)
+        return wz_capi_core::runtime::tls_config::decode_base64_pem(b64)
             .map(Some)
             .map_err(|_| crate::result::Z_ERR_INVALID);
     }
@@ -576,7 +576,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
         // (`vendor/zenoh-pico/src/net/session.c` @
         // `return _z_fut_fn_result_wake_up_after(1000);`).
         DialPhase {
-            redial: Some(wz_runtime_tokio::retry_period::RetryPolicy::constant(1000)),
+            redial: Some(wz_capi_core::runtime::retry_period::RetryPolicy::constant(
+                1000,
+            )),
             ..DialPhase::ONCE
         },
         OpenStance {
@@ -588,7 +590,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // carries the patch ext and nothing else
             // (`vendor/zenoh-pico/src/protocol/codec/transport.c` @
             // `z_result_t _z_init_encode(`), so a drop-in for it offers none.
-            offer: wz_runtime_tokio::session_open::SessionOffer::universal(),
+            offer: wz_capi_core::runtime::session_open::SessionOffer::universal(),
             // pico's `Z_CONFIG_SESSION_ZID_KEY` is not read by this open yet,
             // so a pico session mints its own. The zenoh-c ABI reads its `id`
             // key.
@@ -598,7 +600,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // never consults this session's clock (its own plane stamps from the
             // device's, `crate::advanced_plane`). The shipped map is what every
             // session of this registry was given before the field existed.
-            timestamping: wz_runtime_tokio::node_clock::TimestampingEnabled::default(),
+            timestamping: wz_capi_core::runtime::node_clock::TimestampingEnabled::default(),
             // pico has no client storage: its sessions read shared memory through the
             // default reader, as every session did before the field existed.
             shm_clients: wz_capi_core::faces::no_shm_clients(),
@@ -610,9 +612,9 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // `_z_session_deliver_push_locally`, which hands the message to
             // `_z_handle_network_message` before returning), as zenoh-c's does.
             #[cfg(not(any(feature = "local-subscriber", feature = "local-queryable")))]
-            local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::DriveTask,
+            local_delivery: wz_capi_core::runtime::session::LocalDeliveryDrain::DriveTask,
             #[cfg(any(feature = "local-subscriber", feature = "local-queryable"))]
-            local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::Caller,
+            local_delivery: wz_capi_core::runtime::session::LocalDeliveryDrain::Caller,
             // The plan is zenoh's scouting node, which keeps looking and answers Scouts.
             // pico's open looks once, before the open (`connect` above), and its session
             // answers no Scout.

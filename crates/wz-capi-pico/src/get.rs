@@ -129,8 +129,8 @@
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
-use wz_runtime_tokio::session::QueryOptions;
-use wz_runtime_tokio::session_glue::{ConsolidationMode, QueryTarget};
+use wz_capi_core::runtime::session::QueryOptions;
+use wz_capi_core::runtime::session_glue::{ConsolidationMode, QueryTarget};
 use wz_session_core::locality::Locality;
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 

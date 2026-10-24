@@ -37,7 +37,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use wz_runtime_tokio::advanced_subscriber::{DeclarationForms, EntityForm};
+use wz_capi_core::runtime::advanced_subscriber::{DeclarationForms, EntityForm};
 use wz_session_core::WhatAmI;
 
 use crate::keyexpr::DeclaredKeyexpr;
@@ -187,8 +187,8 @@ mod tests {
     use super::*;
 
     use wz_capi_core::faces::SharedSession;
-    use wz_runtime_tokio::node_clock::NodeHlc;
-    use wz_runtime_tokio::runtime_impl::TokioTime;
+    use wz_capi_core::runtime::node_clock::NodeHlc;
+    use wz_capi_core::runtime::runtime_impl::TokioTime;
 
     /// The forms of an advanced subscriber on `key`, over a registry with no
     /// face: what they declare is read back from the registry's key table, which

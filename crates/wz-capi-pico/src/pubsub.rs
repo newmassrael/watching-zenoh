@@ -30,7 +30,7 @@ use std::ffi::{c_int, c_void};
 use std::sync::{Arc, Mutex as StdMutex};
 
 #[cfg(feature = "liveliness")]
-use wz_runtime_tokio::declare::LivelinessSample;
+use wz_capi_core::runtime::declare::LivelinessSample;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::reliability::Reliability;
@@ -647,7 +647,7 @@ pub unsafe extern "C" fn z_timestamp_id(ts: *const z_timestamp_t) -> crate::zid:
 fn wall_clock_ntp64() -> u64 {
     #[cfg(feature = "engine-tokio")]
     {
-        wz_runtime_tokio::timestamp_source::wall_clock_ntp64()
+        wz_capi_core::runtime::timestamp_source::wall_clock_ntp64()
     }
     #[cfg(not(feature = "engine-tokio"))]
     {

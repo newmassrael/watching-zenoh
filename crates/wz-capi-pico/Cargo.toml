@@ -86,7 +86,7 @@ default = [
 # cooperative one otherwise: a build that names `engine-coop` and no capability the cooperative
 # engine lacks is the cooperative client. The selection reads features, not a config key, because
 # what an engine does not have is not linked.
-engine-tokio = ["dep:wz-capi-core", "dep:wz-runtime-tokio", "dep:tokio"]
+engine-tokio = ["dep:wz-capi-core", "dep:tokio"]
 engine-coop = ["dep:wz-capi-coop", "dep:wz-runtime-posix"]
 # The capabilities pico's own CMake switches name (`Z_FEATURE_QUERY`, `Z_FEATURE_QUERYABLE`,
 # `Z_FEATURE_LIVELINESS`, `Z_FEATURE_ADVANCED_PUBLICATION` / `_SUBSCRIPTION`), each one feature
@@ -200,11 +200,7 @@ rx-busy-poll = ["engine-tokio", "wz-capi-core/rx-busy-poll"]
 # the `unixpipe/` scheme still parses but `bind_locator` returns a feature-gated
 # `Unsupported` at bind, so `bind_endpoint` errors before the guard. NOT enabled
 # by any default; only the run-ci C1bl-style pico lane builds with it.
-transport-link-unixpipe = [
-    "engine-tokio",
-    "wz-runtime-tokio/transport-link-unixpipe",
-    "wz-capi-core/transport-link-unixpipe",
-]
+transport-link-unixpipe = ["engine-tokio", "wz-capi-core/transport-link-unixpipe"]
 # R311y406 — off-default `quic/` ACCEPT transport, forwarding wz-runtime-tokio's
 # `transport-link-quic`. Unlike unixpipe, quic IS a zenoh-pico-native link (though
 # stock zenoh-pico's quic is client-dial only); wz-capi-pico adds the LISTEN side
@@ -213,11 +209,7 @@ transport-link-unixpipe = [
 # With it, `z_open(listen="quic/..")` + those cert keys binds a mesh quic listener
 # (the --peer/--router/--router-hat demo twin, R311y405/y406); without it the
 # `quic/` scheme still parses but `bind_locator` returns `Unsupported` at bind.
-transport-link-quic = [
-    "engine-tokio",
-    "wz-runtime-tokio/transport-link-quic",
-    "wz-capi-core/transport-link-quic",
-]
+transport-link-quic = ["engine-tokio", "wz-capi-core/transport-link-quic"]
 # R311y534 — the `tls/` link, dial AND accept. Unlike unixpipe this is
 # zenoh-pico-native on BOTH sides (its `z_pub_tls.c` / `z_sub_tls.c` each take
 # `-e tls/...` and `-l tls/...`), and it is what the §5.27 api-compat-pico
@@ -225,29 +217,17 @@ transport-link-quic = [
 # twelve `Z_CONFIG_TLS_*` keys into real dial/accept material; without it the
 # `tls/` scheme still parses but bind and dial return a feature-gated
 # `Unsupported`, so the keys are inert rather than misleading.
-transport-link-tls = [
-    "engine-tokio",
-    "wz-runtime-tokio/transport-link-tls",
-    "wz-capi-core/transport-link-tls",
-]
+transport-link-tls = ["engine-tokio", "wz-capi-core/transport-link-tls"]
 # The `ws/` link, dial and accept: zenoh-pico's `Z_FEATURE_LINK_WS` (default 0; upstream builds
 # it only for emscripten, while this ABI runs on a host runtime). With it a `ws/` endpoint under
 # `Z_CONFIG_CONNECT_KEY` or `Z_CONFIG_LISTEN_KEY` dials or binds; without it the scheme still
 # parses and the dial or bind fails the open with the runtime's typed `Unsupported`.
-transport-link-ws = [
-    "engine-tokio",
-    "wz-runtime-tokio/transport-link-ws",
-    "wz-capi-core/transport-link-ws",
-]
+transport-link-ws = ["engine-tokio", "wz-capi-core/transport-link-ws"]
 # The `serial/<device>#baudrate=<n>` link, dial and accept: zenoh-pico's
 # `Z_FEATURE_LINK_SERIAL` (default 0). The listener serves one peer at a time, as one line
 # carries one; the dial runs the serial-link handshake before the session's. Without it the
 # open fails the way a `ws/` one does without its feature.
-transport-link-serial = [
-    "engine-tokio",
-    "wz-runtime-tokio/transport-link-serial",
-    "wz-capi-core/transport-link-serial",
-]
+transport-link-serial = ["engine-tokio", "wz-capi-core/transport-link-serial"]
 
 # The tests of a capability exist only where the capability does: a build that leaves the
 # plane out has no symbol for them to call, so they are not compiled there (and not run).
@@ -406,16 +386,16 @@ wz-codecs = { path = "../wz-codecs", default-features = false }
 # (ids, callback factories, a key's wire form, the write filter's plane and answer), so the ABI
 # layer is spelled in no engine's types (docs/capi-pico-on-coop-engine.md, D1).
 wz-capi-port = { path = "../wz-capi-port" }
-# Depend on wz-runtime-tokio DIRECTLY, not the `wz` facade: the facade
-# re-exports this crate (`wz::capi_pico`), so a facade dependency here would
-# form a package cycle Cargo rejects. wz-runtime-tokio's default feature
-# bundle already carries the full working unicast session — the handshake
-# codecs (init-body / open-body / frame / keep-alive / close), the session
-# open/accept/reconnect machinery, keyexpr matching (wildcard-double /
-# includes) that routes `demo/a` to a `demo/**` subscriber, declare-subscriber
-# and pubsub-put. An incomplete feature set fails the handshake with a
-# pre-Established Terminal, so this rides the proven default bundle; trimming
-# to the exact pub/sub subset is a follow-up refinement.
+# The tokio RUNTIME is not a dependency of this crate: it is the tokio engine's
+# (`wz-capi-core`), and the modules of the capabilities only that engine has reach
+# it through the engine, as `wz_capi_core::runtime`. An ABI depends on its engines,
+# never on a runtime of its own (docs/capi-pico-on-coop-engine.md, D1), and the
+# runtime's crate then has one puller in the catalog, the `runtime-tokio` atom whose
+# code it is. What every session needs of it (the codecs, the open, reconnect,
+# fragmentation) is the engine's base feature list; what a capability needs is that
+# capability's feature here, forwarding to the engine's. The notes below record why
+# each runtime feature a pico build needs is named where it is; the features named
+# `wz-runtime-tokio/...` in them now sit in wz-capi-core.
 #
 # `routing-accept` is added explicitly because it is NOT in the default bundle
 # (it is a selectable role atom, `wz-runtime-tokio/Cargo.toml`). It gates
@@ -499,10 +479,8 @@ wz-capi-port = { path = "../wz-capi-port" }
 # the silent shape described above), and `reply-source-info` is part of
 # `wz-capi-core/queryable` (R311y562: `z_query_reply_options_t` declares a `source_info`, and
 # without the emit gate it is read, staged and silently dropped at the codec, measured by
-# `tests/reply_options_roundtrip.rs`). `liveliness-get` is `wz-capi-core/liveliness-get`.
-wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, optional = true, features = [
-    "transport-fragmentation",
-] }
+# `tests/reply_options_roundtrip.rs`). `liveliness-get` is `wz-capi-core/liveliness-get`, and
+# `transport-fragmentation` is in the engine's base list, which both drop-ins share.
 
 # Per-session zid entropy. zenoh identifies a PEER by its zid, so two sessions
 # sharing one are the SAME peer on the wire — a listener would dedup/aggregate
@@ -551,3 +529,6 @@ optional = true
 wz-runtime-tokio-test-support = { path = "../wz-runtime-tokio-test-support", features = [
     "tls-fixtures",
 ] }
+# The tests drive the runtime's own sessions beside the C ABI's (a wz peer, a router); the
+# library itself reaches the runtime only through its engine, `wz_capi_core::runtime`.
+wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false }

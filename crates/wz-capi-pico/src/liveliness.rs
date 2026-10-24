@@ -33,8 +33,8 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use wz_runtime_tokio::declare::LivelinessSampleKind;
-use wz_runtime_tokio::session::{LivelinessOptions, LivelinessSubscriberOptions};
+use wz_capi_core::runtime::declare::LivelinessSampleKind;
+use wz_capi_core::runtime::session::{LivelinessOptions, LivelinessSubscriberOptions};
 
 use crate::abi::{handle_ref, z_loaned_keyexpr_t};
 use crate::ffi::{guard_val, guarded};
@@ -495,7 +495,7 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(
 /// The wire here is the DECLARATION plane, not the query plane: the request is
 /// a CURRENT liveliness `Interest`, each live token comes back as a
 /// `Declare(DeclToken)` and the snapshot ends with one `DeclFinal`. wz models
-/// that with [`wz_runtime_tokio::session::Session::liveliness_get`], whose
+/// that with [`wz_capi_core::runtime::session::Session::liveliness_get`], whose
 /// application surface is already reply-shaped — which is why this maps onto
 /// the same `z_owned_closure_reply_t` and the same [`crate::get::fire_reply`]
 /// marshal that `z_get` uses, rather than a parallel one.
@@ -555,7 +555,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         // wz's field is a `u32`; saturate rather than wrap, for the reason
         // `crate::get::get_timeout_ms` records — a wrapped huge timeout becomes
         // a tiny one and expires the snapshot immediately.
-        let opts = wz_runtime_tokio::session::LivelinessGetOptions::default()
+        let opts = wz_capi_core::runtime::session::LivelinessGetOptions::default()
             .with_timeout_ms(timeout_ms.min(u32::MAX as u64) as u32);
 
         // A liveliness reply's keyexpr is the TOKEN's, which intersects the

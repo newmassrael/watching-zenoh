@@ -1817,9 +1817,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use std::sync::OnceLock;
-    use wz_runtime_tokio::session_glue::LinkKind;
+    use wz_capi_core::runtime::session_glue::LinkKind;
 
-    use wz_runtime_tokio::runtime_impl::TokioTime;
+    use wz_capi_core::runtime::runtime_impl::TokioTime;
 
     /// What a test callback saw, in order, and how many times its context was
     /// released. Leaked, so a raw pointer to it can ride as the C `context`.

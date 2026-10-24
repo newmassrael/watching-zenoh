@@ -398,6 +398,11 @@ wz-runtime-tokio = { path = "../wz-runtime-tokio", default-features = false, fea
     "transport-unicast",
     "transport-keepalive",
     "transport-batching",
+    # A message past the negotiated batch goes out as fragments and comes back together, as
+    # zenoh's and zenoh-pico's do (`Z_FRAG_MAX_SIZE`): both drop-ins need it, and without it an
+    # oversize put is dropped while the call answers success (measured on the pico ABI,
+    # R311y484, `wz-capi-pico/tests/fragmentation_roundtrip.rs`).
+    "transport-fragmentation",
     "pubsub-put",
     "pubsub-delete",
     "pubsub-allow-loop",

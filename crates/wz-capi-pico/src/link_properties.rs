@@ -9,7 +9,7 @@
 //! the two are separate switches (`Z_FEATURE_CONNECTIVITY`, `Z_FEATURE_ADMIN_SPACE`), so
 //! the table lives here rather than in either.
 
-use wz_runtime_tokio::session_glue::LinkKind;
+use wz_capi_core::runtime::session_glue::LinkKind;
 
 /// `(mtu, is_streamed, is_reliable)` of a link, as pico's link of that kind
 /// answers.

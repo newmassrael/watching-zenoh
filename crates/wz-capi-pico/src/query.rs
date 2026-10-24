@@ -68,8 +68,8 @@ use std::ffi::c_void;
 use std::sync::Arc;
 
 #[cfg(doc)]
-use wz_runtime_tokio::session::HeldQuery;
-use wz_runtime_tokio::session::{TokioHeldQuery, TokioQueryHolder};
+use wz_capi_core::runtime::session::HeldQuery;
+use wz_capi_core::runtime::session::{TokioHeldQuery, TokioQueryHolder};
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
 
 use crate::abi::{
