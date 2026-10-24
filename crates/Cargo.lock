@@ -3531,6 +3531,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-tls-mbedtls"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "cmake",
+ "dunce",
+ "rcgen",
+ "rustls",
+ "wz-runtime-coop",
+ "wz-runtime-posix",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-tls-record"
 version = "0.1.0"
 dependencies = [

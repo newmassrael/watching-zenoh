@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-tls-mbedtls -- the fixed-memory profile's secure channel (decision D9 of
+# docs/session-lifecycle-intent.md): TLS 1.3 with mutual authentication over Mbed TLS's PSA
+# Crypto line, each end pinned by the zid of its key, every allocation from one static arena.
+#
+# The backend behind the cooperative runtime's stream port: `TlsStream` is a `StreamSocket` over
+# another one and `TlsDial` a `StreamDial`, so the stream link runs over the channel unchanged.
+#
+# Mbed TLS is the revision the Zephyr workspace pins (4.1.0 with TF-PSA-Crypto 1.1.0), as the
+# git submodules `vendor/mbedtls` and `vendor/tf-psa-crypto`. With `vendored` (the default)
+# build.rs builds it through its own CMake with this crate's configuration (`config/`), the
+# pattern of `zenoh-pico-sys`, and compiles the channel's C side (`csrc/wz_tls.c`) beside it. An
+# image whose platform carries Mbed TLS (Zephyr) turns `vendored` off and compiles
+# `csrc/wz_tls.c` in its own build, against that library.
+
+[package]
+name = "wz-tls-mbedtls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The fixed-memory profile's secure channel: TLS 1.3 mutual authentication over Mbed TLS, pinned by key-derived zid."
+build = "build.rs"
+links = "wz_tls_mbedtls"
+
+[dependencies]
+# The stream port the channel implements (`stream_link::StreamSocket`, `StreamDial`) and the
+# dial's error (`session_drive::LinkOpenError`).
+wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["session-unicast"] }
+
+[build-dependencies]
+# The pinned Mbed TLS through its own CMake, as zenoh-pico-sys builds zenoh-pico.
+cmake = "0.1"
+# The channel's C side, compiled against the library just built.
+cc = "1"
+# The source paths handed to CMake: not the verbatim `\\?\` form on Windows.
+dunce = "1"
+
+[dev-dependencies]
+# The derivation the session core pins a zid with (decision D1), as the oracle of this crate's.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["no_std"] }
+# The host's TCP, for the dial against a peer in another thread.
+wz-runtime-posix = { path = "../wz-runtime-posix" }
+# The peer zenohd 1.10.1 is: rustls 0.23 with webpki's client verifier.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# The peer's self-signed certificate, as a zenoh router's operator makes one.
+rcgen = "0.13"
+
+[features]
+# `wz-runtime-coop`'s session tier needs a form of its task pool, and the two forms are mutually
+# exclusive selectors; the default is the heap form, as `wz-runtime-posix`'s is, so a
+# workspace-wide build finds this crate buildable. This crate has no heap code of its own.
+default = ["vendored", "alloc"]
+alloc = ["wz-runtime-coop/alloc"]
+# The slot profile, for a program built with the defaults off.
+session-slot = ["wz-runtime-coop/session-slot"]
+# Build the pinned Mbed TLS and the channel's C side here. Off for an image whose platform
+# carries Mbed TLS and compiles `csrc/wz_tls.c` itself.
+vendored = []
+
+[lints]
+workspace = true

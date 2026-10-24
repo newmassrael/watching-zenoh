@@ -199,6 +199,10 @@ members = [
     # over a POSIX libc (a clock, entropy, the date, a UDP socket), for the shared MCU session
     # code run as a Linux process.
     "wz-runtime-posix",
+    # The fixed-memory profile's secure channel (decision D9): TLS 1.3 with mutual
+    # authentication over the pinned Mbed TLS, as a stream over the cooperative runtime's
+    # stream port.
+    "wz-tls-mbedtls",
     "wz-link-lwip",
     # The MCU session shell that is written once for every network stack (no_std
     # lib; the application layer, the admin node, the connection manager and the
