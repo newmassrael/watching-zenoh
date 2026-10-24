@@ -87,6 +87,43 @@ const zenoh_protocol::scouting::id::HELLO
 const zenoh_protocol::scouting::id::SCOUT
 const zenoh_protocol::scouting::scout::flag::I
 const zenoh_protocol::scouting::scout::flag::Z
+const zenoh_protocol::transport::batch_size::MULTICAST
+const zenoh_protocol::transport::batch_size::UNICAST
+const zenoh_protocol::transport::close::flag::S
+const zenoh_protocol::transport::close::flag::Z
+const zenoh_protocol::transport::close::reason::CONNECTION_TO_SELF
+const zenoh_protocol::transport::close::reason::EXPIRED
+const zenoh_protocol::transport::close::reason::GENERIC
+const zenoh_protocol::transport::close::reason::INVALID
+const zenoh_protocol::transport::close::reason::MAX_LINKS
+const zenoh_protocol::transport::close::reason::MAX_SESSIONS
+const zenoh_protocol::transport::close::reason::UNRESPONSIVE
+const zenoh_protocol::transport::close::reason::UNSUPPORTED
+const zenoh_protocol::transport::fragment::flag::M
+const zenoh_protocol::transport::fragment::flag::R
+const zenoh_protocol::transport::fragment::flag::Z
+const zenoh_protocol::transport::frame::flag::R
+const zenoh_protocol::transport::frame::flag::Z
+const zenoh_protocol::transport::id::CLOSE
+const zenoh_protocol::transport::id::FRAGMENT
+const zenoh_protocol::transport::id::FRAME
+const zenoh_protocol::transport::id::INIT
+const zenoh_protocol::transport::id::JOIN
+const zenoh_protocol::transport::id::KEEP_ALIVE
+const zenoh_protocol::transport::id::OAM
+const zenoh_protocol::transport::id::OPEN
+const zenoh_protocol::transport::init::flag::A
+const zenoh_protocol::transport::init::flag::S
+const zenoh_protocol::transport::init::flag::Z
+const zenoh_protocol::transport::join::flag::S
+const zenoh_protocol::transport::join::flag::T
+const zenoh_protocol::transport::join::flag::Z
+const zenoh_protocol::transport::keepalive::flag::Z
+const zenoh_protocol::transport::oam::flag::T
+const zenoh_protocol::transport::oam::flag::Z
+const zenoh_protocol::transport::open::flag::A
+const zenoh_protocol::transport::open::flag::T
+const zenoh_protocol::transport::open::flag::Z
 const zenoh_protocol::zenoh::del::flag::T
 const zenoh_protocol::zenoh::del::flag::Z
 const zenoh_protocol::zenoh::err::flag::E
@@ -138,6 +175,9 @@ enum zenoh_protocol::network::declare::DeclareBody
 enum zenoh_protocol::network::interest::InterestMode
 enum zenoh_protocol::network::request::ext::QueryTarget
 enum zenoh_protocol::scouting::ScoutingBody
+enum zenoh_protocol::transport::TransportBody
+enum zenoh_protocol::transport::TransportBodyLowLatency
+enum zenoh_protocol::transport::TransportBodyLowLatencyRef
 enum zenoh_protocol::zenoh::ConsolidationMode
 enum zenoh_protocol::zenoh::PushBody
 enum zenoh_protocol::zenoh::RequestBody
@@ -315,6 +355,12 @@ fn zenoh_protocol::network::interest::InterestOptions::tokens(&Self) -> bool ; c
 fn zenoh_protocol::network::push::Push::payload_size(&Self) -> usize ; in impl zenoh_protocol::network::push::Push
 fn zenoh_protocol::network::request::Request::payload_size(&Self) -> usize ; in impl zenoh_protocol::network::request::Request
 fn zenoh_protocol::network::response::Response::payload_size(&Self) -> usize ; in impl zenoh_protocol::network::response::Response
+fn zenoh_protocol::transport::close::reason_to_str(u8) -> &'static str
+fn zenoh_protocol::transport::ext::PatchType::has_fragmentation_markers(&Self) -> bool ; in impl<const ID: u8> zenoh_protocol::transport::ext::PatchType<ID>
+fn zenoh_protocol::transport::ext::PatchType::new(u8) -> Self ; in impl<const ID: u8> zenoh_protocol::transport::ext::PatchType<ID>
+fn zenoh_protocol::transport::ext::PatchType::raw(Self) -> u8 ; in impl<const ID: u8> zenoh_protocol::transport::ext::PatchType<ID>
+fn zenoh_protocol::transport::ext::QoSType::new(zenoh_protocol::core::Priority) -> Self ; const ; in impl<const ID: u8> zenoh_protocol::transport::ext::QoSType<ID>
+fn zenoh_protocol::transport::ext::QoSType::priority(&Self) -> zenoh_protocol::core::Priority ; const ; in impl<const ID: u8> zenoh_protocol::transport::ext::QoSType<ID>
 fn zenoh_protocol::zenoh::ext::ShmType::new() -> Self ; const ; in impl<const ID: u8> zenoh_protocol::zenoh::ext::ShmType<ID>
 impl core::clone::Clone for zenoh_protocol::common::extension::ZExtBody
 impl core::clone::Clone for zenoh_protocol::common::extension::ZExtUnit
@@ -389,6 +435,25 @@ impl core::clone::Clone for zenoh_protocol::scouting::ScoutingBody
 impl core::clone::Clone for zenoh_protocol::scouting::ScoutingMessage
 impl core::clone::Clone for zenoh_protocol::scouting::hello::HelloProto
 impl core::clone::Clone for zenoh_protocol::scouting::scout::Scout
+impl core::clone::Clone for zenoh_protocol::transport::PrioritySn
+impl core::clone::Clone for zenoh_protocol::transport::TransportBody
+impl core::clone::Clone for zenoh_protocol::transport::TransportBodyLowLatencyRef
+impl core::clone::Clone for zenoh_protocol::transport::TransportMessage
+impl core::clone::Clone for zenoh_protocol::transport::TransportMessageLowLatencyRef
+impl core::clone::Clone for zenoh_protocol::transport::close::Close
+impl core::clone::Clone for zenoh_protocol::transport::ext::PatchType
+impl core::clone::Clone for zenoh_protocol::transport::ext::QoSType
+impl core::clone::Clone for zenoh_protocol::transport::fragment::Fragment
+impl core::clone::Clone for zenoh_protocol::transport::fragment::FragmentHeader
+impl core::clone::Clone for zenoh_protocol::transport::frame::Frame
+impl core::clone::Clone for zenoh_protocol::transport::frame::FrameHeader
+impl core::clone::Clone for zenoh_protocol::transport::init::InitAck
+impl core::clone::Clone for zenoh_protocol::transport::init::InitSyn
+impl core::clone::Clone for zenoh_protocol::transport::join::Join
+impl core::clone::Clone for zenoh_protocol::transport::keepalive::KeepAlive
+impl core::clone::Clone for zenoh_protocol::transport::oam::Oam
+impl core::clone::Clone for zenoh_protocol::transport::open::OpenAck
+impl core::clone::Clone for zenoh_protocol::transport::open::OpenSyn
 impl core::clone::Clone for zenoh_protocol::zenoh::DataInfo
 impl core::clone::Clone for zenoh_protocol::zenoh::PushBody
 impl core::clone::Clone for zenoh_protocol::zenoh::RequestBody
@@ -481,6 +546,23 @@ impl core::cmp::Eq for zenoh_protocol::scouting::ScoutingBody
 impl core::cmp::Eq for zenoh_protocol::scouting::ScoutingMessage
 impl core::cmp::Eq for zenoh_protocol::scouting::hello::HelloProto
 impl core::cmp::Eq for zenoh_protocol::scouting::scout::Scout
+impl core::cmp::Eq for zenoh_protocol::transport::PrioritySn
+impl core::cmp::Eq for zenoh_protocol::transport::TransportBody
+impl core::cmp::Eq for zenoh_protocol::transport::TransportMessage
+impl core::cmp::Eq for zenoh_protocol::transport::close::Close
+impl core::cmp::Eq for zenoh_protocol::transport::ext::PatchType
+impl core::cmp::Eq for zenoh_protocol::transport::ext::QoSType
+impl core::cmp::Eq for zenoh_protocol::transport::fragment::Fragment
+impl core::cmp::Eq for zenoh_protocol::transport::fragment::FragmentHeader
+impl core::cmp::Eq for zenoh_protocol::transport::frame::Frame
+impl core::cmp::Eq for zenoh_protocol::transport::frame::FrameHeader
+impl core::cmp::Eq for zenoh_protocol::transport::init::InitAck
+impl core::cmp::Eq for zenoh_protocol::transport::init::InitSyn
+impl core::cmp::Eq for zenoh_protocol::transport::join::Join
+impl core::cmp::Eq for zenoh_protocol::transport::keepalive::KeepAlive
+impl core::cmp::Eq for zenoh_protocol::transport::oam::Oam
+impl core::cmp::Eq for zenoh_protocol::transport::open::OpenAck
+impl core::cmp::Eq for zenoh_protocol::transport::open::OpenSyn
 impl core::cmp::Eq for zenoh_protocol::zenoh::DataInfo
 impl core::cmp::Eq for zenoh_protocol::zenoh::PushBody
 impl core::cmp::Eq for zenoh_protocol::zenoh::RequestBody
@@ -501,6 +583,7 @@ impl core::cmp::Ord for zenoh_protocol::core::region::Region
 impl core::cmp::Ord for zenoh_protocol::core::resolution::Bits
 impl core::cmp::Ord for zenoh_protocol::core::resolution::Resolution
 impl core::cmp::Ord for zenoh_protocol::core::whatami::WhatAmI
+impl core::cmp::Ord for zenoh_protocol::transport::ext::PatchType
 impl core::cmp::PartialEq for zenoh_protocol::common::extension::ZExtBody
 impl core::cmp::PartialEq for zenoh_protocol::common::extension::ZExtUnit
 impl core::cmp::PartialEq for zenoh_protocol::common::extension::ZExtUnknown
@@ -580,6 +663,23 @@ impl core::cmp::PartialEq for zenoh_protocol::scouting::ScoutingBody
 impl core::cmp::PartialEq for zenoh_protocol::scouting::ScoutingMessage
 impl core::cmp::PartialEq for zenoh_protocol::scouting::hello::HelloProto
 impl core::cmp::PartialEq for zenoh_protocol::scouting::scout::Scout
+impl core::cmp::PartialEq for zenoh_protocol::transport::PrioritySn
+impl core::cmp::PartialEq for zenoh_protocol::transport::TransportBody
+impl core::cmp::PartialEq for zenoh_protocol::transport::TransportMessage
+impl core::cmp::PartialEq for zenoh_protocol::transport::close::Close
+impl core::cmp::PartialEq for zenoh_protocol::transport::ext::PatchType
+impl core::cmp::PartialEq for zenoh_protocol::transport::ext::QoSType
+impl core::cmp::PartialEq for zenoh_protocol::transport::fragment::Fragment
+impl core::cmp::PartialEq for zenoh_protocol::transport::fragment::FragmentHeader
+impl core::cmp::PartialEq for zenoh_protocol::transport::frame::Frame
+impl core::cmp::PartialEq for zenoh_protocol::transport::frame::FrameHeader
+impl core::cmp::PartialEq for zenoh_protocol::transport::init::InitAck
+impl core::cmp::PartialEq for zenoh_protocol::transport::init::InitSyn
+impl core::cmp::PartialEq for zenoh_protocol::transport::join::Join
+impl core::cmp::PartialEq for zenoh_protocol::transport::keepalive::KeepAlive
+impl core::cmp::PartialEq for zenoh_protocol::transport::oam::Oam
+impl core::cmp::PartialEq for zenoh_protocol::transport::open::OpenAck
+impl core::cmp::PartialEq for zenoh_protocol::transport::open::OpenSyn
 impl core::cmp::PartialEq for zenoh_protocol::zenoh::DataInfo
 impl core::cmp::PartialEq for zenoh_protocol::zenoh::PushBody
 impl core::cmp::PartialEq for zenoh_protocol::zenoh::RequestBody
@@ -600,6 +700,7 @@ impl core::cmp::PartialOrd for zenoh_protocol::core::region::Region
 impl core::cmp::PartialOrd for zenoh_protocol::core::resolution::Bits
 impl core::cmp::PartialOrd for zenoh_protocol::core::resolution::Resolution
 impl core::cmp::PartialOrd for zenoh_protocol::core::whatami::WhatAmI
+impl core::cmp::PartialOrd for zenoh_protocol::transport::ext::PatchType
 impl core::convert::AsRef for zenoh_protocol::core::CowStr
 impl core::convert::AsRef for zenoh_protocol::core::endpoint::Address
 impl core::convert::AsRef for zenoh_protocol::core::endpoint::AddressMut
@@ -636,6 +737,9 @@ impl core::convert::From for zenoh_protocol::network::ext::QoSType
 impl core::convert::From for zenoh_protocol::network::interest::InterestOptions
 impl core::convert::From for zenoh_protocol::network::push::Push
 impl core::convert::From for zenoh_protocol::scouting::ScoutingMessage
+impl core::convert::From for zenoh_protocol::transport::TransportMessage
+impl core::convert::From for zenoh_protocol::transport::ext::PatchType
+impl core::convert::From for zenoh_protocol::transport::ext::QoSType
 impl core::convert::From for zenoh_protocol::zenoh::PushBody
 impl core::convert::From for zenoh_protocol::zenoh::RequestBody
 impl core::convert::From for zenoh_protocol::zenoh::ResponseBody
@@ -651,6 +755,7 @@ impl core::convert::TryFrom for zenoh_protocol::core::region::Bound
 impl core::convert::TryFrom for zenoh_protocol::core::region::RegionName
 impl core::convert::TryFrom for zenoh_protocol::core::whatami::WhatAmI
 impl core::convert::TryFrom for zenoh_protocol::core::whatami::WhatAmIMatcher
+impl core::convert::TryFrom for zenoh_protocol::transport::TransportMessageLowLatency
 impl core::convert::TryInto for zenoh_protocol::core::wire_expr::WireExpr
 impl core::default::Default for zenoh_protocol::common::extension::ZExtBody
 impl core::default::Default for zenoh_protocol::common::extension::ZExtUnit
@@ -671,6 +776,7 @@ impl core::default::Default for zenoh_protocol::network::declare::queryable::ext
 impl core::default::Default for zenoh_protocol::network::ext::NodeIdType
 impl core::default::Default for zenoh_protocol::network::ext::QoSType
 impl core::default::Default for zenoh_protocol::network::request::ext::QueryTarget
+impl core::default::Default for zenoh_protocol::transport::ext::QoSType
 impl core::default::Default for zenoh_protocol::zenoh::del::Del
 impl core::default::Default for zenoh_protocol::zenoh::ext::ShmType
 impl core::default::Default for zenoh_protocol::zenoh::put::Put
@@ -770,6 +876,27 @@ impl core::fmt::Debug for zenoh_protocol::scouting::ScoutingBody
 impl core::fmt::Debug for zenoh_protocol::scouting::ScoutingMessage
 impl core::fmt::Debug for zenoh_protocol::scouting::hello::HelloProto
 impl core::fmt::Debug for zenoh_protocol::scouting::scout::Scout
+impl core::fmt::Debug for zenoh_protocol::transport::PrioritySn
+impl core::fmt::Debug for zenoh_protocol::transport::TransportBody
+impl core::fmt::Debug for zenoh_protocol::transport::TransportBodyLowLatency
+impl core::fmt::Debug for zenoh_protocol::transport::TransportBodyLowLatencyRef
+impl core::fmt::Debug for zenoh_protocol::transport::TransportMessage
+impl core::fmt::Debug for zenoh_protocol::transport::TransportMessageLowLatency
+impl core::fmt::Debug for zenoh_protocol::transport::TransportMessageLowLatencyRef
+impl core::fmt::Debug for zenoh_protocol::transport::close::Close
+impl core::fmt::Debug for zenoh_protocol::transport::ext::PatchType
+impl core::fmt::Debug for zenoh_protocol::transport::ext::QoSType
+impl core::fmt::Debug for zenoh_protocol::transport::fragment::Fragment
+impl core::fmt::Debug for zenoh_protocol::transport::fragment::FragmentHeader
+impl core::fmt::Debug for zenoh_protocol::transport::frame::Frame
+impl core::fmt::Debug for zenoh_protocol::transport::frame::FrameHeader
+impl core::fmt::Debug for zenoh_protocol::transport::init::InitAck
+impl core::fmt::Debug for zenoh_protocol::transport::init::InitSyn
+impl core::fmt::Debug for zenoh_protocol::transport::join::Join
+impl core::fmt::Debug for zenoh_protocol::transport::keepalive::KeepAlive
+impl core::fmt::Debug for zenoh_protocol::transport::oam::Oam
+impl core::fmt::Debug for zenoh_protocol::transport::open::OpenAck
+impl core::fmt::Debug for zenoh_protocol::transport::open::OpenSyn
 impl core::fmt::Debug for zenoh_protocol::zenoh::DataInfo
 impl core::fmt::Debug for zenoh_protocol::zenoh::PushBody
 impl core::fmt::Debug for zenoh_protocol::zenoh::RequestBody
@@ -817,6 +944,7 @@ impl core::fmt::Display for zenoh_protocol::network::NetworkMessage
 impl core::fmt::Display for zenoh_protocol::network::NetworkMessageMut
 impl core::fmt::Display for zenoh_protocol::network::NetworkMessageRef
 impl core::fmt::Display for zenoh_protocol::network::interest::InterestOptions
+impl core::fmt::Display for zenoh_protocol::transport::TransportMessage
 impl core::hash::Hash for zenoh_protocol::core::CongestionControl
 impl core::hash::Hash for zenoh_protocol::core::EntityGlobalIdProto
 impl core::hash::Hash for zenoh_protocol::core::Priority
@@ -874,6 +1002,15 @@ impl core::marker::Copy for zenoh_protocol::network::ext::TimestampType
 impl core::marker::Copy for zenoh_protocol::network::interest::InterestMode
 impl core::marker::Copy for zenoh_protocol::network::interest::InterestOptions
 impl core::marker::Copy for zenoh_protocol::network::request::ext::QueryTarget
+impl core::marker::Copy for zenoh_protocol::transport::PrioritySn
+impl core::marker::Copy for zenoh_protocol::transport::TransportBodyLowLatencyRef
+impl core::marker::Copy for zenoh_protocol::transport::TransportMessageLowLatencyRef
+impl core::marker::Copy for zenoh_protocol::transport::close::Close
+impl core::marker::Copy for zenoh_protocol::transport::ext::PatchType
+impl core::marker::Copy for zenoh_protocol::transport::ext::QoSType
+impl core::marker::Copy for zenoh_protocol::transport::fragment::FragmentHeader
+impl core::marker::Copy for zenoh_protocol::transport::frame::FrameHeader
+impl core::marker::Copy for zenoh_protocol::transport::keepalive::KeepAlive
 impl core::marker::Copy for zenoh_protocol::zenoh::ext::SourceInfoType
 impl core::marker::Copy for zenoh_protocol::zenoh::query::ConsolidationMode
 impl core::marker::StructuralPartialEq for zenoh_protocol::common::extension::ZExtBody
@@ -953,6 +1090,23 @@ impl core::marker::StructuralPartialEq for zenoh_protocol::scouting::ScoutingBod
 impl core::marker::StructuralPartialEq for zenoh_protocol::scouting::ScoutingMessage
 impl core::marker::StructuralPartialEq for zenoh_protocol::scouting::hello::HelloProto
 impl core::marker::StructuralPartialEq for zenoh_protocol::scouting::scout::Scout
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::PrioritySn
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::TransportBody
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::TransportMessage
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::close::Close
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::ext::PatchType
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::ext::QoSType
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::fragment::Fragment
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::fragment::FragmentHeader
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::frame::Frame
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::frame::FrameHeader
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::init::InitAck
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::init::InitSyn
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::join::Join
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::keepalive::KeepAlive
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::oam::Oam
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::open::OpenAck
+impl core::marker::StructuralPartialEq for zenoh_protocol::transport::open::OpenSyn
 impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::DataInfo
 impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::PushBody
 impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::RequestBody
@@ -1085,6 +1239,32 @@ mod zenoh_protocol::scouting::id
 mod zenoh_protocol::scouting::scout
 mod zenoh_protocol::scouting::scout::flag
 mod zenoh_protocol::transport
+mod zenoh_protocol::transport::batch_size
+mod zenoh_protocol::transport::close
+mod zenoh_protocol::transport::close::flag
+mod zenoh_protocol::transport::close::reason
+mod zenoh_protocol::transport::ext
+mod zenoh_protocol::transport::fragment
+mod zenoh_protocol::transport::fragment::ext
+mod zenoh_protocol::transport::fragment::flag
+mod zenoh_protocol::transport::frame
+mod zenoh_protocol::transport::frame::ext
+mod zenoh_protocol::transport::frame::flag
+mod zenoh_protocol::transport::id
+mod zenoh_protocol::transport::init
+mod zenoh_protocol::transport::init::ext
+mod zenoh_protocol::transport::init::flag
+mod zenoh_protocol::transport::join
+mod zenoh_protocol::transport::join::ext
+mod zenoh_protocol::transport::join::flag
+mod zenoh_protocol::transport::keepalive
+mod zenoh_protocol::transport::keepalive::flag
+mod zenoh_protocol::transport::oam
+mod zenoh_protocol::transport::oam::ext
+mod zenoh_protocol::transport::oam::flag
+mod zenoh_protocol::transport::open
+mod zenoh_protocol::transport::open::ext
+mod zenoh_protocol::transport::open::flag
 mod zenoh_protocol::zenoh
 mod zenoh_protocol::zenoh::del
 mod zenoh_protocol::zenoh::del::ext
@@ -1228,6 +1408,36 @@ struct zenoh_protocol::scouting::Scout
 struct zenoh_protocol::scouting::ScoutingMessage
 struct zenoh_protocol::scouting::hello::HelloProto
 struct zenoh_protocol::scouting::scout::Scout
+struct zenoh_protocol::transport::Close
+struct zenoh_protocol::transport::Fragment
+struct zenoh_protocol::transport::FragmentHeader
+struct zenoh_protocol::transport::Frame
+struct zenoh_protocol::transport::FrameHeader
+struct zenoh_protocol::transport::InitAck
+struct zenoh_protocol::transport::InitSyn
+struct zenoh_protocol::transport::Join
+struct zenoh_protocol::transport::KeepAlive
+struct zenoh_protocol::transport::Oam
+struct zenoh_protocol::transport::OpenAck
+struct zenoh_protocol::transport::OpenSyn
+struct zenoh_protocol::transport::PrioritySn
+struct zenoh_protocol::transport::TransportMessage
+struct zenoh_protocol::transport::TransportMessageLowLatency
+struct zenoh_protocol::transport::TransportMessageLowLatencyRef
+struct zenoh_protocol::transport::close::Close
+struct zenoh_protocol::transport::ext::PatchType
+struct zenoh_protocol::transport::ext::QoSType
+struct zenoh_protocol::transport::fragment::Fragment
+struct zenoh_protocol::transport::fragment::FragmentHeader
+struct zenoh_protocol::transport::frame::Frame
+struct zenoh_protocol::transport::frame::FrameHeader
+struct zenoh_protocol::transport::init::InitAck
+struct zenoh_protocol::transport::init::InitSyn
+struct zenoh_protocol::transport::join::Join
+struct zenoh_protocol::transport::keepalive::KeepAlive
+struct zenoh_protocol::transport::oam::Oam
+struct zenoh_protocol::transport::open::OpenAck
+struct zenoh_protocol::transport::open::OpenSyn
 struct zenoh_protocol::zenoh::DataInfo
 struct zenoh_protocol::zenoh::Del
 struct zenoh_protocol::zenoh::Err
@@ -1317,7 +1527,42 @@ type zenoh_protocol::network::response::ext::Timestamp
 type zenoh_protocol::network::response::ext::TimestampType
 type zenoh_protocol::network::response::ext::TsStack
 type zenoh_protocol::network::response::ext::TsStackType
+type zenoh_protocol::transport::AtomicBatchSize
+type zenoh_protocol::transport::BatchSize
 type zenoh_protocol::transport::TransportSn
+type zenoh_protocol::transport::fragment::TransportSn
+type zenoh_protocol::transport::fragment::ext::Drop
+type zenoh_protocol::transport::fragment::ext::First
+type zenoh_protocol::transport::fragment::ext::QoS
+type zenoh_protocol::transport::fragment::ext::QoSType
+type zenoh_protocol::transport::frame::ext::QoS
+type zenoh_protocol::transport::frame::ext::QoSType
+type zenoh_protocol::transport::init::ext::Auth
+type zenoh_protocol::transport::init::ext::Compression
+type zenoh_protocol::transport::init::ext::LowLatency
+type zenoh_protocol::transport::init::ext::MultiLink
+type zenoh_protocol::transport::init::ext::Patch
+type zenoh_protocol::transport::init::ext::PatchType
+type zenoh_protocol::transport::init::ext::QoS
+type zenoh_protocol::transport::init::ext::QoSLink
+type zenoh_protocol::transport::init::ext::RegionName
+type zenoh_protocol::transport::init::ext::Shm
+type zenoh_protocol::transport::join::ext::Patch
+type zenoh_protocol::transport::join::ext::PatchType
+type zenoh_protocol::transport::join::ext::QoS
+type zenoh_protocol::transport::join::ext::QoSType
+type zenoh_protocol::transport::join::ext::Shm
+type zenoh_protocol::transport::oam::OamId
+type zenoh_protocol::transport::oam::ext::QoS
+type zenoh_protocol::transport::oam::ext::QoSType
+type zenoh_protocol::transport::open::ext::Auth
+type zenoh_protocol::transport::open::ext::Compression
+type zenoh_protocol::transport::open::ext::LowLatency
+type zenoh_protocol::transport::open::ext::MultiLinkAck
+type zenoh_protocol::transport::open::ext::MultiLinkSyn
+type zenoh_protocol::transport::open::ext::QoS
+type zenoh_protocol::transport::open::ext::RemoteBound
+type zenoh_protocol::transport::open::ext::Shm
 type zenoh_protocol::zenoh::del::ext::Attachment
 type zenoh_protocol::zenoh::del::ext::AttachmentType
 type zenoh_protocol::zenoh::del::ext::SourceInfo
