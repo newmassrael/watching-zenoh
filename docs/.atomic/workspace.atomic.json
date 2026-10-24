@@ -283814,6 +283814,56 @@
         "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
       ]
     },
+    "Round 3551": {
+      "decision_summary": "The session node and driver, wz-ap-demo, now compile for both QNX 7.1 aarch64le network stacks (io-pkt and io-sock) without the QNX SDK. Two crates.io packages that do not compile on io-sock are carried as plain copies under third-party/, each with one arm changed and a removal condition; a QNX IPv6 group join is refused in wz-runtime-tokio rather than skipped.",
+      "changes_bullets": [
+        "third-party/socket2 (0.6.3) and third-party/tokio (1.52.3), selected by [patch.crates-io] in crates/Cargo.toml: socket2 takes the keep-alive idle time for QNX on io-pkt only (libc has no such constant on io-sock) and answers Unsupported on io-sock; tokio takes the peer-credential arm for io-pkt only and gives io-sock an implementation that returns Unsupported, not the existing no-process one, which reports uid 0 as a success. Each directory carries a WZ-PATCH.md (what changes, what does not, when to delete it); THIRD_PARTY.md has an entry for each.",
+        "crates/wz-runtime-tokio/src/lib.rs: on QNX an IPv6 multicast group join returns Unsupported (libc has no ipv6_mreq there, so socket2 has no such method); IPv4 joins are unchanged.",
+        "mnemosyne.toml: third-party joins scan_exclusions beside vendor, because the 553 sources are crates.io code, not author-written; scripts/lib/upstream_citation_anchor_gate.py skips third-party/ for the same reason; .github/workflows/platform.yml triggers on both copies, since the macOS and Windows legs build them.",
+        "The copies sit outside crates/ on purpose: three gates take every tracked file under crates/ as this tree's own code and each failed on the first copy. reason_citation_gate, which matched the copy's same-named files against upstream citations, was narrowed to the history of HEAD and to skip third-party/ by another session in the round before this one."
+      ],
+      "verification_bullets": [
+        "cargo +nightly check with build-std for aarch64-unknown-nto-qnx710 and aarch64-unknown-nto-qnx710_iosock: wz-ap-demo passes on both; socket2 passes on both. Checked on the workstation without the QNX SDK, since check needs neither a linker nor a C compiler. The SDK headers were read afterwards, read-only, on the machine that holds the SDK, and none of the constants in this round was taken from them.",
+        "The host (cargo check of the four artifact packages and wz-runtime-tokio) and the Android platform (Layer C1sp, packaged twice, same manifest bytes, verified) still pass with both copies; Layer L and validate-workspace pass with no new orphan.",
+        "The gates the copies reddened were each re-run green: upstream_citation_anchor_gate, released_port_gate, feature_public_surface_census, and the citation-coverage check of validate-workspace.",
+        "Not run: an actual QNX link or run; the hosted CI; the extended pre-push sweep before this round."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "wz-capi-pico does not compile on either QNX stack: libc declares neither strftime nor getrandom for QNX, and the pthread_t size contract of its header (8 bytes, pico's unix layout) has no QNX counterpart because zenoh-pico has no QNX platform. Whether wz owns a QNX header layout is a decision, not a guess.",
+        "wz-capi-c stops in the ring build script (it needs the QNX C compiler, so it needs the SDK) and, on io-sock, in quinn-udp (libc has no IP_RECVTOS there); both are first errors, with more possible behind.",
+        "A QNX link and a run are not done. The io-sock headers read afterwards show TCP_KEEPIDLE, LOCAL_PEERCRED with struct xucred, struct ipv6_mreq and IP_RECVTOS, so the Unsupported answers of this round can be replaced by real calls once libc declares them or a header-checked definition is carried.",
+        "Send both changes upstream (socket2, tokio, libc) with the constants read from the header, then delete third-party/. Sending is an outward act and waits for the owner.",
+        "The aarch64 QNX platform rows are still untried at the lane level; their os_provides and system_assumed are unassessed."
+      ],
+      "publishable_decision_summary": "The session node and driver, wz-ap-demo, now compile for both QNX 7.1 aarch64le network stacks (io-pkt and io-sock) without the QNX SDK. Two crates.io packages that do not compile on io-sock are carried as plain copies under third-party/, each with one arm changed and a removal condition; a QNX IPv6 group join is refused in wz-runtime-tokio rather than skipped.",
+      "publishable_changes_bullets": [
+        "third-party/socket2 (0.6.3) and third-party/tokio (1.52.3), selected by [patch.crates-io] in crates/Cargo.toml: socket2 takes the keep-alive idle time for QNX on io-pkt only (libc has no such constant on io-sock) and answers Unsupported on io-sock; tokio takes the peer-credential arm for io-pkt only and gives io-sock an implementation that returns Unsupported, not the existing no-process one, which reports uid 0 as a success. Each directory carries a WZ-PATCH.md (what changes, what does not, when to delete it); THIRD_PARTY.md has an entry for each.",
+        "crates/wz-runtime-tokio/src/lib.rs: on QNX an IPv6 multicast group join returns Unsupported (libc has no ipv6_mreq there, so socket2 has no such method); IPv4 joins are unchanged.",
+        "mnemosyne.toml: third-party joins scan_exclusions beside vendor, because the 553 sources are crates.io code, not author-written; scripts/lib/upstream_citation_anchor_gate.py skips third-party/ for the same reason; .github/workflows/platform.yml triggers on both copies, since the macOS and Windows legs build them.",
+        "The copies sit outside crates/ on purpose: three gates take every tracked file under crates/ as this tree's own code and each failed on the first copy. reason_citation_gate, which matched the copy's same-named files against upstream citations, was narrowed to the history of HEAD and to skip third-party/ by another session in the round before this one."
+      ],
+      "publishable_verification_bullets": [
+        "cargo +nightly check with build-std for aarch64-unknown-nto-qnx710 and aarch64-unknown-nto-qnx710_iosock: wz-ap-demo passes on both; socket2 passes on both. Checked on the workstation without the QNX SDK, since check needs neither a linker nor a C compiler. The SDK headers were read afterwards, read-only, on the machine that holds the SDK, and none of the constants in this round was taken from them.",
+        "The host (cargo check of the four artifact packages and wz-runtime-tokio) and the Android platform (Layer C1sp, packaged twice, same manifest bytes, verified) still pass with both copies; Layer L and validate-workspace pass with no new orphan.",
+        "The gates the copies reddened were each re-run green: upstream_citation_anchor_gate, released_port_gate, feature_public_surface_census, and the citation-coverage check of validate-workspace.",
+        "Not run: an actual QNX link or run; the hosted CI; the extended pre-push sweep before this round."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "wz-capi-pico does not compile on either QNX stack: libc declares neither strftime nor getrandom for QNX, and the pthread_t size contract of its header (8 bytes, pico's unix layout) has no QNX counterpart because zenoh-pico has no QNX platform. Whether wz owns a QNX header layout is a decision, not a guess.",
+        "wz-capi-c stops in the ring build script (it needs the QNX C compiler, so it needs the SDK) and, on io-sock, in quinn-udp (libc has no IP_RECVTOS there); both are first errors, with more possible behind.",
+        "A QNX link and a run are not done. The io-sock headers read afterwards show TCP_KEEPIDLE, LOCAL_PEERCRED with struct xucred, struct ipv6_mreq and IP_RECVTOS, so the Unsupported answers of this round can be replaced by real calls once libc declares them or a header-checked definition is carried.",
+        "Send both changes upstream (socket2, tokio, libc) with the constants read from the header, then delete third-party/. Sending is an outward act and waits for the owner.",
+        "The aarch64 QNX platform rows are still untried at the lane level; their os_provides and system_assumed are unassessed."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
