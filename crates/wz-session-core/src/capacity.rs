@@ -172,11 +172,7 @@ pub struct EffectiveBound {
 
 /// `numerator / denominator` over `u64`, where a zero denominator is no work and bounds nothing.
 fn quotient(numerator: u64, denominator: u64) -> u64 {
-    if denominator == 0 {
-        u64::MAX
-    } else {
-        numerator / denominator
-    }
+    numerator.checked_div(denominator).unwrap_or(u64::MAX)
 }
 
 /// The sessions whose keepalive burst the keepalive thread serves within one keepalive interval at
