@@ -281394,6 +281394,56 @@
         "C1bz was red on origin/main from round 3490's push (501 against 495); this entry's push repairs it, found by another session that measured the diff."
       ]
     },
+    "Round 3497": {
+      "decision_summary": "Open-debt item 924, step 3 of docs/dissect-row-index.md (owner: long-term correct, cost not counted), with D1 corrected: the payload stream is the smallest form of a stream a handle can own, since a packet arena holds headers too, so an owned handle keeps it, now as kept bytes behind a compact chunked run map read by range. The second copy goes where the caller keeps the first: a capture LENT to the handle (Dissection::follow_lent, LentCapture; C doors wz_dissect_pcap_replay_lent and wz_dissect_live_follow_lent, ABI 50) keeps no TCP payload in it and reads each one where it sits. A Segment now borrows its payload from its packet, so that place is where the slice is, and both paths lost a copy. Lent against handed on the same build: peak RSS 176 to 141 MB and 577 to 461 MB, 2.3x and 2.2x the file against 6.6x before step 4b.",
+      "changes_bullets": [
+        "wz-session-core chunk_log.rs: ChunkLog, the chunked log the message list kept privately, shared with the TCP run map",
+        "wz-capture tcp.rs: the run map is a ChunkLog of 32-byte runs over kept payload bytes; bytes(from, to, container) reads a range borrowed from one place or gathered; a run whose payload sits in a lent container keeps its place there and no copy; runs() and OffsetRun removed",
+        "wz-capture lib.rs: LentCapture, Dissection::follow_lent, the lent container on every flow; link.rs: Segment borrows its payload from its packet, which replaced the second header walk the lent path first used",
+        "wz-capi-dissect: LiveDissection::from_capture_lent and follow_lent; wz_dissect_pcap_replay_lent and wz_dissect_live_follow_lent, ABI 50 with every mirror; the C consumer drives both",
+        "redecode_gate.rs: a lent dissection reads as one handed the same bytes, whole, grown through containers that move, and under ceilings, and keeps no payload; docs/dissect-row-index.md: D1 corrected, step 3 recorded"
+      ],
+      "verification_bullets": [
+        "Section 2 instrument through the C ABI, handed against lent on one build, three runs each and every run equal: peak RSS 176 to 141 MB (409,064 rows, file 61 MB) and 577 to 461 MB (1,386,564 rows, file 206 MB); heap after replay 88.8 to 34.7 MiB and 333.4 to 117.4 MiB",
+        "callgrind at 40,064 rows (replay, drain, census): handed 612.9 to 604.5 M instructions and lent 632.9 to 603.0 M once the segment borrowed its payload",
+        "cargo test wz-capture all features (1561, the lent gate among them), wz-session-core (dissect, alloc, reassembly), wz-analyze all features, wz-runtime-tokio pcap_dissect_e2e, wz-capi-dissect, wz-replay, wz-capi-replay on the rebased tree",
+        "clippy -D warnings wz-capture all and no default features, wz-analyze, wz-capi-dissect; Layer C1bo (C consumer, capi-abi-pin ABI 50, header gates); discard_site_lint, accessor_reach_census, analysis_surface_parity, guarded_count_gate on the range"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 4c of docs/dissect-row-index.md: datagram, serial and QUIC rows as index entries with a byte source; then step 5, the memory gate",
+        "wz-session-core does not compile with session-slot since 72d91c328 (publish_options.rs: no arm for the tx-lend-only LinkRefused); reported to its author, not this round's to map",
+        "The hosted CI runs holding rounds 3485 and 3488 were all cancelled before a job ran; read the first completed run that holds them and this round, and tell the consumer session which pin to take if it is red"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 3 of docs/dissect-row-index.md (owner: long-term correct, cost not counted), with D1 corrected: the payload stream is the smallest form of a stream a handle can own, since a packet arena holds headers too, so an owned handle keeps it, now as kept bytes behind a compact chunked run map read by range. The second copy goes where the caller keeps the first: a capture LENT to the handle (Dissection::follow_lent, LentCapture; C doors wz_dissect_pcap_replay_lent and wz_dissect_live_follow_lent, ABI 50) keeps no TCP payload in it and reads each one where it sits. A Segment now borrows its payload from its packet, so that place is where the slice is, and both paths lost a copy. Lent against handed on the same build: peak RSS 176 to 141 MB and 577 to 461 MB, 2.3x and 2.2x the file against 6.6x before step 4b.",
+      "publishable_changes_bullets": [
+        "wz-session-core chunk_log.rs: ChunkLog, the chunked log the message list kept privately, shared with the TCP run map",
+        "wz-capture tcp.rs: the run map is a ChunkLog of 32-byte runs over kept payload bytes; bytes(from, to, container) reads a range borrowed from one place or gathered; a run whose payload sits in a lent container keeps its place there and no copy; runs() and OffsetRun removed",
+        "wz-capture lib.rs: LentCapture, Dissection::follow_lent, the lent container on every flow; link.rs: Segment borrows its payload from its packet, which replaced the second header walk the lent path first used",
+        "wz-capi-dissect: LiveDissection::from_capture_lent and follow_lent; wz_dissect_pcap_replay_lent and wz_dissect_live_follow_lent, ABI 50 with every mirror; the C consumer drives both",
+        "redecode_gate.rs: a lent dissection reads as one handed the same bytes, whole, grown through containers that move, and under ceilings, and keeps no payload; docs/dissect-row-index.md: D1 corrected, step 3 recorded"
+      ],
+      "publishable_verification_bullets": [
+        "Section 2 instrument through the C ABI, handed against lent on one build, three runs each and every run equal: peak RSS 176 to 141 MB (409,064 rows, file 61 MB) and 577 to 461 MB (1,386,564 rows, file 206 MB); heap after replay 88.8 to 34.7 MiB and 333.4 to 117.4 MiB",
+        "callgrind at 40,064 rows (replay, drain, census): handed 612.9 to 604.5 M instructions and lent 632.9 to 603.0 M once the segment borrowed its payload",
+        "cargo test wz-capture all features (1561, the lent gate among them), wz-session-core (dissect, alloc, reassembly), wz-analyze all features, wz-runtime-tokio pcap_dissect_e2e, wz-capi-dissect, wz-replay, wz-capi-replay on the rebased tree",
+        "clippy -D warnings wz-capture all and no default features, wz-analyze, wz-capi-dissect; Layer C1bo (C consumer, capi-abi-pin ABI 50, header gates); discard_site_lint, accessor_reach_census, analysis_surface_parity, guarded_count_gate on the range"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 4c of docs/dissect-row-index.md: datagram, serial and QUIC rows as index entries with a byte source; then step 5, the memory gate",
+        "wz-session-core does not compile with session-slot since 72d91c328 (publish_options.rs: no arm for the tx-lend-only LinkRefused); reported to its author, not this round's to map",
+        "The hosted CI runs holding rounds 3485 and 3488 were all cancelled before a job ran; read the first completed run that holds them and this round, and tell the consumer session which pin to take if it is red"
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
