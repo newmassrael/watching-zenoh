@@ -280918,6 +280918,58 @@
         "The latency of one request and reply with the loop's yield is not measured: the harness on the comparison host spreads 82 to 104 us between runs, wider than the effect a yield once in eight events could have, so a run there could not show it."
       ]
     },
+    "Round 3487": {
+      "decision_summary": "zenoh-runtime is a member of the zenoh crate family under its own name and is built before zenoh-core: it is the one crate that owns process-global state, a pool of tokio runtimes with one per role in a static, and Cargo keeping one crate per package name is what makes it one pool per process, where a runtime private to zenoh-core would have been a second pool. The crate is written by hand where upstream generates its configuration with two derive macros, so it depends on no procedural-macro crate (user-delegated decision of 2026-10-24).",
+      "changes_bullets": [
+        "The `zenoh-runtime` crate, `crates/wz-zenoh-runtime`, named `zenoh-runtime` and versioned 1.10.1, with upstream's one feature `tracing-instrument` and upstream's requirements for the crates its API names (tokio, serde, ron, lazy_static); its surface is upstream's line for line, including the items upstream's derive macros generate (`GlobalRuntimeParam`, the lazy statics, `ZRuntime::iter`, the `Borrow` and `Display` impls).",
+        "The configuration is read as upstream reads it: `ZENOH_RUNTIME` in RON with the implicit-`Some` extension, a role not named keeps its defaults (`rx` has two threads), a field not named keeps its role's, an unknown role or field is refused with a panic at the first use of the pool, and `handover` serves one role from another's runtime. `ZRuntime::block_in_place` panics on a current-thread scheduler with upstream's message.",
+        "One difference of construction, not of behaviour: `ZRuntimePoolGuard` shuts the pool's runtimes down through a movable slot kept beside each handle, where upstream reads the static out by an unsafe copy and drops it; the observable effect, the runtimes stopping with blocking tasks given a second, is the same, and no unsafe code is needed.",
+        "`conformance/differential/tests/zenoh_runtime.rs`, four tests: each case runs the test binary again as a child with `ZENOH_RUNTIME` set, because the pool is configured once per process, and the parent holds what each crate read and which thread served each role equal; Layer E18 now guards the two differential binaries separately (6 and 4).",
+        "The facade feature `api-compat-rust` pulls the crate and re-exports it in `wz::zenoh_family`; the reason of the atom, the design document's member list and order, and the prose-name gate (`ZENOH_RUNTIME` is now carried by this tree) are brought up to it."
+      ],
+      "verification_bullets": [
+        "The surface gate over the family: `zenoh-runtime` reads 41 of 41 lines with 0 missing and 0 extra, from a re-emission of both surfaces on the pinned nightly, and the first emission after writing the crate matched without a change; `zenoh-result` and `zenoh` read as before.",
+        "The crate's own five tests pass (the configuration read, the field-by-field override, the refusals, the role names, the current-thread panic); rustfmt, clippy with warnings denied and the build with `tracing-instrument` pass.",
+        "The differential tests pass, and two faults injected into the crate (a changed default thread count for `rx`, and a configuration that no longer refuses an unknown role) turned exactly the tests that own them red, three of the four, and left the child itself green.",
+        "Layer E18 passes run through run-ci with its counts guarded (6, 4, 3 and 1); the static gate bundle (the catalog audit, the AP-full membership, the store-reason, citation, pin, census, prose, lane, job-budget and cache gates) passes; validate-workspace reads orphans 14 against 14 carried with 0 new, T3 warn 4 and 0 unscanned.",
+        "Not run here: the hosted run of Layer E18, whose cold build of the second graph is not measured."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "carry_forward_bullets": [
+        "Next crate of the family: zenoh-core, whose `ResolveFuture::wait` now has the application runtime of zenoh-runtime to block on; its public surface is larger than `zenoh` re-exports (the lock and parse macros, `ResolveClosure`, `ResolveFuture`, `polyfill`, a `lazy_static` re-export), and `zenoh-macros` follows it. Then zenoh-keyexpr, zenoh-protocol, zenoh-config, zenoh-util and `zenoh`.",
+        "Folding wz's own session runtime pools (the `Tx` threads and the C ABI's per-session runtime) onto the zenoh-runtime pool is decided in the `zenoh` slice, when a session is hooked in; until then a wz session and a `ZRuntime` task run on separate thread sets.",
+        "The differential test of the runtime holds each crate's reading of the configuration and its handover; it does not yet hold the thread NAMES `<role>-<n>` or the pool's shutdown, which need the processes to exit under observation.",
+        "Read the hosted runs of this push per job at the start of the next round, Layer E18 first."
+      ],
+      "publishable_decision_summary": "zenoh-runtime is a member of the zenoh crate family under its own name and is built before zenoh-core: it is the one crate that owns process-global state, a pool of tokio runtimes with one per role in a static, and Cargo keeping one crate per package name is what makes it one pool per process, where a runtime private to zenoh-core would have been a second pool. The crate is written by hand where upstream generates its configuration with two derive macros, so it depends on no procedural-macro crate (user-delegated decision of 2026-10-24).",
+      "publishable_changes_bullets": [
+        "The `zenoh-runtime` crate, `crates/wz-zenoh-runtime`, named `zenoh-runtime` and versioned 1.10.1, with upstream's one feature `tracing-instrument` and upstream's requirements for the crates its API names (tokio, serde, ron, lazy_static); its surface is upstream's line for line, including the items upstream's derive macros generate (`GlobalRuntimeParam`, the lazy statics, `ZRuntime::iter`, the `Borrow` and `Display` impls).",
+        "The configuration is read as upstream reads it: `ZENOH_RUNTIME` in RON with the implicit-`Some` extension, a role not named keeps its defaults (`rx` has two threads), a field not named keeps its role's, an unknown role or field is refused with a panic at the first use of the pool, and `handover` serves one role from another's runtime. `ZRuntime::block_in_place` panics on a current-thread scheduler with upstream's message.",
+        "One difference of construction, not of behaviour: `ZRuntimePoolGuard` shuts the pool's runtimes down through a movable slot kept beside each handle, where upstream reads the static out by an unsafe copy and drops it; the observable effect, the runtimes stopping with blocking tasks given a second, is the same, and no unsafe code is needed.",
+        "`conformance/differential/tests/zenoh_runtime.rs`, four tests: each case runs the test binary again as a child with `ZENOH_RUNTIME` set, because the pool is configured once per process, and the parent holds what each crate read and which thread served each role equal; Layer E18 now guards the two differential binaries separately (6 and 4).",
+        "The facade feature `api-compat-rust` pulls the crate and re-exports it in `wz::zenoh_family`; the reason of the atom, the design document's member list and order, and the prose-name gate (`ZENOH_RUNTIME` is now carried by this tree) are brought up to it."
+      ],
+      "publishable_verification_bullets": [
+        "The surface gate over the family: `zenoh-runtime` reads 41 of 41 lines with 0 missing and 0 extra, from a re-emission of both surfaces on the pinned nightly, and the first emission after writing the crate matched without a change; `zenoh-result` and `zenoh` read as before.",
+        "The crate's own five tests pass (the configuration read, the field-by-field override, the refusals, the role names, the current-thread panic); rustfmt, clippy with warnings denied and the build with `tracing-instrument` pass.",
+        "The differential tests pass, and two faults injected into the crate (a changed default thread count for `rx`, and a configuration that no longer refuses an unknown role) turned exactly the tests that own them red, three of the four, and left the child itself green.",
+        "Layer E18 passes run through run-ci with its counts guarded (6, 4, 3 and 1); the static gate bundle (the catalog audit, the AP-full membership, the store-reason, citation, pin, census, prose, lane, job-budget and cache gates) passes; validate-workspace reads orphans 14 against 14 carried with 0 new, T3 warn 4 and 0 unscanned.",
+        "Not run here: the hosted run of Layer E18, whose cold build of the second graph is not measured."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next crate of the family: zenoh-core, whose `ResolveFuture::wait` now has the application runtime of zenoh-runtime to block on; its public surface is larger than `zenoh` re-exports (the lock and parse macros, `ResolveClosure`, `ResolveFuture`, `polyfill`, a `lazy_static` re-export), and `zenoh-macros` follows it. Then zenoh-keyexpr, zenoh-protocol, zenoh-config, zenoh-util and `zenoh`.",
+        "Folding wz's own session runtime pools (the `Tx` threads and the C ABI's per-session runtime) onto the zenoh-runtime pool is decided in the `zenoh` slice, when a session is hooked in; until then a wz session and a `ZRuntime` task run on separate thread sets.",
+        "The differential test of the runtime holds each crate's reading of the configuration and its handover; it does not yet hold the thread NAMES `<role>-<n>` or the pool's shutdown, which need the processes to exit under observation.",
+        "Read the hosted runs of this push per job at the start of the next round, Layer E18 first."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
