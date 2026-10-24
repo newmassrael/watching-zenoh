@@ -284674,6 +284674,44 @@
         "wz-runtime-tokio's C1bz budget is 467 and counts 7600a7709's writer_queue.rs link; the round that fixes that link lowers it to 466 (its owner, watching-zenoh-17, knows). Next: Q2b, the cancellation token to the port and SessionEngine::get_on_wire over QueryOptions, the tokio engine implementing it and pico's get and querier issuing through it; then Q2c, GET on the cooperative engine."
       ]
     },
+    "Round 3572": {
+      "decision_summary": "Open-debt item 924, step 5: the last copy the unit-size sweep left (owner: do what is left). A WebSocket message that is one masked frame, which is every frame a client sends, was logged as an unmasked copy on both doors. The masking key is the last four bytes of the frame's header, so it stands in the stream just before the payload: the place is LogPlace::StreamMasked, the list keeps where the payload stands and unmasks it as it reads (a copy that lives for the read, not for the row), and the row's stream dependence reaches back over the key, so a byte ceiling that releases the key keeps the message whole first. A masked row on the lent door costs the same at 16, 256 and 4096 bytes (139.4 B), as an unmasked one does, and the handed door holds the stream's copy and no more. Only a message joined out of fragments stands nowhere in the stream and is still logged, which the redecode gate asserts is small and the only thing logged.",
+      "changes_bullets": [
+        "wz-session-core: byte_log.rs (LogPlace::StreamMasked, MASK_KEY_LEN), passive_messages.rs (push_datagram_in_stream takes masked, a masked read unmasks into a copy for the read, stream_dependence reaches back over the key)",
+        "wz-capture: ws.rs (WsMessage.masked, the deframer keeps whether a single frame was masked), lib.rs (feed_websocket places a masked frame in the stream when the stream holds its key and payload), memory_matrix.rs (the masked kind is bounded at the stream's copy), redecode_gate.rs (the masked message reads from the stream; only the fragmented one is logged); docs/dissect-row-index.md"
+      ],
+      "verification_bullets": [
+        "cargo test wz-session-core all features (a masked unit in the stream logs nothing, reads as one kept whole, and is kept whole before a release that takes its key), wz-capture dissect and fixtures, and wz-capi-dissect (the handle memory gate) pass; the matrix holds the report equal to the allocator in every case and the masked websocket kind at 139.35 B on the lent door at every unit size",
+        "clippy -D warnings wz-session-core all and no default features, wz-capture default, all and no default features; rustfmt; discard_site_lint; the hook's round_fed_gates array (112, each exit code read from the rc file, all 0)",
+        "docs: wz-session-core 495, wz-capture 0"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "A message joined out of WebSocket fragments is still logged as a copy: its bytes stand in several frames, so keeping them in place would need a list of spans per row; zenoh's own link sends one frame a message, so it is the exception",
+        "Hosted CI for the rounds since 3504 has not been read by this session (the runs holding them were cancelled by later pushes or still pending); wz-runtime-tokio measured 476 against its doc budget of 474 on the tree after round 3570, in files no round of this debt touches"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 5: the last copy the unit-size sweep left (owner: do what is left). A WebSocket message that is one masked frame, which is every frame a client sends, was logged as an unmasked copy on both doors. The masking key is the last four bytes of the frame's header, so it stands in the stream just before the payload: the place is LogPlace::StreamMasked, the list keeps where the payload stands and unmasks it as it reads (a copy that lives for the read, not for the row), and the row's stream dependence reaches back over the key, so a byte ceiling that releases the key keeps the message whole first. A masked row on the lent door costs the same at 16, 256 and 4096 bytes (139.4 B), as an unmasked one does, and the handed door holds the stream's copy and no more. Only a message joined out of fragments stands nowhere in the stream and is still logged, which the redecode gate asserts is small and the only thing logged.",
+      "publishable_changes_bullets": [
+        "wz-session-core: byte_log.rs (LogPlace::StreamMasked, MASK_KEY_LEN), passive_messages.rs (push_datagram_in_stream takes masked, a masked read unmasks into a copy for the read, stream_dependence reaches back over the key)",
+        "wz-capture: ws.rs (WsMessage.masked, the deframer keeps whether a single frame was masked), lib.rs (feed_websocket places a masked frame in the stream when the stream holds its key and payload), memory_matrix.rs (the masked kind is bounded at the stream's copy), redecode_gate.rs (the masked message reads from the stream; only the fragmented one is logged); docs/dissect-row-index.md"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test wz-session-core all features (a masked unit in the stream logs nothing, reads as one kept whole, and is kept whole before a release that takes its key), wz-capture dissect and fixtures, and wz-capi-dissect (the handle memory gate) pass; the matrix holds the report equal to the allocator in every case and the masked websocket kind at 139.35 B on the lent door at every unit size",
+        "clippy -D warnings wz-session-core all and no default features, wz-capture default, all and no default features; rustfmt; discard_site_lint; the hook's round_fed_gates array (112, each exit code read from the rc file, all 0)",
+        "docs: wz-session-core 495, wz-capture 0"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A message joined out of WebSocket fragments is still logged as a copy: its bytes stand in several frames, so keeping them in place would need a list of spans per row; zenoh's own link sends one frame a message, so it is the exception",
+        "Hosted CI for the rounds since 3504 has not been read by this session (the runs holding them were cancelled by later pushes or still pending); wz-runtime-tokio measured 476 against its doc budget of 474 on the tree after round 3570, in files no round of this debt touches"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
