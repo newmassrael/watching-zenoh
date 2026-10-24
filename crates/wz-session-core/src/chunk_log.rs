@@ -85,6 +85,18 @@ impl<T> ChunkLog<T> {
         self.len
     }
 
+    /// Bytes the log has allocated: every chunk's capacity, which for a log
+    /// that grew is whole chunks and not the items it holds, and the list of
+    /// chunks.
+    pub fn allocated_bytes(&self) -> usize {
+        self.chunks.capacity() * core::mem::size_of::<VecDeque<T>>()
+            + self
+                .chunks
+                .iter()
+                .map(|chunk| chunk.capacity() * core::mem::size_of::<T>())
+                .sum::<usize>()
+    }
+
     /// No item is held.
     #[inline]
     pub fn is_empty(&self) -> bool {

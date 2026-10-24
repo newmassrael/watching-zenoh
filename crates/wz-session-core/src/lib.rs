@@ -1250,6 +1250,11 @@ pub mod passive_messages;
 #[cfg(feature = "alloc")]
 pub mod chunk_log;
 
+// Open-debt item 924, step 5 — the arithmetic a holder's memory report shares.
+// Undocumented on this line for the reason the module above gives.
+#[cfg(feature = "alloc")]
+pub mod heap_account;
+
 // Open-debt item 924 — the unit log a message list reads its datagrams' bytes
 // from, and a capture's scouting list its messages'. Gated as that list is.
 #[cfg(all(

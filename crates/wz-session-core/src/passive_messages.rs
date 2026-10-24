@@ -721,6 +721,80 @@ struct Index {
     wire_ends: BTreeMap<(u16, u64), u64>,
 }
 
+/// What a [`MessageList`] holds on the heap, by structure (open-debt item 924,
+/// D7): the memory report the capture layer sums over its lists.
+///
+/// Only the structures that follow the row count are named, and `small` is the
+/// rest of the index (the contexts, the cut unit), which does not. A figure is
+/// bytes allocated and not bytes used, because the first is what the process
+/// holds. See [`crate::heap_account`] for what is exact and what is a model.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ListMemory {
+    /// The rows: 48-byte entries when the list is an index, else each row's
+    /// decoded frame as the slot it sits in (what a frame owns beyond its slot is
+    /// not counted).
+    pub rows: usize,
+    /// The units' bytes the list keeps (copies; a unit in a lent container costs
+    /// nothing here).
+    pub unit_log: usize,
+    /// The rows kept whole beside the entries, a model of their map.
+    pub whole_rows: usize,
+    /// The facts few rows have (an SN verdict other than continuous, a fragment's
+    /// fate, a resynchronisation), a model of their map.
+    pub sparse: usize,
+    /// Where units a layer below framed end, a model of their map.
+    pub wire_ends: usize,
+    /// The rest of the index, which does not follow the row count.
+    pub small: usize,
+}
+
+impl ListMemory {
+    /// Every structure's bytes together.
+    pub fn total(&self) -> usize {
+        self.rows + self.unit_log + self.whole_rows + self.sparse + self.wire_ends + self.small
+    }
+
+    /// This report and `other` added field by field, for a holder of many lists.
+    pub fn plus(&self, other: &Self) -> Self {
+        Self {
+            rows: self.rows + other.rows,
+            unit_log: self.unit_log + other.unit_log,
+            whole_rows: self.whole_rows + other.whole_rows,
+            sparse: self.sparse + other.sparse,
+            wire_ends: self.wire_ends + other.wire_ends,
+            small: self.small + other.small,
+        }
+    }
+}
+
+impl Index {
+    /// What the index holds on the heap.
+    fn memory(&self) -> ListMemory {
+        ListMemory {
+            rows: self.entries.allocated_bytes(),
+            unit_log: self.log.allocated(),
+            whole_rows: crate::heap_account::btree_bytes::<u64, PassiveFrame>(self.held.len()),
+            sparse: crate::heap_account::btree_bytes::<u64, Sparse>(self.sparse.len()),
+            wire_ends: crate::heap_account::btree_bytes::<(u16, u64), u64>(self.wire_ends.len()),
+            small: crate::heap_account::vec_bytes(&self.contexts)
+                + crate::heap_account::vec_bytes(&self.cut),
+        }
+    }
+}
+
+impl MessageList {
+    /// What the list holds on the heap, by structure.
+    pub fn memory(&self) -> ListMemory {
+        match &self.rows {
+            Store::Held(frames) => ListMemory {
+                rows: frames.allocated_bytes(),
+                ..ListMemory::default()
+            },
+            Store::Indexed(index) => index.memory(),
+        }
+    }
+}
+
 /// One row of an [`Index`], as its [`UnitRow`] says.
 #[derive(Debug, Clone, Copy)]
 enum Entry {
