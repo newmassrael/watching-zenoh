@@ -282230,6 +282230,44 @@
         "No TLS 1.3 KeyUpdate in Mbed TLS 4.1; the Round 3495 items (the 18 percent gap, p256-m, persistent keys, the in-handshake pin)."
       ]
     },
+    "Round 3514": {
+      "decision_summary": "The meter's reading against the loss, measured: a router told nothing, on one core at nice 10 under 32 hogs, three runs at 1024, 1536 and 2048 sessions. No client was lost in the eight runs where the longest keepalive timer lateness stayed under 2T/3 (6667 ms), and 864 were lost in the one run where it passed it (10806 ms). The lateness is the quantity the loss follows, but it does not replace the bound: it grows faster than the session count (about 0.9 s at 1024, 1.9 to 3.4 s at 1536, 3.8 to 10.8 s at 2048), varies threefold between runs at one count, and the figure the router keeps is a process maximum that can only rise. The model's number stays the first line of defence (1100 reads 0.9 to 1.3 s, a seventh of the limit); an admission that follows a windowed lateness is the recorded next step and is not built. The measurement is a test, so every hosted run leaves the same table for its own runner.",
+      "changes_bullets": [
+        "Test `wz_router_hat_lateness_against_the_sessions_it_holds_at_32_hogs` (ignored, prints lateness, ended and DOWN at 1024, 1536, 2048 under 32 hogs); `Scenario::lease_loss_is_a_result` makes a run report the DOWN and ended counts instead of asserting them zero.",
+        "scripts/run-ci.sh: the E7s guard 4 -> 5, with the reason.",
+        "docs/router-data-plane-scaling.md 7.4: the table, what it shows, why the lateness is not the bound, and the windowed admission that is not built."
+      ],
+      "verification_bullets": [
+        "Three runs of the new test on a build host (four cores, 32 hogs): lateness 889, 881, 1263 ms at 1024; 3397, 1853, 1900 at 1536; 10806, 3799, 5446 at 2048; 864 clients ended in the one run at 10806 ms and none in the other eight; no face DOWN in any.",
+        "The whole E7s lane command, release build, on the same host: 5 passed in 301 s, which is the count the guard now declares; the promise test and the starved tests pass as before. In that run the new test read 1951, 1949 and 3605 ms.",
+        "clippy with warnings denied clean on the E7s test target; gate array 110 of 110; reason-review pin gate passes on the tree rebased on round 3513.",
+        "Not measured: the table on a hosted runner (the lane now prints it), a windowed lateness, and more than three runs per row."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Read the E7s job of the hosted run of round 3507 and of this one: the first shows whether the calibration holds the promise on a dearer host, the second prints the lateness table for the hosted runner. Open: a windowed lateness and an admission that follows it (needs the lateness per window and a rule for how fast the ceiling rises); the admin-space export of the lateness, the measured cost and the refusal counters; the data-drop policy with per-lane counters; the lane that re-derives the tables; the request-reply latency with the yield."
+      ],
+      "publishable_decision_summary": "The meter's reading against the loss, measured: a router told nothing, on one core at nice 10 under 32 hogs, three runs at 1024, 1536 and 2048 sessions. No client was lost in the eight runs where the longest keepalive timer lateness stayed under 2T/3 (6667 ms), and 864 were lost in the one run where it passed it (10806 ms). The lateness is the quantity the loss follows, but it does not replace the bound: it grows faster than the session count (about 0.9 s at 1024, 1.9 to 3.4 s at 1536, 3.8 to 10.8 s at 2048), varies threefold between runs at one count, and the figure the router keeps is a process maximum that can only rise. The model's number stays the first line of defence (1100 reads 0.9 to 1.3 s, a seventh of the limit); an admission that follows a windowed lateness is the recorded next step and is not built. The measurement is a test, so every hosted run leaves the same table for its own runner.",
+      "publishable_changes_bullets": [
+        "Test `wz_router_hat_lateness_against_the_sessions_it_holds_at_32_hogs` (ignored, prints lateness, ended and DOWN at 1024, 1536, 2048 under 32 hogs); `Scenario::lease_loss_is_a_result` makes a run report the DOWN and ended counts instead of asserting them zero.",
+        "scripts/run-ci.sh: the E7s guard 4 -> 5, with the reason.",
+        "docs/router-data-plane-scaling.md 7.4: the table, what it shows, why the lateness is not the bound, and the windowed admission that is not built."
+      ],
+      "publishable_verification_bullets": [
+        "Three runs of the new test on a build host (four cores, 32 hogs): lateness 889, 881, 1263 ms at 1024; 3397, 1853, 1900 at 1536; 10806, 3799, 5446 at 2048; 864 clients ended in the one run at 10806 ms and none in the other eight; no face DOWN in any.",
+        "The whole E7s lane command, release build, on the same host: 5 passed in 301 s, which is the count the guard now declares; the promise test and the starved tests pass as before. In that run the new test read 1951, 1949 and 3605 ms.",
+        "clippy with warnings denied clean on the E7s test target; gate array 110 of 110; reason-review pin gate passes on the tree rebased on round 3513.",
+        "Not measured: the table on a hosted runner (the lane now prints it), a windowed lateness, and more than three runs per row."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the E7s job of the hosted run of round 3507 and of this one: the first shows whether the calibration holds the promise on a dearer host, the second prints the lateness table for the hosted runner. Open: a windowed lateness and an admission that follows it (needs the lateness per window and a rule for how fast the ceiling rises); the admin-space export of the lateness, the measured cost and the refusal counters; the data-drop policy with per-lane counters; the lane that re-derives the tables; the request-reply latency with the yield."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
