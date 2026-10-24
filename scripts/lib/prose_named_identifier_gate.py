@@ -264,6 +264,10 @@ UPSTREAM_UNCARRIED = frozenset(
         "Z_CONFIG_MULTICAST_LOCATOR_DEFAULT",
         "Z_CONFIG_SCOUTING_TIMEOUT_DEFAULT",
         "Z_CONFIG_SCOUTING_WHAT_DEFAULT",
+        # Round 3562 — pico's socket receive timeout, which the cooperative engine's prose
+        # cites as what its idle wait matches. wz carries the value (the pico ABI hands the
+        # engine 100 ms as its idle wait), not a constant of that name. Described, not spelled.
+        "Z_CONFIG_SOCKET_TIMEOUT",
         "Z_CONGESTION_CONTROL_DEFAULT",
         # R3406 — seven `Z_FEATURE_*` switches left this set: BATCHING, ENCODING_VALUES,
         # FRAGMENTATION, MATCHING, MULTICAST_DECLARATIONS, PUBLICATION, SUBSCRIPTION.
