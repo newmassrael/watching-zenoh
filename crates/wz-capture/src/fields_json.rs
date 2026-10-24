@@ -7438,6 +7438,7 @@ mod tests {
     /// (pass one) and for its first byte (the capture-order key). Under byte
     /// ceilings, so that rows whose bytes went name no packet and the answer is
     /// an inherited one; the count of such rows is the anti-vacuity.
+    #[cfg(feature = "fixtures")]
     #[test]
     fn a_packet_read_back_from_the_rows_before_is_the_one_a_walk_carries() {
         let file = crate::fixtures::stream_chain_sequence_capture(20);
