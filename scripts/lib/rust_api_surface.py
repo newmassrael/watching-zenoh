@@ -160,6 +160,8 @@ MEMBERS: tuple[Member, ...] = (
            (("default", ""), ("unstable", "unstable")), {"default": 0, "unstable": 0},
            split_wz=True),
     Member("zenoh-macros", "zenoh_macros", "zenoh-macros", DEFAULT_ARM, {"default": 0}),
+    Member("zenoh-collections", "zenoh_collections", "zenoh-collections", DEFAULT_ARM,
+           {"default": 0}),
 )
 
 
