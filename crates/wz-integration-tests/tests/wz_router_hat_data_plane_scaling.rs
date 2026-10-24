@@ -15,8 +15,9 @@
 //! No timing is asserted, for the reason `run-ci.sh`'s decode-cost lane gives: a wall-clock or CPU
 //! ceiling on a shared runner is a flake generator. What is asserted is the population, so that a run
 //! which measured something other than the data plane says so instead of printing a confident number:
-//! every session connected, none was refused, nobody went DOWN in a steady window, and the router
-//! forwarded at least 80% of what was offered. The structural claims about the data plane are held by
+//! every session connected, none was refused, nobody went DOWN in a steady window and no client
+//! session ended on its own (its lease for the router ran out), and the router forwarded at least 80%
+//! of what was offered. The structural claims about the data plane are held by
 //! counters in the router's own tests, which are exact.
 //!
 //! ## Reading the output
@@ -277,16 +278,43 @@ fn churn_document(generation: usize, port: u16) -> String {
     out
 }
 
-fn spawn_sessions(demo: &Path, document: &Path, label: &str) -> ChildGuard {
-    let child = command_with_raised_limit(
+/// The line a client session prints when its drive loop ends on its own: the peer closed it, or its own
+/// lease for the peer ran out. A session the process closes on a stop prints nothing of the kind.
+const SESSION_ENDED: &str = ": ended (";
+
+/// Start a process holding the sessions `document` names. With `ended`, its log is read and every
+/// session that ends on its own adds one to the count: from the client's side that is the lease of a
+/// router that stopped speaking to it, which the router's own DOWN count only sees when its loops come
+/// back to the face.
+fn spawn_sessions(
+    demo: &Path,
+    document: &Path,
+    label: &str,
+    ended: Option<Arc<AtomicUsize>>,
+) -> ChildGuard {
+    let mut command = command_with_raised_limit(
         demo,
         &["--sessions", document.to_str().expect("a UTF-8 path")],
         None,
-    )
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .spawn()
-    .expect("the demo starts a sessions document");
+    );
+    command.stdout(Stdio::null());
+    command.stderr(if ended.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    });
+    let mut child = command
+        .spawn()
+        .expect("the demo starts a sessions document");
+    if let (Some(ended), Some(stderr)) = (ended, child.stderr.take()) {
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if line.contains(SESSION_ENDED) {
+                    ended.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+    }
     ChildGuard::wrap(label.to_string(), child)
 }
 
@@ -324,6 +352,8 @@ struct Window {
     /// Sessions that came up during the window, and how many the churn started in it.
     admitted: usize,
     attempted: usize,
+    /// Steady client sessions that ended on their own in the window ([`SESSION_ENDED`]).
+    ended: usize,
 }
 
 impl Window {
@@ -365,6 +395,7 @@ fn measure(scenario: Scenario) -> Window {
     let settle = Duration::from_millis(after_ms) + Duration::from_secs(4);
     let publishes = (settle + WINDOW + Duration::from_secs(60)).as_millis() as u64 / period_ms;
     let per_process = subscribers / CLIENT_PROCESSES;
+    let ended = Arc::new(AtomicUsize::new(0));
     let mut clients = Vec::new();
     for p in 0..CLIENT_PROCESSES {
         let path = dir.path().join(format!("steady-{p}.json5"));
@@ -381,7 +412,12 @@ fn measure(scenario: Scenario) -> Window {
             ),
         )
         .expect("write the sessions document");
-        clients.push(spawn_sessions(&demo, &path, "wz-ap-demo sessions"));
+        clients.push(spawn_sessions(
+            &demo,
+            &path,
+            "wz-ap-demo sessions",
+            Some(Arc::clone(&ended)),
+        ));
     }
 
     let up_deadline = Instant::now() + Duration::from_secs(60 + subscribers as u64 / 20);
@@ -405,11 +441,12 @@ fn measure(scenario: Scenario) -> Window {
         .flat_map(|core| (0..starved_by.unwrap_or(0)).map(move |_| spawn_cpu_hog(core)))
         .collect();
 
-    let (cpu_before, pushes_before, down_before, up_before) = (
+    let (cpu_before, pushes_before, down_before, up_before, ended_before) = (
         cpu_seconds(router_pid),
         router.pushes.load(Ordering::Relaxed),
         router.down.load(Ordering::Relaxed),
         router.up.load(Ordering::Relaxed),
+        ended.load(Ordering::Relaxed),
     );
     let started = Instant::now();
     let mut waves: VecDeque<(Instant, ChildGuard)> = VecDeque::new();
@@ -422,7 +459,7 @@ fn measure(scenario: Scenario) -> Window {
                 .expect("write the churn document");
             waves.push_back((
                 Instant::now(),
-                spawn_sessions(&demo, &path, "wz-ap-demo churn"),
+                spawn_sessions(&demo, &path, "wz-ap-demo churn", None),
             ));
             while waves
                 .front()
@@ -441,6 +478,7 @@ fn measure(scenario: Scenario) -> Window {
         offered,
         admitted: router.up.load(Ordering::Relaxed) - up_before,
         attempted: generation * CHURN_SESSIONS,
+        ended: ended.load(Ordering::Relaxed) - ended_before,
     };
     drop(waves);
     drop(clients);
@@ -463,6 +501,17 @@ fn measure(scenario: Scenario) -> Window {
                 .lock()
                 .map(|lines| lines.join("\n"))
                 .unwrap_or_default()
+        );
+    }
+    // The router's own DOWN count is a race on a starved router, which sees a face fall only when its
+    // loops come back to it. What the property is, from the other end: no client session lost its
+    // router, and a client ends its session on its own only when its lease for the router ran out.
+    if !churn {
+        assert_eq!(
+            window.ended, 0,
+            "{} client sessions ended on their own in a steady window: their lease for the router \
+             ran out",
+            window.ended
         );
     }
     // A starved router is overloaded on purpose, so how much it forwards is the answer there and
@@ -529,10 +578,12 @@ fn wz_router_hat_keeps_its_links_when_overloaded_and_short_of_cpu() {
     });
     eprintln!(
         "\nstarved router (one shared core, lower priority), 2048 subscribers, offered {offered} messages/s: \
-         forwarded {:.0} messages/s ({:.0}% of offered), {} faces went DOWN",
+         forwarded {:.0} messages/s ({:.0}% of offered), {} faces went DOWN, {} client sessions ended \
+         on their own",
         w.messages_per_second(),
         100.0 * w.delivered_share(),
         w.down,
+        w.ended,
     );
 }
 

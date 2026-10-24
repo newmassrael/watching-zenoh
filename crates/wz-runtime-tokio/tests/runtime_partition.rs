@@ -376,6 +376,37 @@ fn saturated_rx_does_not_starve_tx_when_partitioned() {
     );
 }
 
+/// The control subsystem is wz's own: the keepalive timers run on it so that a TX runtime
+/// whose workers are all busy with data does not hold them. TX holds every one of its
+/// workers and a control task still runs.
+#[test]
+fn saturated_tx_does_not_starve_control_when_partitioned() {
+    let pool = RuntimePool::new(RuntimeParams::defaults()).expect("defaults are a valid partition");
+    let tx_workers = RuntimeParam::defaults_for(WzRuntime::Tx).worker_threads;
+
+    let holders = Holders::new();
+    saturate(
+        |started| {
+            pool.spawn(WzRuntime::Tx, hold_a_worker(started, holders.clone()));
+        },
+        tx_workers,
+    );
+
+    let (control_ran, observer) = progress_flag();
+    pool.spawn(WzRuntime::Control, async move {
+        control_ran.store(true, Ordering::SeqCst);
+    });
+
+    std::thread::sleep(Duration::from_millis(OBSERVE_MS));
+    let ran = observer.load(Ordering::SeqCst);
+    holders.release();
+    assert!(
+        ran,
+        "Control has its own runtime, so TX saturating all {tx_workers} of its workers \
+         must not delay a keepalive timer"
+    );
+}
+
 /// Each subsystem runs on threads of its own, named for it.
 #[test]
 fn each_subsystem_runs_on_threads_named_for_it() {
