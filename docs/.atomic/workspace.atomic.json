@@ -281060,6 +281060,58 @@
         "Read the hosted runs of this push per job at the start of the next round, Layer E18 first."
       ]
     },
+    "Round 3490": {
+      "decision_summary": "A router told the CPU share it may count on now admits only the sessions whose keepalives that share can serve, and refuses the rest, so it keeps the leases it admitted. The bound is integers in wz-session-core (the keepalive thread has a 1/b part of the share, N <= s T / (3 b c_k)), the effective max_sessions is the smaller of it and the configured number, the demo declares it with --cpu-share and --max-data-wait, and the accept loop reads the one number. The first costs (4.5 us per keepalive) were refuted by another session's runs at 32 hogs: no client lost at 1536 sessions in five runs, clients lost at 2048 in five, one emission 6 to 10 us. The recorded cost is 10 us, which puts the bound at 1100, and the new E7s test of the promise passes 12 of 12 runs.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/capacity.rs (new): ControlModel, RECORDED_HOST_MODEL (10 us, 11 us, 4 threads), CapacityContract, liveness_bound, service_bound, effective_max_sessions, LOOP_TURN_UNITS; twelve clockless tests, one of which holds the bound at 32 hogs between two thirds of 1536 and 1536.",
+        "crates/wz-runtime-tokio: WzConfig gains capacity and effective_max_sessions, the module is re-exported, and session_glue.rs takes TURN_UNIT_BUDGET from LOOP_TURN_UNITS, so the quantum the model assumes is the one the loop runs.",
+        "crates/wz-ap-demo: --cpu-share <percent> and --max-data-wait <ms> on --router-hat, refused loudly when they cannot be a promise; the face sources read the effective bound; the router says once that it admits fewer than configured.",
+        "crates/wz-integration-tests/tests/wz_router_hat_data_plane_scaling.rs: Scenario takes a cpu_share; the test of the promise (32 hogs, 1.32%, 2048 knocking) asserts admitted within the bound, the rest refused, no face DOWN, no admitted client ended.",
+        "docs/router-data-plane-scaling.md section 7.4 (the promise, the two bounds, the measured loss against N, what is built and what is not); scripts/run-ci.sh E7s count 3 to 4; docs/reason-review-pins.md row of session_glue.rs."
+      ],
+      "verification_bullets": [
+        "On a build host (four cores, host load 13 to 30), the test of the promise: 9 of 9 runs with the first recorded costs (1222 admitted) and 3 of 3 with the recorded ones (1100): no face DOWN, no admitted client ended, the rest refused.",
+        "Another session's measurement at 32 hogs, five runs each: 1024 and 1536 sessions lost no client, 2048 lost 373 to 1158, 2560 lost 1145 to 1667; the keepalive's lateness peaked at 6.4 s at 1536 (2T/3 is 6.67 s) and grew past 8 s from 2048; one emission 6 to 10 us at the median, 12 to 48 us at the 99th percentile. The model's first costs gave 2440 for the bound and were replaced.",
+        "wz-session-core capacity tests 12 of 12; the config tests of the effective bound pass; the flag parser tests 4 of 4; clippy with warnings denied reports nothing on wz-session-core, wz-runtime-tokio, wz-ap-demo (router-hat build) and the E7s test; the two count guards the range reaches (partition 21, E7s 4) match the runs.",
+        "The gate array (110 of 110, the pin gate among them) and the guarded-count gate pass on the tree rebased on round 3487; Layer Q passes on a build host and the slot bytes equal the record.",
+        "Not measured: the share of the ctl thread (0.33% is from the scheduler's weights), the cost of a whole pacer cycle, the loss above the threshold in a window longer than 20 s, and everything on a hosted runner."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "The new E7s test runs in the hosted E7s lane (count 4) with 32 hogs on a hosted runner, which nobody has measured: its first hosted result is unread, and a red there may be the runner's share and not the model.",
+        "Built of the structure the owner approved: the capacity bound, the declaration, the refusal at the bound. Left: a counter that tells an operator whether a refusal was the configured bound's or the model's; the admin-space export of the measured share with a contract-violated flag; the data-drop policy and its counters; an assertion of the keepalive's lateness against 2T/3 (the clients' ending stands in); a lane that re-derives the tables and fails on drift.",
+        "The costs are this host's and this runtime's; another host, or the io_uring runtime, re-reads c_k, c_u and the thread count before the bound is a promise there.",
+        "The reason of session-close-ingress cites an anchor in session_glue.rs (Ok(nonce) => actions.refresh_cookie_nonce(nonce),) that has no match in the file and none on origin/main before this round; the pin row moved after reading the clauses this change touches (none), and that clause is left as it was.",
+        "Round 3486's carry said the stamp's share is unshown and left it; it stands."
+      ],
+      "publishable_decision_summary": "A router told the CPU share it may count on now admits only the sessions whose keepalives that share can serve, and refuses the rest, so it keeps the leases it admitted. The bound is integers in wz-session-core (the keepalive thread has a 1/b part of the share, N <= s T / (3 b c_k)), the effective max_sessions is the smaller of it and the configured number, the demo declares it with --cpu-share and --max-data-wait, and the accept loop reads the one number. The first costs (4.5 us per keepalive) were refuted by another session's runs at 32 hogs: no client lost at 1536 sessions in five runs, clients lost at 2048 in five, one emission 6 to 10 us. The recorded cost is 10 us, which puts the bound at 1100, and the new E7s test of the promise passes 12 of 12 runs.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/capacity.rs (new): ControlModel, RECORDED_HOST_MODEL (10 us, 11 us, 4 threads), CapacityContract, liveness_bound, service_bound, effective_max_sessions, LOOP_TURN_UNITS; twelve clockless tests, one of which holds the bound at 32 hogs between two thirds of 1536 and 1536.",
+        "crates/wz-runtime-tokio: WzConfig gains capacity and effective_max_sessions, the module is re-exported, and session_glue.rs takes TURN_UNIT_BUDGET from LOOP_TURN_UNITS, so the quantum the model assumes is the one the loop runs.",
+        "crates/wz-ap-demo: --cpu-share <percent> and --max-data-wait <ms> on --router-hat, refused loudly when they cannot be a promise; the face sources read the effective bound; the router says once that it admits fewer than configured.",
+        "crates/wz-integration-tests/tests/wz_router_hat_data_plane_scaling.rs: Scenario takes a cpu_share; the test of the promise (32 hogs, 1.32%, 2048 knocking) asserts admitted within the bound, the rest refused, no face DOWN, no admitted client ended.",
+        "docs/router-data-plane-scaling.md section 7.4 (the promise, the two bounds, the measured loss against N, what is built and what is not); scripts/run-ci.sh E7s count 3 to 4; docs/reason-review-pins.md row of session_glue.rs."
+      ],
+      "publishable_verification_bullets": [
+        "On a build host (four cores, host load 13 to 30), the test of the promise: 9 of 9 runs with the first recorded costs (1222 admitted) and 3 of 3 with the recorded ones (1100): no face DOWN, no admitted client ended, the rest refused.",
+        "Another session's measurement at 32 hogs, five runs each: 1024 and 1536 sessions lost no client, 2048 lost 373 to 1158, 2560 lost 1145 to 1667; the keepalive's lateness peaked at 6.4 s at 1536 (2T/3 is 6.67 s) and grew past 8 s from 2048; one emission 6 to 10 us at the median, 12 to 48 us at the 99th percentile. The model's first costs gave 2440 for the bound and were replaced.",
+        "wz-session-core capacity tests 12 of 12; the config tests of the effective bound pass; the flag parser tests 4 of 4; clippy with warnings denied reports nothing on wz-session-core, wz-runtime-tokio, wz-ap-demo (router-hat build) and the E7s test; the two count guards the range reaches (partition 21, E7s 4) match the runs.",
+        "The gate array (110 of 110, the pin gate among them) and the guarded-count gate pass on the tree rebased on round 3487; Layer Q passes on a build host and the slot bytes equal the record.",
+        "Not measured: the share of the ctl thread (0.33% is from the scheduler's weights), the cost of a whole pacer cycle, the loss above the threshold in a window longer than 20 s, and everything on a hosted runner."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The new E7s test runs in the hosted E7s lane (count 4) with 32 hogs on a hosted runner, which nobody has measured: its first hosted result is unread, and a red there may be the runner's share and not the model.",
+        "Built of the structure the owner approved: the capacity bound, the declaration, the refusal at the bound. Left: a counter that tells an operator whether a refusal was the configured bound's or the model's; the admin-space export of the measured share with a contract-violated flag; the data-drop policy and its counters; an assertion of the keepalive's lateness against 2T/3 (the clients' ending stands in); a lane that re-derives the tables and fails on drift.",
+        "The costs are this host's and this runtime's; another host, or the io_uring runtime, re-reads c_k, c_u and the thread count before the bound is a promise there.",
+        "The reason of session-close-ingress cites an anchor in session_glue.rs (Ok(nonce) => actions.refresh_cookie_nonce(nonce),) that has no match in the file and none on origin/main before this round; the pin row moved after reading the clauses this change touches (none), and that clause is left as it was.",
+        "Round 3486's carry said the stamp's share is unshown and left it; it stands."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
