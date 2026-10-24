@@ -533,9 +533,26 @@ Each step lands with its own done-when; sizes are not estimated here.
      hint whose last confirmation ends first, never a declared one, and a
      table of declared hints refuses and counts the refusal. Witness: its
      seven unit tests.
-   - Left of D3: the sources confirm into it (the link-state ingest and a
-     Hello on AP, the build-time declaration on every profile), each with
-     its lifetime, and the openers read their candidates from it.
+   - **3b, how each source's hints stop being true (Round 3546).** A Hello's
+     must carry a lifetime, since nothing withdraws it. Upstream scouts again
+     at most every 8 s (`zenoh/src/net/runtime/orchestrator.rs`
+     @ `const SCOUT_MAX_PERIOD: Duration = Duration::from_millis(8_000);`), so
+     a live node's Hello is confirmed at least that often. A link-state hint
+     may last until its withdrawal, since the flood is event-driven and the
+     graph drops a node it no longer reaches; a full table still displaces a
+     timed hint before it. A declared hint stays permanent.
+   - **D4 on AP's autoconnect (Round 3546).** A node a discovery plane found
+     (the gossip flood or a Hello) was dialled at its first dialable locator
+     for no node, so Round 3542's D4 had a fourth path it did not name. The
+     dial is now made for the node the intent names
+     (`accept_loop::dial_decision`), as upstream's `connect_peer` dials each
+     locator for its zid.
+   - Left of D3: the sources confirm into the directory and withdraw from it.
+     On AP the discovery planes reach the face loop through one channel of
+     dial intents, which carries no withdrawal; it becomes a channel of
+     found and lost nodes, the loop holds the directory, and the openers read
+     their candidates from it. The build-time declaration confirms on every
+     profile.
 4. **D5.** The peer machine in SCXML and the bounded peer table; the AP
    `ConnectReconcile` desired set is replaced by it.
 5. **D6.** Intent and status, `reset` with a generation, and the status GET.

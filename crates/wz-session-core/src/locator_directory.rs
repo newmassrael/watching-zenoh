@@ -11,18 +11,23 @@
 //! (decision D4), so a stale hint costs one failed dial and never a session to
 //! the wrong node.
 //!
-//! Three sources confirm a hint, and each has its own lifetime:
+//! Three sources confirm a hint, and they differ in how a hint stops being
+//! true:
 //!
 //! - [`LocatorSource::Declared`]: the build or the operator stated it. It does
 //!   not expire and is never evicted; it leaves only when it is withdrawn.
-//! - [`LocatorSource::Hello`]: a scouting Hello from the node listed it.
-//! - [`LocatorSource::Linkstate`]: the link-state flood carried it (AP).
+//! - [`LocatorSource::Hello`]: a scouting Hello from the node listed it. Nothing
+//!   ever says a Hello's locators stopped being true, so the confirmation
+//!   expires unless a later Hello confirms it again (soft state: Clark, 1988;
+//!   Raman and McCanne, 1999), and it must carry a lifetime.
+//! - [`LocatorSource::Linkstate`]: the link-state flood carried it (AP). The
+//!   flood is event-driven, and the graph drops a node it no longer reaches,
+//!   so its source may confirm until it withdraws, or give a lifetime as a
+//!   bound on a withdrawal it might miss.
 //!
-//! A hint a source confirmed expires unless the source confirms it again
-//! (soft state: Clark, 1988; Raman and McCanne, 1999). The directory is the
-//! mechanism only: how long a confirmation lasts is the source's to say, since
-//! only the source knows how often it refreshes, so every confirmation carries
-//! its own [`Lifetime`].
+//! The directory is the mechanism only: how long a confirmation lasts is the
+//! source's to say, since only the source knows how often it refreshes or
+//! whether it withdraws, so every confirmation carries its own [`Lifetime`].
 //!
 //! Lookups never return an expired hint, whether or not [`LocatorDirectory::expire`]
 //! has run since. Candidates come in the order an opener should try them: the
@@ -82,8 +87,8 @@ pub enum DirectoryRefusal {
     LocatorTooLong,
     /// Every row holds a declared hint, so none can make room.
     Full,
-    /// A declared hint must be [`Lifetime::Permanent`], and a soft-state one
-    /// must not be.
+    /// A declared hint must be [`Lifetime::Permanent`], and a Hello's must not
+    /// be, since no message ever withdraws it.
     LifetimeOfAnotherSource,
 }
 
@@ -169,11 +174,12 @@ impl<const N: usize> LocatorDirectory<N> {
         lifetime: Lifetime,
     ) -> Result<(), DirectoryRefusal> {
         let end = match (source, lifetime) {
-            (LocatorSource::Declared, Lifetime::Permanent) => u64::MAX,
-            (LocatorSource::Declared, Lifetime::Millis(_)) | (_, Lifetime::Permanent) => {
+            (LocatorSource::Declared, Lifetime::Millis(_))
+            | (LocatorSource::Hello, Lifetime::Permanent) => {
                 self.refused += 1;
                 return Err(DirectoryRefusal::LifetimeOfAnotherSource);
             }
+            (_, Lifetime::Permanent) => u64::MAX,
             (_, Lifetime::Millis(ms)) => now_ms.saturating_add(ms),
         };
         let mut row = match self.position(&zid, locator) {
@@ -414,6 +420,39 @@ mod tests {
             ["tcp/declared:1", "udp/hello:1"]
         );
         assert_eq!(locators(&dir, &B, 10).as_slice(), ["tcp/b:1"]);
+    }
+
+    /// The flood withdraws what the graph no longer reaches, so its hint may last
+    /// until then; a full table still takes a timed hint before it.
+    #[test]
+    fn a_link_state_hint_may_last_until_its_withdrawal_and_is_displaced_after_timed_ones() {
+        let mut dir = LocatorDirectory::<2>::new();
+        dir.confirm(
+            A,
+            "tcp/ls:1",
+            LocatorSource::Linkstate,
+            0,
+            Lifetime::Permanent,
+        )
+        .unwrap();
+        dir.confirm(
+            A,
+            "udp/hello:1",
+            LocatorSource::Hello,
+            0,
+            Lifetime::Millis(500),
+        )
+        .unwrap();
+        assert_eq!(locators(&dir, &A, 1_000_000).as_slice(), ["tcp/ls:1"]);
+        dir.confirm(B, "udp/b:1", LocatorSource::Hello, 1, Lifetime::Millis(500))
+            .unwrap();
+        assert_eq!(
+            locators(&dir, &A, 2).as_slice(),
+            ["tcp/ls:1"],
+            "the timed hint went first, though the link-state one is older"
+        );
+        dir.withdraw(&A, LocatorSource::Linkstate);
+        assert_eq!(locators(&dir, &A, 2).len(), 0, "withdrawn, it is gone");
     }
 
     #[test]

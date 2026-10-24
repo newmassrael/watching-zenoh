@@ -2049,12 +2049,24 @@ fn holds_zid(faces: &BTreeMap<FaceId, Option<Vec<u8>>>, zid: &[u8]) -> bool {
 /// is never re-dialed), then pick a dialable locator. The forwarder already
 /// applied the autoconnect role + zid policy at emit (A5b), so this is only the
 /// loop-side "do I already have it / can I reach it" decision.
+///
+/// The dial is made for the node the intent names (decision D4 of
+/// `docs/session-lifecycle-intent.md`): a discovery plane found a zid and the
+/// locators it advertised, so a session another node answers at the locator closes
+/// at its InitAck, as upstream's `connect_peer` dials each locator for the zid
+/// (`zenoh/src/net/runtime/orchestrator.rs`
+/// @ `match manager.open_transport_unicast_with_zid(endpoint, zid).await {`).
 fn dial_decision(faces: &BTreeMap<FaceId, Option<Vec<u8>>>, intent: &DialIntent) -> DialDecision {
     if holds_zid(faces, &intent.zid) {
         return DialDecision::AlreadyHeld;
     }
     match first_dialable_locator(&intent.locators) {
-        Some(target) => DialDecision::Dial(target),
+        Some(target) => DialDecision::Dial(
+            match wz_session_core::credential_identity::zid_from_wire(&intent.zid) {
+                Some(zid) => target.for_node(zid),
+                None => target,
+            },
+        ),
         None => DialDecision::NoLocator,
     }
 }
@@ -4282,6 +4294,13 @@ mod tests {
             dial_decision(&empty, &acc()),
             DialDecision::Dial(t)
                 if ip(&t).addr == "127.0.0.1:7447".parse().unwrap() && ip(&t).proto == Proto::Tcp
+        ));
+        // Decision D4: the dial is made for the node the intent names.
+        let mut aa = [0u8; 16];
+        aa[..4].copy_from_slice(&[0xAA; 4]);
+        assert!(matches!(
+            dial_decision(&empty, &acc()),
+            DialDecision::Dial(t) if t.expected_zid == Some(aa)
         ));
         // A held face to the peer's zid -> skip (the dedup), even with a valid
         // locator. A zid-less held face (None) matches no peer.
