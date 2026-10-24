@@ -282952,6 +282952,50 @@
         "A wz-capture lib test fails to compile under the compression and dissect features (fixtures feature): not this work, reported to its owner."
       ]
     },
+    "Round 3530": {
+      "decision_summary": "The kit's client over the D9 channel is held to a stack row and a resource row like the answering clients. Past its verified line the kit lane's verify image is asked its two documents through the router 2,000 times each, and the run is held to the row. The stack gate commits the image's worst chain of direct calls, 7,016 B against 12,288 B. The budget row is set from 8 runs alternated with the client without the channel: the stack peak is 6,864 B in 8 of 8, and the GET median is 644 us (0.583 to 0.765 ms) against 0.395 to 0.472 ms without the channel in the same sitting, so the channel costs about 0.25 ms on a GET at the median. The lane's selftest said every image had a budget row because it asked the population the table must hold, not the table; it now reads the table's rows, and failed until this row existed.",
+      "changes_bullets": [
+        "scripts/kit-lane.sh: run splits into start_and_reset and hold_the_run; a verify image's router serves REST and the run goes on to the probe and the budget; zephyr-client-fixed-tls joins the images; the selftest reads the budget table's rows.",
+        "scripts/lib/stack_frame_gate.py: the zephyr-client-fixed-tls row, peak 7,016 B.",
+        "deploy/resource_budget.json: the zephyr-client-fixed-tls row (stack 6,864 B, GET 644 us +/- 30 percent).",
+        "docs/session-lifecycle-intent.md: D9's kit witness carries the rows and the channel's cost on a GET; step 1b has no residue."
+      ],
+      "verification_bullets": [
+        "On the kit (pc2, developer account, kit lane with the pinned zenohd 1.10.1): zephyr-client-fixed-tls run 8 times, each \"session established, peer verified\", 2,000 answered GETs of each document with no wrong answer, no 'wz: FAIL', stack peak 6,864 of 12,288 B; each of the 4 runs measured again against the new row is inside it. zephyr-client-fixed run 4 times in turn: stack 6,016 B and medians 0.395 to 0.472 ms, inside its row.",
+        "stack_frame_gate.py --check zephyr-client-fixed-tls on that image's ELF: worst chain 7,016 B over 10 frames, largest frame 2,408 B. --selftest and --population pass (7 images).",
+        "resource_budget_gate.py --check (4 images held) and --selftest pass; kit-lane.sh --selftest passes and failed before the row was added; shellcheck clean."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "D4: the expected zid on every dial path (AP, the C ABI, the MCU host), closing at InitAck when the locator answers with another zid.",
+        "The channel's open items: TLS 1.3 KeyUpdate is not implemented in Mbed TLS 4.1; software P-256 (p256-m or the chip's crypto block); volatile keys; the pin checked after the handshake.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to 3529, per job."
+      ],
+      "publishable_decision_summary": "The kit's client over the D9 channel is held to a stack row and a resource row like the answering clients. Past its verified line the kit lane's verify image is asked its two documents through the router 2,000 times each, and the run is held to the row. The stack gate commits the image's worst chain of direct calls, 7,016 B against 12,288 B. The budget row is set from 8 runs alternated with the client without the channel: the stack peak is 6,864 B in 8 of 8, and the GET median is 644 us (0.583 to 0.765 ms) against 0.395 to 0.472 ms without the channel in the same sitting, so the channel costs about 0.25 ms on a GET at the median. The lane's selftest said every image had a budget row because it asked the population the table must hold, not the table; it now reads the table's rows, and failed until this row existed.",
+      "publishable_changes_bullets": [
+        "scripts/kit-lane.sh: run splits into start_and_reset and hold_the_run; a verify image's router serves REST and the run goes on to the probe and the budget; zephyr-client-fixed-tls joins the images; the selftest reads the budget table's rows.",
+        "scripts/lib/stack_frame_gate.py: the zephyr-client-fixed-tls row, peak 7,016 B.",
+        "deploy/resource_budget.json: the zephyr-client-fixed-tls row (stack 6,864 B, GET 644 us +/- 30 percent).",
+        "docs/session-lifecycle-intent.md: D9's kit witness carries the rows and the channel's cost on a GET; step 1b has no residue."
+      ],
+      "publishable_verification_bullets": [
+        "On the kit (pc2, developer account, kit lane with the pinned zenohd 1.10.1): zephyr-client-fixed-tls run 8 times, each \"session established, peer verified\", 2,000 answered GETs of each document with no wrong answer, no 'wz: FAIL', stack peak 6,864 of 12,288 B; each of the 4 runs measured again against the new row is inside it. zephyr-client-fixed run 4 times in turn: stack 6,016 B and medians 0.395 to 0.472 ms, inside its row.",
+        "stack_frame_gate.py --check zephyr-client-fixed-tls on that image's ELF: worst chain 7,016 B over 10 frames, largest frame 2,408 B. --selftest and --population pass (7 images).",
+        "resource_budget_gate.py --check (4 images held) and --selftest pass; kit-lane.sh --selftest passes and failed before the row was added; shellcheck clean."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "D4: the expected zid on every dial path (AP, the C ABI, the MCU host), closing at InitAck when the locator answers with another zid.",
+        "The channel's open items: TLS 1.3 KeyUpdate is not implemented in Mbed TLS 4.1; software P-256 (p256-m or the chip's crypto block); volatile keys; the pin checked after the handshake.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to 3529, per job."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
