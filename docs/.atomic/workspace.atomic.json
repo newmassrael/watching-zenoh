@@ -282036,6 +282036,56 @@
         "Tell the consumer session the one-row window structure has landed, at this round's pin, so it can measure pick_first, pick_middle and pick_last again"
       ]
     },
+    "Round 3510": {
+      "decision_summary": "The key a link's peer proved reaches the session on every profile through one value-returning accessor on the link driver, peer_credential_zid, and peer_identity_verified reads only that. The heap profile's LinkSubject is a reference held by the driver, so a driver that keeps its link behind a lock cannot hand it on and the slot profile has none; a value can be both. The default reads the subject's certificate key where there is one; the cooperative stream link asks its stream, and the Mbed TLS channel answers with the key its peer proved in the handshake. The two reconnect seams now hand on their live link's answer under their lock, so a reconnecting session over TLS is verified by the link it runs on now, and a swap to a link that proves nothing takes the verification away. Before this the seams answered nothing.",
+      "changes_bullets": [
+        "crates/wz-session-core: BoxedLinkDriver::peer_credential_zid (default from LinkSubject under alloc, None without); peer_identity_verified reads it on every profile; SwappableLink and LocalSwappableLink forward it.",
+        "crates/wz-runtime-coop: StreamSocket::peer_credential_zid (None by default); the stream link and IpDriver forward it.",
+        "crates/wz-tls-mbedtls: TlsStream answers its handshake's proven zid; the rustls test checks the link hands on the router's key.",
+        "crates/wz-runtime-tokio/tests/session_close_ingress.rs: a session behind SwappableLink is verified by the live link and loses it on a swap to a link that proves nothing.",
+        "docs/reason-review-pins.md: session-close-ingress re-pinned on session_actions.rs and the ingress witness after re-reading their claims.",
+        "docs/session-lifecycle-intent.md: D9 records it."
+      ],
+      "verification_bullets": [
+        "On the build machine: wz-runtime-coop lib tests on the heap (55) and slot (49) profiles, the tls/ link reporting the channel's key and a tcp/ link none; wz-tls-mbedtls 2 unit and 3 rustls peer tests, the tls/ link handing on the zid of the router's rcgen key; wz-runtime-tokio session_close_ingress 18 including the reconnect-seam case; tls_pem_mtls_e2e 8 and pubkey_handshake_e2e 2, the AP paths now read through the accessor.",
+        "Clippy -D warnings: wz-session-core all targets, wz-session-mcu client-slot (the slot profile), coop heap and slot, wz-tls-mbedtls, wz-runtime-tokio with the ingress feature set. rustdoc Layer C1bz pass for session-core, coop and the channel crate; host-slot-node clean under the no-allocator gate; reason_review_pin_gate pass.",
+        "Found while re-reading: the session-close-ingress reason still says both runtimes forward the feature (false since Round 3491) and names Mbed TLS 3.6 as the candidate (4.1 since Round 3493)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "The verbs back on the cooperative runtime: wz-runtime-coop forwards session-close-ingress again and the channel crate turns on wz-session-core/secure-channel, so the D2 guard refuses a cooperative build with the verbs and no channel; the guard gate grows that row.",
+        "In the same round, correct the session-close-ingress reason's two stale clauses (both runtimes forward the feature; Mbed TLS 3.6 the candidate) with the depth pins in the same commit.",
+        "A zenohd process over a tls/ link; the Zephyr TCP StreamSocket and the kit image over wz-tls-mbedtls; no TLS 1.3 KeyUpdate in Mbed TLS 4.1; the Round 3495 items."
+      ],
+      "publishable_decision_summary": "The key a link's peer proved reaches the session on every profile through one value-returning accessor on the link driver, peer_credential_zid, and peer_identity_verified reads only that. The heap profile's LinkSubject is a reference held by the driver, so a driver that keeps its link behind a lock cannot hand it on and the slot profile has none; a value can be both. The default reads the subject's certificate key where there is one; the cooperative stream link asks its stream, and the Mbed TLS channel answers with the key its peer proved in the handshake. The two reconnect seams now hand on their live link's answer under their lock, so a reconnecting session over TLS is verified by the link it runs on now, and a swap to a link that proves nothing takes the verification away. Before this the seams answered nothing.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core: BoxedLinkDriver::peer_credential_zid (default from LinkSubject under alloc, None without); peer_identity_verified reads it on every profile; SwappableLink and LocalSwappableLink forward it.",
+        "crates/wz-runtime-coop: StreamSocket::peer_credential_zid (None by default); the stream link and IpDriver forward it.",
+        "crates/wz-tls-mbedtls: TlsStream answers its handshake's proven zid; the rustls test checks the link hands on the router's key.",
+        "crates/wz-runtime-tokio/tests/session_close_ingress.rs: a session behind SwappableLink is verified by the live link and loses it on a swap to a link that proves nothing.",
+        "docs/reason-review-pins.md: session-close-ingress re-pinned on session_actions.rs and the ingress witness after re-reading their claims.",
+        "docs/session-lifecycle-intent.md: D9 records it."
+      ],
+      "publishable_verification_bullets": [
+        "On the build machine: wz-runtime-coop lib tests on the heap (55) and slot (49) profiles, the tls/ link reporting the channel's key and a tcp/ link none; wz-tls-mbedtls 2 unit and 3 rustls peer tests, the tls/ link handing on the zid of the router's rcgen key; wz-runtime-tokio session_close_ingress 18 including the reconnect-seam case; tls_pem_mtls_e2e 8 and pubkey_handshake_e2e 2, the AP paths now read through the accessor.",
+        "Clippy -D warnings: wz-session-core all targets, wz-session-mcu client-slot (the slot profile), coop heap and slot, wz-tls-mbedtls, wz-runtime-tokio with the ingress feature set. rustdoc Layer C1bz pass for session-core, coop and the channel crate; host-slot-node clean under the no-allocator gate; reason_review_pin_gate pass.",
+        "Found while re-reading: the session-close-ingress reason still says both runtimes forward the feature (false since Round 3491) and names Mbed TLS 3.6 as the candidate (4.1 since Round 3493)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The verbs back on the cooperative runtime: wz-runtime-coop forwards session-close-ingress again and the channel crate turns on wz-session-core/secure-channel, so the D2 guard refuses a cooperative build with the verbs and no channel; the guard gate grows that row.",
+        "In the same round, correct the session-close-ingress reason's two stale clauses (both runtimes forward the feature; Mbed TLS 3.6 the candidate) with the depth pins in the same commit.",
+        "A zenohd process over a tls/ link; the Zephyr TCP StreamSocket and the kit image over wz-tls-mbedtls; no TLS 1.3 KeyUpdate in Mbed TLS 4.1; the Round 3495 items."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
