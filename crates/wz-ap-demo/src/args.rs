@@ -540,6 +540,116 @@ pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
     None
 }
 
+/// `--cpu-share <percent>` and `--max-data-wait <ms>`: what the operator declares about the CPU this
+/// router-hat may count on (`docs/router-data-plane-scaling.md` section 7.4).
+///
+/// `Ok(None)` when neither is given: nothing is declared, nothing is promised, and `--max-sessions`
+/// is the only bound. A declaration that cannot be a promise is an ERROR, unlike `--max-sessions`'s
+/// warn-and-default: the default there is a bound, and the default here would be no promise at all,
+/// which an operator who asked for one would read as the promise holding.
+///
+/// `--cpu-share` is a percent of ONE core, decimals allowed (`1.3` is 13000 parts per million).
+/// `--max-data-wait` is the longest a frame may wait for the session loop, in milliseconds, and
+/// bounds the sessions further; it is only meaningful beside a share.
+#[cfg(feature = "router-hat-router")]
+pub(crate) fn parse_capacity_contract(
+    args: &[String],
+) -> Result<Option<wz::runtime_tokio::capacity::CapacityContract>, String> {
+    use wz::runtime_tokio::capacity::CapacityContract;
+    let share = parse_pair(args, "--cpu-share");
+    let wait = parse_pair(args, "--max-data-wait");
+    let Some(share) = share else {
+        return match wait {
+            None => Ok(None),
+            Some(_) => {
+                Err("--max-data-wait bounds a declared share: give --cpu-share as well".to_string())
+            }
+        };
+    };
+    let percent: f64 = share
+        .trim()
+        .parse()
+        .map_err(|_| format!("--cpu-share '{share}' is not a number of percent"))?;
+    if !percent.is_finite() || percent <= 0.0 {
+        return Err(format!("--cpu-share '{share}' must be above zero"));
+    }
+    let ppm = (percent * 10_000.0).round();
+    if ppm < 1.0 || ppm > f64::from(u32::MAX) {
+        return Err(format!(
+            "--cpu-share '{share}' is out of range: from 0.0001 to 429496 percent of a core"
+        ));
+    }
+    let contract = CapacityContract::new(ppm as u32).map_err(|e| format!("--cpu-share: {e:?}"))?;
+    match wait {
+        None => Ok(Some(contract)),
+        Some(wait) => {
+            let ms: u32 = wait
+                .trim()
+                .parse()
+                .map_err(|_| format!("--max-data-wait '{wait}' is not a number of milliseconds"))?;
+            contract
+                .with_data_wait_ms(ms)
+                .map(Some)
+                .map_err(|e| format!("--max-data-wait: {e:?}"))
+        }
+    }
+}
+
+#[cfg(all(test, feature = "router-hat-router"))]
+mod capacity_flag_tests {
+    use super::parse_capacity_contract;
+
+    fn words(args: &[&str]) -> Vec<String> {
+        args.iter().map(|a| (*a).to_string()).collect()
+    }
+
+    #[test]
+    fn no_flag_declares_nothing() {
+        assert_eq!(parse_capacity_contract(&words(&["--router-hat"])), Ok(None));
+    }
+
+    #[test]
+    fn a_percent_of_a_core_is_parts_per_million() {
+        let contract = parse_capacity_contract(&words(&["--cpu-share", "1.3"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(contract.share_ppm(), 13_000);
+        assert_eq!(contract.data_wait_ms(), None);
+        let more = parse_capacity_contract(&words(&["--cpu-share", "250"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(more.share_ppm(), 2_500_000, "more than one core is a share");
+    }
+
+    #[test]
+    fn a_data_wait_rides_a_share() {
+        let contract =
+            parse_capacity_contract(&words(&["--cpu-share", "5", "--max-data-wait", "2000"]))
+                .unwrap()
+                .unwrap();
+        assert_eq!(contract.data_wait_ms(), Some(2_000));
+    }
+
+    #[test]
+    fn a_declaration_that_cannot_be_a_promise_is_an_error() {
+        for bad in [
+            words(&["--cpu-share", "0"]),
+            words(&["--cpu-share", "-1"]),
+            words(&["--cpu-share", "many"]),
+            words(&["--cpu-share", "nan"]),
+            words(&["--cpu-share", "1e12"]),
+            words(&["--cpu-share", "5", "--max-data-wait", "0"]),
+            words(&["--cpu-share", "5", "--max-data-wait", "soon"]),
+            words(&["--max-data-wait", "2000"]),
+        ] {
+            assert!(
+                parse_capacity_contract(&bad).is_err(),
+                "{bad:?} is not a promise a router can keep"
+            );
+        }
+    }
+}
+
 /// §5.23 `adminspace-core` — `--metadata <value>`: the node config's
 /// `metadata`, a JSON5 value, which a `--config` file's `metadata` key expands
 /// to. Every run-mode that hosts an adminspace serves it as `local_data`'s

@@ -475,6 +475,13 @@ pub use wz_session_core::locality;
 /// so naming it never depends on a `transport-link-*` feature.
 pub use wz_session_core::locator;
 
+/// For how many sessions a node's control work fits the CPU it was promised: the
+/// [`CapacityContract`](capacity::CapacityContract) an operator declares and the
+/// bounds it yields. Re-exported so a facade consumer (wz-ap-demo's `--cpu-share`)
+/// names `wz::runtime_tokio::capacity::CapacityContract` to hand to
+/// [`config::WzConfig::with_capacity_contract`]. Ungated: integers only.
+pub use wz_session_core::capacity;
+
 /// R311y220 — the QoS `Priority` band value type (and `CongestionControl`).
 /// Re-exported so a facade consumer (wz-ap-demo's `--express-high` / `--low`
 /// prioritized publish) names `wz::runtime_tokio::qos::Priority` to drive

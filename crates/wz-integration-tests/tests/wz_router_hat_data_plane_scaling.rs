@@ -164,17 +164,23 @@ fn forwarded_pushes(line: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-fn spawn_router(demo: &Path, pin: Option<usize>) -> Router {
-    let mut child = command_with_raised_limit(
-        demo,
-        &["--router-hat", "127.0.0.1:0", "--max-sessions", "20000"],
-        pin,
-    )
-    .env("RUST_LOG", "info")
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped())
-    .spawn()
-    .expect("the demo starts as a router");
+fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Router {
+    let max_sessions = ROUTER_MAX_SESSIONS.to_string();
+    let mut args = vec![
+        "--router-hat",
+        "127.0.0.1:0",
+        "--max-sessions",
+        &max_sessions,
+    ];
+    if let Some(share) = cpu_share {
+        args.extend(["--cpu-share", share]);
+    }
+    let mut child = command_with_raised_limit(demo, &args, pin)
+        .env("RUST_LOG", "info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the demo starts as a router");
     let stderr = child.stderr.take().expect("the router's stderr is piped");
     let guard = ChildGuard::wrap("wz-ap-demo router-hat", child);
 
@@ -318,6 +324,36 @@ fn spawn_sessions(
     ChildGuard::wrap(label.to_string(), child)
 }
 
+/// The router's own `--max-sessions`, set high enough that nothing but a declared CPU share limits it.
+const ROUTER_MAX_SESSIONS: usize = 20_000;
+
+/// The lease the demo's sessions negotiate, which the capacity bound is computed for.
+const SESSION_LEASE_MS: u64 = 10_000;
+
+/// How many of `subscribers` sessions a router told it may count on `cpu_share` percent of a core
+/// admits: all of them with no share, and otherwise what the capacity model allows, computed here by
+/// the same function the router runs, so that the test and the router cannot disagree about the number
+/// and a change to the model moves both.
+fn admitted_at(cpu_share: Option<&str>, subscribers: usize) -> usize {
+    use wz_session_core::capacity::{
+        effective_max_sessions, CapacityContract, LOOP_TURN_UNITS, RECORDED_HOST_MODEL,
+    };
+    let Some(share) = cpu_share else {
+        return subscribers;
+    };
+    let percent: f64 = share.parse().expect("a percent of a core");
+    let contract = CapacityContract::new((percent * 10_000.0).round() as u32).expect("a share");
+    effective_max_sessions(
+        ROUTER_MAX_SESSIONS,
+        Some(&contract),
+        SESSION_LEASE_MS,
+        LOOP_TURN_UNITS,
+        RECORDED_HOST_MODEL,
+    )
+    .limit
+    .min(subscribers)
+}
+
 /// The router process's user plus system CPU time, in seconds.
 fn cpu_seconds(pid: u32) -> f64 {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).expect("the router's /proc entry");
@@ -340,6 +376,10 @@ struct Scenario {
     /// The router runs on one core, at a lower priority, shared with this many CPU hogs that start
     /// once every session is in. `None` leaves it the host.
     starved_by: Option<usize>,
+    /// The CPU, in percent of one core, the router is told it may count on (`--cpu-share`). With it
+    /// the router admits only the sessions it can keep the leases of, and refuses the rest; without
+    /// it every session is admitted and a refusal is a failed run.
+    cpu_share: Option<&'static str>,
 }
 
 /// What one window measured.
@@ -376,7 +416,9 @@ fn measure(scenario: Scenario) -> Window {
         churn,
         offered,
         starved_by,
+        cpu_share,
     } = scenario;
+    let expected_up = admitted_at(cpu_share, subscribers);
     assert_eq!(
         subscribers % CLIENT_PROCESSES,
         0,
@@ -385,7 +427,7 @@ fn measure(scenario: Scenario) -> Window {
     let demo = release_demo_binary();
     assert_demo_binary_newer_than_sources(&demo);
     let core = starved_by.map(|_| last_allowed_core());
-    let mut router = spawn_router(&demo, core);
+    let mut router = spawn_router(&demo, core, cpu_share);
     let router_pid = router.guard.child_mut().id();
     let dir = tempfile::tempdir().expect("a directory for the sessions documents");
 
@@ -421,12 +463,17 @@ fn measure(scenario: Scenario) -> Window {
     }
 
     let up_deadline = Instant::now() + Duration::from_secs(60 + subscribers as u64 / 20);
-    while router.up.load(Ordering::Relaxed) < subscribers {
+    // Every session, or as many as the declared share lets the router admit and a refusal for each of
+    // the rest: the router that says no to the session that does not fit is the behaviour measured.
+    while router.up.load(Ordering::Relaxed) < expected_up
+        || router.refused.load(Ordering::Relaxed) < subscribers - expected_up
+    {
         assert!(
             Instant::now() < up_deadline,
-            "only {} of {subscribers} sessions came up (refused {}, went DOWN {})",
+            "only {} of {expected_up} sessions came up and {} of {} were refused (went DOWN {})",
             router.up.load(Ordering::Relaxed),
             router.refused.load(Ordering::Relaxed),
+            subscribers - expected_up,
             router.down.load(Ordering::Relaxed),
         );
         thread::sleep(Duration::from_millis(200));
@@ -485,11 +532,28 @@ fn measure(scenario: Scenario) -> Window {
     drop(hogs);
 
     // The population: a run that failed any of this measured something other than the data plane.
-    assert_eq!(
+    let (up, refused) = (
+        router.up.load(Ordering::Relaxed),
         router.refused.load(Ordering::Relaxed),
-        0,
-        "the router refused sessions; the run measured its session bound"
     );
+    if expected_up == subscribers {
+        assert_eq!(
+            refused, 0,
+            "the router refused sessions; the run measured its session bound"
+        );
+    } else {
+        // A router told its CPU share admits the sessions that fit it and refuses the others, and
+        // never admits past the number: that is what keeps the leases it did admit.
+        assert!(
+            up <= expected_up,
+            "the router admitted {up} sessions past the {expected_up} its declared share allows"
+        );
+        assert!(
+            refused >= subscribers - expected_up,
+            "the router refused {refused} of the {} sessions that do not fit",
+            subscribers - expected_up
+        );
+    }
     if !churn {
         assert_eq!(
             window.down,
@@ -550,6 +614,7 @@ fn wz_router_hat_cost_per_message_against_subscribers_and_churn() {
             churn,
             offered: OFFERED_PER_S,
             starved_by: None,
+            cpu_share: None,
         });
         eprintln!(
             "{subscribers:>11} {:>22} {:>12.1} {:>10.0} {:>8.0}%",
@@ -575,6 +640,7 @@ fn wz_router_hat_keeps_its_links_when_overloaded_and_short_of_cpu() {
         churn: false,
         offered,
         starved_by: Some(3),
+        cpu_share: None,
     });
     eprintln!(
         "\nstarved router (one shared core, lower priority), 2048 subscribers, offered {offered} messages/s: \
@@ -600,10 +666,38 @@ fn wz_router_hat_admission_when_overloaded_and_short_of_cpu() {
         churn: true,
         offered,
         starved_by: Some(3),
+        cpu_share: None,
     });
     eprintln!(
         "\nstarved router, 2048 subscribers, offered {offered} messages/s, 16 sessions/s knocking: \
          admitted {} of {} attempted in {:.0}s",
         w.admitted, w.attempted, w.seconds,
+    );
+}
+
+/// The promise (`docs/router-data-plane-scaling.md` section 7.4): a router told the CPU share it may
+/// count on admits the sessions it can keep the leases of, refuses the others, and loses none of the
+/// ones it admitted. 32 hogs leave a router of four busy threads at nice 10 about 1.3% of a core (the
+/// scheduler's weights, 110 against 1024); at that share the model allows 1100 of the 2048 sessions
+/// that knock, where an undeclared router admits all 2048 and in some runs loses some of them.
+/// Asserted: nobody went DOWN, no admitted client session ended on its own, the router admitted no
+/// more than the model allows and refused the rest. How much it forwards is printed.
+#[test]
+#[ignore = "opt-in measurement: spawns wz-ap-demo built with router-hat-router and 32 CPU hogs, holds 1100 local sessions; run with --ignored --nocapture"]
+fn wz_router_hat_keeps_every_lease_it_admits_at_its_declared_share() {
+    let offered = 40_000;
+    let w = measure(Scenario {
+        subscribers: 2048,
+        churn: false,
+        offered,
+        starved_by: Some(32),
+        cpu_share: Some("1.32"),
+    });
+    eprintln!(
+        "\nrouter told 1.32% of a core, 32 hogs, 2048 sessions knocking, offered {offered} messages/s: \
+         forwarded {:.0} messages/s, {} faces went DOWN, {} admitted client sessions ended on their own",
+        w.messages_per_second(),
+        w.down,
+        w.ended,
     );
 }

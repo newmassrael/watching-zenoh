@@ -1716,7 +1716,10 @@ where
 /// a round, and an event that costs more than the quantum pays the excess in rounds, by
 /// yielding as many times, so that whatever the size of its frames every session gets the same
 /// share of the thread in the long run ([`Turn::after_event`]).
-const TURN_UNIT_BUDGET: u32 = 8;
+///
+/// The value is `wz_session_core::capacity::LOOP_TURN_UNITS`, which the capacity bounds read too
+/// (`docs/router-data-plane-scaling.md` section 7.4): the `q` the model assumes is this one.
+const TURN_UNIT_BUDGET: u32 = wz_session_core::capacity::LOOP_TURN_UNITS;
 
 /// The work one event costs the loop, in the units of [`TURN_UNIT_BUDGET`]: the records it
 /// carries, and one for an event that carries none or no records of its own (a keepalive, a

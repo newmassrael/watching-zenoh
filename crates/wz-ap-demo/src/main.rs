@@ -1148,6 +1148,16 @@ fn demo_main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // `--cpu-share` / `--max-data-wait` — what the operator declares about the CPU this
+            // router may count on. REFUSED loudly rather than degraded: a promise the operator
+            // asked for and did not get would read as the promise holding.
+            let capacity = match crate::args::parse_capacity_contract(rest) {
+                Ok(v) => v,
+                Err(msg) => {
+                    eprintln!("wz-ap-demo: {msg}");
+                    return ExitCode::from(2);
+                }
+            };
             return run_router_hat_mode(
                 // R2099 (open-debt item 512) — an endpoint LIST, exactly as
                 // `--peer` now takes: both are BINDING run-modes reading the same
@@ -1168,6 +1178,7 @@ fn demo_main() -> ExitCode {
                     // R2758 — the same parse the peer mesh mode uses; one flag,
                     // one meaning, both run-modes.
                     max_sessions: crate::args::parse_max_sessions(rest),
+                    capacity,
                     // R2233 (open-debt item 585) — the DIAL mirror of the
                     // `AcceptCertPaths` above: a `--connect quic/...` federation
                     // link from this router-hat verifies the far router's server

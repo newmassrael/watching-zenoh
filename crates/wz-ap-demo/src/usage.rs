@@ -296,6 +296,14 @@ pub(crate) fn print_usage() {
     eprintln!("                             this node holds at once. A peer arriving at the bound");
     eprintln!("                             is refused before it enters the table; default 1000,");
     eprintln!("                             which is zenoh's own.");
+    eprintln!("    --cpu-share <percent>    --router-hat: the CPU, in percent of one core, this");
+    eprintln!("                             router may count on. Declaring it lowers the sessions");
+    eprintln!("                             admitted to what the keepalives can serve at that");
+    eprintln!("                             share, and a session past it is refused. Nothing");
+    eprintln!("                             declared is nothing promised and no cap.");
+    eprintln!("    --max-data-wait <ms>     --router-hat, with --cpu-share: the longest a frame");
+    eprintln!("                             may wait for the session loop; bounds the sessions");
+    eprintln!("                             further.");
     eprintln!("    --session-lifecycle      host the session lifecycle queries (the");
     eprintln!("                             `session-close-ingress` build feature): a GET on");
     eprintln!("                             @/<zid>/<role>/session/close/<peer-zid> closes the");

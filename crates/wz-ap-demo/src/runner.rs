@@ -5327,7 +5327,7 @@ async fn run_peer_until(
             // R2758 — the session bound, off the SAME shared WzConfig the admin
             // GET renders, so the loop and the config surface cannot disagree
             // about how many peers this node will hold.
-            max_sessions: wz_config.borrow().max_sessions,
+            max_sessions: wz_config.borrow().effective_max_sessions().limit,
             // R2095 (open-debt item 513) — the capability offer every face this
             // peer opens carries, dialed and accepted alike (upstream builds
             // `StateOpen` and `StateAccept` from the same manager config; see
@@ -5992,6 +5992,11 @@ pub(crate) struct RouterHatOpts {
     /// run-modes carry separate opts and a router-hat is the node most likely
     /// to reach the limit.
     pub max_sessions: usize,
+    /// `--cpu-share` and `--max-data-wait`: what the operator declares about the CPU this router
+    /// may count on. `None` declares nothing, so `max_sessions` is the only bound. Carried to
+    /// `WzConfig::with_capacity_contract`, which turns it into the number of sessions the router
+    /// admits (`WzConfig::effective_max_sessions`).
+    pub capacity: Option<wz::runtime_tokio::capacity::CapacityContract>,
     /// `--session-lifecycle` -- host the session lifecycle queries on this router;
     /// the peer twin (`PeerOpts::session_lifecycle`) has the reasoning. The same
     /// bare presence flag in both run-modes, so one spelling means one thing.
@@ -6353,6 +6358,21 @@ async fn run_router_hat_until(
             // R2758 — and the same for the session bound, so this host's loop
             // and its admin GET read one number.
             .with_max_sessions(opts.max_sessions);
+        // What the operator declared about the CPU this router may count on lowers the number
+        // of sessions it admits, and says so once: a router that refuses a session it was
+        // configured to admit has a reason an operator can read.
+        let cfg = match opts.capacity {
+            Some(contract) => cfg.with_capacity_contract(contract),
+            None => cfg,
+        };
+        let admitted = cfg.effective_max_sessions();
+        if admitted.limit < cfg.max_sessions {
+            eprintln!(
+                "wz-ap-demo router-hat: admitting at most {} sessions, not the configured {}: \
+                 the keepalives of more would not fit the declared CPU share ({:?} bound)",
+                admitted.limit, cfg.max_sessions, admitted.limiter
+            );
+        }
         // Whether the group is part of the policy: a wz switch carried on the config object
         // and not in the zenoh document, so the same file still starts a stock zenohd.
         #[cfg(feature = "access-acl-multicast")]
@@ -7233,7 +7253,7 @@ async fn run_router_hat_until(
             // takes it off its own: a router-hat holds faces in the same table
             // and is the node most likely to reach the limit. "One source, not
             // two", which is the rule the `host_cfg` comment states.
-            max_sessions: host_cfg.borrow().max_sessions,
+            max_sessions: host_cfg.borrow().effective_max_sessions().limit,
             // R2095 (open-debt item 513) — the capability offer every face this
             // router-hat opens carries, built by `mesh_offer` from the SAME argv
             // words the `--peer` mesh mode reads. The item named both run-modes

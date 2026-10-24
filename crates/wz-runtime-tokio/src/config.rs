@@ -941,6 +941,14 @@ pub struct WzConfig {
     /// of every build. A default loop that could be filled without limit is the
     /// shape the bound exists to refuse.
     pub max_sessions: usize,
+    /// What the operator declares about the CPU this node may count on
+    /// ([`wz_session_core::capacity::CapacityContract`]); `None` declares nothing, promises
+    /// nothing, and leaves [`Self::max_sessions`] as the only bound, as upstream has it. A
+    /// declared share can only LOWER the number of sessions the accept loop admits
+    /// ([`Self::effective_max_sessions`]): refuse the session that does not fit and keep the ones
+    /// that do. Not a key of the config file: the file's surface is upstream's, and a node's
+    /// declaration of its own capacity is wz's, made through this field or the demo's flags.
+    pub capacity: Option<wz_session_core::capacity::CapacityContract>,
     /// R311y216 (transport-qos) — the EMBEDDER-facing "this deploy offers the QoS
     /// transport toward its peers" knob (zenoh `unicast.is_qos`,
     /// `commons/zenoh-config` `TransportUnicastConf`, read into the establishment
@@ -1042,6 +1050,7 @@ impl Default for WzConfig {
             #[cfg(feature = "transport-multilink")]
             max_links: 1,
             max_sessions: DEFAULT_MAX_SESSIONS,
+            capacity: None,
             #[cfg(feature = "transport-qos")]
             qos: false,
             connect_retry: RetryPolicy::ZENOH_DEFAULT,
@@ -1387,6 +1396,37 @@ impl WzConfig {
     pub fn with_max_sessions(mut self, max_sessions: usize) -> Self {
         self.max_sessions = max_sessions;
         self
+    }
+
+    /// Declare the CPU share this node may count on, so that it admits only the sessions whose
+    /// leases it can keep at that share ([`Self::effective_max_sessions`]).
+    #[must_use]
+    pub fn with_capacity_contract(
+        mut self,
+        contract: wz_session_core::capacity::CapacityContract,
+    ) -> Self {
+        self.capacity = Some(contract);
+        self
+    }
+
+    /// The sessions the accept loop may hold at once: [`Self::max_sessions`], or less when the
+    /// declared [`Self::capacity`] says the node cannot keep that many leases at its share. The
+    /// lease the bound is computed for is this node's own when it set one, upstream's default
+    /// (10 s) when it adopts the peer's at the handshake.
+    pub fn effective_max_sessions(&self) -> wz_session_core::capacity::EffectiveBound {
+        const UPSTREAM_DEFAULT_LEASE_MS: u64 = 10_000;
+        let lease_ms = if self.lease_ms == 0 {
+            UPSTREAM_DEFAULT_LEASE_MS
+        } else {
+            self.lease_ms
+        };
+        wz_session_core::capacity::effective_max_sessions(
+            self.max_sessions,
+            self.capacity.as_ref(),
+            lease_ms,
+            wz_session_core::capacity::LOOP_TURN_UNITS,
+            wz_session_core::capacity::RECORDED_HOST_MODEL,
+        )
     }
 
     /// R311y216 (transport-qos) — offer the QoS transport toward this node's
@@ -2938,6 +2978,56 @@ pub fn is_plugins_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sessions a node admits is its configured bound unless it declared the CPU it may count
+    /// on; a declaration can only lower it, and says which limit did.
+    #[test]
+    fn a_declared_cpu_share_lowers_the_sessions_a_node_admits_and_nothing_else_does() {
+        use wz_session_core::capacity::{CapacityContract, Limiter};
+        let plain = WzConfig::new().with_max_sessions(10_000);
+        let bound = plain.effective_max_sessions();
+        assert_eq!(
+            (bound.limit, bound.limiter),
+            (10_000, Limiter::Configured),
+            "nothing declared: upstream's rule, the configured number"
+        );
+
+        // 1.32% of a core, the router at 32 hogs: 1100 with the recorded costs.
+        let declared = plain.with_capacity_contract(CapacityContract::new(13_200).unwrap());
+        let bound = declared.effective_max_sessions();
+        assert_eq!((bound.limit, bound.limiter), (1_100, Limiter::Liveness));
+
+        // A configuration below the model's number stays, and says it was the configuration's.
+        let small = declared.with_max_sessions(500);
+        let bound = small.effective_max_sessions();
+        assert_eq!((bound.limit, bound.limiter), (500, Limiter::Configured));
+    }
+
+    /// The bound is computed for the node's own lease when it set one, and for upstream's default
+    /// when it adopts the peer's: twice the lease is twice the sessions.
+    #[test]
+    fn the_capacity_bound_follows_the_nodes_lease() {
+        use wz_session_core::capacity::CapacityContract;
+        let contract = CapacityContract::new(13_200).unwrap();
+        let mut at_default = WzConfig::new()
+            .with_max_sessions(100_000)
+            .with_capacity_contract(contract);
+        at_default.lease_ms = 0;
+        let mut at_double = at_default.clone();
+        at_double.lease_ms = 20_000;
+        let (one, two) = (
+            at_default.effective_max_sessions().limit,
+            at_double.effective_max_sessions().limit,
+        );
+        assert_eq!(
+            one, 1_100,
+            "a lease adopted at the handshake counts as 10 s"
+        );
+        assert!(
+            two + 1 >= one * 2,
+            "twice the lease, twice the sessions: {one} and {two}"
+        );
+    }
 
     /// R2652 — a key wz KNOWS and deliberately does not honour, CHOSEN from the
     /// registry rather than spelled.

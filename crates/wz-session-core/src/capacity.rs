@@ -44,6 +44,11 @@
 
 use crate::lease::LEASE_EXPIRE_FACTOR;
 
+/// The units of work a session loop does in one turn before it yields the thread: the `q` of the
+/// service bound. ONE value, read by the loop (`wz-runtime-tokio`'s `session_glue`) and by every
+/// bound computed here, so that the number the model assumes is the number the loop runs.
+pub const LOOP_TURN_UNITS: u32 = 8;
+
 /// What the node's control work costs on the host it runs on, and how many threads share the CPU
 /// it is promised.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,13 +84,21 @@ impl ControlModel {
     }
 }
 
-/// The model read on the build host for the tokio runtime (`wz-runtime-tokio`), release build: one
-/// keepalive emission 4.5 us, one loop event of one record 6.5 to 11 us (the upper end is the figure,
-/// an event of `k` records costing at most `k` times it, `a + k b <= k (a + b)`), four busy router
-/// threads (the count that makes the service bound reproduce the router's measured silence from its
-/// peers, section 7.4), times a margin of 2. Read in the Layer E7s runs of
-/// `docs/router-data-plane-scaling.md` sections 7.2 and 7.3.
-pub const RECORDED_HOST_MODEL: ControlModel = ControlModel::new(4_500, 11_000, 4).with_margin(2);
+/// The model read on the build host for the tokio runtime (`wz-runtime-tokio`), release build:
+///
+/// - one keepalive emission 10 us: the upper end of the median (6 to 10 us) of one emission with its
+///   urgent write on a router starved by 32 hogs. The 4.5 us this module first carried was read once
+///   on an unloaded host and the loss measurements refuted the bound it gave;
+/// - one loop event of one record 11 us, the upper end of 6.5 to 11 (an event of `k` records costs at
+///   most `k` times it, `a + k b <= k (a + b)`);
+/// - four busy router threads, the count that makes the service bound reproduce the router's measured
+///   silence from its peers.
+///
+/// No further margin: the bound it gives at 32 hogs, 1100 sessions, sits at 0.72 of the largest
+/// population that lost no client in five runs (1536) and 0.54 of the smallest that lost clients in
+/// all five (2048), which is the room a margin is for. Read in `docs/router-data-plane-scaling.md`
+/// section 7.4.
+pub const RECORDED_HOST_MODEL: ControlModel = ControlModel::new(10_000, 11_000, 4);
 
 /// What an operator declares about the CPU a node may count on, and how stale a frame may get.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,8 +243,8 @@ pub fn effective_max_sessions(
 mod tests {
     use super::*;
 
-    /// The numbers of `docs/router-data-plane-scaling.md` section 7.4, before the margin.
-    const MEASURED: ControlModel = ControlModel::new(4_500, 11_000, 4);
+    /// The numbers of `docs/router-data-plane-scaling.md` section 7.4.
+    const MEASURED: ControlModel = ControlModel::new(10_000, 11_000, 4);
     /// The router's share at 32 hogs in the E7s runs: four threads at nice 10 against hogs at 0.
     const SHARE_32_HOGS: u32 = 13_200;
     /// And at 24 hogs.
@@ -240,8 +253,8 @@ mod tests {
 
     #[test]
     fn the_liveness_bound_is_the_documented_worked_example() {
-        // 0.0132 * 10 s / (3 * 4 * 4.5 us) = 2444.4
-        assert_eq!(liveness_bound(SHARE_32_HOGS, LEASE_MS, MEASURED), 2_444);
+        // 0.0132 * 10 s / (3 * 4 * 10 us) = 1100
+        assert_eq!(liveness_bound(SHARE_32_HOGS, LEASE_MS, MEASURED), 1_100);
     }
 
     #[test]
@@ -253,21 +266,21 @@ mod tests {
     #[test]
     fn a_margin_halves_a_bound_it_doubles_the_costs_of() {
         let margined = MEASURED.with_margin(2);
-        assert_eq!(liveness_bound(SHARE_32_HOGS, LEASE_MS, margined), 1_222);
+        assert_eq!(liveness_bound(SHARE_32_HOGS, LEASE_MS, margined), 550);
         assert_eq!(service_bound(SHARE_32_HOGS, 5_000, 8, margined), 375);
         assert_eq!(margined.busy_threads, 4, "a count of threads is not scaled");
     }
 
     #[test]
     fn the_keepalive_thread_has_a_part_of_the_share_not_all_of_it() {
-        let alone = ControlModel::new(4_500, 11_000, 1);
+        let alone = ControlModel::new(MEASURED.emission_ns, MEASURED.loop_unit_ns, 1);
         let four = liveness_bound(SHARE_32_HOGS, LEASE_MS, MEASURED);
         let one = liveness_bound(SHARE_32_HOGS, LEASE_MS, alone);
         assert!(
             one >= 4 * four && one < 4 * four + 4,
             "one thread that has the whole share serves four times the sessions: {one} and {four}"
         );
-        let zero = ControlModel::new(4_500, 11_000, 0);
+        let zero = ControlModel::new(MEASURED.emission_ns, MEASURED.loop_unit_ns, 0);
         assert_eq!(
             liveness_bound(SHARE_32_HOGS, LEASE_MS, zero),
             liveness_bound(SHARE_32_HOGS, LEASE_MS, alone),
@@ -314,12 +327,12 @@ mod tests {
     #[test]
     fn the_smaller_of_the_configured_and_the_liveness_bound_is_the_limit() {
         let contract = CapacityContract::new(SHARE_32_HOGS).unwrap();
-        // 1222 with the margin: a larger configuration is cut down to it...
+        // 1100: a larger configuration is cut down to it...
         let cut = effective_max_sessions(10_000, Some(&contract), LEASE_MS, 8, RECORDED_HOST_MODEL);
         assert_eq!(
             cut,
             EffectiveBound {
-                limit: 1_222,
+                limit: 1_100,
                 limiter: Limiter::Liveness
             }
         );
@@ -345,7 +358,7 @@ mod tests {
         assert_eq!(
             bound,
             EffectiveBound {
-                limit: 375,
+                limit: 750,
                 limiter: Limiter::Service
             }
         );
@@ -379,16 +392,24 @@ mod tests {
         assert_eq!(bound.limiter, Limiter::Configured);
     }
 
-    /// The model against the E7s population (2048 sessions): well inside the bound at 24 hogs, where no
-    /// lease was lost; just inside it, and so near it, at 32, where some runs lost some clients and
-    /// some did not (section 7.3 and 7.4); and over the margined bound at 32, which is a contract
-    /// that refuses that population.
+    /// The model against the loss measured at 32 hogs (section 7.4): no client lost in five runs at
+    /// 1536 sessions, clients lost in all five at 2048. The bound has to refuse every population that
+    /// lost clients and keep a margin under the largest that lost none: 1100 is 0.72 of 1536.
     #[test]
-    fn the_e7s_population_is_far_inside_the_bound_at_24_hogs_and_near_it_at_32() {
-        let population = 2_048;
-        assert!(liveness_bound(SHARE_24_HOGS, LEASE_MS, MEASURED) > population * 3 / 2);
-        let at_32 = liveness_bound(SHARE_32_HOGS, LEASE_MS, MEASURED);
-        assert!(at_32 > population && at_32 < population * 5 / 4);
-        assert!(liveness_bound(SHARE_32_HOGS, LEASE_MS, RECORDED_HOST_MODEL) < population);
+    fn the_bound_at_32_hogs_sits_under_the_largest_population_that_lost_nothing() {
+        const LARGEST_WITHOUT_LOSS: u64 = 1_536;
+        const SMALLEST_WITH_LOSS: u64 = 2_048;
+        let at_32 = liveness_bound(SHARE_32_HOGS, LEASE_MS, RECORDED_HOST_MODEL);
+        assert!(
+            at_32 < LARGEST_WITHOUT_LOSS,
+            "it must not admit a population at the edge"
+        );
+        assert!(
+            at_32 * 3 > LARGEST_WITHOUT_LOSS * 2,
+            "and not so far under it that the model gives the capacity away: {at_32}"
+        );
+        assert!(at_32 < SMALLEST_WITH_LOSS);
+        // At 24 hogs 2048 sessions lost clients in one run of two; the bound refuses that population.
+        assert!(liveness_bound(SHARE_24_HOGS, LEASE_MS, RECORDED_HOST_MODEL) < SMALLEST_WITH_LOSS);
     }
 }

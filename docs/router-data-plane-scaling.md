@@ -333,12 +333,15 @@ variant on a host whose load was 10 to 30, so the figures show the order of the 
 The measurement is a test now: the E7s test counts the client sessions that ended on their own (the
 client prints `ended (` for one) and asserts none, beside the router's own DOWN count.
 
-### 7.4 Capacity: what the router promises, and for how many sessions (design, not built)
+### 7.4 Capacity: what the router promises, and for how many sessions
 
 7.2 and 7.3 keep leases alive by making the control work cheap to schedule. None of it says for how many
 sessions, at what CPU, the promise holds, and a router asked past that point degrades every session at
 once instead of refusing the one that does not fit. This section states the promise, the number, and what
-the router does at the number. Nothing here is built yet.
+the router does at the number. Built: the bound (`wz-session-core`, `capacity`), the declaration
+(`WzConfig::with_capacity_contract`, the demo's `--cpu-share` and `--max-data-wait`), the refusal at the
+bound (the existing `max_sessions` refusal, now fed the smaller number) and the test of the promise.
+Not built: the separate refusal counter, the admin-space export of the measured share, the drop policy.
 
 **The promise.** While the process receives at least the CPU share `s` that its operator declared, each
 session of up to `N_max(s)` keeps its lease. It is conditional on `s` on purpose: a router cannot promise
@@ -353,8 +356,8 @@ a lease to a host that takes its CPU away, and a promise that does not name its 
   `N` keepalive timers can fall due together, and serving them takes `N c_k b / s`. For the emission to be
   late by less than `2T/3` (the invariant a keepalive sent every `T/3` needs, so that one lost interval
   is still inside the lease) the burst has to finish within `T/3`: `N <= s T / (3 b c_k)`. With
-  `c_k` = 4.5 us, `T` = 10 s, `b` = 4 and `s` = 1.32% (the router at 32 hogs) this is about 2440
-  sessions before the margin, and 3260 at 24 hogs (`s` = 1.76%).
+  `c_k` = 10 us, `T` = 10 s, `b` = 4 and `s` = 1.32% (the router at 32 hogs) this is 1100 sessions,
+  and 1466 at 24 hogs (`s` = 1.76%).
 - (B) Service. The loop returns to a face after `R = N q c_u / s` (7.2), and a frame waits in its buffer
   that long. It does not cost a lease: before the loop judges a peer silent it reads what is waiting
   (`take_what_is_waiting`, `session_glue.rs`), and a frame decoded there stamps the peer's activity, so a
@@ -368,14 +371,27 @@ a lease to a host that takes its CPU away, and a promise that does not name its 
 The promise needs (A) alone: `N_max(s) = s T / (3 c_k)`. An operator who declares `L` as well gets
 `min(N_A, N_B(L))`; with no `L` declared there is no limit from (B), as there is none today.
 
-**What (A) says about the runs.** 2048 sessions is far inside (A) at 24 hogs (3260) and just inside it at
-32 (2440), where the margin of safety is a fifth. The runs at 32 hogs: none of five lost a client
-session in the runs of 7.3, and one of two lost 189 of 2048 in another session's runs of the same test on
-the tip of ledger 3486. A loss in some runs and none in others at a population 17% under the line is what
-a bound with that little room predicts (2048 is 16% under 2440), and it is why the recorded costs carry a margin of 2, which at
-32 hogs puts the bound at 1220 and refuses that population. The model is a fit to these runs and not yet
-tested by them: the loss rate against `N` at 32 hogs, and `c_k` under starvation (the 4.5 us was read
-once on an unloaded host), are the measurements that would show whether it holds.
+**What (A) says about the runs, and the measurement that corrected it.** The first form of this section
+used `c_k` = 4.5 us, read once on an unloaded host, which put (A) at 2440 sessions at 32 hogs and said
+2048 sessions were inside it. Another session then measured the router at 32 hogs on the tip of ledger
+3486 (host load 5 to 31, 20 s window, instrumentation reverted):
+
+| sessions `N` | runs | client sessions that ended on their own |
+|---|---|---|
+| 1024 | 5 | 0, 0, 0, 0, 0 |
+| 1536 | 5 | 0, 0, 0, 0, 0 |
+| 2048 | 5 | 375, 373, 676, 1158, 565 |
+| 2560 | 5 | 1350, 1538, 1667, 1145, 1432 |
+
+The loss starts between 1536 and 2048, not near 2440. One emission with its urgent write cost 6 to 10 us
+at the median and 12 to 48 us at the 99th percentile, not 4.5. The keepalive's lateness against its due
+time peaked at 6.4 s at 1536 (the plateau just under `2T/3` = 6.67 s) and at 8 to 12 s and still growing
+at 2048 and above: losses begin where the lateness passes `2T/3`, which is the condition (A) is written
+for. With `c_k` = 7 us (inside the measured 6 to 10) the bound is 1570, inside the bracket; with 10 us it
+is 1100, at 0.72 of the largest population that lost nothing, and that is the number recorded. Not
+measured: the share of the `ctl` thread (0.33% is from the scheduler's weights, not read from the
+thread's own counters), the cost of a whole pacer cycle (only the emission and the sleep overshoot were
+timed), and the steady state above the threshold, which a 20 s window is too short to show.
 
 **Evidence for the form of (B).** The router's longest silence from its peers in the E7s runs of 7.3 against `R`
 computed from the scheduler's weights (the router's threads at nice 10, weight 110, against the hogs at
@@ -401,25 +417,33 @@ time running, from the scheduler's own counters) is exported to the admin space 
 contract-violated flag when it stays below `s`: the promise is void and says so. With no `s` declared
 there is no cap, as upstream, and no promise.
 
-**The costs are recorded, with margin.** `c_u`, `c_k` and `b` are constants of the build, recorded as
-`RECORDED_HOST_MODEL` in `wz-session-core`'s `capacity` module (integers, so every profile computes the
-same number from the same inputs). The recorded costs are the measured upper bounds times a margin of 2,
-and `b` is the count that reproduces the table above. A lane that re-derives the table, and fails when it
-stops being within 25%, is not built.
+**The costs are recorded, against the measured loss.** `c_u`, `c_k` and `b` are constants of the build,
+recorded as `RECORDED_HOST_MODEL` in `wz-session-core`'s `capacity` module (integers, so every profile
+computes the same number from the same inputs): `c_k` 10 us, `c_u` 11 us, `b` 4, with no further margin,
+because the room a margin is for is already measured (1100 against 1536 with no loss and 2048 with loss).
+A unit test holds that room: the bound at 32 hogs must stay under 1536 and above two thirds of it. They
+are the costs of this host and this runtime; another host re-reads them, and a lane that re-derives the
+table above and fails when it drifts is not built.
 
 **What the router does at the number.** One value, the effective `max_sessions`, is the smaller of the
 configured `transport/unicast/max_sessions` (upstream's key, enforced in the accept loop already, default
-1000) and `N_max(s)`. A session past it is refused at accept and the sessions already admitted are kept:
-refuse the new one, not degrade the old. The refusal keeps upstream's close, and counts apart from the
-configured bound (`refused_over_capacity` beside `refused_over_max_sessions`) so that an operator sees
-whether the limit was theirs or the model's.
+1000) and `N_max(s)` (`WzConfig::effective_max_sessions`, read by the accept loop in place of the bare
+configured number). A session past it is refused at accept and the sessions already admitted are kept:
+refuse the new one, not degrade the old. The router says once at startup that it admits fewer than
+configured and which bound did it. The refusal is the existing one, so it counts with the configured
+bound's (`refused_over_max_sessions`); a counter that tells an operator whether the limit was theirs or the
+model's is not built.
 
 **What the router sheds.** Control frames are never dropped. Data is shed per face from a bounded lane and
 counted per lane on the admin space. Whether a message that asked to block is dropped, waited for, or
 turned into a drop by the router is not decided here: upstream's egress pipeline has to be read first, and
 a router that blocks its loop on one slow face breaks (B) for all the others.
 
-**How it is held.** A clockless test for the arithmetic (the effective bound from `s`, the costs and `T`,
-and the refusal at it); the E7s test at a declared `s` asserting that no client session ended and that the
-timer service lateness stays under `2T/3`, with a loose bound on the hosted runner; the table above as a
-lane that fails when the model stops predicting the loop's return.
+**How it is held.** Clockless tests of the arithmetic (`capacity::tests`, and the config's effective bound
+from a declared share and a lease). The promise itself is
+`wz_router_hat_keeps_every_lease_it_admits_at_its_declared_share`: the router told 1.32% of a core,
+32 hogs, 2048 sessions knocking; it asserts that no more than the model's number were admitted, that the
+rest were refused, that no face went DOWN and that no admitted client session ended. Measured: 8 of 8 runs
+at the first recorded costs (1222 admitted) and 3 of 3 at the recorded ones (1100), host load 13 to 30.
+Not yet held: an assertion of the keepalive's lateness against `2T/3` itself (the clients' ending stands in
+for it), a loose bound for the hosted runner, and the lane that re-derives the tables.
