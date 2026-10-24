@@ -284524,6 +284524,34 @@
         "Next: queries step Q2, the requesting end (z_get, the querier) on the cooperative engine. client_only_dials_a_listener runs in no CI lane (two builds, run by hand on each engine): give it one. Read the hosted CI of rounds 3558, 3562 and this one at the next round's start."
       ]
     },
+    "Round 3568": {
+      "decision_summary": "A red on origin, paid off by the round that caused it. Round 3562's cooperative engine doc cites zenoh-pico's socket receive timeout by its configuration name as what the engine's idle wait matches, and the tree carries the value (the pico ABI hands the engine 100 ms) but no constant of that name, so the prose named-identifier gate (hosted Layer C0, not in the push hook's array) refused it. The sentence is right to cite the upstream knob, so the name joins the gate's set of upstream names deliberately not provided, with the reason beside it, rather than the sentence losing its citation. Reported by watching-zenoh-64 through a8.",
+      "changes_bullets": [
+        "scripts/lib/prose_named_identifier_gate.py: UPSTREAM_UNCARRIED gains pico's socket receive timeout, with the reason (described, not spelled)."
+      ],
+      "verification_bullets": [
+        "prose_named_identifier_gate --check: rc 1 on origin's tip before the change, rc 0 after (Rust prose cites 169 upstream-family names, 137 carried, 32 pinned as not provided); --selftest rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The prose named-identifier gate is hosted-only; a round whose prose cites an upstream constant runs it by hand before the push. Queries step Q2a (QueryOptions moved to session-core) follows."
+      ],
+      "publishable_decision_summary": "A red on origin, paid off by the round that caused it. Round 3562's cooperative engine doc cites zenoh-pico's socket receive timeout by its configuration name as what the engine's idle wait matches, and the tree carries the value (the pico ABI hands the engine 100 ms) but no constant of that name, so the prose named-identifier gate (hosted Layer C0, not in the push hook's array) refused it. The sentence is right to cite the upstream knob, so the name joins the gate's set of upstream names deliberately not provided, with the reason beside it, rather than the sentence losing its citation. Reported by watching-zenoh-64 through a8.",
+      "publishable_changes_bullets": [
+        "scripts/lib/prose_named_identifier_gate.py: UPSTREAM_UNCARRIED gains pico's socket receive timeout, with the reason (described, not spelled)."
+      ],
+      "publishable_verification_bullets": [
+        "prose_named_identifier_gate --check: rc 1 on origin's tip before the change, rc 0 after (Rust prose cites 169 upstream-family names, 137 carried, 32 pinned as not provided); --selftest rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The prose named-identifier gate is hosted-only; a round whose prose cites an upstream constant runs it by hand before the push. Queries step Q2a (QueryOptions moved to session-core) follows."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
