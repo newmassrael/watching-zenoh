@@ -512,8 +512,7 @@ pub struct ExchangeTable {
     ///
     /// Not merged by [`Self::merge`]: a row key names a row of ONE capture's
     /// lists, and the same key in another capture is another row.
-    row_verdicts:
-        crate::overlay_map::OverlayMap<crate::payload::RowKey, crate::payload::RowVerdict>,
+    row_verdicts: crate::verdict_column::VerdictColumn,
     /// For each batched RECORD (a row and the record's place in it) that was a
     /// `ResponseFinal` closing an exchange the capture held the `Request` of: the
     /// request it closed. A row can batch several records, so the key is the row AND
@@ -923,7 +922,7 @@ impl ExchangeTable {
         //
         // The close's row exists only for an exchange that was closed, and a
         // close the capture never saw leaves the request's row the only one.
-        self.row_verdicts.entry_or_default(entry.row).record(truth);
+        self.row_verdicts.record(entry.row, truth);
         if let Ending::Closed {
             row, record, place, ..
         } = ending
@@ -941,7 +940,7 @@ impl ExchangeTable {
             } else {
                 truth
             };
-            self.row_verdicts.entry_or_default(row).record(close_truth);
+            self.row_verdicts.record(row, close_truth);
             // Before the early return below as well: the pairing does not depend
             // on what a selector thought of the exchange.
             *self.closings.entry_or_default((row, record)) = Some(Closing {
@@ -1238,10 +1237,7 @@ impl ExchangeFold {
     /// closed.
     #[cfg(feature = "dissect")]
     pub(crate) fn memory(&self) -> usize {
-        self.table
-            .row_verdicts
-            .memory(crate::payload::RowVerdict::owned_bytes)
-            + self.table.closings.memory(|_| 0)
+        self.table.row_verdicts.memory() + self.table.closings.memory(|_| 0)
     }
 
     /// A fold that has taken no message.

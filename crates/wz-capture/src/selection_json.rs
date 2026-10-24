@@ -123,7 +123,6 @@
 //! is ABSENT rather than unmatched, and a consumer counting "three matched"
 //! needs to be told the list it counted in was made short.
 
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
@@ -342,6 +341,32 @@ pub fn selection_json_where_coordinated(
     out
 }
 
+/// What a selector said of each row, by the row's number, as a nibble a row
+/// (`crate::word_column`): the word is one of four, and a map entry to hold it
+/// was about forty bytes.
+#[derive(Debug, Default, Clone)]
+struct Said {
+    words: crate::word_column::WordColumn,
+}
+
+impl Said {
+    fn insert(&mut self, seq: u64, verdict: RowVerdict) {
+        self.words.set(seq, Some(verdict.code()));
+    }
+
+    fn get(&self, seq: u64) -> Option<RowVerdict> {
+        self.words.get(seq).and_then(RowVerdict::of_code)
+    }
+
+    fn len(&self) -> usize {
+        self.words.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.words.is_empty()
+    }
+}
+
 /// The word a selector said of each row the LAST call of
 /// [`selection_since_json_coordinated`] judged, by the row's number.
 ///
@@ -353,7 +378,7 @@ pub fn selection_json_where_coordinated(
 /// costs a word per row the handle still holds, not a copy of any row.
 #[derive(Debug, Default, Clone)]
 pub struct SelectionMemory {
-    said: BTreeMap<u64, RowVerdict>,
+    said: Said,
     /// Whether a call of [`selection_since_json_coordinated`] has written this
     /// memory. A memory is made empty when a selector has none, and a selector
     /// whose memory was given up to make room is made empty again, so this is
@@ -371,6 +396,11 @@ impl SelectionMemory {
     /// Whether nothing is remembered.
     pub fn is_empty(&self) -> bool {
         self.said.is_empty()
+    }
+
+    /// Bytes the memory holds: the nibble a row is held in, by chunk.
+    pub fn memory(&self) -> usize {
+        self.said.words.allocated_bytes()
     }
 }
 
@@ -410,6 +440,11 @@ impl SelectionMemories {
     /// How many selectors have a memory now.
     pub fn len(&self) -> usize {
         self.slots.len()
+    }
+
+    /// Bytes every selector's memory holds together.
+    pub fn memory(&self) -> usize {
+        self.slots.values().map(SelectionMemory::memory).sum()
     }
 
     /// Whether no selector has a memory.
@@ -511,7 +546,7 @@ pub fn selection_since_json_coordinated(
 ) -> String {
     let grouping = crate::node::session_grouping(d);
     let verdicts = judged_by(d, filter, &grouping, Some(coordinates));
-    let mut said_now: BTreeMap<u64, RowVerdict> = BTreeMap::new();
+    let mut said_now = Said::default();
     let mut fresh: Vec<Row> = Vec::new();
     let mut revised: Vec<(Row, RowVerdict)> = Vec::new();
     for_each_row(d, verdicts.as_ref(), coordinates, &mut |row| {
@@ -527,7 +562,7 @@ pub fn selection_since_json_coordinated(
         }
         if seq > since.after_seq {
             fresh.push(row);
-        } else if let (Some(now), Some(&was)) = (row.verdict, memory.said.get(&seq)) {
+        } else if let (Some(now), Some(was)) = (row.verdict, memory.said.get(seq)) {
             if now != was {
                 revised.push((row, was));
             }

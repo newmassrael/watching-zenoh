@@ -136,6 +136,16 @@ mod exit;
 /// build must not be charged for a walker only a desktop reader runs.
 #[cfg(feature = "dissect")]
 pub mod fields_json;
+// Open-debt item 924, step 5 -- the field walk's per-row digests, kept as one
+// word a row. Private: the memory in `fields_json` is the only holder.
+#[cfg(feature = "dissect")]
+mod digest_column;
+// Open-debt item 924, step 5 -- a small word per row, kept as a nibble. Private:
+// the selection memory is its holder.
+#[cfg(feature = "dissect")]
+mod word_column;
+// Open-debt item 924, step 5 -- what the selector said of each row, kept as a
+// pattern the row names. Private: the census planes are its holders.
 /// R311y869 (§1.1f) — the capture read as DECLARED INTEREST: who asked for
 /// what, and whether anything published is anything anybody asked for.
 ///
@@ -184,6 +194,8 @@ pub mod message_context;
 /// links where both ends named themselves. The one plane whose unit is not a
 /// flow.
 pub mod node;
+#[cfg(feature = "network-codecs")]
+mod verdict_column;
 // A fold over a capture that remembers where it stopped, and the census planes
 // built on it. Documented by its own `//!` text and carrying no outer `///`
 // here, for the reason the transport build modules give.

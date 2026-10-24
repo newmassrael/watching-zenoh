@@ -413,7 +413,10 @@ pub struct FieldsMemory {
     /// it stopped to judge the frames that arrived against. Meaningful only beside
     /// `saved` and `walk`, and `None` for a walk that judged nothing.
     e2e: Option<crate::e2e_slots::SlotLedger>,
-    digests: alloc::collections::BTreeMap<u64, Option<u64>>,
+    /// The digest of every row the walk has written, by sequence number
+    /// ([`crate::digest_column`]): what a later call holds the rows it would
+    /// write now against, to find the ones that moved.
+    digests: crate::digest_column::DigestColumn,
     stats: FieldsStats,
 }
 
@@ -455,9 +458,7 @@ impl FieldsMemory {
         crate::FoldMemory {
             payload_rows: 0,
             exchange_rows: self.pairing.fold().map_or(0, |fold| fold.memory()),
-            row_digests: wz_session_core::heap_account::btree_bytes::<u64, Option<u64>>(
-                self.digests.len(),
-            ),
+            row_digests: self.digests.allocated_bytes(),
         }
     }
 }
@@ -869,19 +870,21 @@ pub fn fields_json_since_remembering_progress(
                 memory.walk = WalkState::default();
                 return None;
             }
-            let (now, _) = probe.into_parts();
-            for (seq, was) in &memory.digests {
-                if *seq > since.after_seq {
+            let (mut now, _) = probe.into_parts();
+            for (seq, was) in memory.digests.iter() {
+                if seq > since.after_seq {
                     continue;
                 }
-                if let (Some(was), Some(Some(is))) = (was, now.get(seq)) {
+                if let Some(is) = now.get(seq) {
                     if was != is {
-                        revised.insert(*seq);
+                        revised.insert(seq);
                     }
                 }
             }
             // The rows still held are the ones the probe saw: a row a ceiling
-            // trimmed has no digest to keep.
+            // trimmed has no digest to keep. A row the probe read as `declined`
+            // has none either, and the column's own cell for it goes.
+            now.retain(|_| true);
             memory.digests = now;
             memory.stats.compared += 1;
         }
@@ -981,7 +984,7 @@ pub fn fields_json_since_remembering_progress(
     }
     let (written, kept) = sink.into_parts();
     memory.stats.revised_rows += kept.len() as u64;
-    memory.digests.extend(written);
+    memory.digests.extend_from(&written);
     // The digests of rows a ceiling has since taken answer nothing: no later call
     // can compare a row the handle no longer holds. Dropped once they outnumber
     // the held rows by a fraction, so the memory follows the handle's size and a
@@ -992,7 +995,7 @@ pub fn fields_json_since_remembering_progress(
         if let Some(held) = coordinates.held_row_count() {
             if memory.digests.len() as u64 > held + held / 4 + 256 {
                 if let Some(ranges) = coordinates.held_seq_ranges() {
-                    memory.digests.retain(|seq, _| seq_in_ranges(&ranges, *seq));
+                    memory.digests.retain(|seq| seq_in_ranges(&ranges, seq));
                 }
             }
         }
@@ -4841,8 +4844,8 @@ impl<'a> RowCloses<'a> {
 /// asked again, and that is not a correction (the row the consumer holds stays
 /// true), so such a row has NO digest and is never reported.
 pub(crate) struct RowSink {
-    /// `seq` to the row's digest, `None` for a row that read `declined`.
-    digests: core::cell::RefCell<alloc::collections::BTreeMap<u64, Option<u64>>>,
+    /// `seq` to the row's digest, and the rows that read `declined` as such.
+    digests: core::cell::RefCell<crate::digest_column::DigestColumn>,
     /// The earlier rows to write again.
     revised: alloc::collections::BTreeSet<u64>,
     /// Those rows as they read now, by `seq`.
@@ -4852,7 +4855,7 @@ pub(crate) struct RowSink {
 impl RowSink {
     pub(crate) fn new(revised: alloc::collections::BTreeSet<u64>) -> Self {
         Self {
-            digests: core::cell::RefCell::new(alloc::collections::BTreeMap::new()),
+            digests: core::cell::RefCell::new(crate::digest_column::DigestColumn::new()),
             revised,
             kept: core::cell::RefCell::new(alloc::collections::BTreeMap::new()),
         }
@@ -4867,7 +4870,7 @@ impl RowSink {
     pub(crate) fn into_parts(
         self,
     ) -> (
-        alloc::collections::BTreeMap<u64, Option<u64>>,
+        crate::digest_column::DigestColumn,
         alloc::collections::BTreeMap<u64, String>,
     ) {
         (self.digests.into_inner(), self.kept.into_inner())
@@ -5058,7 +5061,7 @@ impl RowTags<'_> {
     fn record_row(&self, seq: Option<u64>, text: &str, declined: bool) {
         if let (Some(sink), Some(seq)) = (self.sink, seq) {
             let digest = (!declined).then(|| RowSink::digest(text));
-            sink.digests.borrow_mut().insert(seq, digest);
+            sink.digests.borrow_mut().set(seq, digest);
         }
     }
 
@@ -5336,6 +5339,28 @@ pub enum RowVerdict {
 }
 
 impl RowVerdict {
+    /// The word as a number in `1..=4`, for a column that holds one a row
+    /// ([`crate::word_column`]).
+    pub(crate) const fn code(self) -> u8 {
+        match self {
+            Self::Yes => 1,
+            Self::No => 2,
+            Self::Undecided => 3,
+            Self::Unjudged => 4,
+        }
+    }
+
+    /// The word [`Self::code`] numbered.
+    pub(crate) const fn of_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Yes),
+            2 => Some(Self::No),
+            3 => Some(Self::Undecided),
+            4 => Some(Self::Unjudged),
+            _ => None,
+        }
+    }
+
     /// The word this verdict is written as.
     pub const fn word(self) -> &'static str {
         match self {

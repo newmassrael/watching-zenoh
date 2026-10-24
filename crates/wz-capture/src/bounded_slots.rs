@@ -111,7 +111,7 @@ impl<K: PartialEq, V> BoundedSlots<K, V> {
     }
 
     /// Every memory held, oldest first.
-    #[cfg(all(feature = "dissect", feature = "network-codecs"))]
+    #[cfg(feature = "dissect")]
     pub(crate) fn values(&self) -> impl Iterator<Item = &V> {
         self.entries.iter().map(|(_, v)| v)
     }

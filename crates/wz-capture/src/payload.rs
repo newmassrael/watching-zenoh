@@ -1000,6 +1000,22 @@ pub struct RowKey {
 
 #[cfg(feature = "network-codecs")]
 impl RowKey {
+    /// The key's three coordinates: the list, the direction and the message's
+    /// place. For a structure that keeps rows by them in arrays and so has to take
+    /// them apart ([`crate::verdict_column`]).
+    pub(crate) const fn parts(&self) -> (usize, usize, usize) {
+        (self.list, self.direction, self.message_at)
+    }
+
+    /// The key [`Self::parts`] took apart.
+    pub(crate) const fn from_parts(list: usize, direction: usize, message_at: usize) -> Self {
+        Self {
+            list,
+            direction,
+            message_at,
+        }
+    }
+
     /// The row one frame's records belong to.
     ///
     /// ⚠ IT TAKES THE LIST INDEX AND NOT A [`crate::node::ListContext`], even
@@ -1070,7 +1086,7 @@ pub struct RowVerdict {
 #[cfg(feature = "network-codecs")]
 impl RowVerdict {
     /// Bytes the verdict holds beyond the slot it sits in: its answers.
-    #[cfg(feature = "dissect")]
+    #[cfg(any(test, feature = "dissect"))]
     pub(crate) fn owned_bytes(&self) -> usize {
         wz_session_core::heap_account::vec_bytes(&self.records)
     }
@@ -1160,7 +1176,7 @@ pub struct PayloadCensus {
     /// it are one exchange, judged once by [`crate::exchange::ExchangeTable`],
     /// which holds the rows of both. A document that wants every row reads the two
     /// together (`crate::fields_json::RowJudgement`).
-    row_verdicts: crate::overlay_map::OverlayMap<RowKey, RowVerdict>,
+    row_verdicts: crate::verdict_column::VerdictColumn,
     rows: alloc::collections::BTreeMap<String, EncodingRow>,
     contradictions: Vec<Contradiction>,
     payloads: usize,
@@ -1423,8 +1439,7 @@ impl PayloadCensus {
         // `unjudged` word is for a row that carries no record at all.
         if judges_row {
             self.row_verdicts
-                .entry_or_default(RowKey::of(ctx.list(), frame))
-                .record(truth);
+                .record(RowKey::of(ctx.list(), frame), truth);
         }
         // The tally below counts PAYLOADS, as it always has: a record with no
         // payload is a row to judge and not a payload to count, and the
@@ -1688,7 +1703,7 @@ impl PayloadFold {
     /// every record it judged, which is what the census adds to a handle per row.
     #[cfg(feature = "dissect")]
     pub(crate) fn memory(&self) -> usize {
-        self.census.row_verdicts.memory(RowVerdict::owned_bytes)
+        self.census.row_verdicts.memory()
             + wz_session_core::heap_account::vec_bytes(&self.census.contradictions)
     }
 }
