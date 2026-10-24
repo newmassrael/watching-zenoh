@@ -684,6 +684,12 @@ pub mod send_wire_error;
 #[cfg(feature = "storage-profile")]
 pub mod sample;
 
+/// An [`sample::EncodingHint`] from an encoding label and back, under each upstream library's
+/// rule for the wire id. Moved down from `wz-capi-core` so a C ABI over the cooperative engine
+/// reaches it (see the module's own header).
+#[cfg(feature = "alloc")]
+pub mod encoding_hint;
+
 /// §5.19 — predefined Encoding constants + the MIME id<->str table, the wz mirror
 /// of zenoh's high-level Encoding API (the convenience layer the encoding-* atoms
 /// name, on top of the active `pubsub-encoding` wire field). FOUNDATIONAL

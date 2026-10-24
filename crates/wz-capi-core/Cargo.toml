@@ -180,7 +180,6 @@ transport-stats = ["wz-runtime-tokio/transport-stats"]
 access-extauth-pubkey = [
     "wz-runtime-tokio/routing-accept",
     "wz-runtime-tokio/access-extauth-pubkey",
-    "dep:wz-session-core",
     "wz-session-core/session-extauth",
 ]
 # The zenoh-c switches that are capabilities (`deploy/wz-config.toml`), under zenoh-c's own
@@ -209,7 +208,6 @@ auth_usrpwd = ["access-extauth-usrpwd"]
 access-extauth-usrpwd = [
     "wz-runtime-tokio/routing-accept",
     "wz-runtime-tokio/access-extauth-usrpwd",
-    "dep:wz-session-core",
     "wz-session-core/access-extauth-usrpwd",
 ]
 # The policy a node's config states for the traffic of its sessions: `access_control`,
@@ -437,10 +435,13 @@ wz-runtime-core = { path = "../wz-runtime-core", features = ["alloc"] }
 # here would make it every dependent's (R311y614).
 wz-codecs = { path = "../wz-codecs", default-features = false }
 # The `AuthDispatch` and `UsrPwdMethod` a node's authentication is built from
-# (`node_auth`), which the runtime does not re-export. Optional, and only for the credential
-# feature; `default-features = false` and nothing named here, for the rule the line above
-# states: a feature named here would become every dependent's.
-wz-session-core = { path = "../wz-session-core", default-features = false, optional = true }
+# (`node_auth`), which the runtime does not re-export, and the encoding conversions
+# (`encoding_ids` re-exports `wz_session_core::encoding_hint`, which moved down so the pico ABI
+# over the cooperative engine reaches it without this crate). No longer optional: the
+# conversions are every build's. `alloc` is the one feature named, because the conversions
+# build `String`s; it adds nothing to any dependent, since `wz-runtime-tokio`, which every build
+# of this crate links, already turns it on.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]

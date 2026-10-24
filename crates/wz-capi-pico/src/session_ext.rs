@@ -22,7 +22,7 @@ use std::sync::Arc;
 use wz_capi_core::faces::SharedSession;
 #[cfg(feature = "advanced")]
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
-use wz_runtime_tokio::session_glue::WhatAmI;
+use wz_session_core::WhatAmI;
 
 #[cfg(feature = "connectivity")]
 use crate::connectivity::Connectivity;

@@ -45,8 +45,8 @@ use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 /// pico's `ENCODING_VALUES_ID_TO_STR` (`src/api/encoding.c:89`), 53 entries,
 /// index = encoding id.
 ///
-/// R311y545 — the table itself moved to
-/// [`wz_capi_core::encoding_ids`](wz_capi_core::encoding_ids), which is where
+/// R311y545 — the table itself moved out of this crate, and it lives in
+/// [`wz_codecs::encoding_ids`] since R311y617, which is where
 /// an ABI-neutral wire fact belongs: `wz-capi-c`'s `z_encoding_*` constants
 /// need the SAME ids, and two transcriptions of one wire table drift in a way
 /// neither crate's own tests can see. This stays as a re-export so the
@@ -64,11 +64,11 @@ use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 /// crate, where the oracle has never lived, and a reader following it found
 /// nothing. The oracle needs the real `libzenohpico.so`, so it can only live
 /// where the interop harness does.
-pub use wz_capi_core::encoding_ids::ENCODING_ID_TO_STR;
+pub use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
 
 /// pico's `_Z_ENCODING_ID_DEFAULT` — `zenoh/bytes`, id 0. Re-exported from the
 /// same SSOT as the table it indexes.
-use wz_capi_core::encoding_ids::ENCODING_ID_DEFAULT;
+use wz_codecs::encoding_ids::ENCODING_ID_DEFAULT;
 
 /// Behind a `z_owned_encoding_t`: the wire projection, in the SAME shape the
 /// decode path produces.
@@ -85,7 +85,7 @@ impl EncodingState {
     /// fallback is why `z_encoding_from_str` has no invalid input.
     pub(crate) fn from_str(s: &str) -> Self {
         Self {
-            hint: wz_capi_core::encoding_ids::hint_from_str(s),
+            hint: wz_session_core::encoding_hint::hint_from_str(s),
         }
     }
 
@@ -94,7 +94,7 @@ impl EncodingState {
     /// renders as the empty prefix, which is pico's behaviour too (its bounds
     /// check leaves `prefix` NULL and `prefix_len` 0).
     pub(crate) fn to_string(hint: &EncodingHint) -> String {
-        wz_capi_core::encoding_ids::hint_to_string(hint)
+        wz_session_core::encoding_hint::hint_to_string(hint)
     }
 }
 
@@ -380,7 +380,7 @@ const fn static_view(state: &'static EncodingState) -> StaticLoanedEncoding {
 /// which is the failure class this crate has already paid for once.
 ///
 /// The MIME string is NOT repeated here. It lives once in
-/// [`wz_capi_core::encoding_ids::ENCODING_ID_TO_STR`], indexed by the same id,
+/// [`wz_codecs::encoding_ids::ENCODING_ID_TO_STR`], indexed by the same id,
 /// so `z_encoding_to_string` on a constant renders through the identical table
 /// the wire codec uses. The (name -> id) pairing below is the only transcribed
 /// fact, and it is adjudicated against upstream's COMPILED library by

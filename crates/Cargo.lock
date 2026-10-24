@@ -2849,6 +2849,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "wz-capi-core",
  "wz-cdylib-build",
+ "wz-codecs",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
  "wz-session-core",

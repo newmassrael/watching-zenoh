@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use wz_capi_core::faces::SharedSession;
 use wz_runtime_tokio::advanced_subscriber::{DeclarationForms, EntityForm};
-use wz_runtime_tokio::session_glue::WhatAmI;
+use wz_session_core::WhatAmI;
 
 use crate::keyexpr::DeclaredKeyexpr;
 use crate::write_filter::PicoSession;

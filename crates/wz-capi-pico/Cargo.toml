@@ -346,6 +346,10 @@ wz-capi-core = { path = "../wz-capi-core", default-features = false }
 # (`docs/capi-pico-on-coop-engine.md`, decision D1). `alloc` is what those modules need; the
 # engine's own dependency on this crate unifies the rest.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
+# The wire vocabulary the ABI layer exports over: the encoding id table and the VLE codec of the
+# serialization format, named where they live for the reason above. Nothing named: both modules
+# are ungated, and a feature named here would become every dependent's (R311y614).
+wz-codecs = { path = "../wz-codecs", default-features = false }
 # Depend on wz-runtime-tokio DIRECTLY, not the `wz` facade: the facade
 # re-exports this crate (`wz::capi_pico`), so a facade dependency here would
 # form a package cycle Cargo rejects. wz-runtime-tokio's default feature

@@ -539,6 +539,11 @@ codec_group!(
 #[path = "encoding_ids.rs"]
 pub mod encoding_ids;
 
+/// The VLE (`zint`) codec of zenoh's serialization format, which both C ABIs export, moved down
+/// from `wz-capi-core` for the encoding id table's reason (see the module's own header).
+#[path = "vle.rs"]
+pub mod vle;
+
 pub mod wire_const {
     /// The zenoh protocol version this workspace reads and writes, the
     /// `version` byte an Init, a Join, a Scout and a Hello each carry

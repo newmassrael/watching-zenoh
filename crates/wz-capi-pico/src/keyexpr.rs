@@ -14,7 +14,7 @@ use std::sync::{Arc, Weak};
 
 use wz_capi_core::faces::{SharedSession, WireKey};
 use wz_runtime_tokio::session::RetractionKey;
-use wz_runtime_tokio::session_glue::WhatAmI;
+use wz_session_core::WhatAmI;
 
 use crate::abi::{
     view_bytes, z_loaned_keyexpr_t, z_loaned_string_t, z_moved_keyexpr_t, z_owned_keyexpr_t,

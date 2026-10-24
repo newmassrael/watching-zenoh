@@ -29,7 +29,7 @@
 /// sweeps the top of the range rather than sampling it.
 #[no_mangle]
 pub extern "C" fn _z_zint_len(v: u64) -> u8 {
-    wz_capi_core::codec::zint_len(v) as u8
+    wz_codecs::vle::zint_len(v) as u8
 }
 
 /// pico `_z_zint64_encode_buf` (`src/protocol/codec.c:132-147`): write the VLE
@@ -53,12 +53,12 @@ pub unsafe extern "C" fn _z_zint64_encode_buf(buf: *mut u8, v: u64) -> u8 {
     encode_zint(out, v) as u8
 }
 
-// The codec ITSELF is `wz_capi_core::codec` — one implementation, both ABIs,
+// The codec ITSELF is `wz_codecs::vle` — one implementation, both ABIs,
 // because zenoh-c's `ze_serializer_*` writes the same VLE lengths this one does
 // and two copies of a wire-format encoder drift while each stays green against
 // its own decoder. What remains in this file is the pico ABI's EXPORTS, which
 // are surface even when their bodies are one line.
-pub(crate) use wz_capi_core::codec::{decode_zint, encode_zint, VLE_LEN};
+pub(crate) use wz_codecs::vle::{decode_zint, encode_zint, VLE_LEN};
 
 #[cfg(test)]
 mod tests {

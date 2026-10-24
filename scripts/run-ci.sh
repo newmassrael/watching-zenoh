@@ -13158,13 +13158,16 @@ layer_c1bz_docs_resolve() {
     # and on the tree differ by one removal and no addition. `get.rs`'s link to
     # `wz_session_core::reply_sink::ReplySink` named a crate this one did not
     # depend on, so it resolved only once the crate took wz-session-core directly
-    # (docs/capi-pico-on-coop-engine.md, step 1).
+    # (docs/capi-pico-on-coop-engine.md, step 1). Then 42 -> 41, by removal,
+    # DIFFED the same way: the encoding table's doc in `encoding.rs` named its
+    # old home with a redundant explicit target, and the rewritten sentence that
+    # names `wz_codecs::encoding_ids` (where the table lives) carries none.
     budget="
         wz:4
         wz-ap-demo:25
         wz-capi-c:40
         wz-capi-core:7
-        wz-capi-pico:42
+        wz-capi-pico:41
         wz-link-lwip:9
         wz-mcu-session-acceptor:1
         wz-routing-graph:5

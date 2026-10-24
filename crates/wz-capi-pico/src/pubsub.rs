@@ -32,8 +32,8 @@ use std::sync::{Arc, Mutex as StdMutex};
 #[cfg(feature = "liveliness")]
 use wz_runtime_tokio::declare::LivelinessSample;
 use wz_runtime_tokio::session::PublishOptions;
-use wz_runtime_tokio::Reliability;
 use wz_session_core::locality::Locality;
+use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
 use wz_session_core::sink::SampleView;
 
@@ -153,7 +153,7 @@ pub(crate) struct SampleMarshal {
     /// disagree with it.
     qos: Option<wz_session_core::sample::QosLevel>,
     /// R311y559 — the transport reliability the sample arrived under.
-    reliability: wz_runtime_tokio::Reliability,
+    reliability: Reliability,
     /// R311y559 — the `(zid, eid, sn)` source triple, in the pico ABI shape
     /// `z_sample_source_info` hands back a POINTER to. Stored rather than
     /// synthesised per call for the same reason the cached views are: the
@@ -181,7 +181,7 @@ impl SampleMarshal {
             timestamp: None,
             encoding: None,
             qos: None,
-            reliability: wz_runtime_tokio::Reliability::default(),
+            reliability: Reliability::default(),
             source_info: None,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
             loaned_payload: z_loaned_bytes_t {
@@ -2490,7 +2490,7 @@ pub unsafe extern "C" fn z_sample_source_info(
 ///
 /// Note the enum is INVERTED against wz's own: pico spells
 /// `Z_RELIABILITY_RELIABLE = 0` and `Z_RELIABILITY_BEST_EFFORT = 1`
-/// (`api/constants.h:201-203`) while `wz_runtime_tokio::Reliability`
+/// (`api/constants.h:201-203`) while `Reliability`
 /// is `BestEffort = 0` / `Reliable = 1`. The mapping is written out rather than
 /// cast, because a cast agrees on neither value and R311y545 already paid for
 /// exactly this class of slip on `z_congestion_control_t`.
@@ -2506,7 +2506,7 @@ pub unsafe extern "C" fn z_sample_reliability(sample: *const z_loaned_sample_t) 
     const Z_RELIABILITY_BEST_EFFORT: c_int = 1;
     crate::ffi::guard_val(Z_RELIABILITY_RELIABLE, || {
         match sample_marshal(sample).map(|m| m.reliability) {
-            Some(wz_runtime_tokio::Reliability::BestEffort) => Z_RELIABILITY_BEST_EFFORT,
+            Some(Reliability::BestEffort) => Z_RELIABILITY_BEST_EFFORT,
             _ => Z_RELIABILITY_RELIABLE,
         }
     })

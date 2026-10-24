@@ -70,7 +70,8 @@ use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, DialPhase, OpenError, OpenStance, SessionState,
     DEFAULT_BATCH_SIZE,
 };
-use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
+use wz_runtime_tokio::session_glue::TxQueueConf;
+use wz_session_core::WhatAmI;
 
 /// Open-debt item 913 — whether a `listen` endpoint names a multicast group: a `udp/`
 /// locator whose metadata names an interface (`#iface=`). That is when pico's listen link
