@@ -459,6 +459,31 @@ from. So the order is now:
   reading that kept every message whole, and every message's bytes against its
   payload; dropping the end on reading again fails it, and so does releasing it
   at a unit's first row.
+  Landed (4), its TLS part: a decrypted flow keeps the plaintext each direction
+  opened into (moved out of the pass that built it, not copied) and its
+  messages are entries read again from it. A unit is framed in the plaintext
+  and stated where the record carrying its first byte begins and the record
+  carrying its last byte ends; the pass rewrote decoded frames into those
+  coordinates, which only a message kept whole allows, and now RESTATES the
+  rows (`MessageList::restate_from`): an entry keeps its locator in the
+  plaintext, takes the record's offset as its anchor, and keeps its end beside
+  the entries as a WebSocket unit does (an end-table row with no entry has
+  none). The restatement is by each row's own direction; the rewrite applied
+  the fed direction's records to every row the call added, including rows of
+  the other direction a context released. A trim of the TCP stream keeps
+  nothing whole for such a flow, and a message ceiling's release lets the
+  plaintext before the oldest held message go, found by the list
+  (`oldest_source_offset`) because a restated anchor is in the other space. The
+  byte door answered a decrypted message with a slice of ciphertext at the
+  record; it reads the plaintext now. The analyser's own copy of the byte door
+  sliced a ws message's stream at its anchor too, and gave no sample from a ws
+  capture; it calls `FlowDissection::message_bytes` now. The gate decrypts a
+  capture whose units cross record boundaries both ways and batch messages,
+  plain and under a capture-wide ceiling that discards the decrypted rows,
+  against the reading that kept every message whole, every message's bytes
+  against its unit's plaintext, and the plaintext kept under the ceiling; a
+  restatement that does not flag the stated end fails it, and so does a release
+  one byte early.
 - 5. The memory gate.
 - 6. Random access to a row's field document (D9), taken before 4c's remaining
   landings because it is what the consumer's budget waits on: (a) the tables
