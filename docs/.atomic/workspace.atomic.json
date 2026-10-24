@@ -282786,6 +282786,46 @@
         "Read the hosted runs of the pushes of rounds 3500, 3503, 3506, 3512, 3517 and this one per job, Layer E18 first."
       ]
     },
+    "Round 3526": {
+      "decision_summary": "Open-debt item 924, step 4c, the decrypted TLS flows (owner: long-term correct, cost not counted). The plaintext a pass opened existed only in that pass, and its units were stated at the records that carried them by rewriting the decoded frames, so the messages were kept whole. The flow now keeps the plaintext (moved, not copied), its messages are entries read again from it, and the pass restates the rows instead: an entry keeps its plaintext locator, takes the record's offset as anchor and keeps its end beside the entries, by each row's own direction (the rewrite applied the fed direction's records to every row the call added). A message ceiling releases the plaintext behind the oldest held message. Found in the same seam: the byte door sliced ciphertext for a decrypted message, and the analyser's own copy of it sliced a ws message at its frame header and gave no sample; both now read the unit's bytes.",
+      "changes_bullets": [
+        "wz-session-core passive_messages.rs: MessageList::restate_from (moves anchors and stated ends, entries keep their locator) replaces iter_mut_from; the end table is keyed by row class and locator and a flagged row with no entry has no end; oldest_source_offset; keep_whole_before lets a unit's end go",
+        "wz-capture lib.rs: FlowDissection keeps the decrypted plaintext per direction and reads its entries from it (Streams and its own source); a TCP trim keeps none of them whole; the ceiling release lets the plaintext behind the oldest held message go; record_coordinates replaces the frame rewrite; message_bytes reads a decrypted message's plaintext; redecode_gate.rs: a decrypted capture plain and under a capture-wide ceiling",
+        "wz-analyze: the sample and field walks read message bytes through FlowDissection::message_bytes (its own stream slicer removed) and a ws capture yields samples; discard_site_lint.py: the end table's removals registered; docs/dissect-row-index.md: step 4c (4), its TLS part"
+      ],
+      "verification_bullets": [
+        "The TLS gate passes plain and under capture-wide ceilings of 7, 400 and 2500 messages: the lists read as the reading that kept every message whole, every decrypted message is an entry, its bytes are its unit's plaintext, and the plaintext kept under the tightest ceiling is under half what was opened; a restatement that does not flag the stated end fails it, and so does a release one byte early (mutations). The session-core restated stream list test reads as one kept whole through every discard. The analyser's ws sample test fails with the old stream slice (control) and passes with the flow's door",
+        "cargo test wz-session-core all features, wz-capture all features, wz-capi-dissect, wz-analyze all features, wz-replay",
+        "clippy -D warnings wz-session-core all and no default features, wz-capture all and no default features, wz-analyze all features; rustfmt; discard_site_lint, accessor_reach_census, analysis_surface_parity"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 4c landing (4), the rest: the scouting rows; then step 5, the memory gate",
+        "Hosted CI: read the first completed run holding rounds 3504 to this one; the consumer session takes this round's pin"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 4c, the decrypted TLS flows (owner: long-term correct, cost not counted). The plaintext a pass opened existed only in that pass, and its units were stated at the records that carried them by rewriting the decoded frames, so the messages were kept whole. The flow now keeps the plaintext (moved, not copied), its messages are entries read again from it, and the pass restates the rows instead: an entry keeps its plaintext locator, takes the record's offset as anchor and keeps its end beside the entries, by each row's own direction (the rewrite applied the fed direction's records to every row the call added). A message ceiling releases the plaintext behind the oldest held message. Found in the same seam: the byte door sliced ciphertext for a decrypted message, and the analyser's own copy of it sliced a ws message at its frame header and gave no sample; both now read the unit's bytes.",
+      "publishable_changes_bullets": [
+        "wz-session-core passive_messages.rs: MessageList::restate_from (moves anchors and stated ends, entries keep their locator) replaces iter_mut_from; the end table is keyed by row class and locator and a flagged row with no entry has no end; oldest_source_offset; keep_whole_before lets a unit's end go",
+        "wz-capture lib.rs: FlowDissection keeps the decrypted plaintext per direction and reads its entries from it (Streams and its own source); a TCP trim keeps none of them whole; the ceiling release lets the plaintext behind the oldest held message go; record_coordinates replaces the frame rewrite; message_bytes reads a decrypted message's plaintext; redecode_gate.rs: a decrypted capture plain and under a capture-wide ceiling",
+        "wz-analyze: the sample and field walks read message bytes through FlowDissection::message_bytes (its own stream slicer removed) and a ws capture yields samples; discard_site_lint.py: the end table's removals registered; docs/dissect-row-index.md: step 4c (4), its TLS part"
+      ],
+      "publishable_verification_bullets": [
+        "The TLS gate passes plain and under capture-wide ceilings of 7, 400 and 2500 messages: the lists read as the reading that kept every message whole, every decrypted message is an entry, its bytes are its unit's plaintext, and the plaintext kept under the tightest ceiling is under half what was opened; a restatement that does not flag the stated end fails it, and so does a release one byte early (mutations). The session-core restated stream list test reads as one kept whole through every discard. The analyser's ws sample test fails with the old stream slice (control) and passes with the flow's door",
+        "cargo test wz-session-core all features, wz-capture all features, wz-capi-dissect, wz-analyze all features, wz-replay",
+        "clippy -D warnings wz-session-core all and no default features, wz-capture all and no default features, wz-analyze all features; rustfmt; discard_site_lint, accessor_reach_census, analysis_surface_parity"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 4c landing (4), the rest: the scouting rows; then step 5, the memory gate",
+        "Hosted CI: read the first completed run holding rounds 3504 to this one; the consumer session takes this round's pin"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
