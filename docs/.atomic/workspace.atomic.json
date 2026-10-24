@@ -282894,6 +282894,64 @@
         "Next: the cooperative runtime's critical sections on a host, so a host build links no critical-section symbol and the cooperative pico client exports exactly the C ABI (443 to 441); it touches wz-runtime-coop, wz-runtime-core and their MCU users, so agree its shape with the sessions that build those. Then, one step each: redialling a lost link (pico's auto-reconnect), the listening role, queries, liveliness, scouting, the advanced plane; a CI lane for client_only_dials_a_listener on both engines (no lane runs it today). The engine choice as a build-configuration axis stays with the session that owns that axis (D5). Read the hosted CI of this push."
       ]
     },
+    "Round 3529": {
+      "decision_summary": "The target build contract reaches its first cross platform and its first input beyond the default build: Android arm64 packages all three artifacts through the entry and has a lane, a registered profile is an input that builds the two libraries and is verified again, and every behaviour the lab's placing path supports is held to a declared capability or runtime feature. The owner's directive is full parity with that path; the obligations still open (three platforms, firmware images, a node declaration, bundling) are recorded in the note, not claimed.",
+      "changes_bullets": [
+        "scripts/lib/wz_package.py: --profile NAME (a registered profile under configs/profiles, never a path) resolves strictly, builds a library with no default features and the graph's features for its capabilities and the limits as environment, records the manifest's profile key, and --verify resolves it again and holds each library to what the profile turns on and off; cross builds record toolchain.sdk (an Android NDK revision, read from the NDK's source.properties, never a path) and a --ready list of the platforms a machine can package.",
+        "deploy/wz-config.toml: the Android row is assessed (os_provides read from the NDK 30 headers for API 36, lane build, support verified); 56 runtime features assessed for an executable's device_requires; a [[parity]] table holds each behaviour the lab's placing path supports to a declared capability or runtime feature; platform rows carry a support word and an sdk_kind. scripts/lib/wz_config.py validates all of it.",
+        "scripts/run-ci.sh Layer C1sp (every cross platform with its toolchain set packages twice and verifies; a platform whose toolchain is unset is a note, with no arming flag because no job could set it) and a profile leg in Layer C1st; ci.yml wires C1sp.",
+        "Gate repairs after the first push of this work, which the default pre-push defers: the round cited in three gate headers, wz_package --selftest in the hook, a manifest path judged as text, a comment reworded that read as a self-report, the DT_SONAME absent row removed (elf_facts.py now spells it).",
+        "docs/target-build-contract.md: T13, the support words, section 5a (what the placing path supports and what wz owes) and 5b (the node declaration, a proposal)."
+      ],
+      "verification_bullets": [
+        "Host x86_64 Linux: wz_config --selftest and --check, wz_package --selftest (profile resolution, refusals and verify findings with synthetic files; the real-profile arms ran with the pinned Kconfig interpreter provisioned), Layer C1st including the profile leg, shellcheck on run-ci.sh, and the gates the first push had reddened: round_fed_gate_reach, gate_provenance_lint, root_relative_exclusion_lint, self_report_lint, unwired_lane_lint, armed_skip_guard, prose_named_identifier_gate.",
+        "Android arm64 through the entry with the NDK 30 toolchain: capi-pico, capi-c and wz-ap-demo packaged twice with the same manifest bytes and verified; each needs only libdl, libm and libc; the API level 36 is read from each artifact. Layer C1sp read once on that machine; hosted CI reports the platform as not provisioned.",
+        "Under the registered client profile on the host, capi-pico is 2.8 MB against 5.9 MB for the default build and its device_requires loses sockets-udp, multicast and wall-clock.",
+        "The extended pre-push sweep found one red that is not this work (a wz-capture lib test that does not compile without its fixtures feature); its owner was told.",
+        "Not run: the hosted CI of these commits, Layer C0 in full, anything on a device."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "carry_forward_bullets": [
+        "Read the first hosted run that judges these commits per job, Layer C1st and C1sp first; their hosted cost is unmeasured.",
+        "Linux aarch64 (the SDK is the glibc 2.35 one; the shared glibc 2.39 SDK does not match the board) and both QNX stacks: untried, and each use of the machines that hold their SDKs needs the owner's approval; the yocto and qnx-sdp SDK readings are not implemented.",
+        "A firmware-image class for the Cortex-M path (an artifact kind with the stamp inside, its facilities and a flash lane): owed, not started.",
+        "The node declaration and its generator (section 5b): owed; first decide heap runtime or the fixed-memory slot profile.",
+        "Bundling a library the SDK provides (a QNX board lacks the C++ runtime): owed, the entry refuses an unassumed NEEDED instead.",
+        "The parity table needs the lab's owners to re-state their supported behaviours when they change; runtime features beyond the 54 the default executable enables have no os_needs row.",
+        "A wz-capture lib test fails to compile under the compression and dissect features (fixtures feature): not this work, reported to its owner."
+      ],
+      "publishable_decision_summary": "The target build contract reaches its first cross platform and its first input beyond the default build: Android arm64 packages all three artifacts through the entry and has a lane, a registered profile is an input that builds the two libraries and is verified again, and every behaviour the lab's placing path supports is held to a declared capability or runtime feature. The owner's directive is full parity with that path; the obligations still open (three platforms, firmware images, a node declaration, bundling) are recorded in the note, not claimed.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_package.py: --profile NAME (a registered profile under configs/profiles, never a path) resolves strictly, builds a library with no default features and the graph's features for its capabilities and the limits as environment, records the manifest's profile key, and --verify resolves it again and holds each library to what the profile turns on and off; cross builds record toolchain.sdk (an Android NDK revision, read from the NDK's source.properties, never a path) and a --ready list of the platforms a machine can package.",
+        "deploy/wz-config.toml: the Android row is assessed (os_provides read from the NDK 30 headers for API 36, lane build, support verified); 56 runtime features assessed for an executable's device_requires; a [[parity]] table holds each behaviour the lab's placing path supports to a declared capability or runtime feature; platform rows carry a support word and an sdk_kind. scripts/lib/wz_config.py validates all of it.",
+        "scripts/run-ci.sh Layer C1sp (every cross platform with its toolchain set packages twice and verifies; a platform whose toolchain is unset is a note, with no arming flag because no job could set it) and a profile leg in Layer C1st; ci.yml wires C1sp.",
+        "Gate repairs after the first push of this work, which the default pre-push defers: the round cited in three gate headers, wz_package --selftest in the hook, a manifest path judged as text, a comment reworded that read as a self-report, the DT_SONAME absent row removed (elf_facts.py now spells it).",
+        "docs/target-build-contract.md: T13, the support words, section 5a (what the placing path supports and what wz owes) and 5b (the node declaration, a proposal)."
+      ],
+      "publishable_verification_bullets": [
+        "Host x86_64 Linux: wz_config --selftest and --check, wz_package --selftest (profile resolution, refusals and verify findings with synthetic files; the real-profile arms ran with the pinned Kconfig interpreter provisioned), Layer C1st including the profile leg, shellcheck on run-ci.sh, and the gates the first push had reddened: round_fed_gate_reach, gate_provenance_lint, root_relative_exclusion_lint, self_report_lint, unwired_lane_lint, armed_skip_guard, prose_named_identifier_gate.",
+        "Android arm64 through the entry with the NDK 30 toolchain: capi-pico, capi-c and wz-ap-demo packaged twice with the same manifest bytes and verified; each needs only libdl, libm and libc; the API level 36 is read from each artifact. Layer C1sp read once on that machine; hosted CI reports the platform as not provisioned.",
+        "Under the registered client profile on the host, capi-pico is 2.8 MB against 5.9 MB for the default build and its device_requires loses sockets-udp, multicast and wall-clock.",
+        "The extended pre-push sweep found one red that is not this work (a wz-capture lib test that does not compile without its fixtures feature); its owner was told.",
+        "Not run: the hosted CI of these commits, Layer C0 in full, anything on a device."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-13-runtime"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first hosted run that judges these commits per job, Layer C1st and C1sp first; their hosted cost is unmeasured.",
+        "Linux aarch64 (the SDK is the glibc 2.35 one; the shared glibc 2.39 SDK does not match the board) and both QNX stacks: untried, and each use of the machines that hold their SDKs needs the owner's approval; the yocto and qnx-sdp SDK readings are not implemented.",
+        "A firmware-image class for the Cortex-M path (an artifact kind with the stamp inside, its facilities and a flash lane): owed, not started.",
+        "The node declaration and its generator (section 5b): owed; first decide heap runtime or the fixed-memory slot profile.",
+        "Bundling a library the SDK provides (a QNX board lacks the C++ runtime): owed, the entry refuses an unassumed NEEDED instead.",
+        "The parity table needs the lab's owners to re-state their supported behaviours when they change; runtime features beyond the 54 the default executable enables have no os_needs row.",
+        "A wz-capture lib test fails to compile under the compression and dissect features (fixtures feature): not this work, reported to its owner."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
