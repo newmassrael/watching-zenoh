@@ -387,6 +387,21 @@ def is_test_support(crate):
         or crate.endswith("-tests")
 
 
+def is_family(crate):
+    """A crate of the zenoh compatibility family (`wz-zenoh`, `wz-zenoh-*`; inventory atom
+    `api-compat-rust`). It carries UPSTREAM'S package name, version and error texts, and
+    `conformance/differential` holds those texts equal to upstream's, so what it prints is
+    upstream's text by construction and no wz binary prints it on a path a barrier waits for: a
+    foreign program is the origin of that text, which a `barrier-origin` declaration says, and a
+    family literal is not a producer that makes the declaration stale."""
+    return crate == "wz-zenoh" or crate.startswith("wz-zenoh-")
+
+
+def not_a_producer(crate):
+    """A crate whose literals say nothing about what the tree's own binaries print."""
+    return is_test_support(crate) or is_family(crate)
+
+
 # An attribute that makes its item exist ONLY in a test build: `cfg(test)`, and
 # `cfg(all(test, <anything>))`, which is how a test module that also needs a feature
 # is declared (`wz-capture`'s `window_tests`). `all` with `test` first is the one
@@ -453,12 +468,12 @@ def load_producers(rust_paths, c_paths, pico_root, script_paths=()):
             prod.add(rel, "script", c_segments(value_of(m.group(1), False)))
     skipped_test_files = set()
     for rel in rust_paths:
-        if "/src/" not in rel or is_test_support(crate_of(rel)):
+        if "/src/" not in rel or not_a_producer(crate_of(rel)):
             continue
         _raw, _lit, code = views(rel)
         skipped_test_files |= test_module_files(rel, code)
     for rel in rust_paths:
-        if "/src/" not in rel or is_test_support(crate_of(rel)):
+        if "/src/" not in rel or not_a_producer(crate_of(rel)):
             continue
         if (ROOT / rel) in skipped_test_files or Path(rel).name == "tests.rs":
             continue
@@ -988,7 +1003,7 @@ def producer_literals(rel):
     if rel.endswith(C_EXT):
         text = rust_comments.strip_comments(p.read_text(errors="replace"))
         return [value_of(c, False) for _s, _e, c, _r in string_literals(text)]
-    if "/src/" not in rel or is_test_support(crate_of(rel)):
+    if "/src/" not in rel or not_a_producer(crate_of(rel)):
         return None
     _raw, lit, code = views(rel)
     spans = test_spans(code)
@@ -1172,6 +1187,13 @@ def selftest():
     expect("a value with whitespace is covered only where a human declared it",
            coverage("face 0 UP (peer <anonymous peer>", spaced) == 0
            and coverage("face 0 UP (peer <anonymous peer>", spaced, spaces=True) >= 2)
+
+    # The family's crates reproduce upstream's text and are not producers; the tree's own crates,
+    # test support and the C ABI crates are judged as before.
+    expect("a crate of the zenoh family is not a producer, and its neighbours are",
+           all(not_a_producer(c) for c in ("wz-zenoh", "wz-zenoh-keyexpr", "wz-zenoh-result"))
+           and not any(not_a_producer(c) for c in ("wz", "wz-capi-c", "wz-zenohd-like", "wz-session-core"))
+           and not_a_producer("wz-integration-tests"))
 
     # cfg(test) text must not make a barrier look produced.
     code = rust_comments.strip_comments(
