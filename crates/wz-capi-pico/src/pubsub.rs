@@ -639,6 +639,25 @@ pub unsafe extern "C" fn z_timestamp_id(ts: *const z_timestamp_t) -> crate::zid:
     (*ts).id
 }
 
+/// The wall clock as an NTP64 word, through the host's [`EpochSource`]: the tokio engine's
+/// runtime's where that engine is built in, the host's sockets' runtime otherwise. A clock set
+/// before 1970 reads as the epoch itself.
+///
+/// [`EpochSource`]: wz_session_core::epoch::EpochSource
+fn wall_clock_ntp64() -> u64 {
+    #[cfg(feature = "engine-tokio")]
+    {
+        wz_runtime_tokio::timestamp_source::wall_clock_ntp64()
+    }
+    #[cfg(not(feature = "engine-tokio"))]
+    {
+        use wz_session_core::epoch::EpochSource;
+        wz_runtime_posix::PosixEpoch
+            .try_now_ntp64()
+            .map_or(0, |ntp| ntp.as_word())
+    }
+}
+
 /// Mint a timestamp from a session's clock and zid (pico `z_timestamp_new`).
 ///
 /// **NAMED DIVERGENCE, and it is observable.** pico stamps from its HLC when one
@@ -680,10 +699,9 @@ pub unsafe extern "C" fn z_timestamp_new(
             //
             // Found by looking: the zenoh-c fix names its own mechanism, and the
             // mechanism is shared, so the question "does the other ABI do this
-            // too" answers itself. Both now read the same
-            // [`wall_clock_ntp64`](wz_runtime_tokio::timestamp_source::wall_clock_ntp64)
-            // the storage stack stamps with.
-            time: wz_runtime_tokio::timestamp_source::wall_clock_ntp64(),
+            // too" answers itself. Both now read the wall clock through session-core's
+            // `EpochSource`, the source the storage stack stamps with.
+            time: wall_clock_ntp64(),
         };
         Z_OK
     })

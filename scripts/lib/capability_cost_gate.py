@@ -76,7 +76,7 @@ PICO_BUILDS = CRATES / "target" / "pico-reference"
 # A case's library is under the directory of the cargo profile it was built with.
 TARGET = CRATES / "target"
 
-PICO_BASE = "serial-drive-own-thread,rx-busy-poll"
+PICO_BASE = "engine-tokio,serial-drive-own-thread,rx-busy-poll"
 
 # Planes a build without the capability must not carry, as demangled-symbol patterns. The same
 # patterns are REQUIRED of a build that has the capability.
@@ -97,6 +97,10 @@ CONNECTIVITY = r"^(z_info_transports|z_declare_transport_events_listener)$"
 # The multicast transport (`multicast-transport`, open-debt item 913): the group face and its
 # pipeline, which pico's default build has (`Z_FEATURE_MULTICAST_TRANSPORT`) and zenoh-c's too.
 MULTICAST = r"multicast_glue|multicast_pipeline|MulticastLinkDriver"
+# The engine a pico build runs its sessions on (`engine-tokio` / `engine-coop`,
+# docs/capi-pico-on-coop-engine.md): a build of one links none of the other.
+TOKIO_ENGINE = r"wz_capi_core::|wz_runtime_tokio::"
+COOP_ENGINE = r"wz_capi_coop::"
 
 
 @dataclass(frozen=True)
@@ -119,8 +123,8 @@ class Case:
 CASES: tuple[Case, ...] = (
     Case("pico-client", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE, 1_830_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, THREADED,
-                 CONNECTIVITY, MULTICAST),
-         require=(SINGLE_THREADED,),
+                 CONNECTIVITY, MULTICAST, COOP_ENGINE),
+         require=(SINGLE_THREADED, TOKIO_ENGINE),
          note="a single-threaded pub/sub client that dials TCP: no listener, no scouting, "
               "no UDP, no clock, no unstable API. 1,794,085 measured, down from 1,868,267 "
               "with the unstable API and the connectivity plane"),
@@ -134,6 +138,21 @@ CASES: tuple[Case, ...] = (
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST),
          require=(UDP, SINGLE_THREADED)),
+    # The same client on the cooperative engine: the program steps its session, and no runtime
+    # thread or tokio is linked. Its links dial UDP in every build, so it is compared with the
+    # pico that pico-client-udp is (`link-udp` names that here; it adds nothing to this build).
+    Case("pico-client-coop", "wz-capi-pico", "libwz_capi_pico.so", "engine-coop,link-udp",
+         880_000,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
+                 MULTICAST, TOKIO_ENGINE),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         exports=443,
+         note="the single-threaded client of pico-client-udp on the cooperative engine: "
+              "865,723 measured against pico-client-udp's 1,867,697 (2.15 against 4.63 times "
+              "the same pico). Its exports are pico-client's 441 and two that are not the C "
+              "ABI's: `_critical_section_1_0_acquire` and `_release`, the std implementation "
+              "the cooperative runtime's critical sections need, which rustc exports from a "
+              "cdylib. The count drops to 441 when that runtime takes a hosted lock instead"),
     Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_946_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),
@@ -377,7 +396,10 @@ def cmd_selftest() -> int:
                (GOSSIP, "wz_runtime_tokio::gossip_plane::GossipPlane"),
                (UDP, "wz_runtime_tokio::udp_pipeline::wire_udp_socket"),
                (CLOCK, "uhlc::HLC::new_timestamp"),
-               (ADVANCED, "wz_runtime_tokio::advanced_publisher::put"))))
+               (ADVANCED, "wz_runtime_tokio::advanced_publisher::put"),
+               (UDP, "wz_runtime_coop::udp_link::UdpDriver<S> as Drop>::drop"),
+               (TOKIO_ENGINE, "wz_capi_core::faces::SharedSession::publish_on_wire_all"),
+               (COOP_ENGINE, "wz_capi_coop::engine::CoopEngine<L,C>::open"))))
     # The denominator's own check: a switch pico built otherwise than asked is named, both ways.
     asked = {"Z_FEATURE_MATCHING": 1, "Z_FEATURE_INTEREST": 0, "Z_FEATURE_QUERY": 0}
     expect("a reference built as asked differs nowhere",

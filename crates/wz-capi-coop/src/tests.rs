@@ -216,9 +216,14 @@ fn open(router: &Router) -> Arc<Engine> {
     Engine::open(
         PosixLinks::new(LOOPBACK, PosixTcpDial),
         PosixClock,
-        || params(WhatAmI::Client, 0xb1),
+        PosixEntropy,
         CoopConfig {
             endpoints: vec![router.endpoint()],
+            whatami: WhatAmI::Client,
+            zid: Some(vec![0xb1; 4]),
+            batch_size: 1024,
+            lease_ms: 10_000,
+            tx_queue: TxQueueConf::pico(),
             timeouts: SessionTimeouts::spec_defaults(),
             open_timeout_ms: 5_000,
         },

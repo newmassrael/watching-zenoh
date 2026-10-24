@@ -26,6 +26,8 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(not(feature = "multi-thread"))]
+use wz_capi_pico::zp_read;
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_sample, z_closure_sample_move,
     z_config_default, z_config_loan_mut, z_config_move, z_declare_subscriber,
@@ -198,10 +200,20 @@ fn a_client_only_build_publishes_to_a_listener_and_hears_from_it() {
             Z_OK
         );
 
-        // Publish until the listener has heard it, and wait until it has been heard from.
+        // Publish until the listener has heard it, and wait until it has been heard from. In
+        // pico's single-threaded arm the program advances its session itself, with `zp_read`,
+        // as pico's own single-threaded examples do: the cooperative engine reads nothing
+        // between two calls, and the tokio engine, which reads on its own runtime, answers it
+        // at once.
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut heard_from_listener = false;
         while Instant::now() < deadline {
+            #[cfg(not(feature = "multi-thread"))]
+            assert_eq!(
+                zp_read(z_session_loan(&session), std::ptr::null()),
+                Z_OK,
+                "the session is open"
+            );
             put(&session, c"demo/from-client", c"payload");
             heard_from_listener = seen.lock().unwrap().contains("demo/from-listener");
             if heard_from_listener {

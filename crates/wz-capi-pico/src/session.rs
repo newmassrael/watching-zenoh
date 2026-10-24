@@ -65,12 +65,15 @@ use crate::ffi::{guard_val, guarded};
 // The read-task doors' refusal, which only the multi-threaded arm has.
 #[cfg(feature = "multi-thread")]
 use crate::result::Z_EINVAL;
-use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
+#[cfg(feature = "engine-tokio")]
+use crate::result::Z_ERR_GENERIC;
+use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
+#[cfg(feature = "engine-tokio")]
 use wz_capi_core::drive::{
     open_blocking, CapiTlsConfig, DialPhase, OpenError, OpenStance, SessionState,
     DEFAULT_BATCH_SIZE,
 };
-use wz_runtime_tokio::session_glue::TxQueueConf;
+use wz_session_core::session_init_params::TxQueueConf;
 use wz_session_core::WhatAmI;
 
 /// Open-debt item 913 — whether a `listen` endpoint names a multicast group: a `udp/`
@@ -83,6 +86,7 @@ use wz_session_core::WhatAmI;
 /// opens its raweth transport, a multicast session over raw Ethernet
 /// (`vendor/zenoh-pico/src/transport/raweth/link.c` @
 /// `static z_result_t _z_f_link_listen_raweth(_z_link_t *self) { return _z_f_link_open_raweth(self); }`).
+#[cfg(feature = "engine-tokio")]
 fn is_group_endpoint(endpoint: &str) -> bool {
     let (locator, metadata) = endpoint.split_once('#').unwrap_or((endpoint, ""));
     #[cfg(all(feature = "raweth-transport", target_os = "linux"))]
@@ -203,7 +207,10 @@ fn resolve_tls_config(cfg: &ConfigState) -> Result<CapiTlsConfig, ZResult> {
 /// config map (`zp_config_insert` is scheme-agnostic), which is what keeps a
 /// program written against the full key set compiling and running here — it just
 /// cannot open a `tls/` endpoint, and the runtime says so at bind/dial.
-#[cfg(not(any(feature = "transport-link-tls", feature = "transport-link-quic")))]
+#[cfg(all(
+    feature = "engine-tokio",
+    not(any(feature = "transport-link-tls", feature = "transport-link-quic"))
+))]
 fn resolve_tls_config(_cfg: &ConfigState) -> Result<CapiTlsConfig, ZResult> {
     Ok(CapiTlsConfig::default())
 }
@@ -251,6 +258,7 @@ pub(crate) struct PicoSessionHandle {
     pub(crate) ext: crate::session_ext::PicoSessionExt,
 }
 
+#[cfg(feature = "engine-tokio")]
 impl PicoSessionHandle {
     /// The tokio engine's session, for a capability the port does not carry yet; `None` when
     /// another engine runs it.
@@ -293,6 +301,7 @@ pub(crate) unsafe fn session_handle<'a>(
 /// # Safety
 /// `zs` must be null, or a valid `z_loaned_session_t` whose `_val` slot is null or the live
 /// handle [`z_open`] installed.
+#[cfg(feature = "engine-tokio")]
 pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a SessionState> {
     session_handle(zs)?.tokio()
 }
@@ -402,6 +411,7 @@ pub unsafe extern "C" fn z_open(
         // A malformed value fails the open rather than degrading to a plaintext
         // or trust-free session: a caller that asked for TLS and silently got
         // something else is the one outcome worse than a failed z_open.
+        #[cfg(feature = "engine-tokio")]
         let tls = match resolve_tls_config(&cfg) {
             Ok(tls) => tls,
             Err(code) => return code,
@@ -455,176 +465,281 @@ pub unsafe extern "C" fn z_open(
         } else {
             dial_whatami
         };
-
-        // This ABI stays on one attempt: the retry the zenoh-c open gained reads
-        // zenoh's `connect/retry` and `connect/timeout_ms`, which are zenoh-c
-        // config keys, and this shim resolves pico's numeric keys instead.
-        // pico's transmit model, not zenoh's: a pico put writes on the
-        // caller's thread and a full socket slows it rather than dropping it
-        // (see `TxQueueConf::pico`). zenoh's 1 ms drop wait here discarded the
-        // tail of a burst that `teardown_drain` puts before `z_close`.
-        let session_mode = if listen.is_some() {
-            WhatAmI::Peer
-        } else {
-            dial_whatami
-        };
-        // The locator pico's one transport is opened on, which its admin space
-        // reports as the transport's link: the listen locator when there is one,
-        // the connect locator otherwise (`vendor/zenoh-pico/src/net/session.c` @
-        // `// First, try to open the optional listen locator.`).
-        #[cfg(feature = "admin-space")]
-        let transport_endpoint = listen.clone().or_else(|| connect.first().cloned());
-        // Open-debt item 913 — a listen endpoint that names a group is joined as the
-        // session's one transport, and a connect locator beside it opens nothing: pico adds a
-        // peer to a unicast transport only (`vendor/zenoh-pico/src/transport/manager.c` @
-        // `z_result_t _z_new_peer(`, whose other transports fall through). A build without
-        // the multicast transport has no link for it, and refuses it as pico's does.
-        let joins_a_group = listen.as_deref().is_some_and(is_group_endpoint);
-        #[cfg(not(feature = "multicast-transport"))]
-        if joins_a_group {
-            return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
-        }
-        #[cfg(feature = "multicast-transport")]
-        let (listen, connect, groups) = match listen {
-            Some(endpoint) if joins_a_group => (
-                None,
-                Vec::new(),
-                vec![wz_capi_core::drive::GroupJoin {
-                    endpoint,
-                    profile: PICO_GROUP,
-                    is_shm: false,
-                    // pico declares its entities over whatever transport it holds, a group too
-                    // (MEASURED off the group's wire: `decl_subscriber(1, ..)`), and with
-                    // `Z_FEATURE_MULTICAST_DECLARATIONS` its keyexprs and write filters as well
-                    // (MEASURED: `decl_kexpr(1, demo/mc/zp)`, `Interest(3, .., 1:)`).
-                    #[cfg(not(feature = "multicast-declarations"))]
-                    declarations: wz_capi_core::drive::GroupDeclarations::Entities,
-                    #[cfg(feature = "multicast-declarations")]
-                    declarations: wz_capi_core::drive::GroupDeclarations::Mapped,
-                }],
-            ),
-            listen => (listen, connect, Vec::new()),
-        };
-        #[cfg(not(feature = "multicast-transport"))]
-        let groups = Vec::new();
-        match open_blocking(
-            connect.into_iter().collect(),
-            // pico's config carries ONE listen locator, so the set is that one or none.
-            listen.into_iter().collect(),
-            tls,
+        let request = OpenRequest {
+            connect,
+            listen,
             dial_whatami,
-            // R2948 — pico re-opens a lost client session by default
-            // (`Z_FEATURE_AUTO_RECONNECT`), every 1000 ms
-            // (`vendor/zenoh-pico/src/net/session.c` @
-            // `return _z_fut_fn_result_wake_up_after(1000);`).
-            DialPhase {
-                redial: Some(wz_runtime_tokio::retry_period::RetryPolicy::constant(1000)),
-                ..DialPhase::ONCE
-            },
-            OpenStance {
-                tx_queue: TxQueueConf::pico(),
-                // pico's config has no batch-size key this ABI reads, so it advertises zenoh's
-                // default, as it did when the number was a constant in the core.
-                batch_size: DEFAULT_BATCH_SIZE,
-                // pico negotiates no transport capability on unicast: its InitSyn
-                // carries the patch ext and nothing else
-                // (`vendor/zenoh-pico/src/protocol/codec/transport.c` @
-                // `z_result_t _z_init_encode(`), so a drop-in for it offers none.
-                offer: wz_runtime_tokio::session_open::SessionOffer::universal(),
-                // pico's `Z_CONFIG_SESSION_ZID_KEY` is not read by this open yet,
-                // so a pico session mints its own. The zenoh-c ABI reads its `id`
-                // key.
-                zid: None,
-                start_read_task,
-                // pico has no `timestamping` config key, and its advanced publisher
-                // never consults this session's clock (its own plane stamps from the
-                // device's, `crate::advanced_plane`). The shipped map is what every
-                // session of this registry was given before the field existed.
-                timestamping: wz_runtime_tokio::node_clock::TimestampingEnabled::default(),
-                // pico has no client storage: its sessions read shared memory through the
-                // default reader, as every session did before the field existed.
-                shm_clients: wz_capi_core::faces::no_shm_clients(),
-                // Without the local switches pico runs a callback only from its background
-                // executor, so a delivery the session makes to itself is staged and run there,
-                // never inside the call. With them, a session's own put, get and reply reach
-                // its own subscribers, queryables and reply callbacks INSIDE the call, on the
-                // calling thread (`vendor/zenoh-pico/src/session/loopback.c` @
-                // `_z_session_deliver_push_locally`, which hands the message to
-                // `_z_handle_network_message` before returning), as zenoh-c's does.
-                #[cfg(not(any(feature = "local-subscriber", feature = "local-queryable")))]
-                local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::DriveTask,
-                #[cfg(any(feature = "local-subscriber", feature = "local-queryable"))]
-                local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::Caller,
-                // The plan is zenoh's scouting node, which keeps looking and answers Scouts.
-                // pico's open looks once, before the open (`connect` above), and its session
-                // answers no Scout.
-                #[cfg(feature = "scout")]
-                scouting: None,
-                // zenoh-pico ends its push to every peer link it adds as a PEER, accepted or
-                // opened, with that Final (`_z_interest_push_declarations_to_peer`), and none in
-                // client mode; the rule the flag turns on only sends from a peer to a peer, which
-                // is the pair a zenoh peer's open waits on. R3093 -- it was `false`, and a zenoh
-                // peer that dialled this ABI's listener waited out `scouting/delay`.
-                initial_interest: true,
-                // zenoh-pico has no gossip: its peers are introduced by scouting alone.
-                gossip: None,
-                // Its one listener's bind failing has always failed the open, at the first attempt.
-                listen_phase: wz_capi_core::drive::ListenPhase::SHIPPED,
-                // pico's callbacks all run on the session's one read task, and a program
-                // written for it shares state between them without a lock.
-                face_drive: wz_capi_core::drive::FaceDrive::Serial,
-                // pico's config carries no `transport/auth` keys this ABI reads, so its node
-                // authenticates nobody, as it always has.
-                auth: None,
-                // And no `access_control`, `low_pass_filter` or `downsampling` keys either: its
-                // node states no traffic policy, as it never has.
-                policy: wz_capi_core::node_policy::NodePolicy::default(),
-                // The group its listen endpoint names, when it names one.
-                groups,
-            },
-        ) {
-            Ok(state) => {
-                // R2962 — this session's own role, for the write filters its
-                // publishers and queriers create: a client asks its peers
-                // differently from a peer (see `crate::write_filter`), and a
-                // `listen` config is a peer whatever `Z_CONFIG_MODE_KEY` says.
-                // Kept beside the engine's session in the handle (decision D7). It
-                // carries the session's connectivity listeners too
-                // (`crate::connectivity`), and watches the face registry for them
-                // from here on.
-                let ext = crate::session_ext::PicoSessionExt::new(
-                    session_mode,
-                    &state.zid(),
-                    &state.shared,
-                );
-                #[cfg(feature = "admin-space")]
-                let ext = ext.with_transport_endpoint(transport_endpoint);
-                let handle = PicoSessionHandle {
-                    drive: state.into_drive(),
-                    ext,
-                };
-                *zs = z_owned_session_t {
-                    _val: Box::into_raw(Box::new(handle)) as *mut c_void,
-                    _cnt: std::ptr::null_mut(),
-                };
-                #[cfg(feature = "admin-space")]
-                if start_admin_space {
-                    let code = crate::admin_space::zp_start_admin_space(z_session_loan_mut(zs));
-                    if code != Z_OK {
-                        z_session_drop(z_session_move(zs));
-                        return code;
-                    }
-                }
-                Z_OK
-            }
-            // R311y498 — the core reports a NEUTRAL failure; this shim maps it
-            // onto zenoh-pico's code. The mapping exists precisely because the
-            // other ABI's `int8_t` uses different values for the same idea.
-            Err(OpenError::DriveFailed) => Z_ERR_GENERIC,
-            Err(OpenError::LinkFailed) => crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
-            Err(OpenError::SchemeUnknown) => crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN,
-        }
+            start_read_task,
+            #[cfg(feature = "admin-space")]
+            start_admin_space,
+            #[cfg(feature = "engine-tokio")]
+            tls,
+        };
+        #[cfg(feature = "engine-tokio")]
+        return open_on_tokio(zs, request);
+        #[cfg(not(feature = "engine-tokio"))]
+        return open_on_coop(zs, request);
     })
+}
+
+/// What `z_open` read off the C config and its options, for the engine that opens it.
+struct OpenRequest {
+    connect: Vec<String>,
+    listen: Option<String>,
+    dial_whatami: WhatAmI,
+    // The cooperative engine's single-threaded arm starts no read task: the program steps it.
+    #[cfg_attr(
+        all(not(feature = "engine-tokio"), not(feature = "multi-thread")),
+        allow(dead_code)
+    )]
+    start_read_task: bool,
+    #[cfg(feature = "admin-space")]
+    start_admin_space: bool,
+    #[cfg(feature = "engine-tokio")]
+    tls: CapiTlsConfig,
+}
+
+/// Open `request` on the tokio engine and install the session in `zs`.
+///
+/// # Safety
+/// `zs` is a valid, null-initialised `z_owned_session_t`.
+#[cfg(feature = "engine-tokio")]
+unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
+    let OpenRequest {
+        connect,
+        listen,
+        dial_whatami,
+        start_read_task,
+        #[cfg(feature = "admin-space")]
+        start_admin_space,
+        tls,
+    } = request;
+    // This ABI stays on one attempt: the retry the zenoh-c open gained reads
+    // zenoh's `connect/retry` and `connect/timeout_ms`, which are zenoh-c
+    // config keys, and this shim resolves pico's numeric keys instead.
+    // pico's transmit model, not zenoh's: a pico put writes on the
+    // caller's thread and a full socket slows it rather than dropping it
+    // (see `TxQueueConf::pico`). zenoh's 1 ms drop wait here discarded the
+    // tail of a burst that `teardown_drain` puts before `z_close`.
+    let session_mode = if listen.is_some() {
+        WhatAmI::Peer
+    } else {
+        dial_whatami
+    };
+    // The locator pico's one transport is opened on, which its admin space
+    // reports as the transport's link: the listen locator when there is one,
+    // the connect locator otherwise (`vendor/zenoh-pico/src/net/session.c` @
+    // `// First, try to open the optional listen locator.`).
+    #[cfg(feature = "admin-space")]
+    let transport_endpoint = listen.clone().or_else(|| connect.first().cloned());
+    // Open-debt item 913 — a listen endpoint that names a group is joined as the
+    // session's one transport, and a connect locator beside it opens nothing: pico adds a
+    // peer to a unicast transport only (`vendor/zenoh-pico/src/transport/manager.c` @
+    // `z_result_t _z_new_peer(`, whose other transports fall through). A build without
+    // the multicast transport has no link for it, and refuses it as pico's does.
+    let joins_a_group = listen.as_deref().is_some_and(is_group_endpoint);
+    #[cfg(not(feature = "multicast-transport"))]
+    if joins_a_group {
+        return crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN;
+    }
+    #[cfg(feature = "multicast-transport")]
+    let (listen, connect, groups) = match listen {
+        Some(endpoint) if joins_a_group => (
+            None,
+            Vec::new(),
+            vec![wz_capi_core::drive::GroupJoin {
+                endpoint,
+                profile: PICO_GROUP,
+                is_shm: false,
+                // pico declares its entities over whatever transport it holds, a group too
+                // (MEASURED off the group's wire: `decl_subscriber(1, ..)`), and with
+                // `Z_FEATURE_MULTICAST_DECLARATIONS` its keyexprs and write filters as well
+                // (MEASURED: `decl_kexpr(1, demo/mc/zp)`, `Interest(3, .., 1:)`).
+                #[cfg(not(feature = "multicast-declarations"))]
+                declarations: wz_capi_core::drive::GroupDeclarations::Entities,
+                #[cfg(feature = "multicast-declarations")]
+                declarations: wz_capi_core::drive::GroupDeclarations::Mapped,
+            }],
+        ),
+        listen => (listen, connect, Vec::new()),
+    };
+    #[cfg(not(feature = "multicast-transport"))]
+    let groups = Vec::new();
+    match open_blocking(
+        connect.into_iter().collect(),
+        // pico's config carries ONE listen locator, so the set is that one or none.
+        listen.into_iter().collect(),
+        tls,
+        dial_whatami,
+        // R2948 — pico re-opens a lost client session by default
+        // (`Z_FEATURE_AUTO_RECONNECT`), every 1000 ms
+        // (`vendor/zenoh-pico/src/net/session.c` @
+        // `return _z_fut_fn_result_wake_up_after(1000);`).
+        DialPhase {
+            redial: Some(wz_runtime_tokio::retry_period::RetryPolicy::constant(1000)),
+            ..DialPhase::ONCE
+        },
+        OpenStance {
+            tx_queue: TxQueueConf::pico(),
+            // pico's config has no batch-size key this ABI reads, so it advertises zenoh's
+            // default, as it did when the number was a constant in the core.
+            batch_size: DEFAULT_BATCH_SIZE,
+            // pico negotiates no transport capability on unicast: its InitSyn
+            // carries the patch ext and nothing else
+            // (`vendor/zenoh-pico/src/protocol/codec/transport.c` @
+            // `z_result_t _z_init_encode(`), so a drop-in for it offers none.
+            offer: wz_runtime_tokio::session_open::SessionOffer::universal(),
+            // pico's `Z_CONFIG_SESSION_ZID_KEY` is not read by this open yet,
+            // so a pico session mints its own. The zenoh-c ABI reads its `id`
+            // key.
+            zid: None,
+            start_read_task,
+            // pico has no `timestamping` config key, and its advanced publisher
+            // never consults this session's clock (its own plane stamps from the
+            // device's, `crate::advanced_plane`). The shipped map is what every
+            // session of this registry was given before the field existed.
+            timestamping: wz_runtime_tokio::node_clock::TimestampingEnabled::default(),
+            // pico has no client storage: its sessions read shared memory through the
+            // default reader, as every session did before the field existed.
+            shm_clients: wz_capi_core::faces::no_shm_clients(),
+            // Without the local switches pico runs a callback only from its background
+            // executor, so a delivery the session makes to itself is staged and run there,
+            // never inside the call. With them, a session's own put, get and reply reach
+            // its own subscribers, queryables and reply callbacks INSIDE the call, on the
+            // calling thread (`vendor/zenoh-pico/src/session/loopback.c` @
+            // `_z_session_deliver_push_locally`, which hands the message to
+            // `_z_handle_network_message` before returning), as zenoh-c's does.
+            #[cfg(not(any(feature = "local-subscriber", feature = "local-queryable")))]
+            local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::DriveTask,
+            #[cfg(any(feature = "local-subscriber", feature = "local-queryable"))]
+            local_delivery: wz_runtime_tokio::session::LocalDeliveryDrain::Caller,
+            // The plan is zenoh's scouting node, which keeps looking and answers Scouts.
+            // pico's open looks once, before the open (`connect` above), and its session
+            // answers no Scout.
+            #[cfg(feature = "scout")]
+            scouting: None,
+            // zenoh-pico ends its push to every peer link it adds as a PEER, accepted or
+            // opened, with that Final (`_z_interest_push_declarations_to_peer`), and none in
+            // client mode; the rule the flag turns on only sends from a peer to a peer, which
+            // is the pair a zenoh peer's open waits on. R3093 -- it was `false`, and a zenoh
+            // peer that dialled this ABI's listener waited out `scouting/delay`.
+            initial_interest: true,
+            // zenoh-pico has no gossip: its peers are introduced by scouting alone.
+            gossip: None,
+            // Its one listener's bind failing has always failed the open, at the first attempt.
+            listen_phase: wz_capi_core::drive::ListenPhase::SHIPPED,
+            // pico's callbacks all run on the session's one read task, and a program
+            // written for it shares state between them without a lock.
+            face_drive: wz_capi_core::drive::FaceDrive::Serial,
+            // pico's config carries no `transport/auth` keys this ABI reads, so its node
+            // authenticates nobody, as it always has.
+            auth: None,
+            // And no `access_control`, `low_pass_filter` or `downsampling` keys either: its
+            // node states no traffic policy, as it never has.
+            policy: wz_capi_core::node_policy::NodePolicy::default(),
+            // The group its listen endpoint names, when it names one.
+            groups,
+        },
+    ) {
+        Ok(state) => {
+            // R2962 — this session's own role, for the write filters its
+            // publishers and queriers create: a client asks its peers
+            // differently from a peer (see `crate::write_filter`), and a
+            // `listen` config is a peer whatever `Z_CONFIG_MODE_KEY` says.
+            // Kept beside the engine's session in the handle (decision D7). It
+            // carries the session's connectivity listeners too
+            // (`crate::connectivity`), and watches the face registry for them
+            // from here on.
+            #[cfg(feature = "connectivity")]
+            let ext =
+                crate::session_ext::PicoSessionExt::new(session_mode, &state.zid(), &state.shared);
+            #[cfg(not(feature = "connectivity"))]
+            let ext = crate::session_ext::PicoSessionExt::new(session_mode, &state.zid());
+            #[cfg(feature = "admin-space")]
+            let ext = ext.with_transport_endpoint(transport_endpoint);
+            let handle = PicoSessionHandle {
+                drive: state.into_drive(),
+                ext,
+            };
+            *zs = z_owned_session_t {
+                _val: Box::into_raw(Box::new(handle)) as *mut c_void,
+                _cnt: std::ptr::null_mut(),
+            };
+            #[cfg(feature = "admin-space")]
+            if start_admin_space {
+                let code = crate::admin_space::zp_start_admin_space(z_session_loan_mut(zs));
+                if code != Z_OK {
+                    z_session_drop(z_session_move(zs));
+                    return code;
+                }
+            }
+            Z_OK
+        }
+        // R311y498 — the core reports a NEUTRAL failure; this shim maps it
+        // onto zenoh-pico's code. The mapping exists precisely because the
+        // other ABI's `int8_t` uses different values for the same idea.
+        Err(OpenError::DriveFailed) => Z_ERR_GENERIC,
+        Err(OpenError::LinkFailed) => crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
+        Err(OpenError::SchemeUnknown) => crate::result::Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN,
+    }
+}
+
+/// Open `request` on the cooperative engine and install the session in `zs`: a client session
+/// dialled over the host's sockets, opened on this thread before `z_open` returns, as the tokio
+/// engine's is.
+///
+/// What zenoh-pico's client advertises, as the tokio engine's open does: zenoh's default batch
+/// size (`transport/link/tx/batch_size`, 65535, which the link's own capacity caps), pico's lease
+/// (`Z_TRANSPORT_LEASE`, 10000 ms) and pico's transmit model ([`TxQueueConf::pico`]). The zid is
+/// minted, as this ABI's tokio open mints it: pico's `Z_CONFIG_SESSION_ZID_KEY` is not read yet.
+///
+/// A lost link is not redialled yet (zenoh-pico's `Z_FEATURE_AUTO_RECONNECT`): the session reads
+/// as closed and the program opens a new one.
+///
+/// # Safety
+/// `zs` is a valid, null-initialised `z_owned_session_t`.
+#[cfg(not(feature = "engine-tokio"))]
+unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
+    // A build without the tokio engine has no `peer` feature, so `z_open` refused a listener and
+    // the peer role before this.
+    debug_assert!(request.listen.is_none());
+    let dial_whatami = request.dial_whatami;
+    let connect = request.connect;
+    let opened = wz_capi_coop::CoopEngine::open(
+        wz_runtime_posix::links::PosixLinks::new([0; 4], wz_runtime_posix::stream::PosixTcpDial),
+        wz_runtime_posix::PosixClock,
+        wz_runtime_posix::PosixEntropy,
+        wz_capi_coop::CoopConfig {
+            endpoints: connect,
+            whatami: dial_whatami,
+            zid: None,
+            batch_size: u16::MAX,
+            lease_ms: 10_000,
+            tx_queue: TxQueueConf::pico(),
+            timeouts: wz_session_core::session_timeouts::SessionTimeouts::spec_defaults(),
+            open_timeout_ms: 10_000,
+        },
+    );
+    let engine = match opened {
+        Ok(engine) => engine,
+        Err(wz_capi_coop::OpenError::EntropyUnavailable) => return crate::result::Z_ERR_GENERIC,
+        Err(_) => return crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
+    };
+    let zid = wz_capi_port::SessionDrive::zid(&*engine);
+    let handle = PicoSessionHandle {
+        drive: wz_capi_coop::CoopEngine::into_drive(engine),
+        ext: crate::session_ext::PicoSessionExt::new(dial_whatami, &zid),
+    };
+    // The multi-threaded arm's read task starts with the open unless the options say not to.
+    #[cfg(feature = "multi-thread")]
+    if request.start_read_task {
+        let _ = handle.drive.start_read_task();
+    }
+    *zs = z_owned_session_t {
+        _val: Box::into_raw(Box::new(handle)) as *mut c_void,
+        _cnt: std::ptr::null_mut(),
+    };
+    Z_OK
 }
 
 /// Close a session (pico `z_close`): stop the drive loop and join the driver

@@ -46,7 +46,7 @@ wz-session-core = { path = "../wz-session-core", default-features = false, featu
     "alloc",
     "codec-push",
     "codec-declare",
-    "codec-fragment",
+    "transport-fragmentation",
     "pubsub-put",
     "pubsub-delete",
     "pubsub-encoding",

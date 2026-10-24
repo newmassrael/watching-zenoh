@@ -161,7 +161,22 @@ it behaves as pico behaves in both of pico's threading arms.
   against an acceptor session on a thread of its own over UDP sockets: the router learns the
   subscriber, a push is delivered only when the program steps the session, a put reaches the
   router, and a write filter holds a put back until the router declares a subscriber (30 runs).
-- Next: step 3b, the pico ABI over the engine, with its size-gate case and round trips.
+- 2026-10-24: step 3b. `wz-capi-pico` has two engine features: `engine-tokio` (default, and
+  selected by every capability only that engine has: peer, scouting, queries, liveliness, the
+  unstable API, the TLS and other links, the drive knobs) and `engine-coop`. A build without the
+  tokio engine opens its sessions on the cooperative one: `z_open` reads the config as before and
+  hands the engine the endpoints, the role, pico's lease and transmit model and zenoh's batch
+  size; the engine mints the zid. `link-udp` and `multi-thread` select no engine (the
+  cooperative engine dials UDP in every build and runs its read task as a thread);
+  `deploy/wz-config.toml`'s pico base names `engine-tokio`, since every build it configures is
+  on that engine, and a weak forward counts as a forward there. The size gate
+  has `pico-client-coop`: 865,723 bytes of text against pico-client-udp's 1,867,697, 2.15
+  times the same pico against 4.63. `client_only_dials_a_listener` (a client build dialling the
+  full build's listener, publishing and hearing back) passes on the tokio client, the
+  cooperative single-threaded client and the cooperative multi-threaded one; it now calls
+  `zp_read` in the single-threaded arm, as pico's contract has the program do.
+- Next: the cooperative runtime's critical sections on a host (below), then the capabilities
+  in section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
   engine's session, and the modules of capabilities the cooperative engine does not have yet
@@ -173,6 +188,15 @@ it behaves as pico behaves in both of pico's threading arms.
 
 ## 6. Open
 
+- The cooperative runtime's critical sections on a host. Its executor, timers and join handles
+  lock with `critical-section`, an MCU's interrupt mask, and a host build links the crate's std
+  implementation, whose two `#[no_mangle]` symbols (`_critical_section_1_0_acquire`,
+  `_release`) rustc exports from the C library beside the C ABI (443 exports against 441), where
+  another library's implementation can interpose them. Neither a second version script nor
+  `--exclude-libs` hides them: rustc's own version script lists them. The fix is in the runtime:
+  a hosted build takes a process lock of its own and no `critical-section` symbol.
+- Redialling a lost link (zenoh-pico's `Z_FEATURE_AUTO_RECONNECT`): the cooperative session
+  reads as closed and the program opens a new one.
 - The listening role. pico's `z_open(listen)` holds several peers in one
   session; the cooperative session host holds sessions in slots, and whether
   one C session maps to several slots or to one multi-face session is a design

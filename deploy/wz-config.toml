@@ -76,7 +76,10 @@ catalog_version = 2
 
 [base]
 core = ["rx-busy-poll"]
-pico = ["serial-drive-own-thread", "rx-busy-poll"]
+# `engine-tokio`: the engine a pico build runs its sessions on (docs/capi-pico-on-coop-engine.md).
+# Every build this declaration configures is on the tokio engine; the cooperative engine is not
+# an axis here yet (that note's decision D5).
+pico = ["engine-tokio", "serial-drive-own-thread", "rx-busy-poll"]
 c = []
 
 # The operating-system facilities every HOST build asks for whatever its capabilities

@@ -1408,7 +1408,10 @@ def check_manifest(decl: dict, abi: str, feats: dict) -> list[str]:
                            f"which the declaration does not")
         elif edges != declared:
             out.append(f"{abi}: `{cid}` implies {sorted(edges)}, declared {sorted(declared)}")
-        if abi != "core" and f"wz-capi-core/{cid}" not in feats[cid]:
+        # A capability both of a pico build's engines have forwards WEAKLY
+        # (`wz-capi-core?/<cid>`): to the tokio engine when the build has it, and selecting no
+        # engine (docs/capi-pico-on-coop-engine.md). It is a forward all the same.
+        if abi != "core" and not ({f"wz-capi-core/{cid}", f"wz-capi-core?/{cid}"} & set(feats[cid])):
             out.append(f"{abi}: `{cid}` does not forward wz-capi-core/{cid}")
     others = set(caps) - mine
     for cid in sorted(others & set(feats)):

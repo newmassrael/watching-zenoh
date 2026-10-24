@@ -19,8 +19,10 @@
 //! - with `admin-space`, the session's ADMIN SPACE, which pico also keeps in the
 //!   session (`_admin_space_queryable_id`) and clears with it.
 
+#[cfg(feature = "connectivity")]
 use std::sync::Arc;
 
+#[cfg(feature = "connectivity")]
 use wz_capi_core::faces::SharedSession;
 #[cfg(feature = "advanced")]
 use wz_runtime_tokio::node_clock::{NodeHlc, TimestampingEnabled};
@@ -49,7 +51,8 @@ pub(crate) struct PicoSessionExt {
 }
 
 impl PicoSessionExt {
-    /// A session of role `mode` and identity `zid` over `shared`.
+    /// A session of role `mode` and identity `zid`; with the connectivity plane, over the tokio
+    /// engine's face registry `shared`, which only that engine has.
     ///
     /// The clock STAMPS whatever the role, which is pico's: its timestamps come
     /// from the session's own clock and zid unconditionally
@@ -63,7 +66,11 @@ impl PicoSessionExt {
     /// not per listener: pico dispatches a peer's arrival or departure to every
     /// listener itself, in an order of its own (see `Connectivity`), and a
     /// registration per listener would leave that order to the registry.
-    pub(crate) fn new(mode: WhatAmI, zid: &[u8], shared: &Arc<SharedSession>) -> Self {
+    pub(crate) fn new(
+        mode: WhatAmI,
+        zid: &[u8],
+        #[cfg(feature = "connectivity")] shared: &Arc<SharedSession>,
+    ) -> Self {
         #[cfg(feature = "connectivity")]
         let connectivity = Connectivity::new();
         #[cfg(feature = "connectivity")]
@@ -73,9 +80,6 @@ impl PicoSessionExt {
                 sink.on_face_event(kind, snapshot);
             }))
         };
-        // Without the connectivity plane nothing watches the registry.
-        #[cfg(not(feature = "connectivity"))]
-        let _ = shared;
         // Without the advanced plane nothing stamps, so there is no clock to build.
         #[cfg(not(feature = "advanced"))]
         let _ = zid;

@@ -40,6 +40,7 @@ use wz_session_core::declare::queryable::QuerierCriterion;
 use wz_session_core::declare::subscriber::PublisherCriterion;
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::driver_loop::DriverOutcome;
+use wz_session_core::entropy::EntropySource;
 use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
@@ -49,18 +50,32 @@ use wz_session_core::pubsub::SubscriptionId;
 use wz_session_core::push_build;
 use wz_session_core::sample::{Sample, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
-use wz_session_core::session_init_params::SessionInitParams;
+use wz_session_core::session_init_params::{LinkRxConf, SessionInitParams, TxQueueConf};
 use wz_session_core::session_timeouts::SessionTimeouts;
+use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sink::{BoxedSink, SampleView};
+use wz_session_core::WhatAmI;
 use wz_session_mcu::app_layer::dispatch_to;
 use wz_session_mcu::dial::{parse_locator, McuActions};
 
-/// How a session is opened.
+/// How a session is opened: what the ABI's config says, which the engine turns into the
+/// session's parameters.
 pub struct CoopConfig {
     /// The endpoints to dial (`tcp/a.b.c.d:port` or `udp/a.b.c.d:port`), in order: the session
     /// is opened to the first that answers, as zenoh-pico's client opens to the first of its
     /// `connect` locators that does.
     pub endpoints: Vec<String>,
+    /// The role the session announces.
+    pub whatami: WhatAmI,
+    /// The session's zid as the config states it, up to sixteen bytes; `None` mints sixteen
+    /// random ones.
+    pub zid: Option<Vec<u8>>,
+    /// The batch size the session advertises.
+    pub batch_size: u16,
+    /// The lease the session advertises, in milliseconds.
+    pub lease_ms: u64,
+    /// The transmit model of the ABI the session stands for.
+    pub tx_queue: TxQueueConf,
     /// The handshake's deadlines.
     pub timeouts: SessionTimeouts,
     /// How long one endpoint is given to complete the handshake, in milliseconds.
@@ -75,13 +90,37 @@ pub enum OpenError {
     /// No endpoint could be dialled: each was refused, unreachable or did not complete the
     /// handshake in time. The last endpoint's reason.
     Unreachable(String),
+    /// The platform gave no entropy for the session's zid or its cookie key.
+    EntropyUnavailable,
+}
+
+/// The zid's wire form: the bytes up to the last non-zero one, as zenoh writes an id.
+fn wire_zid(zid: &[u8]) -> Vec<u8> {
+    let len = zid.iter().rposition(|b| *b != 0).map_or(0, |at| at + 1);
+    zid[..len].to_vec()
+}
+
+/// Sixteen random bytes, not all zero (an id of zero bytes names nothing).
+fn fresh_zid(entropy: &mut impl EntropySource) -> Result<Vec<u8>, OpenError> {
+    let mut zid = [0u8; 16];
+    entropy
+        .try_fill_bytes(&mut zid)
+        .map_err(|_| OpenError::EntropyUnavailable)?;
+    if zid.iter().all(|b| *b == 0) {
+        return Err(OpenError::EntropyUnavailable);
+    }
+    Ok(wire_zid(&zid))
 }
 
 /// One session the program steps; see the module doc.
-pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + 'static> {
+pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
     core: Mutex<Confined<Core<L, C>>>,
-    /// What the session delivered under the lock, handed out after it.
-    deliveries: Arc<Mutex<VecDeque<Delivery>>>,
+    /// What the session delivered under the lock, handed out after it: the samples for its
+    /// subscribers, in the order they arrived, and the changes of its matching statuses. Two
+    /// queues and not one of an enum, so a sample is queued as it was built and a matching flip
+    /// does not take a sample's room.
+    samples: Arc<Mutex<VecDeque<(SubId, Sample)>>>,
+    matching: Arc<Mutex<VecDeque<(MatchId, bool)>>>,
     /// The callbacks deliveries go to, by the id of the entity that owns them. Kept outside
     /// [`Core`] so a delivery takes no session state, and a callback that undeclares another
     /// entity finds its target gone rather than the lock held.
@@ -99,14 +138,36 @@ struct Confined<T>(T);
 // SAFETY: a `Confined` is reached only through the `Mutex` that holds it in `CoopEngine`, so one
 // thread at a time uses it. Its `Rc` handles and `RefCell` cells are all owned by the `Core`
 // inside it: no clone of any of them is ever handed out of the lock (deliveries leave as owned
-// `Sample`s and `bool`s, see `Delivery`), so every handle of each `Rc` moves with the `Core` when
-// another thread takes the lock, and none is used by two threads at once.
+// `Sample`s and `bool`s, see `CoopEngine::samples`), so every handle of each `Rc` moves with the
+// `Core` when another thread takes the lock, and none is used by two threads at once.
 unsafe impl<T> Send for Confined<T> {}
 
-/// What the session delivered while it was stepped.
-enum Delivery {
-    Sample(SubId, Sample),
-    Matching(MatchId, bool),
+std::thread_local! {
+    /// The engines this thread is handing deliveries out for, by address.
+    static DELIVERING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// This thread's delivery for one engine, from `enter` to drop.
+struct Delivering(usize);
+
+impl Delivering {
+    /// `None` when this thread is already delivering for `engine`.
+    fn enter(engine: usize) -> Option<Self> {
+        DELIVERING.with(|set| {
+            let mut set = set.borrow_mut();
+            if set.contains(&engine) {
+                return None;
+            }
+            set.push(engine);
+            Some(Self(engine))
+        })
+    }
+}
+
+impl Drop for Delivering {
+    fn drop(&mut self) {
+        DELIVERING.with(|set| set.borrow_mut().retain(|e| *e != self.0));
+    }
 }
 
 /// A subscriber's callback, as the ABI's sink minted it. Locked while it runs, so a delivery
@@ -212,15 +273,22 @@ fn leg(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
-    /// Open a client session over `links` to the first endpoint of `config` that completes the
-    /// handshake, stepping it on this thread until it does. `params` gives each attempt its
-    /// session parameters; the zid of the first is the session's.
+    /// Open a session over `links` to the first endpoint of `config` that completes the
+    /// handshake, stepping it on this thread until it does. `entropy` mints the zid the config
+    /// does not state and each attempt's cookie key.
     pub fn open(
         links: L,
         clock: C,
-        mut params: impl FnMut() -> SessionInitParams,
+        mut entropy: impl EntropySource,
         config: CoopConfig,
     ) -> Result<Arc<Self>, OpenError> {
+        let wire = match &config.zid {
+            Some(zid) => wire_zid(zid),
+            None => fresh_zid(&mut entropy)?,
+        };
+        let mut zid = [0u8; 16];
+        let n = wire.len().min(16);
+        zid[..n].copy_from_slice(&wire[..n]);
         let links = Rc::new(links);
         let runtime = CoopRuntime::new(clock.clone());
         let local = CoopLocalSet::new(&runtime);
@@ -241,10 +309,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                     continue;
                 }
             };
-            let params = params();
-            let mut zid = [0u8; 16];
-            let n = params.zid.len().min(16);
-            zid[..n].copy_from_slice(&params.zid[..n]);
+            // The parameters the tokio engine gives a session (`wz-capi-core`'s `init_params`),
+            // with a cookie key of its own per attempt.
+            let params = SessionInitParams {
+                whatami: config.whatami,
+                zid: wire.clone(),
+                seq_num_res: 2,
+                req_id_res: 2,
+                batch_size: config.batch_size,
+                lease_ms: config.lease_ms,
+                initial_sn: 0,
+                cookie: Vec::new(),
+                tx_queue: config.tx_queue,
+                link_rx: LinkRxConf::default(),
+                cookie_signing_key: SigningKey::from_entropy(&mut entropy)
+                    .map_err(|_| OpenError::EntropyUnavailable)?,
+            };
             let actions = McuActions::<C>::new_generic(sink, params, CoopTime::new(&runtime));
             let task = spawn_session(
                 &local,
@@ -292,7 +372,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             };
             return Ok(Arc::new_cyclic(|this| Self {
                 core: Mutex::new(Confined(core)),
-                deliveries: Arc::new(Mutex::new(VecDeque::new())),
+                samples: Arc::new(Mutex::new(VecDeque::new())),
+                matching: Arc::new(Mutex::new(VecDeque::new())),
                 targets: Mutex::new(Vec::new()),
                 zid,
                 closed: AtomicBool::new(false),
@@ -317,35 +398,46 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// Hand out what the session delivered, with no lock held.
+    ///
+    /// A callback may step its session again (`zp_read` from inside a subscriber), and that step
+    /// delivers nothing itself: the delivery this thread is already making goes on to hand out
+    /// what the inner step queued, in order. Delivering from the inner call would run a callback
+    /// inside itself, waiting on its own lock.
     fn deliver(&self) {
+        let Some(_delivering) = Delivering::enter(self as *const Self as usize) else {
+            return;
+        };
+        // Each popped under its queue's lock alone, which is released before the callback runs:
+        // the pop is its own statement, since a guard in a `while let` condition would live
+        // through the body and a callback that steps the session again would wait on it.
         loop {
-            let Some(delivery) = lock(&self.deliveries).pop_front() else {
-                return;
+            let next = lock(&self.samples).pop_front();
+            let Some((id, sample)) = next else {
+                break;
             };
-            match delivery {
-                Delivery::Sample(id, sample) => {
-                    let callback =
-                        lock(&self.targets)
-                            .iter()
-                            .find_map(|(t, target)| match target {
-                                Target::Subscriber(cb) if *t == id => Some(cb.clone()),
-                                _ => None,
-                            });
-                    if let Some(callback) = callback {
-                        (lock(&callback))(&sample);
-                    }
-                }
-                Delivery::Matching(id, matching) => {
-                    let sink = lock(&self.targets)
-                        .iter()
-                        .find_map(|(t, target)| match target {
-                            Target::Matching(sink) if *t == id => Some(sink.clone()),
-                            _ => None,
-                        });
-                    if let Some(sink) = sink {
-                        sink(matching);
-                    }
-                }
+            let callback = lock(&self.targets)
+                .iter()
+                .find_map(|(t, target)| match target {
+                    Target::Subscriber(cb) if *t == id => Some(cb.clone()),
+                    _ => None,
+                });
+            if let Some(callback) = callback {
+                (lock(&callback))(&sample);
+            }
+        }
+        loop {
+            let next = lock(&self.matching).pop_front();
+            let Some((id, matching)) = next else {
+                break;
+            };
+            let sink = lock(&self.targets)
+                .iter()
+                .find_map(|(t, target)| match target {
+                    Target::Matching(sink) if *t == id => Some(sink.clone()),
+                    _ => None,
+                });
+            if let Some(sink) = sink {
+                sink(matching);
             }
         }
     }
@@ -557,12 +649,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return id;
         };
         let core = &mut core.0;
-        let queue = self.deliveries.clone();
+        let queue = self.samples.clone();
         let registration = core.observer.borrow_mut().subscribers.register_sink(
             &keyexpr,
             allowed_origin,
             BoxedSink::new(move |sample: &dyn SampleView| {
-                lock(&queue).push_back(Delivery::Sample(id, Sample::from_view(sample)));
+                lock(&queue).push_back((id, Sample::from_view(sample)));
             }),
         );
         let Ok(registration) = registration else {
@@ -676,7 +768,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             },
         );
         let now = Self::peer_matches(core, FilterPlane::Subscribers, &keyexpr);
-        let queue = self.deliveries.clone();
+        let queue = self.matching.clone();
         let watch = core
             .observer
             .borrow_mut()
@@ -685,14 +777,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 PublisherCriterion::new(&keyexpr, Locality::Remote),
                 false,
                 BoxedMatchingSink::new(move |matching| {
-                    lock(&queue).push_back(Delivery::Matching(id, matching));
+                    lock(&queue).push_back((id, matching));
                 }),
             );
         lock(&self.targets).push((id, Target::Matching(sink)));
         // An already-matching registration is told so at once, as zenoh-pico tells it
         // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
         if now {
-            lock(&self.deliveries).push_back(Delivery::Matching(id, true));
+            lock(&self.matching).push_back((id, true));
         }
         core.matches.push(MatchEntry { id, watch, keyexpr });
         drop(guard);
@@ -932,7 +1024,80 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
     }
 }
 
-impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for CoopEngine<L, C> {
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+    /// This session as the C handle's drive. Made HERE (out of line), so the session's drop glue
+    /// is this crate's and not a second copy in the ABI crate that holds the handle, as the tokio
+    /// engine's `SessionState::into_drive` is.
+    #[inline(never)]
+    pub fn into_drive(self: Arc<Self>) -> Box<dyn SessionDrive> {
+        Box::new(Drive(self))
+    }
+}
+
+/// The C handle's hold on an engine: the engine is shared with the entities declared on it and
+/// with its read task, so the handle holds it as one of its `Arc`s.
+struct Drive<L: SessionLinks + 'static, C: ClockSource + Clone + 'static>(Arc<CoopEngine<L, C>>);
+
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for Drive<L, C> {
+    fn engine(&self) -> Arc<dyn SessionEngine> {
+        self.0.clone()
+    }
+
+    fn engine_ref(&self) -> &dyn SessionEngine {
+        &*self.0
+    }
+
+    fn zid(&self) -> [u8; 16] {
+        self.0.zid
+    }
+
+    fn close(&self) {
+        SessionDrive::close(&*self.0)
+    }
+
+    fn is_closed(&self) -> bool {
+        SessionDrive::is_closed(&*self.0)
+    }
+
+    fn start_read_task(&self) -> Result<(), CalledFromReadTask> {
+        self.0.start_read_task()
+    }
+
+    fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
+        self.0.stop_read_task()
+    }
+
+    fn read_task_is_running(&self) -> bool {
+        self.0.read_task_is_running()
+    }
+
+    fn read(&self, single: bool) -> Result<(), SessionClosed> {
+        self.0.read(single)
+    }
+
+    fn send_keep_alive(&self) -> Result<(), SessionClosed> {
+        self.0.send_keep_alive()
+    }
+
+    fn spin_once(&self) -> bool {
+        self.0.spin_once()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        &*self.0
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for Drive<L, C> {
+    /// The C program let go of its session (zenoh-pico's `z_session_drop`), which closes it: the
+    /// read task, which holds the engine too, is stopped and joined, and an entity declared on the
+    /// session that outlives it finds it closed.
+    fn drop(&mut self) {
+        SessionDrive::close(&*self.0);
+    }
+}
+
+impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngine<L, C> {
     fn drop(&mut self) {
         // The last handle is gone, so no read task holds one: it has stopped, or is about to
         // drop the handle it held. A session never closed is closed now.

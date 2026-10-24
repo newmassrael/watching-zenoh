@@ -2995,15 +2995,18 @@ dependencies = [
 name = "wz-capi-pico"
 version = "0.1.0"
 dependencies = [
+ "critical-section",
  "getrandom 0.2.17",
  "libc",
  "tokio",
  "windows-sys 0.61.2",
  "wz-abi-stamp",
+ "wz-capi-coop",
  "wz-capi-core",
  "wz-capi-port",
  "wz-cdylib-build",
  "wz-codecs",
+ "wz-runtime-posix",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
  "wz-session-core",

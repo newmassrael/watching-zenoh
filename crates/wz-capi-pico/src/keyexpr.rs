@@ -1283,7 +1283,8 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr_autocanonize(
     })
 }
 
-#[cfg(test)]
+// Their engine is the tokio engine's face registry, which a cooperative build does not have.
+#[cfg(all(test, feature = "engine-tokio"))]
 mod tests {
     use super::*;
 
