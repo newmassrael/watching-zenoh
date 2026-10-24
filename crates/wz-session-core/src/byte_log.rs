@@ -5,7 +5,9 @@
 //! logged at, and released from the front.
 //!
 //! Open-debt item 924 (`docs/dissect-row-index.md`, D8): the unit log a list of
-//! datagrams reads its units' bytes from once it keeps them as index entries.
+//! datagrams reads its units' bytes from once it keeps them as index entries,
+//! and the bytes a TCP assembler keeps for the rows that read its stream again
+//! (a segment is one run, so a read of a run is one slice).
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
@@ -39,7 +41,7 @@ const MAX_CHUNK: usize = 64 * 1024;
 /// before it ends in that count, so the chunk holding a position is found by a
 /// binary search over the chunks' starts.
 #[derive(Debug, Default)]
-pub(crate) struct ByteLog {
+pub struct ByteLog {
     chunks: VecDeque<Chunk>,
     /// Where the next chunk starts: the end of the last chunk ever started,
     /// which outlives that chunk's release.
@@ -67,7 +69,7 @@ impl Chunk {
 
 impl ByteLog {
     /// Log `run` and return the position it was logged at.
-    pub(crate) fn append(&mut self, run: &[u8]) -> u64 {
+    pub fn append(&mut self, run: &[u8]) -> u64 {
         let fits = self
             .chunks
             .back()
@@ -96,7 +98,7 @@ impl ByteLog {
 
     /// The `len` bytes logged at `at`, or `None` when they are not held (never
     /// logged, or released).
-    pub(crate) fn get(&self, at: u64, len: usize) -> Option<&[u8]> {
+    pub fn get(&self, at: u64, len: usize) -> Option<&[u8]> {
         let k = self.chunks.partition_point(|c| c.end() <= at);
         let chunk = self.chunks.get(k)?;
         let from = usize::try_from(at.checked_sub(chunk.at)?).ok()?;
@@ -107,7 +109,7 @@ impl ByteLog {
     /// what a holder calls once nothing reads those bytes any more. A run logged
     /// after the last chunk is released starts a chunk of its own, past every
     /// position ever handed out, so no position is handed out twice.
-    pub(crate) fn release_before(&mut self, at: u64) {
+    pub fn release_before(&mut self, at: u64) {
         while self
             .chunks
             .front()
@@ -125,7 +127,7 @@ impl ByteLog {
     /// Bytes the log holds allocated, logged or not: every chunk's buffer and the
     /// list of chunks that holds them, which doubles as the log grows and is as
     /// much the log's as the bytes are.
-    pub(crate) fn allocated(&self) -> usize {
+    pub fn allocated(&self) -> usize {
         self.chunks.capacity() * core::mem::size_of::<Chunk>()
             + self
                 .chunks

@@ -41,10 +41,11 @@
 //! reads UDP, TCP and WebSocket at units of 16, 256 and 4096 bytes: the report
 //! still equals the allocator, a row on the lent door of a kind that reads its
 //! units where they are costs the same at every size, and the handed door holds
-//! one copy of the unit and no more than the kind's structure is built to hold
-//! (a log of chunks, a chunk's tail over; a stream's kept buffer, which doubles,
-//! up to twice). At 4096 bytes the TCP kept buffer holds 1.4 times its bytes and
-//! a WebSocket flow copies its unmasked payload on both doors; the bounds say so.
+//! one copy of the unit and no more than the kind's structure is built to hold (a
+//! log of chunks, a chunk's tail over). A TCP stream's kept bytes were one
+//! growable buffer, which held 1.4 times its bytes at 4096-byte units and up to
+//! twice in general; they are a log of chunks now. A WebSocket flow copies its
+//! unmasked payload on both doors; the bound says so.
 //!
 //! # The population is derived
 //!
@@ -905,8 +906,9 @@ struct Sized {
     /// copy and a chunk's tail for a kind that keeps a changed form of them.
     lent_copies: f64,
     /// Per byte the unit grows, the bytes the handed door holds beyond the lent
-    /// door: the copy it owns. A log of chunks holds the bytes and a chunk's
-    /// tail; a stream's kept buffer doubles, so it may hold twice its bytes.
+    /// door: the copy it owns. Every owned copy is a log of chunks, which holds
+    /// the bytes and a chunk's tail (a buffer that grows would hold up to twice
+    /// them, and did, for a TCP stream, before its kept bytes were a log).
     handed_copies: f64,
 }
 
@@ -924,8 +926,7 @@ fn sized_kinds() -> [Sized; 3] {
             build: tcp_of,
             expect: Expect::List(is_stream),
             lent_copies: 0.0,
-            // The assembler's kept bytes are one growable buffer.
-            handed_copies: 2.0,
+            handed_copies: 1.1,
         },
         Sized {
             name: "websocket",
@@ -933,7 +934,7 @@ fn sized_kinds() -> [Sized; 3] {
             expect: Expect::List(is_stream),
             // The unmasked payload is a log of its own on both doors.
             lent_copies: 1.1,
-            handed_copies: 2.0,
+            handed_copies: 1.1,
         },
     ]
 }

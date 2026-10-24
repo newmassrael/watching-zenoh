@@ -28,6 +28,7 @@
 //! is a binary search.
 
 use alloc::vec::Vec;
+use wz_session_core::byte_log::ByteLog;
 use wz_session_core::chunk_log::ChunkLog;
 
 use crate::link::Segment;
@@ -235,11 +236,14 @@ pub struct StreamAssembler {
     /// The bytes of the runs whose bytes the assembler keeps itself: every run's,
     /// unless its holder lends the capture container the run's packet sits in
     /// (open-debt item 924, step 3), in stream order.
-    kept: Vec<u8>,
-    /// The absolute offset, in the sequence of every byte ever kept, of
-    /// `kept[0]`: what [`Run::place`] counts from. Moves only when a trim
-    /// releases kept bytes.
-    kept_from: usize,
+    ///
+    /// A log of chunks and not one buffer: a buffer that grows doubles, holding up
+    /// to half of what it has unused (1.4 times the stream at 4 KiB segments) and
+    /// copying every byte at each doubling, and releasing its front moves every
+    /// byte behind it. A run is one segment's bytes and lies in one chunk, so a
+    /// read of a run is a slice, and [`Run::place`] is the position the log gave
+    /// it, which does not change while it is held.
+    kept: ByteLog,
     /// One past the stream's last byte: bytes reassembled so far, trimmed or
     /// not.
     end: usize,
@@ -326,7 +330,7 @@ impl StreamAssembler {
     /// What this assembler holds on the heap.
     pub(crate) fn memory(&self) -> StreamMemory {
         StreamMemory {
-            kept: wz_session_core::heap_account::vec_bytes(&self.kept),
+            kept: self.kept.allocated(),
             runs: self.runs.allocated_bytes(),
             pending: wz_session_core::heap_account::vec_bytes(&self.pending)
                 + self
@@ -361,8 +365,7 @@ impl Default for StreamAssembler {
         Self {
             next_seq: None,
             synced_from_syn: false,
-            kept: Vec::new(),
-            kept_from: 0,
+            kept: ByteLog::default(),
             end: 0,
             discarded: 0,
             runs: ChunkLog::new(),
@@ -513,12 +516,9 @@ impl StreamAssembler {
         container: Option<&'a [u8]>,
     ) -> Option<&'a [u8]> {
         match run.place() {
-            // The run that straddles a trim has lost its front from the kept
-            // bytes, so its place can stand before `kept_from`; the bytes read
-            // of it cannot.
-            Place::Kept(place) => self
-                .kept
-                .get((place + start).checked_sub(self.kept_from)?..(place + stop) - self.kept_from),
+            // The run that straddles a trim keeps its whole chunk, and one wholly
+            // behind it has none: a read of released bytes answers `None`.
+            Place::Kept(place) => self.kept.get((place + start) as u64, stop - start),
             Place::Container(place) => container?.get(place + start..place + stop),
         }
     }
@@ -541,10 +541,11 @@ impl StreamAssembler {
     }
 
     /// Bytes the assembler holds a copy of itself, rather than remembering where
-    /// they are in a lent container.
+    /// they are in a lent container: what its log of chunks has allocated, which
+    /// is none for a stream that lends every run.
     #[cfg(test)]
     pub(crate) fn bytes_kept(&self) -> usize {
-        self.kept.len()
+        self.kept.allocated()
     }
 
     /// `true` when no bytes have been reassembled.
@@ -576,10 +577,11 @@ impl StreamAssembler {
         // The kept bytes still read: from the first retained run the assembler
         // keeps the bytes of (kept places rise with the stream), from the base
         // where that run straddles it. None: every kept byte goes.
-        let kept_end = self.kept_from + self.kept.len();
-        if self.kept.is_empty() {
-            return cut;
-        }
+        //
+        // R3358 — the log gives back every chunk wholly behind that position, so
+        // a stream that once held a lot does not keep the allocation after the
+        // trim (what the buffer this replaced did, until it was told to shrink),
+        // and what stays is at most the chunk the position falls in.
         let kept_base = self
             .runs
             .iter_from(0)
@@ -587,19 +589,8 @@ impl StreamAssembler {
                 Place::Kept(place) => Some(place + base.saturating_sub(r.stream_offset as usize)),
                 Place::Container(_) => None,
             })
-            .unwrap_or(kept_end)
-            .clamp(self.kept_from, kept_end);
-        self.kept.drain(..kept_base - self.kept_from);
-        self.kept_from = kept_base;
-        // R3358 — `drain` shortens the vector and keeps its capacity, so a stream
-        // that once held a lot kept the allocation after the trim and the trim
-        // freed nothing a process could see. Past twice what is now held, the
-        // capacity comes down to a quarter above it, which the stream's next
-        // growth fits inside without another allocation.
-        let held = self.kept.len();
-        if self.kept.capacity() > 2 * held + 4096 {
-            self.kept.shrink_to(held + held / 4 + 4096);
-        }
+            .map_or(u64::MAX, |place| place as u64);
+        self.kept.release_before(kept_base);
         cut
     }
 
@@ -898,11 +889,7 @@ impl StreamAssembler {
         let stream_offset = self.end;
         // Only the fresh tail is the run's, wherever the payload is.
         let place = match payload {
-            Payload::Here(bytes) => {
-                let place = self.kept_from + self.kept.len();
-                self.kept.extend_from_slice(&bytes[already..]);
-                place as u64
-            }
+            Payload::Here(bytes) => self.kept.append(&bytes[already..]),
             Payload::Container { at, .. } => (at + already) as u64 | IN_CONTAINER,
         };
         self.end += fresh;
@@ -1034,17 +1021,22 @@ mod tests {
             s.push(&seg(1000 + i * 1000, 0x18, &chunk, i as usize));
         }
         assert_eq!(s.len(), 64_000);
-        assert!(s.kept.capacity() >= 64_000);
+        let held_before = s.kept.allocated();
+        assert!(held_before >= 64_000);
 
         assert_eq!(s.trim_before(0), 0, "an offset at the start trims nothing");
         assert_eq!(s.trim_before(63_000), 63_000);
         assert_eq!(s.retained_from(), 63_000);
         assert_eq!(stream(&s).len(), 1_000);
         assert_eq!(s.len(), 64_000, "the absolute count never goes backwards");
+        // The log gives back whole chunks: what stays is the chunk the last
+        // kept run lies in (here the largest, a half of all that was held), and
+        // every chunk wholly behind it is gone.
         assert!(
-            s.kept.capacity() < 8 * 1024,
-            "the allocation follows what is held, not what once was: {}",
-            s.kept.capacity()
+            s.kept.allocated() <= held_before / 2 + 1024,
+            "the allocation follows what is held, to within a chunk, and not what \
+             once was: {} of {held_before}",
+            s.kept.allocated()
         );
         assert_eq!(
             s.trim_before(62_000),

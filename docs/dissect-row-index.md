@@ -576,6 +576,14 @@ from. So the order is now:
   does not have, so its instant and packet were looked up where something else
   stood; the offset is the stream's now and the hole is `lost_before`. A TLS row
   went from 144.7 to 128.7 bytes.
+  The sweep of a unit's size found the TCP assembler's kept bytes holding 1.37
+  times the stream at 4 KiB segments (one buffer that doubles: up to half unused,
+  every byte copied at each doubling, and the front released by moving the rest).
+  They are a `ByteLog` now, the chunked log the datagram units already used: a
+  segment is one run and lies in one chunk, so a read is a slice, nothing is
+  copied after it is logged, and a trim gives back whole chunks. A TCP row at 4 KiB
+  went from 5710 to 4462 bytes (1.07 times the stream), and a trimmed stream
+  keeps at most the chunk its position falls in.
 - 6. Random access to a row's field document (D9), taken before 4c's remaining
   landings because it is what the consumer's budget waits on: (a) the tables
   that do not depend on a window survive a walk that begins again; (b) the
