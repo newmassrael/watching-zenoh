@@ -1617,7 +1617,7 @@ pub fn decapsulate(
 /// This is for a reader that holds the PACKET and no transport out of it (a
 /// field row's first byte). A reader that just decapsulated a TCP packet needs
 /// no walk: a [`Segment`] borrows its payload from the packet, so where it sat
-/// is where the slice is ([`offset_within`]). A [`Datagram`] owns its payload
+/// is where the slice is (`offset_within`). A [`Datagram`] owns its payload
 /// (`to_vec`), so the fact "these bytes sat at offset N of the packet" is gone
 /// by the time a caller holds one, and threading it out through every strip
 /// would give every constructor of the type a field meaningless for half of
