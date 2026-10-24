@@ -282826,6 +282826,40 @@
         "Hosted CI: read the first completed run holding rounds 3504 to this one; the consumer session takes this round's pin"
       ]
     },
+    "Round 3527": {
+      "decision_summary": "The case the owner's structure left open, a face that stops reading while publishers that may not drop keep sending to it, is measured at the level where the cost lands: the runtime the other faces share. A parked sender's wait releases its worker (block_in_place), and on a two-worker runtime eight senders parked on a lane that never frees cost an unrelated 20 ms timer 1.3 to 1.8 ms where the same wait without the release starves it by 2.38 s. The release has a limit, the runtime's max_blocking_threads: with more senders parked than that the surplus holds workers again (24 senders on a cap of 8 cost 1.18 s; 700 on the 512 default cost 0.56 s). The pool's default is 50, which is upstream's own default, so this is upstream's limit and wz follows it; nothing in the capacity model counts parked senders, and a router that admits more than 50 faces whose publishers block towards one stopped reader is past it. Recorded as a measured boundary, with two tests that hold both sides of it, and not changed: the default is upstream's, and changing it, or making the wait asynchronous, is the owner's decision.",
+      "changes_bullets": [
+        "wz-runtime-tokio `writer_queue::tests`: a helper that measures the longest an unrelated timer on a two-worker runtime is served late while N senders wait for room on a lane that never frees, and two tests: `senders_parked_on_a_full_lane_do_not_starve_the_runtime_that_releases_its_worker` (8 parked, released: under 250 ms asserted, 1.3 to 1.8 ms read; the control without the release: over 300 ms asserted, 2.38 s read) and `the_release_of_a_parked_sender_stops_at_the_blocking_thread_cap` (6 parked under a cap of 8 released, 24 over it starved).",
+        "docs/router-data-plane-scaling.md 7.4: the measurement, the limit and its default, what is not measured."
+      ],
+      "verification_bullets": [
+        "Both tests pass in three runs on a build host (one unfiltered run and five more of the first): timer lateness 1.3 to 2.2 ms with the release against 2.38 s without it; 1.3 to 2.2 ms under a cap of 8 and 1.18 s over it. A one-off run with 700 parked senders on the default 512 cap read 0.56 s (not kept as a test).",
+        "clippy with warnings denied clean on wz-runtime-tokio; the count gate reached one guard and it holds; gate array run on the rebased tree before the push.",
+        "Not measured: a router with real faces and real Block publishers (the demo's sessions document cannot publish with Block), the runtime pool's own cap of 50 (the test builds its own runtimes), and the keepalive of the blocked publisher's own face end to end."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Owner decisions this leaves: whether the runtime pool's max_blocking_threads of 50 stays upstream's, is raised with the admitted sessions, or the parked wait becomes asynchronous (a seam change: the link's wait_for_room is synchronous so that the MCU profile shares it); and whether the capacity model should count parked senders. Still open: the windowed-lateness admission (the rule for how fast the ceiling rises again is unmeasured); a key in the sessions document to publish with Block, which an end-to-end version of this needs; hosted reads of E7s and of the new E7g step (runs keep being cancelled by later pushes)."
+      ],
+      "publishable_decision_summary": "The case the owner's structure left open, a face that stops reading while publishers that may not drop keep sending to it, is measured at the level where the cost lands: the runtime the other faces share. A parked sender's wait releases its worker (block_in_place), and on a two-worker runtime eight senders parked on a lane that never frees cost an unrelated 20 ms timer 1.3 to 1.8 ms where the same wait without the release starves it by 2.38 s. The release has a limit, the runtime's max_blocking_threads: with more senders parked than that the surplus holds workers again (24 senders on a cap of 8 cost 1.18 s; 700 on the 512 default cost 0.56 s). The pool's default is 50, which is upstream's own default, so this is upstream's limit and wz follows it; nothing in the capacity model counts parked senders, and a router that admits more than 50 faces whose publishers block towards one stopped reader is past it. Recorded as a measured boundary, with two tests that hold both sides of it, and not changed: the default is upstream's, and changing it, or making the wait asynchronous, is the owner's decision.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio `writer_queue::tests`: a helper that measures the longest an unrelated timer on a two-worker runtime is served late while N senders wait for room on a lane that never frees, and two tests: `senders_parked_on_a_full_lane_do_not_starve_the_runtime_that_releases_its_worker` (8 parked, released: under 250 ms asserted, 1.3 to 1.8 ms read; the control without the release: over 300 ms asserted, 2.38 s read) and `the_release_of_a_parked_sender_stops_at_the_blocking_thread_cap` (6 parked under a cap of 8 released, 24 over it starved).",
+        "docs/router-data-plane-scaling.md 7.4: the measurement, the limit and its default, what is not measured."
+      ],
+      "publishable_verification_bullets": [
+        "Both tests pass in three runs on a build host (one unfiltered run and five more of the first): timer lateness 1.3 to 2.2 ms with the release against 2.38 s without it; 1.3 to 2.2 ms under a cap of 8 and 1.18 s over it. A one-off run with 700 parked senders on the default 512 cap read 0.56 s (not kept as a test).",
+        "clippy with warnings denied clean on wz-runtime-tokio; the count gate reached one guard and it holds; gate array run on the rebased tree before the push.",
+        "Not measured: a router with real faces and real Block publishers (the demo's sessions document cannot publish with Block), the runtime pool's own cap of 50 (the test builds its own runtimes), and the keepalive of the blocked publisher's own face end to end."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owner decisions this leaves: whether the runtime pool's max_blocking_threads of 50 stays upstream's, is raised with the admitted sessions, or the parked wait becomes asynchronous (a seam change: the link's wait_for_room is synchronous so that the MCU profile shares it); and whether the capacity model should count parked senders. Still open: the windowed-lateness admission (the rule for how fast the ceiling rises again is unmeasured); a key in the sessions document to publish with Block, which an end-to-end version of this needs; hosted reads of E7s and of the new E7g step (runs keep being cancelled by later pushes)."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
