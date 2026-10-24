@@ -4110,6 +4110,120 @@ mod tests {
         assert_eq!(waiter.join().expect("waiter"), Room::Closed);
     }
 
+    /// The longest an unrelated 20 ms timer on a two-worker runtime was served late while
+    /// `waiters` tasks each waited `wait` for room on a lane that never frees, `through` being
+    /// how a task waits. A face whose peer stopped reading, with publishers that may not drop,
+    /// is exactly this: many senders parked on a full lane. The question is whether the other
+    /// faces' tasks, which share the workers, feel it.
+    ///
+    /// `blocking_cap` is the runtime's `max_blocking_threads`, which is what bounds how many
+    /// waits can release a worker at once: the pool's own default is 50 (upstream's).
+    fn timer_lateness_under_waiters(
+        waiters: usize,
+        blocking_cap: usize,
+        wait: Duration,
+        through: fn(&OutboundTx, RoomWait) -> Room,
+    ) -> (Duration, Vec<Room>) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(blocking_cap)
+            .enable_time()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let (tx, _rx) = outbound_channel_with_capacity([1; Priority::NUM], 10);
+            tx.send(Priority::Data, vec![0u8; 10]).expect("fill");
+            let handles: Vec<_> = (0..waiters)
+                .map(|_| {
+                    let tx = tx.clone();
+                    tokio::spawn(async move { through(&tx, block(wait)) })
+                })
+                .collect();
+            // The timer starts once the waiters are queued, and runs for the whole wait.
+            let mut worst = Duration::ZERO;
+            let ends = Instant::now() + wait;
+            while Instant::now() < ends {
+                let planned = Duration::from_millis(20);
+                let before = Instant::now();
+                tokio::time::sleep(planned).await;
+                worst = worst.max(before.elapsed().saturating_sub(planned));
+            }
+            let mut rooms = Vec::new();
+            for h in handles {
+                rooms.push(h.await.expect("waiter"));
+            }
+            (worst, rooms)
+        })
+    }
+
+    /// A stopped reader with many blocking senders does not cost the node's other tasks the
+    /// runtime: the wait releases its worker (`link_room`'s `block_in_place`), so an unrelated
+    /// timer is served on time while eight senders are parked on a lane that will not free.
+    /// And the measure is sensitive: the same eight senders waiting WITHOUT releasing the
+    /// worker (`wait_for_room` called directly, on a two-worker runtime) starve the timer for
+    /// about the whole wait.
+    #[test]
+    fn senders_parked_on_a_full_lane_do_not_starve_the_runtime_that_releases_its_worker() {
+        let wait = Duration::from_millis(600);
+        let (worst, rooms) = timer_lateness_under_waiters(8, 64, wait, |tx, w| {
+            // `link_room` is the session's seam; its answer is mapped back to `Room` for the
+            // comparison below.
+            match tx.link_room(Priority::Data, w).room {
+                wz_session_core::link::LinkRoom::Free => Room::Free,
+                wz_session_core::link::LinkRoom::Congested => Room::Congested,
+                wz_session_core::link::LinkRoom::Gone => Room::Closed,
+            }
+        });
+        assert!(
+            rooms.iter().all(|r| *r == Room::Congested),
+            "every sender waited out its deadline: {rooms:?}"
+        );
+        eprintln!("timer lateness with 8 senders parked, worker released: {worst:?}");
+        assert!(
+            worst < Duration::from_millis(250),
+            "an unrelated timer was served {worst:?} late while senders were parked"
+        );
+
+        // The control: the same wait that keeps its worker.
+        let (starved, rooms) =
+            timer_lateness_under_waiters(8, 64, wait, |tx, w| tx.wait_for_room(Priority::Data, w));
+        assert!(rooms.iter().all(|r| *r == Room::Congested));
+        eprintln!("timer lateness with 8 senders parked, worker kept: {starved:?}");
+        assert!(
+            starved >= Duration::from_millis(300),
+            "without the release the timer should be starved for most of the wait, saw {starved:?}"
+        );
+    }
+
+    /// The release has a limit, and the limit is the runtime's `max_blocking_threads`: with more
+    /// senders parked than that, the surplus holds workers and the unrelated timer is starved
+    /// again. The pool's default is 50, upstream's, so this is upstream's limit too; the test
+    /// states it so that it is a measured boundary and not an assumption, and so that a change
+    /// of the default that moves it has to move this too.
+    #[test]
+    fn the_release_of_a_parked_sender_stops_at_the_blocking_thread_cap() {
+        let wait = Duration::from_millis(600);
+        let through = |tx: &OutboundTx, w: RoomWait| match tx.link_room(Priority::Data, w).room {
+            wz_session_core::link::LinkRoom::Congested => Room::Congested,
+            wz_session_core::link::LinkRoom::Free => Room::Free,
+            wz_session_core::link::LinkRoom::Gone => Room::Closed,
+        };
+        // Under the cap: released.
+        let (under, _) = timer_lateness_under_waiters(6, 8, wait, through);
+        // Over it: 24 senders, 8 threads to release into.
+        let (over, rooms) = timer_lateness_under_waiters(24, 8, wait, through);
+        eprintln!("timer lateness, 6 parked under a cap of 8: {under:?}; 24 over it: {over:?}");
+        assert!(rooms.iter().all(|r| *r == Room::Congested));
+        assert!(
+            under < Duration::from_millis(250),
+            "under the cap the release holds: {under:?}"
+        );
+        assert!(
+            over >= Duration::from_millis(300),
+            "over the cap the surplus holds workers: {over:?}"
+        );
+    }
+
     /// R2924 — a session that negotiated no QoS has ONE queue, as zenoh's
     /// non-QoS transport does: a keepalive at `Priority::Control` queued behind
     /// data leaves behind it, and every priority draws on the one bound, sized

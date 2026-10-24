@@ -583,13 +583,24 @@ congested mark and is dropped at once, counted as `zenoh_tx_network_message_drop
 to `Block` waits for room whatever the mark says, up to `wait_before_close`, and the session whose room does not
 come is closed as unresponsive (`link.rs`, `RoomWait`; `session_congestion_close.rs`). Control frames do not go through that path: the keepalive takes the
 urgent write (`send_urgent`). So the question 7.2 left open, what the router does with data for a face that
-does not read, is answered by upstream's pipeline and wz follows it; what is NOT measured is the thing (B)
-asks: whether a face that stops reading, with publishers that `Block`, holds a router worker long enough
-to cost the other faces their keepalives. The wait is a condition-variable wait on a runtime worker
-(`wait_for_room`), bounded by `wait_before_close` (5 s by default, half a lease) and by the close, which is
-the cost to measure; the keepalives do not run there, but the session loops of the other faces do. The counters
-are the node's existing metrics and not a wz-only admin key: a wz key in upstream's admin space would be an
-extension of a surface this repository holds to upstream's, which is the owner's decision and is not made here.
+does not read, is answered by upstream's pipeline and wz follows it. What (B) asks of it was measured on
+2026-10-24: whether a face that stops reading, with publishers that `Block`, holds router workers long enough
+to cost the other faces their time. The wait is a condition-variable wait inside the loop that is forwarding the
+message (the publisher's face loop), bounded by `wait_before_close` (5 s by default, half a lease); that loop is
+stopped for it, which is the backpressure `Block` asks for, and the publisher's own lease survives because a loop
+reads before it judges and the wait is shorter than the lease (read from the code; not run end to end). For everyone else: the wait releases its worker (`block_in_place`), and on a
+two-worker runtime with eight senders parked on a lane that never frees an unrelated 20 ms timer was served at
+most 1.3 to 1.8 ms late in five runs, where the same eight waiting without the release starved it by 2.38 s
+(`writer_queue::tests::senders_parked_on_a_full_lane_do_not_starve_the_runtime_that_releases_its_worker`).
+**The release has a limit**, the runtime's `max_blocking_threads`: with more senders parked than that, the
+surplus holds workers again. On a runtime capped at 8, 6 parked senders cost the timer 1.3 to 2.2 ms and 24
+cost it 1.18 s (`the_release_of_a_parked_sender_stops_at_the_blocking_thread_cap`), and a run with 700 senders on
+an uncapped-by-default runtime (512) cost it 0.56 s. The pool's default is 50 (`runtime_pool`, upstream's
+`RuntimeParam::default`), so this is upstream's limit too, tunable per subsystem (`WZ_RUNTIME='tx:max_blocking_threads=N'`);
+a router that admits more than 50 faces whose publishers `Block` towards one stopped reader is past it, and
+nothing in the capacity model counts parked senders. Not measured: that case end to end on a router with real
+faces (the demo's sessions document cannot publish with `Block`, so it needs that key first). The counters
+are the node's existing metrics and the capacity report; both are served as described above.
 
 **How it is held.** Clockless tests of the arithmetic (`capacity::tests`, and the config's effective bound
 from a declared share and a lease). The promise itself is
