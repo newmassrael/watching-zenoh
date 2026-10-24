@@ -572,7 +572,7 @@ mod tests {
         ));
         // And what is refused is refused before the stack is asked.
         std::assert!(matches!(
-            dialer.dial("tls/10.0.0.1:7494"),
+            dialer.dial("quic/10.0.0.1:7494"),
             Err(DialFailed::Refused(DialRefused::Unsupported))
         ));
     }

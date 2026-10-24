@@ -213,6 +213,7 @@ fn report(outcome: &Outcome) -> String {
     )
 }
 
+// wz-proves: none -- the fixed-memory profile's channel (D9, wz-tls-mbedtls) has no catalog atom: transport-link-tls is the tokio link's feature and is not in this image, and session-close-ingress's verbs are not on this path
 #[test]
 #[ignore = "binary-dep e2e (the tls build of deploy/host-slot-node, which Layer Z makes, + zenohd); runs via --ignored"]
 fn zenohd_and_a_fixed_memory_image_each_verify_the_other_over_mutual_tls() {
@@ -236,6 +237,7 @@ fn zenohd_and_a_fixed_memory_image_each_verify_the_other_over_mutual_tls() {
     );
 }
 
+// wz-proves: none -- the control of the leg above, for the same reason: no catalog atom names the fixed-memory profile's channel
 #[test]
 #[ignore = "binary-dep e2e (the tls build of deploy/host-slot-node, which Layer Z makes, + zenohd); runs via --ignored"]
 fn zenohd_claiming_a_zid_its_key_does_not_name_is_not_verified() {
@@ -258,6 +260,7 @@ fn zenohd_claiming_a_zid_its_key_does_not_name_is_not_verified() {
     );
 }
 
+// wz-proves: none -- the control of the first leg, for the same reason: no catalog atom names the fixed-memory profile's channel
 #[test]
 #[ignore = "binary-dep e2e (the tls build of deploy/host-slot-node, which Layer Z makes, + zenohd); runs via --ignored"]
 fn zenohd_pinning_another_device_admits_no_session() {
