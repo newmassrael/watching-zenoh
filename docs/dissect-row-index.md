@@ -484,6 +484,18 @@ from. So the order is now:
   against its unit's plaintext, and the plaintext kept under the ceiling; a
   restatement that does not flag the stated end fails it, and so does a release
   one byte early.
+  Landed (4), its scouting part, which closes 4c: the scouting list kept every
+  SCOUT and HELLO decoded, a slice behind `Deref`. It now keeps each payload in a
+  unit log (a copy, or its place in a lent container) beside a row of what the
+  payload cannot say (direction, packet, instant), and a reader decodes it
+  again (`Scoutings`, from `DatagramDissection::scouting`); a discard lets the
+  copy go, and the ceilings order the lists by the row's packet without
+  decoding. The unit log is session-core's one (`byte_log::UnitLog`), which the
+  message lists now use too, so the placement in a lent container is written
+  once. The gate reads a capture of SCOUTs, HELLOs answering them and SCOUTs
+  whose datagram holds more than the message, handed and lent, plain and under
+  message ceilings, against decoding each packet's payload; a discard that keeps
+  the copy fails it, and so does a lent payload copied.
 - 5. The memory gate.
 - 6. Random access to a row's field document (D9), taken before 4c's remaining
   landings because it is what the consumer's budget waits on: (a) the tables
