@@ -157,17 +157,18 @@ libc = "nto"
 network_stack = "io-sock"
 std = "build-std"
 toolchain_env_extra = ["QNX_HOST", "QNX_TARGET"]
-lane = "none"
-support = "blocked"
+lane = "build"
+support = "verified"
 sdk_kind = "qnx-sdp"
 # What the QNX 7.1 SDP headers declare for the io-sock stack, read from them and NOT run on a board:
 # pthread_create, TCP and UDP sockets, AF_UNIX, IP_ADD_MEMBERSHIP, getifaddrs, the wall clock, files.
 # `entropy` is the board's random device, which no header declares (there is no getrandom or
 # getentropy), so it rests on that service running. `raw-ethernet` is left out: SOCK_RAW is an IP raw
-# socket, and the link level on QNX is BPF.
+# socket, and the link level on QNX is BPF. `multicast` is the IPv4 group join: the IPv6 one answers
+# Unsupported (see the help).
 os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
 system_assumed = ["libsocket.so.4", "libgcc_s.so.1", "libc.so.5", "libm.so.3"]
-help = "QNX 7.1 on aarch64le with the io-sock network stack. The session node and driver (`ap-demo`) compile and link with the SDP's GCC 8.3 and measure the NEEDED set above; the two C libraries do not build yet (see the docs of wz-capi-pico and wz-capi-c on QNX), so the row is blocked. The IPv6 group join, the keep-alive idle time and the peer credential answer Unsupported until libc declares them for io-sock (the headers have ipv6_mreq, TCP_KEEPIDLE and LOCAL_PEERCRED). Nothing was run on a board."
+help = "QNX 7.1 on aarch64le with the io-sock network stack. Lane `build` is Layer C1sp, read on a build machine with the QNX 7.1 SDP (GCC 8.3, the nightly toolchain with build-std): capi-pico, capi-c and ap-demo are packaged twice through the entry in the release profile, the manifests are the same bytes and verify, and each needs libsocket.so.4, libgcc_s.so.1, libc.so.5 and libm.so.3. Four crates.io packages are carried as copies under third-party/ to build here (socket2, tokio, ring, quinn-udp; each has a WZ-PATCH.md). The IPv6 group join, the keep-alive idle time and the peer credential answer Unsupported until libc declares them for io-sock (the headers have ipv6_mreq, TCP_KEEPIDLE and LOCAL_PEERCRED with struct xucred). ring uses the compile-time CPU features on QNX, not run-time detection. capi-pico stops the process if /dev/urandom cannot be read. Hosted CI has no SDP, so it reports the platform as not provisioned. Nothing was run on a board."
 
 [[platform]]
 id = "qnx710-iopkt-aarch64"
@@ -177,14 +178,14 @@ libc = "nto"
 network_stack = "io-pkt"
 std = "build-std"
 toolchain_env_extra = ["QNX_HOST", "QNX_TARGET"]
-lane = "none"
-support = "blocked"
+lane = "build"
+support = "verified"
 sdk_kind = "qnx-sdp"
 # What the QNX 7.1 SDP headers declare for the io-pkt stack, read from them and NOT run on a board;
 # the same set as the io-sock row (IP_ADD_MEMBERSHIP and getifaddrs are declared in usr/include).
 os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
 system_assumed = ["libsocket.so.3", "libgcc_s.so.1", "libc.so.5", "libm.so.3"]
-help = "QNX 7.1 on aarch64le with the io-pkt stack. The session node and driver (`ap-demo`) compile and link with the SDP's GCC 8.3 and measure the NEEDED set above, which differs from the io-sock row in libsocket only; the two C libraries do not build yet, so the row is blocked. The IPv6 group join answers Unsupported. Nothing was run on a board."
+help = "QNX 7.1 on aarch64le with the io-pkt stack. Lane `build` is Layer C1sp, read on a build machine with the QNX 7.1 SDP exactly as for the io-sock row; the measured NEEDED set differs from that row in the network library only (libsocket.so.3). The IPv6 group join answers Unsupported. The io-pkt headers declare no IP_RECVTOS, so the QUIC transport does not request the IPv4 type of service on this stack (third-party/quinn-udp). Hosted CI has no SDP, so it reports the platform as not provisioned. Nothing was run on a board."
 
 # The one platform the entry has run on: the x86_64 Linux host the workspace is built and tested
 # on. `os_provides` is what the lanes exercise there (every facility, `raw-ethernet` with the

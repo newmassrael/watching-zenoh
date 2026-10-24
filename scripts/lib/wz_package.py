@@ -474,6 +474,30 @@ def rustc_identity() -> tuple[str, str]:
     return (f"rustc {fields['release']} ({fields['commit-hash'][:9]} {fields['commit-date']})", fields["host"])
 
 
+# The `qcc` variant (its `-V` selector) of each architecture the QNX rows cover: the one the SDP's
+# compiler driver is told to compile C for, which is also the one cc-rs passes for these triples.
+QNX_QCC_VARIANT = {"aarch64": "gcc_ntoaarch64le_cxx"}
+
+
+def qnx_cc_identity(platform: dict, command: str) -> str | None:
+    """What the SDP's compiler driver reports about the compiler it drives. `qcc` answers neither
+    `--version` nor `-dumpversion`; with a variant selected it does answer the preprocessor's macro
+    dump, whose `__VERSION__` is the GCC it runs, so that is what is read."""
+    arch = platform["triple"].split("-", 1)[0]
+    variant = QNX_QCC_VARIANT.get(arch)
+    if variant is None:
+        raise Refusal(f"platform {platform['id']}: no qcc variant is known for architecture {arch}")
+    with tempfile.TemporaryDirectory(prefix="wz-qcc-") as work:
+        empty = pathlib.Path(work) / "empty.c"
+        empty.write_text("")
+        text = run_text([*shlex.split(command), f"-V{variant}", "-E", "-dM", str(empty)])
+    for line in (text or "").splitlines():
+        if line.startswith("#define __VERSION__ "):
+            version = line.split(" ", 2)[2].strip().strip('"')
+            return f"{pathlib.Path(shlex.split(command)[0]).name} (GCC {version}, variant {variant})"
+    return None
+
+
 def cc_identity(platform: dict, cross: bool) -> str | None:
     """The first line of the C compiler's `--version`. A cross build must name one it can run."""
     words = platform["triple"].replace("-", "_")
@@ -481,6 +505,11 @@ def cc_identity(platform: dict, cross: bool) -> str | None:
     if command is None:
         raise Refusal(f"CC_{words} is not set")
     text = run_text([*shlex.split(command), "--version"])
+    if text is None and cross and platform.get("sdk_kind") == "qnx-sdp":
+        identity = qnx_cc_identity(platform, command)
+        if identity is not None:
+            return identity
+        raise Refusal(f"CC_{words} ({command}) answered neither --version nor the qcc macro dump")
     if text is None:
         if cross:
             raise Refusal(f"CC_{words} ({command}) did not answer --version")
@@ -1042,6 +1071,38 @@ def _selftest() -> int:
                 os.environ.pop("QNX_TARGET", None)
             else:
                 os.environ["QNX_TARGET"] = saved_t
+    # The C compiler identity of a cross build. `qcc` answers no `--version`: with a variant selected it
+    # answers the preprocessor's macro dump, and that is what a qnx-sdp platform is read by.
+    with tempfile.TemporaryDirectory(prefix="wz-qcc-") as fake:
+        qcc = pathlib.Path(fake) / "qcc"
+        qcc.write_text('#!/bin/sh\ncase "$*" in\n*--version*) exit 1 ;;\n'
+                       '*-Vgcc_ntoaarch64le_cxx*-E*) echo \'#define __VERSION__ "8.3.0 test"\' ;;\n*) exit 1 ;;\nesac\n')
+        qcc.chmod(0o755)
+        silent = pathlib.Path(fake) / "silent"
+        silent.write_text("#!/bin/sh\nexit 1\n")
+        silent.chmod(0o755)
+        qnx_target = {"id": "x", "triple": "aarch64-unknown-nto-qnx710_iosock", "sdk_kind": "qnx-sdp"}
+        cc_var = "CC_aarch64_unknown_nto_qnx710_iosock"
+        saved_c = os.environ.get(cc_var)
+        try:
+            os.environ[cc_var] = str(qcc)
+            expect("a qnx-sdp compiler that refuses --version is read through the qcc macro dump",
+                   cc_identity(qnx_target, True) == "qcc (GCC 8.3.0 test, variant gcc_ntoaarch64le_cxx)")
+            os.environ[cc_var] = str(silent)
+            refuses("a qnx-sdp compiler that answers neither", "neither --version nor the qcc macro dump",
+                    lambda: cc_identity(qnx_target, True))
+            os.environ[cc_var] = str(qcc)
+            refuses("a compiler of another sdk kind is not read through qcc", "did not answer --version",
+                    lambda: cc_identity({**qnx_target, "sdk_kind": "yocto"}, True))
+            os.environ["CC_armv7_unknown_nto_qnx710"] = str(qcc)
+            refuses("a qnx-sdp architecture with no known qcc variant", "no qcc variant is known",
+                    lambda: cc_identity({**qnx_target, "triple": "armv7-unknown-nto-qnx710"}, True))
+        finally:
+            os.environ.pop("CC_armv7_unknown_nto_qnx710", None)
+            if saved_c is None:
+                os.environ.pop(cc_var, None)
+            else:
+                os.environ[cc_var] = saved_c
     yocto_vars = ("OECORE_SDK_VERSION", "OECORE_TARGET_ARCH", "OECORE_TARGET_OS")
     saved_y = {v: os.environ.pop(v) for v in yocto_vars if v in os.environ}
     try:

@@ -15,8 +15,9 @@
 # (io-pkt is aarch64-unknown-nto-qnx710, io-sock is aarch64-unknown-nto-qnx710_iosock) and share one
 # compiler:
 #
-#   * CC, AR and the linker of each triple, as variables of that triple. The linker is `qcc`, the
-#     SDP's driver, which rustc's own target specification passes its `-V` selector to;
+#   * CC, AR and the linker of each triple, as variables of that triple. The C compiler and the
+#     linker are both `qcc`, the SDP's driver: the build scripts that compile C (cc-rs) select the
+#     SDP's variant with a `-V` option, which only the driver takes and the bare `...-gcc` refuses;
 #   * the standard library of both triples has no prebuilt copy, so a build of either needs a
 #     nightly cargo, which the caller puts first, and the entry adds `-Z build-std` for them.
 #
@@ -44,10 +45,10 @@ for tool in "$WZ_QNX_GCC" "$WZ_QNX_AR" qcc; do
     fi
 done
 
-export CC_aarch64_unknown_nto_qnx710="$WZ_QNX_GCC"
+export CC_aarch64_unknown_nto_qnx710=qcc
 export AR_aarch64_unknown_nto_qnx710="$WZ_QNX_AR"
 export CARGO_TARGET_AARCH64_UNKNOWN_NTO_QNX710_LINKER=qcc
-export CC_aarch64_unknown_nto_qnx710_iosock="$WZ_QNX_GCC"
+export CC_aarch64_unknown_nto_qnx710_iosock=qcc
 export AR_aarch64_unknown_nto_qnx710_iosock="$WZ_QNX_AR"
 export CARGO_TARGET_AARCH64_UNKNOWN_NTO_QNX710_IOSOCK_LINKER=qcc
 
