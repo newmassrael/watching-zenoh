@@ -129,10 +129,10 @@
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
-use wz_runtime_tokio::locality::Locality;
-use wz_runtime_tokio::reply_sink::{ReplyKind, ReplyView};
 use wz_runtime_tokio::session::QueryOptions;
 use wz_runtime_tokio::session_glue::{ConsolidationMode, QueryTarget};
+use wz_session_core::locality::Locality;
+use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
 use crate::abi::{z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
@@ -257,7 +257,7 @@ impl ReplyMarshal {
         let sample_kind = match kind {
             // Only Put/Del reach a sample; the Err arm's value is inert (the C
             // side must gate on `z_reply_is_ok` before `z_reply_ok`).
-            ReplyKind::Del => sample_kind_of(wz_runtime_tokio::sample::SampleKind::Del),
+            ReplyKind::Del => sample_kind_of(wz_session_core::sample::SampleKind::Del),
             _ => Z_SAMPLE_KIND_PUT,
         };
         Self {
@@ -1167,7 +1167,7 @@ unsafe fn get_inner(
     // Reject a non-canonical / pico-unsafe keyexpr up front — the gate the
     // declare paths hoist, for the same reason: the fan is best-effort per face,
     // so a per-face reject would be swallowed and the call would report Z_OK.
-    if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+    if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
         return Z_ERR_INVALID;
     }
 
@@ -1258,10 +1258,10 @@ pub(crate) unsafe fn adopt_reply_closure(
 pub(crate) struct PicoQueryValueMeta {
     /// The query's value encoding — the Query body's encoding field. Consumed
     /// from the caller's moved `z_moved_encoding_t*`.
-    pub(crate) encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
+    pub(crate) encoding: Option<wz_session_core::sample::EncodingHint>,
     /// The query's `(zid, eid, sn)` — the Query body's source_info ext 0x01.
     /// Borrowed from the caller's `z_source_info_t*`, projected to an owned hint.
-    pub(crate) source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+    pub(crate) source_info: Option<wz_session_core::sample::SourceInfo>,
 }
 
 /// R311y551 — the three request-QoS option fields, bundled so the shared
@@ -1917,7 +1917,7 @@ mod tests {
     /// means the OPPOSITE thing in the sibling ABI.
     #[test]
     fn the_get_options_qos_trio_reaches_the_query_options() {
-        use wz_runtime_tokio::qos::{CongestionControl, Priority};
+        use wz_session_core::qos::{CongestionControl, Priority};
 
         // 0 is DROP in pico and BLOCK in zenoh-c. A mapping cribbed from the
         // sibling inverts the `nodrop` bit, and this assertion is what sees it.

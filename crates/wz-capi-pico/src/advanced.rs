@@ -56,8 +56,8 @@ use wz_runtime_tokio::advanced_publisher::{
 use wz_runtime_tokio::advanced_subscriber::{
     AdvancedSubscriberOptions, HistoryConfig, Miss, RecoveryConfig, SubscriberDetection,
 };
-use wz_runtime_tokio::sample::Sample;
-use wz_runtime_tokio::sink::SampleView;
+use wz_session_core::sample::Sample;
+use wz_session_core::sink::SampleView;
 
 use crate::abi::{handle_ref, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::advanced_forms::PicoSubscriberForms;
@@ -573,7 +573,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
         // The same outbound canon gate every declare in this crate hoists, so a
         // key no peer could take is refused with the code a plain publisher
         // gives it before anything is declared.
-        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_ERR_INVALID;
         }
         let session = PicoSession::of(state);
@@ -974,7 +974,7 @@ pub unsafe extern "C" fn ze_declare_advanced_subscriber(
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
         };
-        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_ERR_INVALID;
         }
         let miss: MissSlot = Arc::new(ListenerSet::new());
@@ -1758,12 +1758,12 @@ mod tests {
         assert_eq!(cache.max_samples, 4);
         assert_eq!(
             cache.replies_config.congestion_control,
-            wz_runtime_tokio::qos::CongestionControl::Block,
+            wz_session_core::qos::CongestionControl::Block,
             "pico spells BLOCK as 1; reading it as zenoh-c's 0 would invert this"
         );
         assert_eq!(
             cache.replies_config.priority,
-            wz_runtime_tokio::qos::Priority::Data
+            wz_session_core::qos::Priority::Data
         );
         assert!(cache.replies_config.is_express);
     }

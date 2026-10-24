@@ -340,6 +340,12 @@ workspace = true
 # arrived: two ABIs, one session model. See wz-capi-core's manifest for why
 # duplicating it was the worse option.
 wz-capi-core = { path = "../wz-capi-core", default-features = false }
+# The session core's own types (key expression canon and matching, QoS, locality, samples, the
+# sinks), named where they live and not through the tokio engine's re-exports of them: the ABI
+# layer knows no engine, and the engine this crate drives is a selection
+# (`docs/capi-pico-on-coop-engine.md`, decision D1). `alloc` is what those modules need; the
+# engine's own dependency on this crate unifies the rest.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
 # Depend on wz-runtime-tokio DIRECTLY, not the `wz` facade: the facade
 # re-exports this crate (`wz::capi_pico`), so a facade dependency here would
 # form a package cycle Cargo rejects. wz-runtime-tokio's default feature

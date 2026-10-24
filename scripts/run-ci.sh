@@ -13146,12 +13146,18 @@ layer_c1bz_docs_resolve() {
     # d0b764831 had already taken the interceptor doc's four back to 478):
     # the multicast glue's new `//!` links are full paths, and the three
     # `MulticastOutcome` links of the same module doc went with them.
+    # The pico C ABI's types from where they live -- wz-capi-pico 43 -> 42, by
+    # resolution, DIFFED: the `error` lines of this lane's command at `005a50669`
+    # and on the tree differ by one removal and no addition. `get.rs`'s link to
+    # `wz_session_core::reply_sink::ReplySink` named a crate this one did not
+    # depend on, so it resolved only once the crate took wz-session-core directly
+    # (docs/capi-pico-on-coop-engine.md, step 1).
     budget="
         wz:4
         wz-ap-demo:25
         wz-capi-c:40
         wz-capi-core:7
-        wz-capi-pico:43
+        wz-capi-pico:42
         wz-link-lwip:9
         wz-mcu-session-acceptor:1
         wz-routing-graph:5

@@ -27,7 +27,7 @@
 //! pub/sub; a get program failed to link rather than silently no-op).
 //!
 //! The seam that family needs is a NEW wz core concept, not a binding detail:
-//! [`wz_runtime_tokio::query_sink::ReplyOut`] is a borrowed `&mut` reply
+//! [`wz_session_core::query_sink::ReplyOut`] is a borrowed `&mut` reply
 //! ACCUMULATOR whose `with_responder` / `clear_responder` only stamp a responder
 //! IDENTITY (zid + eid) — not a detachment. Nothing in the tree owns a responder
 //! past the callback, and wz sends the `ResponseFinal` once the callback
@@ -67,10 +67,10 @@ use std::cell::UnsafeCell;
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use wz_runtime_tokio::query_sink::{QueryView, ReplyMeta, ReplyOut};
 #[cfg(doc)]
 use wz_runtime_tokio::session::HeldQuery;
 use wz_runtime_tokio::session::{TokioHeldQuery, TokioQueryHolder};
+use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
 
 use crate::abi::{
     handle_ref, impl_handle_ownership7, z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t,
@@ -118,9 +118,9 @@ pub struct z_loaned_query_t {
 /// Projecting to owned hints at read time is what makes the deferral sound.
 #[derive(Default)]
 struct ReplyMetaOwned {
-    encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
-    timestamp: Option<wz_runtime_tokio::sample::TimestampHint>,
-    source_info: Option<wz_runtime_tokio::sample::SourceInfo>,
+    encoding: Option<wz_session_core::sample::EncodingHint>,
+    timestamp: Option<wz_session_core::sample::TimestampHint>,
+    source_info: Option<wz_session_core::sample::SourceInfo>,
     /// The `is_express` its options carried, `false` when there were none. pico
     /// builds every reply's QoS from THIS flag and the query's own congestion
     /// control and priority (`vendor/zenoh-pico/src/net/primitives.c` @
@@ -135,7 +135,7 @@ impl ReplyMetaOwned {
     fn view<'a>(
         &'a self,
         attachment: Option<&'a [u8]>,
-        query_qos: wz_runtime_tokio::sample::QosLevel,
+        query_qos: wz_session_core::sample::QosLevel,
     ) -> ReplyMeta<'a> {
         ReplyMeta::new()
             .with_encoding(self.encoding.as_ref())
@@ -166,7 +166,7 @@ enum PendingReply {
     /// `_z_encoding_from_moved(opts.encoding));`).
     Err {
         payload: crate::bytes::ByteBuf,
-        encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
+        encoding: Option<wz_session_core::sample::EncodingHint>,
     },
 }
 
@@ -187,7 +187,7 @@ enum PendingReply {
 fn emit_held(
     held: &TokioHeldQuery,
     reply: PendingReply,
-    query_qos: wz_runtime_tokio::sample::QosLevel,
+    query_qos: wz_session_core::sample::QosLevel,
 ) {
     held.reply(|out| {
         let mut out = out;
@@ -204,7 +204,7 @@ fn emit_held(
 fn flush_one(
     out: &mut &mut dyn ReplyOut,
     reply: PendingReply,
-    query_qos: wz_runtime_tokio::sample::QosLevel,
+    query_qos: wz_session_core::sample::QosLevel,
 ) {
     match reply {
         // R311y562 — ONE seam carries all four metadata arms now
@@ -255,7 +255,7 @@ fn flush_one(
 /// key, so an admission here is an admission there; a refusal at flush means
 /// the two gates disagree, a wz defect with no C caller left to tell — so a
 /// debug build stops on it rather than dropping the reply unseen.
-fn admitted_at_the_abi(staged: Result<(), wz_runtime_tokio::query_sink::ReplyError>) {
+fn admitted_at_the_abi(staged: Result<(), wz_session_core::query_sink::ReplyError>) {
     debug_assert_eq!(
         staged,
         Ok(()),
@@ -308,7 +308,7 @@ struct QueryMarshal {
     /// R2594 — the query's QoS, which a DEFERRED reply inherits. Like `rid` it
     /// has no pico accessor; it is carried only so the escaped responder can
     /// seed its replies from it.
-    qos: wz_runtime_tokio::sample::QosLevel,
+    qos: wz_session_core::sample::QosLevel,
     /// The FACE's session, on a marshal the dispatch built: a link's, the local
     /// plane's or a group's. `None` on one built outside a dispatch (a test
     /// fixture), which is exactly the case that cannot be escaped — see
@@ -550,7 +550,7 @@ impl QueryView for QueryMarshal {
     fn is_local(&self) -> bool {
         self.is_local
     }
-    fn qos(&self) -> wz_runtime_tokio::sample::QosLevel {
+    fn qos(&self) -> wz_session_core::sample::QosLevel {
         self.qos
     }
 }
@@ -1141,7 +1141,7 @@ unsafe fn declare_queryable_inner(
     // outbound gate `z_declare_subscriber` hoists, and for the same reason:
     // the registry declares best-effort per face, so a per-face reject would
     // be swallowed and the call would report `Z_OK` for a dead SSOT entry.
-    if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+    if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
         return Err(Z_ERR_INVALID);
     }
     let (complete, allowed_origin) = if options.is_null() {
@@ -1195,7 +1195,7 @@ pub(crate) fn declare_queryable_on(
     keyexpr: String,
     existing: Option<&DeclaredKeyexpr>,
     complete: bool,
-    allowed_origin: wz_runtime_tokio::locality::Locality,
+    allowed_origin: wz_session_core::locality::Locality,
     sink: wz_capi_core::faces::QueryableSink,
 ) -> Result<(QblId, DeclaredKeyexpr), ZResult> {
     let key = DeclaredKeyexpr::declare_non_wild_prefix(&session.shared, &keyexpr, existing)?;
@@ -1762,8 +1762,8 @@ mod tests {
         fn rid(&self) -> u64 {
             7
         }
-        fn qos(&self) -> wz_runtime_tokio::sample::QosLevel {
-            wz_runtime_tokio::sample::QosLevel::DEFAULT
+        fn qos(&self) -> wz_session_core::sample::QosLevel {
+            wz_session_core::sample::QosLevel::DEFAULT
         }
     }
 
@@ -1873,7 +1873,7 @@ mod tests {
     /// A [`ReplyOut`] that records the QoS each staged reply was given.
     #[derive(Default)]
     struct QosTap {
-        seen: Vec<Option<wz_runtime_tokio::sample::QosLevel>>,
+        seen: Vec<Option<wz_session_core::sample::QosLevel>>,
     }
 
     impl ReplyOut for QosTap {
@@ -1890,7 +1890,7 @@ mod tests {
             _keyexpr: &str,
             _payload: &[u8],
             meta: ReplyMeta<'_>,
-        ) -> Result<(), wz_runtime_tokio::query_sink::ReplyError> {
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
             self.seen.push(meta.qos);
             Ok(())
         }
@@ -1898,7 +1898,7 @@ mod tests {
             &mut self,
             _keyexpr: &str,
             meta: ReplyMeta<'_>,
-        ) -> Result<(), wz_runtime_tokio::query_sink::ReplyError> {
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
             self.seen.push(meta.qos);
             Ok(())
         }
@@ -1912,8 +1912,8 @@ mod tests {
     /// bit.
     #[test]
     fn a_reply_takes_the_express_bit_of_its_options_and_the_rest_of_the_queries_qos() {
-        use wz_runtime_tokio::qos::{CongestionControl, Priority};
-        use wz_runtime_tokio::sample::QosLevel;
+        use wz_session_core::qos::{CongestionControl, Priority};
+        use wz_session_core::sample::QosLevel;
         let query_qos = QosLevel::from_parts(Priority::RealTime, CongestionControl::Block, false);
         let put = |express| PendingReply::Put {
             keyexpr: "a/b".to_owned(),
@@ -2006,7 +2006,7 @@ mod tests {
         }
         let mut tap = QosTap::default();
         marshal.flush(&mut tap);
-        let plain = wz_runtime_tokio::sample::QosLevel::DEFAULT;
+        let plain = wz_session_core::sample::QosLevel::DEFAULT;
         assert_eq!(
             tap.seen,
             vec![

@@ -34,12 +34,12 @@ pub(crate) const Z_CONGESTION_CONTROL_DROP: z_congestion_control_t = 0;
 /// than panicking, matching the permissive-decode spirit of
 /// [`priority_from_pico`].
 ///
-/// [`CongestionControl`]: wz_runtime_tokio::qos::CongestionControl
+/// [`CongestionControl`]: wz_session_core::qos::CongestionControl
 #[cfg(any(feature = "query", feature = "advanced"))]
 pub(crate) fn congestion_from_pico(
     c: z_congestion_control_t,
-) -> wz_runtime_tokio::qos::CongestionControl {
-    use wz_runtime_tokio::qos::CongestionControl;
+) -> wz_session_core::qos::CongestionControl {
+    use wz_session_core::qos::CongestionControl;
     match c {
         Z_CONGESTION_CONTROL_DROP => CongestionControl::Drop,
         // BLOCK (1) and anything unrecognised — pico's `z_get_options_default`
@@ -56,9 +56,9 @@ pub(crate) fn congestion_from_pico(
 /// spelling, so it is accepted on the wire and never produced from a C option.
 /// Anything outside 0..=7 cannot fit the 3-bit field and clamps to the default.
 ///
-/// [`Priority`]: wz_runtime_tokio::qos::Priority
-pub(crate) fn priority_from_pico(p: z_priority_t) -> wz_runtime_tokio::qos::Priority {
-    use wz_runtime_tokio::qos::Priority;
+/// [`Priority`]: wz_session_core::qos::Priority
+pub(crate) fn priority_from_pico(p: z_priority_t) -> wz_session_core::qos::Priority {
+    use wz_session_core::qos::Priority;
     match u8::try_from(p) {
         Ok(byte) if byte <= 7 => Priority::from_wire(byte),
         _ => Priority::DEFAULT,

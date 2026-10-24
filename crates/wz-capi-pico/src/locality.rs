@@ -15,7 +15,7 @@
 use std::ffi::c_int;
 
 #[cfg(any(feature = "local-subscriber", feature = "local-queryable", test))]
-use wz_runtime_tokio::locality::Locality;
+use wz_session_core::locality::Locality;
 
 /// pico `z_locality_t`, an enum passed as an `int`.
 pub type z_locality_t = c_int;
@@ -48,29 +48,29 @@ pub(crate) fn locality_from_pico(value: z_locality_t) -> Locality {
 macro_rules! default_locality {
     ($feature:literal) => {{
         #[cfg(feature = $feature)]
-        let locality = wz_runtime_tokio::locality::Locality::Any;
+        let locality = wz_session_core::locality::Locality::Any;
         #[cfg(not(feature = $feature))]
-        let locality = wz_runtime_tokio::locality::Locality::Remote;
+        let locality = wz_session_core::locality::Locality::Remote;
         locality
     }};
 }
 
 /// Give `$ty` a method `$field()` answering the struct's locality field as a
-/// [`Locality`](wz_runtime_tokio::locality::Locality)
+/// [`Locality`](wz_session_core::locality::Locality)
 /// with the switch `$feature` on, and `Remote` without it (the field is then absent).
 macro_rules! locality_option_field {
     ($ty:ty, $field:ident, $feature:literal) => {
         impl $ty {
             #[cfg(feature = $feature)]
             #[inline]
-            pub(crate) fn $field(&self) -> wz_runtime_tokio::locality::Locality {
+            pub(crate) fn $field(&self) -> wz_session_core::locality::Locality {
                 crate::locality::locality_from_pico(self.$field)
             }
 
             #[cfg(not(feature = $feature))]
             #[inline]
-            pub(crate) fn $field(&self) -> wz_runtime_tokio::locality::Locality {
-                wz_runtime_tokio::locality::Locality::Remote
+            pub(crate) fn $field(&self) -> wz_session_core::locality::Locality {
+                wz_session_core::locality::Locality::Remote
             }
         }
     };

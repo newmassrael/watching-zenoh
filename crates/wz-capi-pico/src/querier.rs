@@ -251,7 +251,7 @@ pub(crate) struct QuerierState {
     /// `querier->_encoding = encoding == NULL ? _z_encoding_null() : _z_encoding_steal(encoding);`)
     /// and a get without one of its own sends with it (`vendor/zenoh-pico/src/api/api.c` @
     /// `&querier->_encoding);  // it is safe to use alias`).
-    encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
+    encoding: Option<wz_session_core::sample::EncodingHint>,
     matches: StdMutex<Vec<MatchId>>,
 }
 
@@ -398,7 +398,7 @@ pub unsafe extern "C" fn z_declare_querier(
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
         };
-        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_ERR_INVALID;
         }
         // pico dereferences `options` only when non-null and otherwise takes the

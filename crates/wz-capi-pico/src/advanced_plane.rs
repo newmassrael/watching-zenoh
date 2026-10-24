@@ -29,9 +29,9 @@ use wz_runtime_tokio::advanced_publisher::{
 };
 use wz_runtime_tokio::node_clock::NodeHlc;
 use wz_runtime_tokio::runtime_impl::TokioTime;
-use wz_runtime_tokio::sample::SampleKind;
 use wz_runtime_tokio::session::{PublishError, PublishOptions, TokioQueryHolder};
 use wz_runtime_tokio::Reliability;
+use wz_session_core::sample::SampleKind;
 
 use crate::liveliness::TokenState;
 use crate::pubsub::{PlainPublisher, PublisherQos};

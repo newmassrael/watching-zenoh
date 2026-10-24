@@ -3,7 +3,7 @@
 
 //! The ENCODING plane — pico's `z_owned_encoding_t`, the `id;schema` string
 //! form, and the wire projection wz already carries as
-//! [`wz_runtime_tokio::sample::EncodingHint`].
+//! [`wz_session_core::sample::EncodingHint`].
 //!
 //! ## Why the id table is transcribed, and why that is safe here
 //!
@@ -35,7 +35,7 @@
 
 use std::ffi::{c_char, c_void, CStr};
 
-use wz_runtime_tokio::sample::EncodingHint;
+use wz_session_core::sample::EncodingHint;
 
 use crate::abi::{handle_ref, impl_handle_ownership7, z_owned_string_t};
 use crate::bytes::store_owned_string;

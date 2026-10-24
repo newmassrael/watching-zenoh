@@ -694,8 +694,8 @@ pub unsafe extern "C" fn z_keyexpr_drop(obj: *mut z_moved_keyexpr_t) {
 // cdylib did not (`wz-integration-tests/tests/pico_abi_symbol_census.rs`).
 //
 // None of them re-derives keyexpr semantics. Canonization routes through
-// `wz_runtime_tokio::keyexpr_canon::canonize_keyexpr` and the set relations
-// through `wz_runtime_tokio::keyexpr_match`, which are the SSOTs the wire path
+// `wz_session_core::keyexpr_canon::canonize_keyexpr` and the set relations
+// through `wz_session_core::keyexpr_match`, which are the SSOTs the wire path
 // and the R300 outbound gate already use — a second reading of the grammar
 // here would be a copy that drifts from the one the wire obeys, and the
 // drift would be invisible to every test that reads only this copy.
@@ -775,7 +775,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
         };
         // The canon CHECK, not the canon transform: equality with the canonical
         // form is exactly `_z_keyexpr_is_canon` returning OK.
-        match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&text) {
+        match wz_session_core::keyexpr_canon::canonize_keyexpr(&text) {
             Ok(canon) if canon.as_str() == text => {
                 store_owned_keyexpr(keyexpr, DeclaredKeyexpr::literal_only(text));
                 Z_OK
@@ -804,7 +804,7 @@ pub unsafe extern "C" fn z_keyexpr_from_str_autocanonize(
         let Some(text) = owned_keyexpr_input(keyexpr, name, len) else {
             return Z_ERR_NULL;
         };
-        match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&text) {
+        match wz_session_core::keyexpr_canon::canonize_keyexpr(&text) {
             Ok(canon) => {
                 store_owned_keyexpr(
                     keyexpr,
@@ -841,7 +841,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
         let Some(text) = owned_keyexpr_input(keyexpr, name, *len) else {
             return Z_ERR_NULL;
         };
-        match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&text) {
+        match wz_session_core::keyexpr_canon::canonize_keyexpr(&text) {
             Ok(canon) => {
                 *len = canon.as_str().len();
                 store_owned_keyexpr(
@@ -974,7 +974,7 @@ pub unsafe extern "C" fn z_keyexpr_concat(
             }
         };
         let joined = format!("{head}{tail}");
-        match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&joined) {
+        match wz_session_core::keyexpr_canon::canonize_keyexpr(&joined) {
             Ok(canon) => {
                 store_owned_keyexpr(key, extended_from(left, canon.as_str()));
                 Z_OK
@@ -1017,7 +1017,7 @@ pub unsafe extern "C" fn z_keyexpr_join(
             return Z_ERR_NULL;
         };
         let joined = format!("{l}/{r}");
-        match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(&joined) {
+        match wz_session_core::keyexpr_canon::canonize_keyexpr(&joined) {
             Ok(canon) => {
                 store_owned_keyexpr(key, extended_from(left, canon.as_str()));
                 Z_OK
@@ -1059,7 +1059,7 @@ pub unsafe extern "C" fn z_keyexpr_includes(
         (Some(a), Some(b)) => {
             let a_chunks: Vec<&str> = a.split('/').collect();
             let b_chunks: Vec<&str> = b.split('/').collect();
-            wz_runtime_tokio::keyexpr_match::keyexpr_includes_patterns(&a_chunks, &b_chunks)
+            wz_session_core::keyexpr_match::keyexpr_includes_patterns(&a_chunks, &b_chunks)
         }
         _ => false,
     })
@@ -1078,7 +1078,7 @@ pub unsafe extern "C" fn z_keyexpr_intersects(
         (Some(a), Some(b)) => {
             let a_chunks: Vec<&str> = a.split('/').collect();
             let b_chunks: Vec<&str> = b.split('/').collect();
-            wz_runtime_tokio::keyexpr_match::keyexpr_intersect_patterns(&a_chunks, &b_chunks)
+            wz_session_core::keyexpr_match::keyexpr_intersect_patterns(&a_chunks, &b_chunks)
         }
         _ => false,
     })
@@ -1129,7 +1129,7 @@ pub unsafe extern "C" fn z_keyexpr_is_canon(start: *const c_char, len: usize) ->
         else {
             return Z_ERR_INVALID;
         };
-        match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(text) {
+        match wz_session_core::keyexpr_canon::canonize_keyexpr(text) {
             Ok(canon) if canon.as_str() == text => Z_OK,
             _ => Z_ERR_INVALID,
         }
@@ -1162,8 +1162,8 @@ pub unsafe extern "C" fn z_keyexpr_is_canon(start: *const c_char, len: usize) ->
 /// the same table finally reaching the C ABI. Found by the dlopen differential
 /// in `pico_pure_function_oracle.rs`, which compares the two libraries' EXPORTS
 /// rather than wz's Rust function.
-fn pico_canon_status(err: &wz_runtime_tokio::keyexpr_canon::KeyexprCanonError) -> ZResult {
-    use wz_runtime_tokio::keyexpr_canon::KeyexprCanonError as E;
+fn pico_canon_status(err: &wz_session_core::keyexpr_canon::KeyexprCanonError) -> ZResult {
+    use wz_session_core::keyexpr_canon::KeyexprCanonError as E;
     match err {
         E::EmptyChunk => -4,
         E::StarsInChunk => -5,
@@ -1187,7 +1187,7 @@ pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize)
         else {
             return Z_ERR_INVALID;
         };
-        let canon = match wz_runtime_tokio::keyexpr_canon::canonize_keyexpr(text) {
+        let canon = match wz_session_core::keyexpr_canon::canonize_keyexpr(text) {
             Ok(c) => c,
             Err(err) => return pico_canon_status(&err),
         };

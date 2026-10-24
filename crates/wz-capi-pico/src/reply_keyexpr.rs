@@ -74,11 +74,11 @@ pub(crate) fn parameters_has_anyke(parameters: &[u8]) -> bool {
 /// under is routinely a PATTERN (a queryable declared on `a/**` sees the
 /// querier's `a/**`), while its replies carry CONCRETE keys — so equality would
 /// reject the ordinary wildcard case, not an edge case. Routed through the one
-/// matching SSOT ([`wz_runtime_tokio::keyexpr_match`](wz_runtime_tokio::keyexpr_match))
+/// matching SSOT ([`wz_session_core::keyexpr_match`](wz_session_core::keyexpr_match))
 /// rather than re-derived.
 ///
 /// R311y833 — the intersection half now DELEGATES to
-/// [`wz_runtime_tokio::reply_acceptance::reply_keyexpr_intersects`] rather than
+/// [`wz_session_core::reply_acceptance::reply_keyexpr_intersects`] rather than
 /// re-deriving it. The rule was correct here and absent from the native
 /// runtime, which is the asymmetry y833 removed: one codebase had two getters
 /// with opposite default behaviour because this function was `pub(crate)` and
@@ -89,5 +89,5 @@ pub(crate) fn reply_keyexpr_is_covered(query_keyexpr: &str, reply: &str, anyke: 
     if anyke {
         return true;
     }
-    wz_runtime_tokio::reply_acceptance::reply_keyexpr_intersects(query_keyexpr, reply)
+    wz_session_core::reply_acceptance::reply_keyexpr_intersects(query_keyexpr, reply)
 }

@@ -31,11 +31,11 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 #[cfg(feature = "liveliness")]
 use wz_runtime_tokio::declare::LivelinessSample;
-use wz_runtime_tokio::locality::Locality;
-use wz_runtime_tokio::sample::SampleKind;
 use wz_runtime_tokio::session::PublishOptions;
-use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::Reliability;
+use wz_session_core::locality::Locality;
+use wz_session_core::sample::SampleKind;
+use wz_session_core::sink::SampleView;
 
 use crate::abi::{
     handle_ref, impl_handle_ownership7, z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t,
@@ -151,7 +151,7 @@ pub(crate) struct SampleMarshal {
     /// accessors decode it rather than each carrying its own field, because
     /// they are three READINGS of one wire byte and separate fields could
     /// disagree with it.
-    qos: Option<wz_runtime_tokio::sample::QosLevel>,
+    qos: Option<wz_session_core::sample::QosLevel>,
     /// R311y559 — the transport reliability the sample arrived under.
     reliability: wz_runtime_tokio::Reliability,
     /// R311y559 — the `(zid, eid, sn)` source triple, in the pico ABI shape
@@ -224,13 +224,13 @@ impl SampleMarshal {
         mut self,
         attachment: Option<&[u8]>,
         encoding: Option<(u32, Option<&str>)>,
-        timestamp: Option<&wz_runtime_tokio::sample::TimestampHint>,
-        source_info: Option<&wz_runtime_tokio::sample::SourceInfo>,
+        timestamp: Option<&wz_session_core::sample::TimestampHint>,
+        source_info: Option<&wz_session_core::sample::SourceInfo>,
     ) -> Self {
         self.attachment = attachment.map(ByteBuf::from);
         self.timestamp = timestamp.map(timestamp_of);
         self.encoding = encoding.map(|(packed_id, schema)| {
-            own_encoding(wz_runtime_tokio::sample::EncodingHint {
+            own_encoding(wz_session_core::sample::EncodingHint {
                 packed_id,
                 schema: schema.map(str::to_owned),
             })
@@ -357,7 +357,7 @@ crate::abi::impl_boxed_element!(
 
 /// The pico timestamp for a wz [`TimestampHint`]. Shared by the sample and
 /// reply metadata paths so the two cannot render one differently.
-fn timestamp_of(hint: &wz_runtime_tokio::sample::TimestampHint) -> z_timestamp_t {
+fn timestamp_of(hint: &wz_session_core::sample::TimestampHint) -> z_timestamp_t {
     z_timestamp_t {
         valid: true,
         id: crate::zid::z_id_t::from_wire(&hint.zid),
@@ -367,7 +367,7 @@ fn timestamp_of(hint: &wz_runtime_tokio::sample::TimestampHint) -> z_timestamp_t
 
 /// Box an [`EncodingHint`] into an owned encoding slot.
 fn own_encoding(
-    hint: wz_runtime_tokio::sample::EncodingHint,
+    hint: wz_session_core::sample::EncodingHint,
 ) -> crate::encoding::z_owned_encoding_t {
     let mut owned = crate::encoding::z_owned_encoding_t::null_value();
     // SAFETY: `owned` is a live slot this call fills.
@@ -786,9 +786,9 @@ pub(crate) struct PlainPublisher {
 /// it wraps.
 #[derive(Clone, Debug)]
 pub(crate) struct PublisherQos {
-    encoding: Option<wz_runtime_tokio::sample::EncodingHint>,
-    congestion_control: wz_runtime_tokio::qos::CongestionControl,
-    priority: wz_runtime_tokio::qos::Priority,
+    encoding: Option<wz_session_core::sample::EncodingHint>,
+    congestion_control: wz_session_core::qos::CongestionControl,
+    priority: wz_session_core::qos::Priority,
     is_express: bool,
     reliability: Reliability,
     /// Where its samples may go: `allowed_destination` with `local-subscriber`
@@ -1519,10 +1519,10 @@ pub const Z_RELIABILITY_BEST_EFFORT: c_int = 1;
 /// plane it serves. The two recognised values agree, and the mapping is written
 /// out rather than cast because the SIBLING zenoh-c ABI inverts them —
 /// R311y545 paid for exactly that.
-fn push_congestion_from_pico(c: c_int) -> wz_runtime_tokio::qos::CongestionControl {
+fn push_congestion_from_pico(c: c_int) -> wz_session_core::qos::CongestionControl {
     match c {
-        crate::qos::Z_CONGESTION_CONTROL_BLOCK => wz_runtime_tokio::qos::CongestionControl::Block,
-        _ => wz_runtime_tokio::qos::CongestionControl::Drop,
+        crate::qos::Z_CONGESTION_CONTROL_BLOCK => wz_session_core::qos::CongestionControl::Block,
+        _ => wz_session_core::qos::CongestionControl::Drop,
     }
 }
 
@@ -1544,7 +1544,7 @@ fn reliability_from_pico(r: c_int) -> Reliability {
 /// `ptr` must be null or point at a valid `z_timestamp_t`.
 pub(crate) unsafe fn timestamp_hint_of(
     ptr: *const z_timestamp_t,
-) -> Option<wz_runtime_tokio::sample::TimestampHint> {
+) -> Option<wz_session_core::sample::TimestampHint> {
     if ptr.is_null() {
         return None;
     }
@@ -1552,7 +1552,7 @@ pub(crate) unsafe fn timestamp_hint_of(
     if !ts.valid {
         return None;
     }
-    Some(wz_runtime_tokio::sample::TimestampHint {
+    Some(wz_session_core::sample::TimestampHint {
         time: ts.time,
         // The wire form strips trailing zeros; the codec re-pads.
         zid: ts.id.id.to_vec(),
@@ -1560,7 +1560,7 @@ pub(crate) unsafe fn timestamp_hint_of(
 }
 
 /// R311y561 — read a caller-supplied `z_source_info_t*` option field into a wz
-/// [`SourceInfo`](wz_runtime_tokio::sample::SourceInfo). The INVERSE of
+/// [`SourceInfo`](wz_session_core::sample::SourceInfo). The INVERSE of
 /// [`source_info_of`], which projects the receive direction.
 ///
 /// This is the field R311y559 left UNREAD on every pico put/delete path, and it
@@ -1580,7 +1580,7 @@ pub(crate) unsafe fn timestamp_hint_of(
 /// `ptr` must be null or point at a valid `z_source_info_t`.
 pub(crate) unsafe fn source_info_hint_of(
     ptr: *const z_source_info_t,
-) -> Option<wz_runtime_tokio::sample::SourceInfo> {
+) -> Option<wz_session_core::sample::SourceInfo> {
     if ptr.is_null() {
         return None;
     }
@@ -1591,7 +1591,7 @@ pub(crate) unsafe fn source_info_hint_of(
     if info._source_id.zid.id.iter().all(|b| *b == 0) {
         return None;
     }
-    Some(wz_runtime_tokio::sample::SourceInfo::new(
+    Some(wz_session_core::sample::SourceInfo::new(
         &info._source_id.zid.id,
         info._source_id.eid,
         info._source_sn,
@@ -2120,7 +2120,7 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // face, so a per-face reject would otherwise be swallowed). `cclosure`
         // is already owned, so this early return drops it and runs the C
         // `drop(context)` (consume-on-all-paths).
-        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_ERR_INVALID;
         }
 
@@ -2224,7 +2224,7 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
         };
-        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_ERR_INVALID;
         }
         // The returned SubId is deliberately discarded: with no owned handle
@@ -2366,7 +2366,7 @@ impl z_source_info_t {
     }
 }
 
-/// The pico ABI shape for a wz [`SourceInfo`](wz_runtime_tokio::sample::SourceInfo).
+/// The pico ABI shape for a wz [`SourceInfo`](wz_session_core::sample::SourceInfo).
 ///
 /// `zid_len` is DROPPED, and deliberately: wz carries the wire's effective zid
 /// length because the codec's header nibble encodes it, while pico's `z_id_t`
@@ -2374,7 +2374,7 @@ impl z_source_info_t {
 /// right-zero-padded to 16, so the projection is a copy — but a reader
 /// comparing two zids must compare all 16 bytes, which is what
 /// `z_id_to_string` and every pico program do.
-pub(crate) fn source_info_of(info: &wz_runtime_tokio::sample::SourceInfo) -> z_source_info_t {
+pub(crate) fn source_info_of(info: &wz_session_core::sample::SourceInfo) -> z_source_info_t {
     z_source_info_t {
         _source_id: crate::entity::z_entity_global_id_t {
             zid: crate::zid::z_id_t::from_wire(&info.zid),
@@ -2533,9 +2533,9 @@ pub unsafe extern "C" fn z_sample_congestion_control(sample: *const z_loaned_sam
         // left to the wildcard, so the pico ABI's answer is a decision and not
         // whatever a new variant happened to fall into.
         match sample_qos(sample).map(|q| q.congestion()) {
-            Some(wz_runtime_tokio::qos::CongestionControl::Block) => Z_CONGESTION_CONTROL_BLOCK,
-            Some(wz_runtime_tokio::qos::CongestionControl::BlockFirst)
-            | Some(wz_runtime_tokio::qos::CongestionControl::Drop)
+            Some(wz_session_core::qos::CongestionControl::Block) => Z_CONGESTION_CONTROL_BLOCK,
+            Some(wz_session_core::qos::CongestionControl::BlockFirst)
+            | Some(wz_session_core::qos::CongestionControl::Drop)
             | None => Z_CONGESTION_CONTROL_DROP,
         }
     })
@@ -2584,7 +2584,7 @@ unsafe fn sample_marshal<'a>(sample: *const z_loaned_sample_t) -> Option<&'a Sam
 /// The QoS byte behind a loaned sample, or `None` when it carried no QoS ext.
 unsafe fn sample_qos(
     sample: *const z_loaned_sample_t,
-) -> Option<wz_runtime_tokio::sample::QosLevel> {
+) -> Option<wz_session_core::sample::QosLevel> {
     sample_marshal(sample).and_then(|m| m.qos)
 }
 

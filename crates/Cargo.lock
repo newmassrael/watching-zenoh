@@ -2814,6 +2814,7 @@ dependencies = [
  "wz-cdylib-build",
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
+ "wz-session-core",
 ]
 
 [[package]]

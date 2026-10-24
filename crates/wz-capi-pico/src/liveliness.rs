@@ -539,7 +539,7 @@ pub unsafe extern "C" fn z_liveliness_get(
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
         };
-        if wz_runtime_tokio::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
+        if wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(&ke).is_err() {
             return Z_ERR_INVALID;
         }
         // A NULL options pointer is pico's "defaults", not an error.
@@ -594,7 +594,7 @@ pub unsafe extern "C" fn z_liveliness_get(
             let issued = session.liveliness_get(
                 ke.clone(),
                 opts,
-                move |view: &dyn wz_runtime_tokio::reply_sink::ReplyView| {
+                move |view: &dyn wz_session_core::reply_sink::ReplyView| {
                     per_face.fire(view);
                 },
                 // Completion is signalled by the pending entry's sink being
