@@ -282434,6 +282434,46 @@
         "Approved structure, in order, step 1 landed: (2) the pure snapshot struct of the capacity report in wz-session-core (share, lease, limit and limiter, admitted, the measured floor and median, the three lateness readings, refusals by cause, schema version) with a test that fails when the report and the document drift; (3) the responder under a wz-owned root (wz/@/<zid>/capacity), gated by the same read permission and ACL, answering nothing when denied; (4) a differential test that a query for @/** answers what it answered before; (5) the admission that follows the windowed lateness, as its own round. In parallel: a face that stops reading against blocking publishers, to see whether wait_for_room costs other faces their keepalives (the demo has neither a stoppable client nor a blocking publisher). Also open: the hosted E7s jobs of rounds 3507, 3514 and 3515 (runs cancelled by later pushes)."
       ]
     },
+    "Round 3519": {
+      "decision_summary": "Open-debt item 924, step 4c, the recovered QUIC streams (owner: long-term correct, cost not counted). A recovered stream's plaintext exists only in the calls that hand it in, so it was walked there and its messages kept whole. The stream now keeps each direction's plaintext from the first byte a held message is read from, its messages are entries read again from it, a frame ceiling's discard lets the plaintext before the oldest held message go, and the byte door hands those messages' bytes back. The plaintext sink used to be handed the rows rewritten into the offer's space for the call and restored after it, which only a row kept whole allows; it is now handed the offer's stream offset (DecryptedStream::base) and its consumers slice at the difference, giving the same answers. Found while verifying: round 3504 left wz-analyze with two needless borrows clippy refuses; fixed here.",
+      "changes_bullets": [
+        "wz-capture lib.rs: QuicStreamDissection keeps Plaintext per direction and a Keep, reads units into entries, discards with its plaintext as source and releases behind the oldest held message; DecryptedStream::base and plaintext_offset; the QUIC stream byte answer reads the kept plaintext (unit_message_bytes serves datagram logs and stream plaintext alike); NoByteSource::RecoveredPlaintextNotRetained removed; the every-producer corpus holds its stream/no cell with a byte ceiling",
+        "wz-analyze: the plaintext sink slices at plaintext_offset; two needless borrows of the now borrowed datagram payload removed",
+        "redecode_gate.rs: a recovered stream in odd-length offers both ways, plain and under a frame ceiling; discard_site_lint.py: the plaintext release registered; docs/dissect-row-index.md: the stream half of step 4c (3)"
+      ],
+      "verification_bullets": [
+        "The gate's recovered stream test passes, plain and under a frame ceiling: the list reads as the reading that kept every message whole, every message's bytes are the stream's, and the kept plaintext under the ceiling is under half what was fed; releasing four bytes early fails it (mutation). The two existing sink tests pass unchanged in what they assert, reading offsets through plaintext_offset",
+        "cargo test wz-capture all features, wz-capi-dissect, wz-capi-replay, wz-replay, wz-analyze all features",
+        "clippy -D warnings wz-capture all and no default features, wz-analyze all features, wz-capi-dissect; rustfmt; discard_site_lint, accessor_reach_census, analysis_surface_parity; rustdoc adds no warning in wz-capture"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 4c landing (4): WebSocket messages, TLS plaintext (its remap rewrites rows after the sink; give it the same base and a kept plaintext) and the scouting rows; then step 5, the memory gate",
+        "Hosted CI: read the first completed run holding this round; round 3504 to 3516 left a wz-analyze clippy refusal that this round fixes, so a red clippy lane on those rounds is that, and the consumer session takes this round's pin"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 4c, the recovered QUIC streams (owner: long-term correct, cost not counted). A recovered stream's plaintext exists only in the calls that hand it in, so it was walked there and its messages kept whole. The stream now keeps each direction's plaintext from the first byte a held message is read from, its messages are entries read again from it, a frame ceiling's discard lets the plaintext before the oldest held message go, and the byte door hands those messages' bytes back. The plaintext sink used to be handed the rows rewritten into the offer's space for the call and restored after it, which only a row kept whole allows; it is now handed the offer's stream offset (DecryptedStream::base) and its consumers slice at the difference, giving the same answers. Found while verifying: round 3504 left wz-analyze with two needless borrows clippy refuses; fixed here.",
+      "publishable_changes_bullets": [
+        "wz-capture lib.rs: QuicStreamDissection keeps Plaintext per direction and a Keep, reads units into entries, discards with its plaintext as source and releases behind the oldest held message; DecryptedStream::base and plaintext_offset; the QUIC stream byte answer reads the kept plaintext (unit_message_bytes serves datagram logs and stream plaintext alike); NoByteSource::RecoveredPlaintextNotRetained removed; the every-producer corpus holds its stream/no cell with a byte ceiling",
+        "wz-analyze: the plaintext sink slices at plaintext_offset; two needless borrows of the now borrowed datagram payload removed",
+        "redecode_gate.rs: a recovered stream in odd-length offers both ways, plain and under a frame ceiling; discard_site_lint.py: the plaintext release registered; docs/dissect-row-index.md: the stream half of step 4c (3)"
+      ],
+      "publishable_verification_bullets": [
+        "The gate's recovered stream test passes, plain and under a frame ceiling: the list reads as the reading that kept every message whole, every message's bytes are the stream's, and the kept plaintext under the ceiling is under half what was fed; releasing four bytes early fails it (mutation). The two existing sink tests pass unchanged in what they assert, reading offsets through plaintext_offset",
+        "cargo test wz-capture all features, wz-capi-dissect, wz-capi-replay, wz-replay, wz-analyze all features",
+        "clippy -D warnings wz-capture all and no default features, wz-analyze all features, wz-capi-dissect; rustfmt; discard_site_lint, accessor_reach_census, analysis_surface_parity; rustdoc adds no warning in wz-capture"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 4c landing (4): WebSocket messages, TLS plaintext (its remap rewrites rows after the sink; give it the same base and a kept plaintext) and the scouting rows; then step 5, the memory gate",
+        "Hosted CI: read the first completed run holding this round; round 3504 to 3516 left a wz-analyze clippy refusal that this round fixes, so a red clippy lane on those rounds is that, and the consumer session takes this round's pin"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
