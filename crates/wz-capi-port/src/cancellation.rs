@@ -23,6 +23,10 @@
 //!   `_z_sync_group_wait`s
 //!   (`vendor/zenoh-pico/src/session/cancellation.c` @ `_z_sync_group_wait(&ct->_sync_group);`).
 //!
+//! It is the port's and not an engine's: an ABI hands the token out, and the engine that issues
+//! a get registers the get's undo with it (`CancellableFan::record`), whichever engine that is.
+//! `wz-capi-core`, where it was written, re-exports it under its old path.
+//!
 //! ## The contract
 //!
 //! * [`CancellationToken::register`] is refused once a cancel has STARTED, so a

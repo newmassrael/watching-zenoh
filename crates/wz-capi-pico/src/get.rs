@@ -129,9 +129,11 @@
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
-use wz_capi_core::runtime::session::QueryOptions;
-use wz_capi_core::runtime::session_glue::{ConsolidationMode, QueryTarget};
+use wz_capi_port::cancellation::{register_fan, CancellationToken, Registration};
+use wz_capi_port::ReplyCallback;
 use wz_session_core::locality::Locality;
+use wz_session_core::query_mode::{ConsolidationMode, QueryTarget};
+use wz_session_core::query_options::QueryOptions;
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
 
 use crate::abi::{z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t};
@@ -142,8 +144,7 @@ use crate::pubsub::{
 };
 use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t, ANYKE_PARAM, PARAM_SEPARATOR};
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
-use crate::session::{tokio_session, z_loaned_session_t};
-use wz_capi_core::faces::SharedSession;
+use crate::session::{session_handle, z_loaned_session_t, Engine};
 use wz_capi_port::WireKey;
 
 // --- pico enum-typed option fields -----------------------------------------
@@ -725,16 +726,12 @@ impl z_get_options_t {
     /// # Safety
     /// The field must be null or a moved token this crate produced.
     #[cfg(feature = "unstable-api")]
-    unsafe fn take_cancellation_token(
-        &self,
-    ) -> Option<Arc<wz_capi_core::cancellation::CancellationToken>> {
+    unsafe fn take_cancellation_token(&self) -> Option<Arc<CancellationToken>> {
         crate::cancellation::take_moved_cancellation_token(self.cancellation_token)
     }
 
     #[cfg(not(feature = "unstable-api"))]
-    unsafe fn take_cancellation_token(
-        &self,
-    ) -> Option<Arc<wz_capi_core::cancellation::CancellationToken>> {
+    unsafe fn take_cancellation_token(&self) -> Option<Arc<CancellationToken>> {
         None
     }
 }
@@ -1157,9 +1154,8 @@ unsafe fn get_inner(
     // also correctly reports "this get is over".
     let cclosure = adopt_reply_closure(callback);
 
-    let (handle, state) = match tokio_session(zs) {
-        Some(s) => s,
-        None => return Z_ERR_NULL,
+    let Some(handle) = session_handle(zs) else {
+        return Z_ERR_NULL;
     };
     let ke = match keyexpr_str(keyexpr) {
         Some(k) => k.to_owned(),
@@ -1204,12 +1200,13 @@ unsafe fn get_inner(
     };
     // R2959 — the query names the caller's key in its own wire form, as pico's
     // `_z_query` does (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)`).
-    let Some(wire) = wire_key_of(keyexpr, crate::session::engine_ref(handle)) else {
+    let engine = crate::session::engine_ref(handle);
+    let Some(wire) = wire_key_of(keyexpr, engine) else {
         return Z_ERR_INVALID;
     };
 
     issue_get(
-        &state.shared,
+        engine,
         ke,
         wire,
         params_in,
@@ -1301,9 +1298,9 @@ impl PicoQueryQos {
     }
 }
 
-/// Issue one get on an already-resolved registry — everything `get_inner` does
-/// after it has turned a `z_loaned_session_t` and a `z_loaned_keyexpr_t` into an
-/// `Arc<SharedSession>` and a checked keyexpr string.
+/// Issue one get on an already-resolved session — everything `get_inner` does
+/// after it has turned a `z_loaned_session_t` and a `z_loaned_keyexpr_t` into the
+/// session's engine and a checked keyexpr string.
 ///
 /// Split out at R311y528 so `z_querier_get` shares it rather than restating it.
 /// A querier is exactly "a keyexpr plus get options, bound to a session" in both
@@ -1316,7 +1313,7 @@ impl PicoQueryQos {
 /// `drop(context)` from here: every path below completes the get.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn issue_get(
-    shared: &Arc<SharedSession>,
+    engine: &Engine,
     keyexpr: String,
     wire: WireKey,
     params_in: &[u8],
@@ -1329,7 +1326,7 @@ pub(crate) fn issue_get(
     qos: PicoQueryQos,
     value_meta: PicoQueryValueMeta,
     closure: Arc<CReplyClosure>,
-    token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
+    token: Option<Arc<CancellationToken>>,
 ) -> ZResult {
     let params = transmit_parameters(params_in, accept_replies);
 
@@ -1354,12 +1351,14 @@ pub(crate) fn issue_get(
         value_meta,
     );
 
-    fan_get(shared, &keyexpr, &wire, &opts, closure, gate, token)
+    fan_get(engine, &keyexpr, &wire, &opts, closure, gate, token)
 }
 
 /// Fan one C get across every connected face and, where its destination admits
 /// session-local traffic, once to the session's own queryables, returning `Z_OK`.
-/// The legs are [`SharedSession::fan_query`]'s, shared with the zenoh-c ABI.
+/// The legs are the engine's ([`wz_capi_port::SessionEngine::get_on_wire`]): the
+/// tokio engine's registry fan, shared with the zenoh-c ABI, or the cooperative
+/// engine's one link.
 ///
 /// The C thread holds its own `Arc` clone (`guard`) for the whole fan. That is
 /// load-bearing: without it, a leg answering and dropping its pending entry
@@ -1367,11 +1366,9 @@ pub(crate) fn issue_get(
 /// run the C `drop(context)` — completing the get while it was still being
 /// issued.
 ///
-/// The sessions are snapshotted OUT of the registry lock before any `query`
-/// runs (the `publish_all` pattern): a `query` can stage work whose drain fires
-/// a C callback, and a pico callback is explicitly allowed to re-enter the
-/// session (`z_put` from inside one is supported), so holding the lock across it
-/// would deadlock the non-reentrant mutex.
+/// An engine issues its legs with none of its locks held across a leg: a leg can
+/// stage work whose drain fires a C callback, and a pico callback is explicitly
+/// allowed to re-enter the session (`z_put` from inside one is supported).
 ///
 /// Zero legs is `Z_OK` with no query issued: `guard` is then the last clone, so
 /// the C `drop(context)` runs here on the C thread and the get completes
@@ -1379,13 +1376,13 @@ pub(crate) fn issue_get(
 /// — `_z_query` runs `_z_drop_handler_execute(dropper, arg)` on the caller
 /// thread when `remaining_finals == 0` (`src/net/primitives.c:560-562`).
 fn fan_get(
-    shared: &Arc<SharedSession>,
+    engine: &Engine,
     keyexpr: &str,
     wire: &WireKey,
     opts: &QueryOptions,
     closure: Arc<CReplyClosure>,
     gate: Arc<ReplyGate>,
-    token: Option<Arc<wz_capi_core::cancellation::CancellationToken>>,
+    token: Option<Arc<CancellationToken>>,
 ) -> ZResult {
     let guard = closure.clone();
     // R311y575 — the cancellation is registered BEFORE the first face is
@@ -1401,7 +1398,7 @@ fn fan_get(
     let fan = match &token {
         None => None,
         Some(token) => {
-            let Some((fan, registration)) = wz_capi_core::cancellation::register_fan(token) else {
+            let Some((fan, registration)) = register_fan(token) else {
                 // ALREADY CANCELLED. Upstream's
                 // `_z_cancellation_token_add_on_cancel_handler` answers
                 // `Z_ERR_CANCELLED` here, `_z_query` unregisters the pending
@@ -1419,36 +1416,34 @@ fn fan_get(
     };
     let registration = fan.as_ref().map(|(_, r)| Arc::clone(r));
     let fan = fan.map(|(f, _)| f);
-    shared.fan_query(opts.allowed_destination, fan.as_deref(), |query_leg| {
+    // R2959 — a declared key goes out as its alias where the leg can name one, and the
+    // reply gate still matches the literal. A leg whose issue fails is not one: its
+    // callback was dropped with its rolled-back pending entry, so it cannot hold the get
+    // open, and if EVERY leg fails, `guard` below completes it.
+    let issued = engine.get_on_wire(keyexpr, wire, opts, fan.as_deref(), &mut || {
         let leg = LegReply {
             closure: closure.clone(),
             gate: gate.clone(),
             _registration: registration.clone(),
         };
-        // Only `on_reply` carries the `Arc`. `on_final` needs no body at all:
-        // completion is signalled by the pending entry's sink being DROPPED
-        // (which drops this closure and releases the clone), and that happens
-        // on a real final, a timeout sweep, and a face death alike — whereas a
-        // counter incremented here would never be reached by the face-death
-        // path. See the module doc.
-        let on_reply = move |view: &dyn ReplyView| leg.fire(view);
-        // R2959 — a declared key goes out as its alias where the leg can name one,
-        // and the reply gate still matches the literal (`QueryLeg::query_on_wire`). An
-        // issue error (a face mid-teardown, an alias the face was never told) is
-        // swallowed, matching the fan-out publish's best-effort discipline: its `Arc`
-        // clone was already dropped with the rolled-back sink, so it cannot hold the
-        // get open, and if EVERY leg errors, `guard` below completes it.
-        query_leg
-            .query_on_wire(keyexpr, wire, opts.clone(), on_reply)
-            .ok()
-            .map(|handle| handle.rid())
+        // Only the reply callback carries the `Arc`. Completion is signalled by the
+        // callback being DROPPED (which releases the clone), and that happens on a
+        // real final, a timeout sweep, and a face death alike — whereas a counter
+        // incremented on a final would never be reached by the face-death path. See
+        // the module doc.
+        Box::new(move |view: &dyn ReplyView| leg.fire(view)) as ReplyCallback
     });
     drop(guard);
     // After `guard`, explicitly: locals drop in REVERSE declaration order, so
     // left implicit the registration would go first and a concurrent `cancel`
     // could return before the zero-face path's C `drop(context)` had run.
     drop(registration);
-    Z_OK
+    match issued {
+        Some(_) => Z_OK,
+        // An engine with no requesting end in this build: a build defect, said rather
+        // than reported as a get nobody answered.
+        None => crate::result::Z_ERR_GENERIC,
+    }
 }
 
 /// R2949 — what each leg's reply callback owns: a face's, the local plane's, or a
@@ -1469,7 +1464,7 @@ fn fan_get(
 pub(crate) struct LegReply {
     pub(crate) closure: Arc<CReplyClosure>,
     pub(crate) gate: Arc<ReplyGate>,
-    pub(crate) _registration: Option<Arc<wz_capi_core::cancellation::Registration>>,
+    pub(crate) _registration: Option<Arc<Registration>>,
 }
 
 impl LegReply {

@@ -53,7 +53,9 @@
 //! the values, so returning one ABI's constant from shared code would be a
 //! wrong-code bug in the other.
 
-pub mod cancellation;
+/// The one cancellation token both C ABIs hand out: the port's (`wz_capi_port::cancellation`),
+/// where every engine that issues a get registers with it. Re-exported under its old path.
+pub use wz_capi_port::cancellation;
 pub mod codec;
 pub mod drive;
 pub mod encoding_ids;

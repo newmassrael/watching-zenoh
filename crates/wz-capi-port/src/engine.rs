@@ -10,18 +10,21 @@
 //! implements the trait; an ABI holds `Arc<dyn SessionEngine>` and reaches the engine through
 //! nothing else (`docs/capi-pico-on-coop-engine.md`, decision D1).
 //!
-//! The queryable joined when the cooperative engine answered queries; a capability no second
-//! engine has yet (the requesting end of a query, liveliness, scouting, the connectivity and admin
-//! planes, the advanced publisher) is not here: an ABI module that needs one still names its
-//! engine, and joins this trait when a second engine implements it.
+//! The queryable joined when the cooperative engine answered queries, and the get (over
+//! session-core's `QueryOptions`) when it asked them; a capability no second engine has yet
+//! (liveliness, scouting, the connectivity and admin planes, the advanced publisher) is not
+//! here: an ABI module that needs one still names its engine, and joins this trait when a second
+//! engine implements it.
 
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
+use wz_session_core::query_options::QueryOptions;
 
+use crate::cancellation::CancellableFan;
 use crate::{
     FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, QblId, QueryableSink,
-    SubId, SubscriberSink, WireKey,
+    ReplyCallback, SubId, SubscriberSink, WireKey,
 };
 
 /// The operations a C ABI's client surface makes on one session, whatever engine runs it.
@@ -164,5 +167,24 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// nothing.
     fn undeclare_queryable(&self, id: QblId) {
         let _ = id;
+    }
+
+    /// Ask a query on `keyexpr` (named on the wire as `wire`) with `opts`: one leg per peer the
+    /// engine reaches, and one to the session's own queryables where `opts` admits them. `leg`
+    /// mints each leg's [`ReplyCallback`], whose drop is that leg's end, so a get is over when
+    /// the last callback it minted is dropped. `fan`, when the get can be cancelled, is told of
+    /// each leg as it is issued ([`CancellableFan::record`]), and a fan cancelled while the
+    /// legs are issued stops the issuing. The number of legs issued, or `None` from an engine
+    /// with no requesting end in this build, which is the provided answer.
+    fn get_on_wire(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        opts: &QueryOptions,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Option<usize> {
+        let _ = (keyexpr, wire, opts, fan, leg);
+        None
     }
 }

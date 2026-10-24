@@ -589,7 +589,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             value_meta.encoding = state.encoding.clone();
         }
         issue_get(
-            &state.shared,
+            state.shared.engine_ref(),
             state.key.literal().to_owned(),
             state.key.wire(state.shared.engine_ref()),
             params_in,

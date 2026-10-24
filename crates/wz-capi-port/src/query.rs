@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The queryable's vocabulary: what a C queryable's callbacks are minted with, and a query kept
-//! past its handler.
+//! The query plane's vocabulary: what a C queryable's callbacks are minted with, a query kept
+//! past its handler, and the reply callback of one leg of a get.
 //!
 //! A queryable's handler answers through session-core's [`ReplyOut`] while it runs. A C program
 //! may also KEEP the query (zenoh-pico's `z_query_take_from_loaned`, zenoh-c's `z_query_clone`)
@@ -14,6 +14,7 @@
 use std::sync::Arc;
 
 use wz_session_core::query_sink::{QueryView, ReplyOut};
+use wz_session_core::reply_sink::ReplyView;
 
 /// A C-level queryable id, keying what an engine holds for one C declaration.
 pub type QblId = u64;
@@ -44,3 +45,7 @@ pub type QueryCallback = Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send
 
 /// Mints one queryable callback per face, given what the face's queries are held through.
 pub type QueryableSink = Arc<dyn Fn(Arc<dyn QueryHolder>) -> QueryCallback + Send + Sync>;
+
+/// One leg of a get: it reads each reply that leg delivers, and dropping it is that leg's end
+/// (its final, its timeout, the loss of its face, its cancellation), whichever comes first.
+pub type ReplyCallback = Box<dyn FnMut(&dyn ReplyView) + Send + 'static>;

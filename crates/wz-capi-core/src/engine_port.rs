@@ -282,6 +282,31 @@ impl SessionEngine for SharedSession {
     fn undeclare_queryable(&self, id: wz_capi_port::QblId) {
         SharedSession::undeclare_queryable(self, id);
     }
+
+    #[cfg(feature = "query")]
+    fn get_on_wire(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        opts: &wz_session_core::query_options::QueryOptions,
+        fan: Option<&crate::cancellation::CancellableFan>,
+        leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
+    ) -> Option<usize> {
+        // The registry's fan: one leg per face (and group), and the local plane where the
+        // options admit it. A leg whose issue fails (a face mid-teardown, an alias the face was
+        // never told) drops its callback with its rolled-back pending entry, so it cannot hold
+        // the get open; it is not counted.
+        let mut issued = 0;
+        self.fan_query(opts.allowed_destination, fan, |query_leg| {
+            let rid = query_leg
+                .query_on_wire(keyexpr, wire, opts.clone(), leg())
+                .ok()
+                .map(|handle| handle.rid());
+            issued += usize::from(rid.is_some());
+            rid
+        });
+        Some(issued)
+    }
 }
 
 /// One face's session as the port's [`QueryHolder`](wz_capi_port::QueryHolder): a query held

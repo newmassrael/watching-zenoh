@@ -41,12 +41,13 @@ use std::sync::Arc;
 
 use wz_session_core::sink::SampleView;
 
+pub mod cancellation;
 mod drive;
 mod engine;
 mod query;
 pub use drive::{CalledFromReadTask, SessionClosed, SessionDrive};
 pub use engine::SessionEngine;
-pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink};
+pub use query::{HeldQuery, QblId, QueryCallback, QueryHolder, QueryableSink, ReplyCallback};
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries. It keys whatever an
 /// engine holds for the one C subscription (the per-face subscribers it spawned, on an engine
