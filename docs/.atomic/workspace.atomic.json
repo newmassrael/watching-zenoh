@@ -284756,6 +284756,44 @@
         "Sending the socket2, tokio, ring, quinn-udp and libc changes upstream is an outward act and waits for the owner; each WZ-PATCH.md says when its copy is deleted."
       ]
     },
+    "Round 3574": {
+      "decision_summary": "Open-debt item 924, step 5: the last copy a WebSocket flow kept of a payload (owner: fix what is left). A message joined out of fragments stands nowhere in the stream as one run, so the list logged an unmasked copy. It is the payloads of its frames one after another, so the place is LogPlace::Frames: the index keeps the stretches (a StreamSpan of sixteen bytes a frame: where the payload stands, how long, whether masked by the four bytes before it) once for the unit, counted under sparse, and the list joins them as it reads, a copy that lives for the read. The dependence is the first stretch's, the unit's last row lets the stretches go, and a unit whose key or first stretch the stream releases is kept whole first. No WebSocket flow keeps a copy of a payload now: a fragmented row on the lent door costs 285.0 B at 16, 256 and 4096 B units, a single frame 139.4 B. Stale doc lines that called counted maps models were corrected.",
+      "changes_bullets": [
+        "wz-session-core: byte_log.rs (LogPlace::Frames), passive_messages.rs (StreamSpan, Index::spans, push_datagram_in_frames, the join on read, stream_dependence and the release of the stretches with the unit, ListMemory docs without the model wording)",
+        "wz-capture: ws.rs (WsMessage.spans replaces payload_at and masked, the deframer collects each frame's stretch), lib.rs (feed_websocket places a message in the stream when every stretch and key is held and they add up to the payload), memory_matrix.rs (a fragmented kind), redecode_gate.rs (a ws flow logs nothing); discard_site_lint.py; docs/dissect-row-index.md"
+      ],
+      "verification_bullets": [
+        "cargo test wz-session-core all features (a unit in two stretches, one masked and one not, with a control frame between, logs nothing, reads as one kept whole, is kept whole before a release that takes its first stretch, and lets its stretches go with its last row), wz-capture dissect and fixtures, and wz-capi-dissect (the handle memory gate) pass; the matrix holds the report equal to the allocator in every case and the fragmented websocket kind at 284.97 B on the lent door at every unit size",
+        "clippy -D warnings wz-session-core all and no default features, wz-capture default, all and no default features; rustfmt; discard_site_lint (one new removal site registered); the hook's round_fed_gates array (112, each exit code read from the rc file, all 0)",
+        "docs: wz-session-core 495 (exact, summary line excluded), wz-capture 0"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Hosted CI for the rounds of this debt has not been read by this session: the runs holding them were cancelled by later pushes or still pending each time it looked; read the first completed run that holds round 3574 or later",
+        "Nothing of the unit-size sweep is left open: the report is exact, and every payload a TLS, TCP or WebSocket flow holds is held once, by the stream"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 5: the last copy a WebSocket flow kept of a payload (owner: fix what is left). A message joined out of fragments stands nowhere in the stream as one run, so the list logged an unmasked copy. It is the payloads of its frames one after another, so the place is LogPlace::Frames: the index keeps the stretches (a StreamSpan of sixteen bytes a frame: where the payload stands, how long, whether masked by the four bytes before it) once for the unit, counted under sparse, and the list joins them as it reads, a copy that lives for the read. The dependence is the first stretch's, the unit's last row lets the stretches go, and a unit whose key or first stretch the stream releases is kept whole first. No WebSocket flow keeps a copy of a payload now: a fragmented row on the lent door costs 285.0 B at 16, 256 and 4096 B units, a single frame 139.4 B. Stale doc lines that called counted maps models were corrected.",
+      "publishable_changes_bullets": [
+        "wz-session-core: byte_log.rs (LogPlace::Frames), passive_messages.rs (StreamSpan, Index::spans, push_datagram_in_frames, the join on read, stream_dependence and the release of the stretches with the unit, ListMemory docs without the model wording)",
+        "wz-capture: ws.rs (WsMessage.spans replaces payload_at and masked, the deframer collects each frame's stretch), lib.rs (feed_websocket places a message in the stream when every stretch and key is held and they add up to the payload), memory_matrix.rs (a fragmented kind), redecode_gate.rs (a ws flow logs nothing); discard_site_lint.py; docs/dissect-row-index.md"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test wz-session-core all features (a unit in two stretches, one masked and one not, with a control frame between, logs nothing, reads as one kept whole, is kept whole before a release that takes its first stretch, and lets its stretches go with its last row), wz-capture dissect and fixtures, and wz-capi-dissect (the handle memory gate) pass; the matrix holds the report equal to the allocator in every case and the fragmented websocket kind at 284.97 B on the lent door at every unit size",
+        "clippy -D warnings wz-session-core all and no default features, wz-capture default, all and no default features; rustfmt; discard_site_lint (one new removal site registered); the hook's round_fed_gates array (112, each exit code read from the rc file, all 0)",
+        "docs: wz-session-core 495 (exact, summary line excluded), wz-capture 0"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Hosted CI for the rounds of this debt has not been read by this session: the runs holding them were cancelled by later pushes or still pending each time it looked; read the first completed run that holds round 3574 or later",
+        "Nothing of the unit-size sweep is left open: the report is exact, and every payload a TLS, TCP or WebSocket flow holds is held once, by the stream"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
