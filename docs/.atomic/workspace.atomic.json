@@ -283152,6 +283152,44 @@
         "Hosted CI: read the first completed run holding rounds 3504 to this one; the consumer session takes this round's pin, and a dissection's scouting list is read through DatagramDissection::scouting now"
       ]
     },
+    "Round 3535": {
+      "decision_summary": "A regression of mine, found by hosted CI and by two peers' bisections: the calibration of round 3507 sent a KeepAlive at the establishment of each of the first 64 sessions to time an emission, and on a lowlatency link the stream length prefix changes from two bytes to four after the open returns, so a frame written inside the open is read by the peer as garbage and the link is lost (hosted Layer C1ad, lowlatency_negotiates_and_delivers_put_over_real_tcp, red from the first push of that round; making the emission a no-op passed it). Peers report the pico declaration tests of Layer E failing from the same push with the same shape, which this removal is expected to clear and which is not claimed until a run says so. The repair removes the frame: a frame a node puts on a peer's wire for its own purposes is a protocol act and not a measurement. The meter is seeded by calibrate_with_probe instead, 128 KeepAlive-sized writes timed on a private loopback socket pair before the router accepts anything, touching no peer. Also repaired: the scaling document is read with LF endings so that the Windows runner's CRLF checkout does not fail the document tests, and the hosted runner's first calibrated limit (178 admitted of 1100) showed that a quarter was too tight a floor on what a dearer host may admit, so the promise test now asks for a tenth.",
+      "changes_bullets": [
+        "wz-runtime-tokio `emission_cost`: `calibrate_on_establishment` and `wants_samples` removed; `calibrate_with_probe` (public) times 128 three-byte writes on a loopback socket pair with a drain thread and records them as the first samples; two tests (the probe seeds floor and median before any session exists; a fresh meter has none). `keepalive_pacer` no longer calls anything at establishment.",
+        "wz-ap-demo router-hat calls the probe before it accepts and logs how many writes it timed.",
+        "wz-session-core `capacity` tests read the scaling document with CRLF turned to LF.",
+        "E7s promise test: the population floor is a tenth of the recorded number, not a quarter.",
+        "docs/router-data-plane-scaling.md 7.4: the passage on the seed rewritten with the reason it was wrong."
+      ],
+      "verification_bullets": [
+        "Reproduced on a build host at the tip: lowlatency_e2e fails with the acceptor's first event Poll(LinkLost(PeerClosed)); with the establishment emission as a no-op it passes (three variants run, the failing and the passing differ only in that call). After the repair the three tests of lowlatency_e2e pass, the two probe tests, the capacity tests, clippy with warnings denied on wz-runtime-tokio, wz-ap-demo (router-hat build) and the E7s test target.",
+        "Not verified: Layer E's pico declaration tests (no pico CLI is built on any host used here; a peer is re-running them on another host); the promise test on a hosted runner after this change (the hosted run before it ended at the population assertion with 178 of 1100 admitted, a figure the calibration produced by design); the three other hosted reds of that run belong to other lines (TLS zenohd interop A4/C0, the only_zenohd lane-reach, wz-capture) and were not touched."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Read first: whether Layer E pico_keyexpr_declaration_twice_and_diff and C1ad are green on the run of this push (the peers' attribution of the pico failures to the same cause is a hypothesis). Lesson: a measurement must not put a frame on a peer's wire; the lowlatency link changes its stream framing after the open, which only a test of that transport shows, so a change that adds a frame to the establishment path has to run the transport-mode lanes (C1ad) before it pushes. Open as before: credit-based flow control, the wait_for_slot bulkhead, Block publishing key in the sessions document, windowed-lateness admission, hosted E7s/E7g reads."
+      ],
+      "publishable_decision_summary": "A regression of mine, found by hosted CI and by two peers' bisections: the calibration of round 3507 sent a KeepAlive at the establishment of each of the first 64 sessions to time an emission, and on a lowlatency link the stream length prefix changes from two bytes to four after the open returns, so a frame written inside the open is read by the peer as garbage and the link is lost (hosted Layer C1ad, lowlatency_negotiates_and_delivers_put_over_real_tcp, red from the first push of that round; making the emission a no-op passed it). Peers report the pico declaration tests of Layer E failing from the same push with the same shape, which this removal is expected to clear and which is not claimed until a run says so. The repair removes the frame: a frame a node puts on a peer's wire for its own purposes is a protocol act and not a measurement. The meter is seeded by calibrate_with_probe instead, 128 KeepAlive-sized writes timed on a private loopback socket pair before the router accepts anything, touching no peer. Also repaired: the scaling document is read with LF endings so that the Windows runner's CRLF checkout does not fail the document tests, and the hosted runner's first calibrated limit (178 admitted of 1100) showed that a quarter was too tight a floor on what a dearer host may admit, so the promise test now asks for a tenth.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio `emission_cost`: `calibrate_on_establishment` and `wants_samples` removed; `calibrate_with_probe` (public) times 128 three-byte writes on a loopback socket pair with a drain thread and records them as the first samples; two tests (the probe seeds floor and median before any session exists; a fresh meter has none). `keepalive_pacer` no longer calls anything at establishment.",
+        "wz-ap-demo router-hat calls the probe before it accepts and logs how many writes it timed.",
+        "wz-session-core `capacity` tests read the scaling document with CRLF turned to LF.",
+        "E7s promise test: the population floor is a tenth of the recorded number, not a quarter.",
+        "docs/router-data-plane-scaling.md 7.4: the passage on the seed rewritten with the reason it was wrong."
+      ],
+      "publishable_verification_bullets": [
+        "Reproduced on a build host at the tip: lowlatency_e2e fails with the acceptor's first event Poll(LinkLost(PeerClosed)); with the establishment emission as a no-op it passes (three variants run, the failing and the passing differ only in that call). After the repair the three tests of lowlatency_e2e pass, the two probe tests, the capacity tests, clippy with warnings denied on wz-runtime-tokio, wz-ap-demo (router-hat build) and the E7s test target.",
+        "Not verified: Layer E's pico declaration tests (no pico CLI is built on any host used here; a peer is re-running them on another host); the promise test on a hosted runner after this change (the hosted run before it ended at the population assertion with 178 of 1100 admitted, a figure the calibration produced by design); the three other hosted reds of that run belong to other lines (TLS zenohd interop A4/C0, the only_zenohd lane-reach, wz-capture) and were not touched."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read first: whether Layer E pico_keyexpr_declaration_twice_and_diff and C1ad are green on the run of this push (the peers' attribution of the pico failures to the same cause is a hypothesis). Lesson: a measurement must not put a frame on a peer's wire; the lowlatency link changes its stream framing after the open, which only a test of that transport shows, so a change that adds a frame to the establishment path has to run the transport-mode lanes (C1ad) before it pushes. Open as before: credit-based flow control, the wait_for_slot bulkhead, Block publishing key in the sessions document, windowed-lateness admission, hosted E7s/E7g reads."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
