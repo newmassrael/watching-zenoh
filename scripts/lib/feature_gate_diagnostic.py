@@ -1140,6 +1140,36 @@ def default_closure(features: dict[str, list[str]]) -> set[str]:
     return seen
 
 
+def patch_section() -> str:
+    """The workspace's `[patch.crates-io]`, with every path made absolute.
+
+    The probe is a fresh `[workspace]`, so the patches the real workspace
+    carries do not follow it. The copied lock names a patched crate by its path,
+    not by a registry checksum, so without the section cargo looks the crate up
+    in the registry index, which `--offline` cannot reach: `no matching package
+    named `tokio` found`, reported here as "rustc did not say the item is
+    gated". The section is read from the workspace manifest, never listed here,
+    so a crate patched later reaches the probe without anyone editing this file.
+    """
+    # Read line by line: the oldest python a runner provides has no `tomllib`. A line of the section
+    # that is not `name = { path = "..." }` stops the gate, so a patch of another shape (a git source)
+    # is not silently left out of the probe.
+    patches: dict[str, str] = {}
+    inside = False
+    for line in (WORKSPACE / "Cargo.toml").read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if text.startswith("["):
+            inside = text == "[patch.crates-io]"
+        elif inside and text and not text.startswith("#"):
+            found = re.fullmatch(r'([A-Za-z0-9_-]+)\s*=\s*\{\s*path\s*=\s*"([^"]+)"\s*\}', text)
+            if found is None:
+                raise SystemExit(f"feature-gate-diagnostic: cannot read the patch line {text!r}")
+            patches[found[1]] = str((WORKSPACE / found[2]).resolve())
+    if not patches:
+        return ""
+    return "[patch.crates-io]\n" + "".join(f'{n} = {{ path = "{p}" }}\n' for n, p in sorted(patches.items())) + "\n"
+
+
 def build_probe(
     package: str,
     feature: str,
@@ -1171,6 +1201,7 @@ def build_probe(
             "[dependencies]\n"
             f'{package} = {{ path = "{WORKSPACE / package}", '
             f"default-features = false, features = [{wanted}] }}\n\n"
+            f"{patch_section()}"
             "[workspace]\n"
         )
         # THE WORKSPACE'S OWN LOCKFILE, and no network. The probe is a fresh
