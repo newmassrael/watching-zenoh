@@ -48,7 +48,7 @@ use wz_session_core::reliability::Reliability;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::{TxLender, TxStore};
-use crate::session_drive::{LinkOpenError, SessionDatagramLink};
+use crate::session_drive::{IpEndpoint, LinkOpenError, LinkProto, Locator, SessionDatagramLink};
 use crate::udp_link::SERVICE_WAIT_MS;
 
 /// The receive buffer of a link that takes the largest batch zenoh can negotiate: its length and
@@ -63,6 +63,10 @@ pub trait StreamSocket: Sized {
     /// Why a call failed, as the platform reports it. `Copy`, because the driver keeps the last
     /// failure for the deploy to report.
     type Error: Copy + Debug;
+
+    /// The protocol the stream is, which the link's two ends are named by: a plain connection
+    /// is `tcp/`, a secure channel over one `tls/`.
+    const PROTO: LinkProto = LinkProto::Tcp;
 
     /// The `(address, port)` this end of the connection is bound to.
     fn local(&self) -> ([u8; 4], u16);
@@ -98,15 +102,71 @@ pub trait StreamDial {
     /// failed: [`LinkOpenError::Refused`] when the other end did not take it,
     /// [`LinkOpenError::Exhausted`] when the platform had no socket to give.
     fn dial(&self, addr: [u8; 4], port: u16) -> Result<Self::Stream, LinkOpenError>;
+
+    /// Whether the dial opens streams at all. A stack asks before it claims any buffer, so a
+    /// protocol it does not carry is [`LinkOpenError::Unsupported`] (permanent) and never
+    /// [`LinkOpenError::Exhausted`] (retried) when its tables happen to be full.
+    const CARRIED: bool = true;
 }
 
-/// `tcp/a.b.c.d:port`, zenoh's rendering of a TCP locator, written into fixed text: the longest
-/// one, `tcp/255.255.255.255:65535`, is 25 bytes of the [`MAX_LOCATOR_LEN`] the text has.
-fn tcp_locator(addr: [u8; 4], port: u16) -> heapless::String<MAX_LOCATOR_LEN> {
-    let [a, b, c, d] = addr;
+/// The dial of a stream protocol a stack does not carry: an image with no secure channel names
+/// it for `tls/`, and every dial is [`LinkOpenError::Unsupported`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoDial;
+
+/// The stream [`NoDial`] would yield: there is none.
+#[derive(Debug)]
+pub enum NoStream {}
+
+impl StreamSocket for NoStream {
+    type Error = core::convert::Infallible;
+
+    fn local(&self) -> ([u8; 4], u16) {
+        match *self {}
+    }
+
+    fn peer(&self) -> ([u8; 4], u16) {
+        match *self {}
+    }
+
+    fn send_parts(&self, _parts: &[&[u8]]) -> Result<(), Self::Error> {
+        match *self {}
+    }
+
+    fn wait_readable(&self, _timeout_ms: c_int) {
+        match *self {}
+    }
+
+    fn try_read(&self, _buf: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+        match *self {}
+    }
+
+    fn shutdown(&self) {
+        match *self {}
+    }
+}
+
+impl StreamDial for NoDial {
+    type Stream = NoStream;
+
+    const CARRIED: bool = false;
+
+    fn dial(&self, _addr: [u8; 4], _port: u16) -> Result<NoStream, LinkOpenError> {
+        Err(LinkOpenError::Unsupported)
+    }
+}
+
+/// `<scheme>/a.b.c.d:port`, zenoh's rendering of a stream's locator, written into fixed text:
+/// the longest one, `tcp/255.255.255.255:65535`, is 25 bytes of the [`MAX_LOCATOR_LEN`] the text
+/// has, and every scheme is three letters.
+fn locator_text(
+    proto: LinkProto,
+    (addr, port): ([u8; 4], u16),
+) -> heapless::String<MAX_LOCATOR_LEN> {
     let mut text = heapless::String::new();
+    let at = IpEndpoint { addr, port };
     // Cannot fail: the longest rendering is shorter than the text's capacity.
-    let _ = write!(text, "tcp/{a}.{b}.{c}.{d}:{port}");
+    let _ = write!(text, "{}", Locator { proto, at });
     text
 }
 
@@ -182,8 +242,8 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
         let (local, peer) = (socket.local(), socket.peer());
         Self {
             endpoints: LinkEndpoints::new(
-                tcp_locator(local.0, local.1).as_str(),
-                tcp_locator(peer.0, peer.1).as_str(),
+                locator_text(S::PROTO, local).as_str(),
+                locator_text(S::PROTO, peer).as_str(),
             ),
             socket,
             rx_buf: RefCell::new(rx_buf),

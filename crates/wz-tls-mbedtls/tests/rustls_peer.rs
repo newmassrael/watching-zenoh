@@ -22,10 +22,13 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 
-use wz_runtime_coop::session_drive::LinkOpenError;
+use wz_runtime_coop::ip_stack::{IpDriver, IpLinks};
+use wz_runtime_coop::session_drive::{IpEndpoint, LinkOpenError, Locator, SessionLinks};
 use wz_runtime_coop::stream_link::{StreamDial, StreamSocket};
+use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_session_core::credential_identity::zid_from_spki_der;
+use wz_session_core::link::BoxedLinkDriver;
 use wz_tls_mbedtls::channel::{start, Identity, Zid};
 use wz_tls_mbedtls::stream::{HandshakeBudget, TlsDial};
 
@@ -193,4 +196,37 @@ fn a_router_that_pins_another_certificate_refuses_the_device() {
         served.join().expect("the router's thread").is_err(),
         "the router refused the handshake"
     );
+}
+
+#[test]
+fn a_tls_locator_opens_the_stream_link_over_the_channel_on_the_hosts_links() {
+    let (_library, device) = device();
+    let router = RouterIdentity::generate();
+    let (port, served) = listen(router_config(&router, device.certificate_der()));
+
+    // The heap profile's links over the host's sockets, given the channel for `tls/`.
+    let links =
+        IpLinks::<PosixUdpSocket, PosixTcpDial>::new(LOOPBACK, PosixTcpDial).with_tls(dial(device));
+    let at = IpEndpoint {
+        addr: LOOPBACK,
+        port,
+    };
+    let link = links
+        .open_initiator(Locator::tls(at))
+        .expect("the secure stream link opens")
+        .pump;
+    let IpDriver::Tls(_) = &*link else {
+        panic!("a `tls/` dial opened another kind of link");
+    };
+    assert_eq!(
+        link.link_endpoints().map(|ends| ends.dst.as_str()),
+        Some(format!("tls/127.0.0.1:{port}").as_str())
+    );
+
+    link.close_blocking();
+    let presented = served
+        .join()
+        .expect("the router's thread")
+        .expect("the router served until the device ended the session");
+    assert_eq!(presented, device.certificate_der());
 }

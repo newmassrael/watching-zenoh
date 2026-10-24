@@ -80,10 +80,11 @@ where
     L: Deref<Target = LwipLink> + Clone + 'static,
 {
     fn bind(&mut self, to: Locator) -> Result<LwipUdpDriver, LinkOpenError> {
-        // lwIP's links here are UDP sockets; a `tcp/` endpoint is not this stack's to dial.
+        // lwIP's links here are UDP sockets; a `tcp/` or `tls/` endpoint is not this stack's to
+        // dial.
         match to.proto {
             LinkProto::Udp => self.links.bind_driver(0, to.at),
-            LinkProto::Tcp => Err(LinkOpenError::Unsupported),
+            LinkProto::Tcp | LinkProto::Tls => Err(LinkOpenError::Unsupported),
         }
     }
 }

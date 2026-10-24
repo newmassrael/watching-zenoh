@@ -227,10 +227,24 @@ pub enum LinkProto {
     Udp,
     /// `tcp/`: a byte stream.
     Tcp,
+    /// `tls/`: a byte stream inside a TLS 1.3 channel, each end proving its key
+    /// (decision D9 of `docs/session-lifecycle-intent.md`).
+    Tls,
 }
 
-/// What a dial names: a protocol and the end it reaches, `udp/a.b.c.d:port` or
-/// `tcp/a.b.c.d:port`.
+impl LinkProto {
+    /// The locator scheme that names the protocol: `udp`, `tcp` or `tls`.
+    pub const fn scheme(self) -> &'static str {
+        match self {
+            LinkProto::Udp => "udp",
+            LinkProto::Tcp => "tcp",
+            LinkProto::Tls => "tls",
+        }
+    }
+}
+
+/// What a dial names: a protocol and the end it reaches, `udp/a.b.c.d:port`,
+/// `tcp/a.b.c.d:port` or `tls/a.b.c.d:port`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Locator {
     /// The protocol the link speaks.
@@ -255,17 +269,26 @@ impl Locator {
             at,
         }
     }
+
+    /// A TLS locator.
+    pub const fn tls(at: IpEndpoint) -> Self {
+        Self {
+            proto: LinkProto::Tls,
+            at,
+        }
+    }
 }
 
-/// zenoh's text of the locator, `udp/a.b.c.d:port` or `tcp/a.b.c.d:port`.
+/// zenoh's text of the locator, `<scheme>/a.b.c.d:port`.
 impl core::fmt::Display for Locator {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let scheme = match self.proto {
-            LinkProto::Udp => "udp",
-            LinkProto::Tcp => "tcp",
-        };
         let [a, b, c, d] = self.at.addr;
-        write!(f, "{scheme}/{a}.{b}.{c}.{d}:{}", self.at.port)
+        write!(
+            f,
+            "{}/{a}.{b}.{c}.{d}:{}",
+            self.proto.scheme(),
+            self.at.port
+        )
     }
 }
 

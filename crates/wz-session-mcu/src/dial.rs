@@ -57,14 +57,16 @@ pub use heap::*;
 /// The action bundle of one MCU session.
 pub type McuActions<C> = SessionLinkActions<CoopRuntime<C>, CoopTime<C>>;
 
-/// Read `udp/<a.b.c.d>:<port>` or `tcp/<a.b.c.d>:<port>` into the locator it
-/// names.
+/// Read `udp/<a.b.c.d>:<port>`, `tcp/<a.b.c.d>:<port>` or `tls/<a.b.c.d>:<port>`
+/// into the locator it names.
 pub fn parse_locator(endpoint: &str) -> Result<Locator, DialRefused> {
-    let (proto, rest) = if let Some(rest) = endpoint.strip_prefix("udp/") {
-        (LinkProto::Udp, rest)
-    } else if let Some(rest) = endpoint.strip_prefix("tcp/") {
-        (LinkProto::Tcp, rest)
-    } else {
+    let Some((proto, rest)) = [LinkProto::Udp, LinkProto::Tcp, LinkProto::Tls]
+        .into_iter()
+        .find_map(|proto| {
+            let rest = endpoint.strip_prefix(proto.scheme())?.strip_prefix('/')?;
+            Some((proto, rest))
+        })
+    else {
         return Err(DialRefused::Unsupported);
     };
     if rest.contains(['?', '#']) {
@@ -318,15 +320,19 @@ mod parse_tests {
     use super::*;
 
     #[test]
-    fn udp_or_tcp_to_an_ipv4_address_is_dialable() {
+    fn udp_tcp_or_tls_to_an_ipv4_address_is_dialable() {
         let at = IpEndpoint {
             addr: [127, 0, 0, 1],
             port: 7447,
         };
         std::assert_eq!(parse_locator("udp/127.0.0.1:7447"), Ok(Locator::udp(at)));
         std::assert_eq!(parse_locator("tcp/127.0.0.1:7447"), Ok(Locator::tcp(at)));
+        // Whether a stack carries the secure channel is the stack's to say, not the parser's.
+        std::assert_eq!(parse_locator("tls/127.0.0.1:7447"), Ok(Locator::tls(at)));
         for (text, why) in [
-            ("tls/127.0.0.1:7447", DialRefused::Unsupported),
+            ("quic/127.0.0.1:7447", DialRefused::Unsupported),
+            ("tlsx/127.0.0.1:7447", DialRefused::Unsupported),
+            ("tls/127.0.0.1:7447?prio=1", DialRefused::Unsupported),
             ("tcp/127.0.0.1:7447?prio=1", DialRefused::Unsupported),
             ("tcp/router.local:7447", DialRefused::BadAddress),
             ("udp/127.0.0.1:7447#iface=eth0", DialRefused::Unsupported),

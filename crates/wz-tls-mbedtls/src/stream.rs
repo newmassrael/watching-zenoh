@@ -10,7 +10,7 @@
 use core::cell::{Cell, RefCell};
 use core::ffi::c_int;
 
-use wz_runtime_coop::session_drive::LinkOpenError;
+use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto};
 use wz_runtime_coop::stream_link::{StreamDial, StreamSocket};
 
 use crate::channel::{Identity, Io, Role, Session, Step, TlsError, Transport, Want, Zid};
@@ -92,6 +92,8 @@ const REENTERED: TlsError = TlsError::State;
 
 impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
     type Error = TlsStreamError<S::Error>;
+
+    const PROTO: LinkProto = LinkProto::Tls;
 
     fn local(&self) -> ([u8; 4], u16) {
         self.lower.socket.local()

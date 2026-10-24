@@ -627,8 +627,8 @@ impl<S: DatagramSocket + 'static> Bind<FixedUdpDriver<S>> for UdpStack<S> {
         match to.proto {
             LinkProto::Udp => self.bind_initiator(to.at),
             // A stack of datagram sockets has no stream to give; one that has both is
-            // `stream_link`'s `IpStack`.
-            LinkProto::Tcp => Err(LinkOpenError::Unsupported),
+            // `ip_stack`'s `IpStack`.
+            LinkProto::Tcp | LinkProto::Tls => Err(LinkOpenError::Unsupported),
         }
     }
 }
