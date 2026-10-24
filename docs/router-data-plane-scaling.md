@@ -477,6 +477,29 @@ raised to 220, no client ended, no face DOWN; on pc3 (slower, lateness 0.9 to 1.
 code, the limit sampled between 850 and 1100, no client ended, no face DOWN. NOT measured: a host that is dearer than these; the hosted run of this change is the
 first reading of the calibration where it matters, and the headroom of 220 is one host's ratio.
 
+**The lateness against the sessions held (measured 2026-10-24, pc2, 32 hogs, a router told nothing, 20 s window,
+three runs per row; `wz_router_hat_lateness_against_the_sessions_it_holds_at_32_hogs`).** The longest keepalive
+timer lateness the router reported, in ms, with the clients that ended on their own:
+
+| sessions | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| 1024 | 889 | 881 | 1263 |
+| 1536 | 3397 | 1853 | 1900 |
+| 2048 | 10806 (864 clients ended) | 3799 | 5446 |
+
+Read: no client was lost in any run where the lateness stayed under `2T/3` = 6667 ms (8 of 9 runs), and 864 were lost
+in the one run where it passed it (10806 ms). So the lateness is the quantity the loss follows, as the model assumed,
+and it is the better predictor of the two: at 2048 sessions two runs of three kept every lease. What it does not do
+is take the place of the bound. It grows faster than the session count (about 0.9 s at 1024, 1.9 to 3.4 s at 1536,
+3.8 to 10.8 s at 2048) and varies by a factor of three between runs at the same count, so a number of sessions read
+off it would be a number the next run contradicts; and the figure the router keeps is a maximum over the process's
+life, which can only rise, so a router that used it to refuse sessions would refuse them for ever after one bad
+second. NOT built: an admission that follows a windowed lateness (admit while the lateness of the last minute is
+under a fraction of `2T/3`, such as one half), which would be a feedback control on the very quantity the lease
+depends on and would bound what the model's constant cannot. It needs the lateness per window and not per process,
+and a rule for how fast the ceiling rises again; neither is measured. The model's number stays the first line of
+defence, and 1100 gives 0.9 to 1.3 s, about a seventh of the limit.
+
 **What the router does at the number.** One value, the effective `max_sessions`, is the smaller of the
 configured `transport/unicast/max_sessions` (upstream's key, enforced in the accept loop already, default
 1000) and `N_max(s)` (`WzConfig::effective_max_sessions`, read by the accept loop in place of the bare

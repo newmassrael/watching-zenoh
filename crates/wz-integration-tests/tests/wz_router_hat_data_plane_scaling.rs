@@ -411,6 +411,9 @@ struct Scenario {
     /// the router admits only the sessions it can keep the leases of, and refuses the rest; without
     /// it every session is admitted and a refusal is a failed run.
     cpu_share: Option<&'static str>,
+    /// A run that MEASURES where leases are lost (the lateness against the loss) reports the DOWN
+    /// and ended counts instead of asserting them zero.
+    lease_loss_is_a_result: bool,
 }
 
 /// What one window measured.
@@ -455,6 +458,7 @@ fn measure(scenario: Scenario) -> Window {
         offered,
         starved_by,
         cpu_share,
+        lease_loss_is_a_result,
     } = scenario;
     let expected_up = admitted_at(cpu_share, subscribers);
     assert_eq!(
@@ -622,7 +626,7 @@ fn measure(scenario: Scenario) -> Window {
                 .unwrap_or_default()
         );
     }
-    if !churn {
+    if !churn && !lease_loss_is_a_result {
         assert_eq!(
             window.down,
             0,
@@ -638,7 +642,7 @@ fn measure(scenario: Scenario) -> Window {
     // The router's own DOWN count is a race on a starved router, which sees a face fall only when its
     // loops come back to it. What the property is, from the other end: no client session lost its
     // router, and a client ends its session on its own only when its lease for the router ran out.
-    if !churn {
+    if !churn && !lease_loss_is_a_result {
         assert_eq!(
             window.ended, 0,
             "{} client sessions ended on their own in a steady window: their lease for the router \
@@ -697,6 +701,7 @@ fn wz_router_hat_cost_per_message_against_subscribers_and_churn() {
             offered: OFFERED_PER_S,
             starved_by: None,
             cpu_share: None,
+            lease_loss_is_a_result: false,
         });
         eprintln!(
             "{subscribers:>11} {:>22} {:>12.1} {:>10.0} {:>8.0}%",
@@ -723,6 +728,7 @@ fn wz_router_hat_keeps_its_links_when_overloaded_and_short_of_cpu() {
         offered,
         starved_by: Some(3),
         cpu_share: None,
+        lease_loss_is_a_result: false,
     });
     eprintln!(
         "\nstarved router (one shared core, lower priority), 2048 subscribers, offered {offered} messages/s: \
@@ -750,6 +756,7 @@ fn wz_router_hat_admission_when_overloaded_and_short_of_cpu() {
         offered,
         starved_by: Some(3),
         cpu_share: None,
+        lease_loss_is_a_result: false,
     });
     eprintln!(
         "\nstarved router, 2048 subscribers, offered {offered} messages/s, 16 sessions/s knocking: \
@@ -775,6 +782,7 @@ fn wz_router_hat_keeps_every_lease_it_admits_at_its_declared_share() {
         offered,
         starved_by: Some(32),
         cpu_share: Some("1.32"),
+        lease_loss_is_a_result: false,
     });
     eprintln!(
         "\nrouter told 1.32% of a core, 32 hogs, 2048 sessions knocking, offered {offered} messages/s: \
@@ -788,4 +796,35 @@ fn wz_router_hat_keeps_every_lease_it_admits_at_its_declared_share() {
         w.admitted,
         w.capacity_note,
     );
+}
+
+/// Where leases are lost, against how late the keepalive timers are served (section 7.4): a router
+/// that was told nothing about its CPU, on one core at nice 10 with 32 hogs, holding N sessions,
+/// for N around the point the recorded model puts at its limit. Printed, not asserted: for each N
+/// the longest keepalive timer lateness the router reported, the clients that ended on their own
+/// and the faces that went DOWN. If the clients are lost exactly when the lateness passes `2T/3`,
+/// the lateness is the bound itself and the model's `s / b` is not needed.
+#[test]
+#[ignore = "opt-in measurement: spawns wz-ap-demo built with router-hat-router and 32 CPU hogs, holds up to 2048 local sessions, three minutes per row; run with --ignored --nocapture"]
+fn wz_router_hat_lateness_against_the_sessions_it_holds_at_32_hogs() {
+    let limit = wz_session_core::capacity::keepalive_lateness_limit_ms(SESSION_LEASE_MS);
+    eprintln!("\n2T/3 = {limit} ms; 32 hogs, one core at nice 10, offered 40000 messages/s");
+    eprintln!(
+        "{:>9} {:>14} {:>7} {:>5}",
+        "sessions", "lateness (ms)", "ended", "down"
+    );
+    for subscribers in [1024, 1536, 2048] {
+        let w = measure(Scenario {
+            subscribers,
+            churn: false,
+            offered: 40_000,
+            starved_by: Some(32),
+            cpu_share: None,
+            lease_loss_is_a_result: true,
+        });
+        eprintln!(
+            "{subscribers:>9} {:>14} {:>7} {:>5}",
+            w.keepalive_late_ms, w.ended, w.down
+        );
+    }
 }

@@ -21428,15 +21428,17 @@ layer_e6u_peer_unixpipe_forward() {
 # router still admits, and asserts nothing. A fourth (R3490) holds the promise of
 # `docs/router-data-plane-scaling.md` section 7.4: a router told its CPU share (32
 # hogs, 1.32%) admits no more than the capacity model allows, refuses the rest, and
-# loses no admitted client. The count guard is 4 so that a dropped `#[ignore]`
-# (selecting none) or a renamed test reddens.
+# loses no admitted client. A fifth (R3508) prints, with no assertion, the keepalive lateness
+# and the clients lost at 1024, 1536 and 2048 sessions under 32 hogs, so every hosted run
+# leaves that table for the runner it ran on. The count guard is 5 so that a dropped
+# `#[ignore]` (selecting none) or a renamed test reddens.
 #
 # The test fns carry the `wz_router_hat_` prefix, so the default Layer E sweep's
 # `--skip wz_router` leaves them to this lane. They hold up to 2048 local sessions
 # and run about three minutes, which is why they are `#[ignore]`d and their own lane.
 layer_e7s_router_hat_data_plane_scaling() {
     (cd crates && cargo build --release -p wz-ap-demo --no-default-features --features preset-ap-client,router-hat-router --quiet) || return 1
-    _runci_guarded_test "E7s router data-plane scaling" 4 \
+    _runci_guarded_test "E7s router data-plane scaling" 5 \
         cargo test -p wz-integration-tests \
         --test wz_router_hat_data_plane_scaling -- --ignored --nocapture --test-threads=1 --quiet || return 1
 }
