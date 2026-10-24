@@ -124,7 +124,7 @@ impl HelloProto {
         let locators = if rng.gen_bool(0.5) {
             Vec::from_iter((1..5).map(|_| Locator::rand()))
         } else {
-            vec![]
+            Vec::new()
         };
         Self {
             version,

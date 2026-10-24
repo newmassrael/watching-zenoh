@@ -95,6 +95,7 @@ pub use wz_capi_pico as capi_pico;
 #[cfg(feature = "api-compat-rust")]
 pub mod zenoh_family {
     pub use zenoh_buffers;
+    pub use zenoh_codec;
     pub use zenoh_collections;
     pub use zenoh_core;
     pub use zenoh_keyexpr;

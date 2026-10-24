@@ -2799,7 +2799,10 @@ PIN_NO_SYMBOL = 0
 # R3560 -- 31 -> 32, one atom. `api-compat-rust`'s reason completes the protocol crate and cites
 # the test that holds its transport messages to upstream's. READ off the census's own FAIL line,
 # `wz citations: 32 against a pin of 31`.
-PIN_WZ_CITATIONS = 32
+# R3565 -- 32 -> 33, one atom. `api-compat-rust`'s reason gains the first slice of the codec crate
+# and cites the test that holds its integers, strings and extensions to upstream's. READ off the
+# census's own FAIL line, `wz citations: 33 against a pin of 32`.
+PIN_WZ_CITATIONS = 33
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

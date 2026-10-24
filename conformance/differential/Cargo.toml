@@ -53,6 +53,10 @@ uhlc = { version = "0.8.0", default-features = false, features = ["std"] }
 # wz's by path, as for every family crate), built with `std`.
 up_buffers = { package = "zenoh-buffers", version = "=1.10.1" }
 wz_buffers = { package = "zenoh-buffers", path = "../../crates/wz-zenoh-buffers" }
+# `zenoh-codec`: the pair again, each over its own `zenoh-buffers` and `zenoh-protocol` (the ones named
+# above), built with `std`.
+up_codec = { package = "zenoh-codec", version = "=1.10.1" }
+wz_codec = { package = "zenoh-codec", path = "../../crates/wz-zenoh-codec" }
 # `zenoh-collections`: the pair again. Both are built with the default `std`, which carries every
 # container but `SingleOrVec`.
 up_collections = { package = "zenoh-collections", version = "=1.10.1" }

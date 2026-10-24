@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# This package reproduces the public API and the documentation of the crate of the same name of
+# eclipse-zenoh/zenoh, which is EPL-2.0 OR Apache-2.0, so the whole package is under that expression.
+# The notices of the upstream files it derives from are kept in its sources (see LICENSES/ and
+# THIRD_PARTY.md at the root of this repository).
+#
+# zenoh-codec -- the wire format of the zenoh protocol (version 0x09): the `WCodec`, `RCodec` and
+# `LCodec` traits and the `Zenoh080` codec family that write the messages of `zenoh-protocol` to a
+# `zenoh-buffers` writer and read them back, over watching-zenoh (inventory atom `api-compat-rust`,
+# open-debt item 910, docs/build-configuration.md C13).
+#
+# Named `zenoh-codec` and versioned as the pinned zenoh, like every crate of the family (see
+# `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). The codec traits are what
+# `zenoh-transport` and `zenoh` write their own messages against, so an ecosystem crate that names
+# them must meet the one of this graph. This crate is `zenoh-codec`'s own and is NOT `wz-codecs`, the
+# codec watching-zenoh generates from its statecharts: the two meet only in the differential tests,
+# as the same bytes.
+#
+# It is built in slices, each landing whole with the ratchet of `scripts/lib/rust_api_surface.py`
+# lowered in its own round. Until a slice lands its items are missing lines of the surface gate, not
+# stubs here. The `shared-memory` arm waits for `zenoh-shm`, a later member.
+
+[package]
+name = "zenoh-codec"
+version = "1.10.1"
+edition.workspace = true
+rust-version.workspace = true
+license = "EPL-2.0 OR Apache-2.0"
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Wire format of the zenoh protocol (1.10.1), as a drop-in over watching-zenoh."
+
+[lib]
+name = "zenoh_codec"
+path = "src/lib.rs"
+
+# Upstream's features by their names and by what they turn on in the crates below. `tracing` is what
+# a skipped extension is logged through, and only with `std`, as upstream's. `shared-memory` is
+# upstream's plus `zenoh-shm`, which joins it with the member of that name: until then the feature
+# carries the codec of a slice (`Zenoh080Sliced`) and not the one of a shared-memory buffer.
+[features]
+default = ["std"]
+shared-memory = [
+    "std",
+    "zenoh-buffers/shared-memory",
+    "zenoh-protocol/shared-memory",
+]
+std = [
+    "tracing",
+    "uhlc/std",
+    "zenoh-buffers/std",
+    "zenoh-protocol/std",
+]
+
+[dependencies]
+tracing = { version = "0.1.41", optional = true }
+uhlc = { version = "0.8.0", default-features = false }
+zenoh-buffers = { path = "../wz-zenoh-buffers", default-features = false }
+zenoh-protocol = { path = "../wz-zenoh-protocol", default-features = false }
+
+# The `test` feature of the protocol crate is what its random constructors are built with, and they
+# draw from `rand`'s thread generator, which exists with its `std` features: upstream's dev
+# dependency is `rand` with its defaults, and this one names the two that matter.
+[dev-dependencies]
+rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
+zenoh-protocol = { path = "../wz-zenoh-protocol", default-features = false, features = ["test"] }
+
+[lints]
+workspace = true

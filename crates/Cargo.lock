@@ -2918,6 +2918,7 @@ dependencies = [
  "wz-runtime-zephyr",
  "wz-session-lwip",
  "zenoh-buffers",
+ "zenoh-codec",
  "zenoh-collections",
  "zenoh-core",
  "zenoh-keyexpr",
@@ -3693,6 +3694,17 @@ version = "1.10.1"
 dependencies = [
  "rand 0.8.6",
  "zenoh-collections",
+]
+
+[[package]]
+name = "zenoh-codec"
+version = "1.10.1"
+dependencies = [
+ "rand 0.8.6",
+ "tracing",
+ "uhlc",
+ "zenoh-buffers",
+ "zenoh-protocol",
 ]
 
 [[package]]

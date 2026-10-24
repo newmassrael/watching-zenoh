@@ -135,7 +135,11 @@ original reproduced by naming it. Three things follow from it:
   and writes),
   `zenoh-protocol` (complete: the core types, the scouting messages, the extensions every
   message may carry and the zenoh, network and transport messages, 1,567 of 1,567 default
-  lines and 1,581 with `shared-memory`, held to upstream's by differential tests of each module)
+  lines and 1,581 with `shared-memory`, held to upstream's by differential tests of each module),
+  `zenoh-codec` (in progress: the codec traits, the integer, byte string, array and buffer codecs,
+  the codecs of the core types and the extensions, 52 of 95 default lines; the scouting, zenoh,
+  network and transport messages and the shared-memory arm missing; this crate's surface is
+  small, so the bytes are held by differential tests of the wire format)
   and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each
@@ -375,7 +379,7 @@ Each step lands with its own done-when; sizes are not estimated here.
 12. **Rust API compatibility** (C13). Register `api-compat-rust`; derive the
     upstream surface from rustdoc JSON; the family of compatibility crates, lowest first
     (`zenoh-result`, `zenoh-runtime`, `zenoh-core`, `zenoh-macros`, `zenoh-keyexpr`,
-    `zenoh-protocol`, `zenoh-config`, `zenoh-util`, then `zenoh`); the surface gate over each; differential tests against
+    `zenoh-protocol`, `zenoh-codec`, `zenoh-config`, `zenoh-util`, then `zenoh`); the surface gate over each; differential tests against
     each; upstream's examples, tests and an ecosystem crate built against the patched graph.
 13. **Resource gates** (D5): stack peak and wire turnaround per registered profile,
     each a committed figure that a change moves visibly.

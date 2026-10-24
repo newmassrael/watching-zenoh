@@ -15,6 +15,9 @@
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-protocol 1.10.1, file
 // src/network/push.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
 
+#[cfg(feature = "test")]
+use alloc::vec::Vec;
+
 use zenoh_buffers::buffer::Buffer;
 
 #[cfg(feature = "test")]
