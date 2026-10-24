@@ -105,7 +105,17 @@ it behaves as pico behaves in both of pico's threading arms.
 
 ## 5. Status
 
-- 2026-10-24: this note; step 1.
+- 2026-10-24: this note; step 1 (the ABI layer names `wz-session-core` directly; the size
+  gate's cases are unchanged: same exports, every case in budget).
+- 2026-10-24: the link the engine needs, ahead of step 3: `IpDriver` takes its buffers as
+  parameters, so the slot and the heap profile share it, and `ip_stack::IpLinks` is the session
+  shell's `SessionLinks` over a platform's datagram and stream sockets, written once
+  (`wz_runtime_posix::links::PosixLinks` on the host). Until then a program with a heap had no
+  links over the host's sockets at all.
+- Next: step 2, the engine port. What the ABI layer calls on the tokio engine is
+  `wz_capi_core::faces::SharedSession` (publish in six forms, key expression declarations,
+  liveliness, the face registry) and `drive::SessionState`; the port is the subset the
+  single-threaded client calls, and the tokio engine implements it first.
 
 ## 6. Open
 
