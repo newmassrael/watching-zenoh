@@ -151,6 +151,7 @@ pub fn outbound_channel_with_capacity(
             batch_bytes,
             single_lane: false,
             occupied: [0; Priority::NUM],
+            reserved: [0; Priority::NUM],
             congested: [false; Priority::NUM],
             block_first: [false; Priority::NUM],
             in_flight: [None; Priority::NUM],
@@ -609,6 +610,10 @@ struct RoomSignal {
     /// Whether a watcher is set. Read before the watcher's lock is taken.
     watched: AtomicBool,
     watcher: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// The tasks waiting for room by waker ([`OutboundTx::poll_reserve`]): each is woken once,
+    /// by the next notice, and asks again. Whether any is set is read before the lock is taken.
+    waiting: AtomicBool,
+    wakers: Mutex<Vec<std::task::Waker>>,
 }
 
 impl RoomSignal {
@@ -618,7 +623,21 @@ impl RoomSignal {
             waiters: AtomicUsize::new(0),
             watched: AtomicBool::new(false),
             watcher: Mutex::new(None),
+            waiting: AtomicBool::new(false),
+            wakers: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Have `waker` woken by the next notice, replacing one the same task registered before.
+    /// Call it holding the lanes' lock, after the room was found missing: a notice changes the
+    /// state under that lock before it asks, so either the check saw the change or the waker
+    /// is in the list when the notice reads it, and a wake-up cannot be lost.
+    fn register(&self, waker: &std::task::Waker) {
+        let mut wakers = self.wakers.lock().unwrap_or_else(|e| e.into_inner());
+        if !wakers.iter().any(|known| known.will_wake(waker)) {
+            wakers.push(waker.clone());
+        }
+        self.waiting.store(true, Ordering::SeqCst);
     }
 
     /// Call `watcher` at every notice from now on, or stop calling the one there is. One
@@ -655,6 +674,17 @@ impl RoomSignal {
         if self.waiters.load(Ordering::SeqCst) > 0 {
             self.cv.notify_all();
         }
+        if self.waiting.load(Ordering::SeqCst) {
+            // Taken out of the lock before any is woken: a waker may run its task at once.
+            let woken = {
+                let mut wakers = self.wakers.lock().unwrap_or_else(|e| e.into_inner());
+                self.waiting.store(false, Ordering::SeqCst);
+                std::mem::take(&mut *wakers)
+            };
+            for waker in woken {
+                waker.wake();
+            }
+        }
         if self.watched.load(Ordering::SeqCst) {
             // Cloned out of the lock, so that the call is made holding nothing of this queue's.
             let watcher = self
@@ -686,6 +716,12 @@ struct LaneState {
     single_lane: bool,
     /// Each lane's bytes queued or in flight.
     occupied: [usize; Priority::NUM],
+    /// Each lane's bytes PROMISED to a sender that holds a [`Permit`] and has not yet sent its
+    /// frame: room that is spoken for and not yet used. A lane has room for another permit
+    /// while `occupied + reserved` is under its bound ([`LaneState::has_room`]), which is what
+    /// lets a sender that waits for room and a sender that already has it never be given the
+    /// same room twice.
+    reserved: [usize; Priority::NUM],
     /// R2923 — each lane's CONGESTED mark, zenoh's per-priority
     /// `set_congested`: raised when a wait for room on the lane runs out,
     /// lowered when the writer frees some of it (zenoh's `refill`) or a later
@@ -1072,6 +1108,14 @@ impl LaneState {
     /// queue is closed, a droppable message meets the congested mark, the
     /// lane has room, or the request may not wait at all. `None` means the
     /// caller has to wait for the writer.
+    /// Whether `lane` has room for one more frame: what it holds, and what is promised to a
+    /// sender that has not sent yet, is under its bound, and a pooled queue has a slot. The one
+    /// definition of room, asked by a sender that waits on a thread and by one that waits on a
+    /// waker alike.
+    fn has_room(&self, lane: usize) -> bool {
+        self.occupied[lane] + self.reserved[lane] < self.capacity[lane] && self.slot_room()
+    }
+
     fn room_at_once(&mut self, lane: usize, wait: RoomWait) -> Option<Room> {
         if self.closed {
             return Some(Room::Closed);
@@ -1079,7 +1123,7 @@ impl LaneState {
         if wait.is_droppable() && self.congested[lane] {
             return Some(Room::Congested);
         }
-        if self.occupied[lane] < self.capacity[lane] && self.slot_room() {
+        if self.has_room(lane) {
             self.congested[lane] = false;
             return Some(Room::Free);
         }
@@ -1323,7 +1367,146 @@ pub struct OutboundTx {
     shared: Arc<Lanes>,
 }
 
+/// Why a reservation was not given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReserveError {
+    /// The lane has no room now. [`OutboundTx::try_reserve`] answers it at once;
+    /// [`OutboundTx::poll_reserve`] waits for the room instead.
+    Full,
+    /// The queue is closed: nothing more will be written on this link.
+    Closed,
+}
+
+/// Room on a lane, promised to one sender: the right to enqueue one frame without asking again.
+///
+/// This is the reservation of a bounded channel (Tokio's `mpsc::Sender::reserve`, a `Sink`'s
+/// `poll_ready` before `start_send`). Asking for room and using it are two steps so that a
+/// sender can wait for the first WITHOUT holding what the second needs: a session takes its
+/// conduit's lock, mints a sequence number and emits under it, and cannot wait for room under
+/// that lock on a thread that has to go on, so it gets its [`Permit`] first and sends under
+/// the lock with nothing left to wait for.
+///
+/// The lane counts what a permit promises as occupied until it is used or dropped
+/// ([`LaneState::has_room`]), by the unit the lane was shaped in when the permit was given, so
+/// that what is given back is what was taken whatever the queue is reshaped to meanwhile.
+/// Dropping an unused permit returns the room and wakes whoever waits for it.
+#[must_use = "a permit that is dropped at once promises nothing: send with it, or do not ask"]
+pub struct Permit {
+    shared: Arc<Lanes>,
+    lane: usize,
+    unit: usize,
+}
+
+impl Drop for Permit {
+    fn drop(&mut self) {
+        // A destructor that panics while a test unwinds aborts the process: no `expect`.
+        if let Ok(mut st) = self.shared.state.lock() {
+            st.reserved[self.lane] = st.reserved[self.lane].saturating_sub(self.unit);
+        }
+        self.shared.room.notify_all();
+    }
+}
+
 impl OutboundTx {
+    /// Promise one frame of room on `priority`'s lane if there is some now, without waiting.
+    pub fn try_reserve(&self, priority: Priority) -> Result<Permit, ReserveError> {
+        let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+        self.reserve_in(&mut st, priority)
+    }
+
+    /// [`Self::try_reserve`], and when there is no room, the waker of `cx` is woken when there
+    /// may be, which is when the writer takes a frame, a permit is dropped, or the queue closes.
+    /// The task then asks again: a wake-up is a reason to ask and not a grant, since another
+    /// sender may have taken the room first.
+    ///
+    /// The deadline is the caller's. A link that decided how long a message may wait would have
+    /// to know whether the message may be dropped and whether it is the first of a chain; the
+    /// caller knows both and wraps this in the timeout it has (`tokio::time::timeout`, or a
+    /// blocking adapter's own).
+    pub fn poll_reserve(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        priority: Priority,
+    ) -> std::task::Poll<Result<Permit, ReserveError>> {
+        let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+        match self.reserve_in(&mut st, priority) {
+            Err(ReserveError::Full) => {
+                // Registered under the lock the room was found missing under, which is what
+                // keeps a notice from slipping between the check and the registration.
+                self.shared.room.register(cx.waker());
+                std::task::Poll::Pending
+            }
+            other => std::task::Poll::Ready(other),
+        }
+    }
+
+    fn reserve_in(&self, st: &mut LaneState, priority: Priority) -> Result<Permit, ReserveError> {
+        if st.closed {
+            return Err(ReserveError::Closed);
+        }
+        let lane = st.lane_of(priority);
+        if !st.has_room(lane) {
+            return Err(ReserveError::Full);
+        }
+        // One batch is what a frame may carry; it is what the lane's bound is counted in.
+        let unit = st.batch_bytes.max(1);
+        st.reserved[lane] += unit;
+        // As a wait that finds room lowers the mark (zenoh's `refill`).
+        st.congested[lane] = false;
+        Ok(Permit {
+            shared: Arc::clone(&self.shared),
+            lane,
+            unit,
+        })
+    }
+
+    /// Enqueue `frame` on `priority`'s lane with the room `permit` promised, which turns from
+    /// promised into occupied. A closed queue gives the frame back, and the permit is returned
+    /// with it dropped.
+    pub fn send_reserved(
+        &self,
+        mut permit: Permit,
+        priority: Priority,
+        frame: Vec<u8>,
+    ) -> Result<(), OutboundClosed> {
+        debug_assert!(
+            Arc::ptr_eq(&permit.shared, &self.shared),
+            "a permit is for the queue that gave it"
+        );
+        let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+        // What was promised is given back in the same step as what is used is counted, under
+        // one lock, so that no one sees the room twice or not at all. The permit then holds
+        // nothing, and its `Drop`, which runs when this function ends and the lock is let go,
+        // gives back nothing.
+        let unit = std::mem::take(&mut permit.unit);
+        st.reserved[permit.lane] = st.reserved[permit.lane].saturating_sub(unit);
+        if st.closed {
+            return Err(OutboundClosed(frame));
+        }
+        let lane = st.lane_of(priority);
+        st.occupied[lane] += frame.len();
+        st.lanes[lane].push_back(Entry::Heap(priority, frame));
+        drop(st);
+        self.shared.frame_landed();
+        Ok(())
+    }
+
+    /// Whether `priority`'s lane is marked congested (R2923): a wait for room on it ran out and
+    /// the writer has not freed any since. A sender that owns its deadline asks, for a message
+    /// that may be dropped, before it waits at all, as zenoh does.
+    pub fn is_congested(&self, priority: Priority) -> bool {
+        let st = self.shared.state.lock().expect("outbound lanes poisoned");
+        st.congested[st.lane_of(priority)]
+    }
+
+    /// Mark `priority`'s lane congested: a wait the caller owns ran out. The writer freeing room,
+    /// or a later reservation, lowers it.
+    pub fn mark_congested(&self, priority: Priority) {
+        let mut st = self.shared.state.lock().expect("outbound lanes poisoned");
+        let lane = st.lane_of(priority);
+        st.congested[lane] = true;
+    }
+
     /// An empty buffer with room for at least `min_capacity` bytes, to build a
     /// frame in: one the writer has finished with when the lane set keeps one that
     /// fits, a fresh allocation otherwise.
@@ -1555,7 +1738,7 @@ impl OutboundTx {
             if st.closed {
                 return Room::Closed;
             }
-            if st.occupied[lane] < st.capacity[lane] && st.slot_room() {
+            if st.has_room(lane) {
                 st.congested[lane] = false;
                 return Room::Free;
             }
@@ -4200,6 +4383,276 @@ mod tests {
             before,
             "a cleared watcher is not called"
         );
+    }
+
+    /// A waker that counts how many times it was woken, for a test that polls by hand.
+    struct CountingWake(AtomicUsize);
+
+    impl std::task::Wake for CountingWake {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counting_waker() -> (Arc<CountingWake>, std::task::Waker) {
+        let counter = Arc::new(CountingWake(AtomicUsize::new(0)));
+        let waker = std::task::Waker::from(Arc::clone(&counter));
+        (counter, waker)
+    }
+
+    fn polled(
+        tx: &OutboundTx,
+        waker: &std::task::Waker,
+    ) -> std::task::Poll<Result<Permit, ReserveError>> {
+        let mut cx = std::task::Context::from_waker(waker);
+        tx.poll_reserve(&mut cx, Priority::Data)
+    }
+
+    /// A lane of two batches of four bytes: two permits fit and a third does not. The promise
+    /// counts against room as a frame does, and the other way: a wait that asks the old way
+    /// finds a lane full of promises full, so that the two kinds of sender are never given the
+    /// same room.
+    #[test]
+    fn a_permit_takes_room_that_a_waiting_sender_would_have_been_given() {
+        let (tx, _rx) = outbound_channel_with_capacity([2; Priority::NUM], 4);
+        let first = tx.try_reserve(Priority::Data).expect("the first fits");
+        let second = tx.try_reserve(Priority::Data).expect("the second fits");
+        assert_eq!(
+            tx.try_reserve(Priority::Data).err(),
+            Some(ReserveError::Full),
+            "two batches are promised"
+        );
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, block(Duration::ZERO)),
+            Room::Congested,
+            "and a sender that asks for room the other way is told so"
+        );
+        assert!(
+            tx.try_reserve(Priority::RealTime).is_ok(),
+            "another lane's room is its own"
+        );
+        drop(second);
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, block(Duration::ZERO)),
+            Room::Free,
+            "a permit that is dropped unused gives its room back"
+        );
+        drop(first);
+    }
+
+    /// Sending with a permit turns the promise into a frame, exactly once: the lane holds one
+    /// frame and no promise, so the room is neither counted twice nor lost, and the frame is
+    /// the writer's.
+    #[test]
+    fn sending_with_a_permit_turns_the_promise_into_the_frame_and_nothing_stays_promised() {
+        let (tx, mut rx) = outbound_channel_with_capacity([2; Priority::NUM], 4);
+        let permit = tx.try_reserve(Priority::Data).expect("room");
+        tx.send_reserved(permit, Priority::Data, vec![7u8; 4])
+            .expect("the queue is open");
+        let second = tx
+            .try_reserve(Priority::Data)
+            .expect("one batch is held, one is free");
+        assert_eq!(
+            tx.try_reserve(Priority::Data).err(),
+            Some(ReserveError::Full),
+            "one frame and one promise fill two batches, and the sent permit promises nothing more"
+        );
+        drop(second);
+        assert_eq!(
+            rx.try_recv(),
+            Some(vec![7u8; 4]),
+            "the frame is the writer's"
+        );
+        assert!(rx.try_recv().is_none(), "and the writer asks for the next");
+        assert!(
+            tx.try_reserve(Priority::Data).is_ok() && tx.try_reserve(Priority::Data).is_ok(),
+            "the lane is empty and promised nothing: both batches are free again"
+        );
+    }
+
+    /// Sending with one permit gives back that permit's room and no other's: while another sender
+    /// still holds its promise, the lane stays as full as the two of them make it. With only one
+    /// permit out a double release would be hidden (the count cannot go below zero), so the case
+    /// is made with two.
+    #[test]
+    fn sending_with_a_permit_does_not_give_back_the_room_another_still_holds() {
+        let (tx, _rx) = outbound_channel_with_capacity([2; Priority::NUM], 4);
+        let other = tx.try_reserve(Priority::Data).expect("room");
+        let mine = tx.try_reserve(Priority::Data).expect("room");
+        tx.send_reserved(mine, Priority::Data, vec![1u8; 4])
+            .expect("open");
+        assert_eq!(
+            tx.try_reserve(Priority::Data).err(),
+            Some(ReserveError::Full),
+            "one promise and one frame fill two batches, whatever was given back for the frame"
+        );
+        drop(other);
+        assert!(
+            tx.try_reserve(Priority::Data).is_ok(),
+            "and the promise that is dropped is the room that comes back"
+        );
+    }
+
+    /// A sender that finds no room is woken when there is some, once, and has to ask again: the
+    /// writer taking a frame is room, a permit being dropped is room, and the queue closing is an
+    /// answer. Each is a separate case because each is a different notice.
+    #[test]
+    fn a_task_waiting_for_a_permit_is_woken_by_each_way_room_is_made() {
+        // The writer takes a frame.
+        let (tx, mut rx) = outbound_channel_with_capacity([1; Priority::NUM], 4);
+        tx.send(Priority::Data, vec![1u8; 4])
+            .expect("fills the lane");
+        let (woken, waker) = counting_waker();
+        assert!(polled(&tx, &waker).is_pending(), "no room");
+        assert_eq!(woken.0.load(Ordering::SeqCst), 0, "and not woken yet");
+        assert!(rx.try_recv().is_some());
+        assert!(
+            rx.try_recv().is_none(),
+            "the writer asks for the next: that frees the lane"
+        );
+        assert_eq!(
+            woken.0.load(Ordering::SeqCst),
+            1,
+            "woken by the writer, once"
+        );
+        assert!(matches!(polled(&tx, &waker), std::task::Poll::Ready(Ok(_))));
+
+        // A permit is dropped.
+        let (tx, _rx) = outbound_channel_with_capacity([1; Priority::NUM], 4);
+        let held = tx.try_reserve(Priority::Data).expect("room");
+        let (woken, waker) = counting_waker();
+        assert!(polled(&tx, &waker).is_pending());
+        drop(held);
+        assert_eq!(
+            woken.0.load(Ordering::SeqCst),
+            1,
+            "woken by the room a permit gave back"
+        );
+        assert!(matches!(polled(&tx, &waker), std::task::Poll::Ready(Ok(_))));
+
+        // The queue closes.
+        let (tx, mut rx) = outbound_channel_with_capacity([1; Priority::NUM], 4);
+        tx.send(Priority::Data, vec![1u8; 4])
+            .expect("fills the lane");
+        let (woken, waker) = counting_waker();
+        assert!(polled(&tx, &waker).is_pending());
+        rx.close();
+        assert_eq!(woken.0.load(Ordering::SeqCst), 1, "woken by the close");
+        assert!(matches!(
+            polled(&tx, &waker),
+            std::task::Poll::Ready(Err(ReserveError::Closed))
+        ));
+    }
+
+    /// The same task polled twice while it waits is registered once, and a task that was woken and
+    /// asked again by someone else first waits again: a wake-up is a reason to ask and not a grant.
+    #[test]
+    fn a_waiting_task_is_registered_once_and_waits_again_when_the_room_was_taken() {
+        let (tx, _rx) = outbound_channel_with_capacity([1; Priority::NUM], 4);
+        let held = tx.try_reserve(Priority::Data).expect("room");
+        let (woken, waker) = counting_waker();
+        assert!(polled(&tx, &waker).is_pending());
+        assert!(polled(&tx, &waker).is_pending());
+        assert!(polled(&tx, &waker).is_pending());
+        drop(held);
+        assert_eq!(
+            woken.0.load(Ordering::SeqCst),
+            1,
+            "three polls of one task, one wake-up"
+        );
+        // Another sender takes the room before the woken task asks again.
+        let thief = tx
+            .try_reserve(Priority::Data)
+            .expect("the room is free for anyone");
+        assert!(
+            polled(&tx, &waker).is_pending(),
+            "the woken task finds it taken and waits again"
+        );
+        drop(thief);
+        assert_eq!(woken.0.load(Ordering::SeqCst), 2, "and is woken again");
+    }
+
+    /// The mark of R2923 is the caller's to read and raise, because the deadline is the caller's:
+    /// a sender that waited its own time out marks the lane, a droppable sender asks before it
+    /// waits, and a later reservation lowers it.
+    #[test]
+    fn the_congested_mark_is_the_callers_to_raise_and_a_reservation_lowers_it() {
+        let (tx, _rx) = outbound_channel_with_capacity([1; Priority::NUM], 4);
+        assert!(!tx.is_congested(Priority::Data));
+        tx.mark_congested(Priority::Data);
+        assert!(tx.is_congested(Priority::Data));
+        assert!(
+            !tx.is_congested(Priority::RealTime),
+            "the mark is the lane's own"
+        );
+        let permit = tx.try_reserve(Priority::Data).expect("there is room");
+        assert!(
+            !tx.is_congested(Priority::Data),
+            "a reservation that found room lowers the mark, as a wait that finds room does"
+        );
+        drop(permit);
+    }
+
+    /// Many tasks on a multi-thread runtime reserve and send through a lane of two batches while one
+    /// thread writes: every frame arrives, nothing is promised at the end, and no task is left
+    /// waiting for a wake-up that was lost. The bound on time is the test's: a lost wake-up would
+    /// hang it, and a leaked promise would leave the lane full.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn many_tasks_reserving_and_sending_lose_no_frame_no_wakeup_and_no_room() {
+        const TASKS: usize = 32;
+        const PER_TASK: usize = 200;
+        let (tx, mut rx) = outbound_channel_with_capacity([2; Priority::NUM], 4);
+        let received = Arc::new(AtomicUsize::new(0));
+        let writer = {
+            let received = Arc::clone(&received);
+            std::thread::spawn(move || {
+                while received.load(Ordering::SeqCst) < TASKS * PER_TASK {
+                    match rx.try_recv() {
+                        Some(_) => {
+                            received.fetch_add(1, Ordering::SeqCst);
+                        }
+                        None => std::thread::yield_now(),
+                    }
+                }
+                rx
+            })
+        };
+        let mut tasks = Vec::new();
+        for _ in 0..TASKS {
+            let tx = tx.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..PER_TASK {
+                    let permit = std::future::poll_fn(|cx| tx.poll_reserve(cx, Priority::Data))
+                        .await
+                        .expect("the queue stays open");
+                    tx.send_reserved(permit, Priority::Data, vec![1u8; 4])
+                        .expect("open");
+                }
+            }));
+        }
+        let all = async {
+            for task in tasks {
+                task.await.expect("a sending task");
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(60), all)
+            .await
+            .expect("every task finished: no wake-up was lost");
+        let mut rx = writer.join().expect("the writer thread");
+        assert_eq!(received.load(Ordering::SeqCst), TASKS * PER_TASK);
+        assert!(rx.try_recv().is_none(), "nothing is left queued");
+        assert_eq!(
+            tx.wait_for_room(Priority::Data, block(Duration::ZERO)),
+            Room::Free,
+            "and nothing is promised: the lane is empty"
+        );
+        let first = tx
+            .try_reserve(Priority::Data)
+            .expect("both batches are free");
+        let second = tx
+            .try_reserve(Priority::Data)
+            .expect("both batches are free");
+        drop((first, second));
     }
 
     /// R2923 — once a wait on a lane runs out the lane is marked congested,

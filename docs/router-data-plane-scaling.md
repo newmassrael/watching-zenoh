@@ -726,3 +726,56 @@ as before. A declaration, a query and a reply are rare and are not held. A link 
 and the waker with it, and the gated face's 25 ms recheck covers the interval. Counters are on the forwarder (`egress_held`, `egress_held_bytes`, `egress_released`, `egress_abandoned`,
 `egress_destinations_closed`, `egress_gated_faces`) and not in the capacity report yet. `wait_for_slot`, the
 wait for a pooled frame slot under `runtime-zero-copy`, is not touched.
+
+### 7.6 Room as a reservation: what a sender waits for, and what it holds while it waits
+
+7.5 left three ways of waiting for room in the send path, all on one condition variable of the link's outbound
+queue: `wait_for_room` (a thread parks, up to the message's deadline), `ParkBudget` (a bulkhead that rations how
+many threads may park), and `watch_room` (a router that holds messages asks to be called when there is room). They
+are three expressions of one question, and a thread that parks is the reason the other two exist. Read in the code
+on 2026-10-24: the session core asks the question in three places (the first frame of a message, each further
+fragment of a chain, and the multicast queue); the first two ask while holding the conduit's lock, which is how
+the sequence number of a frame is also its place on the wire (R2923; upstream waits under its stage lock the
+same way); and no driver of the MCU, cooperative, lwIP or C ABI profile overrides the question, so it is always
+answered "room" there. The seam is constrained by the lock and not by the MCU.
+
+**The structure.** Asking for room and using it are two steps, as a bounded channel's reservation is
+(`mpsc::Sender::reserve`; a `Sink`'s `poll_ready` before `start_send`). The queue gives a [`Permit`] for one frame
+of a lane, and a frame is enqueued with it (`OutboundTx::try_reserve`, `poll_reserve`, `send_reserved`). A sender
+that has to wait for room waits for the first step without holding what the second needs: it asks outside the
+conduit's lock, and under the lock it mints the sequence number and enqueues with nothing left to wait for. The wait
+is a `Poll` with a `Waker`, so no thread parks; the deadline is the caller's (a link that decided how long a message
+may wait would have to know whether it may be dropped and whether it is the first of a chain, which the caller
+knows and the link does not), with the lane's congested mark read and raised by the caller (`is_congested`,
+`mark_congested`). A blocking caller is an adapter over the same step that parks its own thread, which is the
+condition-variable wait written once and not three times.
+
+**What is built (`writer_queue.rs`).** The lane counts what a permit promises as occupied until it is used or
+dropped, by the unit the lane was shaped in when the permit was given, so that a reshape between the two cannot
+make the lane give back more than it took. There is one definition of room (`LaneState::has_room`: what the lane
+holds plus what it has promised is under its bound, and a pooled queue has a slot), asked by `wait_for_room` and by
+a reservation alike, so a sender that waits on a thread and one that waits on a waker are never given the same
+room. Waiting tasks are registered under the lock the room was found missing under, and a notice (the writer
+taking a frame, a permit dropped, the queue closing) wakes each once; a task registered twice is woken once, and a
+woken task that finds the room taken waits again, since a wake-up is a reason to ask and not a grant. Held by six
+tests, three of which were each shown to fail by removing the thing it holds (the promise counted in the room, the
+registration, the release of the permit that was sent) and by a stress of 32 tasks and 6400 frames on four workers
+that would hang on a lost wake-up and leave the lane full on a leaked promise.
+
+**What is not built, and why.**
+- The session core does not use it yet. `Permit` is a type of the tokio runtime, and the seam in the session core
+  (`BoxedLinkDriver`, no_std, one object for every profile) needs an opaque one whose default is "no permit, nothing
+  to release" for the drivers that never wait. A message appended to an open frame needs no room, and which
+  messages open a frame is known only under the lock, so a reservation before the lock is either speculative (a
+  counter and a lock round for every message, which 7.4 measured the cost of) or asked only when the batching
+  window is closed. That choice is made with the session core's dispatch and is the next step.
+- A chain of fragments cannot be made asynchronous by this alone. A chain is wire-atomic (an interleaved frame
+  would advance the peer's receive gate past the remaining fragments), so it holds the conduit's lock across its
+  waits, as upstream's does, and a lane of two batches cannot be promised a chain of a hundred fragments up
+  front. Making the chain wait without a thread needs the conduit's lock to be one a task can hold across a wait
+  (an async mutex, taken in order), which is a change of the lock and not of the queue.
+- `ParkBudget` and `watch_room` stay until their callers are moved: a synchronous `publish` and the C ABI still park
+  a thread, and the router holds messages with a closure. The wake list and the closure watcher are two registers
+  of one notice and are to become one.
+- `wait_for_slot` (the pool's slot) and the block-first slot are other waits on the same signal and are moved with
+  the room wait.
