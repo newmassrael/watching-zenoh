@@ -269,17 +269,21 @@ handshake derived, which is the binding D1 requires.
     - The main thread used 2,336 B of stack.
     - The link map puts Mbed TLS at about 72.7 KB of code and read-only
       data: crypto 42.4 KB, TLS 18.2 KB, X.509 12.2 KB.
-  - **The record buffers, decided and measured (Round 3494).**
+  - **The record buffers, decided and measured (Round 3495).**
     - The receive buffer is the protocol's maximum of 2^14 bytes. rustls
       0.23, which zenohd 1.10.1 links, does not implement the record size
-      limit (its source has no such extension). zenoh's TLS link leaves
-      rustls's fragment size at its 16 kB default
-      (`io/zenoh-links/zenoh-link-tls/src/lib.rs`).
+      limit (its source has no such extension). zenoh's TLS link sets its
+      MTU to the largest batch and leaves rustls's fragment size at its
+      16 kB default (`io/zenoh-links/zenoh-link-tls/src/lib.rs` @
+      `const TLS_MAX_MTU: BatchSize = BatchSize::MAX;`).
     - Data records from a zenoh peer do stay within the negotiated batch,
       because both establishment sides take the smaller batch
-      (`unicast/establishment/accept.rs`, `open.rs`) and rustls writes a
-      record per write. That is an implementation's behaviour, though, not
-      a bound the protocol gives.
+      (`io/zenoh-transport/src/unicast/establishment/accept.rs` @
+      `.min(init_syn.batch_size)`;
+      `io/zenoh-transport/src/unicast/establishment/open.rs` @
+      `state.transport.batch_size = state.transport.batch_size.min(init_ack.batch_size);`),
+      and rustls writes a record per write. That is an implementation's
+      behaviour, though, not a bound the protocol gives.
     - rustls also joins a whole handshake flight into one record
       (`HandshakeFlight`), so how large that record is depends on the
       certificate the peer presents.
