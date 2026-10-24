@@ -421,6 +421,18 @@ from. So the order is now:
   reading that kept them whole, row, head and origin, and every message's bytes
   against the payload the frame was built from. Not measured: no serial capture
   of the consumer's size exists.
+  Landed (3), its datagram half: the recovered RFC 9221 datagrams' plaintext,
+  which exists only in the call that hands it in, is logged by their list, and
+  the byte door hands back a recovered message's bytes from that log (its
+  packet holds ciphertext, so the caller does not hold them). A cleartext
+  datagram message is still named as the caller's packet, as the C door's
+  contract says: the list's copy is its means of reading, not a second home of
+  the bytes. The gate feeds batching plaintexts
+  in both directions and holds the list to the reading that kept it whole and
+  every message's bytes to the plaintext. Left of (3): the recovered QUIC
+  streams, whose plaintext sink rewrites the rows' coordinates in place, which
+  only a row kept whole allows; the sink is handed the stream offset of the
+  plaintext's first byte instead.
 - 5. The memory gate.
 - 6. Random access to a row's field document (D9), taken before 4c's remaining
   landings because it is what the consumer's budget waits on: (a) the tables
