@@ -285006,6 +285006,40 @@
         "Read the first completed hosted CI run that judges Rounds 3502 to this round, per job."
       ]
     },
+    "Round 3580": {
+      "decision_summary": "Open-debt item 924, hosted CI read: the first completed run that holds round 3574 reds two layers on one line of mine. cases() in memory_matrix.rs declared its vec mut for an extend that only the fixtures feature compiles; a build without fixtures (C1bn, C0mut) denies the unused mut. The vec is now shadowed inside the fixtures arm, so no feature set carries a binding it does not use. The other reds of that run are not this debt's: the lifecycle verbs without a secure channel and two unclaimed loop_peers tests (C1bnl, C1cn), EncodingHint in a tokio session test (C1bj), the router capacity lanes (E7g, E7s) and the upstream release count (Layer U).",
+      "changes_bullets": [
+        "wz-capture: memory_matrix.rs (cases() shadows the vec inside the fixtures arm instead of declaring it mut)"
+      ],
+      "verification_bullets": [
+        "clippy -D warnings on wz-capture in the three shapes the failed layers compile (all targets default, all features, features dissect) and with wz-session-core beside it, each exit 0 on the build host; rustfmt check clean",
+        "the failing logs were read per job and attributed by the file each names: C1bn and C0mut name memory_matrix.rs:635, the other six reds name other files"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Hosted CI for this fix is unread: read the first completed run that holds it, and confirm C1bn and C0mut no longer name memory_matrix.rs",
+        "The reds that are not this debt's (C1bnl, C1cn, C1bj, E7g, E7s, Layer U) belong to the sessions that moved those files"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, hosted CI read: the first completed run that holds round 3574 reds two layers on one line of mine. cases() in memory_matrix.rs declared its vec mut for an extend that only the fixtures feature compiles; a build without fixtures (C1bn, C0mut) denies the unused mut. The vec is now shadowed inside the fixtures arm, so no feature set carries a binding it does not use. The other reds of that run are not this debt's: the lifecycle verbs without a secure channel and two unclaimed loop_peers tests (C1bnl, C1cn), EncodingHint in a tokio session test (C1bj), the router capacity lanes (E7g, E7s) and the upstream release count (Layer U).",
+      "publishable_changes_bullets": [
+        "wz-capture: memory_matrix.rs (cases() shadows the vec inside the fixtures arm instead of declaring it mut)"
+      ],
+      "publishable_verification_bullets": [
+        "clippy -D warnings on wz-capture in the three shapes the failed layers compile (all targets default, all features, features dissect) and with wz-session-core beside it, each exit 0 on the build host; rustfmt check clean",
+        "the failing logs were read per job and attributed by the file each names: C1bn and C0mut name memory_matrix.rs:635, the other six reds name other files"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Hosted CI for this fix is unread: read the first completed run that holds it, and confirm C1bn and C0mut no longer name memory_matrix.rs",
+        "The reds that are not this debt's (C1bnl, C1cn, C1bj, E7g, E7s, Layer U) belong to the sessions that moved those files"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
