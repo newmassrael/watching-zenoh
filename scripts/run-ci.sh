@@ -21428,7 +21428,7 @@ layer_e6u_peer_unixpipe_forward() {
 # router still admits, and asserts nothing. A fourth (R3490) holds the promise of
 # `docs/router-data-plane-scaling.md` section 7.4: a router told its CPU share (32
 # hogs, 1.32%) admits no more than the capacity model allows, refuses the rest, and
-# loses no admitted client. A fifth (R3508) prints, with no assertion, the keepalive lateness
+# loses no admitted client. A fifth (R3514) prints, with no assertion, the keepalive lateness
 # and the clients lost at 1024, 1536 and 2048 sessions under 32 hogs, so every hosted run
 # leaves that table for the runner it ran on. The count guard is 5 so that a dropped
 # `#[ignore]` (selecting none) or a renamed test reddens.
