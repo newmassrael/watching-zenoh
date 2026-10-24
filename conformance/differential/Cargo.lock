@@ -172,6 +172,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05c8b63e8d9609db387f0324918f81d68fe27748f084ef092fb35954d0539a85"
 
 [[package]]
+name = "ppv-lite86"
+version = "0.2.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
+dependencies = [
+ "zerocopy",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -195,6 +204,18 @@ version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
+ "libc",
+ "rand_chacha",
+ "rand_core",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
+dependencies = [
+ "ppv-lite86",
  "rand_core",
 ]
 
@@ -471,10 +492,14 @@ name = "wz-family-differential"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rand",
+ "serde_json",
  "tokio",
  "tracing",
  "zenoh-core 1.10.1",
  "zenoh-core 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zenoh-keyexpr 1.10.1",
+ "zenoh-keyexpr 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-result 1.10.1",
  "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-runtime 1.10.1",
@@ -506,6 +531,16 @@ dependencies = [
 [[package]]
 name = "zenoh-keyexpr"
 version = "1.10.1"
+dependencies = [
+ "rand",
+ "schemars",
+ "serde",
+ "zenoh-result 1.10.1",
+]
+
+[[package]]
+name = "zenoh-keyexpr"
+version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02c6fcb7f18846b4e9b097c61ed7c656ec8d7858ab54a12d5f5025fe1514caae"
 dependencies = [
@@ -528,7 +563,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
- "zenoh-keyexpr",
+ "zenoh-keyexpr 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

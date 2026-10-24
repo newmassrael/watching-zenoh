@@ -135,13 +135,19 @@ class Member:
     `missing` is the RATCHET of the member: the count of upstream lines per arm the wz crate does
     not yet have. A slice that lands lowers it in the same round; a count that rises is a regression
     and a count that falls without moving it is progress the record has not taken. Either way the
-    gate fails until this table is the measurement."""
+    gate fails until this table is the measurement.
+
+    `split_wz` says the wz crate declares the features that split the arms, so its surface is
+    emitted once per arm with that arm's features and held to that arm. A crate that declares none
+    of them has the one surface, held to every arm, and the lines only an arm's features add are
+    missing there; the flag is turned on in the slice that gives the features meaning."""
 
     package: str
     lib: str
     wz_package: str
     arms: tuple[tuple[str, str], ...]
     missing: dict[str, int]
+    split_wz: bool = False
 
 
 MEMBERS: tuple[Member, ...] = (
@@ -150,7 +156,16 @@ MEMBERS: tuple[Member, ...] = (
     Member("zenoh-result", "zenoh_result", "zenoh-result", DEFAULT_ARM, {"default": 0}),
     Member("zenoh-runtime", "zenoh_runtime", "zenoh-runtime", DEFAULT_ARM, {"default": 0}),
     Member("zenoh-core", "zenoh_core", "zenoh-core", DEFAULT_ARM, {"default": 0}),
+    Member("zenoh-keyexpr", "zenoh_keyexpr", "zenoh-keyexpr",
+           (("default", ""), ("unstable", "unstable")), {"default": 229, "unstable": 229},
+           split_wz=True),
 )
+
+
+def wz_arms(member: Member) -> tuple[tuple[str | None, str], ...]:
+    """The surfaces a member's wz crate is emitted as: one per arm when it declares the arms'
+    features, else the one, which has no arm name."""
+    return member.arms if member.split_wz else ((None, ""),)
 
 ITEM_KINDS = {
     "struct": "struct", "enum": "enum", "trait": "trait", "function": "fn",
@@ -564,12 +579,14 @@ def emit(toolchain: str, member: Member, features: str) -> dict:
         raise InputError(f"rustdoc wrote no readable JSON at {out} ({e})") from e
 
 
-def emit_wz(toolchain: str, member: Member) -> dict:
-    """rustdoc JSON of the wz crate of one member, from this tree."""
+def emit_wz(toolchain: str, member: Member, features: str = "") -> dict:
+    """rustdoc JSON of the wz crate of one member with one feature set, from this tree."""
     target_dir = TARGET_DIR / member.wz_package
     cmd = ["cargo", f"+{toolchain}", "rustdoc", "-p", member.wz_package, "--lib", "--locked",
-           "--target-dir", str(target_dir), "--", "-Z", "unstable-options",
-           "--output-format", "json"]
+           "--target-dir", str(target_dir)]
+    if features:
+        cmd += ["--features", features]
+    cmd += ["--", "-Z", "unstable-options", "--output-format", "json"]
     proc = subprocess.run(cmd, cwd=ROOT / "crates", capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         raise InputError(
@@ -583,8 +600,11 @@ def emit_wz(toolchain: str, member: Member) -> dict:
         raise InputError(f"rustdoc wrote no readable JSON at {out} ({e})") from e
 
 
-def wz_surface_file(member: Member) -> Path:
-    return SURFACE_DIR / f"{member.wz_package}-{census.UPSTREAM_VERSION}.surface"
+def wz_surface_file(member: Member, arm: str | None = None) -> Path:
+    # `-wz-<arm>`: the wz crate has upstream's package name, so `<package>-<version>-<arm>` is the
+    # file of upstream's own surface for that arm.
+    suffix = f"-wz-{arm}" if arm else ""
+    return SURFACE_DIR / f"{member.wz_package}-{census.UPSTREAM_VERSION}{suffix}.surface"
 
 
 def wz_header(toolchain: str, fmt: int, member: Member) -> list[str]:
@@ -602,22 +622,33 @@ def compatibility_arm(toolchain: str, fmt: int, member: Member) -> list[str]:
     It may carry no line upstream does not (C10: a wz-only door is in `wz::ext`), and the lines
     of each arm it does not carry yet must number exactly `member.missing[arm]`."""
     failures: list[str] = []
-    path = wz_surface_file(member)
-    if not path.is_file():
-        return [f"{path.relative_to(ROOT)} is missing -- emit it with --write"]
-    meta, wz = read_surface(path)
-    for key, value in (("toolchain", toolchain), ("format_version", str(fmt))):
-        if meta.get(key) != value:
-            failures.append(f"{path.relative_to(ROOT)} says {key} `{meta.get(key)}`, the pin says "
-                            f"`{value}` -- re-emit it")
-    if wz != sorted(set(wz)):
-        failures.append(f"{path.relative_to(ROOT)} is not sorted and unique -- not this script's output")
     upstream = {arm: read_surface(surface_file(member, arm))[1] for arm, _features in member.arms}
     if set(member.missing) != set(upstream):
         failures.append(f"{member.package}: the ratchet names arm(s) {sorted(member.missing)} and the "
                         f"member has {sorted(upstream)}")
         return failures
-    return failures + compatibility_check(wz, upstream, member.missing, member.wz_package)
+    wz_by_arm: dict[str | None, list[str]] = {}
+    for arm, _features in wz_arms(member):
+        path = wz_surface_file(member, arm)
+        if not path.is_file():
+            return failures + [f"{path.relative_to(ROOT)} is missing -- emit it with --write"]
+        meta, wz = read_surface(path)
+        for key, value in (("toolchain", toolchain), ("format_version", str(fmt))):
+            if meta.get(key) != value:
+                failures.append(f"{path.relative_to(ROOT)} says {key} `{meta.get(key)}`, the pin "
+                                f"says `{value}` -- re-emit it")
+        if wz != sorted(set(wz)):
+            failures.append(f"{path.relative_to(ROOT)} is not sorted and unique -- not this "
+                            f"script's output")
+        wz_by_arm[arm] = wz
+    if not member.split_wz:
+        return failures + compatibility_check(wz_by_arm[None], upstream, member.missing,
+                                              member.wz_package)
+    # Each arm is held to the surface the wz crate has WITH that arm's features.
+    for arm, lines in upstream.items():
+        failures += compatibility_check(wz_by_arm[arm], {arm: lines}, member.missing,
+                                        member.wz_package)
+    return failures
 
 
 def compatibility_check(wz: list[str], upstream: dict[str, list[str]],
@@ -958,17 +989,19 @@ def main() -> int:
                         failures += [f"{member.package} {arm}: {d}" for d in diff]
                         print(f"  rust-api-surface: {member.package} {arm}: re-emitted {len(lines)} "
                               f"line(s), {len(diff)} difference(s)")
-                wz_lines = normalise(emit_wz(toolchain, member), fmt, member.lib)
-                path = wz_surface_file(member)
-                if args.write:
-                    path.write_text("\n".join(wz_header(toolchain, fmt, member) + wz_lines) + "\n")
-                    print(f"  rust-api-surface: wrote {path.relative_to(ROOT)} ({len(wz_lines)} lines)")
-                else:
-                    _, old = read_surface(path)
-                    diff = compare(old, wz_lines)
-                    failures += [f"{member.wz_package}: {d}" for d in diff]
-                    print(f"  rust-api-surface: {member.wz_package}: re-emitted {len(wz_lines)} line(s), "
-                          f"{len(diff)} difference(s)")
+                for arm, features in wz_arms(member):
+                    wz_lines = normalise(emit_wz(toolchain, member, features), fmt, member.lib)
+                    path = wz_surface_file(member, arm)
+                    if args.write:
+                        path.write_text("\n".join(wz_header(toolchain, fmt, member) + wz_lines) + "\n")
+                        print(f"  rust-api-surface: wrote {path.relative_to(ROOT)} ({len(wz_lines)} lines)")
+                    else:
+                        _, old = read_surface(path)
+                        diff = compare(old, wz_lines)
+                        failures += [f"{member.wz_package} {arm or ''}: {d}" for d in diff]
+                        print(f"  rust-api-surface: {member.wz_package} {arm or ''}: re-emitted "
+                              f"{len(wz_lines)} line(s), {len(diff)} difference(s)")
+                if not args.write:
                     failures += compatibility_arm(toolchain, fmt, member)
             if failures:
                 for f in failures:

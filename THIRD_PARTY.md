@@ -265,6 +265,22 @@ not tracked under the Non-Commercial / Commercial license that covers
 the rest of this repo. See `LICENSE-GENERATED.md` in the SCE repo at the
 pinned revision for the generation-time policy.
 
+## crates/wz-zenoh-* — the zenoh family's public API, reproduced
+
+- **Origin**: https://github.com/eclipse-zenoh/zenoh, tag `1.10.1` (the crates `zenoh-result`,
+  `zenoh-runtime`, `zenoh-core`, `zenoh-keyexpr` and those that follow them).
+- **License of the origin**: EPL-2.0 OR Apache-2.0.
+- **What is reproduced**: the public API of each crate, which a drop-in has to equal: item names,
+  signatures, trait implementations, the text and expansion of the exported macros (a crate that
+  uses a macro expands this text), the error messages, and the documentation of the public items.
+  Nothing else is vendored and no upstream crate is a dependency of the product graph.
+- **What is original**: the algorithms behind that API are written here from the language's
+  definition (key expression validation, canonization, inclusion and intersection) or restructured
+  (the runtime pool's shutdown), and each is held to upstream's behaviour by
+  `conformance/differential`, which links upstream's crates for the comparison only.
+- **Scope of use**: the crates carry upstream's package names so that a `[patch.crates-io]` entry
+  swaps them in (`docs/build-configuration.md` C13); they are not published to a registry.
+
 ## How this ledger is maintained
 
 - A vendor pin bump appends a new Round entry to

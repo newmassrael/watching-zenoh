@@ -299,6 +299,16 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     # R3418 -- the two node-config features left the row when Round 3417 made them
     # capabilities, on in this crate's default build: a default feature is not on this
     # census's axis, and a row that keeps naming one waits for nothing.
+    # R3494 -- a member of the zenoh compatibility family (`api-compat-rust`): its features are
+    # the arms of upstream's own surface. Held to `FAMILY_GRADED` below.
+    "zenoh-keyexpr": (
+        "a crate of the zenoh compatibility family: `unstable` is an arm of upstream's own public "
+        "surface that `scripts/lib/rust_api_surface.py` emits the wz crate with and holds it to, "
+        "and `internal` is the doc-hidden set zenoh's own crates use, which the arm list leaves out "
+        "and `conformance/differential` enables on both crates. Held to `FAMILY_GRADED` below "
+        "rather than to this sentence",
+        frozenset({"internal", "unstable"}),
+    ),
     "wz-capi-core": (
         "the ABI-neutral session model: a workspace-internal rlib whose only "
         "consumers are the two C ABI crates, and the one of them that turns the "
@@ -1066,6 +1076,30 @@ def axis_reachable_crate(pkg: str) -> str | None:
             _, _, value = line.partition("=")
             return value.strip().strip('"').strip("'")
     return pkg.replace("-", "_")
+
+# R3494 -- the packages whose `OFF_AXIS` reason is the claim "this crate is a member of the zenoh
+# compatibility family, whose public surface is graded against upstream's own, per feature arm",
+# MEASURED instead of asserted (inventory atom `api-compat-rust`).
+#
+# The crate's features are not Rust paths a diagnostic probe should expect a consumer to find
+# missing: they are the ARMS of upstream's own public surface, and a wz crate is held to the arm
+# it carries by `scripts/lib/rust_api_surface.py`, line by line, with a ratchet for the lines it
+# lacks. So the predicate is the narrow true one: every feature of the row is either
+#   * a feature of an arm of the member, which the surface gate emits the wz crate WITH and holds
+#     to that arm (`Member.split_wz`), or
+#   * enabled on the wz crate's dependency line in `conformance/differential/Cargo.toml`, where the
+#     differential tests exercise it against upstream's crate with the same feature on. This is
+#     the case of `internal`, which the arm list leaves out on purpose (it widens visibility for
+#     zenoh's own crates, and a user replacing zenoh does not build with it).
+# A row naming a feature that is neither is a FINDING, as is a package that is not a member, one
+# whose surfaces are not split per arm, or a row the table covers only part of.
+FAMILY_GRADED: dict[str, frozenset[str]] = {
+    "zenoh-keyexpr": frozenset({"internal", "unstable"}),
+}
+
+#: The manifest of the differential workspace, whose dependency line names the features the wz
+#: crate is exercised with.
+FAMILY_DIFFERENTIAL_MANIFEST = ROOT / "conformance" / "differential" / "Cargo.toml"
 
 # The residue of item 606, as a SET so that it is derived rather than recounted.
 # Every `OFF_AXIS` row is in exactly one of three places: `ABI_CONTRACT`,
@@ -1849,6 +1883,74 @@ def facade_only_findings(
     return findings
 
 
+def _dependency_features(manifest: str, package: str) -> set[str] | None:
+    """The features named on the dependency line of `manifest` that is on `package` by path, or
+    `None` when there is no such line. A line is one `name = { ... }` of the table, which the
+    differential workspace keeps on a single line per crate."""
+    for line in manifest.splitlines():
+        if f'package = "{package}"' in line and "path =" in line:
+            match = re.search(r"features\s*=\s*\[([^\]]*)\]", line)
+            return set(re.findall(r'"([^"]+)"', match.group(1))) if match else set()
+    return None
+
+
+def family_graded_findings(
+    members: dict[str, typing.Any] | None = None, manifest: str | None = None
+) -> list[str]:
+    """R3494 -- hold every `FAMILY_GRADED` row to the surface gate's member table and to the
+    differential workspace's manifest. Both inputs are injectable, for the reason the sibling
+    arms give."""
+    if members is None:
+        import rust_api_surface as ras
+
+        members = {m.package: m for m in ras.MEMBERS}
+    if manifest is None:
+        try:
+            manifest = FAMILY_DIFFERENTIAL_MANIFEST.read_text(encoding="utf-8")
+        except OSError as e:
+            return [f"cannot read {FAMILY_DIFFERENTIAL_MANIFEST} ({e}), so `FAMILY_GRADED` is held "
+                    f"to nothing"]
+    findings: list[str] = []
+    for pkg in sorted(FAMILY_GRADED):
+        if pkg not in OFF_AXIS:
+            findings.append(
+                f"`{pkg}` claims graded arms in `FAMILY_GRADED` but has no `OFF_AXIS` row, so the "
+                f"claim excuses nothing and is unread"
+            )
+            continue
+        _why, row = OFF_AXIS[pkg]
+        feats = set(FAMILY_GRADED[pkg])
+        if feats != set(row):
+            findings.append(
+                f"`{pkg}`'s `OFF_AXIS` row names {sorted(row)} and `FAMILY_GRADED` holds "
+                f"{sorted(feats)}. A predicate covering PART of a row leaves the rest excused by "
+                f"prose while the row reads as measured"
+            )
+            continue
+        member = members.get(pkg)
+        if member is None or not member.split_wz:
+            findings.append(
+                f"`{pkg}` is not a member of `rust_api_surface.py` whose wz surface is emitted "
+                f"per arm (`split_wz`), so no surface gate holds its features to an arm"
+            )
+            continue
+        arm_features = {f for _arm, fs in member.arms for f in fs.split(",") if f}
+        exercised = _dependency_features(manifest, pkg)
+        if exercised is None:
+            findings.append(
+                f"the differential workspace has no dependency line on `{pkg}` by path, so "
+                f"nothing exercises its features against upstream's"
+            )
+            continue
+        for feat in sorted(feats - arm_features - exercised):
+            findings.append(
+                f"`{pkg}` / `{feat}` is neither a feature of an arm the surface gate holds the wz "
+                f"crate to nor enabled on its dependency line in the differential workspace, so "
+                f"nothing grades what it gates"
+            )
+    return findings
+
+
 #: the `target_os = "..."` a platform-gated site must carry, in the SAME
 #: attribute as the feature. The value is captured so a finding can name it.
 PLATFORM_CFG = re.compile(r'target_os\s*=\s*"([a-z0-9_]+)"')
@@ -2092,6 +2194,7 @@ def test_only_reach_findings(
         | set(PLATFORM_GATED)
         | set(FACADE_ONLY)
         | set(AXIS_REACHABLE)
+        | set(FAMILY_GRADED)
     )
     for pkg in sorted(set(OFF_AXIS) - measured - PROSE_ONLY):
         findings.append(
@@ -2117,6 +2220,7 @@ def test_only_reach_findings(
         PLATFORM_GATED,
         FACADE_ONLY,
         AXIS_REACHABLE,
+        FAMILY_GRADED,
     )
     for i, first in enumerate(tables):
         for second in tables[i + 1 :]:
@@ -2376,6 +2480,7 @@ def check() -> int:
     findings.extend(platform_gated_findings(ROOT, sites))
     findings.extend(facade_only_findings())
     findings.extend(axis_reachable_findings(sites=sites))
+    findings.extend(family_graded_findings())
     findings.extend(test_only_reach_findings())
     findings.extend(test_only_feature_findings())
 
@@ -2407,7 +2512,8 @@ def check() -> int:
         f"`TEST_ONLY_FEATURE`, {len(set(PLATFORM_GATED) & set(OFF_AXIS))} to "
         f"`PLATFORM_GATED`, {len(set(FACADE_ONLY) & set(OFF_AXIS))} to "
         f"`FACADE_ONLY`, {len(set(AXIS_REACHABLE) & set(OFF_AXIS))} to "
-        f"`AXIS_REACHABLE`, {len(PROSE_ONLY)} still prose (item 606)"
+        f"`AXIS_REACHABLE`, {len(set(FAMILY_GRADED) & set(OFF_AXIS))} to "
+        f"`FAMILY_GRADED`, {len(PROSE_ONLY)} still prose (item 606)"
     )
     for kind in (
         "public-item",
@@ -2692,6 +2798,82 @@ def facade_only_selftest() -> int:
          "a selector-only consumer that names the crate in code must be reported"),
         (any("excuses nothing and is unread" in f for f in selector_stale),
          "a selector-only entry with no edge behind it must be reported"),
+    )
+    for ok, why in checks:
+        if not ok:
+            print(f"feature-public-surface: SELFTEST FAIL -- {why}")
+            return 1
+    return 0
+
+
+def family_graded_selftest() -> int:
+    """R3494 -- drive `family_graded_findings` through every way it refuses.
+
+    The CONTROL is first: a member split per arm, whose row names one arm feature and one feature the
+    differential workspace enables, must PASS, or the predicate refuses the shape it is written for.
+    """
+
+    class Fixture(typing.NamedTuple):
+        split_wz: bool
+        arms: tuple[tuple[str, str], ...]
+
+    pkg = "demo-family"
+    member = Fixture(True, (("default", ""), ("unstable", "unstable")))
+    manifest = (
+        'wz_demo = { package = "demo-family", path = "../../crates/wz-demo", '
+        'features = ["unstable", "internal"] }\n'
+    )
+    row = ("fixture", frozenset({"unstable", "internal"}))
+    real_off, real_graded = OFF_AXIS.get(pkg), dict(FAMILY_GRADED)
+    FAMILY_GRADED.clear()
+    try:
+        OFF_AXIS[pkg] = row
+        FAMILY_GRADED[pkg] = frozenset({"unstable", "internal"})
+        control = family_graded_findings({pkg: member}, manifest)
+        # a feature that is no arm and that nothing enables
+        OFF_AXIS[pkg] = ("fixture", frozenset({"unstable", "internal", "orphan"}))
+        FAMILY_GRADED[pkg] = frozenset({"unstable", "internal", "orphan"})
+        ungraded = family_graded_findings({pkg: member}, manifest)
+        # the table covers only part of the row
+        FAMILY_GRADED[pkg] = frozenset({"unstable"})
+        partial = family_graded_findings({pkg: member}, manifest)
+        OFF_AXIS[pkg] = row
+        FAMILY_GRADED[pkg] = frozenset({"unstable", "internal"})
+        # the package is not a member, or is a member whose surface is not split per arm
+        not_member = family_graded_findings({}, manifest)
+        unsplit = family_graded_findings({pkg: Fixture(False, member.arms)}, manifest)
+        # the differential workspace has no line for it, or does not enable the feature
+        no_line = family_graded_findings({pkg: member}, "other = { path = \"x\" }\n")
+        not_enabled = family_graded_findings(
+            {pkg: member},
+            'wz_demo = { package = "demo-family", path = "x", features = ["unstable"] }\n',
+        )
+        # the package has no row
+        del OFF_AXIS[pkg]
+        orphan = family_graded_findings({pkg: member}, manifest)
+    finally:
+        OFF_AXIS.pop(pkg, None)
+        FAMILY_GRADED.clear()
+        FAMILY_GRADED.update(real_graded)
+        if real_off is not None:
+            OFF_AXIS[pkg] = real_off
+
+    checks = (
+        (not control, "the CONTROL -- an arm feature and an exercised one -- must PASS"),
+        (any("nothing grades what it gates" in f for f in ungraded),
+         "a feature that is no arm and that nothing enables must be reported"),
+        (any("PART of a row" in f for f in partial),
+         "a predicate covering part of a row must be reported"),
+        (any("not a member" in f for f in not_member),
+         "a package that is not a member of the surface gate must be reported"),
+        (any("not a member" in f for f in unsplit),
+         "a member whose surface is not split per arm must be reported"),
+        (any("no dependency line" in f for f in no_line),
+         "a package the differential workspace does not depend on must be reported"),
+        (any("`internal`" in f for f in not_enabled),
+         "a feature the differential workspace does not enable must be reported"),
+        (any("has no `OFF_AXIS` row" in f for f in orphan),
+         "a `FAMILY_GRADED` entry whose package has no row excuses nothing"),
     )
     for ok, why in checks:
         if not ok:
@@ -3283,6 +3465,8 @@ def selftest() -> int:
     # refusals below are the shapes that refutation is made of — a second
     # consumer, a facade row that pulls nothing in, an empty graph.
     if facade_only_selftest() != 0:
+        return 1
+    if family_graded_selftest() != 0:
         return 1
 
     # R2297 — AND THE AXIS-REACH PREDICATE. Its subject is the axis rather than

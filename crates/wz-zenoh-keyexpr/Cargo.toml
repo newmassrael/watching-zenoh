@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# zenoh-keyexpr -- key expressions of the zenoh family: their syntax, their set semantics (does one
+# include or intersect another), the owned and borrowed forms, key-expression formats and the trees that
+# store values by key expression, over watching-zenoh (inventory atom `api-compat-rust`, open-debt item
+# 910, docs/build-configuration.md C13).
+#
+# Named `zenoh-keyexpr` and versioned as the pinned zenoh, like every crate of the family (see
+# `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). The types of this crate are in
+# the public API of `zenoh` (`keyexpr`, `OwnedKeyExpr` and their traits are re-exported there), and
+# `zenoh-macros` checks a literal against it at compile time.
+#
+# It is built in slices, each landing whole with the ratchet of `scripts/lib/rust_api_surface.py`
+# lowered in its own round: the key expression types, then formats, then the key expression trees.
+# Until a slice lands its items are missing lines of the surface gate, not stubs here.
+
+[package]
+name = "zenoh-keyexpr"
+version = "1.10.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Key expressions of the zenoh family (1.10.1), as a drop-in over watching-zenoh."
+
+[lib]
+name = "zenoh_keyexpr"
+path = "src/lib.rs"
+
+# Upstream's features by their names. `internal` and `js` are declared because a crate that depends on
+# this one with them (zenoh does, through its own `internal` feature) must find them; each joins the
+# slice that gives it meaning, as the family's manifest rule says.
+[features]
+default = ["std"]
+# `internal` carries the doc-hidden items zenoh's own crates use. So far it holds `chunks` and
+# `is_wild`; the prefix-stripping ones join with the `zenoh` slice that needs them.
+internal = []
+std = ["dep:schemars", "zenoh-result/std"]
+unstable = []
+
+# The requirements are upstream's: `OwnedKeyExpr` is `Serialize`, `Deserialize` and (with `std`)
+# `JsonSchema`, and `KeyExprFuzzer` is generic over `rand::Rng`, so a caller that names those traits
+# meets the same crates, at the same semver line, upstream's would.
+[dependencies]
+rand = { version = "0.8.5", default-features = false, features = ["alloc", "getrandom"] }
+schemars = { version = "1.1.0", features = ["either1"], optional = true }
+serde = { version = "1.0.225", default-features = false, features = ["alloc", "derive"] }
+zenoh-result = { path = "../wz-zenoh-result", default-features = false }
+
+[dev-dependencies]
+rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
+
+[lints]
+workspace = true

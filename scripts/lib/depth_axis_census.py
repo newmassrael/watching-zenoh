@@ -1228,6 +1228,11 @@ CITATION = re.compile(r"\b((?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.(?:rs|c|h))(?::
 # `an_upstream_crates_error_is_the_zerror_of_the_patched_crate`, which a lane runs (Layer E18).
 # UNREACHED and NO_SYMBOL hold at 0 and 0. READ off the census's own FAIL line, `reached: 2
 # against a pin of 1` and `wz citations: 21 against a pin of 20`.
+# R3494 -- WZ_CITATIONS 21 -> 22. `api-compat-rust`'s reason gained one resolvable wz citation, the
+# differential test that holds the key expression language to upstream's
+# (`conformance/differential/tests/zenoh_keyexpr.rs`). REACHED, UNREACHED and NO_SYMBOL hold at
+# 2, 0 and 0, and AMBIGUOUS does not move. READ off the census's own FAIL line, `wz citations:
+# 22 against a pin of 21`.
 PIN_REACHED = 2
 PIN_UNREACHED = 0
 PIN_NO_SYMBOL = 0
@@ -2766,7 +2771,7 @@ PIN_NO_SYMBOL = 0
 # (`switchboard.rs` re-counted, and the fixed-memory `SessionHost` the old
 # measurement predates). READ off the census's own FAIL lines, `wz citations: 18
 # against a pin of 0` and then `20 against a pin of 18`.
-PIN_WZ_CITATIONS = 21
+PIN_WZ_CITATIONS = 22
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite
