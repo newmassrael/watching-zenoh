@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+# zenoh-protocol -- the messages of the zenoh protocol (version 0x09) as Rust types: the core types
+# they are made of (zenoh ids, locators, endpoints, wire expressions, encodings, parameters, regions),
+# the extensions every message may carry, and the transport, network, zenoh and scouting messages
+# with their ids, flags and constants, over watching-zenoh (inventory atom `api-compat-rust`,
+# open-debt item 910, docs/build-configuration.md C13).
+#
+# Named `zenoh-protocol` and versioned as the pinned zenoh, like every crate of the family (see
+# `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). The types of this crate are the
+# vocabulary of `zenoh-codec`, `zenoh-transport`, `zenoh-link` and `zenoh` itself, and several appear
+# in `zenoh`'s own public API (`ZenohIdProto`, `WhatAmI`, `Encoding`, `Locator`, `EndPoint`), so an
+# ecosystem crate that names them must meet the one of this graph. The crate holds the types and not
+# the wire format: that is `zenoh-codec`'s, a later member.
+#
+# It is built in slices, each landing whole with the ratchet of `scripts/lib/rust_api_surface.py`
+# lowered in its own round. Until a slice lands its items are missing lines of the surface gate, not
+# stubs here.
+
+[package]
+name = "zenoh-protocol"
+version = "1.10.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Messages of the zenoh protocol (1.10.1), as a drop-in over watching-zenoh."
+
+[lib]
+name = "zenoh_protocol"
+path = "src/lib.rs"
+
+# Upstream's features by their names and by what they turn on in the crates below. `internal` and
+# `unstable` join the slice that gives them an item, as the family's manifest rule says.
+[features]
+default = ["std"]
+internal = []
+shared-memory = ["std", "zenoh-buffers/shared-memory"]
+std = [
+    "rand?/std",
+    "rand?/std_rng",
+    "serde/std",
+    "uhlc/std",
+    "zenoh-buffers/std",
+    "zenoh-keyexpr/std",
+    "zenoh-result/std",
+]
+test = ["rand", "zenoh-buffers/test"]
+unstable = []
+
+# The requirements are upstream's, at its semver lines: `ZenohIdProto` and `Encoding` are `Serialize`
+# and `Deserialize`, a timestamp is `uhlc`'s, the generators of the `test` feature draw from `rand`,
+# and a literal that names a constant is built with `const_format`.
+[dependencies]
+const_format = "0.2.34"
+rand = { version = "0.8.5", optional = true, default-features = false, features = ["alloc", "getrandom"] }
+serde = { version = "1.0.225", default-features = false, features = ["derive", "alloc"] }
+uhlc = { version = "0.8.0", default-features = false }
+zenoh-buffers = { path = "../wz-zenoh-buffers", default-features = false }
+zenoh-keyexpr = { path = "../wz-zenoh-keyexpr", default-features = false }
+zenoh-macros = { path = "../wz-zenoh-macros" }
+zenoh-result = { path = "../wz-zenoh-result", default-features = false }
+
+[dev-dependencies]
+lazy_static = "1.5.0"
+rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
+serde_json = "1.0.145"
+
+[lints]
+workspace = true

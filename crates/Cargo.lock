@@ -323,6 +323,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
 
 [[package]]
+name = "const_format"
+version = "0.2.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3decb4d6965448659923544a634a0571ba44cede4e11ef15a5a317126840454"
+dependencies = [
+ "const_format_proc_macros",
+ "konst",
+]
+
+[[package]]
+name = "const_format_proc_macros"
+version = "0.2.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "941b570269a642506f08cb5b688c04bfa6cfd41a26f8bcdc49db8fd00c0ab659"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-xid",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -771,6 +792,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "humantime"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
+
+[[package]]
 name = "id-arena"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -903,6 +930,21 @@ checksum = "89d255a6b6ecd77bb93ce91de984d7039bff7503f500eb4851a1269732f22baf"
 dependencies = [
  "hashbrown 0.14.5",
 ]
+
+[[package]]
+name = "konst"
+version = "0.2.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "128133ed7824fcd73d6e7b17957c5eb7bacb885649bd8c69708b2331a10bcefb"
+dependencies = [
+ "konst_macro_rules",
+]
+
+[[package]]
+name = "konst_macro_rules"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
 
 [[package]]
 name = "lazy_static"
@@ -2419,6 +2461,9 @@ version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b62a645e3e4e6c85b7abe49b086aa3204119431f42b6123b0070419fb6e9d24e"
 dependencies = [
+ "humantime",
+ "lazy_static",
+ "log",
  "rand 0.8.6",
  "serde",
  "spin 0.10.0",
@@ -2881,6 +2926,7 @@ dependencies = [
  "zenoh-core",
  "zenoh-keyexpr",
  "zenoh-macros",
+ "zenoh-protocol",
  "zenoh-result",
  "zenoh-runtime",
 ]
@@ -3701,6 +3747,22 @@ dependencies = [
  "cc",
  "cmake",
  "dunce",
+]
+
+[[package]]
+name = "zenoh-protocol"
+version = "1.10.1"
+dependencies = [
+ "const_format",
+ "lazy_static",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "uhlc",
+ "zenoh-buffers",
+ "zenoh-keyexpr",
+ "zenoh-macros",
+ "zenoh-result",
 ]
 
 [[package]]

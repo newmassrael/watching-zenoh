@@ -23353,6 +23353,9 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh-keyexpr trees)" 12 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_keyexpr_tree || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh-protocol core)" 14 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_protocol_core || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-buffers)" 5 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_buffers || return 1

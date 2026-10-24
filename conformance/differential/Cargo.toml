@@ -41,6 +41,12 @@ up_keyexpr = { package = "zenoh-keyexpr", version = "=1.10.1", features = ["unst
 wz_keyexpr = { package = "zenoh-keyexpr", path = "../../crates/wz-zenoh-keyexpr", features = ["unstable", "internal"] }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
 serde_json = "1"
+# `zenoh-protocol`: the pair again, each over its own family crates (upstream's from the registry,
+# wz's by path) and each built with `unstable` and `internal`, which carry `CongestionControl::BlockFirst`
+# and the empty `Locator` and `EndPoint`, and with `test`, whose `rand()` constructors the shape test
+# runs on both.
+up_protocol = { package = "zenoh-protocol", version = "=1.10.1", features = ["unstable", "internal", "test"] }
+wz_protocol = { package = "zenoh-protocol", path = "../../crates/wz-zenoh-protocol", features = ["unstable", "internal", "test"] }
 # `zenoh-buffers`: the pair again, each over its own `zenoh-collections` (upstream's from the registry,
 # wz's by path, as for every family crate), built with `std`.
 up_buffers = { package = "zenoh-buffers", version = "=1.10.1" }

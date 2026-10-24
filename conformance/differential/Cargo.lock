@@ -49,6 +49,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "const_format"
+version = "0.2.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3decb4d6965448659923544a634a0571ba44cede4e11ef15a5a317126840454"
+dependencies = [
+ "const_format_proc_macros",
+ "konst",
+]
+
+[[package]]
+name = "const_format_proc_macros"
+version = "0.2.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "941b570269a642506f08cb5b688c04bfa6cfd41a26f8bcdc49db8fd00c0ab659"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-xid",
+]
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -117,6 +138,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "humantime"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -132,6 +159,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "konst"
+version = "0.2.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "128133ed7824fcd73d6e7b17957c5eb7bacb885649bd8c69708b2331a10bcefb"
+dependencies = [
+ "konst_macro_rules",
+]
+
+[[package]]
+name = "konst_macro_rules"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4933f3f57a8e9d9da04db23fb153356ecaf00cbd14aee46279c33dc80925c37"
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -142,6 +184,12 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "log"
+version = "0.4.34"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "memchr"
@@ -416,6 +464,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "spin"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -512,10 +566,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
+name = "uhlc"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b62a645e3e4e6c85b7abe49b086aa3204119431f42b6123b0070419fb6e9d24e"
+dependencies = [
+ "humantime",
+ "lazy_static",
+ "log",
+ "rand",
+ "serde",
+ "spin",
+]
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unicode-xid"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "version_check"
@@ -579,6 +653,8 @@ dependencies = [
  "zenoh-core 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-keyexpr 1.10.1",
  "zenoh-keyexpr 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zenoh-protocol 1.10.1",
+ "zenoh-protocol 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-result 1.10.1",
  "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-runtime 1.10.1",
@@ -589,6 +665,7 @@ dependencies = [
 name = "zenoh-buffers"
 version = "1.10.1"
 dependencies = [
+ "rand",
  "zenoh-collections 1.10.1",
 ]
 
@@ -598,6 +675,7 @@ version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "555a8169c9888fc5571f1b38d2843a63db786621e153abad1b075c40b20e83b4"
 dependencies = [
+ "rand",
  "zenoh-collections 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -688,6 +766,36 @@ dependencies = [
  "quote",
  "syn 2.0.119",
  "zenoh-keyexpr 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "zenoh-protocol"
+version = "1.10.1"
+dependencies = [
+ "const_format",
+ "rand",
+ "serde",
+ "uhlc",
+ "zenoh-buffers 1.10.1",
+ "zenoh-keyexpr 1.10.1",
+ "zenoh-macros 1.10.1",
+ "zenoh-result 1.10.1",
+]
+
+[[package]]
+name = "zenoh-protocol"
+version = "1.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4492192986df044627f33c8eeb8aa237fb4d3bbd2d8cc68bc7eee16748c2fb61"
+dependencies = [
+ "const_format",
+ "rand",
+ "serde",
+ "uhlc",
+ "zenoh-buffers 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zenoh-keyexpr 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zenoh-macros 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

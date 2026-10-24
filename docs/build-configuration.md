@@ -132,7 +132,10 @@ original reproduced by naming it. Three things follow from it:
   135 of 135 lines, held to upstream's by generated sequences of operations),
   `zenoh-buffers` (complete: the reader and writer traits, `BBuf`, `ZSlice` and `ZBuf`, 122 of 122
   default lines and 129 with `shared-memory`, held to upstream's by generated sequences of reads
-  and writes) and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
+  and writes),
+  `zenoh-protocol` (in progress: the core types and the scouting messages, 630 of 1,567
+  default lines; the common extensions and the zenoh, network and transport messages missing)
+  and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each
   crate against upstream's, a graph in which an upstream crate and the wz crate meet one type once

@@ -1,0 +1,155 @@
+// SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+//! The address a link is reached at: an endpoint without its configuration.
+
+use alloc::{borrow::ToOwned, string::String};
+use core::{convert::TryFrom, fmt, hash::Hash, str::FromStr};
+
+use zenoh_result::{Error as ZError, ZResult};
+
+use super::endpoint::*;
+
+/// A string that respects the [`Locator`] canon form: `<proto>/<address>[?<metadata>]`.
+///
+/// `<metadata>` is of the form `<key1>=<value1>;...;<keyN>=<valueN>` where keys are alphabetically sorted.
+#[derive(Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(into = "String")]
+#[serde(try_from = "String")]
+pub struct Locator(pub(super) EndPoint);
+
+impl Locator {
+    pub fn new<A, B, C>(protocol: A, address: B, metadata: C) -> ZResult<Self>
+    where
+        A: AsRef<str>,
+        B: AsRef<str>,
+        C: AsRef<str>,
+    {
+        let ep = EndPoint::new(protocol, address, metadata, "")?;
+        Ok(Self(ep))
+    }
+
+    pub fn protocol(&self) -> Protocol<'_> {
+        self.0.protocol()
+    }
+
+    pub fn protocol_mut(&mut self) -> ProtocolMut<'_> {
+        self.0.protocol_mut()
+    }
+
+    pub fn address(&self) -> Address<'_> {
+        self.0.address()
+    }
+
+    pub fn address_mut(&mut self) -> AddressMut<'_> {
+        self.0.address_mut()
+    }
+
+    pub fn metadata(&self) -> Metadata<'_> {
+        self.0.metadata()
+    }
+
+    pub fn metadata_mut(&mut self) -> MetadataMut<'_> {
+        self.0.metadata_mut()
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub fn to_endpoint(&self) -> EndPoint {
+        self.0.clone()
+    }
+
+    /// Constructs an uninitialized empty Locator.
+    #[zenoh_macros::internal]
+    pub fn empty() -> Self {
+        Locator(EndPoint::empty())
+    }
+}
+
+impl From<EndPoint> for Locator {
+    fn from(mut val: EndPoint) -> Self {
+        if let Some(cidx) = val.inner.find(CONFIG_SEPARATOR) {
+            val.inner.truncate(cidx);
+        }
+        Locator(val)
+    }
+}
+
+impl TryFrom<&str> for Locator {
+    type Error = ZError;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        Self::try_from(s.to_owned())
+    }
+}
+
+impl From<Locator> for String {
+    fn from(val: Locator) -> Self {
+        val.0.into()
+    }
+}
+
+impl TryFrom<String> for Locator {
+    type Error = ZError;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        let ep = EndPoint::try_from(s)?;
+        Ok(ep.into())
+    }
+}
+
+impl FromStr for Locator {
+    type Err = ZError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::try_from(s.to_owned())
+    }
+}
+
+impl fmt::Display for Locator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.as_str())
+    }
+}
+
+impl fmt::Debug for Locator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self}")
+    }
+}
+
+impl Locator {
+    #[cfg(feature = "test")]
+    #[doc(hidden)]
+    pub fn rand() -> Self {
+        EndPoint::rand().into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_locator_is_an_endpoint_without_its_configuration() {
+        let l: Locator = "tcp/localhost:7447?prio=1-3#iface=lo".parse().unwrap();
+        assert_eq!(l.as_str(), "tcp/localhost:7447?prio=1-3");
+        assert_eq!(l.to_endpoint().as_str(), "tcp/localhost:7447?prio=1-3");
+        assert_eq!(
+            (l.protocol().as_str(), l.address().as_str()),
+            ("tcp", "localhost:7447")
+        );
+        assert_eq!(l.metadata().get("prio"), Some("1-3"));
+        assert_eq!(
+            Locator::new("udp", "1.2.3.4:5", "rel=0")
+                .unwrap()
+                .to_string(),
+            "udp/1.2.3.4:5?rel=0"
+        );
+        assert!(Locator::try_from("nonsense").is_err());
+        let json = serde_json::to_string(&l).unwrap();
+        assert_eq!(serde_json::from_str::<Locator>(&json).unwrap(), l);
+    }
+}
