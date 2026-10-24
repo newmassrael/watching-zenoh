@@ -251,6 +251,23 @@ changelog that authorized the bump.
 - **Upstream-tracking**: pin set when the freertos-sys foundation lands.
   Bumps follow FreeRTOS-Kernel `V*` release tags rather than main HEAD.
 
+## vendor/mbedtls and vendor/tf-psa-crypto — Mbed TLS on its PSA Crypto line
+
+- **Origin**: https://github.com/zephyrproject-rtos/mbedtls and
+  https://github.com/zephyrproject-rtos/tf-psa-crypto, the Zephyr project's trees of
+  https://github.com/Mbed-TLS/mbedtls and https://github.com/Mbed-TLS/TF-PSA-Crypto.
+- **Commit pin**: `554163f6f` (Mbed TLS 4.1.0) and `2d8815936` (TF-PSA-Crypto 1.1.0), the
+  revisions the Zephyr workspace's `west.yml` pins, so the host and the kit run one code.
+- **License**: Apache-2.0 OR GPL-2.0-or-later, at the user's choice; this tree takes them under
+  Apache-2.0. Full text in `vendor/mbedtls/LICENSE` and `vendor/tf-psa-crypto/LICENSE`.
+- **Scope of use**: the fixed-memory profile's secure channel (decision D9 of
+  `docs/session-lifecycle-intent.md`). `crates/wz-tls-mbedtls` builds both through Mbed TLS's
+  own CMake under its configuration (`crates/wz-tls-mbedtls/config/`: TLS 1.3, P-256,
+  AES-128-GCM, one static arena) and links them with the channel's C side. A Zephyr image uses
+  the copy its workspace carries instead. `mldsa-native`, the third crypto module Zephyr pins,
+  is not carried: it is compiled only with ML-DSA on, which this configuration leaves off.
+- **Upstream-tracking**: bumps follow the Zephyr workspace's pin, so the two never differ.
+
 ## Generated output
 
 Source files under `out/<crate>/` (e.g. `out/wz-codecs/`,
