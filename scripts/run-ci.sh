@@ -10508,8 +10508,12 @@ layer_c1cb_cargo_test_init_ack_admission() {
 # names a subsystem itself, so all sixteen passed unchanged during the whole
 # period no production code named one. `subsystem_spawn_gate.py` (Layer C0,
 # pre-push gate 2t) is the static half; these are the executable half.
+#
+# R3486 -- 20 -> 21. `saturated_tx_does_not_starve_control_when_partitioned` holds every
+# tx worker and asks that a task on the control runtime still runs, the property the
+# keepalive timers' move to that runtime rests on.
 layer_c1cg_cargo_test_runtime_partition() {
-    _runci_guarded_test C1cg 20 \
+    _runci_guarded_test C1cg 21 \
         cargo test -p wz-runtime-tokio --test runtime_partition --quiet || return 1
 }
 
