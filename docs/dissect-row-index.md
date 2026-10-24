@@ -232,6 +232,26 @@ from. So the order is now:
 - 4b. Stream rows become index entries with their sparse facts, decoded again
   on demand under a bounded cache, their bytes read from the reassembled stream.
   This is the step where resident memory falls.
+  Landed: a list reads through `Messages` (the list and a `UnitBytes` source,
+  the flow's reassembled streams), keeps a TCP flow's own units as 40-byte
+  entries (D2) with SN verdicts other than continuous, fragment fates and
+  resynchronisations kept apart by produced-index and the context once per
+  change (D3), and keeps whole what it cannot read again (a datagram, a
+  WebSocket message, a decrypted record, a unit whose bytes a byte ceiling
+  released before it completed, and a row whose bytes are about to be released,
+  which `keep_whole_before` turns whole first). Every row's `RowHead` (the
+  record drain hands out, kind included) is answered without decoding, so drain,
+  the capture-order keys, the oldest-message probes and the node census decode
+  nothing but the Init and Join rows. The four selector-narrowed census planes
+  are one fold over one walk (`CensusFold`, D6). The gate holds a dissection
+  that keeps entries equal to one that keeps every message whole, row for row
+  and head for head, including under message and byte ceilings, and was
+  mutation-checked three ways. Measured with the section 2 instrument (median
+  of six alternating runs at 409,064 rows, three at 1,386,564): peak RSS 404 to
+  177 MB and 1,364 to 590 MB; heap after census 348 to 117 MiB and 1,355 to 444
+  MiB; replay 308 to 257 ms and 1,047 to 874 ms; census 210 to 166 ms and 803 to
+  551 ms; fields windows 2,185 to 2,590 ms (+19%) and 7,699 to 9,368 ms (+22%),
+  the price section 5 states. The bounded cache (D5) is not built: see section 7.
 - 3. The byte source, and the reassembled stream copy goes.
 - 4c. Datagram, serial and QUIC rows become index entries too, their bytes read
   from the source.
@@ -243,4 +263,12 @@ from. So the order is now:
   decided in step 5.
 - QUIC streams and the serial line produce rows outside the TCP segment map;
   their byte source is decided when step 3 reaches them.
-- The cache default is set from a measurement in step 4.
+- The cache (D5). Measured after 4b: a field window reads each of its rows three
+  times (the declaration pre-pass, the exchange pairing fold and the renderer's
+  list-order pass; the renderer's capture-order pass takes the rows its first
+  pass read, up to 8,192), and that is the +19% above. A cache inside the list
+  needs interior mutability, which would make `Dissection` lose `Sync`, a
+  public auto trait; a cache the reader owns has to be carried through the
+  enumeration doors the three readers walk. Which of the two, or one walk that
+  feeds the three as the census planes are fed, is decided with that
+  measurement in hand.
