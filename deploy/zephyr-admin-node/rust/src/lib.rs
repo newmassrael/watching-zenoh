@@ -92,6 +92,8 @@ mod fixed_client;
 mod fixed_get;
 #[cfg(all(role_admin, storage_fixed))]
 mod fixed_node;
+#[cfg(all(feature = "tls", role_client, storage_fixed))]
+mod fixed_tls;
 #[cfg(feature = "mac-cyt4bf")]
 mod mac_cyt4bf;
 #[cfg(feature = "t1s-lan865x")]

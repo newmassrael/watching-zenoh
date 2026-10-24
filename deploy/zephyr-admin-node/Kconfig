@@ -29,8 +29,19 @@ config WZ_CLIENT_ENDPOINT
 	default "udp/192.168.100.1:7447"
 	depends on WZ_ROLE_CLIENT
 	help
-	  `udp/<ipv4>:<port>`, the only scheme the node's dialer reads. It is read when the image is
+	  `udp/<ipv4>:<port>`, or `tls/<ipv4>:<port>` with WZ_TLS. It is read when the image is
 	  built: an endpoint longer than a locator row does not build.
+
+config WZ_TLS
+	bool "The client dials its router over the secure channel"
+	depends on WZ_ROLE_CLIENT && WZ_FIXED_MEMORY && WZ_NET_BACKEND_ZEPHYR_SOCKETS
+	depends on NET_TCP && MBEDTLS && PSA_CRYPTO
+	help
+	  The fixed-memory client dials `tls/`: TLS 1.3 with mutual authentication (decision D9 of
+	  docs/session-lifecycle-intent.md) through wz-tls-mbedtls over Zephyr's TCP, its memory the
+	  arena Zephyr gives Mbed TLS (CONFIG_MBEDTLS_HEAP_SIZE). The node generates its identity at
+	  start, prints its certificate as PEM for the router's operator to pin, and takes the zid
+	  its key names. overlays/t2g_client_tls.conf states the Mbed TLS configuration it needs.
 
 config WZ_IDLE_WAIT_MS
 	int "Longest the client's link sleeps when its session has nothing due, in milliseconds"

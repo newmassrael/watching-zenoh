@@ -196,6 +196,13 @@ fixed-client = [
 # `_COUNT`, ...) over the session and says the round trips on the console. Off, the client only
 # answers, as before. The queries are asked in the session's event, with no mailbox.
 get = ["fixed-client", "wz-session-mcu/query-get"]
+# The fixed client dials its router over the secure channel (`CONFIG_WZ_TLS`, decision D9 of
+# docs/session-lifecycle-intent.md): `tls/` through `wz-tls-mbedtls` over Zephyr's TCP
+# (`wz_runtime_zephyr::stream`). Its identity is a key it generates in the PSA key store at
+# start, its certificate is printed for the router's operator, and its zid is the one the key
+# names. The channel's C side is compiled by the image's CMake against Zephyr's own Mbed TLS, so
+# the crate is built without `vendored`.
+tls = ["fixed-client", "dep:wz-tls-mbedtls"]
 # The messages of one send window leave as one datagram (`CONFIG_WZ_TX_BATCHING`): a reply and the
 # final that ends its query are one frame. Off, every message is a datagram of its own.
 batching = [
@@ -244,6 +251,8 @@ wz-link-lwip = { path = "../../../crates/wz-link-lwip", optional = true }
 wz-session-lwip = { path = "../../../crates/wz-session-lwip", optional = true, default-features = false }
 wz-runtime-coop = { path = "../../../crates/wz-runtime-coop", optional = true, default-features = false }
 wz-runtime-zephyr = { path = "../../../crates/wz-runtime-zephyr", optional = true, default-features = false }
+# The secure channel (`tls`), on the slot profile, against the Mbed TLS the platform carries.
+wz-tls-mbedtls = { path = "../../../crates/wz-tls-mbedtls", optional = true, default-features = false, features = ["session-slot"] }
 # The SPI probe's two halves: the TC6 protocol, and the rules of the SCB master it
 # runs over. Only `CONFIG_WZ_T2G_SPI_PROBE` pulls the first in; either it or
 # `CONFIG_WZ_T1S` pulls in the second.

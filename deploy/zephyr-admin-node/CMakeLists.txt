@@ -58,6 +58,23 @@ if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
       endif()
       # The client asks (the getter every slot-profile node shares): the query, how many times and
       # how, stated here once as constants the Rust side checks when it compiles.
+      # The client dials over the secure channel (decision D9): the channel's C side is compiled
+      # here, against Zephyr's own Mbed TLS (the crate is built without its `vendored`), and the
+      # stream calls and the channel's calls are the Rust side's to find at the image link.
+      if(CONFIG_WZ_TLS)
+        list(APPEND backend_feature tls)
+        set(tls_src ${CMAKE_CURRENT_SOURCE_DIR}/../../crates/wz-tls-mbedtls)
+        target_sources(app PRIVATE ${tls_src}/csrc/wz_tls.c)
+        target_include_directories(app PRIVATE ${tls_src}/csrc)
+        target_include_directories(mbedtls_iface INTERFACE ${tls_src}/config/zephyr)
+        list(APPEND backend_undefined
+          connect send recv getpeername shutdown setsockopt
+          wz_tls_start wz_tls_arena_peak wz_tls_arena_peak_reset
+          wz_tls_identity_generate wz_tls_identity_zid wz_tls_identity_cert wz_tls_identity_free
+          wz_tls_session_open wz_tls_session_set_io_ctx wz_tls_session_handshake
+          wz_tls_session_peer_zid wz_tls_session_suite wz_tls_session_write wz_tls_session_read
+          wz_tls_session_pending wz_tls_session_close_notify wz_tls_session_free)
+      endif()
       if(CONFIG_WZ_GET)
         list(APPEND backend_feature get)
         list(APPEND backend_env

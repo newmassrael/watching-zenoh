@@ -33,7 +33,9 @@
 use core::fmt;
 
 use wz::runtime_zephyr::glue::{log, log_args, stack_usage, yield_us};
-use wz::runtime_zephyr::net::{await_board_ipv4, board_zid_fixed, ZephyrStack};
+use wz::runtime_zephyr::net::await_board_ipv4;
+#[cfg(not(feature = "tls"))]
+use wz::runtime_zephyr::net::{board_zid_fixed, ZephyrStack};
 use wz::runtime_zephyr::stack::StackWatch;
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
 use wz_runtime_coop::session_drive::SlotStack;
@@ -132,7 +134,10 @@ const IDLE_SLEEP: u32 = {
 };
 
 pub(crate) type Clock = ZephyrClock<TICK_HZ>;
+#[cfg(not(feature = "tls"))]
 type Stack = ZephyrStack;
+#[cfg(feature = "tls")]
+type Stack = crate::fixed_tls::Stack;
 
 /// The table of session slots this image places, as the node's storage holds it: one type for the
 /// assertion below and the probe.
@@ -255,13 +260,32 @@ pub fn run() -> i32 {
         log(c"wz: FAIL - the board's interface never got an IPv4 address");
         return 1;
     };
+    // Over the secure channel the node's zid is the one its key names (decision D1), and its
+    // certificate is printed for the router's operator to pin; otherwise the board derives it.
+    #[cfg(feature = "tls")]
+    let channel = match crate::fixed_tls::identity() {
+        Ok(channel) => channel,
+        Err(why) => {
+            log(why);
+            return 2;
+        }
+    };
+    #[cfg(feature = "tls")]
+    let identity = {
+        channel.certificate_pem(log_args);
+        NodeIdentity::new(&channel.zid(), key)
+    };
+    #[cfg(not(feature = "tls"))]
     let identity = board_zid_fixed().and_then(|(zid, len)| NodeIdentity::new(&zid[..len], key));
     let Some(identity) = identity else {
         log(c"wz: FAIL - the board gave no identity to derive a zenoh id from");
         return 1;
     };
 
+    #[cfg(not(feature = "tls"))]
     let stack = Stack::new(address, &NODE.rx, &NODE.tx);
+    #[cfg(feature = "tls")]
+    let stack = crate::fixed_tls::stack(address, &NODE.rx, &NODE.tx, channel);
     let stack = if IDLE_WAIT_MS > 0 {
         stack.with_idle_wait_ms(IDLE_WAIT_MS)
     } else {
