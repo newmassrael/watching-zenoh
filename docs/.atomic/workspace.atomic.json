@@ -284842,6 +284842,46 @@
         "A mutation test cannot see a leniency fault (wz then equals upstream): keep a hand-built class for every refusal, with its edge cases, and drive each by an injected fault one at a time when a batch shows fewer owners than faults."
       ]
     },
+    "Round 3576": {
+      "decision_summary": "Queries steps Q2b and Q2c: z_get on both engines. The cancellation token moves to the engine port, and SessionEngine gains get_on_wire over session-core's QueryOptions: one reply callback minted per leg, whose drop is that leg's end, each leg's undo recorded with the get's cancellation fan. The tokio engine implements it over its faces, and pico's get and querier ask through it. The cooperative engine asks one leg, to its link's peer, registered with the observer by the tokio engine's rules; its sink only queues owned replies and the leg's end, which the deliveries hand out with no lock held (D8). Deadlines are rounded up, swept every step, and bound the idle wait; a cancel drops the callback at once without a step; a lost link ends its legs. The querier stays on the tokio engine until the cooperative one has the queryable matching plane (Q2d).",
+      "changes_bullets": [
+        "wz-capi-port: cancellation.rs (moved from wz-capi-core, which re-exports it); ReplyCallback; SessionEngine::get_on_wire, None when an engine has no get.",
+        "wz-capi-core: engine_port implements get_on_wire over its query fan.",
+        "wz-capi-pico: get.rs and querier.rs ask through the port; query selects neither engine; the querier items need engine-tokio; hold_a_listener holds a queryable on demo/listener/**.",
+        "wz-capi-coop: feature query; engine/get.rs (event queue, leg-end guard); get_on_wire, cancel_get, deadline sweep in step, idle wait bounded by the next deadline, pending legs ended by close and link loss.",
+        "Tests: four coop get tests on the router stand-in (Answer and Silence commands); client_only_dials_a_listener asks the listener's queryable.",
+        "nondefault-tests-gate.sh: the coop row is query,queryable."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings clean: wz-capi-port, wz-capi-core (default, no-default), wz-capi-c; wz-capi-coop lib alone with none, query, queryable, and all targets with none, query, query+queryable; wz-capi-pico default, all-features, and engine-coop and engine-tokio each with link-udp+query and link-udp+query+queryable. Tests: wz-capi-coop 7 / 11 / 13 passed (none / query / both, three runs of both); wz-capi-port and wz-capi-pico pass. client_only_dials_a_listener against the full build's listener: 3 passed with queryable, 2 without, on each engine. The deadline test caught a get ending 0.3 ms early; the deadline is now rounded up.",
+        "C1bz counted with the lane's command: wz-capi-coop 0, wz-capi-port 0, wz-capi-pico 41, wz-capi-core 7, wz-capi-c 40, all at budget. capability_cost_gate: pico-client-coop 888951 of 895000, pico-client and pico-default in budget. The hook's round_fed_gates plus the prose and surface gates: 114 run, 0 failed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next: Q2d, the querier on the cooperative engine (it watches whether a queryable matches, a plane that engine lacks), and a CI lane for client_only_dials_a_listener (two invocations: the full build's example, then the client build on each engine). wz-runtime-tokio's C1bz budget is still 467 until watching-zenoh-17's writer_queue.rs fix lowers it."
+      ],
+      "publishable_decision_summary": "Queries steps Q2b and Q2c: z_get on both engines. The cancellation token moves to the engine port, and SessionEngine gains get_on_wire over session-core's QueryOptions: one reply callback minted per leg, whose drop is that leg's end, each leg's undo recorded with the get's cancellation fan. The tokio engine implements it over its faces, and pico's get and querier ask through it. The cooperative engine asks one leg, to its link's peer, registered with the observer by the tokio engine's rules; its sink only queues owned replies and the leg's end, which the deliveries hand out with no lock held (D8). Deadlines are rounded up, swept every step, and bound the idle wait; a cancel drops the callback at once without a step; a lost link ends its legs. The querier stays on the tokio engine until the cooperative one has the queryable matching plane (Q2d).",
+      "publishable_changes_bullets": [
+        "wz-capi-port: cancellation.rs (moved from wz-capi-core, which re-exports it); ReplyCallback; SessionEngine::get_on_wire, None when an engine has no get.",
+        "wz-capi-core: engine_port implements get_on_wire over its query fan.",
+        "wz-capi-pico: get.rs and querier.rs ask through the port; query selects neither engine; the querier items need engine-tokio; hold_a_listener holds a queryable on demo/listener/**.",
+        "wz-capi-coop: feature query; engine/get.rs (event queue, leg-end guard); get_on_wire, cancel_get, deadline sweep in step, idle wait bounded by the next deadline, pending legs ended by close and link loss.",
+        "Tests: four coop get tests on the router stand-in (Answer and Silence commands); client_only_dials_a_listener asks the listener's queryable.",
+        "nondefault-tests-gate.sh: the coop row is query,queryable."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings clean: wz-capi-port, wz-capi-core (default, no-default), wz-capi-c; wz-capi-coop lib alone with none, query, queryable, and all targets with none, query, query+queryable; wz-capi-pico default, all-features, and engine-coop and engine-tokio each with link-udp+query and link-udp+query+queryable. Tests: wz-capi-coop 7 / 11 / 13 passed (none / query / both, three runs of both); wz-capi-port and wz-capi-pico pass. client_only_dials_a_listener against the full build's listener: 3 passed with queryable, 2 without, on each engine. The deadline test caught a get ending 0.3 ms early; the deadline is now rounded up.",
+        "C1bz counted with the lane's command: wz-capi-coop 0, wz-capi-port 0, wz-capi-pico 41, wz-capi-core 7, wz-capi-c 40, all at budget. capability_cost_gate: pico-client-coop 888951 of 895000, pico-client and pico-default in budget. The hook's round_fed_gates plus the prose and surface gates: 114 run, 0 failed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next: Q2d, the querier on the cooperative engine (it watches whether a queryable matches, a plane that engine lacks), and a CI lane for client_only_dials_a_listener (two invocations: the full build's example, then the client build on each engine). wz-runtime-tokio's C1bz budget is still 467 until watching-zenoh-17's writer_queue.rs fix lowers it."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
