@@ -347,8 +347,15 @@ handshake derived, which is the binding D1 requires.
       reconnect seams hand on their live link's answer, so a reconnecting
       session over TLS is verified by the link it runs on now. Before this
       the seams answered nothing and such a session was never verified.
-    - Not yet: the verbs back on the cooperative runtime, a zenohd process
-      over the link, and the kit image over the crate.
+    - The verbs are back on the cooperative profile, through the channel
+      (Round 3513). The runtime offers no lifecycle feature, because it
+      cannot promise a channel. `wz-tls-mbedtls` offers
+      `session-close-ingress` and always states `secure-channel`, so every
+      cooperative build with the verbs has the channel too. The guard gate
+      builds the runtime with the verbs and no channel, which is refused,
+      and the channel crate with the verbs, which builds.
+    - Not yet: a zenohd process over the link, and the kit image over the
+      crate, which is the witness step 1b names.
   - What this leaves open:
     - Mbed TLS 4.1 does not implement TLS 1.3 KeyUpdate. A KeyUpdate from
       the peer ends the session with an unexpected-message alert: the
@@ -405,6 +412,11 @@ Each step lands with its own done-when; sizes are not estimated here.
      `lifecycle-channel-guard-gate.sh` builds the refused combinations, and it
      fails when the guard is removed. Left of 1b: D9's channel on the
      fixed-memory profile, which brings the verbs back to it.
+   - **1b, the channel on the fixed-memory profile (Rounds 3502 to 3513).**
+     `wz-tls-mbedtls` behind the stream port, the `tls/` locator kind, the
+     proven key read by the session on every profile, and the verbs offered
+     by the channel crate (D9 above). Left of 1b: a fixed-memory image and a
+     router verifying each other over the channel.
 2. **D4.** The expected zid on every dial path. Done when a dial to a locator
    that answers with another zid closes at InitAck on AP, the C ABI and the MCU
    host.
