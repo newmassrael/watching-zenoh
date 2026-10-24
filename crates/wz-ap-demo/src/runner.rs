@@ -4081,21 +4081,30 @@ impl wz::runtime_tokio::lifecycle_query::SessionLifecycleAuthority for ClosePerm
     fn admits_close(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
         self.0
     }
+
+    /// A reset closes the session too (once per generation), so the permit to
+    /// close is the permit to reset: the demo has no policy that tells them apart.
+    fn admits_reset(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
+        self.0
+    }
 }
 
-/// Host the session lifecycle queries -- the close query and the capability query
+/// Host the session lifecycle queries -- the close, reset and capability queries
 /// (`wz_session_core::lifecycle_query`) -- on a forwarder.
 ///
 /// `register` is the forwarder's `register_local_queryable`, passed in because the
 /// peer and the router are two types with one method of that shape. One answerer
-/// serves both patterns, so the two queries cannot disagree about who this node is
-/// or what it permits.
+/// serves every pattern, so the queries cannot disagree about who this node is or
+/// what it permits. `intent` is what a close withdraws the peer from (decision D6):
+/// the face loop's reconcile channel on a host that has one, `NoIntent` on one
+/// that dials nobody again.
 #[cfg(feature = "session-close-ingress")]
-fn host_session_lifecycle<D, E>(
+fn host_session_lifecycle<D, I, E>(
     zid_hex: &str,
     whatami: &str,
     permit: bool,
     directory: D,
+    intent: I,
     mut register: impl FnMut(
         &str,
         Box<
@@ -4107,16 +4116,14 @@ fn host_session_lifecycle<D, E>(
     ) -> Result<usize, E>,
 ) where
     D: wz::runtime_tokio::lifecycle_query::SessionDirectory + 'static,
+    I: wz::runtime_tokio::lifecycle_query::PeerIntent + 'static,
     E: std::fmt::Debug,
 {
     use wz::runtime_tokio::lifecycle_query::LifecycleQueries;
     use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
-    let queries = std::rc::Rc::new(LifecycleQueries::new(
-        zid_hex,
-        whatami,
-        ClosePermit(permit),
-        directory,
-    ));
+    let queries = std::rc::Rc::new(
+        LifecycleQueries::new(zid_hex, whatami, ClosePermit(permit), directory).with_intent(intent),
+    );
     for pattern in queries.patterns() {
         let answerer = std::rc::Rc::clone(&queries);
         let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
@@ -4134,7 +4141,7 @@ fn host_session_lifecycle<D, E>(
         }
     }
     log::info!(
-        "wz-ap-demo {whatami}: session close {}",
+        "wz-ap-demo {whatami}: session close and reset {}",
         if permit {
             "PERMITTED (--session-close-permit)"
         } else {
@@ -5056,6 +5063,9 @@ async fn run_peer_until(
             params.whatami.to_str(),
             session_close_permit,
             forwarder.lifecycle_directory(),
+            // The peer's loop holds no intent it is told of at run time: it dials
+            // its static connect list and the peers gossip names.
+            wz::runtime_tokio::lifecycle_query::NoIntent,
             |pattern, handler| forwarder.register_local_queryable(pattern, true, handler),
         );
     }
@@ -7018,11 +7028,19 @@ async fn run_router_hat_until(
     // peer arm for what is hosted and what the permit decides.
     #[cfg(feature = "session-close-ingress")]
     if session_lifecycle {
+        // Decision D6 — the router's loop holds its connect endpoints by their
+        // machines, so a close withdraws the peer there and it is not dialled
+        // again; without the reconcile there is no intent to withdraw.
+        #[cfg(feature = "router-connect-reconcile")]
+        let intent = wz::runtime_tokio::accept_loop::LoopIntent(reconcile_tx.clone());
+        #[cfg(not(feature = "router-connect-reconcile"))]
+        let intent = wz::runtime_tokio::lifecycle_query::NoIntent;
         host_session_lifecycle(
             &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
             params.whatami.to_str(),
             session_close_permit,
             forwarder.lifecycle_directory(),
+            intent,
             |pattern, handler| {
                 forwarder.register_local_queryable(pattern, true, handler);
                 Ok::<usize, std::convert::Infallible>(0)

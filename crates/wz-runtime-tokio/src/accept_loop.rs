@@ -474,6 +474,43 @@ pub enum ConnectReconcile {
         /// The locators the graph holds for the node, as the node advertised them.
         locators: Vec<String>,
     },
+    /// Decision D6 — take a NODE out of the intent: a lifecycle `close`. Every
+    /// machine that holds it is stopped — its own, and each configured
+    /// endpoint's whose last session reached it — so no session to it is
+    /// dialled again until an `open` or a connect-list edit names it. Its live
+    /// sessions are closed by the close itself, not by this request.
+    #[cfg(feature = "session-close-ingress")]
+    Withdraw {
+        /// The node's zid in its sixteen-byte form.
+        zid: DirectoryZid,
+    },
+}
+
+/// Decision D6 — the intent a lifecycle `close` withdraws a peer from: the
+/// loop's peers ([`crate::loop_peers`]), reached over the loop's reconcile
+/// channel. A host that holds the sender wraps it in this and hands it to the
+/// lifecycle queries as their intent.
+#[cfg(all(
+    feature = "router-connect-reconcile",
+    feature = "session-close-ingress"
+))]
+#[derive(Debug, Clone)]
+pub struct LoopIntent(pub ReconcileSender);
+
+#[cfg(all(
+    feature = "router-connect-reconcile",
+    feature = "session-close-ingress"
+))]
+impl wz_session_core::lifecycle_query::PeerIntent for LoopIntent {
+    fn withdraw(&self, peer_zid: &[u8]) {
+        let Some(zid) = wz_session_core::credential_identity::zid_from_wire(peer_zid) else {
+            log::warn!("lifecycle close: {peer_zid:02x?} is not a zid; no intent is withdrawn");
+            return;
+        };
+        if self.0.send(ConnectReconcile::Withdraw { zid }).is_err() {
+            log::warn!("lifecycle close: the face loop is gone; no intent is withdrawn");
+        }
+    }
 }
 
 /// The payload alias a feature-off build still needs for the channel types to
@@ -533,6 +570,12 @@ pub enum ConnectPlan {
         /// The locators the graph holds for the node, as the node advertised them.
         locators: Vec<String>,
     },
+    /// A node out of the intent (decision D6).
+    #[cfg(feature = "session-close-ingress")]
+    Withdraw {
+        /// The node's zid in its sixteen-byte form.
+        zid: DirectoryZid,
+    },
 }
 
 /// R2671 (open-debt item 770) — FOLD one [`ConnectReconcile`] into the plan the
@@ -561,6 +604,8 @@ pub fn fold_connect_reconcile(
         ConnectReconcile::AddNode { zid, locators } => {
             return ConnectPlan::Node { zid, locators };
         }
+        #[cfg(feature = "session-close-ingress")]
+        ConnectReconcile::Withdraw { zid } => return ConnectPlan::Withdraw { zid },
     };
     // R2233 — fold each through the ONE classification and refuse a member with
     // no pre-handshake identity, exactly as the startup seed does. Keyed by the
@@ -3000,16 +3045,6 @@ where
                                                 peer_zid: peer_zid.clone(),
                                                 live_links,
                                             });
-                                            ml_faces.insert(id, (peer_zid, joined.clone()));
-                                            // R311y219b — tell the forwarder this
-                                            // joined link's inbound (which arrives
-                                            // tagged with its OWN id, never
-                                            // `register`ed) maps to the PRIMARY
-                                            // registered face, so a routing forwarder
-                                            // delivers its data/control instead of
-                                            // dropping it at the faces.get gate. A
-                                            // no-op for observation-only forwarders.
-                                            forwarder.register_joined(id, primary_id, &joined);
                                             // Decision D5 — an endpoint whose dial
                                             // joined a session is held by that
                                             // session's face, and is lost with it;
@@ -3020,9 +3055,20 @@ where
                                                     id,
                                                     crate::loop_peers::DialEnd::AlreadyHeld {
                                                         held: primary_id,
+                                                        remote: wz_session_core::credential_identity::zid_from_wire(&peer_zid),
                                                     }
                                                 );
                                             }
+                                            ml_faces.insert(id, (peer_zid, joined.clone()));
+                                            // R311y219b — tell the forwarder this
+                                            // joined link's inbound (which arrives
+                                            // tagged with its OWN id, never
+                                            // `register`ed) maps to the PRIMARY
+                                            // registered face, so a routing forwarder
+                                            // delivers its data/control instead of
+                                            // dropping it at the faces.get gate. A
+                                            // no-op for observation-only forwarders.
+                                            forwarder.register_joined(id, primary_id, &joined);
                                             driving.push(Box::pin(drive_joined_face(
                                                 face, opened, joined, forwarder,
                                             ))
@@ -3044,6 +3090,7 @@ where
                                                     id,
                                                     crate::loop_peers::DialEnd::AlreadyHeld {
                                                         held: primary_id,
+                                                        remote: wz_session_core::credential_identity::zid_from_wire(&peer_zid),
                                                     }
                                                 );
                                             }
@@ -3134,6 +3181,7 @@ where
                                             Some((held, _)) => {
                                                 crate::loop_peers::DialEnd::AlreadyHeld {
                                                     held: *held,
+                                                    remote: wz_session_core::credential_identity::zid_from_wire(z),
                                                 }
                                             }
                                             // Held by the forwarder alone, by no face
@@ -3235,7 +3283,13 @@ where
                         // unheld.
                         #[cfg(feature = "router-connect-reconcile")]
                         if peer_dial {
-                            if !peer_dial_ended!(id, crate::loop_peers::DialEnd::Established) {
+                            let end = crate::loop_peers::DialEnd::Established {
+                                remote: face
+                                    .peer_zid
+                                    .as_deref()
+                                    .and_then(wz_session_core::credential_identity::zid_from_wire),
+                            };
+                            if !peer_dial_ended!(id, end) {
                                 continue;
                             }
                             #[cfg(feature = "session-close-ingress")]
@@ -3677,6 +3731,14 @@ where
                             );
                             let cx = peer_cx!();
                             let actions = peers.open_node(zid, &cx, &mut next_id);
+                            take_peer_actions!(actions);
+                        }
+                        // Decision D6 — a lifecycle `close`: every machine that
+                        // holds the node is stopped, so it is not dialled again.
+                        #[cfg(feature = "session-close-ingress")]
+                        ConnectPlan::Withdraw { zid } => {
+                            let cx = peer_cx!();
+                            let actions = peers.withdraw(&zid, &cx, &mut next_id);
                             take_peer_actions!(actions);
                         }
                     }
@@ -4190,7 +4252,9 @@ mod tests {
                     peers.set_endpoints(targets, replace, &cx, next_id)
                 }
                 #[cfg(feature = "session-close-ingress")]
-                ConnectPlan::Node { .. } => panic!("an endpoint request plans no node"),
+                ConnectPlan::Node { .. } | ConnectPlan::Withdraw { .. } => {
+                    panic!("an endpoint request plans no node")
+                }
             }
         };
 
@@ -4283,7 +4347,9 @@ mod tests {
                 assert_eq!(targets[0].key, MeshDialKey::Ip(addr));
                 assert_eq!(targets[0].expected_zid, None, "a locator names no node");
             }
-            ConnectPlan::Node { .. } => panic!("an add of locators plans no node"),
+            ConnectPlan::Node { .. } | ConnectPlan::Withdraw { .. } => {
+                panic!("an add of locators plans no node")
+            }
         }
 
         let handed = fold_connect_reconcile(

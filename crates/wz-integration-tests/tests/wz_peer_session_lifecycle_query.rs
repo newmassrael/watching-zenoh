@@ -164,8 +164,8 @@ fn wz_peer_session_lifecycle_close_query_closes_the_session_and_answers() {
     // CAPABILITY: the node says which verbs it has.
     let verbs = ask(&addr_a, &verbs_key, &mut a);
     assert!(
-        verbs.contains(r#"\"verbs\":[\"close\"]"#),
-        "the capability query did not list the close verb:\n{verbs}"
+        verbs.contains(r#"\"verbs\":[\"close\",\"reset\"]"#),
+        "the capability query did not list the close and reset verbs:\n{verbs}"
     );
 
     // CLOSE: the verdict, then the effect.
@@ -204,7 +204,7 @@ fn wz_peer_session_lifecycle_close_without_the_permit_is_refused_with_a_reason()
     // The node knows the verb whether or not it permits it...
     let verbs = ask(&addr_a, &verbs_key, &mut a);
     assert!(
-        verbs.contains(r#"\"verbs\":[\"close\"]"#),
+        verbs.contains(r#"\"verbs\":[\"close\",\"reset\"]"#),
         "the capability query is about the node's verbs, not the permit:\n{verbs}"
     );
     // ...and refuses to run it, saying why, before it reads any session.

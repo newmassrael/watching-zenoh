@@ -14,7 +14,10 @@
 //!   dial fails as a mismatch (decision D4); the machine is refused
 //!   (`IdentityMismatch`), so it does not dial again;
 //! - a zid at a port nobody listens on: every attempt fails, and the machine
-//!   backs off and dials again on the retry schedule.
+//!   backs off and dials again on the retry schedule;
+//! - the far node's zid, withdrawn once its face is up (a lifecycle `close`,
+//!   decision D6): the machine closes the session, and the node is not dialled
+//!   again although the retry wait is far shorter than the run.
 
 #![cfg(all(
     feature = "router-connect-reconcile",
@@ -88,12 +91,20 @@ async fn shutdown_on(mut rx: watch::Receiver<bool>) {
 #[derive(Debug, Clone)]
 enum Seen {
     Up(Option<Vec<u8>>),
+    Down,
     Failed { mismatch: bool },
 }
 
 /// Run the node under test, told to hold `zid` at `target`, beside a far node
-/// listening as `FAR`, for `window`; return what its loop reported.
-async fn hold(zid: [u8; 4], target: Option<SocketAddr>, window: Duration) -> Vec<Seen> {
+/// listening as `FAR`, for `window`; return what its loop reported. With
+/// `withdraw_on_up`, the node is withdrawn from the intent the moment a face
+/// comes up, as a lifecycle `close` withdraws it.
+async fn hold(
+    zid: [u8; 4],
+    target: Option<SocketAddr>,
+    window: Duration,
+    withdraw_on_up: bool,
+) -> Vec<Seen> {
     let far_listener = BoundListener::Tcp(
         bind_tcp(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -126,6 +137,7 @@ async fn hold(zid: [u8; 4], target: Option<SocketAddr>, window: Duration) -> Vec
     .expect("the loop's channel");
     let seen: Arc<StdMutex<Vec<Seen>>> = Arc::new(StdMutex::new(Vec::new()));
     let sink = seen.clone();
+    let withdraw = tx.clone();
     let mut near_params = fixture_session_init_params();
     near_params.zid = NEAR.to_vec();
     let near = peer_loop(
@@ -137,7 +149,15 @@ async fn hold(zid: [u8; 4], target: Option<SocketAddr>, window: Duration) -> Vec
         move |event: &AcceptEvent| {
             let mut seen = sink.lock().expect("seen");
             match event {
-                AcceptEvent::FaceUp(face) => seen.push(Seen::Up(face.peer_zid.clone())),
+                AcceptEvent::FaceUp(face) => {
+                    seen.push(Seen::Up(face.peer_zid.clone()));
+                    if withdraw_on_up {
+                        withdraw
+                            .send(ConnectReconcile::Withdraw { zid: sixteen(zid) })
+                            .expect("the loop's channel");
+                    }
+                }
+                AcceptEvent::FaceDown(..) => seen.push(Seen::Down),
                 AcceptEvent::FaceFailed { cause, .. } => seen.push(Seen::Failed {
                     mismatch: matches!(cause, OpenError::InitAckPeerMismatch),
                 }),
@@ -163,16 +183,34 @@ async fn hold(zid: [u8; 4], target: Option<SocketAddr>, window: Duration) -> Vec
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_node_opened_by_its_own_zid_is_held() {
-    let seen = hold(FAR, None, Duration::from_millis(1500)).await;
+    let seen = hold(FAR, None, Duration::from_millis(1500), false).await;
     assert!(
         matches!(seen.as_slice(), [Seen::Up(Some(zid))] if zid.as_slice() == FAR),
         "one face, to the far node: {seen:?}"
     );
 }
 
+/// Decision D6 — a withdrawn node's session is closed by its machine, and the
+/// loss is nobody's to retry: with a 150 ms retry wait in a 1.5 s run, a
+/// machine that still held the node would have brought a second face up.
+#[tokio::test(flavor = "current_thread")]
+async fn a_withdrawn_node_is_closed_and_not_dialled_again() {
+    let seen = hold(FAR, None, Duration::from_millis(1500), true).await;
+    assert!(
+        matches!(seen.as_slice(), [Seen::Up(Some(zid)), Seen::Down] if zid.as_slice() == FAR),
+        "one face, closed by the withdrawal, and no second: {seen:?}"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn a_node_another_answers_for_is_refused_and_not_dialled_again() {
-    let seen = hold([0xb0, 0xb1, 0xb2, 0xb3], None, Duration::from_millis(1500)).await;
+    let seen = hold(
+        [0xb0, 0xb1, 0xb2, 0xb3],
+        None,
+        Duration::from_millis(1500),
+        false,
+    )
+    .await;
     assert!(
         matches!(seen.as_slice(), [Seen::Failed { mismatch: true }]),
         "one dial, closed at the InitAck, and no retry of a refused node: {seen:?}"
@@ -182,7 +220,13 @@ async fn a_node_another_answers_for_is_refused_and_not_dialled_again() {
 #[tokio::test(flavor = "current_thread")]
 async fn an_unreachable_node_is_dialled_again_on_the_retry_schedule() {
     let refusing = wz_runtime_tokio_test_support::refusing_port();
-    let seen = hold(FAR, Some(refusing.addr()), Duration::from_millis(1500)).await;
+    let seen = hold(
+        FAR,
+        Some(refusing.addr()),
+        Duration::from_millis(1500),
+        false,
+    )
+    .await;
     assert!(
         seen.len() >= 3
             && seen

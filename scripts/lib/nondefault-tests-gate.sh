@@ -204,8 +204,10 @@ router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast
     # same feature list as the row above, which is what the opener's `cfg(all(..))`
     # names. The planner's own unit tests (`loop_peers`, since the configured
     # endpoints joined it) are gated as the connect reconcile is, and the row lists
-    # that module's `cfg(all(..))` whole.
-    "wz-runtime-tokio|hook|routing-accept,router-connect-reconcile|loop_peers::"
+    # that module's `cfg(all(..))` whole, with `session-close-ingress` beside it:
+    # a `close` withdrawing a peer (decision D6, Round 3579) is that seam's, and so
+    # are the planner's tests of it.
+    "wz-runtime-tokio|hook|routing-accept,router-connect-reconcile,session-close-ingress|loop_peers::"
     "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
 router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast|\
 accept_loop::tests::an_added_node_is_handed_to_the_planner_and_added_locators_name_no_node"

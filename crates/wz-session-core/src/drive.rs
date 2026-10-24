@@ -2340,10 +2340,21 @@ pub struct LifecycleKey<'a> {
     pub whatami: &'a str,
     /// The verb: `close`, and later its siblings.
     pub verb: &'a str,
+    /// The verb's argument, for the one verb that takes one: `reset`'s
+    /// generation, `@/<zid>/<whatami>/session/reset/<generation>/<peer-zid>`
+    /// (decision D6 of `docs/session-lifecycle-intent.md`). `None` for every
+    /// other verb.
+    pub argument: Option<&'a str>,
     /// WHICH session the verb acts on — the `<peer-zid>` chunk, and the reason
     /// the target is in the key instead of the payload.
     pub peer_zid: &'a str,
 }
+
+/// The verb whose key carries an argument, its generation (decision D6): a
+/// reset is the one verb that is not idempotent by nature, so a duplicate is
+/// told apart by the generation it carries.
+#[cfg(feature = "session-close-ingress")]
+pub const RESET_VERB: &str = "reset";
 
 #[cfg(feature = "session-close-ingress")]
 impl<'a> LifecycleKey<'a> {
@@ -2357,6 +2368,11 @@ impl<'a> LifecycleKey<'a> {
     ///
     /// No chunk may be empty: `@//peer/session/close/x` names no node, and a
     /// blank target is the shape most likely to be read as "all of them".
+    ///
+    /// Decision D6 — `reset` alone takes one more chunk, its generation, between
+    /// the verb and the target. Which verb takes an argument is the grammar's,
+    /// not the caller's, so a seven-chunk key of any other verb is refused as
+    /// one chunk long.
     pub fn parse(keyexpr: &'a str) -> Option<Self> {
         let mut chunks = keyexpr.split('/');
         let at = chunks.next()?;
@@ -2364,6 +2380,11 @@ impl<'a> LifecycleKey<'a> {
         let whatami = chunks.next()?;
         let session = chunks.next()?;
         let verb = chunks.next()?;
+        let argument = if verb == RESET_VERB {
+            Some(chunks.next()?)
+        } else {
+            None
+        };
         let peer_zid = chunks.next()?;
         if chunks.next().is_some() {
             return None;
@@ -2371,13 +2392,19 @@ impl<'a> LifecycleKey<'a> {
         if at != "@" || session != "session" {
             return None;
         }
-        if node_zid.is_empty() || whatami.is_empty() || verb.is_empty() || peer_zid.is_empty() {
+        if node_zid.is_empty()
+            || whatami.is_empty()
+            || verb.is_empty()
+            || peer_zid.is_empty()
+            || argument.is_some_and(str::is_empty)
+        {
             return None;
         }
         Some(Self {
             node_zid,
             whatami,
             verb,
+            argument,
             peer_zid,
         })
     }
@@ -2408,6 +2435,19 @@ pub trait SessionLifecycleAuthority {
     fn admits_open(&self, _key: &LifecycleKey<'_>) -> bool {
         false
     }
+
+    /// Decision D6 — whether the RESET command this key carries may run: close
+    /// the sessions with the peer once for the key's generation, leaving the
+    /// peer in the node's intent so its machine connects again.
+    ///
+    /// Defaulted to `false` for the reason [`Self::admits_open`] is: an
+    /// authority written before the verb existed was never asked about it. A
+    /// third method rather than a reading of `admits_close`, because "this
+    /// session may be torn down for good" and "this session may be cycled"
+    /// are two permissions a policy can mean to grant apart.
+    fn admits_reset(&self, _key: &LifecycleKey<'_>) -> bool {
+        false
+    }
 }
 
 #[cfg(feature = "session-close-ingress")]
@@ -2418,6 +2458,10 @@ impl<A: SessionLifecycleAuthority + ?Sized> SessionLifecycleAuthority for &A {
 
     fn admits_open(&self, key: &LifecycleKey<'_>) -> bool {
         (**self).admits_open(key)
+    }
+
+    fn admits_reset(&self, key: &LifecycleKey<'_>) -> bool {
+        (**self).admits_reset(key)
     }
 }
 
@@ -3071,6 +3115,28 @@ mod lifecycle_key_tests {
         assert_eq!(close.verb, "close");
         assert_eq!(open.verb, "open");
         assert_eq!(close.peer_zid, open.peer_zid);
+        assert_eq!(close.argument, None);
+    }
+
+    // Decision D6 — `reset` alone carries its generation between the verb and
+    // the target; a reset without one, or with an empty one, is not the grammar.
+    #[test]
+    fn a_reset_carries_its_generation_and_no_other_verb_carries_one() {
+        let reset = LifecycleKey::parse("@/node-a/peer/session/reset/7/peer-b").expect("reset");
+        assert_eq!(reset.verb, "reset");
+        assert_eq!(reset.argument, Some("7"));
+        assert_eq!(reset.peer_zid, "peer-b");
+        for keyexpr in [
+            "@/node-a/peer/session/reset/peer-b",
+            "@/node-a/peer/session/reset//peer-b",
+            "@/node-a/peer/session/reset/7/peer-b/extra",
+            "@/node-a/peer/session/close/7/peer-b",
+        ] {
+            assert!(
+                LifecycleKey::parse(keyexpr).is_none(),
+                "`{keyexpr}` must not parse as a lifecycle key"
+            );
+        }
     }
 }
 

@@ -267,6 +267,6 @@ fn the_capability_query_lists_close_whatever_the_authority_says() {
         let node = node(permit, &actions);
         let (answered, bodies) = ask(&node, &format!("@/{NODE}/peer/session/verbs"));
         assert_eq!(answered, Answered::Verbs);
-        assert_eq!(bodies, vec![r#"{"verbs":["close"]}"#]);
+        assert_eq!(bodies, vec![r#"{"verbs":["close","reset"]}"#]);
     }
 }

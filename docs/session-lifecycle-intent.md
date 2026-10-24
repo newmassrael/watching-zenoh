@@ -660,9 +660,42 @@ Each step lands with its own done-when; sizes are not estimated here.
      face that failed at the dropped router's address) rather than a log
      line announcing one, and the multilink dial-side fixture dials its
      node at two endpoints.
-   - Left of D5: the `close` verb reaches the node's machine as
-     `manual.stop`; that is D6's intent.
+   - D5 is done on AP: every peer the face loop is told to hold, by zid or by
+     locator, is held by its machine. The `close` verb reaching the machine
+     as `manual.stop` is D6's.
 5. **D6.** Intent and status, `reset` with a generation, and the status GET.
+   - **6a, close withdraws and reset is once per generation (Round 3579).**
+     The close and reset verbs are queries (`wz_session_core::lifecycle_query`),
+     where a reply says what was done.
+     - A close takes the peer out of the intent before it orders the
+       sessions closed. The intent is a port, `PeerIntent`, apart from the
+       sessions' `SessionDirectory`. On AP the face loop's reconcile channel
+       implements it: `ConnectReconcile::Withdraw` reaches
+       `LoopPeers::withdraw`, which stops every machine that holds the node
+       (`manual.stop`). That is the node's own machine and each configured
+       endpoint's whose last session reached it. An endpoint has no zid of
+       its own, so the planner keeps the zid each peer's last session named.
+       A held session is closed by the machine's `close_session`, a running
+       dial is dropped, and a wait is cancelled, its timer's generation no
+       longer the peer's. The machine stays `Idle` until an `open` or a
+       connect-list edit names the peer again.
+     - `reset/<generation>` is the one verb whose key carries an argument,
+       and the grammar (`LifecycleKey::parse`) says so, so a seven-chunk key
+       of any other verb is still refused. The answerer keeps the latest
+       generation taken per peer. A generation no later than it answers
+       `duplicate` and closes nothing; a later one orders the sessions closed
+       and leaves the intent, so the peer's machine backs off and dials
+       again. A generation is taken even when no session was found, so its
+       retransmission after the peer is back closes nothing.
+     - The authority gains `admits_reset`, defaulted to refuse. The
+       capability document lists `close` and `reset`. The ap-demo router hands
+       its reconcile sender as the intent; the peer host has no run-time
+       intent and says `NoIntent`.
+     Witness: the reset and close-withdraw tests of `lifecycle_query`, the
+     grammar's reset arm, the planner's two withdraw tests, and
+     `node_peer_open_e2e`'s withdrawn node: one face, closed by the
+     withdrawal, and none after it, where the retry wait is a tenth of the
+     run.
 6. **The MCU opener** over `SessionHost`, `wz-session-lwip` forwarding the
    feature, and a witness on the fixed-memory image.
 7. **D7** transports 2 and 3 as values of the build configuration axis.

@@ -11,15 +11,23 @@
 //! Push has no reply path, so a caller could not tell a close that ran from one
 //! that was refused or aimed at nobody. This is the same verb asked as a GET, which has one.
 //!
-//! # The two queries
+//! # The three queries
 //!
-//! * `GET @/<zid>/<whatami>/session/close/<peer-zid>` orders EVERY session this
-//!   node holds with that peer closed and answers one JSON object:
-//!   `{"verdict":"closing","links":N}`, `{"verdict":"already_closed"}`,
-//!   `{"verdict":"not_found"}` or `{"verdict":"refused","reason":"..."}`.
-//! * `GET @/<zid>/<whatami>/session/verbs` answers `{"verbs":["close"]}`: the
-//!   verbs this node has bound. It says what the node KNOWS, not whether this
-//!   caller may use it; permission is judged by `refused` on the close query.
+//! * `GET @/<zid>/<whatami>/session/close/<peer-zid>` takes the peer out of the
+//!   node's intent, orders EVERY session this node holds with that peer closed
+//!   and answers one JSON object: `{"verdict":"closing","links":N}`,
+//!   `{"verdict":"already_closed"}`, `{"verdict":"not_found"}` or
+//!   `{"verdict":"refused","reason":"..."}`.
+//! * `GET @/<zid>/<whatami>/session/reset/<generation>/<peer-zid>` orders those
+//!   sessions closed once per generation and leaves the intent, so a peer the
+//!   node should hold is connected again (decision D6 of
+//!   `docs/session-lifecycle-intent.md`). A generation no later than one already
+//!   taken answers `{"verdict":"duplicate","generation":G}` and closes nothing;
+//!   otherwise `resetting` with `links`, `already_closed`, `not_found` or
+//!   `refused`.
+//! * `GET @/<zid>/<whatami>/session/verbs` answers `{"verbs":["close","reset"]}`:
+//!   the verbs this node has bound. It says what the node KNOWS, not whether this
+//!   caller may use it; permission is judged by `refused` on each verb's query.
 //!
 //! A node that binds neither answers nothing, which a querier reads as "no
 //! surface". That is the honest answer for a node that has no lifecycle ingress.
@@ -40,22 +48,27 @@
 //! many this call ordered. A close that finds the peer's links all already ordered
 //! answers `already_closed`.
 //!
-//! # Why the close query is exact-key only
+//! # Why the close and reset queries are exact-key only
 //!
 //! A GET may carry a wildcard, and a wildcard close is "close everything that
 //! matches". The close query is answered only for a literal key that names this
-//! node, this role, the `close` verb and one peer. A wildcard that merely
+//! node, this role, the `close` verb and one peer, and the reset query only for
+//! one that also names one generation. A wildcard that merely
 //! intersects it gets no reply, so a destructive verb is never reached by a pattern
 //! the caller did not mean as a target. The capability query has no such risk, so
 //! it answers any key that intersects it.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec::Vec;
+use core::cell::RefCell;
 
+use crate::drive::RESET_VERB;
 // Re-exported: the two types a host binds the queries with, so it names one module.
 pub use crate::drive::{LifecycleKey, SessionLifecycleAuthority};
 use crate::query_sink::{QueryView, ReplyError, ReplyOut};
 use crate::text_out::{FixedText, TextOut};
-use crate::zid_hex::{same_zid, zenoh_hex_to_zid};
+use crate::zid_hex::{canonical_zid, same_zid, zenoh_hex_to_zid};
 
 /// The verb the close query carries in its key.
 const CLOSE_VERB: &str = "close";
@@ -94,6 +107,37 @@ impl<D: SessionDirectory + ?Sized> SessionDirectory for &D {
     }
 }
 
+/// The node's intent, as the close query changes it (decision D6 of
+/// `docs/session-lifecycle-intent.md`): the peers the node should be connected
+/// to, apart from the sessions it has.
+///
+/// A port for the reason [`SessionDirectory`] is one, and a SEPARATE one because
+/// the two are held apart on purpose: a close takes the peer out of the intent
+/// and ends its sessions, a reset ends the sessions and leaves the intent, so a
+/// peer the node should still hold is connected again by its machine.
+pub trait PeerIntent {
+    /// Take the peer whose zid is `peer_zid` (wire bytes, any trailing zero
+    /// bytes) out of the intent: it is not dialled again, by any machine that
+    /// held it, until an `open` or a connect-list edit names it again.
+    fn withdraw(&self, peer_zid: &[u8]);
+}
+
+impl<I: PeerIntent + ?Sized> PeerIntent for &I {
+    fn withdraw(&self, peer_zid: &[u8]) {
+        (**self).withdraw(peer_zid)
+    }
+}
+
+/// The intent of a host that holds no peer by intent: it dials nobody again, so
+/// a close has no intent to withdraw. Said by a type rather than by an
+/// `Option`, so the queries of such a host state it where they are built.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoIntent;
+
+impl PeerIntent for NoIntent {
+    fn withdraw(&self, _peer_zid: &[u8]) {}
+}
+
 /// Why a close was refused, as one of a closed set of reasons.
 ///
 /// The words are the implementation's own and a querier shows them as written, so
@@ -104,11 +148,20 @@ pub enum RefusedReason {
     NotPermitted,
     /// The key's last chunk is not a zid in the spelling a key carries.
     PeerNotAZid,
+    /// The node's authority does not admit resetting the session this key names.
+    ResetNotPermitted,
+    /// A reset key's generation chunk is not a decimal number.
+    GenerationNotANumber,
 }
 
 impl RefusedReason {
     /// Every reason this module can give, for the declared set to be held to.
-    pub const ALL: [Self; 2] = [Self::NotPermitted, Self::PeerNotAZid];
+    pub const ALL: [Self; 4] = [
+        Self::NotPermitted,
+        Self::PeerNotAZid,
+        Self::ResetNotPermitted,
+        Self::GenerationNotANumber,
+    ];
 
     /// The sentence a querier is shown. Plain ASCII with no quote or backslash, so
     /// it is written into the JSON as it stands.
@@ -116,6 +169,10 @@ impl RefusedReason {
         match self {
             Self::NotPermitted => "this node does not permit closing the session with that peer",
             Self::PeerNotAZid => "the last chunk of the key is not a zid",
+            Self::ResetNotPermitted => {
+                "this node does not permit resetting the session with that peer"
+            }
+            Self::GenerationNotANumber => "the generation chunk of the key is not a number",
         }
     }
 }
@@ -182,11 +239,88 @@ impl CloseVerdict {
     pub const WORDS: [&'static str; 4] = ["closing", "already_closed", "not_found", "refused"];
 }
 
-/// The lifecycle verbs a node has bound, in the order the capability query lists
-/// them. One today.
-pub const VERBS: [&str; 1] = [CLOSE_VERB];
+/// The answer to a reset query (decision D6): the close a generation asks for,
+/// once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetVerdict {
+    /// The close was ordered on `links` links; a peer the node still holds by
+    /// intent is connected again by its machine.
+    Resetting {
+        /// Links this call ordered closed.
+        links: u32,
+    },
+    /// Every session with that peer had already been ordered closed.
+    AlreadyClosed,
+    /// This node holds no session with that peer.
+    NotFound,
+    /// A reset of this generation or a later one was already taken, so this one
+    /// is a retransmission and closes nothing.
+    Duplicate {
+        /// The latest generation taken for the peer.
+        last: u64,
+    },
+    /// The reset was not attempted.
+    Refused(RefusedReason),
+}
 
-/// Write the capability document `{"verbs":["close"]}`.
+impl ResetVerdict {
+    /// The verdict a [`CloseOrder`] amounts to, for a generation not seen before.
+    pub fn of(order: CloseOrder) -> Self {
+        match CloseVerdict::of(order) {
+            CloseVerdict::Closing { links } => Self::Resetting { links },
+            CloseVerdict::AlreadyClosed => Self::AlreadyClosed,
+            _ => Self::NotFound,
+        }
+    }
+
+    /// Write the reply document: one JSON object. The words of `verdict` are the
+    /// closed set `resetting`, `already_closed`, `not_found`, `duplicate`,
+    /// `refused`; `links` appears only on `resetting`, `generation` only on
+    /// `duplicate` and `reason` only on `refused`.
+    pub fn write_json<W: TextOut + ?Sized>(&self, out: &mut W) {
+        match self {
+            Self::Resetting { links } => {
+                let _ = write!(out, "{{\"verdict\":\"resetting\",\"links\":{links}}}");
+            }
+            Self::AlreadyClosed => out.push_str("{\"verdict\":\"already_closed\"}"),
+            Self::NotFound => out.push_str("{\"verdict\":\"not_found\"}"),
+            Self::Duplicate { last } => {
+                let _ = write!(out, "{{\"verdict\":\"duplicate\",\"generation\":{last}}}");
+            }
+            Self::Refused(reason) => {
+                out.push_str("{\"verdict\":\"refused\",\"reason\":\"");
+                out.push_str(reason.words());
+                out.push_str("\"}");
+            }
+        }
+    }
+
+    /// The `verdict` word, for a declared set to be held to.
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::Resetting { .. } => "resetting",
+            Self::AlreadyClosed => "already_closed",
+            Self::NotFound => "not_found",
+            Self::Duplicate { .. } => "duplicate",
+            Self::Refused(_) => "refused",
+        }
+    }
+
+    /// Every `verdict` word, for a declared set to be held to.
+    pub const WORDS: [&'static str; 5] = [
+        "resetting",
+        "already_closed",
+        "not_found",
+        "duplicate",
+        "refused",
+    ];
+}
+
+/// The lifecycle verbs a node has bound, in the order the capability query lists
+/// them.
+pub const VERBS: [&str; 2] = [CLOSE_VERB, RESET_VERB];
+
+/// Write the capability document `{"verbs":["close","reset"]}`.
 pub fn write_verbs_json<W: TextOut + ?Sized>(out: &mut W) {
     out.push_str("{\"verbs\":[");
     for (i, verb) in VERBS.iter().enumerate() {
@@ -201,27 +335,35 @@ pub fn write_verbs_json<W: TextOut + ?Sized>(out: &mut W) {
 }
 
 /// The queryables a node hosts to serve the lifecycle queries, as the key
-/// patterns to register them on. The first answers the close query for any peer,
-/// the second the capability query.
-pub fn query_patterns(zid_hex: &str, whatami: &str) -> [String; 2] {
+/// patterns to register them on: the close query for any peer, the reset query
+/// for any generation and peer, and the capability query.
+pub fn query_patterns(zid_hex: &str, whatami: &str) -> [String; 3] {
     let root = alloc::format!("@/{zid_hex}/{whatami}/session");
     [
-        alloc::format!("{root}/close/*"),
+        alloc::format!("{root}/{CLOSE_VERB}/*"),
+        alloc::format!("{root}/{RESET_VERB}/*/*"),
         alloc::format!("{root}/verbs"),
     ]
 }
 
 /// Answers the lifecycle queries of one node.
 ///
-/// Holds nothing it does not borrow from the host: the node's identity, the
-/// authority that says who may close and the directory that holds the sessions.
-/// [`Self::answer`] is the body of the queryable handler the host registers on
-/// [`query_patterns`].
-pub struct LifecycleQueries<A, D> {
+/// Holds nothing it does not borrow from the host but one record: the node's
+/// identity, the authority that says who may close or reset, the directory that
+/// holds the sessions and the intent a close withdraws the peer from. The record
+/// is the latest reset generation taken per peer, the duplicate suppression of
+/// at-most-once calls (decision D6; Birrell and Nelson, 1984), and it lives here
+/// because this is where a reset is taken. [`Self::answer`] is the body of the
+/// queryable handler the host registers on [`query_patterns`].
+pub struct LifecycleQueries<A, D, I = NoIntent> {
     zid_hex: String,
     whatami: String,
     authority: A,
     directory: D,
+    intent: I,
+    /// The latest reset generation taken, by the peer's zid in its canonical
+    /// form. Volatile, as every runtime edit of D6 is.
+    resets: RefCell<BTreeMap<Vec<u8>, u64>>,
 }
 
 /// What [`LifecycleQueries::answer`] did with a query.
@@ -229,26 +371,47 @@ pub struct LifecycleQueries<A, D> {
 pub enum Answered {
     /// A reply was staged: the close query's verdict.
     Close(CloseVerdict),
+    /// A reply was staged: the reset query's verdict.
+    Reset(ResetVerdict),
     /// A reply was staged: the capability document.
     Verbs,
-    /// The query is neither lifecycle query this node serves, or is a close query
-    /// that is not an exact key; nothing was replied.
+    /// The query is no lifecycle query this node serves, or is a close or reset
+    /// query that is not an exact key; nothing was replied.
     Unserved,
 }
 
-impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D> {
-    /// The queries of the node `zid_hex` (zenoh's spelling) of role `whatami`.
+impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D, NoIntent> {
+    /// The queries of the node `zid_hex` (zenoh's spelling) of role `whatami`,
+    /// for a host that holds no peer by intent ([`Self::with_intent`] says it
+    /// does).
     pub fn new(zid_hex: &str, whatami: &str, authority: A, directory: D) -> Self {
         Self {
             zid_hex: String::from(zid_hex),
             whatami: String::from(whatami),
             authority,
             directory,
+            intent: NoIntent,
+            resets: RefCell::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl<A: SessionLifecycleAuthority, D: SessionDirectory, I: PeerIntent> LifecycleQueries<A, D, I> {
+    /// These queries for a host that holds its peers by `intent`: a close also
+    /// withdraws the peer from it, so no machine dials the peer again.
+    pub fn with_intent<J: PeerIntent>(self, intent: J) -> LifecycleQueries<A, D, J> {
+        LifecycleQueries {
+            zid_hex: self.zid_hex,
+            whatami: self.whatami,
+            authority: self.authority,
+            directory: self.directory,
+            intent,
+            resets: self.resets,
         }
     }
 
     /// The patterns to register this on.
-    pub fn patterns(&self) -> [String; 2] {
+    pub fn patterns(&self) -> [String; 3] {
         query_patterns(&self.zid_hex, &self.whatami)
     }
 
@@ -256,8 +419,8 @@ impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D> {
         alloc::format!("@/{}/{}/session/verbs", self.zid_hex, self.whatami)
     }
 
-    /// Answer one query: the close query with its verdict, the capability query
-    /// with the verb list, or nothing.
+    /// Answer one query: the close or reset query with its verdict, the
+    /// capability query with the verb list, or nothing.
     pub fn answer(&self, view: &dyn QueryView, out: &mut dyn ReplyOut) -> Answered {
         let key = view.keyexpr();
 
@@ -272,36 +435,83 @@ impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D> {
             };
         }
 
-        // The close query: an exact key naming this node and one peer. A pattern
-        // is never a target (module docs).
+        // The close and reset queries: an exact key naming this node and one peer.
+        // A pattern is never a target (module docs), the generation included.
         let Some(parsed) = LifecycleKey::parse(key) else {
             return Answered::Unserved;
         };
-        if parsed.verb != CLOSE_VERB
-            || parsed.node_zid != self.zid_hex
+        if parsed.node_zid != self.zid_hex
             || parsed.whatami != self.whatami
             || parsed.peer_zid.contains(['*', '$'])
+            || parsed.argument.is_some_and(|a| a.contains(['*', '$']))
         {
             return Answered::Unserved;
         }
-
-        let verdict = if !self.authority.admits_close(&parsed) {
-            CloseVerdict::Refused(RefusedReason::NotPermitted)
-        } else if let Some(peer) = zenoh_hex_to_zid(parsed.peer_zid) {
-            CloseVerdict::of(self.directory.order_close(&peer))
-        } else {
-            CloseVerdict::Refused(RefusedReason::PeerNotAZid)
-        };
-
         let mut body: FixedText<192> = FixedText::new();
-        verdict.write_json(&mut body);
+        let answered = match parsed.verb {
+            CLOSE_VERB => {
+                let verdict = self.close(&parsed);
+                verdict.write_json(&mut body);
+                Answered::Close(verdict)
+            }
+            RESET_VERB => {
+                let verdict = self.reset(&parsed);
+                verdict.write_json(&mut body);
+                Answered::Reset(verdict)
+            }
+            _ => return Answered::Unserved,
+        };
         match body.finish() {
-            Ok(text) if reply_json(out, key, text).is_ok() => Answered::Close(verdict),
+            Ok(text) if reply_json(out, key, text).is_ok() => answered,
             // A reply the stage refused still happened as an order: the verdict is
             // what the node did, and the host's reply-stage counters say the rest.
-            Ok(_) => Answered::Close(verdict),
+            Ok(_) => answered,
             Err(_) => Answered::Unserved,
         }
+    }
+
+    /// Close: the peer leaves the intent, and every session with it is ordered
+    /// closed. Withdrawn first, so a session that ends before the withdrawal
+    /// reaches the node's machines is not dialled again for long: the machine
+    /// that took the loss is stopped where it waits.
+    fn close(&self, key: &LifecycleKey<'_>) -> CloseVerdict {
+        if !self.authority.admits_close(key) {
+            return CloseVerdict::Refused(RefusedReason::NotPermitted);
+        }
+        let Some(peer) = zenoh_hex_to_zid(key.peer_zid) else {
+            return CloseVerdict::Refused(RefusedReason::PeerNotAZid);
+        };
+        self.intent.withdraw(&peer);
+        CloseVerdict::of(self.directory.order_close(&peer))
+    }
+
+    /// Reset: every session with the peer is ordered closed once for the key's
+    /// generation, and the intent is left as it is. A generation no later than
+    /// the latest taken for the peer is a retransmission and closes nothing.
+    fn reset(&self, key: &LifecycleKey<'_>) -> ResetVerdict {
+        if !self.authority.admits_reset(key) {
+            return ResetVerdict::Refused(RefusedReason::ResetNotPermitted);
+        }
+        let Some(peer) = zenoh_hex_to_zid(key.peer_zid) else {
+            return ResetVerdict::Refused(RefusedReason::PeerNotAZid);
+        };
+        let Some(generation) = key.argument.and_then(|g| g.parse::<u64>().ok()) else {
+            return ResetVerdict::Refused(RefusedReason::GenerationNotANumber);
+        };
+        let canonical = Vec::from(canonical_zid(&peer));
+        {
+            let mut resets = self.resets.borrow_mut();
+            if let Some(&last) = resets.get(&canonical) {
+                if generation <= last {
+                    return ResetVerdict::Duplicate { last };
+                }
+            }
+            // Taken before the close is ordered: a close the node could not carry
+            // out (no session) is still this generation's, so a retransmission
+            // after the peer is back does not close it.
+            resets.insert(canonical, generation);
+        }
+        ResetVerdict::of(self.directory.order_close(&peer))
     }
 }
 
@@ -445,6 +655,11 @@ mod tests {
             self.asked.set(self.asked.get() + 1);
             self.admits
         }
+
+        fn admits_reset(&self, _key: &LifecycleKey<'_>) -> bool {
+            self.asked.set(self.asked.get() + 1);
+            self.admits
+        }
     }
 
     /// Sessions that remember being ordered closed.
@@ -492,8 +707,8 @@ mod tests {
         )
     }
 
-    fn ask(
-        node: &LifecycleQueries<Authority, Table>,
+    fn ask<I: PeerIntent>(
+        node: &LifecycleQueries<Authority, Table, I>,
         key: &str,
     ) -> (Answered, Vec<(String, String)>) {
         let mut out = Recorder::default();
@@ -691,7 +906,10 @@ mod tests {
                 assert_eq!(answered, Answered::Verbs, "{asked}");
                 assert_eq!(
                     replies,
-                    vec![(verbs.clone(), String::from("{\"verbs\":[\"close\"]}"))],
+                    vec![(
+                        verbs.clone(),
+                        String::from("{\"verbs\":[\"close\",\"reset\"]}")
+                    )],
                     "{asked}"
                 );
             }
@@ -705,12 +923,149 @@ mod tests {
         );
     }
 
-    /// The patterns a host registers are the two keys the queries are asked on.
+    /// The patterns a host registers are the three keys the queries are asked on.
     #[test]
-    fn the_registered_patterns_cover_exactly_the_two_queries() {
-        let [close, verbs] = query_patterns(ME, "peer");
+    fn the_registered_patterns_cover_exactly_the_three_queries() {
+        let [close, reset, verbs] = query_patterns(ME, "peer");
         assert_eq!(close, "@/a1b2/peer/session/close/*");
+        assert_eq!(reset, "@/a1b2/peer/session/reset/*/*");
         assert_eq!(verbs, "@/a1b2/peer/session/verbs");
+    }
+
+    /// The intent of a host that records each peer a close withdraws.
+    #[derive(Default)]
+    struct Intent(RefCell<Vec<Vec<u8>>>);
+
+    impl PeerIntent for Intent {
+        fn withdraw(&self, peer_zid: &[u8]) {
+            self.0.borrow_mut().push(peer_zid.to_vec());
+        }
+    }
+
+    /// Decision D6 — a close takes the peer out of the intent and ends its
+    /// sessions; a reset ends them and leaves the intent.
+    #[test]
+    fn a_close_withdraws_the_peer_and_a_reset_does_not() {
+        let node = node(true, vec![fake(PEER_A)]).with_intent(Intent::default());
+        let (answered, _) = ask(
+            &node,
+            &alloc::format!("@/{ME}/peer/session/reset/1/{PEER_A}"),
+        );
+        assert_eq!(
+            answered,
+            Answered::Reset(ResetVerdict::Resetting { links: 1 })
+        );
+        assert!(
+            node.intent.0.borrow().is_empty(),
+            "a reset leaves the intent"
+        );
+
+        node.directory.0.borrow()[0].ordered.set(false);
+        let (answered, _) = ask(&node, &alloc::format!("@/{ME}/peer/session/close/{PEER_A}"));
+        assert_eq!(
+            answered,
+            Answered::Close(CloseVerdict::Closing { links: 1 })
+        );
+        assert_eq!(
+            *node.intent.0.borrow(),
+            vec![zenoh_hex_to_zid(PEER_A).expect("a zid")],
+            "a close withdraws the peer it names"
+        );
+    }
+
+    /// Decision D6 — a reset closes once per generation: a retransmission of a
+    /// generation already taken, or of an earlier one, closes nothing and says
+    /// which generation was taken; a later one closes again.
+    #[test]
+    fn a_reset_closes_once_per_generation() {
+        let node = node(true, vec![fake(PEER_A)]);
+        let reset =
+            |generation: u64| alloc::format!("@/{ME}/peer/session/reset/{generation}/{PEER_A}");
+
+        let (answered, replies) = ask(&node, &reset(7));
+        assert_eq!(
+            answered,
+            Answered::Reset(ResetVerdict::Resetting { links: 1 })
+        );
+        assert_eq!(replies[0].1, "{\"verdict\":\"resetting\",\"links\":1}");
+
+        node.directory.0.borrow()[0].ordered.set(false);
+        for again in [7, 3] {
+            let (answered, replies) = ask(&node, &reset(again));
+            assert_eq!(
+                answered,
+                Answered::Reset(ResetVerdict::Duplicate { last: 7 })
+            );
+            assert_eq!(replies[0].1, "{\"verdict\":\"duplicate\",\"generation\":7}");
+        }
+        assert!(
+            !node.directory.0.borrow()[0].ordered.get(),
+            "a duplicate orders no close"
+        );
+
+        let (answered, _) = ask(&node, &reset(8));
+        assert_eq!(
+            answered,
+            Answered::Reset(ResetVerdict::Resetting { links: 1 })
+        );
+
+        // A generation taken for a peer the node holds no session with is still
+        // taken: its retransmission after the peer is back closes nothing.
+        let (answered, _) = ask(
+            &node,
+            &alloc::format!("@/{ME}/peer/session/reset/1/{PEER_B}"),
+        );
+        assert_eq!(answered, Answered::Reset(ResetVerdict::NotFound));
+        let (answered, _) = ask(
+            &node,
+            &alloc::format!("@/{ME}/peer/session/reset/1/{PEER_B}"),
+        );
+        assert_eq!(
+            answered,
+            Answered::Reset(ResetVerdict::Duplicate { last: 1 })
+        );
+    }
+
+    /// A reset is refused when the authority does not admit it, or when its
+    /// generation is not a number, and then takes no generation; a pattern in
+    /// the generation is no target at all.
+    #[test]
+    fn a_reset_is_refused_or_unserved_and_then_takes_no_generation() {
+        let node = node(false, vec![fake(PEER_A)]);
+        let (answered, _) = ask(
+            &node,
+            &alloc::format!("@/{ME}/peer/session/reset/1/{PEER_A}"),
+        );
+        assert_eq!(
+            answered,
+            Answered::Reset(ResetVerdict::Refused(RefusedReason::ResetNotPermitted))
+        );
+
+        let node = node_for_bad_peer();
+        let (answered, _) = ask(
+            &node,
+            &alloc::format!("@/{ME}/peer/session/reset/x/{PEER_A}"),
+        );
+        assert_eq!(
+            answered,
+            Answered::Reset(ResetVerdict::Refused(RefusedReason::GenerationNotANumber))
+        );
+        for key in [
+            alloc::format!("@/{ME}/peer/session/reset/*/{PEER_A}"),
+            alloc::format!("@/{ME}/peer/session/reset/{PEER_A}"),
+        ] {
+            assert_eq!(ask(&node, &key).0, Answered::Unserved, "{key}");
+        }
+        assert!(!node.directory.0.borrow()[0].ordered.get());
+        let (answered, _) = ask(
+            &node,
+            &alloc::format!("@/{ME}/peer/session/reset/1/{PEER_A}"),
+        );
+        assert_eq!(
+            answered,
+            Answered::Reset(ResetVerdict::Resetting { links: 1 }),
+            "the refused and unserved keys took no generation"
+        );
     }
 
     /// The words a querier switches on are one closed set, each its own document.
@@ -745,6 +1100,24 @@ mod tests {
             assert!(
                 !reason.words().contains(['"', '\\']),
                 "a reason is written into the JSON as it stands"
+            );
+        }
+        let all = [
+            ResetVerdict::Resetting { links: 2 },
+            ResetVerdict::AlreadyClosed,
+            ResetVerdict::NotFound,
+            ResetVerdict::Duplicate { last: 4 },
+            ResetVerdict::Refused(RefusedReason::ResetNotPermitted),
+        ];
+        let words: Vec<&str> = all.iter().map(ResetVerdict::word).collect();
+        assert_eq!(words, ResetVerdict::WORDS);
+        for verdict in all {
+            let mut text: FixedText<192> = FixedText::new();
+            verdict.write_json(&mut text);
+            let doc = text.finish().expect("fits");
+            assert!(
+                doc.starts_with(&alloc::format!("{{\"verdict\":\"{}\"", verdict.word())),
+                "{doc}"
             );
         }
     }

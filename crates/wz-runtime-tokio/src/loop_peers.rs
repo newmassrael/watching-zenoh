@@ -96,13 +96,18 @@ pub enum PeerAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialEnd {
     /// A session to the peer is up, held as the dialled face.
-    Established,
+    Established {
+        /// The zid the session's remote named, which a `close` names it by.
+        remote: Option<DirectoryZid>,
+    },
     /// A session to the peer is up, but the loop holds it as `held`, another face
     /// (the peer was already reached another way, or the dialled link joined
     /// the session `held` represents); the dialled face is not held on its own.
     AlreadyHeld {
         /// The face the loop holds to the peer.
         held: FaceId,
+        /// The zid the session's remote named, which a `close` names it by.
+        remote: Option<DirectoryZid>,
     },
     /// The loop has no room for another session.
     NoSlot,
@@ -142,6 +147,10 @@ pub struct LoopPeers {
     retry: RedialSchedule<PeerKey>,
     /// The arming of each peer's retry timer that is still its own.
     armed: BTreeMap<PeerKey, u64>,
+    /// The zid each peer's last session named, kept after the session is lost:
+    /// a `close` names a node by its zid, and an endpoint, which has none of its
+    /// own, is the node it reached (decision D6).
+    remotes: BTreeMap<PeerKey, DirectoryZid>,
     /// The next arming's generation.
     next_generation: u64,
 }
@@ -158,6 +167,7 @@ impl LoopPeers {
             held: BTreeMap::new(),
             retry: RedialSchedule::new(policy),
             armed: BTreeMap::new(),
+            remotes: BTreeMap::new(),
             next_generation: 0,
         }
     }
@@ -261,16 +271,18 @@ impl LoopPeers {
         if self.released.remove(&id) {
             // Its peer was forgotten while it ran: a session that came up stands,
             // owned by no machine, as a forgotten peer's held session does.
-            return Some((end == DialEnd::Established, Vec::new()));
+            return Some((matches!(end, DialEnd::Established { .. }), Vec::new()));
         }
         let key = self.dialing.remove(&id)?;
         let (event, keep) = match end {
-            DialEnd::Established => {
+            DialEnd::Established { remote } => {
                 self.held.entry(id).or_default().insert(key.clone());
+                self.learn_remote(&key, remote);
                 (E::DialEstablished, true)
             }
-            DialEnd::AlreadyHeld { held } => {
+            DialEnd::AlreadyHeld { held, remote } => {
                 self.held.entry(held).or_default().insert(key.clone());
+                self.learn_remote(&key, remote);
                 (E::DialEstablished, false)
             }
             DialEnd::NoSlot => (E::DialNoSlot, false),
@@ -297,9 +309,45 @@ impl LoopPeers {
         Some(actions)
     }
 
+    /// `close` for the node `zid` (decision D6): every machine that holds it,
+    /// its own and that of each endpoint whose last session reached it, is
+    /// stopped. A session it holds is closed, a dial it runs is dropped and a
+    /// wait it is in is cancelled, and the peer is not dialled again until an
+    /// `open`, or a connect-list edit naming the endpoint, starts it. The
+    /// machine stays in the table, `Idle`.
+    #[cfg(feature = "session-close-ingress")]
+    pub fn withdraw(
+        &mut self,
+        zid: &DirectoryZid,
+        cx: &PeerContext<'_>,
+        next_id: &mut u64,
+    ) -> Vec<PeerAction> {
+        let node = PeerKey::Node(*zid);
+        let mut keys: Vec<PeerKey> = self
+            .remotes
+            .iter()
+            .filter(|(key, remote)| *remote == zid && **key != node)
+            .map(|(key, _)| key.clone())
+            .collect();
+        keys.push(node);
+        let mut actions = Vec::new();
+        for key in keys {
+            let duties = self.table.close(&key);
+            actions.extend(self.perform(key, duties, false, cx, next_id));
+        }
+        actions
+    }
+
     /// The state of `key`'s machine.
     pub fn state(&self, key: &PeerKey) -> Option<PeerConnectionState> {
         self.table.state(key)
+    }
+
+    /// Keep the zid `key`'s session named, for a later `close` to name it by.
+    fn learn_remote(&mut self, key: &PeerKey, remote: Option<DirectoryZid>) {
+        if let Some(remote) = remote {
+            self.remotes.insert(key.clone(), remote);
+        }
     }
 
     /// `open` for `key`: the authority admitted it.
@@ -326,6 +374,7 @@ impl LoopPeers {
         // initial wait rather than the ceiling of the outage before its removal.
         self.retry.forget(key);
         self.armed.remove(key);
+        self.remotes.remove(key);
         let running: Vec<FaceId> = self
             .dialing
             .iter()
@@ -466,6 +515,8 @@ mod tests {
 
     const A: DirectoryZid = [0xa1; 16];
     const NODE: PeerKey = PeerKey::Node(A);
+    /// A dial that came up, its remote unnamed.
+    const UP: DialEnd = DialEnd::Established { remote: None };
 
     fn directory_with(locators: &[&str]) -> Box<LoopDirectory> {
         let mut directory = Box::new(LoopDirectory::new());
@@ -517,7 +568,7 @@ mod tests {
             "a second open is a no-op"
         );
         let (keep, actions) = peers
-            .dial_ended(id, DialEnd::Established, &cx, &mut next_id)
+            .dial_ended(id, UP, &cx, &mut next_id)
             .expect("its dial");
         assert!(keep && actions.is_empty());
         assert_eq!(peers.state(&NODE), Some(S::Established));
@@ -554,7 +605,7 @@ mod tests {
         let mut peers = LoopPeers::new(RetryPolicy::constant(700));
         let mut next_id = 0;
         let (id, _) = the_dial(&peers.open_node(A, &cx, &mut next_id));
-        peers.dial_ended(id, DialEnd::Established, &cx, &mut next_id);
+        peers.dial_ended(id, UP, &cx, &mut next_id);
         let actions = peers.face_down(id, &cx, &mut next_id).expect("a held face");
         assert_eq!(the_retry(&actions).2, 700);
         assert!(peers.face_down(id, &cx, &mut next_id).is_none(), "once");
@@ -602,7 +653,10 @@ mod tests {
         let (keep, _) = peers
             .dial_ended(
                 id,
-                DialEnd::AlreadyHeld { held: FaceId(99) },
+                DialEnd::AlreadyHeld {
+                    held: FaceId(99),
+                    remote: None,
+                },
                 &cx,
                 &mut next_id,
             )
@@ -625,9 +679,7 @@ mod tests {
         let mut peers = LoopPeers::new(RetryPolicy::constant(1000));
         let mut next_id = 0;
         assert!(!peers.is_dialing(FaceId(5)));
-        assert!(peers
-            .dial_ended(FaceId(5), DialEnd::Established, &cx, &mut next_id)
-            .is_none());
+        assert!(peers.dial_ended(FaceId(5), UP, &cx, &mut next_id).is_none());
         assert!(peers.face_down(FaceId(5), &cx, &mut next_id).is_none());
     }
 
@@ -652,7 +704,7 @@ mod tests {
             "an endpoint is dialled as written, for no node"
         );
         assert!(!peers.dials_a_node(id), "an endpoint's dial may aggregate");
-        peers.dial_ended(id, DialEnd::Established, &cx, &mut next_id);
+        peers.dial_ended(id, UP, &cx, &mut next_id);
         assert_eq!(peers.state(&key), Some(S::Established));
         let lost = peers.face_down(id, &cx, &mut next_id).expect("held");
         assert_eq!(
@@ -764,9 +816,7 @@ mod tests {
             peers.is_dialing(id),
             "its end is still the planner's to answer"
         );
-        let (keep, actions) = peers
-            .dial_ended(id, DialEnd::Established, &cx, &mut next_id)
-            .unwrap();
+        let (keep, actions) = peers.dial_ended(id, UP, &cx, &mut next_id).unwrap();
         assert!(keep && actions.is_empty(), "held, and nothing asked of it");
         assert!(
             peers.face_down(id, &cx, &mut next_id).is_none(),
@@ -801,14 +851,89 @@ mod tests {
                 other => panic!("expected dials, got {other:?}"),
             })
             .collect();
-        peers.dial_ended(ids[0], DialEnd::Established, &cx, &mut next_id);
+        peers.dial_ended(ids[0], UP, &cx, &mut next_id);
         peers.dial_ended(
             ids[1],
-            DialEnd::AlreadyHeld { held: ids[0] },
+            DialEnd::AlreadyHeld {
+                held: ids[0],
+                remote: None,
+            },
             &cx,
             &mut next_id,
         );
         let lost = peers.face_down(ids[0], &cx, &mut next_id).expect("held");
         assert_eq!(lost.len(), 2, "both endpoints back off: {lost:?}");
+    }
+
+    /// Decision D6 — a `close` of a held node stops its machine: its session is
+    /// dropped, and the face's loss that follows is nobody's to retry.
+    #[cfg(feature = "session-close-ingress")]
+    #[test]
+    fn a_withdrawn_node_drops_its_session_and_is_not_dialled_again() {
+        let directory = directory_with(&["tcp/127.0.0.1:7213"]);
+        let cx = PeerContext {
+            directory: &directory,
+            now_ms: 0,
+        };
+        let mut peers = LoopPeers::new(RetryPolicy::constant(500));
+        let mut next_id = 0;
+        let (id, _) = the_dial(&peers.open_node(A, &cx, &mut next_id));
+        peers.dial_ended(id, UP, &cx, &mut next_id);
+        assert_eq!(
+            peers.withdraw(&A, &cx, &mut next_id),
+            [PeerAction::Close { id }]
+        );
+        assert_eq!(peers.state(&NODE), Some(S::Idle));
+        assert!(
+            peers.face_down(id, &cx, &mut next_id).is_none(),
+            "the face it closed holds nobody"
+        );
+        the_dial(&peers.open_node(A, &cx, &mut next_id));
+        assert_eq!(
+            peers.state(&NODE),
+            Some(S::Connecting),
+            "an open starts it again"
+        );
+    }
+
+    /// Decision D6 — an endpoint has no zid of its own, and a `close` names it by
+    /// the node its last session reached: its machine is stopped where it waits,
+    /// and the timer it armed dials nothing. Listing it again starts it.
+    #[cfg(feature = "session-close-ingress")]
+    #[test]
+    fn a_withdrawn_endpoint_is_named_by_the_node_it_reached() {
+        let directory = directory_with(&[]);
+        let cx = PeerContext {
+            directory: &directory,
+            now_ms: 0,
+        };
+        let mut peers = LoopPeers::new(RetryPolicy::constant(500));
+        let mut next_id = 0;
+        let plan = endpoint("tcp/127.0.0.1:7214");
+        let key = PeerKey::Endpoint(plan.key.clone());
+        let (id, _) = the_dial(&peers.set_endpoints(vec![plan.clone()], false, &cx, &mut next_id));
+        peers.dial_ended(
+            id,
+            DialEnd::Established { remote: Some(A) },
+            &cx,
+            &mut next_id,
+        );
+        let (_, generation, _) = the_retry(&peers.face_down(id, &cx, &mut next_id).expect("held"));
+        assert_eq!(peers.state(&key), Some(S::Backoff));
+
+        assert!(peers.withdraw(&A, &cx, &mut next_id).is_empty());
+        assert_eq!(peers.state(&key), Some(S::Idle));
+        assert!(
+            peers
+                .retry_due(key.clone(), generation, &cx, &mut next_id)
+                .is_empty(),
+            "the wait it was in is cancelled"
+        );
+        assert!(
+            peers.withdraw(&[0xb2; 16], &cx, &mut next_id).is_empty(),
+            "another node's close touches it not"
+        );
+        the_dial(&peers.set_endpoints(vec![plan], false, &cx, &mut next_id));
+        assert_eq!(peers.state(&key), Some(S::Connecting));
     }
 }
