@@ -281814,6 +281814,60 @@
         "The consumer session asked whether one row's field document can be produced at about one row's decode instead of the 160 ms a one-row window costs; answer it with the measured source of that cost"
       ]
     },
+    "Round 3505": {
+      "decision_summary": "A tls/ locator names a stream link inside the secure channel of D9, and a stack carries that channel only when it is given one. LinkProto gains Tls; IpStack and IpLinks take a third, secure-stream dial through with_tls, whose default is a dial that carries nothing. Without a channel a tls/ dial is Unsupported, decided before any buffer is claimed, so a stack whose tables happen to be full never reports a protocol it lacks as Exhausted and retried. A stream names its own protocol (StreamSocket::PROTO), so the link's endpoints read tls/ over a channel and the stream link stays written once. The locator parser takes tls/; whether a stack can dial it is the stack's answer, not the parser's. Also repaid: Layer 0's shellcheck red from Round 3491, where the D2 guard's text sat in single quotes with backticks.",
+      "changes_bullets": [
+        "crates/wz-runtime-coop: LinkProto::Tls with scheme(), Locator::tls; StreamSocket::PROTO and StreamDial::CARRIED; NoDial and NoStream; IpDriver::Tls; IpStack and IpLinks with_tls; the datagram stack refuses tls/ as Unsupported.",
+        "crates/wz-session-lwip slot_node and crates/wz-session-mcu dial: tls/ refused by the lwIP stack, parsed by the dialler.",
+        "crates/wz-tls-mbedtls: TlsStream names LinkProto::Tls; a test opens a tls/ link on the host's links given the channel.",
+        "scripts/lib/lifecycle-channel-guard-gate.sh: the guard's text escaped in double quotes (SC2016).",
+        "docs/reason-review-pins.md: session-close-ingress re-pinned on session_drive.rs after re-reading its claim (SessionPump::step raises out-of-band requests at its head).",
+        "docs/session-lifecycle-intent.md: D9 records the locator kind."
+      ],
+      "verification_bullets": [
+        "On the build machine: wz-runtime-coop lib tests on the heap profile (55) and the slot profile (49), with three new tls/ cases (a stack given a channel opens a tls/ link with tls/ endpoints; a stack without one refuses tls/ as Unsupported even with its tables full; heap links the same); wz-tls-mbedtls 2 unit and 3 rustls peer tests (the third opens a tls/ link on the posix links given the channel and the router verifies the device); wz-runtime-posix 20; wz-session-mcu parse tests under dial (tls/ parses, quic/ and tlsx/ do not).",
+        "Clippy -D warnings: coop heap and slot, wz-tls-mbedtls default and slot, posix slot, session-mcu dial and client-slot, session-lwip session-slot. host-slot-node clean under the no-allocator gate in both builds; rustdoc Layer C1bz pass; reason_review_pin_gate, upstream_citation_anchor_gate, prose_feature_gate --check and feature_public_surface_census --check pass; shellcheck 0.11 clean on the guard gate.",
+        "Hosted run 40070154299 read per job: Layer 0 (this tree's SC2016, repaid here); C0, E7s and the zenoh-keyexpr census row are other sessions', told and confirmed by them."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "carry_forward_bullets": [
+        "The verified zid on the cooperative session (the link's TlsStream peer zid to the session's peer_identity_verified), then session-close-ingress forwarded to the cooperative runtime again under secure-channel.",
+        "A zenohd process over a tls/ link; the Zephyr TCP StreamSocket and the kit image over wz-tls-mbedtls.",
+        "From Round 3502: no TLS 1.3 KeyUpdate in Mbed TLS 4.1; from Round 3495: the 18 percent gap, p256-m, persistent keys, the in-handshake pin.",
+        "Read the hosted run of this push per job, with the two new submodules in mind (checkout and the Windows build)."
+      ],
+      "publishable_decision_summary": "A tls/ locator names a stream link inside the secure channel of D9, and a stack carries that channel only when it is given one. LinkProto gains Tls; IpStack and IpLinks take a third, secure-stream dial through with_tls, whose default is a dial that carries nothing. Without a channel a tls/ dial is Unsupported, decided before any buffer is claimed, so a stack whose tables happen to be full never reports a protocol it lacks as Exhausted and retried. A stream names its own protocol (StreamSocket::PROTO), so the link's endpoints read tls/ over a channel and the stream link stays written once. The locator parser takes tls/; whether a stack can dial it is the stack's answer, not the parser's. Also repaid: Layer 0's shellcheck red from Round 3491, where the D2 guard's text sat in single quotes with backticks.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-coop: LinkProto::Tls with scheme(), Locator::tls; StreamSocket::PROTO and StreamDial::CARRIED; NoDial and NoStream; IpDriver::Tls; IpStack and IpLinks with_tls; the datagram stack refuses tls/ as Unsupported.",
+        "crates/wz-session-lwip slot_node and crates/wz-session-mcu dial: tls/ refused by the lwIP stack, parsed by the dialler.",
+        "crates/wz-tls-mbedtls: TlsStream names LinkProto::Tls; a test opens a tls/ link on the host's links given the channel.",
+        "scripts/lib/lifecycle-channel-guard-gate.sh: the guard's text escaped in double quotes (SC2016).",
+        "docs/reason-review-pins.md: session-close-ingress re-pinned on session_drive.rs after re-reading its claim (SessionPump::step raises out-of-band requests at its head).",
+        "docs/session-lifecycle-intent.md: D9 records the locator kind."
+      ],
+      "publishable_verification_bullets": [
+        "On the build machine: wz-runtime-coop lib tests on the heap profile (55) and the slot profile (49), with three new tls/ cases (a stack given a channel opens a tls/ link with tls/ endpoints; a stack without one refuses tls/ as Unsupported even with its tables full; heap links the same); wz-tls-mbedtls 2 unit and 3 rustls peer tests (the third opens a tls/ link on the posix links given the channel and the router verifies the device); wz-runtime-posix 20; wz-session-mcu parse tests under dial (tls/ parses, quic/ and tlsx/ do not).",
+        "Clippy -D warnings: coop heap and slot, wz-tls-mbedtls default and slot, posix slot, session-mcu dial and client-slot, session-lwip session-slot. host-slot-node clean under the no-allocator gate in both builds; rustdoc Layer C1bz pass; reason_review_pin_gate, upstream_citation_anchor_gate, prose_feature_gate --check and feature_public_surface_census --check pass; shellcheck 0.11 clean on the guard gate.",
+        "Hosted run 40070154299 read per job: Layer 0 (this tree's SC2016, repaid here); C0, E7s and the zenoh-keyexpr census row are other sessions', told and confirmed by them."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-2-locator"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The verified zid on the cooperative session (the link's TlsStream peer zid to the session's peer_identity_verified), then session-close-ingress forwarded to the cooperative runtime again under secure-channel.",
+        "A zenohd process over a tls/ link; the Zephyr TCP StreamSocket and the kit image over wz-tls-mbedtls.",
+        "From Round 3502: no TLS 1.3 KeyUpdate in Mbed TLS 4.1; from Round 3495: the 18 percent gap, p256-m, persistent keys, the in-handshake pin.",
+        "Read the hosted run of this push per job, with the two new submodules in mind (checkout and the Windows build)."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
