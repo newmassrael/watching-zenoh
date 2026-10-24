@@ -607,6 +607,17 @@ where
             R::link_driver(sink).close_blocking();
         });
     }
+
+    // The live link's proven key, read under the lock: a swap installs a new
+    // link, whose peer proved its own key, so the answer is never a former
+    // link's.
+    fn peer_credential_zid(
+        &self,
+    ) -> Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]> {
+        R::with_mutex_mut(&self.inner, |sink| {
+            R::link_driver(sink).peer_credential_zid()
+        })
+    }
 }
 
 /// R311ki — single-task transport-replacement seam, the MCU twin of
@@ -762,6 +773,13 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
 
     fn close_blocking(&self) {
         R::link_driver(&self.inner.borrow()).close_blocking();
+    }
+
+    // As `SwappableLink`'s: the live link's proven key.
+    fn peer_credential_zid(
+        &self,
+    ) -> Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]> {
+        R::link_driver(&self.inner.borrow()).peer_credential_zid()
     }
 }
 

@@ -58,6 +58,7 @@ use wz_runtime_tokio::Reliability;
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
 use wz_session_core::credential_identity::zid_from_spki_der;
 use wz_session_core::link::LinkSubject;
+use wz_session_core::reconnect::SwappableLink;
 use wz_session_core::session_init_params::zid_bytes;
 use wz_session_core::wire::{PushOwned, WireStorage};
 
@@ -939,5 +940,32 @@ async fn a_close_request_reaches_a_running_drive_loop() {
         closed.is_ok(),
         "the running loop did not raise the close request: it was staged and \
          never reached the session"
+    );
+}
+
+/// A session behind the reconnect seam is verified by the key its LIVE link's
+/// peer proved: the seam hands the link's proven key on (it cannot hand on the
+/// subject, a reference behind its lock), and a swap to a link that proves
+/// nothing takes the verification away with the old link.
+#[test]
+fn a_session_behind_the_reconnect_seam_is_verified_by_its_live_links_key() {
+    let zid = zid_from_spki_der(COMMANDER_SPKI);
+    let certified: Arc<dyn BoxedLinkDriver + Send + Sync> = Arc::new(CertifiedDriver {
+        subject: LinkSubject::UNKNOWN.with_cert_credential_zid(Some(zid)),
+    });
+    let seam = Arc::new(SwappableLink::<TokioRuntime>::new(certified));
+    let (actions, _engine) = established_session_over(seam.clone());
+    <TokioRuntime as Runtime>::with_mutex_mut(&actions.remote_peer_zid, |slot| {
+        *slot = Some(zid_bytes(&zid));
+    });
+    assert!(
+        actions.peer_identity_verified(),
+        "the live link's peer proved the key the claimed zid names"
+    );
+
+    drop(seam.swap(Arc::new(NoopOutboundDriver::default())));
+    assert!(
+        !actions.peer_identity_verified(),
+        "the new link proved nothing, and the old link's proof left with it"
     );
 }

@@ -832,6 +832,32 @@ pub trait BoxedLinkDriver {
         None
     }
 
+    /// The zid the key the PEER PROVED on this link names
+    /// ([`crate::credential_identity::zid_from_spki_der`] over its
+    /// `SubjectPublicKeyInfo`), or `None` for a link whose peer proved no key
+    /// inside a secure channel (decisions D1 and D9 of
+    /// `docs/session-lifecycle-intent.md`).
+    ///
+    /// The one read [`crate::session_actions::SessionLinkActions::peer_identity_verified`]
+    /// makes, on every profile: a value, not a reference, so a driver that
+    /// holds its link behind a lock (the reconnect seams) can hand it on, and
+    /// the slot profile, which has no [`LinkSubject`], can answer it too. The
+    /// default reads the subject's [`LinkSubject::cert_credential_zid`] where
+    /// there is one; a stack of the slot profile answers it from its channel.
+    fn peer_credential_zid(
+        &self,
+    ) -> Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]> {
+        #[cfg(feature = "alloc")]
+        {
+            self.link_subject()
+                .and_then(|subject| subject.cert_credential_zid)
+        }
+        #[cfg(not(feature = "alloc"))]
+        {
+            None
+        }
+    }
+
     /// R311y473 — the LOCATOR PAIR of this driver's transport: the `{src,dst}`
     /// zenoh's adminspace renders per link (`link_to_json`,
     /// `net/runtime/adminspace.rs:608-613`), or `None` for a driver that cannot

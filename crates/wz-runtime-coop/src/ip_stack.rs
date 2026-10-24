@@ -139,6 +139,12 @@ where
         either!(self, link => link.link_endpoints())
     }
 
+    fn peer_credential_zid(
+        &self,
+    ) -> Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]> {
+        either!(self, link => link.peer_credential_zid())
+    }
+
     fn batch_length_prefixed(&self) -> bool {
         either!(self, link => link.batch_length_prefixed())
     }
@@ -589,7 +595,13 @@ mod tests {
         fn shutdown(&self) {
             self.0.shutdown()
         }
+        fn peer_credential_zid(&self) -> Option<[u8; 16]> {
+            Some(PROVEN)
+        }
     }
+
+    /// The zid of the key every [`Channel`]'s peer proved.
+    const PROVEN: [u8; 16] = [0x5e; 16];
 
     const ROUTER: IpEndpoint = IpEndpoint {
         addr: [10, 0, 0, 1],
@@ -617,6 +629,20 @@ mod tests {
         let ends = tls.link_endpoints().expect("a connection knows both ends");
         assert_eq!(ends.dst.as_str(), "tls/10.0.0.1:7447");
         assert_eq!(ends.src.as_str(), "tls/10.0.0.2:40002");
+        assert_eq!(
+            tls.peer_credential_zid(),
+            Some(PROVEN),
+            "the session reads the key the channel's peer proved"
+        );
+        drop(tls);
+        let tcp = stack
+            .bind(Locator::tcp(ROUTER))
+            .expect("a plain stream link");
+        assert_eq!(
+            tcp.peer_credential_zid(),
+            None,
+            "a plain connection proves nobody"
+        );
     }
 
     #[cfg(feature = "session-slot")]
@@ -768,6 +794,7 @@ mod tests {
             tls.link_endpoints().map(|ends| ends.dst.as_str()),
             Some("tls/10.0.0.1:7447")
         );
+        assert_eq!(tls.peer_credential_zid(), Some(PROVEN));
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]

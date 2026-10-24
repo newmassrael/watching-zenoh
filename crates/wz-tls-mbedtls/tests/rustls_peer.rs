@@ -222,6 +222,11 @@ fn a_tls_locator_opens_the_stream_link_over_the_channel_on_the_hosts_links() {
         link.link_endpoints().map(|ends| ends.dst.as_str()),
         Some(format!("tls/127.0.0.1:{port}").as_str())
     );
+    assert_eq!(
+        link.peer_credential_zid(),
+        Some(router.zid()),
+        "the link hands the session the key the router proved"
+    );
 
     link.close_blocking();
     let presented = served

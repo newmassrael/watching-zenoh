@@ -153,6 +153,10 @@ impl<S: StreamSocket + 'static> StreamSocket for TlsStream<S> {
         }
         self.lower.socket.shutdown();
     }
+
+    fn peer_credential_zid(&self) -> Option<Zid> {
+        Some(self.peer_zid)
+    }
 }
 
 /// How long a dial waits for the peer's handshake records: `waits` waits of `wait_ms` each,

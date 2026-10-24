@@ -36,6 +36,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use wz_session_core::caps::MAX_LOCATOR_LEN;
+use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
 #[cfg(feature = "alloc")]
 use wz_session_core::link::RxFrame;
 use wz_session_core::link::{
@@ -89,6 +90,12 @@ pub trait StreamSocket: Sized {
 
     /// End the connection in both directions. The peer reads the end of the stream.
     fn shutdown(&self);
+
+    /// The zid of the key the peer proved when the stream was opened, for a stream that is a
+    /// secure channel (decision D1); `None` for a plain connection, which proves nobody.
+    fn peer_credential_zid(&self) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
+        None
+    }
 }
 
 /// How a stack opens the connected streams its `tcp/` links run over: a value the stack holds,
@@ -394,6 +401,10 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
 
     fn link_endpoints(&self) -> Option<&LinkEndpoints> {
         Some(&self.endpoints)
+    }
+
+    fn peer_credential_zid(&self) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
+        self.socket.peer_credential_zid()
     }
 
     fn batch_length_prefixed(&self) -> bool {

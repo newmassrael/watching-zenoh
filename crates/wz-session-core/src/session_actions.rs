@@ -6132,9 +6132,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// INSIDE A SECURE CHANNEL names (decisions D1 and D9 of
     /// `docs/session-lifecycle-intent.md`).
     ///
-    /// The one credential is the key of the link's peer certificate
-    /// ([`crate::link::LinkSubject::cert_credential_zid`]): the TLS or QUIC
-    /// handshake made the peer sign its transcript with it, and the same
+    /// The one credential is the key of the link's peer certificate, as the link
+    /// reports it on every profile
+    /// ([`crate::link::BoxedLinkDriver::peer_credential_zid`]): the TLS or QUIC
+    /// handshake (or the fixed-memory profile's channel) made the peer sign its
+    /// transcript with it, and the same
     /// handshake derived the keys that protect every later frame, so the peer
     /// that proved the key is the peer that sent what follows. The key the
     /// public-key authentication stage proves is NOT read. It proves possession
@@ -6146,12 +6148,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The claim is copied out before the link is read, so no two of this
     /// session's locks are ever held together here.
     pub fn peer_identity_verified(&self) -> bool {
-        use crate::credential_identity::CREDENTIAL_ZID_BYTES;
-        // Only the certificate arm below compares: a build without `alloc` (the
-        // slot profile) has no link subject to read, and so nothing to bind a
-        // claim to until it gets a secure channel of its own.
-        #[cfg(feature = "alloc")]
-        use crate::credential_identity::zid_is_bound;
+        use crate::credential_identity::{zid_is_bound, CREDENTIAL_ZID_BYTES};
         let claimed = R::with_mutex_mut(&self.remote_peer_zid, |slot| {
             slot.as_deref()
                 .filter(|zid| zid.len() <= CREDENTIAL_ZID_BYTES)
@@ -6164,18 +6161,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let Some((bytes, len)) = claimed else {
             return false;
         };
-        let claimed = &bytes[..len];
-        #[cfg(feature = "alloc")]
-        if let Some(zid) = self
-            .link_subject()
-            .and_then(|subject| subject.cert_credential_zid)
-        {
-            if zid_is_bound(claimed, &zid) {
-                return true;
-            }
-        }
-        let _ = claimed;
-        false
+        // The link is read after the claim's lock is released.
+        self.link_driver()
+            .peer_credential_zid()
+            .is_some_and(|zid| zid_is_bound(&bytes[..len], &zid))
     }
 
     /// R3b — run the auth dispatch's send stage for `role` and install the
