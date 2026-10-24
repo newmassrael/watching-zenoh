@@ -227,6 +227,17 @@ impl<T> ChunkLog<T> {
     }
 }
 
+/// The items, oldest first, moved out of the log: what a holder that keeps the
+/// same items in another structure takes, which removes none of them.
+impl<T> IntoIterator for ChunkLog<T> {
+    type Item = T;
+    type IntoIter = core::iter::Flatten<alloc::vec::IntoIter<VecDeque<T>>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.chunks.into_iter().flatten()
+    }
+}
+
 /// Keep a chunk one run: see [`ChunkLog`]. Free while the ring has not
 /// wrapped, which is every chunk but a one-chunk log's at a live ceiling.
 fn straighten<T>(chunk: &mut VecDeque<T>) {

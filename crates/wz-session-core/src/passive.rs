@@ -2482,6 +2482,37 @@ impl PassiveSession {
         handshake: LinkHandshake,
         instant: Option<u64>,
     ) -> Vec<PassiveFrame> {
+        self.next_datagram_unit_at(direction, bytes, offset, handshake, instant)
+            .map_or_else(Vec::new, |unit| unit.frames)
+    }
+
+    /// [`Self::next_datagram_on`], as a whole unit with the context it was read
+    /// in: what [`Self::next_unit_with`] is to a stream.
+    ///
+    /// What a holder needs that keeps a datagram's records as index entries and
+    /// reads them again from its bytes ([`redecode_unit`]). `None` for a unit
+    /// that yields no record (a batch header alone).
+    pub fn next_datagram_unit_on(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+        offset: usize,
+        handshake: LinkHandshake,
+    ) -> Option<ReadUnit> {
+        self.next_datagram_unit_at(direction, bytes, offset, handshake, self.observed_at_ns)
+    }
+
+    /// [`Self::next_datagram_unit_on`], with the capture instant of the unit
+    /// stated by the caller, as [`Self::next_datagram_at`] takes it.
+    pub fn next_datagram_unit_at(
+        &mut self,
+        direction: Direction,
+        bytes: &[u8],
+        offset: usize,
+        handshake: LinkHandshake,
+        instant: Option<u64>,
+    ) -> Option<ReadUnit> {
+        let start = self.context;
         // `prefix_width` 0 rather than one of the two stream widths: a datagram
         // has no prefix, and reporting 2 here would be a measurement of
         // nothing. `resync` `None`: a datagram link has no framing to lose, so
@@ -2501,7 +2532,7 @@ impl PassiveSession {
         // it a second time, from a match over its message lists, and the serial
         // line was labelled with the answer the OTHER caller of this function
         // deserved.
-        self.decode_framing_unit(
+        let frames = self.decode_framing_unit(
             direction,
             bytes,
             UnitSource {
@@ -2513,7 +2544,11 @@ impl PassiveSession {
             },
             handshake,
             None,
-        )
+        );
+        (!frames.is_empty()).then_some(ReadUnit {
+            start: Some(start),
+            frames,
+        })
     }
 
     /// R311y583 (A2) — what this session's chain router makes of one

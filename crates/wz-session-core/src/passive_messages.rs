@@ -75,6 +75,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
+use crate::byte_log::ByteLog;
 use crate::chunk_log::{ChunkLog, Iter};
 use crate::inbound::InboundFrame;
 #[cfg(feature = "reassembly")]
@@ -311,13 +312,12 @@ impl MessageList {
     /// what the session knew when it read the unit ([`ReadUnit::start`]),
     /// coordinates an entry can carry, and the unit's bytes in `source`, whole:
     /// a holder bounded by a byte ceiling can have released the front of a unit
-    /// before its last byte arrived. A unit that lacks any of the three, and
-    /// every unit of a list that already keeps its records whole, is kept whole
-    /// instead, which reads the same.
+    /// before its last byte arrived. A unit that lacks any of the three is kept
+    /// whole instead, which reads the same.
     pub fn push_unit(&mut self, unit: ReadUnit, source: &dyn UnitBytes) {
         let ReadUnit { start, frames } = unit;
         let readable = start.filter(|_| {
-            frames.iter().all(UnitRow::can_hold)
+            frames.iter().all(UnitRow::can_hold_streamed)
                 && frames.first().is_some_and(|first| {
                     let body = first.stream_offset + first.prefix_width;
                     first.wire_end.is_some_and(|end| {
@@ -329,15 +329,72 @@ impl MessageList {
             self.append(frames);
             return;
         };
-        if matches!(&self.rows, Store::Held(log) if log.is_empty()) {
-            self.rows = Store::Indexed(Box::default());
+        let produced = self.produced;
+        self.index()
+            .push_unit(produced, start, &frames, Locus::Streamed);
+        self.produced += frames.len() as u64;
+    }
+
+    /// Append every record of one datagram unit, as
+    /// `PassiveSession::next_datagram_unit_on` hands it out, with `bytes` the
+    /// unit as it was read and `handshake` the link's.
+    ///
+    /// Open-debt item 924, step 4c (`docs/dissect-row-index.md`, D8) — the
+    /// unit's bytes go into the list's unit log, and its records are read again
+    /// from there. `in_container` is where `bytes` sit in the capture container
+    /// the list's holder lends, when they do: the log then remembers that place
+    /// and keeps no copy, and a reader hands the container in with its source
+    /// ([`UnitBytes::container`]). A unit an entry cannot stand for (a record
+    /// inadmissible on its link, a coordinate past an entry's fields) is kept
+    /// whole, which reads the same, and logs nothing.
+    pub fn push_datagram(
+        &mut self,
+        unit: ReadUnit,
+        bytes: &[u8],
+        in_container: Option<usize>,
+        handshake: LinkHandshake,
+    ) {
+        let ReadUnit { start, frames } = unit;
+        let readable = start.filter(|_| {
+            u32::try_from(bytes.len()).is_ok() && frames.iter().all(UnitRow::can_hold_logged)
+        });
+        let Some(start) = readable else {
+            self.append(frames);
+            return;
+        };
+        let produced = self.produced;
+        let index = self.index();
+        let place = match in_container {
+            Some(offset) => LogPlace::Container(offset),
+            None => LogPlace::Kept(index.log.append(bytes)),
+        };
+        index.push_unit(
+            produced,
+            start,
+            &frames,
+            Locus::Logged {
+                place,
+                len: bytes.len(),
+                handshake,
+            },
+        );
+        self.produced += frames.len() as u64;
+    }
+
+    /// The list's index, made of the rows it keeps whole if it has none yet:
+    /// what a list that begins to keep entries turns into, whatever it held.
+    fn index(&mut self) -> &mut Index {
+        if let Store::Held(log) = &mut self.rows {
+            let mut index = Box::<Index>::default();
+            let first_produced = self.produced - log.len() as u64;
+            for (k, frame) in core::mem::take(log).into_iter().enumerate() {
+                index.push_held(first_produced + k as u64, frame);
+            }
+            self.rows = Store::Indexed(index);
         }
         match &mut self.rows {
-            Store::Indexed(index) => {
-                index.push_unit(self.produced, start, &frames);
-                self.produced += frames.len() as u64;
-            }
-            Store::Held(_) => self.append(frames),
+            Store::Indexed(index) => index,
+            Store::Held(_) => unreachable!("the list was given an index above"),
         }
     }
 
@@ -419,7 +476,7 @@ impl MessageList {
                     index
                         .entries
                         .iter_from(from)
-                        .all(|entry| matches!(entry, Entry::Held)),
+                        .all(|entry| matches!(entry.entry(), Entry::Held)),
                     "a message read again from its bytes cannot be rewritten in place"
                 );
                 Box::new(
@@ -475,6 +532,13 @@ pub trait UnitBytes {
     /// The bytes of `direction`'s stream from offset `from` up to `to`, or
     /// `None` when the source does not hold all of them.
     fn stream_bytes(&self, direction: Direction, from: usize, to: usize) -> Option<Cow<'_, [u8]>>;
+
+    /// The capture container the list's holder lends, which a datagram unit
+    /// logged by its place there is read from ([`MessageList::push_datagram`]);
+    /// `None` when the holder lends none.
+    fn container(&self) -> Option<&[u8]> {
+        None
+    }
 }
 
 /// The source of a list that keeps every message whole, and so reads no bytes.
@@ -487,12 +551,30 @@ impl UnitBytes for NoBytes {
     }
 }
 
+/// The source of a list of datagrams: no stream, and the container its holder
+/// lends, if any. The list keeps the rest of its units' bytes itself.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Datagrams<'a> {
+    /// What [`UnitBytes::container`] answers.
+    pub container: Option<&'a [u8]>,
+}
+
+impl UnitBytes for Datagrams<'_> {
+    fn stream_bytes(&self, _: Direction, _: usize, _: usize) -> Option<Cow<'_, [u8]>> {
+        None
+    }
+
+    fn container(&self) -> Option<&[u8]> {
+        self.container
+    }
+}
+
 /// How a [`MessageList`] keeps its rows.
 #[derive(Debug)]
 enum Store {
-    /// Every row as its decoded frame. A list starts here, and stays here
-    /// unless its first unit can be read again from its bytes: a datagram list,
-    /// a stream a layer below framed (WebSocket) or decrypted (TLS).
+    /// Every row as its decoded frame. A list starts here, and stays here until
+    /// a unit it is handed can be read again from its bytes; a list whose units
+    /// a layer below framed (WebSocket) or decrypted (TLS) is never handed one.
     Held(ChunkLog<PassiveFrame>),
     /// Rows as index entries, read again on demand (see [`Index`]). Boxed, so a
     /// list that keeps its frames does not carry the index's size.
@@ -505,12 +587,13 @@ impl Default for Store {
     }
 }
 
-/// The rows of a list that keeps its stream units as index entries.
+/// The rows of a list that keeps its units as index entries.
 ///
-/// Open-debt item 924, step 4b (`docs/dissect-row-index.md`, D2 and D3). One
-/// entry per row, in row order. An entry of a row read off a byte stream says
-/// where its unit lies and what the first reading knew that the unit's bytes do
-/// not; [`redecode_unit`] makes the row again from those. The few facts most
+/// Open-debt item 924, steps 4b and 4c (`docs/dissect-row-index.md`, D2, D3
+/// and D8). One entry per row, in row order. An entry says where its unit's
+/// bytes lie (a range of its direction's stream, or a place in the unit log) and
+/// what the first reading knew that the unit's bytes do not; [`redecode_unit`]
+/// makes the row again from those. The few facts most
 /// rows do not have (an SN verdict other than continuous, a fragment's fate, a
 /// resynchronisation) are kept apart, by produced-index, and the context a unit
 /// was read in is kept once per change.
@@ -521,7 +604,11 @@ impl Default for Store {
 #[derive(Debug, Default)]
 struct Index {
     /// One per row, oldest first.
-    entries: ChunkLog<Entry>,
+    entries: ChunkLog<UnitRow>,
+    /// The bytes of the datagram units whose entries are logged with a copy
+    /// ([`LogPlace::Kept`]), in the order they were logged. A unit's bytes go
+    /// when a discard takes the unit's last row ([`Self::pop_front`]).
+    log: ByteLog,
     /// The frames of the rows kept whole, by produced-index. Few: a list keeps
     /// a row whole only where it cannot read it again.
     held: BTreeMap<u64, PassiveFrame>,
@@ -545,7 +632,7 @@ struct Index {
     cut_resync: Option<StreamResync>,
 }
 
-/// One row of an [`Index`].
+/// One row of an [`Index`], as its [`UnitRow`] says.
 #[derive(Debug, Clone, Copy)]
 enum Entry {
     /// Kept whole, in [`Index::held`].
@@ -554,14 +641,22 @@ enum Entry {
     Unit(UnitRow),
 }
 
-/// What an [`Index`] keeps of a row read off a byte stream: where its unit
-/// lies, where the row sits in it, and what the first reading knew that the
-/// unit's bytes do not say. 40 bytes, against a decoded frame's 424 and what
-/// it owns.
+/// What an [`Index`] keeps of a row: where its unit's bytes lie, where the row
+/// sits in the unit, and what the first reading knew that the unit's bytes do
+/// not say. 48 bytes, against a decoded frame's 424 and what it owns.
+///
+/// One layout for every row (open-debt item 924, D8): a row kept whole is the
+/// [`HELD`] flag on it rather than an enum around it, whose tag would cost a
+/// word on every row, and a row of a datagram unit differs from one of a
+/// stream unit only in what its [`Self::locator`] counts ([`LOGGED`]).
 #[derive(Debug, Clone, Copy)]
 struct UnitRow {
-    /// The unit's length prefix, in its direction's stream.
-    stream_offset: u64,
+    /// [`PassiveFrame::stream_offset`] of the unit: its length prefix in its
+    /// direction's stream, or the index of the packet that carried a datagram.
+    anchor: u64,
+    /// Where the unit's body is: its first byte in its direction's stream, or,
+    /// with [`LOGGED`] set, its place in the unit log ([`LogPlace`]).
+    locator: u64,
     /// The capture instant of the row's first byte, when [`TIMED`] is set.
     observed_at_ns: u64,
     /// [`PassiveFrame::unit_len`]: the unit's length as read, which for an lz4
@@ -580,24 +675,85 @@ struct UnitRow {
     /// [`RowHead::kind`].
     kind: u8,
     /// The flags below.
-    flags: u8,
+    flags: u16,
 }
 
 /// The row travelled [`Direction::B`].
-const SIDE_B: u8 = 1;
+const SIDE_B: u16 = 1;
 /// [`UnitRow::observed_at_ns`] is an instant.
-const TIMED: u8 = 1 << 1;
+const TIMED: u16 = 1 << 1;
 /// [`PassiveFrame::exceeds_negotiated_batch`].
-const OVER_BATCH: u8 = 1 << 2;
+const OVER_BATCH: u16 = 1 << 2;
 /// The row carries a resynchronisation ([`Sparse::resync`]).
-const AFTER_RESYNC: u8 = 1 << 3;
+const AFTER_RESYNC: u16 = 1 << 3;
 /// The row was read out of an lz4 batch ([`PassiveFrame::decompressed`]).
-const DECOMPRESSED: u8 = 1 << 4;
+const DECOMPRESSED: u16 = 1 << 4;
 /// The row's SN verdict is [`SnVerdict::Continuous`], the common one, which is
 /// kept here rather than in [`Index::sparse`].
-const CONTINUOUS: u8 = 1 << 5;
+const CONTINUOUS: u16 = 1 << 5;
 /// [`Index::sparse`] holds facts for this row.
-const SPARSE: u8 = 1 << 6;
+const SPARSE: u16 = 1 << 6;
+/// The row is kept whole, in [`Index::held`]; no other field means anything.
+const HELD: u16 = 1 << 7;
+/// The row's unit is a datagram: its anchor is a packet index and its locator a
+/// place in the unit log.
+const LOGGED: u16 = 1 << 8;
+/// The datagram's link carries no handshake ([`LinkHandshake::Absent`]).
+///
+/// Kept so a datagram is read again with the input it was first read with. No
+/// reachable state makes the two readings of an entry differ today: the walk
+/// reads the flag to judge a handshake message inadmissible, and such a row is
+/// kept whole, and to look for a batch header, which only an InitAck folded on
+/// the link turns on, and a link without a handshake folds none. The redecode
+/// gate therefore cannot tell this flag from its absence, and the flag does not
+/// depend on that holding.
+const NO_HANDSHAKE: u16 = 1 << 9;
+
+/// [`UnitRow::locator`] of a logged unit names an offset in the container the
+/// list's holder lends, not a position in the list's own log. No container or
+/// log reaches 2^63 bytes.
+const IN_CONTAINER: u64 = 1 << 63;
+
+/// Where a logged unit's bytes are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogPlace {
+    /// At this position of the list's [`Index::log`].
+    Kept(u64),
+    /// At this offset of the container the list's holder lends.
+    Container(usize),
+}
+
+impl LogPlace {
+    fn locator(self) -> u64 {
+        match self {
+            LogPlace::Kept(at) => at,
+            LogPlace::Container(offset) => offset as u64 | IN_CONTAINER,
+        }
+    }
+
+    fn of(locator: u64) -> Self {
+        if locator & IN_CONTAINER != 0 {
+            LogPlace::Container((locator & !IN_CONTAINER) as usize)
+        } else {
+            LogPlace::Kept(locator)
+        }
+    }
+}
+
+/// Where the unit of the rows [`Index::push_unit`] is handed lies.
+#[derive(Debug, Clone, Copy)]
+enum Locus {
+    /// In its direction's stream, where its rows' coordinates say.
+    Streamed,
+    /// In the unit log.
+    Logged {
+        place: LogPlace,
+        /// The unit's length.
+        len: usize,
+        /// The link's handshake, which a datagram's reading depends on.
+        handshake: LinkHandshake,
+    },
+}
 
 /// The facts few rows have.
 #[derive(Debug, Clone, Default)]
@@ -622,30 +778,85 @@ impl Sparse {
 }
 
 impl UnitRow {
-    /// Whether `frame` is a row an entry can stand for: read off a byte stream
-    /// (whose unit can be read again from the stream, on a link that carries a
-    /// handshake), with coordinates the entry's fields hold.
-    fn can_hold(frame: &PassiveFrame) -> bool {
+    /// The row of a message kept whole.
+    const HELD_ROW: Self = Self {
+        anchor: 0,
+        locator: 0,
+        observed_at_ns: 0,
+        unit_len: 0,
+        wire_len: 0,
+        unit_offset: 0,
+        batch_index: 0,
+        context: 0,
+        prefix_width: 0,
+        kind: 0,
+        flags: HELD,
+    };
+
+    /// What the row is.
+    fn entry(self) -> Entry {
+        if self.flags & HELD != 0 {
+            Entry::Held
+        } else {
+            Entry::Unit(self)
+        }
+    }
+
+    /// The coordinates every entry's fields must hold, whatever its unit.
+    fn fits(frame: &PassiveFrame) -> bool {
         let fits = |n: usize| u32::try_from(n).is_ok();
-        frame.offset_space == OffsetSpace::StreamBytes
-            && !frame.inadmissible_on_link
+        !frame.inadmissible_on_link
             && u8::try_from(frame.prefix_width).is_ok()
             && fits(frame.unit_len)
             && fits(frame.unit_offset)
             && fits(frame.batch_index)
+    }
+
+    /// Whether `frame` is a row an entry can stand for read off a byte stream
+    /// (whose unit can be read again from the stream, on a link that carries a
+    /// handshake).
+    fn can_hold_streamed(frame: &PassiveFrame) -> bool {
+        Self::fits(frame)
+            && frame.offset_space == OffsetSpace::StreamBytes
             && frame
                 .wire_end
                 .and_then(|end| end.checked_sub(frame.stream_offset + frame.prefix_width))
-                .is_some_and(fits)
+                .is_some_and(|n| u32::try_from(n).is_ok())
     }
 
-    /// The entry for `frame`, read in the context at `context`, and the facts
-    /// it keeps apart. `frame` passed [`Self::can_hold`].
-    fn of(frame: &PassiveFrame, context: u32) -> (Self, Sparse) {
+    /// Whether `frame` is a row an entry can stand for read out of a datagram:
+    /// anchored at a packet, with no prefix and no end in that space, which is
+    /// what the walk writes for a datagram and what an entry gives back.
+    fn can_hold_logged(frame: &PassiveFrame) -> bool {
+        Self::fits(frame)
+            && frame.offset_space == OffsetSpace::PacketIndex
+            && frame.prefix_width == 0
+            && frame.wire_end.is_none()
+    }
+
+    /// The entry for `frame`, of a unit lying where `locus` says, read in the
+    /// context at `context`, and the facts it keeps apart. `frame` passed the
+    /// `can_hold` of its locus.
+    fn of(frame: &PassiveFrame, locus: Locus, context: u32) -> (Self, Sparse) {
         let narrow = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-        let body = frame.stream_offset + frame.prefix_width;
         let facts = MessageFacts::of(frame);
-        let mut flags = 0u8;
+        let (locator, wire_len, mut flags) = match locus {
+            Locus::Streamed => {
+                let body = frame.stream_offset + frame.prefix_width;
+                (body as u64, frame.wire_end.unwrap_or(body) - body, 0)
+            }
+            Locus::Logged {
+                place,
+                len,
+                handshake,
+            } => {
+                let mut flags = LOGGED;
+                if handshake == LinkHandshake::Absent {
+                    flags |= NO_HANDSHAKE;
+                }
+                (place.locator(), len, flags)
+            }
+        };
         if frame.direction == Direction::B {
             flags |= SIDE_B;
         }
@@ -675,10 +886,11 @@ impl UnitRow {
             flags |= SPARSE;
         }
         let row = Self {
-            stream_offset: frame.stream_offset as u64,
+            anchor: frame.stream_offset as u64,
+            locator,
             observed_at_ns: frame.observed_at_ns.unwrap_or(0),
             unit_len: narrow(frame.unit_len),
-            wire_len: narrow(frame.wire_end.unwrap_or(body) - body),
+            wire_len: narrow(wire_len),
             unit_offset: narrow(frame.unit_offset),
             batch_index: narrow(frame.batch_index),
             context,
@@ -701,23 +913,39 @@ impl UnitRow {
         (self.flags & TIMED != 0).then_some(self.observed_at_ns)
     }
 
-    /// Where the unit's body begins and ends, in its direction's stream.
+    fn logged(&self) -> bool {
+        self.flags & LOGGED != 0
+    }
+
+    /// Where the body of a streamed unit begins and ends, in its direction's
+    /// stream.
     fn body(&self) -> (usize, usize) {
-        let from = self.stream_offset as usize + usize::from(self.prefix_width);
+        let from = self.locator as usize;
         (from, from + self.wire_len as usize)
+    }
+
+    /// Where the unit stands, in the space it was read in.
+    fn anchor(&self) -> Anchor {
+        if self.logged() {
+            Anchor::packet(self.anchor as usize)
+        } else {
+            Anchor::bytes(self.anchor as usize)
+        }
     }
 
     /// The row's head, which an entry answers without reading the unit.
     fn head(&self) -> RowHead {
+        let anchor = self.anchor();
         RowHead {
             direction: self.direction(),
-            stream_offset: self.stream_offset as usize,
-            offset_space: OffsetSpace::StreamBytes,
+            stream_offset: anchor.offset,
+            offset_space: anchor.space,
             batch_index: self.batch_index as usize,
             unit_offset: self.unit_offset as usize,
             unit_len: self.unit_len as usize,
             prefix_width: usize::from(self.prefix_width),
-            wire_end: Some(self.body().1),
+            // A datagram's anchor names a packet and has no end.
+            wire_end: (!self.logged()).then(|| self.body().1),
             observed_at_ns: self.observed_at_ns(),
             kind: self.kind,
             decompressed: self.flags & DECOMPRESSED != 0,
@@ -774,24 +1002,36 @@ impl ReadAgain {
 impl Index {
     /// Append a row kept whole; `produced` is its produced-index.
     fn push_held(&mut self, produced: u64, frame: PassiveFrame) {
-        self.entries.push_back(Entry::Held);
+        self.entries.push_back(UnitRow::HELD_ROW);
         self.held.insert(produced, frame);
     }
 
-    /// Append the rows of one unit as entries; `produced` is the produced-index
-    /// of the first of them.
-    fn push_unit(&mut self, produced: u64, start: FlowContext, frames: &[PassiveFrame]) {
+    /// Append the rows of one unit, lying where `locus` says, as entries;
+    /// `produced` is the produced-index of the first of them.
+    fn push_unit(
+        &mut self,
+        produced: u64,
+        start: FlowContext,
+        frames: &[PassiveFrame],
+        locus: Locus,
+    ) {
         if self.contexts.last() != Some(&start) {
             self.contexts.push(start);
         }
         let context = u32::try_from(self.contexts.len() - 1).unwrap_or(u32::MAX);
         for (k, frame) in frames.iter().enumerate() {
-            let (row, sparse) = UnitRow::of(frame, context);
+            let (row, sparse) = UnitRow::of(frame, locus, context);
             if row.flags & SPARSE != 0 {
                 self.sparse.insert(produced + k as u64, sparse);
             }
-            self.entries.push_back(Entry::Unit(row));
+            self.entries.push_back(row);
         }
+    }
+
+    /// What the row at `position` is.
+    #[inline]
+    fn entry(&self, position: usize) -> Option<Entry> {
+        self.entries.get(position).map(|row| row.entry())
     }
 
     /// The frame of the row kept whole at `position`.
@@ -816,12 +1056,14 @@ impl Index {
         let seat = usize::from(direction == Direction::B);
         let mut position = usize::try_from(self.whole_below[seat].saturating_sub(first_produced))
             .unwrap_or(usize::MAX);
-        while let Some(entry) = self.entries.get(position).copied() {
+        while let Some(entry) = self.entry(position) {
             let Entry::Unit(row) = entry else {
                 position += 1;
                 continue;
             };
-            if row.direction() != direction {
+            // A logged unit's bytes are the list's own, and no stream releases
+            // them.
+            if row.logged() || row.direction() != direction {
                 position += 1;
                 continue;
             }
@@ -833,7 +1075,7 @@ impl Index {
             while let Some(frame) = unit.take(position) {
                 let key = first_produced + position as u64;
                 if let Some(slot) = self.entries.get_mut(position) {
-                    *slot = Entry::Held;
+                    *slot = UnitRow::HELD_ROW;
                 }
                 self.sparse.remove(&key);
                 self.held.insert(key, frame);
@@ -849,14 +1091,15 @@ impl Index {
     ///
     /// # Panics
     ///
-    /// When `source` does not hold the unit's bytes, or the unit does not read
-    /// again into the records its entries describe. Either says the list and
-    /// its source have come apart: a holder releases bytes only behind the
-    /// oldest row it still holds, and the walk that read the unit is the walk
-    /// that reads it again. Reading on would hand a reader a row that is not
-    /// the one the capture holds.
+    /// When neither the list's log nor `source` holds the unit's bytes, or the
+    /// unit does not read again into the records its entries describe. Either
+    /// says the list and its source have come apart: a holder releases bytes
+    /// only behind the oldest row it still holds, a reader of a list whose
+    /// units are in a lent container hands the container in, and the walk that
+    /// read the unit is the walk that reads it again. Reading on would hand a
+    /// reader a row that is not the one the capture holds.
     fn read_unit(&self, position: usize, first_produced: u64, source: &dyn UnitBytes) -> ReadAgain {
-        let Some(Entry::Unit(row)) = self.entries.get(position).copied() else {
+        let Some(Entry::Unit(row)) = self.entry(position) else {
             unreachable!("only an entry is read again, and {position} is not one");
         };
         let batch = row.batch_index as usize;
@@ -870,7 +1113,9 @@ impl Index {
         let mut messages: Vec<MessageFacts> = self.cut[..cut].to_vec();
         let mut resync = if cut > 0 { self.cut_resync } else { None };
         for (at, entry) in self.entries.iter_from(from).enumerate() {
-            let Entry::Unit(member) = entry else { break };
+            let Entry::Unit(member) = entry.entry() else {
+                break;
+            };
             if member.batch_index as usize != messages.len() {
                 break;
             }
@@ -888,20 +1133,21 @@ impl Index {
             unit_instant: messages.first().and_then(|m| m.observed_at_ns),
             messages,
         };
-        let (body, end) = row.body();
         let direction = row.direction();
-        let Some(bytes) = source.stream_bytes(direction, body, end) else {
-            panic!("the stream no longer holds bytes {body}..{end} of a unit a list holds");
-        };
+        let bytes = self.unit_bytes(&row, source);
         let frames = redecode_unit(
             UnitInput {
                 direction,
                 bytes: &bytes,
-                anchor: Anchor::bytes(row.stream_offset as usize),
+                anchor: row.anchor(),
                 prefix_width: usize::from(row.prefix_width),
-                // A byte stream is a unicast link by construction, which is what
-                // `UnitRow::can_hold` admitted.
-                handshake: LinkHandshake::Present,
+                // A byte stream is a unicast link by construction; a datagram's
+                // link said which it was when the unit was logged.
+                handshake: if row.flags & NO_HANDSHAKE != 0 {
+                    LinkHandshake::Absent
+                } else {
+                    LinkHandshake::Present
+                },
             },
             &facts,
         )
@@ -914,6 +1160,33 @@ impl Index {
         }
     }
 
+    /// The bytes of the unit `row` belongs to, from the list's log or from
+    /// `source`; panics where [`Self::read_unit`] says.
+    fn unit_bytes<'a>(&'a self, row: &UnitRow, source: &'a dyn UnitBytes) -> Cow<'a, [u8]> {
+        let len = row.wire_len as usize;
+        if !row.logged() {
+            let (body, end) = row.body();
+            return source
+                .stream_bytes(row.direction(), body, end)
+                .unwrap_or_else(|| {
+                    panic!("the stream no longer holds bytes {body}..{end} of a unit a list holds")
+                });
+        }
+        let bytes = match LogPlace::of(row.locator) {
+            LogPlace::Kept(at) => self.log.get(at, len),
+            LogPlace::Container(offset) => source
+                .container()
+                .and_then(|container| container.get(offset..offset.checked_add(len)?)),
+        };
+        match bytes {
+            Some(bytes) => Cow::Borrowed(bytes),
+            None => panic!(
+                "the {len} bytes of a datagram a list holds are not at {:?}",
+                LogPlace::of(row.locator)
+            ),
+        }
+    }
+
     /// The row at `position` as a reader is handed it.
     fn row<'a>(
         &'a self,
@@ -921,7 +1194,7 @@ impl Index {
         first_produced: u64,
         source: &dyn UnitBytes,
     ) -> Option<Row<'a>> {
-        match *self.entries.get(position)? {
+        match self.entry(position)? {
             Entry::Held => self.held(position, first_produced).map(Row::held),
             Entry::Unit(_) => self
                 .read_unit(position, first_produced, source)
@@ -933,15 +1206,16 @@ impl Index {
     /// The head of the row at `position`.
     #[inline]
     fn head(&self, position: usize, first_produced: u64) -> Option<RowHead> {
-        match *self.entries.get(position)? {
+        match self.entry(position)? {
             Entry::Held => self.held(position, first_produced).map(RowHead::of),
             Entry::Unit(row) => Some(row.head()),
         }
     }
 
-    /// Release the oldest row and hand back its frame.
+    /// Release the oldest row and hand back its frame. A row that was the last
+    /// its unit had held releases the unit's logged bytes with it.
     fn pop_front(&mut self, first_produced: u64, source: &dyn UnitBytes) -> Option<PassiveFrame> {
-        match *self.entries.get(0)? {
+        match self.entry(0)? {
             Entry::Held => {
                 let _ = self.entries.pop_front();
                 // A cut unit whose rows were kept whole since needs no facts.
@@ -956,7 +1230,7 @@ impl Index {
                 // The rest of the unit is still held: keep what reading it again
                 // needs of the row going. Otherwise the cut, if any, ends here.
                 let continues = matches!(
-                    self.entries.get(0),
+                    self.entry(0),
                     Some(Entry::Unit(next)) if next.batch_index == row.batch_index + 1
                 );
                 if continues {
@@ -967,6 +1241,11 @@ impl Index {
                 } else {
                     self.cut.clear();
                     self.cut_resync = None;
+                    // The unit's last row: nothing reads its bytes any more, and
+                    // every unit logged before it went before it.
+                    if let (true, LogPlace::Kept(at)) = (row.logged(), LogPlace::of(row.locator)) {
+                        self.log.release_before(at + u64::from(row.wire_len));
+                    }
                 }
                 frame
             }
@@ -1279,7 +1558,7 @@ fn walk_row<'a>(
     position: usize,
     ahead: &mut Option<ReadAgain>,
 ) -> Option<Row<'a>> {
-    match *index.entries.get(position)? {
+    match index.entry(position)? {
         Entry::Held => index.held(position, first_produced).map(Row::held),
         Entry::Unit(_) => {
             if let Some(frame) = ahead.as_mut().and_then(|unit| unit.take(position)) {
@@ -2060,5 +2339,173 @@ mod tests {
         list.push(numbered(5));
         check(&list, 5..6);
         assert_eq!(census.total(), regrown);
+    }
+
+    /// Datagrams of one, two and three keep-alives and one that does not
+    /// decode, `n` of them.
+    fn datagrams(n: usize) -> Vec<Vec<u8>> {
+        (0..n)
+            .map(|k| match k % 4 {
+                0 => alloc::vec![0x04],
+                1 => alloc::vec![0x04, 0x04],
+                2 => alloc::vec![0x04, 0x04, 0x04],
+                _ => alloc::vec![0x1f, 0xff, 0x00],
+            })
+            .collect()
+    }
+
+    /// `units` read by one session into a list that logs them (by their place
+    /// in `container` when it is given, which holds them back to back) and by
+    /// another into a list that keeps them whole.
+    fn logged_and_whole(
+        units: &[Vec<u8>],
+        handshake: LinkHandshake,
+        container: Option<&[u8]>,
+    ) -> (MessageList, MessageList) {
+        let mut logging = crate::passive::PassiveSession::new();
+        let mut keeping = crate::passive::PassiveSession::new();
+        let (mut logged, mut whole) = (MessageList::new(), MessageList::new());
+        let mut place = 0;
+        for (packet, unit) in units.iter().enumerate() {
+            let direction = if packet % 3 == 0 {
+                Direction::B
+            } else {
+                Direction::A
+            };
+            let _ = logging.observe_at_nanos(1_000 * packet as u64);
+            let _ = keeping.observe_at_nanos(1_000 * packet as u64);
+            if let Some(read) = logging.next_datagram_unit_on(direction, unit, packet, handshake) {
+                logged.push_datagram(read, unit, container.map(|_| place), handshake);
+            }
+            whole.append(keeping.next_datagram_on(direction, unit, packet, handshake));
+            place += unit.len();
+        }
+        (logged, whole)
+    }
+
+    /// Every row and head of `logged`, read with `source`, as `whole` holds it.
+    fn assert_reads_as_whole(logged: &MessageList, whole: &MessageList, source: &dyn UnitBytes) {
+        let (rows, kept) = (logged.read(source), whole.read(&NoBytes));
+        assert_eq!(rows.len(), kept.len());
+        assert_eq!(rows.produced(), kept.produced());
+        for (k, (row, want)) in rows.iter().zip(kept.iter()).enumerate() {
+            assert_eq!(
+                alloc::format!("{:?}", *row),
+                alloc::format!("{:?}", *want),
+                "row {k}"
+            );
+            assert_eq!(
+                rows.heads_from(k).next(),
+                Some(RowHead::of(&want)),
+                "head {k}"
+            );
+            assert_eq!(
+                alloc::format!("{:?}", *rows.row(k)),
+                alloc::format!("{:?}", *want)
+            );
+        }
+    }
+
+    /// The bytes a list's unit log holds allocated.
+    fn logged_allocation(list: &MessageList) -> usize {
+        match &list.rows {
+            Store::Held(_) => 0,
+            Store::Indexed(index) => index.log.allocated(),
+        }
+    }
+
+    /// Open-debt item 924, step 4c — a list of datagrams kept as entries reads
+    /// as one kept whole, row for row and head for head, on a link with a
+    /// handshake and on one without, logged with a copy and logged by place in a
+    /// lent container; and the lent one keeps no copy.
+    #[test]
+    fn a_datagram_list_kept_as_entries_reads_as_one_kept_whole() {
+        let units = datagrams(64);
+        let container: Vec<u8> = units.concat();
+        for handshake in [LinkHandshake::Present, LinkHandshake::Absent] {
+            let (logged, whole) = logged_and_whole(&units, handshake, None);
+            assert!(
+                matches!(logged.rows, Store::Indexed(_)),
+                "the units became entries"
+            );
+            assert!(
+                logged_allocation(&logged) >= container.len(),
+                "a copy is logged"
+            );
+            assert_reads_as_whole(&logged, &whole, &NoBytes);
+
+            let (lent, whole) = logged_and_whole(&units, handshake, Some(&container));
+            assert_eq!(logged_allocation(&lent), 0, "a lent unit keeps no copy");
+            let source = Datagrams {
+                container: Some(&container),
+            };
+            assert_reads_as_whole(&lent, &whole, &source);
+        }
+    }
+
+    /// A lent unit is read where the container holds it: a reader that does
+    /// not hand the container in has no bytes to read it from.
+    #[test]
+    #[should_panic(expected = "bytes of a datagram a list holds are not at")]
+    fn a_lent_datagram_read_without_its_container_is_refused() {
+        let units = datagrams(4);
+        let container: Vec<u8> = units.concat();
+        let (lent, _) = logged_and_whole(&units, LinkHandshake::Present, Some(&container));
+        let _ = lent.read(&NoBytes).row(0);
+    }
+
+    /// Discarding a unit's last row releases its logged bytes, and what stays
+    /// reads as it did, including a unit a discard cut.
+    #[test]
+    fn discarding_a_datagram_releases_its_bytes_and_keeps_the_rest_readable() {
+        // Enough units that the log is mostly chunks of its largest size: what a
+        // release can give back is whole chunks, so the one the front is in stays.
+        let units = datagrams(200_000);
+        let (mut logged, mut whole) = logged_and_whole(&units, LinkHandshake::Present, None);
+        let before = logged_allocation(&logged);
+        let mut census = DroppedFrameCensus::default();
+        // Most of the 350,000 rows, and an odd count, so the front is left inside
+        // a unit of several rows.
+        for _ in 0..300_001 {
+            census.absorb(logged.discard_oldest(&NoBytes).expect("a row"));
+            census.absorb(whole.discard_oldest(&NoBytes).expect("a row"));
+        }
+        assert!(
+            logged_allocation(&logged) < before / 2,
+            "the discarded units' bytes went"
+        );
+        assert_reads_as_whole(&logged, &whole, &NoBytes);
+        while let Some(receipt) = logged.discard_oldest(&NoBytes) {
+            census.absorb(receipt);
+        }
+        assert_eq!(logged_allocation(&logged), 0, "an empty list logs nothing");
+    }
+
+    /// Every row still held reads as it did after EVERY discard, from the
+    /// first to the last: a release that came before a unit's last row went
+    /// shows only when the unit cut is the last its chunk holds, which the last
+    /// unit of a log always is.
+    #[test]
+    fn every_discard_leaves_every_row_still_held_readable() {
+        // Counts whose last unit is one of three rows, one inside the first
+        // chunk and one past it.
+        for (count, handshake) in [(95, LinkHandshake::Present), (231, LinkHandshake::Absent)] {
+            let units = datagrams(count);
+            let (mut logged, mut whole) = logged_and_whole(&units, handshake, None);
+            let mut census = DroppedFrameCensus::default();
+            while !logged.is_empty() {
+                census.absorb(logged.discard_oldest(&NoBytes).expect("a row"));
+                census.absorb(whole.discard_oldest(&NoBytes).expect("a row"));
+                assert_reads_as_whole(&logged, &whole, &NoBytes);
+            }
+            assert_eq!(logged_allocation(&logged), 0, "an empty list logs nothing");
+        }
+    }
+
+    /// The row a list keeps for every message it can read again, whatever its
+    /// unit. A word more and every list of a capture grows by it.
+    #[test]
+    fn an_entry_is_forty_eight_bytes() {
+        assert_eq!(core::mem::size_of::<UnitRow>(), 48);
     }
 }
