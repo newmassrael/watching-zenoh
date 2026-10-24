@@ -632,7 +632,7 @@ fn is_stream(o: &MessageListOrigin) -> bool {
 /// fit a batch, so on a real capture it is amortised over a row of hundreds to
 /// thousands of bytes; the fixture's are twelve.
 fn cases() -> Vec<Case> {
-    let mut cases = alloc::vec![
+    let cases = alloc::vec![
         Case {
             name: "udp",
             build: udp,
@@ -699,24 +699,28 @@ fn cases() -> Vec<Case> {
         },
     ];
     #[cfg(feature = "fixtures")]
-    cases.extend([
-        Case {
-            name: "udp fragment chains",
-            build: udp_chains,
-            lendable: true,
-            expect: Expect::List(|o| matches!(o, MessageListOrigin::Datagram)),
-            ceiling: 152.0,
-            ceiling_lent: 128.0,
-        },
-        Case {
-            name: "tcp fragment chains",
-            build: tcp_chains,
-            lendable: true,
-            expect: Expect::List(is_stream),
-            ceiling: 194.0,
-            ceiling_lent: 173.0,
-        },
-    ]);
+    let cases = {
+        let mut cases = cases;
+        cases.extend([
+            Case {
+                name: "udp fragment chains",
+                build: udp_chains,
+                lendable: true,
+                expect: Expect::List(|o| matches!(o, MessageListOrigin::Datagram)),
+                ceiling: 152.0,
+                ceiling_lent: 128.0,
+            },
+            Case {
+                name: "tcp fragment chains",
+                build: tcp_chains,
+                lendable: true,
+                expect: Expect::List(is_stream),
+                ceiling: 194.0,
+                ceiling_lent: 173.0,
+            },
+        ]);
+        cases
+    };
     cases
 }
 
