@@ -1986,6 +1986,7 @@ fn record_loopback_samples(session: &TokioSession, pattern: &str) -> Arc<Mutex<V
 ))]
 #[test]
 fn publish_options_with_metadata_setters_chain() {
+    use crate::sample::{EncodingHint, SourceInfo};
     // Builder ergonomics: every R232 with_* setter is chainable
     // and pins exactly the field it names, leaving the other
     // four metadata slots untouched.
@@ -2145,6 +2146,7 @@ fn publish_loopback_propagates_timestamp_to_sample() {
 #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-encoding"))]
 #[test]
 fn publish_loopback_propagates_encoding_to_put_sample() {
+    use crate::sample::EncodingHint;
     let (session, _driver) = build_session();
     let captured = record_loopback_samples(&session, "home/temp");
 
@@ -2165,6 +2167,7 @@ fn publish_loopback_propagates_encoding_to_put_sample() {
 #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-encoding"))]
 #[test]
 fn publish_loopback_omits_encoding_for_del_kind_even_when_opts_supplied() {
+    use crate::sample::EncodingHint;
     // Mirror zenoh-pico's wire constraint: _z_msg_del_t has no
     // encoding field. The wire-arrival dispatch projects Del with
     // encoding=None unconditionally; the loopback path must
@@ -2192,6 +2195,7 @@ fn publish_loopback_omits_encoding_for_del_kind_even_when_opts_supplied() {
 #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-source-info"))]
 #[test]
 fn publish_loopback_propagates_source_info_to_sample() {
+    use crate::sample::SourceInfo;
     let (session, _driver) = build_session();
     let captured = record_loopback_samples(&session, "home/temp");
 
@@ -2406,6 +2410,7 @@ fn publish_qos_folds_band_into_observable_sample() {
 ))]
 #[test]
 fn publish_loopback_propagates_all_metadata_in_one_chain() {
+    use crate::sample::{EncodingHint, SourceInfo};
     // Composition: every R232 metadata field set together must
     // surface together on the projected Sample, in the same
     // shape the wire-arrival dispatcher produces. Mirrors what a
@@ -4740,6 +4745,7 @@ fn alloc_next_request_id_increments_and_starts_at_zero() {
 #[cfg(feature = "query-attachment")]
 #[test]
 fn query_options_query_metadata_extracts_wire_fields() {
+    use crate::sample::EncodingHint;
     // R240 — QueryOptions::query_metadata must surface the
     // wire-propagatable subset (target / consolidation /
     // attachment / timeout_ms). R311y250 — payload / encoding now
@@ -9527,6 +9533,7 @@ fn declared_queryable_fires_on_loopback_query() {
 ))]
 #[test]
 fn loopback_query_surfaces_body_metadata_to_queryable() {
+    use crate::sample::{EncodingHint, SourceInfo};
     type Captured = (
         Option<Vec<u8>>,             // parameters
         Option<Vec<u8>>,             // attachment

@@ -309,9 +309,8 @@ use crate::reply_sink::ReplyView;
 //     `Session::publish` remote leg matches (codec-push) and the
 //     `transport-unicast` `Publisher` / `publish_aliased` set (via `super::*`);
 //     gated on either so a multicast-only + codec-push build still sees it.
-//   * `EncodingHint` / `SourceInfo` — named by the `transport-unicast`
-//     `querier` / `queryable` `QueryOptions` struct fields (unconditional in a
-//     `transport-unicast` build, consumed via `super::*`).
+//   * `EncodingHint` / `SourceInfo` — named by the owned query event a
+//     `queryable` keeps (consumed via `super::*`); the tests import their own.
 //   * `Reliability` / `TimestampHint` / `QosLevel` — named only by the
 //     `cfg(test)` module now (their former lib consumer `PublishOptions` moved
 //     to `publish_common`, which carries its own imports). `Reliability` rides
@@ -326,8 +325,8 @@ use crate::sample::Reliability;
 use crate::sample::SampleKind;
 #[cfg(all(test, feature = "pubsub-timestamp"))]
 use crate::sample::TimestampHint;
-// The owned query event a queryable keeps (`queryable.rs`); this module's tests reach the names
-// through `super::*` on the builds that have it.
+// The owned query event a queryable keeps (`queryable.rs`). A test that names these imports them
+// itself: their gates are not this one, and a test build without `query-queryable` lost them here.
 #[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
 use crate::sample::{EncodingHint, SourceInfo};
 // R311gb-2b / R311nb — `declare_subscriber` takes `impl FnMut(&dyn
