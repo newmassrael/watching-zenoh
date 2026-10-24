@@ -200,6 +200,21 @@ it behaves as pico behaves in both of pico's threading arms.
   a push arrives), a session that redials none ends with its link, and a session stepped for
   three leases keeps its lease (red without the KeepAlive codec). pico-client-coop: 881,043
   bytes, 2.19 times the same pico.
+- 2026-10-24: a read waits on its link outside the session's lock. Until now each pass of the
+  link's loop waited one millisecond on the socket, under the engine's lock, so a quiet session's
+  read task woke a thousand times a second and a publisher on another thread could wait behind
+  it; and a session waiting to dial again had no socket to wait on at all, so its read task spun
+  (1.3 million reads in 600 ms, measured). A link the engine opens is now waited on by its owner
+  (`IpLinks::waited_by_owner`): its loop reads what is queued and does not wait, and the link
+  hands out a wait on a duplicate of its socket's descriptor (`SessionDatagramLink::readiness`)
+  that a read makes before it takes the lock, for at most `idle_wait_ms` (pico's ABI: 100, pico's
+  socket timeout), returning as soon as input is queued; a link that already holds a whole batch
+  says so (`holds_input`) and is not waited on. A secure channel holds bytes of its own that the
+  socket's wait would not see, so it gives no wait and keeps waiting in its loop. While no link is
+  open, a read sleeps until the next dial, at most the same wait. Tests: a quiet session makes 8
+  reads or fewer in 600 ms (258 with the loop's wait), its read task wakes for a push in under
+  60 ms, and a session waiting to dial makes 8 or fewer. pico-client-coop: 888,223 bytes, 2.20
+  times the same pico.
 - Next: the capabilities in section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
@@ -212,8 +227,6 @@ it behaves as pico behaves in both of pico's threading arms.
 
 ## 6. Open
 
-- The read task steps its session in a loop with no idle wait; pico's read task sleeps
-  `Z_RUNTIME_IDLE_READ_TASK_SLEEP` when nothing was read.
 - The listening role. pico's `z_open(listen)` holds several peers in one
   session; the cooperative session host holds sessions in slots, and whether
   one C session maps to several slots or to one multi-face session is a design

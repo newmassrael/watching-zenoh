@@ -18,6 +18,8 @@
 use core::ffi::c_int;
 use core::mem::size_of;
 
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use wz_runtime_coop::session_drive::LinkReadiness;
 use wz_runtime_coop::udp_link::{DatagramSocket, Received, SERVICE_WAIT_MS};
 
 /// Why a socket call failed: the call, and the `errno` it left.
@@ -49,6 +51,49 @@ pub enum PosixNetError {
     PeerName(c_int),
     /// A stream's `sendmsg` failed with this `errno`.
     Write(c_int),
+}
+
+/// A wait on a socket that a thread other than its link's makes ([`LinkReadiness`]): `poll` on a
+/// duplicate of the socket's descriptor, which this owns and closes. A duplicate and not the
+/// number itself, so a wait that outlives the socket never reaches a descriptor number its close
+/// has freed for another file.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub(crate) struct FdReadiness(c_int);
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl FdReadiness {
+    /// A wait on `fd`, or `None` when the descriptor cannot be duplicated.
+    pub(crate) fn of(fd: c_int) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        // SAFETY: `fd` is the caller's live descriptor; `fcntl` duplicates it or fails.
+        let dup = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
+        if dup < 0 {
+            return None;
+        }
+        Some(alloc::boxed::Box::new(FdReadiness(dup)))
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl LinkReadiness for FdReadiness {
+    fn wait_readable(&self, timeout_ms: u32) {
+        let mut pfd = libc::pollfd {
+            fd: self.0,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let timeout = c_int::try_from(timeout_ms).unwrap_or(c_int::MAX);
+        // SAFETY: one live `pollfd` over the descriptor this owns; the timeout bounds the wait. A
+        // failed or interrupted wait is a quiet socket: the step that follows reports the error.
+        unsafe { libc::poll(&mut pfd, 1, timeout) };
+    }
+}
+
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+impl Drop for FdReadiness {
+    fn drop(&mut self) {
+        // SAFETY: the duplicate is this value's own descriptor, closed exactly once.
+        unsafe { libc::close(self.0) };
+    }
 }
 
 /// The calling thread's `errno`.
@@ -243,6 +288,11 @@ impl DatagramSocket for PosixUdpSocket {
 
     fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, PosixNetError> {
         self.receive(buf, libc::MSG_DONTWAIT)
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        FdReadiness::of(self.fd)
     }
 }
 

@@ -709,7 +709,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let dial_whatami = request.dial_whatami;
     let connect = request.connect;
     let opened = wz_capi_coop::CoopEngine::open(
-        wz_runtime_posix::links::PosixLinks::new([0; 4], wz_runtime_posix::stream::PosixTcpDial),
+        wz_runtime_posix::links::PosixLinks::new([0; 4], wz_runtime_posix::stream::PosixTcpDial)
+            .waited_by_owner(),
         wz_runtime_posix::PosixClock,
         wz_runtime_posix::PosixEntropy,
         wz_capi_coop::CoopConfig {
@@ -725,6 +726,9 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             // (`vendor/zenoh-pico/src/net/session.c` @
             // `return _z_fut_fn_result_wake_up_after(1000);`).
             redial_ms: Some(1000),
+            // A read waits on the link as long as pico's socket receive times out
+            // (`vendor/zenoh-pico/CMakeLists.txt` @ `set(Z_CONFIG_SOCKET_TIMEOUT 100`).
+            idle_wait_ms: 100,
         },
     );
     let engine = match opened {

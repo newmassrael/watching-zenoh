@@ -49,6 +49,8 @@ use wz_session_core::reliability::Reliability;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::{TxLender, TxStore};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::LinkReadiness;
 use crate::session_drive::{IpEndpoint, LinkOpenError, LinkProto, Locator, SessionDatagramLink};
 use crate::udp_link::SERVICE_WAIT_MS;
 
@@ -94,6 +96,15 @@ pub trait StreamSocket: Sized {
     /// The zid of the key the peer proved when the stream was opened, for a stream that is a
     /// secure channel (decision D1); `None` for a plain connection, which proves nobody.
     fn peer_credential_zid(&self) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
+        None
+    }
+
+    /// A wait for this stream that a thread other than the link's can make
+    /// ([`SessionDatagramLink::readiness`]); `None` when the platform gives none (a secure
+    /// channel holds bytes of its own the socket's wait would not see), and then a link over the
+    /// stream waits in its own loop whatever it was asked.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
         None
     }
 }
@@ -225,6 +236,9 @@ pub struct StreamDriver<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> {
     lost: Cell<Option<LostCause>>,
     /// The last failure the socket reported, kept for the deploy to report.
     error: Cell<Option<S::Error>>,
+    /// Whether the link's owner waits on its stream ([`Self::waited_by_owner`]), so its loop does
+    /// not.
+    owner_waits: bool,
 }
 
 /// The fixed-memory profile's driver: its receive buffer and the buffer its frames are built in
@@ -259,7 +273,19 @@ impl<S: StreamSocket, B: AsMut<[u8]>, T: TxStore> StreamDriver<S, B, T> {
             tx: TxLender::new(tx),
             lost: Cell::new(None),
             error: Cell::new(None),
+            owner_waits: false,
         }
+    }
+
+    /// The same link, waited on by its owner when its stream can be
+    /// ([`SessionDatagramLink::readiness`]): its loop then reads what is queued and does not
+    /// wait, and its owner waits on the stream with nothing of the session held. A stream that
+    /// gives no such wait keeps the link waiting in its loop.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[must_use]
+    pub fn waited_by_owner(mut self) -> Self {
+        self.owner_waits = self.socket.readiness().is_some();
+        self
     }
 
     /// The most recent failure the socket reported, if it has failed.
@@ -435,9 +461,23 @@ impl<S: StreamSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static> 
     for StreamDriver<S, B, T>
 {
     fn service(&self) {
-        // A whole batch already held (the last read brought two) is read without waiting.
-        if self.lost.get().is_none() && !self.batch_held() {
+        // A whole batch already held (the last read brought two) is read without waiting, and a
+        // link its owner waits on does not wait here.
+        if self.lost.get().is_none() && !self.batch_held() && !self.owner_waits {
             self.socket.wait_readable(SERVICE_WAIT_MS);
+        }
+    }
+
+    fn holds_input(&self) -> bool {
+        self.batch_held()
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        if self.owner_waits {
+            self.socket.readiness()
+        } else {
+            None
         }
     }
 

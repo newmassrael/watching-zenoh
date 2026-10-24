@@ -53,6 +53,8 @@ use wz_session_core::reliability::Reliability;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::{TxLender, TxStore};
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::LinkReadiness;
 use crate::session_drive::SessionDatagramLink;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{
@@ -125,6 +127,14 @@ pub trait DatagramSocket: Sized {
     /// Take one queued datagram into `buf` without blocking: `Ok(None)` when nothing is queued,
     /// else its length and source.
     fn try_recv(&self, buf: &mut [u8]) -> Result<Option<Received>, Self::Error>;
+
+    /// A wait for this socket that a thread other than the link's can make
+    /// ([`SessionDatagramLink::readiness`]); `None` when the platform gives none, and then a link
+    /// over the socket waits in its own loop whatever it was asked.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        None
+    }
 }
 
 /// `udp/a.b.c.d:port`, zenoh's rendering of a UDP locator, written into fixed text: the longest
@@ -171,6 +181,9 @@ pub struct UdpDriver<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> {
     idle_wait_ms: u32,
     /// The receive timeout the socket is armed with now, in milliseconds.
     armed_wait_ms: Cell<c_int>,
+    /// Whether the link's owner waits on its socket ([`Self::waited_by_owner`]), so its loop does
+    /// not.
+    owner_waits: bool,
 }
 
 /// The fixed-memory profile's driver: its receive buffer and the buffer its frames are built in
@@ -254,9 +267,21 @@ impl<S: DatagramSocket, B: AsMut<[u8]>, T: TxStore> UdpDriver<S, B, T> {
             rx_error: Cell::new(None),
             idle_wait_ms: SERVICE_WAIT_MS as u32,
             armed_wait_ms: Cell::new(SERVICE_WAIT_MS),
+            owner_waits: false,
         };
         driver.note_endpoints();
         driver
+    }
+
+    /// The same link, waited on by its owner when its socket can be
+    /// ([`SessionDatagramLink::readiness`]): its loop then reads what is queued and does not
+    /// wait, and its owner waits on the socket with nothing of the session held. A socket that
+    /// gives no such wait keeps the link waiting in its loop.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[must_use]
+    pub fn waited_by_owner(mut self) -> Self {
+        self.owner_waits = self.socket.readiness().is_some();
+        self
     }
 
     /// Let this link wait up to `ms` milliseconds for a datagram when its session has nothing due
@@ -461,6 +486,10 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     SessionDatagramLink for UdpDriver<S, B, T>
 {
     fn service(&self) {
+        // A link its owner waits on reads what is queued and does not wait here.
+        if self.owner_waits {
+            return;
+        }
         // The loop's thread owes the network stack the CPU while it has nothing to do. It gives
         // it by waiting for the socket, so a datagram is taken the moment it is queued, and a
         // quiet socket costs one millisecond, which is what bounds the loop's timers.
@@ -483,8 +512,8 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
     fn service_within(&self, max_wait_ms: u64) {
         // Something is due now (a deadline, a query left for the application's layer): a wait
         // of the tick would be the whole of what the thing costs. The receive that follows reads
-        // what is queued without waiting.
-        if max_wait_ms == 0 {
+        // what is queued without waiting. A link its owner waits on never waits here.
+        if max_wait_ms == 0 || self.owner_waits {
             return;
         }
         // The most this link may wait: what its session has due, and what its image allows. At
@@ -519,6 +548,19 @@ impl<S: DatagramSocket + 'static, B: AsMut<[u8]> + 'static, T: TxStore + 'static
                 self.rx_error.set(Some(e));
                 None
             }
+        }
+    }
+
+    fn holds_input(&self) -> bool {
+        self.stash.get().is_some()
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        if self.owner_waits {
+            self.socket.readiness()
+        } else {
+            None
         }
     }
 

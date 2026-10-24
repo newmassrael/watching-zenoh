@@ -237,6 +237,7 @@ fn config(router: &Router) -> CoopConfig {
         timeouts: SessionTimeouts::spec_defaults(),
         open_timeout_ms: 5_000,
         redial_ms: None,
+        idle_wait_ms: 100,
     }
 }
 
@@ -246,7 +247,7 @@ fn open(router: &Router) -> Arc<Engine> {
 
 fn open_with(config: CoopConfig) -> Arc<Engine> {
     Engine::open(
-        PosixLinks::new(LOOPBACK, PosixTcpDial),
+        PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
         PosixEntropy,
         config,
@@ -491,6 +492,92 @@ fn a_stepped_session_keeps_its_lease() {
     until(&engine, "the push after three leases", || {
         received.load(Ordering::SeqCst) == 1
     });
+}
+
+/// How many reads a session makes in `span` with nothing arriving.
+fn reads_in(engine: &Engine, span: Duration) -> u32 {
+    let end = Instant::now() + span;
+    let mut reads = 0;
+    while Instant::now() < end {
+        let _ = SessionDrive::read(engine, false);
+        reads += 1;
+    }
+    reads
+}
+
+/// A read of a quiet session waits on its link, with nothing of the session held, for as long as
+/// the config says, and the read task wakes the moment a push arrives. The CONTROL is the count:
+/// a read that waited in the link's own loop took one millisecond, so the same span held hundreds
+/// of reads, and a read task woke a thousand times a second.
+#[test]
+fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let reads = reads_in(&engine, Duration::from_millis(600));
+    assert!(
+        reads <= 8,
+        "a quiet read waits up to 100 ms; 600 ms took {reads} reads"
+    );
+
+    let arrived = Arc::new(Mutex::new(None));
+    let stamp = arrived.clone();
+    engine.declare_subscriber_on_wire(
+        "demo/**".to_owned(),
+        WireKey::literal(),
+        Locality::Any,
+        None,
+        Arc::new(move || {
+            let stamp = stamp.clone();
+            Box::new(move |_: &dyn SampleView| {
+                stamp.lock().unwrap().get_or_insert(Instant::now());
+            })
+        }),
+    );
+    SessionDrive::start_read_task(&*engine).expect("a read task");
+    // The read task's first wait is under way before the push is sent.
+    std::thread::sleep(Duration::from_millis(250));
+    let sent = Instant::now();
+    router.send(Command::Push("demo/a", b"now"));
+    let deadline = sent + Duration::from_secs(5);
+    let at = loop {
+        if let Some(at) = *arrived.lock().unwrap() {
+            break at;
+        }
+        assert!(Instant::now() < deadline, "the push never arrived");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    let took = at.duration_since(sent);
+    assert!(
+        took < Duration::from_millis(60),
+        "a waiting read task wakes for the push, not at the end of its wait: {took:?}"
+    );
+    SessionDrive::close(&*engine);
+}
+
+/// A session waiting to dial again sleeps until the dial is due, at most the idle wait at a
+/// time, instead of stepping a session that has no link.
+#[test]
+fn a_session_waiting_to_dial_again_sleeps() {
+    let router = Router::start(CatchAll::None);
+    let engine = open_with(CoopConfig {
+        redial_ms: Some(10_000),
+        open_timeout_ms: 100,
+        ..config(&router)
+    });
+    router.send(Command::Close);
+    drop(router);
+    until(&engine, "the link to be lost", || {
+        engine.peer_identities().is_empty()
+    });
+    // The dial made at the loss fails within its handshake deadline; the next is ten seconds
+    // away.
+    let _ = reads_in(&engine, Duration::from_millis(300));
+    let reads = reads_in(&engine, Duration::from_millis(600));
+    assert!(
+        reads <= 8,
+        "a session waiting to dial sleeps up to 100 ms at a time; 600 ms took {reads} reads"
+    );
+    assert!(!SessionDrive::is_closed(&*engine));
 }
 
 /// A session that redials none ends with its link, and reads as closed from then on.

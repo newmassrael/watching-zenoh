@@ -37,6 +37,10 @@
 #[cfg(test)]
 extern crate std;
 
+// The heap profile's links hand their owner a boxed wait on their socket (`net::FdReadiness`).
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+extern crate alloc;
+
 pub mod glue;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub mod links;

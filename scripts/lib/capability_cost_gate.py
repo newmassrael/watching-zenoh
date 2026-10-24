@@ -148,10 +148,11 @@ CASES: tuple[Case, ...] = (
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          exports=441,
          note="the single-threaded client of pico-client-udp on the cooperative engine: "
-              "881,043 measured, 2.19 times the same pico, against pico-client-udp's 4.63. It "
+              "888,223 measured, 2.20 times the same pico, against pico-client-udp's 4.63. It "
               "grew from 867,811 by what pico's client has by default and it lacked: the "
-              "KeepAlive and Close codecs, and a lost link dialled again with the session's "
-              "declarations sent again over it. Its exports are pico-client's 441: the runtime's critical "
+              "KeepAlive and Close codecs, a lost link dialled again with the session's "
+              "declarations sent again over it (881,043), and a read that waits on its link "
+              "outside the session's lock. Its exports are pico-client's 441: the runtime's critical "
               "sections are a lock of the process (`host-lock`), so no `critical-section` "
               "implementation is linked, whose two symbols a cdylib exported beside the C ABI "
               "(443 before)"),

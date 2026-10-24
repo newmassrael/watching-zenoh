@@ -41,7 +41,8 @@ use wz_capi_port::{
     SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey,
 };
 use wz_runtime_coop::session_drive::{
-    spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
+    spawn_session, LinkReadiness, OpenedLink, SessionDatagramLink, SessionDriveConfig,
+    SessionLinks, SessionRole,
 };
 use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 use wz_session_core::close_reason::CloseReason;
@@ -94,6 +95,11 @@ pub struct CoopConfig {
     /// them failed, in milliseconds; the first round is dialled as soon as the loss is seen.
     /// `None` for a session that ends with its link.
     pub redial_ms: Option<u64>,
+    /// The longest a read waits for its link to have something to read before it steps the
+    /// session, in milliseconds; a read returns as soon as something is there. The wait is made
+    /// with nothing of the session held, on a link whose network stack lets its owner wait
+    /// (`SessionDatagramLink::readiness`); a link whose stack does not waits in its own loop.
+    pub idle_wait_ms: u32,
 }
 
 /// Why no session was opened.
@@ -240,10 +246,33 @@ enum Link<C: ClockSource + 'static> {
     Waiting { at_us: u64 },
 }
 
-/// One link's half of the session: the actions that send over it and the task that runs it.
+/// One link's half of the session: the actions that send over it, the task that runs it, the
+/// link the task reads, and the wait its owner makes for that link's input.
 struct Wire<C: ClockSource + 'static> {
     actions: Rc<McuActions<C>>,
     task: CoopLocalJoinHandle<DriverOutcome>,
+    link: Rc<dyn SessionDatagramLink>,
+    readiness: Option<Arc<dyn LinkReadiness>>,
+}
+
+/// What a read waits for before it steps the session, with nothing of the session held.
+enum IdleWait {
+    /// Nothing: the link holds input already, or its own loop waits for it.
+    None,
+    /// The link's next input, for at most this many milliseconds.
+    Input(Arc<dyn LinkReadiness>, u32),
+    /// The next dial, for at most this many milliseconds.
+    Dial(u32),
+}
+
+impl IdleWait {
+    fn wait(self) {
+        match self {
+            IdleWait::None => {}
+            IdleWait::Input(readiness, ms) => readiness.wait_readable(ms),
+            IdleWait::Dial(ms) => std::thread::sleep(std::time::Duration::from_millis(ms.into())),
+        }
+    }
 }
 
 struct SubEntry {
@@ -393,9 +422,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     .map_err(|_| OpenError::EntropyUnavailable)?,
             };
             let actions = McuActions::<C>::new_generic(sink, params, CoopTime::new(&self.runtime));
+            let readiness = pump.readiness().map(Arc::from);
+            let link = Rc::new(pump);
             let task = spawn_session(
                 &self.local,
-                pump,
+                link.clone(),
                 actions.clone(),
                 CoopTime::new(&self.runtime),
                 SessionDriveConfig {
@@ -405,12 +436,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 },
                 dispatch_to(self.observer.clone(), actions.clone()),
             );
+            // The task's first step sends the InitSyn now, not after the wait of the next read.
+            self.local.run_until_idle();
             let deadline_us = self
                 .clock
                 .now_us()
                 .saturating_add(self.config.open_timeout_ms.saturating_mul(1000));
             return Ok(Link::Dialing {
-                wire: Wire { actions, task },
+                wire: Wire {
+                    actions,
+                    task,
+                    link,
+                    readiness,
+                },
                 next: at + 1,
                 deadline_us,
             });
@@ -522,6 +560,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
+    /// What a read waits for before it steps the session: the link's next input, for at most
+    /// [`CoopConfig::idle_wait_ms`], unless the link already holds some or waits in its own loop;
+    /// and while no link is open, the next dial, for no longer either. zenoh-pico's read waits
+    /// the same way, on a socket whose receive timeout is that long (`Z_CONFIG_SOCKET_TIMEOUT`).
+    fn idle_wait(&self) -> IdleWait {
+        let most = self.config.idle_wait_ms;
+        match &self.link {
+            Link::Up(wire) | Link::Dialing { wire, .. } => match &wire.readiness {
+                Some(readiness) if !wire.link.holds_input() => {
+                    IdleWait::Input(readiness.clone(), most)
+                }
+                _ => IdleWait::None,
+            },
+            Link::Waiting { at_us } => {
+                let left_ms = at_us.saturating_sub(self.clock.now_us()) / 1000;
+                match u32::try_from(left_ms).map_or(most, |left| left.min(most)) {
+                    0 => IdleWait::None,
+                    ms => IdleWait::Dial(ms),
+                }
+            }
+        }
+    }
+
     /// End the link, whatever it is doing, telling an established peer so.
     fn end_link(&mut self) {
         let link = std::mem::replace(&mut self.link, Link::Waiting { at_us: u64::MAX });
@@ -577,6 +638,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         core.link = core.dial_from(0, OpenError::NoEndpoint)?;
         while !matches!(core.link, Link::Up(_)) {
+            core.idle_wait().wait();
             core.local.run_until_idle();
             core.poll_link(None)?;
         }
@@ -1220,6 +1282,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
     }
 
     fn read(&self, _single: bool) -> Result<(), SessionClosed> {
+        // The wait comes first and holds nothing of the session, so what arrives during it is
+        // read by this call and a publisher on another thread is not held up by it.
+        let wait = self
+            .live()
+            .map_or(IdleWait::None, |core| core.0.idle_wait());
+        wait.wait();
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
         let stepped = match self.live() {

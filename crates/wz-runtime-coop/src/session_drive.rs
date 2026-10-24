@@ -32,6 +32,8 @@
 //! link — [`SessionDatagramLink`] — and each network stack implements that
 //! seam (`wz_session_lwip::LwipSessionLink` over lwIP).
 
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use alloc::boxed::Box;
 #[cfg(not(feature = "session-slot"))]
 use alloc::rc::Rc;
 #[cfg(feature = "session-slot")]
@@ -175,6 +177,33 @@ pub trait SessionDatagramLink {
     fn lost(&self) -> Option<LostCause> {
         None
     }
+
+    /// Whether the link holds input it has already taken from its stack: a whole batch read
+    /// together with the one before it, a datagram read while the loop waited. The next step
+    /// reads it, and a wait on the stack would not see it ([`Self::readiness`]).
+    fn holds_input(&self) -> bool {
+        false
+    }
+
+    /// A wait for this link's next input that its OWNER makes, from any thread and with nothing
+    /// of the session's held, for a link opened to be waited on that way: its [`Self::service`]
+    /// then does not wait, so the loop that drives it never sleeps under its owner's lock. `None`
+    /// for a link whose loop waits, which is every link that was not opened otherwise. The heap
+    /// profile's: a slot image's loop is the only thing that drives its links.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
+        None
+    }
+}
+
+/// A wait for a link's next input, made by a thread that does not drive the link
+/// ([`SessionDatagramLink::readiness`]).
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+pub trait LinkReadiness: Send + Sync {
+    /// Block until the link's stack has input queued, or `timeout_ms` has passed; return at once
+    /// when it already has. A failed wait is a quiet link: the step that follows reads and
+    /// reports the failure.
+    fn wait_readable(&self, timeout_ms: u32);
 }
 
 /// A shared link is a link: the same object is usually the session's
@@ -207,6 +236,15 @@ impl<T: SessionDatagramLink + ?Sized> SessionDatagramLink for Rc<T> {
 
     fn lost(&self) -> Option<LostCause> {
         (**self).lost()
+    }
+
+    fn holds_input(&self) -> bool {
+        (**self).holds_input()
+    }
+
+    #[cfg(feature = "alloc")]
+    fn readiness(&self) -> Option<Box<dyn LinkReadiness>> {
+        (**self).readiness()
     }
 }
 
@@ -1199,6 +1237,10 @@ impl<D: SessionDatagramLink + 'static> SessionDatagramLink for DriverPump<D> {
 
     fn lost(&self) -> Option<LostCause> {
         self.0.lost()
+    }
+
+    fn holds_input(&self) -> bool {
+        self.0.holds_input()
     }
 }
 

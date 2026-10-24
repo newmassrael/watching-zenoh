@@ -36,6 +36,8 @@ use wz_session_core::session_slot::SlotDriver;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::link_storage::HeapTx;
 use crate::link_storage::TxStore;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::session_drive::LinkReadiness;
 use crate::session_drive::SessionDatagramLink;
 #[cfg(feature = "session-slot")]
 use crate::session_drive::{Bind, DriverPump, SlotStack};
@@ -190,6 +192,15 @@ where
     fn lost(&self) -> Option<LostCause> {
         either!(self, link => link.lost())
     }
+
+    fn holds_input(&self) -> bool {
+        either!(self, link => link.holds_input())
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        either!(self, link => link.readiness())
+    }
 }
 
 /// A platform's datagram sockets `U` and the streams its dial `D` opens as the session shell's
@@ -206,6 +217,7 @@ pub struct IpLinks<U, D, L = NoDial> {
     tls: L,
     tx_slots: usize,
     tx_capacity: usize,
+    owner_waits: bool,
     datagrams: core::marker::PhantomData<fn() -> U>,
 }
 
@@ -226,6 +238,7 @@ where
             tls: NoDial,
             tx_slots: 0,
             tx_capacity: 0,
+            owner_waits: false,
             datagrams: core::marker::PhantomData,
         }
     }
@@ -248,7 +261,41 @@ where
             tls,
             tx_slots: self.tx_slots,
             tx_capacity: self.tx_capacity,
+            owner_waits: self.owner_waits,
             datagrams: self.datagrams,
+        }
+    }
+
+    /// Links whose owner waits for their input ([`SessionDatagramLink::readiness`]): what holds a
+    /// session behind a lock and waits for it outside the lock. Each link whose socket can be
+    /// waited on that way does not wait in its loop; one whose socket cannot still does.
+    #[must_use]
+    pub fn waited_by_owner(mut self) -> Self {
+        self.owner_waits = true;
+        self
+    }
+
+    /// A stream link as these links open it: waited on by its owner when they are.
+    fn opened_stream<S: StreamSocket>(
+        &self,
+        link: StreamDriver<S, Vec<u8>, HeapTx>,
+    ) -> StreamDriver<S, Vec<u8>, HeapTx> {
+        if self.owner_waits {
+            link.waited_by_owner()
+        } else {
+            link
+        }
+    }
+
+    /// A datagram link as these links open it: waited on by its owner when they are.
+    fn opened_datagram(
+        &self,
+        link: UdpDriver<U, Vec<u8>, HeapTx>,
+    ) -> UdpDriver<U, Vec<u8>, HeapTx> {
+        if self.owner_waits {
+            link.waited_by_owner()
+        } else {
+            link
         }
     }
 
@@ -278,27 +325,25 @@ where
             LinkProto::Udp => {
                 // Port 0 has the stack choose a free one, one per initiator session.
                 let socket = U::bind(self.local, 0).map_err(|_| LinkOpenError::Exhausted)?;
-                Ok(IpDriver::Udp(UdpDriver::initiator_with_buffers(
-                    socket,
-                    (to.at.addr, to.at.port),
-                    UDP_RX_CAPACITY,
-                    self.tx(),
+                Ok(IpDriver::Udp(self.opened_datagram(
+                    UdpDriver::initiator_with_buffers(
+                        socket,
+                        (to.at.addr, to.at.port),
+                        UDP_RX_CAPACITY,
+                        self.tx(),
+                    ),
                 )))
             }
             LinkProto::Tcp => {
                 let socket = self.dial.dial(to.at.addr, to.at.port)?;
-                Ok(IpDriver::Tcp(StreamDriver::with_buffers(
-                    socket,
-                    STREAM_RX_CAPACITY,
-                    self.tx(),
+                Ok(IpDriver::Tcp(self.opened_stream(
+                    StreamDriver::with_buffers(socket, STREAM_RX_CAPACITY, self.tx()),
                 )))
             }
             LinkProto::Tls => {
                 let channel = self.tls.dial(to.at.addr, to.at.port)?;
-                Ok(IpDriver::Tls(StreamDriver::with_buffers(
-                    channel,
-                    STREAM_RX_CAPACITY,
-                    self.tx(),
+                Ok(IpDriver::Tls(self.opened_stream(
+                    StreamDriver::with_buffers(channel, STREAM_RX_CAPACITY, self.tx()),
                 )))
             }
         }
@@ -319,10 +364,8 @@ where
     fn open_acceptor(&self, port: u16) -> Result<OpenedLink<Self::Pump>, LinkOpenError> {
         // The peer is whoever opens a session first; the driver is bound by its InitSyn.
         let socket = U::bind(self.local, port).map_err(|_| LinkOpenError::Exhausted)?;
-        let driver = Rc::new(IpDriver::Udp(UdpDriver::acceptor_with_buffers(
-            socket,
-            UDP_RX_CAPACITY,
-            self.tx(),
+        let driver = Rc::new(IpDriver::Udp(self.opened_datagram(
+            UdpDriver::acceptor_with_buffers(socket, UDP_RX_CAPACITY, self.tx()),
         )));
         Ok(OpenedLink {
             sink: driver.clone(),

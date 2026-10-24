@@ -18,6 +18,8 @@ use core::ffi::c_int;
 use core::mem::size_of;
 
 use wz_runtime_coop::session_drive::LinkOpenError;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use wz_runtime_coop::session_drive::LinkReadiness;
 use wz_runtime_coop::stream_link::{StreamDial, StreamSocket};
 
 use crate::net::{errno, sockaddr, PosixNetError};
@@ -205,6 +207,11 @@ impl StreamSocket for PosixTcpSocket {
         // SAFETY: plain system call on this socket's own descriptor. A stream already shut is
         // not an error worth reporting here: the link is ending either way.
         unsafe { libc::shutdown(self.fd, libc::SHUT_RDWR) };
+    }
+
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn readiness(&self) -> Option<alloc::boxed::Box<dyn LinkReadiness>> {
+        crate::net::FdReadiness::of(self.fd)
     }
 }
 
