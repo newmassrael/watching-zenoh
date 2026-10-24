@@ -439,9 +439,16 @@ OS_FACILITIES = (
 )
 PLATFORM_KEYS = {
     "id", "triple", "os", "libc", "network_stack", "std", "toolchain_env_extra",
-    "os_provides", "system_assumed", "lane", "help",
+    "os_provides", "system_assumed", "lane", "support", "help",
 }
-PLATFORM_REQUIRED = {"id", "triple", "os", "libc", "std", "lane", "help"}
+PLATFORM_REQUIRED = {"id", "triple", "os", "libc", "std", "lane", "support", "help"}
+# What is known of a build for the platform, in words a person reads (docs/target-build-contract.md
+# T11). `lane` says the strongest lane that is green; `support` says why it is `none` when it is:
+#   untried   no wz build for the platform has been attempted;
+#   built     a build has succeeded (by hand or by the entry) and no lane has passed on it;
+#   blocked   a build was attempted and does not succeed, for a reason the row's help names;
+#   verified  a lane has passed, so `lane` is not `none`.
+SUPPORTS = ("untried", "built", "blocked", "verified")
 # The strongest lane that is green for the platform, as the catalogue states it
 # (`docs/target-build-contract.md` T11): `none` until a lane exists and has passed.
 LANES = ("none", "build", "run", "interop")
@@ -511,6 +518,11 @@ def validate_platforms(data: dict) -> list[str]:
             out.append(f"{who}: std is `{p.get('std')}`, not one of {', '.join(STD_KINDS)}")
         if p.get("lane") not in LANES:
             out.append(f"{who}: lane is `{p.get('lane')}`, not one of {', '.join(LANES)}")
+        if p.get("support") not in SUPPORTS:
+            out.append(f"{who}: support is `{p.get('support')}`, not one of {', '.join(SUPPORTS)}")
+        elif (p.get("support") == "verified") != (p.get("lane") not in ("none", None)):
+            out.append(f"{who}: support `{p['support']}` and lane `{p.get('lane')}` disagree: a platform is "
+                       "`verified` exactly when a lane is green, and `none` says nothing passed")
         if p.get("os") == "nto":
             if p.get("network_stack") not in NETWORK_STACKS:
                 out.append(f"{who}: a QNX platform names its network stack ({', '.join(NETWORK_STACKS)})")
@@ -1701,6 +1713,7 @@ os = "linux"
 libc = "glibc"
 std = "prebuilt"
 lane = "none"
+support = "built"
 os_provides = ["threads", "sockets-tcp", "sockets-udp", "entropy"]
 help = "A sample platform."
 
@@ -2006,6 +2019,20 @@ def cmd_selftest() -> int:
            caps_refused('libc = "glibc"', 'libc = "musl"', "not one of glibc"))
     expect("a platform with an unknown lane is refused",
            caps_refused('lane = "none"', 'lane = "green"', "lane is `green`"))
+    expect("a platform that states no support is refused",
+           caps_refused('support = "built"\n', "", "has no `support`"))
+    expect("a platform with an unknown support word is refused",
+           caps_refused('support = "built"', 'support = "maybe"', "support is `maybe`"))
+    expect("a lane that is green on a platform that is not verified is refused",
+           caps_refused('lane = "none"', 'lane = "build"', "disagree"))
+    expect("a platform called verified with no green lane is refused",
+           caps_refused('support = "built"', 'support = "verified"', "disagree"))
+    expect("a verified platform with a green lane validates",
+           validate_decl(read_decl_toml(SAMPLE.replace('lane = "none"', 'lane = "build"').replace(
+               'support = "built"', 'support = "verified"'))) == [])
+    expect("untried and blocked are platforms with no green lane and validate",
+           all(validate_decl(read_decl_toml(SAMPLE.replace('support = "built"', f'support = "{w}"'))) == []
+               for w in ("untried", "blocked")))
     expect("a platform with an unknown std kind is refused",
            caps_refused('std = "prebuilt"', 'std = "nightly"', "std is `nightly`"))
     expect("a network stack on a platform that is not QNX is refused",

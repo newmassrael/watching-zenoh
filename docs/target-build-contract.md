@@ -76,6 +76,18 @@ what it was given: the rustc release line and the first line of the C compiler's
 `--version`, never a path. Rejected: the entry installing SDKs (the lanes of the
 owner's machines differ and a licence may bind them).
 
+A cross build also records the identity of its SDK, because that is what tells a
+consumer whether an artifact is for its device. `toolchain.sdk` is `null` for a native
+build and otherwise an object whose `kind` the platform row declares: `android-ndk`
+(the NDK release string and the API level, MEASURED from the artifact's
+`.note.android.ident`, so it cannot disagree with the file), `yocto` (the SDK version
+and the target architecture and OS its environment script exports, recorded as the
+values of the variables the row names, never as paths) and `qnx-sdp` (the SDP version
+the triple names, `qnx710` being 7.1, and the network stack of the row). Not
+implemented: those three rows are refused as unassessed, and the Yocto and QNX shapes
+were not exercised against a real SDK; the shape is fixed here so that the lane that
+first builds for one fills it instead of inventing it.
+
 **T3. A platform is a row of the declaration.** `deploy/wz-config.toml` has
 `[[platform]]` (not `[[target]]`: the `target` axis of `build-configuration.md` is the
 class above, a host Linux or an MCU image, and a platform is one concrete operating
@@ -203,6 +215,18 @@ answer is "unknown", not "none". They are not measured because measuring them me
 running the artifact. Memory and stack figures are not in schema 1: they are the
 resource gates of step 13 and the manifest names the profile they belong to.
 
+An executable's `device_requires` is `null`, and `null` means UNKNOWN, never "asks for
+nothing" and never a pass: a consumer that needs to know what the session node asks of
+a device is told that wz has not said. It is unknown because the facilities that matter
+there (a UDP link, multicast, a certificate file) are switched by features of the wz
+runtime the executable links, which cargo resolves and the executable's own four
+features do not list; its facility needs are therefore not a union over capabilities.
+What would make it derived is the same discipline applied one level down: the resolved
+features of the runtime package, each assessed for the facilities it may ask for, the
+way the 31 capabilities were, and a build's manifest listing the enabled features that
+are not assessed yet, so a consumer sees which part of the answer is missing instead of
+a flat unknown. That is a per-feature assessment of a large manifest and is not done.
+
 **T10. A refusal writes no manifest.** The entry exits non-zero with the reason on
 stderr and removes a partial output directory. The consumer's tool never meets a
 half-described artifact.
@@ -214,6 +238,17 @@ it). The catalogue states the strongest green lane of each target as a fact tied
 `catalog_version`, and the manifest copies it; wz never writes "supported" beside a
 target with no lane. Android starts at `build`; the Linux board and both QNX rows are
 registered with their lanes at none, and a lane is added when it is first green.
+
+`none` is one word for three different states, so each platform also states `support`,
+and the manifest copies it beside the lane: `untried` (no build has been attempted:
+the aarch64 Linux board and both QNX rows today), `built` (a build has succeeded, by
+hand or by the entry, and no lane has passed: Android, which was built once by hand,
+and the host until its hosted run is read), `blocked` (a build was attempted and fails,
+and the row's help says why: none today) and `verified` (a lane is green). The
+declaration holds them together: `verified` exactly when the lane is not `none`.
+"Not supported" is not a state of its own: a platform wz will not build would not have
+a row. A consumer that shows a person "not verified" for `none` is right in every case,
+and `support` is what tells that person whether anyone has tried.
 
 **T12. The vendored C zenoh-pico is not an artifact of the entry.** wz's replacement
 of pico is `wz-capi-pico`; the vendored C library is the interop counterpart, built
@@ -238,7 +273,7 @@ keys, their order and their values are the entry's own output.
   "platform": {
     "id": "linux-x86_64-glibc", "triple": "x86_64-unknown-linux-gnu",
     "os": "linux", "libc": "glibc", "network_stack": null,
-    "strongest_green_lane": "none"
+    "support": "built", "strongest_green_lane": "none"
   },
   "toolchain": { "rustc": "rustc 1.97.0 (2d8144b78 2026-07-07)",
                  "cc": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0", "sdk": null },

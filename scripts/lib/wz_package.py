@@ -56,7 +56,7 @@ MANIFEST_SCHEMA = 1
 
 TOP_KEYS = ["schema", "catalog_version", "built_from", "platform", "toolchain", "system_assumed", "artifacts"]
 BUILT_FROM_KEYS = ["commit", "tree_clean"]
-PLATFORM_KEYS = ["id", "triple", "os", "libc", "network_stack", "strongest_green_lane"]
+PLATFORM_KEYS = ["id", "triple", "os", "libc", "network_stack", "support", "strongest_green_lane"]
 TOOLCHAIN_KEYS = ["rustc", "cc", "sdk"]
 ARTIFACT_KEYS = ["id", "name", "kind", "path", "sha256", "size", "elf", "abi", "provides", "features",
                  "device_requires"]
@@ -197,6 +197,7 @@ def assemble(decl: dict, platform: dict, built_from: dict, toolchain: dict, entr
             "os": platform["os"],
             "libc": platform["libc"],
             "network_stack": platform.get("network_stack"),
+            "support": platform["support"],
             "strongest_green_lane": platform["lane"],
         },
         "toolchain": toolchain,
@@ -278,7 +279,8 @@ def verify_dir(out: pathlib.Path, decl: dict) -> list[str]:
     if row is None:
         return findings + [f"the platform `{plat['id']}` is not declared"]
     want_platform = {"id": row["id"], "triple": row["triple"], "os": row["os"], "libc": row["libc"],
-                     "network_stack": row.get("network_stack"), "strongest_green_lane": row["lane"]}
+                     "network_stack": row.get("network_stack"), "support": row["support"],
+                     "strongest_green_lane": row["lane"]}
     if plat != want_platform:
         findings.append(f"platform {plat} differs from its declaration {want_platform}")
     if "system_assumed" not in row or manifest["system_assumed"] != row["system_assumed"]:

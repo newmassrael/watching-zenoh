@@ -98,7 +98,10 @@ base = ["threads", "sockets-tcp", "entropy"]
 # row assumes a device has, which a measured build of the platform gives). The entry of the
 # contract refuses a platform it has no such statement for, and `--check` lists them. `lane` is the
 # strongest lane that is green for the platform, `none` until a lane exists and has passed; it is
-# changed in the commit that lands the lane.
+# changed in the commit that lands the lane. `support` says in words why a lane is `none`:
+# `untried` (no build attempted), `built` (a build succeeded and no lane has passed), `blocked`
+# (a build was attempted and fails, the row's help says why) or `verified` (a lane is green,
+# which is exactly when `lane` is not `none`).
 #
 # `std = "build-std"` is a platform whose standard library has no prebuilt copy (a tier-3 target).
 # The variables a build reads for the triple are derived from it (`toolchain_env`); a platform
@@ -110,7 +113,8 @@ os = "linux"
 libc = "glibc"
 std = "prebuilt"
 lane = "none"
-help = "An aarch64 Linux board on glibc (a Yocto image); no wz build of it exists yet."
+support = "untried"
+help = "An aarch64 Linux board on glibc (a Yocto image); no wz build of it has been tried."
 
 [[platform]]
 id = "android-arm64"
@@ -119,8 +123,9 @@ os = "android"
 libc = "bionic"
 std = "prebuilt"
 lane = "none"
+support = "built"
 system_assumed = ["libdl.so", "libm.so", "libc.so"]
-help = "An Android arm64 device; wz-capi-pico and wz-ap-demo link against these three and nothing else."
+help = "An Android arm64 device; wz-capi-pico and wz-ap-demo were built for it by hand (NDK 30, API 36) and link against these three and nothing else. wz-capi-c was not tried; nothing was run on a device."
 
 [[platform]]
 id = "qnx710-iosock-aarch64"
@@ -131,7 +136,8 @@ network_stack = "io-sock"
 std = "build-std"
 toolchain_env_extra = ["QNX_HOST", "QNX_TARGET"]
 lane = "none"
-help = "QNX 7.1 on aarch64le with the io-sock network stack; no wz build of it exists yet."
+support = "untried"
+help = "QNX 7.1 on aarch64le with the io-sock network stack; no wz build of it has been tried."
 
 [[platform]]
 id = "qnx710-iopkt-aarch64"
@@ -142,7 +148,8 @@ network_stack = "io-pkt"
 std = "build-std"
 toolchain_env_extra = ["QNX_HOST", "QNX_TARGET"]
 lane = "none"
-help = "QNX 7.1 on aarch64le with the io-pkt network stack; no wz build of it exists yet."
+support = "untried"
+help = "QNX 7.1 on aarch64le with the io-pkt network stack; no wz build of it has been tried."
 
 # The one platform the entry has run on: the x86_64 Linux host the workspace is built and tested
 # on. `os_provides` is what the lanes exercise there (every facility, `raw-ethernet` with the
@@ -155,6 +162,7 @@ os = "linux"
 libc = "glibc"
 std = "prebuilt"
 lane = "none"
+support = "built"
 os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "raw-ethernet", "unix-sockets", "filesystem", "entropy", "wall-clock"]
 system_assumed = ["libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-x86-64.so.2"]
 help = "The x86_64 Linux host the workspace is built and tested on; the one platform the entry has run on."
