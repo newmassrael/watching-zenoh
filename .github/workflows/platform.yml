@@ -67,6 +67,10 @@ on:
       - "crates/wz-capture/**"
       - "crates/wz-cdylib-build/**"
       - "crates/wz-abi-stamp/**"
+      # The patched copies of two crates.io packages the lane builds (THIRD_PARTY.md): a change to
+      # one is a change to what the macOS and Windows legs compile.
+      - "third-party/socket2/**"
+      - "third-party/tokio/**"
       - "crates/wz-codecs/**"
       - "crates/wz-codecs-test-support/**"
       - "crates/wz-codegen-build/**"
