@@ -15362,7 +15362,11 @@ layer_l_lockfile_freshness() {
             echo "$out" | head -5 >&2
         fi
         rc=1
-    done < <(find . -name Cargo.lock -not -path "./vendor/*" -not -path "*/target/*" | sort)
+    # `./.claude/worktrees/*` is OTHER working trees of this repository, each gated on its own
+    # commits. Reading their locks made this tree's commit fail on a lock this commit never
+    # touched (every worktree carries its own `vendor/`, which the first exclusion above does not
+    # reach: it names only THIS tree's).
+    done < <(find . -name Cargo.lock -not -path "./vendor/*" -not -path "./.claude/worktrees/*" -not -path "*/target/*" | sort)
     return "$rc"
 }
 
