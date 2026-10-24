@@ -281014,6 +281014,52 @@
         "The hosted CI of 33d459f71 was cancelled by later pushes; read the first completed run that contains it and tell the consumer session which pin to take if it is red"
       ]
     },
+    "Round 3489": {
+      "decision_summary": "zenoh-core joins the zenoh crate family after zenoh-runtime, under its own package name: its traits Resolvable, Wait and Resolve are implemented by every builder of zenoh and by the ecosystem's builders, and its macros are expanded by them, so the graph must hold one crate of that name; its synchronous wait of a future blocks on the application runtime of the zenoh-runtime member, which is now present (user-delegated order of 2026-10-24).",
+      "changes_bullets": [
+        "The `zenoh-core` crate, `crates/wz-zenoh-core`, named `zenoh-core` and versioned 1.10.1, with upstream's features `std` and `tracing-instrument` (the second forwards to `zenoh-runtime`) and upstream's requirements; its surface is upstream's line for line: the traits `Resolvable`, `Wait`, `Resolve`, the hidden `IntoSendFuture`, `ResolveClosure`, `ResolveFuture`, `polyfill::OptionExt`, the re-exports of `zenoh-result` and `lazy_static`, and the fourteen helper macros with the expansions upstream has, since a crate that uses one expands this text.",
+        "`ResolveFuture::wait` blocks on the application runtime of the `zenoh-runtime` member, and refuses a current-thread scheduler as upstream's does, through that crate.",
+        "`conformance/differential/tests/zenoh_core.rs`, six tests: every case is written once in a macro that expands it for each crate, the macros that name `zenoh_result` in their caller are expanded in a module that names that crate's own `zenoh-result` by that name, and the two crates' outputs are held equal for the resolve types, a wait on a multi-threaded runtime, the current-thread refusal, the lock, parse, feature, conversion, implication and configurable-constant macros, and the async forms; Layer E18 guards the binary with a count of 6.",
+        "The facade feature `api-compat-rust` pulls the crate and re-exports it in `wz::zenoh_family`; the reason of the atom and the design document's member list are brought up to it."
+      ],
+      "verification_bullets": [
+        "The surface gate: `zenoh-core` reads 0 missing and 0 extra against upstream's surface on the pinned nightly, on the first emission after the crate was written; the other members read as before.",
+        "The differential tests pass (6 of 6). Two faults injected into the crate, a swapped arm of `zcondfeat!` and a `Wait` that no longer goes through the application runtime, turned three of the six red; two earlier injections (a changed `zwrite!`, a changed `zparse_default!`) did not compile, so they are not counted as evidence: a fault must compile to be a control.",
+        "rustfmt, clippy with warnings denied and the facade build with the feature pass; Layer E18 passes run through run-ci with its counts guarded (6, 4, 6, 3 and 1); the static gate bundle passes and validate-workspace reads orphans 14 against 14 carried with 0 new.",
+        "Not run here: the hosted run of Layer E18; the runs of the two earlier pushes of this family were cancelled by the next push or still pending when this was written."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "carry_forward_bullets": [
+        "Next crate of the family: zenoh-macros, a procedural-macro crate (`ke!`, `nonwild_ke!`, the `zenoh::key_expr` macros and the internal-trait attribute), which depends on zenoh-keyexpr to check literals at compile time, so zenoh-keyexpr comes first; then zenoh-protocol, zenoh-config, zenoh-util and `zenoh`.",
+        "The differential test of `ResolveFuture::wait` shows both crates block on a multi-threaded runtime and refuse a current-thread one; it does not show that both block on the SAME pool, since each crate has its own `zenoh-runtime` here by design. The one-pool property is the patch scenario's subject and wants a case for `zenoh-runtime` once a second family crate holds a handle to it.",
+        "Read the hosted runs of this push per job at the start of the next round, Layer E18 first."
+      ],
+      "publishable_decision_summary": "zenoh-core joins the zenoh crate family after zenoh-runtime, under its own package name: its traits Resolvable, Wait and Resolve are implemented by every builder of zenoh and by the ecosystem's builders, and its macros are expanded by them, so the graph must hold one crate of that name; its synchronous wait of a future blocks on the application runtime of the zenoh-runtime member, which is now present (user-delegated order of 2026-10-24).",
+      "publishable_changes_bullets": [
+        "The `zenoh-core` crate, `crates/wz-zenoh-core`, named `zenoh-core` and versioned 1.10.1, with upstream's features `std` and `tracing-instrument` (the second forwards to `zenoh-runtime`) and upstream's requirements; its surface is upstream's line for line: the traits `Resolvable`, `Wait`, `Resolve`, the hidden `IntoSendFuture`, `ResolveClosure`, `ResolveFuture`, `polyfill::OptionExt`, the re-exports of `zenoh-result` and `lazy_static`, and the fourteen helper macros with the expansions upstream has, since a crate that uses one expands this text.",
+        "`ResolveFuture::wait` blocks on the application runtime of the `zenoh-runtime` member, and refuses a current-thread scheduler as upstream's does, through that crate.",
+        "`conformance/differential/tests/zenoh_core.rs`, six tests: every case is written once in a macro that expands it for each crate, the macros that name `zenoh_result` in their caller are expanded in a module that names that crate's own `zenoh-result` by that name, and the two crates' outputs are held equal for the resolve types, a wait on a multi-threaded runtime, the current-thread refusal, the lock, parse, feature, conversion, implication and configurable-constant macros, and the async forms; Layer E18 guards the binary with a count of 6.",
+        "The facade feature `api-compat-rust` pulls the crate and re-exports it in `wz::zenoh_family`; the reason of the atom and the design document's member list are brought up to it."
+      ],
+      "publishable_verification_bullets": [
+        "The surface gate: `zenoh-core` reads 0 missing and 0 extra against upstream's surface on the pinned nightly, on the first emission after the crate was written; the other members read as before.",
+        "The differential tests pass (6 of 6). Two faults injected into the crate, a swapped arm of `zcondfeat!` and a `Wait` that no longer goes through the application runtime, turned three of the six red; two earlier injections (a changed `zwrite!`, a changed `zparse_default!`) did not compile, so they are not counted as evidence: a fault must compile to be a control.",
+        "rustfmt, clippy with warnings denied and the facade build with the feature pass; Layer E18 passes run through run-ci with its counts guarded (6, 4, 6, 3 and 1); the static gate bundle passes and validate-workspace reads orphans 14 against 14 carried with 0 new.",
+        "Not run here: the hosted run of Layer E18; the runs of the two earlier pushes of this family were cancelled by the next push or still pending when this was written."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next crate of the family: zenoh-macros, a procedural-macro crate (`ke!`, `nonwild_ke!`, the `zenoh::key_expr` macros and the internal-trait attribute), which depends on zenoh-keyexpr to check literals at compile time, so zenoh-keyexpr comes first; then zenoh-protocol, zenoh-config, zenoh-util and `zenoh`.",
+        "The differential test of `ResolveFuture::wait` shows both crates block on a multi-threaded runtime and refuse a current-thread one; it does not show that both block on the SAME pool, since each crate has its own `zenoh-runtime` here by design. The one-pool property is the patch scenario's subject and wants a case for `zenoh-runtime` once a second family crate holds a handle to it.",
+        "Read the hosted runs of this push per job at the start of the next round, Layer E18 first."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
