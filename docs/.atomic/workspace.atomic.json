@@ -280788,6 +280788,42 @@
         "Read the hosted runs of this push per job at the start of the next round, and the Windows C ABI job of the earlier push once more."
       ]
     },
+    "Round 3484": {
+      "decision_summary": "Size step 3 starts: the pico C ABI over the cooperative engine (docs/capi-pico-on-coop-engine.md). Measured: every session runs its own OS thread and multi-thread tokio runtime, even in pico's single-threaded arm, where zp_read and zp_spin_once therefore do nothing; the cooperative host client is 126 KB of text (142 KB with the getter), not a same-condition figure. Decided: one ABI crate with two engines behind a port; pico's own threading model in both arms (the application steps the engine; the read and lease tasks are threads stepping it); the engine is the cooperative heap profile over UDP and TCP; it grows beside the tokio engine, measured by the size gate from its first slice. Landed now: the ABI layer takes session-core types from session-core (103 paths), and the heap profile gets IpLinks, its SessionLinks over both sockets, which the host had none of.",
+      "changes_bullets": [
+        "docs/capi-pico-on-coop-engine.md: the design note (measured facts, D1 to D6, six steps, status).",
+        "wz-capi-pico: a direct wz-session-core dependency (alloc); keyexpr_canon, keyexpr_match, locality, qos, query_sink, reply_acceptance, reply_sink, sample and sink named where they live in 13 files. One doc link resolves: C1bz budget 43 to 42 (diffed).",
+        "wz-runtime-coop ip_stack: IpDriver generic over its two buffers (slot defaults kept); HeapIpDriver; IpLinks, SessionLinks over datagram and stream sockets on the heap profile; the module builds on both profiles.",
+        "wz-runtime-posix links: PosixLinks and PosixHeapDriver."
+      ],
+      "verification_bullets": [
+        "On the build host: wz-capi-pico fmt, clippy -D warnings on the default and the pico-client feature sets, 102 lib tests, C1bz; capability_cost_gate.py --check: all ten cases within budget with unchanged export counts (441, 464, 802; pico-client 1,796,757 text, 4.51 times the same-build pico). wz-runtime-coop on the heap (54 tests), slot (47) and no-allocator profiles and wz-runtime-posix on both (20 and 19 tests), clippy -D warnings on each, C1m, C1n, C1bz for both crates, fmt. The new heap tests open a datagram and a stream link over fakes, refuse a refused connection, and open an acceptor with no peer; the posix test dials a real loopback listener over TCP. The hook's 110 round-fed static gates pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Next is step 2 of the note: the engine port, the subset of wz_capi_core's SharedSession and SessionState the single-threaded client calls, implemented first by the tokio engine, so that the crate builds without it; then step 3, the cooperative engine over ClientNode and PosixLinks with a size-gate case beside pico-client. The build-configuration axis for the selection belongs to the session that owns the runtime axis; ask before touching deploy/Kconfig, configs/profiles or the wz-config generator."
+      ],
+      "publishable_decision_summary": "Size step 3 starts: the pico C ABI over the cooperative engine (docs/capi-pico-on-coop-engine.md). Measured: every session runs its own OS thread and multi-thread tokio runtime, even in pico's single-threaded arm, where zp_read and zp_spin_once therefore do nothing; the cooperative host client is 126 KB of text (142 KB with the getter), not a same-condition figure. Decided: one ABI crate with two engines behind a port; pico's own threading model in both arms (the application steps the engine; the read and lease tasks are threads stepping it); the engine is the cooperative heap profile over UDP and TCP; it grows beside the tokio engine, measured by the size gate from its first slice. Landed now: the ABI layer takes session-core types from session-core (103 paths), and the heap profile gets IpLinks, its SessionLinks over both sockets, which the host had none of.",
+      "publishable_changes_bullets": [
+        "docs/capi-pico-on-coop-engine.md: the design note (measured facts, D1 to D6, six steps, status).",
+        "wz-capi-pico: a direct wz-session-core dependency (alloc); keyexpr_canon, keyexpr_match, locality, qos, query_sink, reply_acceptance, reply_sink, sample and sink named where they live in 13 files. One doc link resolves: C1bz budget 43 to 42 (diffed).",
+        "wz-runtime-coop ip_stack: IpDriver generic over its two buffers (slot defaults kept); HeapIpDriver; IpLinks, SessionLinks over datagram and stream sockets on the heap profile; the module builds on both profiles.",
+        "wz-runtime-posix links: PosixLinks and PosixHeapDriver."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: wz-capi-pico fmt, clippy -D warnings on the default and the pico-client feature sets, 102 lib tests, C1bz; capability_cost_gate.py --check: all ten cases within budget with unchanged export counts (441, 464, 802; pico-client 1,796,757 text, 4.51 times the same-build pico). wz-runtime-coop on the heap (54 tests), slot (47) and no-allocator profiles and wz-runtime-posix on both (20 and 19 tests), clippy -D warnings on each, C1m, C1n, C1bz for both crates, fmt. The new heap tests open a datagram and a stream link over fakes, refuse a refused connection, and open an acceptor with no peer; the posix test dials a real loopback listener over TCP. The hook's 110 round-fed static gates pass."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next is step 2 of the note: the engine port, the subset of wz_capi_core's SharedSession and SessionState the single-threaded client calls, implemented first by the tokio engine, so that the crate builds without it; then step 3, the cooperative engine over ClientNode and PosixLinks with a size-gate case beside pico-client. The build-configuration axis for the selection belongs to the session that owns the runtime axis; ask before touching deploy/Kconfig, configs/profiles or the wz-config generator."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
