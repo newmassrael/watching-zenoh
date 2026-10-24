@@ -194,6 +194,18 @@ impl Outcome {
 /// reached them in a continuing one. The ledger therefore remembers which list
 /// judged each slot ([`Self::crossed`]), and a caller that sees it say so walks the
 /// whole capture again.
+///
+/// # What it judged, kept by row (open-debt item 924, D9)
+///
+/// A frame's outcome depends on the frames of its slot before it, so a reader
+/// that looks at one row cannot judge it alone. The ledger therefore keeps the
+/// outcome of every frame it judged, by the row it came in and its place among
+/// the row's judgments, and, per list, how far the walks have judged the list in
+/// order ([`Frontier`]). A row behind the frontier is read back from what was
+/// kept and moves no counter; a row past it is judged against the counters the
+/// frontier left. That is the reference dissector's first pass (a frame's
+/// stateful verdicts stored on its first visit), kept per declaration text
+/// because the text decides the profiles.
 #[derive(Debug, Default)]
 pub struct SlotLedger {
     judges: BTreeMap<Slot, Judge>,
@@ -201,6 +213,26 @@ pub struct SlotLedger {
     owners: BTreeMap<Slot, usize>,
     /// Some slot was judged from two lists.
     crossed: bool,
+    /// The outcome of each frame judged, by its list, its row's produced-index
+    /// and its place among the judgments of that row. Kept for the field walker,
+    /// so built with it.
+    #[cfg(feature = "dissect")]
+    judged: BTreeMap<(usize, u64, u32), Outcome>,
+    /// Per list, how far it has been judged in order.
+    #[cfg(feature = "dissect")]
+    frontiers: BTreeMap<usize, Frontier>,
+}
+
+/// How far one list has been judged in the order a walk over the whole capture
+/// judges it: every row before `produced` was judged, and the largest
+/// capture-order key among them is `last_key` (`None` for a list judged in its
+/// own order, a datagram list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Frontier {
+    /// The produced-index of the first row not judged.
+    pub produced: u64,
+    /// The largest key judged, for a list judged in capture order.
+    pub last_key: Option<(usize, u64)>,
 }
 
 impl SlotLedger {
@@ -218,7 +250,54 @@ impl SlotLedger {
     pub fn crossed(&self) -> bool {
         self.crossed
     }
+}
 
+/// What the ledger keeps of each row it judged, for the field walker (open-debt
+/// item 924, D9; see [`SlotLedger`]).
+#[cfg(feature = "dissect")]
+impl SlotLedger {
+    /// How far the list at `list` has been judged in order.
+    pub(crate) fn frontier(&self, list: usize) -> Frontier {
+        self.frontiers.get(&list).copied().unwrap_or_default()
+    }
+
+    /// The list at `list` has been judged in order up to `frontier`; a frontier
+    /// behind the one held moves nothing.
+    pub(crate) fn judged_up_to(&mut self, list: usize, frontier: Frontier) {
+        let held = self.frontiers.entry(list).or_default();
+        if frontier.produced > held.produced {
+            *held = frontier;
+        }
+    }
+
+    /// What was judged of the frame that was judgment `ordinal` of the row at
+    /// produced-index `produced` of the list at `list`, when it was.
+    pub(crate) fn recall(&self, list: usize, produced: u64, ordinal: u32) -> Option<Outcome> {
+        self.judged.get(&(list, produced, ordinal)).cloned()
+    }
+
+    /// Keep what was judged of a frame, for [`Self::recall`].
+    pub(crate) fn remember(&mut self, list: usize, produced: u64, ordinal: u32, outcome: &Outcome) {
+        self.judged
+            .insert((list, produced, ordinal), outcome.clone());
+    }
+
+    /// Let go of what was judged of the rows of the list at `list` older than
+    /// `first_held`, the produced-index of the oldest row it holds: no reader can
+    /// ask for them again.
+    pub(crate) fn forget_before(&mut self, list: usize, first_held: u64) {
+        let gone: Vec<(usize, u64, u32)> = self
+            .judged
+            .range((list, 0, 0)..(list, first_held, 0))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in gone {
+            let _ = self.judged.remove(&key);
+        }
+    }
+}
+
+impl SlotLedger {
     /// Read `reception.payload` under its profile and judge it against its slot.
     pub fn receive(&mut self, reception: &Reception<'_>) -> Outcome {
         self.receive_from(0, reception)

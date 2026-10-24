@@ -471,6 +471,29 @@ impl FieldsMemory {
         !ledger.crossed() && ledger.slots() <= 4 * held + 1024
     }
 
+    /// Open-debt item 924, D9 — whether the end-to-end ledger this memory holds
+    /// may be judged on from by a walk that begins again: it may be gone on from
+    /// at all ([`Self::e2e_may_continue`]), and in every stream list the rows it
+    /// has not judged sort, in capture order, after every row it has. A walk
+    /// then reads back the rows behind the frontier and judges the rest in the
+    /// order one walk over everything judges them.
+    fn e2e_ledger_holds(&self, d: &crate::Dissection) -> bool {
+        let Some(ledger) = self.e2e.as_ref().filter(|_| self.e2e_may_continue(d)) else {
+            return false;
+        };
+        let lists = crate::node::stream_list_indices(d);
+        d.flows().iter().zip(lists).all(|(flow, list)| {
+            let frontier = ledger.frontier(list);
+            let first_held = flow.frames.produced() - flow.frames.len() as u64;
+            let from = usize::try_from(frontier.produced.saturating_sub(first_held))
+                .unwrap_or(usize::MAX)
+                .min(flow.frames.len());
+            let packet = inherited_order_packet(flow, 0, from).unwrap_or(0);
+            flow.capture_order_from(from, packet, frontier.last_key, flow.frames.len())
+                .is_some()
+        })
+    }
+
     /// What this memory has done since it was made.
     pub fn stats(&self) -> FieldsStats {
         self.stats
@@ -660,14 +683,27 @@ pub fn fields_json_since_remembering_progress(
             // again and no cap): the rows between are passed and ordered by
             // nobody, and the order of the window's own rows is their keys'.
             let window_start = match stream_lists.get(i).copied() {
-                Some(list) if !judges_e2e => first_unpassed_position(
-                    |produced| coordinates.row_seq(list, produced),
-                    first_held,
-                    start,
-                    flow.frames.len(),
-                    since.after_seq,
-                ),
-                _ => start,
+                Some(list) => {
+                    let first = first_unpassed_position(
+                        |produced| coordinates.row_seq(list, produced),
+                        first_held,
+                        start,
+                        flow.frames.len(),
+                        since.after_seq,
+                    );
+                    // Under an end-to-end rule, no later than the first row the
+                    // ledger has not judged, as the producer has it.
+                    match memory.e2e.as_ref().filter(|_| judges_e2e) {
+                        None => first,
+                        Some(ledger) => {
+                            let judged = ledger.frontier(list).produced.saturating_sub(first_held);
+                            first
+                                .min(usize::try_from(judged).unwrap_or(usize::MAX))
+                                .max(start)
+                        }
+                    }
+                }
+                None => start,
             };
             let (start, packet, after) = if window_start > start {
                 let packet = inherited_order_packet(flow, start, window_start).unwrap_or(packet);
@@ -837,9 +873,12 @@ pub fn fields_json_since_remembering_progress(
 
     let sink = RowSink::new(revised);
     // The counters this walk judges against: the last walk's when it goes on from
-    // there, and none when it begins.
+    // there. Open-debt item 924, D9 — and when it begins again, too, with what
+    // they judged of each row, when they are still this capture's and every row
+    // they have not judged sorts after every row they have; otherwise none.
+    let ledger_kept = judges_e2e && (resume || (continues && memory.e2e_ledger_holds(d)));
     let ledger = match memory.e2e.take() {
-        Some(ledger) if resume && judges_e2e => ledger,
+        Some(ledger) if ledger_kept => ledger,
         _ => crate::e2e_slots::SlotLedger::new(),
     };
     let declared = map.map(|m| Declarations::with_ledger(m, ledger));
@@ -893,7 +932,7 @@ pub fn fields_json_since_remembering_progress(
     // over everything writes, so it is thrown away and the walk begun again, which
     // judges list by list; the counters it leaves say the slot is shared, and no later
     // call goes on from them.
-    if resume && judges_e2e && declared.as_ref().is_some_and(|d| d.e2e_crossed()) {
+    if ledger_kept && declared.as_ref().is_some_and(|d| d.e2e_crossed()) {
         memory.walk = WalkState::default();
         memory.e2e = None;
         return fields_json_since_remembering_progress(
@@ -2089,6 +2128,7 @@ fn push_stream_flow(
     // The produced-index of the OLDEST message still held, so a row's
     // sequence number is looked up by an index a front trim does not move.
     let first_produced = flow.frames.produced() - flow.frames.len() as u64;
+    tags.forget_judged_before(declarations, first_produced);
     // A resumed walk starts where the last one stopped and takes the folds it
     // left; every message before `start` is a row the cursor passes (the caller
     // holds that to be true before it asks), so none of them is visited and the
@@ -2261,6 +2301,7 @@ fn push_stream_flow(
         if !tags.keep_going() {
             break;
         }
+        tags.at_row(declarations, first_produced + position as u64);
         let row = position
             .checked_sub(start)
             .and_then(|at| handed.get_mut(at))
@@ -2400,6 +2441,15 @@ fn push_stream_flow(
         r.walk.order_packet = order_packet;
         r.walk.order_last = order_last;
         r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
+        // Every row before `end` has now been judged in capture order, the walk
+        // having begun no later than the first row the ledger had not judged.
+        tags.judged_up_to(
+            declarations,
+            crate::e2e_slots::Frontier {
+                produced: first_produced + end as u64,
+                last_key: order_last,
+            },
+        );
     }
     let _ = write!(out, "],\"shown\":{shown},\"omitted\":{omitted}}}");
 }
@@ -2431,6 +2481,7 @@ fn push_datagram_flow(
     // The produced-index of the oldest message each list still holds, so a row's
     // sequence number is looked up by an index a front trim does not move.
     let first_produced = flow.frames.produced() - flow.frames.len() as u64;
+    tags.forget_judged_before(declarations, first_produced);
     // The scouting list's own produced-index base: `ScoutingList` is trimmed from
     // the front by the same ceiling and counts what it ever held.
     let scouting_first = flow.scouting.produced() - flow.scouting.len() as u64;
@@ -2480,6 +2531,7 @@ fn push_datagram_flow(
             }
             break;
         }
+        tags.at_row(declarations, first_produced + position as u64);
         // As in the stream half: a stopped walk writes no more rows.
         if !tags.keep_going() {
             break;
@@ -2733,6 +2785,15 @@ fn push_datagram_flow(
         r.walk.produced = first_produced + frames_end as u64;
         r.walk.scouting_produced = scouting_first + scouting_end as u64;
         r.walk.unnumbered = (resumed && r.walk.unnumbered) || unnumbered;
+        // A datagram list is judged in its own order, so its frontier is a
+        // position and no key.
+        tags.judged_up_to(
+            declarations,
+            crate::e2e_slots::Frontier {
+                produced: first_produced + frames_end as u64,
+                last_key: None,
+            },
+        );
     }
     out.push_str("]}}");
 }
@@ -4908,19 +4969,66 @@ impl RowTags<'_> {
         declarations: Option<&Declarations<'_>>,
     ) -> Option<usize> {
         let after_seq = self.after_seq?;
-        if cap.is_some()
-            || declarations.is_some_and(|d| d.has_e2e_rules())
-            || self.sink.is_some_and(|sink| !sink.revised.is_empty())
-        {
+        if cap.is_some() || self.sink.is_some_and(|sink| !sink.revised.is_empty()) {
             return None;
         }
-        Some(first_unpassed_position(
+        let first = first_unpassed_position(
             |produced| self.frame_seq(produced),
             first_produced,
             from,
             len,
             after_seq,
-        ))
+        );
+        // Under an end-to-end rule a row's verdict depends on the rows before it
+        // in its slot: the rows the ledger has judged in order are read back from
+        // it (D9), and the walk begins no later than the first row it has not
+        // judged, so every row from there is judged in order.
+        match declarations.filter(|d| d.has_e2e_rules()) {
+            None => Some(first),
+            Some(d) => {
+                let list = self.numbering?.list?;
+                let judged = d.e2e_frontier(list).produced.saturating_sub(first_produced);
+                Some(
+                    first
+                        .min(usize::try_from(judged).unwrap_or(usize::MAX))
+                        .max(from),
+                )
+            }
+        }
+    }
+
+    /// The row whose frames the declarations judge from now on, by its
+    /// produced-index (D9).
+    fn at_row(&self, declarations: Option<&Declarations<'_>>, produced: u64) {
+        if let Some(d) = declarations.filter(|d| d.has_e2e_rules()) {
+            d.at_row(produced);
+        }
+    }
+
+    /// The walk of this list judged it in order up to `frontier` (D9); a list
+    /// with no number has no frontier to keep.
+    fn judged_up_to(
+        &self,
+        declarations: Option<&Declarations<'_>>,
+        frontier: crate::e2e_slots::Frontier,
+    ) {
+        if let (Some(d), Some(list)) = (
+            declarations.filter(|d| d.has_e2e_rules()),
+            self.numbering.and_then(|n| n.list),
+        ) {
+            d.e2e_judged_up_to(list, frontier);
+        }
+    }
+
+    /// Let the declarations forget what they judged of this list's rows older
+    /// than `first_held` (D9).
+    fn forget_judged_before(&self, declarations: Option<&Declarations<'_>>, first_held: u64) {
+        if let (Some(d), Some(list)) = (
+            declarations.filter(|d| d.has_e2e_rules()),
+            self.numbering.and_then(|n| n.list),
+        ) {
+            d.e2e_forget_before(list, first_held);
+        }
     }
 
     /// Remember a row the document wrote (or wrote again): its digest, or none

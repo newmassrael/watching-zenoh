@@ -67,6 +67,10 @@ pub struct Declarations<'a> {
     /// The list the frames being judged now came from, which the ledger remembers as
     /// the owner of each slot it judges them in. See [`Self::enter_list`].
     list: core::cell::Cell<usize>,
+    /// The produced-index of the row whose frames are being judged now, and how
+    /// many of its frames have been, when the walker says which row it is; the
+    /// key the ledger keeps a frame's outcome under. See [`Self::at_row`].
+    row: core::cell::Cell<Option<(u64, u32)>>,
     /// R311y875 — the rules that bound the WRONG thing, tallied by the triple
     /// that identifies one misbinding. See [`Self::misbindings`].
     misbound: RefCell<alloc::collections::BTreeMap<MisbindingKey, (usize, MatchedRule)>>,
@@ -156,6 +160,7 @@ impl<'a> Declarations<'a> {
             used: RefCell::new(BTreeSet::new()),
             e2e: RefCell::new(ledger),
             list: core::cell::Cell::new(0),
+            row: core::cell::Cell::new(None),
             misbound: RefCell::new(alloc::collections::BTreeMap::new()),
             refused: RefCell::new(alloc::collections::BTreeMap::new()),
             rescans: RefCell::new((0, 0)),
@@ -168,6 +173,30 @@ impl<'a> Declarations<'a> {
     /// by what a frame says and not by where it was read.
     pub fn enter_list(&self, list: usize) {
         self.list.set(list);
+        self.row.set(None);
+    }
+
+    /// The frames judged from now on are those of the row at produced-index
+    /// `produced` of the list entered (open-debt item 924, D9): a row the
+    /// ledger has judged before, behind the list's frontier, is read back from
+    /// what it kept and moves no counter, and a row past it is judged and kept.
+    pub(crate) fn at_row(&self, produced: u64) {
+        self.row.set(Some((produced, 0)));
+    }
+
+    /// How far the list at `list` has been judged in order.
+    pub(crate) fn e2e_frontier(&self, list: usize) -> crate::e2e_slots::Frontier {
+        self.e2e.borrow().frontier(list)
+    }
+
+    /// A walk judged the list at `list` in order up to `frontier`.
+    pub(crate) fn e2e_judged_up_to(&self, list: usize, frontier: crate::e2e_slots::Frontier) {
+        self.e2e.borrow_mut().judged_up_to(list, frontier);
+    }
+
+    /// Let go of what was judged of the rows of `list` older than `first_held`.
+    pub(crate) fn e2e_forget_before(&self, list: usize, first_held: u64) {
+        self.e2e.borrow_mut().forget_before(list, first_held);
     }
 
     /// Whether any end-to-end slot has been judged from two different lists.
@@ -306,17 +335,43 @@ impl<'a> Declarations<'a> {
         }
         let matched = map.e2e_for_keyexpr(keyexpr)?;
         self.record_applied(matched.id);
+        // Which frame of which row this is, when the walker said (D9).
+        let list = self.list.get();
+        let at = self.row.get().map(|(produced, ordinal)| {
+            self.row.set(Some((produced, ordinal + 1)));
+            (produced, ordinal)
+        });
         let outcome = match payload {
-            Some(payload) => self.e2e.borrow_mut().receive_from(
-                self.list.get(),
-                &crate::e2e_slots::Reception {
-                    profile: matched.format.profile(),
-                    keyexpr,
-                    payload,
-                    sender,
-                    observed_at_ns,
-                },
-            ),
+            Some(payload) => {
+                let mut ledger = self.e2e.borrow_mut();
+                let behind = at.filter(|(produced, _)| *produced < ledger.frontier(list).produced);
+                match behind.and_then(|(produced, ordinal)| ledger.recall(list, produced, ordinal))
+                {
+                    // Judged before, in order: what it was then, with no counter
+                    // moved a second time.
+                    Some(outcome) => outcome,
+                    None => {
+                        debug_assert!(
+                            behind.is_none(),
+                            "a row behind the frontier was judged with fewer frames than now"
+                        );
+                        let outcome = ledger.receive_from(
+                            list,
+                            &crate::e2e_slots::Reception {
+                                profile: matched.format.profile(),
+                                keyexpr,
+                                payload,
+                                sender,
+                                observed_at_ns,
+                            },
+                        );
+                        if let Some((produced, ordinal)) = at {
+                            ledger.remember(list, produced, ordinal, &outcome);
+                        }
+                        outcome
+                    }
+                }
+            }
             None => crate::e2e_slots::Outcome::Unreadable {
                 why: crate::e2e_slots::UNREADABLE_PAYLOAD,
             },

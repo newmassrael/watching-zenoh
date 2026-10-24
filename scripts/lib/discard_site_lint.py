@@ -188,6 +188,13 @@ ALLOWED = [
         "cut below, and nothing else reads them",
     ),
     (
+        "wz-capture/e2e_slots.rs",
+        "let _ = self.judged.remove(&key);",
+        "Open-debt item 924, D9 — the end-to-end outcomes the ledger kept of "
+        "rows a front trim has taken: the rows are gone and counted where they "
+        "went, and an outcome is read only for its own row",
+    ),
+    (
         "wz-session-core/passive_messages.rs",
         "self.chains.rows.remove(&first_produced);",
         "Open-debt item 924, D9 — the chain fact of the row the door is "

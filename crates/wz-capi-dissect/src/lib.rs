@@ -16240,7 +16240,18 @@ mod tests {
         after: u64,
         max_rows: u64,
     ) -> String {
-        let declarations = std::ffi::CString::new("").expect("no NUL");
+        live_fields_window_declaring(handle, capture, after, max_rows, "")
+    }
+
+    /// `wz_dissect_live_fields_since_window` under `declarations`.
+    fn live_fields_window_declaring(
+        handle: *mut live::LiveDissection,
+        capture: &[u8],
+        after: u64,
+        max_rows: u64,
+        declarations: &str,
+    ) -> String {
+        let declarations = std::ffi::CString::new(declarations).expect("no NUL");
         let mut out: *mut c_char = core::ptr::null_mut();
         let rc = unsafe {
             wz_dissect_live_fields_since_window(
@@ -16425,32 +16436,75 @@ mod tests {
             frames_per_flow: Some(4),
             ..Default::default()
         };
+        // Counters that repeat, skip past the profile's gap and go back, so the
+        // judge's verdicts differ from row to row and each depends on the rows
+        // before it in its slot.
+        let counters: Vec<u64> = (0..48u64)
+            .map(|k| match k % 8 {
+                3 => k - 1,
+                5 => k + 6,
+                6 => k.saturating_sub(4),
+                _ => k,
+            })
+            .collect();
         let captures = [
-            ("interleaved", interleaved.clone(), Default::default()),
-            ("interleaved, bytes", interleaved.clone(), byte_ceiling),
-            ("interleaved, frames", interleaved, frame_ceiling),
+            ("interleaved", interleaved.clone(), Default::default(), ""),
+            ("interleaved, bytes", interleaved.clone(), byte_ceiling, ""),
+            ("interleaved, frames", interleaved, frame_ceiling, ""),
             (
                 "exchange",
                 pcap_prefix(&exchange_packets(), exchange_packets().len()),
                 Default::default(),
+                "",
             ),
             (
                 "stream chains",
                 wz_capture::fixtures::stream_chain_sequence_capture(20),
                 Default::default(),
+                "",
             ),
             (
                 "datagram chains",
                 wz_capture::fixtures::chain_sequence_capture(20),
                 Default::default(),
+                "",
+            ),
+            // Step 6 (d): under an end-to-end rule, the rows the ledger judged are
+            // read back and the rest judged in order.
+            (
+                "end to end",
+                e2e_capture(&counters),
+                Default::default(),
+                E2E_RULES,
+            ),
+            (
+                "end to end, frames",
+                e2e_capture(&counters),
+                frame_ceiling,
+                E2E_RULES,
             ),
         ];
         let mut picked = 0usize;
-        for (name, file, limits) in captures {
+        for (name, file, limits, declarations) in captures {
             for size in [1u64, 3] {
                 let handle = Box::into_raw(Box::new(live::LiveDissection::new(limits)));
                 unsafe { (*handle).follow(&file).expect("follows") };
-                let whole = live_fields_since(handle, &file, 0);
+                let whole = live_fields_since_declaring(handle, &file, 0, declarations);
+                if !declarations.is_empty() {
+                    // Anti-vacuity: the judge ran, on every published row of the
+                    // whole capture (a ceiling holds four rows, handshakes among
+                    // them), and did not find them all the same.
+                    let judged = whole.matches("\"e2e\":{").count();
+                    if limits == Default::default() {
+                        assert!(judged >= 40, "{name}: {judged} rows judged");
+                        assert!(
+                            whole.contains("\"counter_reason\":\"repeat\""),
+                            "{name}: no repeat judged"
+                        );
+                    } else {
+                        assert!(judged > 0, "{name}: no row judged");
+                    }
+                }
                 let issued = through_seq_of(&whole);
                 let document: Vec<(u64, V)> = rows_of(&parsed(&whole))
                     .into_iter()
@@ -16473,7 +16527,13 @@ mod tests {
                 }
                 for after in order {
                     let before = unsafe { (*handle).fields_work() }.messages_walked;
-                    let doc = parsed(&live_fields_window(handle, &file, after, size));
+                    let doc = parsed(&live_fields_window_declaring(
+                        handle,
+                        &file,
+                        after,
+                        size,
+                        declarations,
+                    ));
                     let walked = unsafe { (*handle).fields_work() }.messages_walked - before;
                     let got: Vec<(u64, V)> = rows_of(&doc)
                         .into_iter()
