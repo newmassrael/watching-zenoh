@@ -283190,6 +283190,54 @@
         "Read first: whether Layer E pico_keyexpr_declaration_twice_and_diff and C1ad are green on the run of this push (the peers' attribution of the pico failures to the same cause is a hypothesis). Lesson: a measurement must not put a frame on a peer's wire; the lowlatency link changes its stream framing after the open, which only a test of that transport shows, so a change that adds a frame to the establishment path has to run the transport-mode lanes (C1ad) before it pushes. Open as before: credit-based flow control, the wait_for_slot bulkhead, Block publishing key in the sessions document, windowed-lateness admission, hosted E7s/E7g reads."
       ]
     },
+    "Round 3536": {
+      "decision_summary": "The aarch64 Linux platform (glibc 2.35, a Yocto SDK) packages all three artifacts through the entry and is verified: its row moves to lane build. The first build failed on a size pin measured on x86_64 only, and the pin now has a row per measured target.",
+      "changes_bullets": [
+        "scripts/yocto-toolchain-env.sh: turns a Yocto SDK's environment script into the entry's variables (CC, AR and a linker wrapper for the triple), refuses a set LD_LIBRARY_PATH, and clears the plain target-compiler variables the script exports so build scripts run for the host are not handed a cross compiler.",
+        "scripts/lib/wz_package.py: the yocto SDK identity (the SDK's own version, architecture and OS, as values, never a path); the selftest no longer depends on which platform row happens to be unassessed.",
+        "deploy/wz-config.toml: the linux-aarch64-glibc row is assessed (os_provides from the C library's interface, system_assumed from the build) with lane build and support verified; rust-toolchain.toml lists the aarch64 Linux and Android targets with the pinned toolchain.",
+        "crates/wz-capi-pico/src/os/unix.rs and sync.rs: the pthread_attr_t size pin is 64 bytes on aarch64 glibc as well as macOS, 56 elsewhere; the row for each target is the one it was measured on.",
+        "docs/target-build-contract.md: step 5 recorded."
+      ],
+      "verification_bullets": [
+        "On a build machine with the glibc 2.35 Yocto SDK (version 4.0.35) read-only: capi-pico, capi-c and wz-ap-demo packaged through the entry, twice with the same manifest bytes, then verified (Layer C1sp, 154 s); each measures a glibc floor of GLIBC_2.34 and needs libgcc_s, libm and libc.",
+        "The failed first build named the cause (the pin asserted 56 bytes, the target's pthread_attr_t is 64, measured with the SDK's headers); on the host, wz-capi-pico lib tests and clippy -D warnings pass with the changed pin.",
+        "wz_config --check and --selftest, wz_package --selftest, the static gates this work touches, shellcheck of the new script; the push ran the default hook.",
+        "Not run: anything on a board; the extended pre-push sweep, which is red on origin/main for two causes outside this work (a socket path in the capacity cost calibration, which its author's session no longer exists to fix; the wz-capture fixtures test of the earlier step)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "Run and interop lanes for aarch64 Linux need the board; the row's lane stays build.",
+        "The extended pre-push sweep is red on origin/main (upstream_link_config_keys_gate on emission_cost.rs calibrate_with_probe): its owner must route that socket through the options seam or claim the not-applicable marker.",
+        "QNX (both stacks): untried; the qnx-sdp SDK reading and a bundled library for boards without the C++ runtime are owed.",
+        "system_assumed for this platform is the build's, not yet compared with the board's own libraries."
+      ],
+      "publishable_decision_summary": "The aarch64 Linux platform (glibc 2.35, a Yocto SDK) packages all three artifacts through the entry and is verified: its row moves to lane build. The first build failed on a size pin measured on x86_64 only, and the pin now has a row per measured target.",
+      "publishable_changes_bullets": [
+        "scripts/yocto-toolchain-env.sh: turns a Yocto SDK's environment script into the entry's variables (CC, AR and a linker wrapper for the triple), refuses a set LD_LIBRARY_PATH, and clears the plain target-compiler variables the script exports so build scripts run for the host are not handed a cross compiler.",
+        "scripts/lib/wz_package.py: the yocto SDK identity (the SDK's own version, architecture and OS, as values, never a path); the selftest no longer depends on which platform row happens to be unassessed.",
+        "deploy/wz-config.toml: the linux-aarch64-glibc row is assessed (os_provides from the C library's interface, system_assumed from the build) with lane build and support verified; rust-toolchain.toml lists the aarch64 Linux and Android targets with the pinned toolchain.",
+        "crates/wz-capi-pico/src/os/unix.rs and sync.rs: the pthread_attr_t size pin is 64 bytes on aarch64 glibc as well as macOS, 56 elsewhere; the row for each target is the one it was measured on.",
+        "docs/target-build-contract.md: step 5 recorded."
+      ],
+      "publishable_verification_bullets": [
+        "On a build machine with the glibc 2.35 Yocto SDK (version 4.0.35) read-only: capi-pico, capi-c and wz-ap-demo packaged through the entry, twice with the same manifest bytes, then verified (Layer C1sp, 154 s); each measures a glibc floor of GLIBC_2.34 and needs libgcc_s, libm and libc.",
+        "The failed first build named the cause (the pin asserted 56 bytes, the target's pthread_attr_t is 64, measured with the SDK's headers); on the host, wz-capi-pico lib tests and clippy -D warnings pass with the changed pin.",
+        "wz_config --check and --selftest, wz_package --selftest, the static gates this work touches, shellcheck of the new script; the push ran the default hook.",
+        "Not run: anything on a board; the extended pre-push sweep, which is red on origin/main for two causes outside this work (a socket path in the capacity cost calibration, which its author's session no longer exists to fix; the wz-capture fixtures test of the earlier step)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Run and interop lanes for aarch64 Linux need the board; the row's lane stays build.",
+        "The extended pre-push sweep is red on origin/main (upstream_link_config_keys_gate on emission_cost.rs calibrate_with_probe): its owner must route that socket through the options seam or claim the not-applicable marker.",
+        "QNX (both stacks): untried; the qnx-sdp SDK reading and a bundled library for boards without the C++ runtime are owed.",
+        "system_assumed for this platform is the build's, not yet compared with the board's own libraries."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
