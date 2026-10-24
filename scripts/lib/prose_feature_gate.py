@@ -107,6 +107,12 @@ UNRESOLVED_DECLARED: dict[tuple[str, str], str] = {
         "manifest) outside `crates/`, the shape of the kit-lane row above, so this workspace's "
         "metadata cannot adjudicate its features"
     ),
+    ("scripts/run-ci.sh", "declared"): (
+        "Layer C1st builds `deploy/host-slot-node`'s `declared-node` from the tracked generated "
+        "constants of a node declaration; that image is a standalone workspace of its own "
+        "(`[workspace]` in its manifest) outside `crates/`, the shape of the rows above, so this "
+        "workspace's metadata cannot adjudicate its features"
+    ),
     ("scripts/lib/guarded_count_gate.py", "zenoh-config"): (
         "a FIXTURE string naming an invented package (`demo-crate`), which is "
         "that gate's own test input rather than a command anyone runs"
