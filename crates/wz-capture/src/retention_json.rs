@@ -136,7 +136,7 @@ impl Retention {
             .flat_map(|(_, _, list)| list.iter())
             .filter_map(|frame| frame.observed_at_ns)
             .min();
-        let scouting_lists = || d.datagram_flows().iter().map(|flow| &flow.scouting);
+        let scouting_lists = || d.datagram_flows().iter().map(|flow| flow.scouting());
         let scouting: usize = scouting_lists().map(|list| list.len()).sum();
         let oldest_of_scouting = scouting_lists()
             .flat_map(|list| list.iter())

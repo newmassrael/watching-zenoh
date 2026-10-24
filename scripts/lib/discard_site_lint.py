@@ -524,7 +524,7 @@ ALLOWED = [
     ),
     (
         "wz-capture/lib.rs",
-        "let removed = self.held.pop_front().is_some();",
+        "let Some(row) = self.rows.pop_front() else {",
         "`ScoutingList::discard_oldest`, THE DOOR: it reports whether it "
         "removed a message, and its one caller counts `self.drops.scouting += 1` "
         "on that answer, as the type doc says. The obligation is the caller's, "

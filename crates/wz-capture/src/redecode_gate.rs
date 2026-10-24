@@ -788,6 +788,127 @@ fn websocket_capture() -> (Vec<u8>, Vec<WsSent>) {
     )
 }
 
+/// Open-debt item 924, step 4c — A SCOUTING LIST'S ROWS. A scouting list keeps
+/// each message's payload, logged once (a copy, or its place in a lent
+/// container), and decodes it again when it is read. On a capture of SCOUTs to
+/// the group, HELLOs answering them, and SCOUTs whose datagram holds more than
+/// the message, every message reads as decoding its packet's payload says,
+/// handed and lent, plain and under message ceilings that discard from the
+/// front; a ceiling lets the discarded copies go, and a lent dissection keeps
+/// no copy at all.
+#[test]
+fn a_scouting_lists_rows_read_again_from_their_logged_payloads() {
+    use crate::datagram_tests::{hello_with_locators, scout_message, udp_packet, SCOUT_GROUP};
+    let asker = [192, 168, 1, 5];
+    let mut payloads: Vec<Vec<u8>> = Vec::new();
+    let mut packets: Vec<Vec<u8>> = Vec::new();
+    // Enough that each list's log spans several chunks, which is what a
+    // release gives back.
+    for k in 0..600usize {
+        let (payload, packet) = match k % 3 {
+            0 => {
+                let p = scout_message();
+                let packet = udp_packet(asker, 43210, SCOUT_GROUP, 7446, &p);
+                (p, packet)
+            }
+            1 => {
+                let p = hello_with_locators();
+                let packet = udp_packet([192, 168, 1, 9], 7447, asker, 43210, &p);
+                (p, packet)
+            }
+            // A datagram that holds more than the message read out of it.
+            _ => {
+                let mut p = scout_message();
+                p.push(0xEE);
+                let packet = udp_packet(asker, 43210, SCOUT_GROUP, 7446, &p);
+                (p, packet)
+            }
+        };
+        payloads.push(payload);
+        packets.push(packet);
+    }
+    let rows: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (i as u32, 0, p.as_slice()))
+        .collect();
+    let file = crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &rows);
+    let expected = |packet: usize| -> String {
+        let payload = &payloads[packet];
+        let read = wz_session_core::scouting_message::parse_scouting_observed(payload);
+        let whole = matches!(&read, Ok((_, n)) if *n == payload.len());
+        format!(
+            "{:?} {whole} {}",
+            read.map(|(frame, _)| frame),
+            payload.len()
+        )
+    };
+    let mut limits = alloc::vec![crate::DissectionLimits::default()];
+    for cap in [1, 3, 7] {
+        limits.push(crate::DissectionLimits {
+            frames_per_flow: Some(cap),
+            ..crate::DissectionLimits::default()
+        });
+    }
+    let mut checked = 0usize;
+    // Per flow, what its log holds allocated with no ceiling.
+    let mut uncapped: Vec<usize> = Vec::new();
+    for limits in limits {
+        let what = format!("scouting, {limits:?}");
+        let handed = Dissection::from_pcap_declaring_bounded(&file, &[], &[], limits)
+            .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let mut lent = Dissection::with_limits(limits);
+        let container: alloc::sync::Arc<dyn crate::LentCapture> =
+            alloc::sync::Arc::new(file.clone());
+        lent.follow_lent(&mut crate::CaptureCursor::new(), container)
+            .unwrap_or_else(|e| panic!("{what}: lent: {e:?}"));
+        lent.finish();
+        for (n, (flow, flow_lent)) in handed
+            .datagram_flows()
+            .iter()
+            .zip(lent.datagram_flows())
+            .enumerate()
+        {
+            let (scouting, scouting_lent) = (flow.scouting(), flow_lent.scouting());
+            assert_eq!(scouting.len(), scouting_lent.len(), "{what}: held");
+            assert_eq!(scouting.produced(), scouting_lent.produced(), "{what}");
+            for (datagram, datagram_lent) in scouting.iter().zip(scouting_lent.iter()) {
+                let read = format!(
+                    "{:?} {} {}",
+                    datagram.frame, datagram.read_whole, datagram.unit_len
+                );
+                assert_eq!(read, expected(datagram.packet_index), "{what}: decoded");
+                assert_eq!(
+                    format!("{datagram:?}"),
+                    format!("{datagram_lent:?}"),
+                    "{what}: lent reads as handed"
+                );
+                checked += 1;
+            }
+            assert_eq!(
+                flow_lent.scouting.log_allocated(),
+                0,
+                "{what}: a lent payload is not copied"
+            );
+            let allocated = flow.scouting.log_allocated();
+            if limits.frames_per_flow.is_none() {
+                uncapped.push(allocated);
+            } else {
+                // A release gives back whole chunks, and the last chunk, about
+                // half of a log, holds the messages still held: a list that
+                // released nothing holds all of it.
+                assert!(
+                    allocated < uncapped[n] * 3 / 4,
+                    "{what}: the discarded payloads' copies went: {allocated} of {} held",
+                    uncapped[n]
+                );
+            }
+        }
+        assert!(handed.drops().scouting > 0 || limits.frames_per_flow.is_none());
+    }
+    assert!(checked > 40, "{checked} scouting rows prove little");
+}
+
 /// Opens a record whose protected payload is `inner content type || plaintext`.
 struct PlainOpener;
 

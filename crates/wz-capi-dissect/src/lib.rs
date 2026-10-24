@@ -5604,7 +5604,7 @@ fn summary_json(d: &Dissection) -> String {
         s.push_str(&format!(
             "{{\"frames\":{},\"scouting\":{}}}",
             f.frames().len(),
-            f.scouting.len()
+            f.scouting().len()
         ));
     }
     // The skipped packets are part of the summary on purpose: a consumer that

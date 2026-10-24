@@ -550,7 +550,9 @@ fn the_tracked_discovery_capture_reaches_the_consumer_surface() {
     let words: Vec<&'static str> = flows
         .iter()
         .map(|f| {
-            f.scouting[0]
+            f.scouting()
+                .first()
+                .expect("a scouting datagram")
                 .frame
                 .as_ref()
                 .expect("a scouting datagram decodes")

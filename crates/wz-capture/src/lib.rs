@@ -882,7 +882,10 @@ pub struct DatagramDissection {
     /// merges on it. This is deliberately not done here: the merge belongs to
     /// whoever is presenting, and doing it eagerly would force an ordering on
     /// a consumer that may want the two separated.
-    pub scouting: ScoutingList,
+    ///
+    /// Read through [`Self::scouting`], which hands the list the container its
+    /// payloads may sit in.
+    pub(crate) scouting: ScoutingList,
     /// R311y651 (§4.4) — the index of the last packet seen on this flow, which
     /// is what makes "least recently active" answerable here as it already was
     /// for a stream flow.
@@ -1625,6 +1628,14 @@ impl DatagramDissection {
         self.quic_datagrams.read(self)
     }
 
+    /// The scouting messages observed on this flow, oldest first, each
+    /// decoded again from its payload when it is read (open-debt item 924,
+    /// step 4c).
+    pub fn scouting(&self) -> Scoutings<'_> {
+        self.scouting
+            .read(self.lent.as_deref().map(LentCapture::bytes))
+    }
+
     /// The source a list of this flow reads its datagrams from, as a borrow
     /// beside the lists, so a caller that changes a list can hand it in.
     fn datagrams(lent: &Option<alloc::sync::Arc<dyn LentCapture>>) -> messages::Datagrams<'_> {
@@ -1852,28 +1863,92 @@ pub struct ScoutingDatagram {
 /// message has no such tally to join — its loss is `drops.scouting`, counted by
 /// the caller of [`Self::discard_oldest`].
 ///
-/// Read through [`Deref`](core::ops::Deref) as a slice, which is what every
-/// reader of the old `Vec` did.
+/// # What it keeps of a message
+///
+/// Open-debt item 924, step 4c (`docs/dissect-row-index.md`, D8) — the
+/// datagram's payload, logged once (a copy, or its place in the capture
+/// container the dissection is lent), and beside it what the payload cannot
+/// say: the direction, the packet and the instant. A message is decoded again
+/// from the payload each time it is read ([`Self::read`]), as a datagram list's
+/// are; nothing decoded is kept.
 #[derive(Debug, Default)]
 pub struct ScoutingList {
-    held: alloc::collections::VecDeque<ScoutingDatagram>,
+    rows: wz_session_core::chunk_log::ChunkLog<ScoutingRow>,
+    log: wz_session_core::byte_log::UnitLog,
     produced: u64,
 }
 
+/// What a [`ScoutingList`] keeps of one message beside its logged payload.
+#[derive(Debug, Clone, Copy)]
+struct ScoutingRow {
+    /// The payload's place in the list's log
+    /// (`wz_session_core::byte_log::LogPlace::locator`).
+    locator: u64,
+    packet_index: u64,
+    /// The instant in nanoseconds, when the source has a clock.
+    observed_at_ns: Option<u64>,
+    len: u32,
+    direction: Direction,
+}
+
 impl ScoutingList {
-    /// Append one scouting message.
-    pub fn push(&mut self, datagram: ScoutingDatagram) {
-        self.held.push_back(datagram);
-        self.held.make_contiguous();
+    /// Append the scouting message `payload` carried, in `direction`, in the
+    /// packet at `packet_index`, at `observed_at_ns`; `in_container` is where
+    /// the payload sits in the capture container the dissection is lent, when
+    /// it sits there, which the list then reads it from and does not copy.
+    fn push(
+        &mut self,
+        direction: Direction,
+        packet_index: usize,
+        observed_at_ns: Option<u64>,
+        payload: &[u8],
+        in_container: Option<usize>,
+    ) {
+        let place = self.log.place(payload, in_container);
+        self.rows.push_back(ScoutingRow {
+            locator: place.locator(),
+            packet_index: packet_index as u64,
+            observed_at_ns,
+            len: u32::try_from(payload.len()).unwrap_or(u32::MAX),
+            direction,
+        });
         self.produced += 1;
     }
 
-    /// Remove the oldest message; `false` when there was none. `produced` is
-    /// untouched, which is what keeps a drain's watermark meaningful.
+    /// Remove the oldest message, and the copy of its payload with it; `false`
+    /// when there was none. `produced` is untouched, which is what keeps a
+    /// drain's watermark meaningful.
     pub fn discard_oldest(&mut self) -> bool {
-        let removed = self.held.pop_front().is_some();
-        self.held.make_contiguous();
-        removed
+        let Some(row) = self.rows.pop_front() else {
+            return false;
+        };
+        self.log.release_through(
+            wz_session_core::byte_log::LogPlace::of(row.locator),
+            row.len as usize,
+        );
+        true
+    }
+
+    /// Messages held now.
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// The packet the oldest message held came in, read off its row: what the
+    /// ceilings order lists by, which decoding the message would not change.
+    fn oldest_packet(&self) -> Option<usize> {
+        self.rows.get(0).map(|row| row.packet_index as usize)
+    }
+
+    /// Bytes the list's log holds allocated for copies of payloads.
+    #[cfg(test)]
+    fn log_allocated(&self) -> usize {
+        self.log.allocated()
+    }
+
+    /// No message is held.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
     }
 
     /// Messages EVER appended, a different number from `len` once the ceiling
@@ -1881,23 +1956,89 @@ impl ScoutingList {
     pub fn produced(&self) -> u64 {
         self.produced
     }
-}
 
-impl core::ops::Deref for ScoutingList {
-    type Target = [ScoutingDatagram];
-
-    fn deref(&self) -> &[ScoutingDatagram] {
-        // Contiguous after every mutation, so the first slice is all of it.
-        self.held.as_slices().0
+    /// The list as a reader reads it, with `container` the capture container
+    /// the dissection is lent, which a payload logged by its place there is
+    /// read from.
+    pub fn read<'a>(&'a self, container: Option<&'a [u8]>) -> Scoutings<'a> {
+        Scoutings {
+            list: self,
+            container,
+        }
     }
 }
 
-impl<'a> IntoIterator for &'a ScoutingList {
-    type Item = &'a ScoutingDatagram;
-    type IntoIter = core::slice::Iter<'a, ScoutingDatagram>;
+/// A [`ScoutingList`] as a reader reads it: each message decoded again from
+/// its payload when it is asked for.
+#[derive(Debug, Clone, Copy)]
+pub struct Scoutings<'a> {
+    list: &'a ScoutingList,
+    container: Option<&'a [u8]>,
+}
 
-    fn into_iter(self) -> Self::IntoIter {
-        (**self).iter()
+impl<'a> Scoutings<'a> {
+    /// Messages held.
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    /// No message is held.
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    /// Messages ever appended: [`ScoutingList::produced`].
+    pub fn produced(&self) -> u64 {
+        self.list.produced()
+    }
+
+    /// The message at position `index` among those held, oldest first.
+    ///
+    /// # Panics
+    ///
+    /// When the payload of a message held is in a container this reader was
+    /// not handed: the list and its reader have come apart, and answering
+    /// `None` would read as a message that is not there.
+    pub fn get(&self, index: usize) -> Option<ScoutingDatagram> {
+        let row = *self.list.rows.get(index)?;
+        let place = wz_session_core::byte_log::LogPlace::of(row.locator);
+        let payload = self
+            .list
+            .log
+            .get(place, row.len as usize, self.container)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the {} bytes of a scouting message a list holds are not at {place:?}",
+                    row.len
+                )
+            });
+        let read = parse_scouting_observed(payload);
+        let read_whole = matches!(&read, Ok((_, n)) if *n == payload.len());
+        Some(ScoutingDatagram {
+            direction: row.direction,
+            packet_index: row.packet_index as usize,
+            frame: read.map(|(frame, _)| frame),
+            observed_at_ms: row.observed_at_ns.map(|ns| ns / NANOS_PER_MILLI),
+            observed_at_ns: row.observed_at_ns,
+            unit_len: payload.len(),
+            read_whole,
+        })
+    }
+
+    /// The oldest message held.
+    pub fn first(&self) -> Option<ScoutingDatagram> {
+        self.get(0)
+    }
+
+    /// Every message held, oldest first, each decoded as it is reached.
+    pub fn iter(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = ScoutingDatagram> + ExactSizeIterator + 'a {
+        let this = *self;
+        (0..self.len()).map(move |index| {
+            this.get(index)
+                .unwrap_or_else(|| unreachable!("{index} is a position held"))
+        })
     }
 }
 
@@ -4703,7 +4844,13 @@ mod live_tap_tests {
             1,
             "one scout is among the newest three"
         );
-        assert_eq!(flow.scouting[0].packet_index, 3);
+        assert_eq!(
+            flow.scouting()
+                .first()
+                .expect("a scouting message")
+                .packet_index,
+            3
+        );
         assert_eq!(flow.frames.len(), 2);
         assert_eq!(d.health().drops.scouting, 2, "the two oldest scouts");
         assert_eq!(d.health().drops.frames, 1, "and the one transport message");
@@ -7943,8 +8090,8 @@ impl Dissection {
             if let Some(head) = flow.frames().heads_from(0).next() {
                 offer(head.stream_offset, TotalList::Datagram, i);
             }
-            if let Some(datagram) = flow.scouting.first() {
-                offer(datagram.packet_index, TotalList::Scouting, i);
+            if let Some(packet) = flow.scouting.oldest_packet() {
+                offer(packet, TotalList::Scouting, i);
             }
             if let Some(head) = flow.quic_datagrams().heads_from(0).next() {
                 offer(head.stream_offset, TotalList::QuicDatagram, i);
@@ -8283,17 +8430,17 @@ impl Dissection {
             let whole = matches!(&read, Ok((_, n)) if *n == d.payload.len());
             let frame = read.map(|(frame, _)| frame);
             flow.ingest.observe_scouting(&frame, whole);
-            flow.scouting.push(ScoutingDatagram {
+            // Open-debt item 924, step 4c — the payload is logged (or named by
+            // its place in the container) and the message is read again from
+            // it. The clock was advanced for this datagram above, before the
+            // flow borrow; a transport frame on this flow reads the same.
+            flow.scouting.push(
                 direction,
-                packet_index: d.packet_index,
-                frame,
-                // The clock was advanced for this datagram above, before the
-                // flow borrow; a transport frame on this flow reads the same.
-                observed_at_ms: flow.session.observed_at(),
-                observed_at_ns: flow.session.observed_at_nanos(),
-                unit_len: d.payload.len(),
-                read_whole: whole,
-            });
+                d.packet_index,
+                flow.session.observed_at_nanos(),
+                d.payload,
+                in_container,
+            );
             // R311y651 (§4.4) — bounded by the SAME limit the frame list is,
             // because it answers the same question — how many decoded messages
             // of this flow are kept — and a second knob for one axis is a knob
@@ -8381,7 +8528,7 @@ impl Dissection {
                     .heads_from(0)
                     .next()
                     .map(|f| (f.stream_offset, 0u8)),
-                flow.scouting.first().map(|s| (s.packet_index, 1u8)),
+                flow.scouting.oldest_packet().map(|packet| (packet, 1u8)),
                 flow.quic_datagrams()
                     .heads_from(0)
                     .next()
@@ -11917,14 +12064,20 @@ mod datagram_tests {
             flow.frames()
         );
         assert_eq!(flow.scouting.len(), 1, "it must be reported, not dropped");
-        match &flow.scouting[0].frame {
+        match &flow.scouting().first().expect("a scouting message").frame {
             Ok(ScoutingFrame::Scout { body, .. }) => {
                 assert_eq!(body.version, 0x09);
                 assert_eq!(body.what(), 0x03, "the interest mask must survive");
             }
             other => panic!("a multicast SCOUT decoded as {other:?}"),
         }
-        assert_eq!(flow.scouting[0].packet_index, 0);
+        assert_eq!(
+            flow.scouting()
+                .first()
+                .expect("a scouting message")
+                .packet_index,
+            0
+        );
     }
 
     /// R311y608 — THE OTHER HALF OF THE EXCHANGE, and it does not come back on
@@ -11989,10 +12142,13 @@ mod datagram_tests {
         let reply = &d.datagram_flows()[0];
         assert_eq!(reply.scouting.len(), 1, "the HELLO must be reported");
         assert!(
-            matches!(&reply.scouting[0].frame, Ok(ScoutingFrame::Hello { .. })),
+            matches!(
+                &reply.scouting().first().expect("a scouting message").frame,
+                Ok(ScoutingFrame::Hello { .. })
+            ),
             "an evicted scout flow must not turn its answer back into an \
              Open: {:?}",
-            reply.scouting[0].frame
+            reply.scouting().first().expect("a scouting message").frame
         );
         assert!(
             reply.frames.is_empty(),
@@ -12035,7 +12191,7 @@ mod datagram_tests {
             reply.frames
         );
         assert_eq!(reply.scouting.len(), 1, "the HELLO must be reported");
-        match &reply.scouting[0].frame {
+        match &reply.scouting().first().expect("a scouting message").frame {
             Ok(ScoutingFrame::Hello { body, .. }) => {
                 assert_eq!(body.version, 0x09);
                 assert_eq!(body.whatami(), 0x01, "the whatami must survive");
@@ -12475,7 +12631,7 @@ mod datagram_tests {
         assert!(flow.frames.is_empty());
         assert_eq!(flow.scouting.len(), 1);
         assert!(matches!(
-            flow.scouting[0].frame,
+            flow.scouting().first().expect("a scouting message").frame,
             Ok(ScoutingFrame::Scout { .. })
         ));
     }
@@ -12732,7 +12888,7 @@ mod datagram_tests {
                 1,
                 "{name} never reached the scouting decoder"
             );
-            match &flow.scouting[0].frame {
+            match &flow.scouting().first().expect("a scouting message").frame {
                 Ok(ScoutingFrame::Unknown { mid }) => panic!(
                     "{name} (MID {mid:#04x}) is on zenoh's scouting wire and \
                      this build cannot name it"
@@ -15548,7 +15704,7 @@ mod datagram_tests {
         // identical SCOUTs make a cap that keeps the first three
         // indistinguishable from one that keeps the last.
         let kept: Vec<usize> = d.datagram_flows()[0]
-            .scouting
+            .scouting()
             .iter()
             .map(|s| s.packet_index)
             .collect();

@@ -282,8 +282,9 @@ pub(crate) fn for_each_row<'d>(
         // record plane to judge, so under a selector it is unjudged BY
         // CONSTRUCTION and says so directly, on the field document's argument.
         let scouting_id = coordinates.scouting_list_id(&flow.flow);
-        let scouting_first = flow.scouting.produced() - flow.scouting.len() as u64;
-        for (position, datagram) in flow.scouting.iter().enumerate() {
+        let scouting = flow.scouting();
+        let scouting_first = scouting.produced() - scouting.len() as u64;
+        for (position, datagram) in scouting.iter().enumerate() {
             let verdict = match (verdicts, list) {
                 (Some(_), Some(_)) => Some(RowVerdict::Unjudged),
                 _ => None,

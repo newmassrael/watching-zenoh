@@ -701,7 +701,7 @@ impl LiveDissection {
         // reconciled.
         let mut scouting_present: BTreeSet<FlowKey> = BTreeSet::new();
         for flow in dissection.datagram_flows() {
-            let list = &flow.scouting;
+            let list = flow.scouting();
             let produced = list.produced();
             if produced == 0 && !scouting_marks.contains_key(&flow.flow) {
                 continue;
@@ -723,7 +723,10 @@ impl LiveDissection {
                 });
             while mark.drained < produced && written < out.len() {
                 let idx = (mark.drained - first_held) as usize;
-                out[written] = record_of_scouting(&list[idx], flow_id, list_id);
+                let Some(datagram) = list.get(idx) else {
+                    break;
+                };
+                out[written] = record_of_scouting(&datagram, flow_id, list_id);
                 written += 1;
                 mark.drained += 1;
             }

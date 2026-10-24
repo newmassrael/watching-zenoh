@@ -162,6 +162,12 @@ ROSTER: frozenset[tuple[str, str]] = frozenset(
         # closure: no public field or door hands one out any more. The row moved
         # with the reading, for the same reason; `Messages::first` was REMOVED.
         ("Messages", "is_empty"),
+        # Step 4c — the scouting list is read the same way, through `Scoutings`
+        # (each message decoded again from its logged payload), and stopped
+        # being a slice behind `Deref`; its `is_empty` stands beside the `len`
+        # both shipped surfaces ask, for clippy's `len_without_is_empty`, and no
+        # surface asks it.
+        ("Scoutings", "is_empty"),
         # R3055 -- `StreamAssembler::fin_seen` and `StreamAssembler::rst_seen`
         # LEFT this roster by being asked: a flow's `halves` in the field document
         # reports, per direction, whether a FIN and an RST were observed, and both

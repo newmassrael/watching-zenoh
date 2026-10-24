@@ -75,7 +75,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
-use crate::byte_log::ByteLog;
+use crate::byte_log::{LogPlace, UnitLog};
 use crate::chunk_log::{ChunkLog, Iter};
 use crate::inbound::InboundFrame;
 #[cfg(feature = "reassembly")]
@@ -418,10 +418,7 @@ impl MessageList {
             self.note_chain(produced + k as u64, frame);
         }
         let index = self.index();
-        let place = match in_container {
-            Some(offset) => LogPlace::Container(offset),
-            None => LogPlace::Kept(index.log.append(bytes)),
-        };
+        let place = index.log.place(bytes, in_container);
         index.push_unit(
             produced,
             start,
@@ -689,10 +686,11 @@ impl Default for Store {
 struct Index {
     /// One per row, oldest first.
     entries: ChunkLog<UnitRow>,
-    /// The bytes of the datagram units whose entries are logged with a copy
-    /// ([`LogPlace::Kept`]), in the order they were logged. A unit's bytes go
-    /// when a discard takes the unit's last row ([`Self::pop_front`]).
-    log: ByteLog,
+    /// The units whose entries are logged ([`LOGGED`]): a copy of each one's
+    /// bytes, in the order they were logged, or its place in the container the
+    /// list's holder lends. A unit's copy goes when a discard takes the unit's
+    /// last row ([`Self::pop_front`]).
+    log: UnitLog,
     /// The frames of the rows kept whole, by produced-index. Few: a list keeps
     /// a row whole only where it cannot read it again.
     held: BTreeMap<u64, PassiveFrame>,
@@ -803,37 +801,6 @@ const NO_HANDSHAKE: u16 = 1 << 9;
 /// the end of its bytes: a WebSocket message's last frame, the TLS record that
 /// carried a unit's last plaintext byte.
 const WIRE_END: u16 = 1 << 10;
-
-/// [`UnitRow::locator`] of a logged unit names an offset in the container the
-/// list's holder lends, not a position in the list's own log. No container or
-/// log reaches 2^63 bytes.
-const IN_CONTAINER: u64 = 1 << 63;
-
-/// Where a logged unit's bytes are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LogPlace {
-    /// At this position of the list's [`Index::log`].
-    Kept(u64),
-    /// At this offset of the container the list's holder lends.
-    Container(usize),
-}
-
-impl LogPlace {
-    fn locator(self) -> u64 {
-        match self {
-            LogPlace::Kept(at) => at,
-            LogPlace::Container(offset) => offset as u64 | IN_CONTAINER,
-        }
-    }
-
-    fn of(locator: u64) -> Self {
-        if locator & IN_CONTAINER != 0 {
-            LogPlace::Container((locator & !IN_CONTAINER) as usize)
-        } else {
-            LogPlace::Kept(locator)
-        }
-    }
-}
 
 /// Where the unit of the rows [`Index::push_unit`] is handed lies.
 #[derive(Debug, Clone, Copy)]
@@ -1356,13 +1323,9 @@ impl Index {
             let (body, end) = row.body();
             return source.stream_bytes(row.direction(), body, end);
         }
-        match LogPlace::of(row.locator) {
-            LogPlace::Kept(at) => self.log.get(at, len),
-            LogPlace::Container(offset) => source
-                .container()
-                .and_then(|container| container.get(offset..offset.checked_add(len)?)),
-        }
-        .map(Cow::Borrowed)
+        self.log
+            .get(LogPlace::of(row.locator), len, source.container())
+            .map(Cow::Borrowed)
     }
 
     /// The row at `position` as a reader is handed it.
@@ -1437,8 +1400,9 @@ impl Index {
                     self.cut_resync = None;
                     // The unit's last row: nothing reads its bytes any more, and
                     // every unit logged before it went before it.
-                    if let (true, LogPlace::Kept(at)) = (row.logged(), LogPlace::of(row.locator)) {
-                        self.log.release_before(at + u64::from(row.wire_len));
+                    if row.logged() {
+                        self.log
+                            .release_through(LogPlace::of(row.locator), row.wire_len as usize);
                     }
                     if row.flags & WIRE_END != 0 {
                         self.wire_ends.remove(&row.end_key());

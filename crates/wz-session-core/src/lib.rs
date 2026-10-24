@@ -1245,7 +1245,7 @@ pub mod passive_messages;
 pub mod chunk_log;
 
 // Open-debt item 924 — the unit log a message list reads its datagrams' bytes
-// from. Gated as that list is, and crate-private: only the list holds one.
+// from, and a capture's scouting list its messages'. Gated as that list is.
 #[cfg(all(
     feature = "alloc",
     feature = "codec-init-body",
@@ -1253,7 +1253,7 @@ pub mod chunk_log;
     feature = "codec-close",
     feature = "codec-frame"
 ))]
-mod byte_log;
+pub mod byte_log;
 
 /// R311y579 (G3 + G6-serde) — the LEAF-SCALAR field walker: a dissection that
 /// reports, per scalar, the byte span it was decoded from, in a wz-owned view

@@ -1478,9 +1478,8 @@ fn oldest_held_packet(d: &crate::Dissection) -> usize {
                 .heads_from(0)
                 .next()
                 .map_or(usize::MAX, |frame| frame.stream_offset),
-            flow.scouting
-                .iter()
-                .next()
+            flow.scouting()
+                .first()
                 .map_or(usize::MAX, |datagram| datagram.packet_index),
         ]
     });
@@ -2673,8 +2672,11 @@ fn push_datagram_flow(
     // consumer merges on. NOT stamped into the id spaces: a scouting message
     // references no keyexpr, and its packet may precede the last frame's, which
     // would move a cursor that only moves forward.
-    for (position, datagram) in flow.scouting.iter().enumerate().skip(scouting_start) {
-        let index = datagram.packet_index;
+    //
+    // Open-debt item 924, step 4c — a message is decoded again from its payload
+    // only once the cursor and the window have said it is written.
+    let scouting = flow.scouting();
+    for position in scouting_start..scouting.len() {
         let seq = tags.scouting_seq(&flow.flow, scouting_first + position as u64);
         unnumbered |= seq.is_none();
         if tags.beyond_window(seq) {
@@ -2687,6 +2689,10 @@ fn push_datagram_flow(
         if tags.passed_by_cursor(seq) {
             continue;
         }
+        let Some(datagram) = scouting.get(position) else {
+            break;
+        };
+        let index = datagram.packet_index;
         let Some(file) = reread else {
             continue;
         };
@@ -2733,7 +2739,7 @@ fn push_datagram_flow(
                 bytes: read.payload,
                 space: MidSpace::Scouting,
                 direction: datagram.direction,
-                framed: &scouting_name(datagram),
+                framed: &scouting_name(&datagram),
                 spaces,
                 declarations,
                 // A scouting datagram is not a session frame: there is no

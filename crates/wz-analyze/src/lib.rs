@@ -3940,7 +3940,7 @@ fn datagram_field_rows(
         // reports `messages decoded: 0` beside `scouting: 3 message(s)`, so a
         // walk of `frames` alone produces an empty listing over a capture that
         // is nothing but discovery traffic.
-        for datagram in &flow.scouting {
+        for datagram in flow.scouting().iter() {
             let Some(packet) = file.packet(datagram.packet_index) else {
                 note_disagreement(
                     &mut named,
@@ -4978,7 +4978,7 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
             .iter()
             .map(|f| MessageRow::transport(&f, OffsetSpace::Packet))
             .collect();
-        rows.extend(flow.scouting.iter().map(MessageRow::scouting));
+        rows.extend(flow.scouting().iter().map(|s| MessageRow::scouting(&s)));
         // R311y718 — and the zenoh recovered out of this flow's QUIC streams.
         //
         // Their offsets are STREAM BYTES, not packet indices: a recovered QUIC
@@ -5056,7 +5056,7 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
             // own enumeration so that the number and the rows above cannot
             // disagree about which lists exist.
             flow.decoded_messages(),
-            flow.scouting.len(),
+            flow.scouting().len(),
             state,
             per_message.then_some(&rows[..]),
             cap,

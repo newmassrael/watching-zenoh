@@ -660,8 +660,8 @@ impl NodeCensus {
     /// because a leaked space is exactly what
     /// [`ObservedNode::anchors_exact`] exists to notice, and a token that is
     /// itself a leak would have made the flag agree with anything.
-    pub fn observe_scouting(&mut self, flow: &FlowKey, scouting: &[crate::ScoutingDatagram]) {
-        for datagram in scouting {
+    pub fn observe_scouting(&mut self, flow: &FlowKey, scouting: crate::Scoutings<'_>) {
+        for datagram in scouting.iter() {
             let Ok(decoded) = &datagram.frame else {
                 continue;
             };
@@ -918,7 +918,7 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
         // all are. A SECOND producer and not a frame list: a scouting datagram
         // is in the Scout/Hello namespace rather than the transport one, so it
         // cannot be a `PassiveFrame` and `message_lists` cannot carry it.
-        census.observe_scouting(&flow.flow, &flow.scouting);
+        census.observe_scouting(&flow.flow, flow.scouting());
     }
     census
 }
@@ -1037,7 +1037,7 @@ impl NodeMemory {
             .census
             .clone();
         for flow in dissection.datagram_flows() {
-            census.observe_scouting(&flow.flow, &flow.scouting);
+            census.observe_scouting(&flow.flow, flow.scouting());
         }
         census
     }

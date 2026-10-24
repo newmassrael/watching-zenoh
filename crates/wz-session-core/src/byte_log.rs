@@ -118,9 +118,97 @@ impl ByteLog {
     }
 
     /// Bytes the log holds allocated, logged or not.
-    #[cfg(test)]
     pub(crate) fn allocated(&self) -> usize {
         self.chunks.iter().map(|c| c.bytes.capacity()).sum()
+    }
+}
+
+/// The bit of a [`LogPlace`]'s locator that says the unit is in a container,
+/// at an offset there rather than a position of the log's copy. No container
+/// or log reaches 2^63 bytes.
+const IN_CONTAINER: u64 = 1 << 63;
+
+/// Where a logged unit's bytes are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogPlace {
+    /// At this position of the [`UnitLog`]'s own copy.
+    Kept(u64),
+    /// At this offset of the capture container the log's holder lends, which
+    /// the log keeps no copy of.
+    Container(usize),
+}
+
+impl LogPlace {
+    /// The place as one word, which a row keeps.
+    pub fn locator(self) -> u64 {
+        match self {
+            LogPlace::Kept(at) => at,
+            LogPlace::Container(offset) => offset as u64 | IN_CONTAINER,
+        }
+    }
+
+    /// The place a [`Self::locator`] word names.
+    pub fn of(locator: u64) -> Self {
+        if locator & IN_CONTAINER != 0 {
+            LogPlace::Container((locator & !IN_CONTAINER) as usize)
+        } else {
+            LogPlace::Kept(locator)
+        }
+    }
+}
+
+/// The units a list read and reads again, each logged once: a copy of its
+/// bytes, or, for a unit that sits in a capture container its holder lends,
+/// its place there and no copy.
+///
+/// Open-debt item 924 (`docs/dissect-row-index.md`, D8): the unit log of every
+/// list whose units arrive whole (a datagram, a serial frame, a WebSocket
+/// message, a scouting message), read by the place it hands out and released
+/// from the front as the units' last readers go.
+#[derive(Debug, Default)]
+pub struct UnitLog {
+    copies: ByteLog,
+}
+
+impl UnitLog {
+    /// Log the unit `bytes`, which sit at `in_container` in the container the
+    /// log's holder lends when that is `Some`, and return its place.
+    pub fn place(&mut self, bytes: &[u8], in_container: Option<usize>) -> LogPlace {
+        match in_container {
+            Some(offset) => LogPlace::Container(offset),
+            None => LogPlace::Kept(self.copies.append(bytes)),
+        }
+    }
+
+    /// The `len` bytes of the unit at `place`, read from the log's copy or
+    /// from `container`; `None` when they are not held (released, or in a
+    /// container the reader does not hand in).
+    pub fn get<'a>(
+        &'a self,
+        place: LogPlace,
+        len: usize,
+        container: Option<&'a [u8]>,
+    ) -> Option<&'a [u8]> {
+        match place {
+            LogPlace::Kept(at) => self.copies.get(at, len),
+            LogPlace::Container(offset) => container?.get(offset..offset.checked_add(len)?),
+        }
+    }
+
+    /// Let go of the copy of the unit of `len` bytes at `place` and of every
+    /// unit logged before it: what a holder calls when that unit's last reader
+    /// goes, every earlier one having gone before it.
+    pub fn release_through(&mut self, place: LogPlace, len: usize) {
+        if let LogPlace::Kept(at) = place {
+            self.copies.release_before(at + len as u64);
+        }
+    }
+
+    /// Bytes the log holds allocated for its copies, logged or not: what its
+    /// holder's memory account charges it (a unit in a lent container costs
+    /// nothing here).
+    pub fn allocated(&self) -> usize {
+        self.copies.allocated()
     }
 }
 
