@@ -1177,25 +1177,11 @@ impl MatchingPlane {
 
 /// R2962 — HOW a matching Interest names its key and what it asks of the peer,
 /// for a caller that is not this session's own `declare_publisher` /
-/// `declare_querier`.
-///
-/// Those two ask in one fixed way: the literal keyexpr, no aggregate. A declaring
-/// C ABI asks in the way its reference library does — zenoh-pico's write filter
-/// names the entity's own DECLARED key (`mapping_id` plus the rest of the key as
-/// `suffix`) and, as a client, asks for aggregated answers
-/// (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_create`). The
-/// session has no opinion about that, so the ABI hands it in.
+/// `declare_querier`, which ask in one fixed way (the literal keyexpr, no
+/// aggregate). Defined in session-core, which a C ABI over another engine also
+/// names.
 #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InterestForm {
-    /// The keyexpr declaration the Interest names, `0` for none.
-    pub mapping_id: u64,
-    /// What follows the declared prefix; the whole literal when `mapping_id` is 0.
-    pub suffix: Option<String>,
-    /// Ask the peer to answer aggregated (see
-    /// [`wz_session_core::interest_build::build_interest_kinds_with_aggregate`]).
-    pub aggregate: bool,
-}
+pub use wz_session_core::declare_form::InterestForm;
 
 /// R2962 — a reference on a matching Interest, released on drop.
 ///

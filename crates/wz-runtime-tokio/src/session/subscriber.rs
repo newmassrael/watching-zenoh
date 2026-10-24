@@ -33,17 +33,10 @@ pub struct SubscribeOptions {
 }
 
 /// The key an entity's `Undeclare*` names beside its id, in the wire form it
-/// is held under: a declared prefix's id and the rest of the key, or `0` and
-/// the whole literal. Shared by [`SubscribeOptions`] and
-/// [`crate::session::QueryableOptions`], whose retractions take the same shape.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RetractionKey {
-    /// The prefix's mapping id, or `0` for a literal.
-    pub mapping_id: u64,
-    /// The rest of the key after the prefix; the whole key when `mapping_id`
-    /// is `0`.
-    pub suffix: String,
-}
+/// is held under. Shared by [`SubscribeOptions`] and
+/// [`crate::session::QueryableOptions`], whose retractions take the same shape,
+/// and defined in session-core, which a C ABI over another engine also names.
+pub use wz_session_core::declare_form::RetractionKey;
 
 impl SubscribeOptions {
     /// Default options — `allowed_origin = Locality::Any`, id-only retraction.

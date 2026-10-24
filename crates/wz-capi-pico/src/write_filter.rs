@@ -52,7 +52,7 @@ use wz_capi_core::faces::SharedSession;
 use wz_capi_port::{FilterId, FilterPlane, FilteredPut, WireKey};
 #[cfg(feature = "advanced")]
 use wz_runtime_tokio::node_clock::NodeHlc;
-use wz_runtime_tokio::session::InterestForm;
+use wz_session_core::declare_form::InterestForm;
 use wz_session_core::WhatAmI;
 
 use crate::keyexpr::DeclaredKeyexpr;

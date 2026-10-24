@@ -696,6 +696,12 @@ pub mod encoding_hint;
 #[cfg(feature = "alloc")]
 pub mod publish_options;
 
+/// How a declaration names its key on the wire: the key a retraction names, and the form of a
+/// matching Interest. Moved down from `wz-runtime-tokio`, which re-exports both, so a C ABI over
+/// the cooperative engine hands them to an engine without naming that one.
+#[cfg(feature = "alloc")]
+pub mod declare_form;
+
 /// §5.19 — predefined Encoding constants + the MIME id<->str table, the wz mirror
 /// of zenoh's high-level Encoding API (the convenience layer the encoding-* atoms
 /// name, on top of the active `pubsub-encoding` wire field). FOUNDATIONAL
