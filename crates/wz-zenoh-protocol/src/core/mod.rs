@@ -629,9 +629,6 @@ pub enum CongestionControl {
     BlockFirst = 2,
 }
 
-// The five defaults below are the network messages' own, and are used by them: until that slice
-// lands they are unused when the `internal` feature, which makes them public, is off.
-#[cfg_attr(not(feature = "internal"), allow(dead_code))]
 impl CongestionControl {
     pub const DEFAULT: Self = Self::Drop;
 

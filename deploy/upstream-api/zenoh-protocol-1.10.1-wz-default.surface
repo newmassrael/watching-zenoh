@@ -30,6 +30,57 @@ const zenoh_protocol::core::endpoint::CONFIG_SEPARATOR
 const zenoh_protocol::core::endpoint::METADATA_SEPARATOR
 const zenoh_protocol::core::endpoint::PROTO_SEPARATOR
 const zenoh_protocol::core::wire_expr::EMPTY_EXPR_ID
+const zenoh_protocol::network::declare::ext::flag::C
+const zenoh_protocol::network::declare::flag::I
+const zenoh_protocol::network::declare::flag::M
+const zenoh_protocol::network::declare::flag::N
+const zenoh_protocol::network::declare::flag::Z
+const zenoh_protocol::network::declare::id::D_FINAL
+const zenoh_protocol::network::declare::id::D_KEYEXPR
+const zenoh_protocol::network::declare::id::D_QUERYABLE
+const zenoh_protocol::network::declare::id::D_SUBSCRIBER
+const zenoh_protocol::network::declare::id::D_TOKEN
+const zenoh_protocol::network::declare::id::U_KEYEXPR
+const zenoh_protocol::network::declare::id::U_QUERYABLE
+const zenoh_protocol::network::declare::id::U_SUBSCRIBER
+const zenoh_protocol::network::declare::id::U_TOKEN
+const zenoh_protocol::network::declare::keyexpr::flag::N
+const zenoh_protocol::network::declare::keyexpr::flag::Z
+const zenoh_protocol::network::declare::queryable::ext::flag::C
+const zenoh_protocol::network::declare::queryable::flag::M
+const zenoh_protocol::network::declare::queryable::flag::N
+const zenoh_protocol::network::declare::queryable::flag::Z
+const zenoh_protocol::network::declare::subscriber::flag::M
+const zenoh_protocol::network::declare::subscriber::flag::N
+const zenoh_protocol::network::declare::subscriber::flag::Z
+const zenoh_protocol::network::declare::token::flag::M
+const zenoh_protocol::network::declare::token::flag::N
+const zenoh_protocol::network::declare::token::flag::Z
+const zenoh_protocol::network::id::DECLARE
+const zenoh_protocol::network::id::INTEREST
+const zenoh_protocol::network::id::OAM
+const zenoh_protocol::network::id::PUSH
+const zenoh_protocol::network::id::REQUEST
+const zenoh_protocol::network::id::RESPONSE
+const zenoh_protocol::network::id::RESPONSE_FINAL
+const zenoh_protocol::network::interest::flag::Z
+const zenoh_protocol::network::oam::flag::T
+const zenoh_protocol::network::oam::flag::Z
+const zenoh_protocol::network::oam::id::OAM_LINKSTATE
+const zenoh_protocol::network::push::flag::M
+const zenoh_protocol::network::push::flag::N
+const zenoh_protocol::network::push::flag::Z
+const zenoh_protocol::network::request::flag::M
+const zenoh_protocol::network::request::flag::N
+const zenoh_protocol::network::request::flag::Z
+const zenoh_protocol::network::response::flag::M
+const zenoh_protocol::network::response::flag::N
+const zenoh_protocol::network::response::flag::Z
+const zenoh_protocol::network::timestamp_stack::MAX_STACK_SIZE
+const zenoh_protocol::network::timestamp_stack::interception_point::IS_CUSTOM_TS
+const zenoh_protocol::network::timestamp_stack::interception_point::RECEIVE
+const zenoh_protocol::network::timestamp_stack::interception_point::ROUTE
+const zenoh_protocol::network::timestamp_stack::interception_point::SEND
 const zenoh_protocol::scouting::hello::flag::L
 const zenoh_protocol::scouting::hello::flag::Z
 const zenoh_protocol::scouting::id::HELLO
@@ -78,7 +129,14 @@ enum zenoh_protocol::core::region::Region
 enum zenoh_protocol::core::resolution::Bits
 enum zenoh_protocol::core::resolution::Field
 enum zenoh_protocol::core::whatami::WhatAmI
+enum zenoh_protocol::network::DeclareBody
 enum zenoh_protocol::network::Mapping
+enum zenoh_protocol::network::NetworkBody
+enum zenoh_protocol::network::NetworkBodyMut
+enum zenoh_protocol::network::NetworkBodyRef
+enum zenoh_protocol::network::declare::DeclareBody
+enum zenoh_protocol::network::interest::InterestMode
+enum zenoh_protocol::network::request::ext::QueryTarget
 enum zenoh_protocol::scouting::ScoutingBody
 enum zenoh_protocol::zenoh::ConsolidationMode
 enum zenoh_protocol::zenoh::PushBody
@@ -231,6 +289,32 @@ fn zenoh_protocol::core::wire_expr::WireExpr::to_owned(&Self) -> zenoh_protocol:
 fn zenoh_protocol::core::wire_expr::WireExpr::try_as_id(&'0 Self) -> zenoh_result::ZResult<zenoh_protocol::core::wire_expr::ExprId> ; in impl<'0> zenoh_protocol::core::wire_expr::WireExpr<'0>
 fn zenoh_protocol::core::wire_expr::WireExpr::try_as_str(&'0 Self) -> zenoh_result::ZResult<&'0 str> ; in impl<'0> zenoh_protocol::core::wire_expr::WireExpr<'0>
 fn zenoh_protocol::core::wire_expr::WireExpr::with_suffix(Self, &'0 str) -> Self ; in impl<'0> zenoh_protocol::core::wire_expr::WireExpr<'0>
+fn zenoh_protocol::network::NetworkMessage::as_mut(&mut Self) -> zenoh_protocol::network::NetworkMessageMut<'_> ; in impl zenoh_protocol::network::NetworkMessage
+fn zenoh_protocol::network::NetworkMessageMut::as_mut(&mut Self) -> zenoh_protocol::network::NetworkMessageMut<'_> ; in impl zenoh_protocol::network::NetworkMessageMut<'_>
+fn zenoh_protocol::network::declare::common::ext::WireExprType::is_null(&Self) -> bool ; in impl zenoh_protocol::network::declare::common::ext::WireExprType
+fn zenoh_protocol::network::declare::common::ext::WireExprType::null() -> Self ; in impl zenoh_protocol::network::declare::common::ext::WireExprType
+fn zenoh_protocol::network::ext::QoSType::get_congestion_control(&Self) -> zenoh_protocol::core::CongestionControl ; const ; in impl<const ID: u8> zenoh_protocol::network::ext::QoSType<ID>
+fn zenoh_protocol::network::ext::QoSType::get_priority(&Self) -> zenoh_protocol::core::Priority ; const ; in impl<const ID: u8> zenoh_protocol::network::ext::QoSType<ID>
+fn zenoh_protocol::network::ext::QoSType::is_express(&Self) -> bool ; const ; in impl<const ID: u8> zenoh_protocol::network::ext::QoSType<ID>
+fn zenoh_protocol::network::ext::QoSType::new(zenoh_protocol::core::Priority, zenoh_protocol::core::CongestionControl, bool) -> Self ; const ; in impl<const ID: u8> zenoh_protocol::network::ext::QoSType<ID>
+fn zenoh_protocol::network::ext::QoSType::set_congestion_control(&mut Self, zenoh_protocol::core::CongestionControl) ; in impl<const ID: u8> zenoh_protocol::network::ext::QoSType<ID>
+fn zenoh_protocol::network::ext::QoSType::set_is_express(&mut Self, bool) ; in impl<const ID: u8> zenoh_protocol::network::ext::QoSType<ID>
+fn zenoh_protocol::network::ext::QoSType::set_priority(&mut Self, zenoh_protocol::core::Priority) ; in impl<const ID: u8> zenoh_protocol::network::ext::QoSType<ID>
+fn zenoh_protocol::network::interest::Interest::options(&Self) -> u8 ; in impl zenoh_protocol::network::interest::Interest
+fn zenoh_protocol::network::interest::InterestMode::is_current(&Self) -> bool ; in impl zenoh_protocol::network::interest::InterestMode
+fn zenoh_protocol::network::interest::InterestMode::is_future(&Self) -> bool ; in impl zenoh_protocol::network::interest::InterestMode
+fn zenoh_protocol::network::interest::InterestOptions::aggregate(&Self) -> bool ; const ; in impl zenoh_protocol::network::interest::InterestOptions
+fn zenoh_protocol::network::interest::InterestOptions::empty() -> Self ; const ; in impl zenoh_protocol::network::interest::InterestOptions
+fn zenoh_protocol::network::interest::InterestOptions::keyexprs(&Self) -> bool ; const ; in impl zenoh_protocol::network::interest::InterestOptions
+fn zenoh_protocol::network::interest::InterestOptions::mapping(&Self) -> bool ; const ; in impl zenoh_protocol::network::interest::InterestOptions
+fn zenoh_protocol::network::interest::InterestOptions::named(&Self) -> bool ; const ; in impl zenoh_protocol::network::interest::InterestOptions
+fn zenoh_protocol::network::interest::InterestOptions::queryables(&Self) -> bool ; const ; in impl zenoh_protocol::network::interest::InterestOptions
+fn zenoh_protocol::network::interest::InterestOptions::restricted(&Self) -> bool ; const ; in impl zenoh_protocol::network::interest::InterestOptions
+fn zenoh_protocol::network::interest::InterestOptions::subscribers(&Self) -> bool ; const ; in impl zenoh_protocol::network::interest::InterestOptions
+fn zenoh_protocol::network::interest::InterestOptions::tokens(&Self) -> bool ; const ; in impl zenoh_protocol::network::interest::InterestOptions
+fn zenoh_protocol::network::push::Push::payload_size(&Self) -> usize ; in impl zenoh_protocol::network::push::Push
+fn zenoh_protocol::network::request::Request::payload_size(&Self) -> usize ; in impl zenoh_protocol::network::request::Request
+fn zenoh_protocol::network::response::Response::payload_size(&Self) -> usize ; in impl zenoh_protocol::network::response::Response
 impl core::clone::Clone for zenoh_protocol::common::extension::ZExtBody
 impl core::clone::Clone for zenoh_protocol::common::extension::ZExtUnit
 impl core::clone::Clone for zenoh_protocol::common::extension::ZExtUnknown
@@ -267,6 +351,39 @@ impl core::clone::Clone for zenoh_protocol::core::whatami::WhatAmI
 impl core::clone::Clone for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::clone::Clone for zenoh_protocol::core::wire_expr::WireExpr
 impl core::clone::Clone for zenoh_protocol::network::Mapping
+impl core::clone::Clone for zenoh_protocol::network::NetworkBody
+impl core::clone::Clone for zenoh_protocol::network::NetworkBodyRef
+impl core::clone::Clone for zenoh_protocol::network::NetworkMessage
+impl core::clone::Clone for zenoh_protocol::network::NetworkMessageRef
+impl core::clone::Clone for zenoh_protocol::network::declare::Declare
+impl core::clone::Clone for zenoh_protocol::network::declare::DeclareBody
+impl core::clone::Clone for zenoh_protocol::network::declare::common::DeclareFinal
+impl core::clone::Clone for zenoh_protocol::network::declare::common::ext::WireExprType
+impl core::clone::Clone for zenoh_protocol::network::declare::keyexpr::DeclareKeyExpr
+impl core::clone::Clone for zenoh_protocol::network::declare::keyexpr::UndeclareKeyExpr
+impl core::clone::Clone for zenoh_protocol::network::declare::queryable::DeclareQueryable
+impl core::clone::Clone for zenoh_protocol::network::declare::queryable::UndeclareQueryable
+impl core::clone::Clone for zenoh_protocol::network::declare::queryable::ext::QueryableInfoType
+impl core::clone::Clone for zenoh_protocol::network::declare::subscriber::DeclareSubscriber
+impl core::clone::Clone for zenoh_protocol::network::declare::subscriber::UndeclareSubscriber
+impl core::clone::Clone for zenoh_protocol::network::declare::token::DeclareToken
+impl core::clone::Clone for zenoh_protocol::network::declare::token::UndeclareToken
+impl core::clone::Clone for zenoh_protocol::network::ext::EntityGlobalIdType
+impl core::clone::Clone for zenoh_protocol::network::ext::NodeIdType
+impl core::clone::Clone for zenoh_protocol::network::ext::QoSType
+impl core::clone::Clone for zenoh_protocol::network::ext::TimestampType
+impl core::clone::Clone for zenoh_protocol::network::interest::Interest
+impl core::clone::Clone for zenoh_protocol::network::interest::InterestMode
+impl core::clone::Clone for zenoh_protocol::network::interest::InterestOptions
+impl core::clone::Clone for zenoh_protocol::network::oam::Oam
+impl core::clone::Clone for zenoh_protocol::network::push::Push
+impl core::clone::Clone for zenoh_protocol::network::request::Request
+impl core::clone::Clone for zenoh_protocol::network::request::ext::QueryTarget
+impl core::clone::Clone for zenoh_protocol::network::response::Response
+impl core::clone::Clone for zenoh_protocol::network::response::ResponseFinal
+impl core::clone::Clone for zenoh_protocol::network::timestamp_stack::Interception
+impl core::clone::Clone for zenoh_protocol::network::timestamp_stack::TimestampStack
+impl core::clone::Clone for zenoh_protocol::network::timestamp_stack::TsStackType
 impl core::clone::Clone for zenoh_protocol::scouting::ScoutingBody
 impl core::clone::Clone for zenoh_protocol::scouting::ScoutingMessage
 impl core::clone::Clone for zenoh_protocol::scouting::hello::HelloProto
@@ -323,6 +440,41 @@ impl core::cmp::Eq for zenoh_protocol::core::whatami::WhatAmI
 impl core::cmp::Eq for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::cmp::Eq for zenoh_protocol::core::wire_expr::WireExpr
 impl core::cmp::Eq for zenoh_protocol::network::Mapping
+impl core::cmp::Eq for zenoh_protocol::network::NetworkBody
+impl core::cmp::Eq for zenoh_protocol::network::NetworkBodyMut
+impl core::cmp::Eq for zenoh_protocol::network::NetworkBodyRef
+impl core::cmp::Eq for zenoh_protocol::network::NetworkMessage
+impl core::cmp::Eq for zenoh_protocol::network::NetworkMessageMut
+impl core::cmp::Eq for zenoh_protocol::network::NetworkMessageRef
+impl core::cmp::Eq for zenoh_protocol::network::declare::Declare
+impl core::cmp::Eq for zenoh_protocol::network::declare::DeclareBody
+impl core::cmp::Eq for zenoh_protocol::network::declare::common::DeclareFinal
+impl core::cmp::Eq for zenoh_protocol::network::declare::common::ext::WireExprType
+impl core::cmp::Eq for zenoh_protocol::network::declare::keyexpr::DeclareKeyExpr
+impl core::cmp::Eq for zenoh_protocol::network::declare::keyexpr::UndeclareKeyExpr
+impl core::cmp::Eq for zenoh_protocol::network::declare::queryable::DeclareQueryable
+impl core::cmp::Eq for zenoh_protocol::network::declare::queryable::UndeclareQueryable
+impl core::cmp::Eq for zenoh_protocol::network::declare::queryable::ext::QueryableInfoType
+impl core::cmp::Eq for zenoh_protocol::network::declare::subscriber::DeclareSubscriber
+impl core::cmp::Eq for zenoh_protocol::network::declare::subscriber::UndeclareSubscriber
+impl core::cmp::Eq for zenoh_protocol::network::declare::token::DeclareToken
+impl core::cmp::Eq for zenoh_protocol::network::declare::token::UndeclareToken
+impl core::cmp::Eq for zenoh_protocol::network::ext::EntityGlobalIdType
+impl core::cmp::Eq for zenoh_protocol::network::ext::NodeIdType
+impl core::cmp::Eq for zenoh_protocol::network::ext::QoSType
+impl core::cmp::Eq for zenoh_protocol::network::ext::TimestampType
+impl core::cmp::Eq for zenoh_protocol::network::interest::Interest
+impl core::cmp::Eq for zenoh_protocol::network::interest::InterestMode
+impl core::cmp::Eq for zenoh_protocol::network::interest::InterestOptions
+impl core::cmp::Eq for zenoh_protocol::network::oam::Oam
+impl core::cmp::Eq for zenoh_protocol::network::push::Push
+impl core::cmp::Eq for zenoh_protocol::network::request::Request
+impl core::cmp::Eq for zenoh_protocol::network::request::ext::QueryTarget
+impl core::cmp::Eq for zenoh_protocol::network::response::Response
+impl core::cmp::Eq for zenoh_protocol::network::response::ResponseFinal
+impl core::cmp::Eq for zenoh_protocol::network::timestamp_stack::Interception
+impl core::cmp::Eq for zenoh_protocol::network::timestamp_stack::TimestampStack
+impl core::cmp::Eq for zenoh_protocol::network::timestamp_stack::TsStackType
 impl core::cmp::Eq for zenoh_protocol::scouting::ScoutingBody
 impl core::cmp::Eq for zenoh_protocol::scouting::ScoutingMessage
 impl core::cmp::Eq for zenoh_protocol::scouting::hello::HelloProto
@@ -386,6 +538,41 @@ impl core::cmp::PartialEq for zenoh_protocol::core::whatami::WhatAmI
 impl core::cmp::PartialEq for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::cmp::PartialEq for zenoh_protocol::core::wire_expr::WireExpr
 impl core::cmp::PartialEq for zenoh_protocol::network::Mapping
+impl core::cmp::PartialEq for zenoh_protocol::network::NetworkBody
+impl core::cmp::PartialEq for zenoh_protocol::network::NetworkBodyMut
+impl core::cmp::PartialEq for zenoh_protocol::network::NetworkBodyRef
+impl core::cmp::PartialEq for zenoh_protocol::network::NetworkMessage
+impl core::cmp::PartialEq for zenoh_protocol::network::NetworkMessageMut
+impl core::cmp::PartialEq for zenoh_protocol::network::NetworkMessageRef
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::Declare
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::DeclareBody
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::common::DeclareFinal
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::common::ext::WireExprType
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::keyexpr::DeclareKeyExpr
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::keyexpr::UndeclareKeyExpr
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::queryable::DeclareQueryable
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::queryable::UndeclareQueryable
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::queryable::ext::QueryableInfoType
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::subscriber::DeclareSubscriber
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::subscriber::UndeclareSubscriber
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::token::DeclareToken
+impl core::cmp::PartialEq for zenoh_protocol::network::declare::token::UndeclareToken
+impl core::cmp::PartialEq for zenoh_protocol::network::ext::EntityGlobalIdType
+impl core::cmp::PartialEq for zenoh_protocol::network::ext::NodeIdType
+impl core::cmp::PartialEq for zenoh_protocol::network::ext::QoSType
+impl core::cmp::PartialEq for zenoh_protocol::network::ext::TimestampType
+impl core::cmp::PartialEq for zenoh_protocol::network::interest::Interest
+impl core::cmp::PartialEq for zenoh_protocol::network::interest::InterestMode
+impl core::cmp::PartialEq for zenoh_protocol::network::interest::InterestOptions
+impl core::cmp::PartialEq for zenoh_protocol::network::oam::Oam
+impl core::cmp::PartialEq for zenoh_protocol::network::push::Push
+impl core::cmp::PartialEq for zenoh_protocol::network::request::Request
+impl core::cmp::PartialEq for zenoh_protocol::network::request::ext::QueryTarget
+impl core::cmp::PartialEq for zenoh_protocol::network::response::Response
+impl core::cmp::PartialEq for zenoh_protocol::network::response::ResponseFinal
+impl core::cmp::PartialEq for zenoh_protocol::network::timestamp_stack::Interception
+impl core::cmp::PartialEq for zenoh_protocol::network::timestamp_stack::TimestampStack
+impl core::cmp::PartialEq for zenoh_protocol::network::timestamp_stack::TsStackType
 impl core::cmp::PartialEq for zenoh_protocol::scouting::ScoutingBody
 impl core::cmp::PartialEq for zenoh_protocol::scouting::ScoutingMessage
 impl core::cmp::PartialEq for zenoh_protocol::scouting::hello::HelloProto
@@ -426,6 +613,7 @@ impl core::convert::From for u8
 impl core::convert::From for uhlc::id::ID
 impl core::convert::From for zenoh_keyexpr::key_expr::owned::OwnedKeyExpr
 impl core::convert::From for zenoh_protocol::common::extension::ZExtUnknown
+impl core::convert::From for zenoh_protocol::common::extension::ZExtZ64
 impl core::convert::From for zenoh_protocol::core::CowStr
 impl core::convert::From for zenoh_protocol::core::Reliability
 impl core::convert::From for zenoh_protocol::core::SizeError
@@ -438,6 +626,11 @@ impl core::convert::From for zenoh_protocol::core::resolution::Bits
 impl core::convert::From for zenoh_protocol::core::resolution::Resolution
 impl core::convert::From for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::convert::From for zenoh_protocol::core::wire_expr::WireExpr
+impl core::convert::From for zenoh_protocol::network::NetworkMessage
+impl core::convert::From for zenoh_protocol::network::ext::NodeIdType
+impl core::convert::From for zenoh_protocol::network::ext::QoSType
+impl core::convert::From for zenoh_protocol::network::interest::InterestOptions
+impl core::convert::From for zenoh_protocol::network::push::Push
 impl core::convert::From for zenoh_protocol::scouting::ScoutingMessage
 impl core::convert::From for zenoh_protocol::zenoh::PushBody
 impl core::convert::From for zenoh_protocol::zenoh::RequestBody
@@ -470,6 +663,10 @@ impl core::default::Default for zenoh_protocol::core::region::Region
 impl core::default::Default for zenoh_protocol::core::resolution::Resolution
 impl core::default::Default for zenoh_protocol::core::whatami::WhatAmI
 impl core::default::Default for zenoh_protocol::network::Mapping
+impl core::default::Default for zenoh_protocol::network::declare::queryable::ext::QueryableInfoType
+impl core::default::Default for zenoh_protocol::network::ext::NodeIdType
+impl core::default::Default for zenoh_protocol::network::ext::QoSType
+impl core::default::Default for zenoh_protocol::network::request::ext::QueryTarget
 impl core::default::Default for zenoh_protocol::zenoh::del::Del
 impl core::default::Default for zenoh_protocol::zenoh::put::Put
 impl core::default::Default for zenoh_protocol::zenoh::query::ConsolidationMode
@@ -529,6 +726,41 @@ impl core::fmt::Debug for zenoh_protocol::core::whatami::WhatAmIMatcherVisitor
 impl core::fmt::Debug for zenoh_protocol::core::whatami::WhatAmIVisitor
 impl core::fmt::Debug for zenoh_protocol::core::wire_expr::WireExpr
 impl core::fmt::Debug for zenoh_protocol::network::Mapping
+impl core::fmt::Debug for zenoh_protocol::network::NetworkBody
+impl core::fmt::Debug for zenoh_protocol::network::NetworkBodyMut
+impl core::fmt::Debug for zenoh_protocol::network::NetworkBodyRef
+impl core::fmt::Debug for zenoh_protocol::network::NetworkMessage
+impl core::fmt::Debug for zenoh_protocol::network::NetworkMessageMut
+impl core::fmt::Debug for zenoh_protocol::network::NetworkMessageRef
+impl core::fmt::Debug for zenoh_protocol::network::declare::Declare
+impl core::fmt::Debug for zenoh_protocol::network::declare::DeclareBody
+impl core::fmt::Debug for zenoh_protocol::network::declare::common::DeclareFinal
+impl core::fmt::Debug for zenoh_protocol::network::declare::common::ext::WireExprType
+impl core::fmt::Debug for zenoh_protocol::network::declare::keyexpr::DeclareKeyExpr
+impl core::fmt::Debug for zenoh_protocol::network::declare::keyexpr::UndeclareKeyExpr
+impl core::fmt::Debug for zenoh_protocol::network::declare::queryable::DeclareQueryable
+impl core::fmt::Debug for zenoh_protocol::network::declare::queryable::UndeclareQueryable
+impl core::fmt::Debug for zenoh_protocol::network::declare::queryable::ext::QueryableInfoType
+impl core::fmt::Debug for zenoh_protocol::network::declare::subscriber::DeclareSubscriber
+impl core::fmt::Debug for zenoh_protocol::network::declare::subscriber::UndeclareSubscriber
+impl core::fmt::Debug for zenoh_protocol::network::declare::token::DeclareToken
+impl core::fmt::Debug for zenoh_protocol::network::declare::token::UndeclareToken
+impl core::fmt::Debug for zenoh_protocol::network::ext::EntityGlobalIdType
+impl core::fmt::Debug for zenoh_protocol::network::ext::NodeIdType
+impl core::fmt::Debug for zenoh_protocol::network::ext::QoSType
+impl core::fmt::Debug for zenoh_protocol::network::ext::TimestampType
+impl core::fmt::Debug for zenoh_protocol::network::interest::Interest
+impl core::fmt::Debug for zenoh_protocol::network::interest::InterestMode
+impl core::fmt::Debug for zenoh_protocol::network::interest::InterestOptions
+impl core::fmt::Debug for zenoh_protocol::network::oam::Oam
+impl core::fmt::Debug for zenoh_protocol::network::push::Push
+impl core::fmt::Debug for zenoh_protocol::network::request::Request
+impl core::fmt::Debug for zenoh_protocol::network::request::ext::QueryTarget
+impl core::fmt::Debug for zenoh_protocol::network::response::Response
+impl core::fmt::Debug for zenoh_protocol::network::response::ResponseFinal
+impl core::fmt::Debug for zenoh_protocol::network::timestamp_stack::Interception
+impl core::fmt::Debug for zenoh_protocol::network::timestamp_stack::TimestampStack
+impl core::fmt::Debug for zenoh_protocol::network::timestamp_stack::TsStackType
 impl core::fmt::Debug for zenoh_protocol::scouting::ScoutingBody
 impl core::fmt::Debug for zenoh_protocol::scouting::ScoutingMessage
 impl core::fmt::Debug for zenoh_protocol::scouting::hello::HelloProto
@@ -575,6 +807,10 @@ impl core::fmt::Display for zenoh_protocol::core::resolution::Bits
 impl core::fmt::Display for zenoh_protocol::core::whatami::WhatAmI
 impl core::fmt::Display for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::fmt::Display for zenoh_protocol::core::wire_expr::WireExpr
+impl core::fmt::Display for zenoh_protocol::network::NetworkMessage
+impl core::fmt::Display for zenoh_protocol::network::NetworkMessageMut
+impl core::fmt::Display for zenoh_protocol::network::NetworkMessageRef
+impl core::fmt::Display for zenoh_protocol::network::interest::InterestOptions
 impl core::hash::Hash for zenoh_protocol::core::CongestionControl
 impl core::hash::Hash for zenoh_protocol::core::EntityGlobalIdProto
 impl core::hash::Hash for zenoh_protocol::core::Priority
@@ -598,6 +834,8 @@ impl core::hash::Hash for zenoh_protocol::core::whatami::WhatAmI
 impl core::hash::Hash for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::hash::Hash for zenoh_protocol::core::wire_expr::WireExpr
 impl core::hash::Hash for zenoh_protocol::network::Mapping
+impl core::hash::Hash for zenoh_protocol::network::interest::InterestMode
+impl core::hash::Hash for zenoh_protocol::network::interest::InterestOptions
 impl core::iter::traits::collect::FromIterator for zenoh_protocol::core::parameters::Parameters
 impl core::marker::Copy for zenoh_protocol::common::extension::ZExtUnit
 impl core::marker::Copy for zenoh_protocol::common::extension::ZExtZ64
@@ -621,6 +859,15 @@ impl core::marker::Copy for zenoh_protocol::core::resolution::Resolution
 impl core::marker::Copy for zenoh_protocol::core::whatami::WhatAmI
 impl core::marker::Copy for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::marker::Copy for zenoh_protocol::network::Mapping
+impl core::marker::Copy for zenoh_protocol::network::NetworkBodyRef
+impl core::marker::Copy for zenoh_protocol::network::NetworkMessageRef
+impl core::marker::Copy for zenoh_protocol::network::declare::queryable::ext::QueryableInfoType
+impl core::marker::Copy for zenoh_protocol::network::ext::NodeIdType
+impl core::marker::Copy for zenoh_protocol::network::ext::QoSType
+impl core::marker::Copy for zenoh_protocol::network::ext::TimestampType
+impl core::marker::Copy for zenoh_protocol::network::interest::InterestMode
+impl core::marker::Copy for zenoh_protocol::network::interest::InterestOptions
+impl core::marker::Copy for zenoh_protocol::network::request::ext::QueryTarget
 impl core::marker::Copy for zenoh_protocol::zenoh::ext::SourceInfoType
 impl core::marker::Copy for zenoh_protocol::zenoh::query::ConsolidationMode
 impl core::marker::StructuralPartialEq for zenoh_protocol::common::extension::ZExtBody
@@ -662,6 +909,40 @@ impl core::marker::StructuralPartialEq for zenoh_protocol::core::whatami::WhatAm
 impl core::marker::StructuralPartialEq for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::marker::StructuralPartialEq for zenoh_protocol::core::wire_expr::WireExpr
 impl core::marker::StructuralPartialEq for zenoh_protocol::network::Mapping
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::NetworkBody
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::NetworkBodyMut
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::NetworkBodyRef
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::NetworkMessage
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::NetworkMessageMut
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::NetworkMessageRef
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::Declare
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::DeclareBody
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::common::DeclareFinal
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::common::ext::WireExprType
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::keyexpr::DeclareKeyExpr
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::keyexpr::UndeclareKeyExpr
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::queryable::DeclareQueryable
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::queryable::UndeclareQueryable
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::queryable::ext::QueryableInfoType
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::subscriber::DeclareSubscriber
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::subscriber::UndeclareSubscriber
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::token::DeclareToken
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::declare::token::UndeclareToken
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::ext::EntityGlobalIdType
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::ext::NodeIdType
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::ext::QoSType
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::ext::TimestampType
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::interest::Interest
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::interest::InterestMode
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::oam::Oam
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::push::Push
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::request::Request
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::request::ext::QueryTarget
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::response::Response
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::response::ResponseFinal
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::timestamp_stack::Interception
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::timestamp_stack::TimestampStack
+impl core::marker::StructuralPartialEq for zenoh_protocol::network::timestamp_stack::TsStackType
 impl core::marker::StructuralPartialEq for zenoh_protocol::scouting::ScoutingBody
 impl core::marker::StructuralPartialEq for zenoh_protocol::scouting::ScoutingMessage
 impl core::marker::StructuralPartialEq for zenoh_protocol::scouting::hello::HelloProto
@@ -680,6 +961,10 @@ impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::query::Consoli
 impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::query::Query
 impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::reply::Reply
 impl core::ops::arith::Add for zenoh_protocol::core::CowStr
+impl core::ops::arith::Add for zenoh_protocol::network::interest::InterestOptions
+impl core::ops::arith::AddAssign for zenoh_protocol::network::interest::InterestOptions
+impl core::ops::arith::Sub for zenoh_protocol::network::interest::InterestOptions
+impl core::ops::arith::SubAssign for zenoh_protocol::network::interest::InterestOptions
 impl core::ops::bit::BitOr for zenoh_protocol::core::whatami::WhatAmI
 impl core::ops::bit::BitOr for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::ops::deref::Deref for zenoh_protocol::core::CowStr
@@ -708,6 +993,7 @@ impl serde_core::de::Deserialize for zenoh_protocol::core::region::RegionName
 impl serde_core::de::Deserialize for zenoh_protocol::core::resolution::Bits
 impl serde_core::de::Deserialize for zenoh_protocol::core::whatami::WhatAmI
 impl serde_core::de::Deserialize for zenoh_protocol::core::whatami::WhatAmIMatcher
+impl serde_core::de::Deserialize for zenoh_protocol::network::request::ext::QueryTarget
 impl serde_core::de::Deserialize for zenoh_protocol::zenoh::query::ConsolidationMode
 impl serde_core::de::Visitor for zenoh_protocol::core::resolution::BitsVisitor
 impl serde_core::de::Visitor for zenoh_protocol::core::whatami::WhatAmIMatcherVisitor
@@ -726,6 +1012,9 @@ impl serde_core::ser::Serialize for zenoh_protocol::core::region::RegionName
 impl serde_core::ser::Serialize for zenoh_protocol::core::resolution::Bits
 impl serde_core::ser::Serialize for zenoh_protocol::core::whatami::WhatAmI
 impl serde_core::ser::Serialize for zenoh_protocol::core::whatami::WhatAmIMatcher
+impl zenoh_protocol::network::NetworkMessageExt for zenoh_protocol::network::NetworkMessage
+impl zenoh_protocol::network::NetworkMessageExt for zenoh_protocol::network::NetworkMessageMut
+impl zenoh_protocol::network::NetworkMessageExt for zenoh_protocol::network::NetworkMessageRef
 macro zenoh_protocol::zextunit
 macro zenoh_protocol::zextz64
 macro zenoh_protocol::zextzbuf
@@ -745,7 +1034,43 @@ mod zenoh_protocol::core::resolution
 mod zenoh_protocol::core::whatami
 mod zenoh_protocol::core::wire_expr
 mod zenoh_protocol::network
+mod zenoh_protocol::network::declare
+mod zenoh_protocol::network::declare::common
+mod zenoh_protocol::network::declare::common::ext
+mod zenoh_protocol::network::declare::ext
+mod zenoh_protocol::network::declare::ext::flag
+mod zenoh_protocol::network::declare::flag
+mod zenoh_protocol::network::declare::id
+mod zenoh_protocol::network::declare::keyexpr
+mod zenoh_protocol::network::declare::keyexpr::flag
+mod zenoh_protocol::network::declare::queryable
+mod zenoh_protocol::network::declare::queryable::ext
+mod zenoh_protocol::network::declare::queryable::ext::flag
+mod zenoh_protocol::network::declare::queryable::flag
+mod zenoh_protocol::network::declare::subscriber
+mod zenoh_protocol::network::declare::subscriber::flag
+mod zenoh_protocol::network::declare::token
+mod zenoh_protocol::network::declare::token::flag
+mod zenoh_protocol::network::ext
+mod zenoh_protocol::network::id
+mod zenoh_protocol::network::interest
+mod zenoh_protocol::network::interest::ext
+mod zenoh_protocol::network::interest::flag
+mod zenoh_protocol::network::oam
+mod zenoh_protocol::network::oam::ext
+mod zenoh_protocol::network::oam::flag
+mod zenoh_protocol::network::oam::id
+mod zenoh_protocol::network::push
+mod zenoh_protocol::network::push::ext
+mod zenoh_protocol::network::push::flag
 mod zenoh_protocol::network::request
+mod zenoh_protocol::network::request::ext
+mod zenoh_protocol::network::request::flag
+mod zenoh_protocol::network::response
+mod zenoh_protocol::network::response::ext
+mod zenoh_protocol::network::response::flag
+mod zenoh_protocol::network::timestamp_stack
+mod zenoh_protocol::network::timestamp_stack::interception_point
 mod zenoh_protocol::scouting
 mod zenoh_protocol::scouting::hello
 mod zenoh_protocol::scouting::hello::flag
@@ -835,6 +1160,62 @@ struct zenoh_protocol::core::whatami::WhatAmIMatcher
 struct zenoh_protocol::core::whatami::WhatAmIMatcherVisitor
 struct zenoh_protocol::core::whatami::WhatAmIVisitor
 struct zenoh_protocol::core::wire_expr::WireExpr
+struct zenoh_protocol::network::Declare
+struct zenoh_protocol::network::DeclareFinal
+struct zenoh_protocol::network::DeclareKeyExpr
+struct zenoh_protocol::network::DeclareQueryable
+struct zenoh_protocol::network::DeclareSubscriber
+struct zenoh_protocol::network::DeclareToken
+struct zenoh_protocol::network::Interest
+struct zenoh_protocol::network::NetworkMessage
+struct zenoh_protocol::network::NetworkMessageMut
+struct zenoh_protocol::network::NetworkMessageRef
+struct zenoh_protocol::network::Oam
+struct zenoh_protocol::network::Push
+struct zenoh_protocol::network::Request
+struct zenoh_protocol::network::Response
+struct zenoh_protocol::network::ResponseFinal
+struct zenoh_protocol::network::UndeclareKeyExpr
+struct zenoh_protocol::network::UndeclareQueryable
+struct zenoh_protocol::network::UndeclareSubscriber
+struct zenoh_protocol::network::UndeclareToken
+struct zenoh_protocol::network::declare::Declare
+struct zenoh_protocol::network::declare::DeclareFinal
+struct zenoh_protocol::network::declare::DeclareKeyExpr
+struct zenoh_protocol::network::declare::DeclareQueryable
+struct zenoh_protocol::network::declare::DeclareSubscriber
+struct zenoh_protocol::network::declare::DeclareToken
+struct zenoh_protocol::network::declare::UndeclareKeyExpr
+struct zenoh_protocol::network::declare::UndeclareQueryable
+struct zenoh_protocol::network::declare::UndeclareSubscriber
+struct zenoh_protocol::network::declare::UndeclareToken
+struct zenoh_protocol::network::declare::common::DeclareFinal
+struct zenoh_protocol::network::declare::common::ext::WireExprType
+struct zenoh_protocol::network::declare::ext::QueryableInfoType
+struct zenoh_protocol::network::declare::ext::WireExprType
+struct zenoh_protocol::network::declare::keyexpr::DeclareKeyExpr
+struct zenoh_protocol::network::declare::keyexpr::UndeclareKeyExpr
+struct zenoh_protocol::network::declare::queryable::DeclareQueryable
+struct zenoh_protocol::network::declare::queryable::UndeclareQueryable
+struct zenoh_protocol::network::declare::queryable::ext::QueryableInfoType
+struct zenoh_protocol::network::declare::subscriber::DeclareSubscriber
+struct zenoh_protocol::network::declare::subscriber::UndeclareSubscriber
+struct zenoh_protocol::network::declare::token::DeclareToken
+struct zenoh_protocol::network::declare::token::UndeclareToken
+struct zenoh_protocol::network::ext::EntityGlobalIdType
+struct zenoh_protocol::network::ext::NodeIdType
+struct zenoh_protocol::network::ext::QoSType
+struct zenoh_protocol::network::ext::TimestampType
+struct zenoh_protocol::network::interest::Interest
+struct zenoh_protocol::network::interest::InterestOptions
+struct zenoh_protocol::network::oam::Oam
+struct zenoh_protocol::network::push::Push
+struct zenoh_protocol::network::request::Request
+struct zenoh_protocol::network::response::Response
+struct zenoh_protocol::network::response::ResponseFinal
+struct zenoh_protocol::network::timestamp_stack::Interception
+struct zenoh_protocol::network::timestamp_stack::TimestampStack
+struct zenoh_protocol::network::timestamp_stack::TsStackType
 struct zenoh_protocol::scouting::HelloProto
 struct zenoh_protocol::scouting::Scout
 struct zenoh_protocol::scouting::ScoutingMessage
@@ -854,6 +1235,7 @@ struct zenoh_protocol::zenoh::ext::ValueType
 struct zenoh_protocol::zenoh::put::Put
 struct zenoh_protocol::zenoh::query::Query
 struct zenoh_protocol::zenoh::reply::Reply
+trait zenoh_protocol::network::NetworkMessageExt
 type zenoh_protocol::core::AtomicExprId
 type zenoh_protocol::core::EncodingId
 type zenoh_protocol::core::EntityId
@@ -864,9 +1246,69 @@ type zenoh_protocol::core::encoding::EncodingId
 type zenoh_protocol::core::wire_expr::AtomicExprId
 type zenoh_protocol::core::wire_expr::ExprId
 type zenoh_protocol::core::wire_expr::ExprLen
+type zenoh_protocol::network::AtomicRequestId
 type zenoh_protocol::network::RequestId
+type zenoh_protocol::network::declare::QueryableId
+type zenoh_protocol::network::declare::SubscriberId
+type zenoh_protocol::network::declare::TokenId
+type zenoh_protocol::network::declare::common::ext::WireExprExt
+type zenoh_protocol::network::declare::ext::NodeId
+type zenoh_protocol::network::declare::ext::NodeIdType
+type zenoh_protocol::network::declare::ext::QoS
+type zenoh_protocol::network::declare::ext::QoSType
+type zenoh_protocol::network::declare::ext::QueryableInfo
+type zenoh_protocol::network::declare::ext::Timestamp
+type zenoh_protocol::network::declare::ext::TimestampType
+type zenoh_protocol::network::declare::ext::WireExprExt
+type zenoh_protocol::network::declare::queryable::QueryableId
+type zenoh_protocol::network::declare::queryable::ext::QueryableInfo
+type zenoh_protocol::network::declare::subscriber::SubscriberId
+type zenoh_protocol::network::declare::token::TokenId
+type zenoh_protocol::network::interest::AtomicDeclareRequestId
+type zenoh_protocol::network::interest::DeclareRequestId
+type zenoh_protocol::network::interest::InterestId
+type zenoh_protocol::network::interest::ext::NodeId
+type zenoh_protocol::network::interest::ext::NodeIdType
+type zenoh_protocol::network::interest::ext::QoS
+type zenoh_protocol::network::interest::ext::QoSType
+type zenoh_protocol::network::interest::ext::Timestamp
+type zenoh_protocol::network::interest::ext::TimestampType
+type zenoh_protocol::network::oam::OamId
+type zenoh_protocol::network::oam::ext::QoS
+type zenoh_protocol::network::oam::ext::QoSType
+type zenoh_protocol::network::oam::ext::Timestamp
+type zenoh_protocol::network::oam::ext::TimestampType
+type zenoh_protocol::network::push::ext::NodeId
+type zenoh_protocol::network::push::ext::NodeIdType
+type zenoh_protocol::network::push::ext::QoS
+type zenoh_protocol::network::push::ext::QoSType
+type zenoh_protocol::network::push::ext::Timestamp
+type zenoh_protocol::network::push::ext::TimestampType
+type zenoh_protocol::network::push::ext::TsStack
+type zenoh_protocol::network::push::ext::TsStackType
 type zenoh_protocol::network::request::AtomicRequestId
 type zenoh_protocol::network::request::RequestId
+type zenoh_protocol::network::request::ext::Budget
+type zenoh_protocol::network::request::ext::BudgetType
+type zenoh_protocol::network::request::ext::NodeId
+type zenoh_protocol::network::request::ext::NodeIdType
+type zenoh_protocol::network::request::ext::QoS
+type zenoh_protocol::network::request::ext::QoSType
+type zenoh_protocol::network::request::ext::Target
+type zenoh_protocol::network::request::ext::Timeout
+type zenoh_protocol::network::request::ext::TimeoutType
+type zenoh_protocol::network::request::ext::Timestamp
+type zenoh_protocol::network::request::ext::TimestampType
+type zenoh_protocol::network::request::ext::TsStack
+type zenoh_protocol::network::request::ext::TsStackType
+type zenoh_protocol::network::response::ext::QoS
+type zenoh_protocol::network::response::ext::QoSType
+type zenoh_protocol::network::response::ext::ResponderId
+type zenoh_protocol::network::response::ext::ResponderIdType
+type zenoh_protocol::network::response::ext::Timestamp
+type zenoh_protocol::network::response::ext::TimestampType
+type zenoh_protocol::network::response::ext::TsStack
+type zenoh_protocol::network::response::ext::TsStackType
 type zenoh_protocol::transport::TransportSn
 type zenoh_protocol::zenoh::del::ext::Attachment
 type zenoh_protocol::zenoh::del::ext::AttachmentType
