@@ -7311,11 +7311,11 @@ impl Dissection {
             }
         };
         // Open-debt item 924, step 3 — a packet that sits in the lent container
-        // has its payload there too, at the place the same walk the strips use
-        // names ([`link::transport_payload_at`]); the assembler then keeps no copy.
+        // has its payload there too: the segment borrows it from the packet, so
+        // its place is where the slice is, and the assembler keeps no copy.
         let at = in_container
             .and_then(|packet| {
-                link::transport_payload_at(link_type, packet_index, bytes)
+                link::offset_within(bytes, segment.payload)
                     .map(|payload| tcp::PayloadAt::Container(packet + payload))
             })
             .unwrap_or(tcp::PayloadAt::Here);
@@ -7657,7 +7657,7 @@ impl Dissection {
             syn: false,
             fin: false,
             rst: false,
-            payload: record.payload,
+            payload: &record.payload,
             packet_index: record.packet_index,
             // No checksum exists at this layer: AF_VSOCK is not a network
             // protocol and vsockmon carries none. `None` is the same answer the

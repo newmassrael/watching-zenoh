@@ -1013,8 +1013,15 @@ pub enum TransportChecksum {
 }
 
 /// One TCP segment lifted out of a captured packet.
+///
+/// Open-debt item 924, step 3 — it BORROWS its payload from the bytes it was
+/// lifted out of (the packet, or the datagram the IP-fragment reassembler
+/// rebuilt), and is read while they are alive: an assembler copies what it
+/// keeps, so a payload owned here was a copy made only to be copied again, and
+/// a borrowed one says where in the packet it sits, which an assembler lent
+/// the capture container keeps instead of the bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Segment {
+pub struct Segment<'a> {
     /// Which connection it belongs to.
     pub flow: FlowKey,
     /// `true` when it travelled from [`FlowKey::low`] toward `high`.
@@ -1030,7 +1037,7 @@ pub struct Segment {
     /// RST flag.
     pub rst: bool,
     /// Payload bytes, empty for a pure ACK.
-    pub payload: Vec<u8>,
+    pub payload: &'a [u8],
     /// Index of the packet this came out of, carried through so a decoded
     /// message can be reported against the packet that carried it.
     pub packet_index: usize,
@@ -1254,9 +1261,9 @@ pub struct VsockRecord {
 
 /// What a captured packet turned out to carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Transport {
+pub enum Transport<'a> {
     /// A TCP segment, to be fed to a stream reassembler.
-    Tcp(Segment),
+    Tcp(Segment<'a>),
     /// A UDP datagram, already a whole message.
     Udp(Datagram),
     /// R311y603 — the payload of one AF_VSOCK record.
@@ -1530,7 +1537,7 @@ pub fn decapsulate(
     link_type: u32,
     packet_index: usize,
     bytes: &[u8],
-) -> Result<Transport, SkipReason> {
+) -> Result<Transport<'_>, SkipReason> {
     if link_type == LINKTYPE_VSOCK {
         return strip_vsockmon(bytes, packet_index).map(Transport::Vsock);
     }
@@ -1607,15 +1614,17 @@ pub fn decapsulate(
 ///
 /// # Why a second walk and not a field on [`Segment`] / [`Datagram`]
 ///
-/// Both types own their payload (`to_vec`), so by the time a caller holds one
-/// the fact "these bytes sat at offset N of the packet" is gone, and it is a
-/// fact only the strip that sliced them had. Threading it out through every
-/// strip would give every constructor of either type — tests, the vsock
-/// record, the IP-fragment reassembly door — a field that is meaningless for
-/// half of them. This walks the SAME doors instead (`enter_link`,
-/// `walk_ip_chain`) and reads the header lengths through the SAME rules the
-/// strips use (`tcp_header_len`, `UDP_HEADER_LEN`), so the two cannot
-/// disagree about where a body starts.
+/// This is for a reader that holds the PACKET and no transport out of it (a
+/// field row's first byte). A reader that just decapsulated a TCP packet needs
+/// no walk: a [`Segment`] borrows its payload from the packet, so where it sat
+/// is where the slice is ([`offset_within`]). A [`Datagram`] owns its payload
+/// (`to_vec`), so the fact "these bytes sat at offset N of the packet" is gone
+/// by the time a caller holds one, and threading it out through every strip
+/// would give every constructor of the type a field meaningless for half of
+/// them. This walks the SAME doors instead (`enter_link`, `walk_ip_chain`) and
+/// reads the header lengths through the SAME rules the strips use
+/// (`tcp_header_len`, `UDP_HEADER_LEN`), so the two cannot disagree about where
+/// a body starts.
 ///
 /// # When it answers `None`, and why that is not a failure
 ///
@@ -2056,7 +2065,7 @@ pub fn transport_from_ip(
     packet_index: usize,
     checksums: Checksums,
     tunnel: Tunnel,
-) -> Result<Transport, SkipReason> {
+) -> Result<Transport<'_>, SkipReason> {
     match proto {
         IP_PROTO_TCP => {
             strip_tcp(src, dst, payload, packet_index, checksums, tunnel).map(Transport::Tcp)
@@ -2804,7 +2813,7 @@ fn strip_tcp(
     packet_index: usize,
     checksums: Checksums,
     tunnel: Tunnel,
-) -> Result<Segment, SkipReason> {
+) -> Result<Segment<'_>, SkipReason> {
     let data_off = tcp_header_len(bytes)?;
     let src_port = u16::from_be_bytes([bytes[0], bytes[1]]);
     let dst_port = u16::from_be_bytes([bytes[2], bytes[3]]);
@@ -2820,7 +2829,7 @@ fn strip_tcp(
         syn: flags & 0x02 != 0,
         fin: flags & 0x01 != 0,
         rst: flags & 0x04 != 0,
-        payload: bytes[data_off..].to_vec(),
+        payload: &bytes[data_off..],
         packet_index,
         checksums,
         tunnel,
@@ -3409,7 +3418,7 @@ mod tests {
     /// return both transports; these legs are all about the TCP path, so the
     /// unwrap is here rather than repeated at every call site.
     #[track_caller]
-    fn tcp(link_type: u32, idx: usize, bytes: &[u8]) -> Result<Segment, SkipReason> {
+    fn tcp(link_type: u32, idx: usize, bytes: &[u8]) -> Result<Segment<'_>, SkipReason> {
         match decapsulate(link_type, idx, bytes) {
             Ok(Transport::Tcp(s)) => Ok(s),
             Ok(Transport::Udp(d) | Transport::RawEth(d)) => {
@@ -4907,7 +4916,8 @@ mod tests {
         let mut first = alloc::vec![0u8; 8];
         first[0] = 60; // -> Destination Options
         first.extend_from_slice(&second);
-        let seg = tcp(LINKTYPE_ETHERNET, 0, &eth_ipv6(V6_A, V6_B, 0, &first))
+        let packet = eth_ipv6(V6_A, V6_B, 0, &first);
+        let seg = tcp(LINKTYPE_ETHERNET, 0, &packet)
             .expect("hop-by-hop then destination-options then TCP");
         assert_eq!(seg.payload, b"two");
         assert_eq!(seg.seq, 11);

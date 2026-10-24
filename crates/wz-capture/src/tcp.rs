@@ -743,7 +743,7 @@ impl StreamAssembler {
         };
 
         let payload = match at {
-            PayloadAt::Here => Payload::Here(&seg.payload),
+            PayloadAt::Here => Payload::Here(seg.payload),
             PayloadAt::Container(at) => Payload::Container {
                 at,
                 len: seg.payload.len(),
@@ -934,7 +934,7 @@ mod tests {
     /// through the REAL parser rather than constructing `Segment` by hand —
     /// a hand-built `Segment` would test the assembler against the author's
     /// idea of what the parser produces.
-    fn seg(seq: u32, flags: u8, payload: &[u8], packet_index: usize) -> Segment {
+    fn seg(seq: u32, flags: u8, payload: &[u8], packet_index: usize) -> Segment<'static> {
         let mut tcp = Vec::new();
         tcp.extend_from_slice(&1000u16.to_be_bytes());
         tcp.extend_from_slice(&2000u16.to_be_bytes());
@@ -952,7 +952,11 @@ mod tests {
         ip.extend_from_slice(&[10, 0, 0, 1]);
         ip.extend_from_slice(&[10, 0, 0, 2]);
         ip.extend_from_slice(&tcp);
-        match decapsulate(LINKTYPE_IPV4, packet_index, &ip).expect("fixture decapsulates") {
+        // A segment borrows its payload from the packet it was lifted out of,
+        // and a fixture's packet has no capture to live in: it is kept for the
+        // rest of the test process, a few bytes per call.
+        let ip: &'static [u8] = ip.leak();
+        match decapsulate(LINKTYPE_IPV4, packet_index, ip).expect("fixture decapsulates") {
             crate::link::Transport::Tcp(s) => s,
             other => panic!("the TCP fixture decapsulated as {other:?}"),
         }
