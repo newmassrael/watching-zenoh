@@ -1924,7 +1924,9 @@ pub struct DissectionMemory {
     /// holds for a unit still arriving.
     pub plaintext: usize,
     /// The encrypted records an encrypted flow keeps for a decryptor, bounded per
-    /// flow (`tls::MAX_KEPT_RECORDS_PER_DIRECTION` a direction).
+    /// flow (`tls::MAX_KEPT_RECORDS_PER_DIRECTION` a direction): the records'
+    /// own list, which are views of the stream. The ciphertext they cover is the
+    /// stream's, under `stream_kept`.
     pub tls_records: usize,
     /// The scouting lists: their rows and their logged payloads.
     pub scouting: usize,
@@ -2891,7 +2893,15 @@ impl FlowDissection {
     ///
     /// A decrypted flow's messages are read from its plaintext, which this does
     /// not touch, so none of them is kept whole for it.
+    ///
+    /// An encrypted flow's kept records are views of the stream, so `offset` is
+    /// held to the oldest of them ([`tls::TlsFlowState::trim_floor`]): the stream
+    /// gives up a record's bytes when the record is dropped, and not before.
     fn trim_stream_before(&mut self, direction: Direction, offset: usize) -> usize {
+        let offset = match &self.framing {
+            Framing::Encrypted(state) => offset.min(state.trim_floor(dir_index(direction))),
+            _ => offset,
+        };
         let Self {
             frames,
             low_to_high,
@@ -3033,6 +3043,28 @@ impl FlowDissection {
             }),
             _ => None,
         }
+    }
+
+    /// The bytes of one of this flow's kept encrypted records, header included,
+    /// exactly as the wire carried them, or `None` when `record` is not one this
+    /// flow keeps.
+    ///
+    /// A kept record ([`tls::EncryptedFlow::kept_records`]) is a view of the
+    /// stream and holds no bytes of its own; this reads them where the stream
+    /// keeps them, which is what [`Self::decrypt_with`] hands an opener. Borrowed
+    /// where the record sits in one segment, gathered into a copy where it spans
+    /// two.
+    pub fn encrypted_record_bytes(
+        &self,
+        direction: Direction,
+        record: &tls::EncryptedRecord,
+    ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
+        let from = record.stream_offset;
+        self.assembler(direction).bytes(
+            from,
+            from + record.len,
+            self.lent.as_deref().map(LentCapture::bytes),
+        )
     }
 
     /// The assembler for one direction.
@@ -7146,15 +7178,33 @@ impl Dissection {
                     per_direction[index] = Some(reason);
                     continue;
                 }
+                // A kept record is a view of the stream: its bytes are read where
+                // the stream keeps them, which is the assembler's own kept bytes
+                // or the container the flow was lent.
+                let assembler = match direction {
+                    Direction::A => &flow.low_to_high,
+                    Direction::B => &flow.high_to_low,
+                };
+                let container = flow.lent.as_deref().map(LentCapture::bytes);
                 for record in &state.kept[index] {
-                    match opener.open(direction, record) {
+                    let from = record.stream_offset;
+                    let Some(bytes) = assembler.bytes(from, from + record.len, container) else {
+                        let reason = tls::NotDecrypted::RecordNotHeld {
+                            direction,
+                            index: record.index,
+                        };
+                        refusal.get_or_insert(reason);
+                        per_direction[index] = Some(reason);
+                        break;
+                    };
+                    match opener.open(direction, record, &bytes) {
                         Some(opened) => {
                             state.opened[index] += 1;
                             summary.records += 1;
                             // (1) above.
                             if opened.content_type == tls::CT_APPLICATION_DATA {
                                 spans[index].push((plaintext[index].len(), record.stream_offset));
-                                record_ends[index].push(record.stream_offset + record.bytes.len());
+                                record_ends[index].push(record.stream_offset + record.len);
                                 plaintext[index].extend_from_slice(&opened.plaintext);
                             }
                         }
@@ -18300,7 +18350,14 @@ mod tls_flow_tests {
         d.finish();
         let flow = &d.encrypted_flows()[0];
         assert_eq!(flow.kept_records[0].len(), 2, "only the whole ones");
-        assert_eq!(flow.kept_records[0][0].bytes.len(), whole);
+        assert_eq!(flow.kept_records[0][0].len, whole);
+        // The record holds no bytes of its own: the stream gives them, whole and
+        // as the wire carried them.
+        let held = d.flows()[0]
+            .encrypted_record_bytes(Direction::A, &flow.kept_records[0][0])
+            .expect("the stream still holds a kept record's bytes");
+        assert_eq!(held.len(), whole);
+        assert_eq!(&held[..], &cut[..whole]);
         assert_eq!(
             flow.per_direction[0].trailing_bytes, 5,
             "and the shortfall is still named -- as the PAYLOAD bytes present, \
@@ -19147,6 +19204,7 @@ mod tls_flow_tests {
             &mut self,
             direction: Direction,
             record: &crate::tls::EncryptedRecord,
+            bytes: &[u8],
         ) -> Option<crate::tls::OpenedRecord> {
             self.asked.push((direction, record.index));
             // R311y668 — a keyless direction opens NOTHING, which is what makes
@@ -19160,7 +19218,7 @@ mod tls_flow_tests {
             {
                 return None;
             }
-            let body = record.bytes.get(5..)?;
+            let body = bytes.get(5..)?;
             Some(crate::tls::OpenedRecord {
                 content_type: *body.first()?,
                 plaintext: body[1..].to_vec(),
@@ -19637,19 +19695,20 @@ mod tls_flow_tests {
         );
     }
 
-    /// R311y661 — a record after a HOLE carries the offset the hole put it at.
+    /// A record after a HOLE carries its offset in the reassembled stream, which
+    /// is contiguous across the hole, and the hole is stated beside it.
     ///
-    /// The claim under test is arithmetic that no other test can see: a
-    /// direction that lost a segment resumes further along its stream than the
-    /// bytes before it ended, and a coordinate that ignored the loss would name,
-    /// for every later record, a position occupied by something else. `packet_for`
-    /// resolves such a number without complaint — it is a valid offset into a
-    /// stream that exists — so the wrong answer arrives as a confident one.
-    ///
-    /// Before this round the encrypted arm's gap handler only cleared the held
-    /// tail; there was no coordinate to keep, so there was nothing to notice.
+    /// R311y661 stepped the record's coordinate over the hole as well, on the
+    /// belief that the stream resumes further along; it does not (the assembler
+    /// counts the bytes it delivered, and the splice is where the discontinuity
+    /// is said). The number then named a position the stream does not have, and
+    /// `packet_for` resolves such a number without complaint when something else
+    /// stands there. The claim here is that the offset is one the stream answers
+    /// for: the record's bytes read back from it, whole, and its packet is the
+    /// packet that carried it. The hole is `lost_before`, which is where a
+    /// decryptor needs it.
     #[test]
-    fn a_record_after_a_hole_carries_the_offset_the_hole_put_it_at() {
+    fn a_record_after_a_hole_is_a_view_of_the_contiguous_stream() {
         let random = [7u8; 32];
         let hello = hello_with_random(&random);
         let first = protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(0));
@@ -19679,12 +19738,84 @@ mod tls_flow_tests {
             .map(|r| r.stream_offset)
             .collect();
         // The hello is 57 and the first record 10, so it sits at 57. The second
-        // begins 50 bytes of hole later: 57 + 10 + 50 = 117.
+        // follows it in the reassembled stream, at 67; the 50 bytes of hole are
+        // not in that stream, and are stated as the loss before the record.
         assert_eq!(
             offsets,
-            alloc::vec![57, 117],
-            "a coordinate blind to the hole would read [57, 67] -- and 67 is a \
-             real offset in this stream, so nothing downstream would object"
+            alloc::vec![57, 67],
+            "an offset past the hole (117) is a position the contiguous stream \
+             does not have"
+        );
+        assert_eq!(
+            enc[0].kept_records[0]
+                .iter()
+                .map(|r| r.lost_before)
+                .collect::<Vec<_>>(),
+            alloc::vec![0, u64::from(HOLE)]
+        );
+        // The record reads back from the stream, whole, and its packet is the one
+        // that carried it.
+        let record = &enc[0].kept_records[0][1];
+        assert_eq!(
+            &d.flows()[0]
+                .encrypted_record_bytes(Direction::A, record)
+                .expect("the stream holds the record")[..],
+            &after[..]
+        );
+        assert_eq!(
+            d.flows()[0]
+                .assembler(Direction::A)
+                .packet_for_offset(record.stream_offset),
+            Some(1)
+        );
+    }
+
+    /// A kept record is a view of the stream, so the stream's byte ceiling stops
+    /// at the oldest kept record: under a ceiling far below the flow's size every
+    /// kept record still reads back whole, and the flow still opens.
+    ///
+    /// Without the floor the ceiling cuts the stream to its last few bytes while
+    /// the records (which no longer hold a copy of their own) point at what was
+    /// cut, and the flow reports `RecordNotHeld`. The records are bounded by their
+    /// own count and the stream follows it, which is the one place the ciphertext
+    /// of an encrypted flow is held.
+    #[test]
+    fn a_byte_ceiling_stops_at_the_oldest_kept_record() {
+        let random = [7u8; 32];
+        let records: Vec<Vec<u8>> = (0..6u8)
+            .map(|i| protected(crate::tls::CT_APPLICATION_DATA, &framed_unit(i)))
+            .collect();
+        let mut d = Dissection::with_limits(DissectionLimits {
+            stream_bytes_per_direction: Some(8),
+            ..DissectionLimits::default()
+        });
+        let mut seq = 1000u32;
+        let mut packets = alloc::vec![hello_with_random(&random)];
+        packets.extend(records.iter().cloned());
+        for (i, bytes) in packets.iter().enumerate() {
+            d.push_packet(LINKTYPE_ETHERNET, i, &tcp_packet(1111, 7447, seq, bytes));
+            seq += bytes.len() as u32;
+        }
+        d.finish();
+
+        let flow = &d.encrypted_flows()[0];
+        assert_eq!(flow.kept_records[0].len(), 6, "every protected record");
+        for (record, wire) in flow.kept_records[0].iter().zip(&records) {
+            let held = d.flows()[0]
+                .encrypted_record_bytes(Direction::A, record)
+                .expect("the ceiling did not take a kept record's bytes");
+            assert_eq!(
+                &held[..],
+                &wire[..],
+                "record {} reads back whole",
+                record.index
+            );
+        }
+        let summary = d.decrypt_with(&mut FakeOpener::new());
+        assert_eq!(
+            (summary.decrypted, summary.records),
+            (1, 6),
+            "the flow opens under a ceiling that would have cut it to 8 bytes"
         );
     }
 
@@ -19729,9 +19860,10 @@ mod tls_flow_tests {
             fn open(
                 &mut self,
                 _direction: Direction,
-                record: &crate::tls::EncryptedRecord,
+                _record: &crate::tls::EncryptedRecord,
+                bytes: &[u8],
             ) -> Option<crate::tls::OpenedRecord> {
-                let body = record.bytes.get(5..)?;
+                let body = bytes.get(5..)?;
                 Some(crate::tls::OpenedRecord {
                     content_type: *body.first()?,
                     plaintext: body[1..].to_vec(),
@@ -19791,6 +19923,7 @@ mod tls_flow_tests {
                 &mut self,
                 _direction: Direction,
                 _record: &crate::tls::EncryptedRecord,
+                _bytes: &[u8],
             ) -> Option<crate::tls::OpenedRecord> {
                 None
             }

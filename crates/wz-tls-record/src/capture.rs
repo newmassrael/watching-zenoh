@@ -676,6 +676,7 @@ impl DirectionState {
     fn open(
         &mut self,
         record: &EncryptedRecord,
+        bytes: &[u8],
         owed: bool,
     ) -> Option<(OpenedRecord, KeyUpdateScan)> {
         // At most this many records fitted in the hole, whichever epoch they
@@ -686,7 +687,7 @@ impl DirectionState {
         loop {
             let from = (record.index - base) + skew;
             for k in 0..=window {
-                if let Some(opened) = self.epochs[at].open(from + k, &record.bytes) {
+                if let Some(opened) = self.epochs[at].open(from + k, bytes) {
                     // Found, and by AUTHENTICATION rather than by inference: the
                     // tag is a 128-bit check, so the offset that opens the record
                     // is the offset. COMMITTED here and only here -- `k` holds
@@ -952,7 +953,12 @@ impl RecordOpener for CaptureOpener {
         Ok(())
     }
 
-    fn open(&mut self, direction: Direction, record: &EncryptedRecord) -> Option<OpenedRecord> {
+    fn open(
+        &mut self,
+        direction: Direction,
+        record: &EncryptedRecord,
+        bytes: &[u8],
+    ) -> Option<OpenedRecord> {
         let at = match direction {
             Direction::A => 0,
             Direction::B => 1,
@@ -960,7 +966,7 @@ impl RecordOpener for CaptureOpener {
         // Read BEFORE the direction is borrowed: the obligation lives on the
         // opener precisely because it is the one fact neither direction owns.
         let owed = self.owed[at] > 0;
-        let (opened, scan) = self.directions[at].as_mut()?.open(record, owed)?;
+        let (opened, scan) = self.directions[at].as_mut()?.open(record, bytes, owed)?;
         if scan.seen > 0 {
             // This direction has now sent a `KeyUpdate`, which discharges ONE
             // of whatever it owed. R311y685: it used to discharge all of them,
@@ -1164,9 +1170,12 @@ mod tests {
             index: 7,
             stream_offset: 0,
             lost_before: 0,
-            bytes,
+            len: bytes.len(),
         };
-        assert!(state.open(&record, false).is_none(), "nothing can open it");
+        assert!(
+            state.open(&record, &bytes, false).is_none(),
+            "nothing can open it"
+        );
         assert_eq!(
             (state.at, state.base, state.skew),
             (0, 0, 0),
@@ -1181,7 +1190,7 @@ mod tests {
             lost_before: 10_000,
             ..record.clone()
         };
-        assert!(state.open(&wide, false).is_none());
+        assert!(state.open(&wide, &bytes, false).is_none());
         assert_eq!((state.at, state.base, state.skew), (0, 0, 0));
     }
 

@@ -523,6 +523,20 @@ pub enum NotDecrypted {
         /// The direction no key material covered.
         direction: Direction,
     },
+    /// A kept record's bytes are not where the stream keeps them, so the record
+    /// could not be handed to the opener and the direction stops here.
+    ///
+    /// A kept record is a view into the stream, and the stream does not give up a
+    /// kept record's bytes (its trim stops at the oldest one), so a dissection
+    /// does not reach this state: it is the reading of a violated invariant, said
+    /// aloud and not as a refusal of keys. It is a variant of its own, and not
+    /// [`Self::RecordRefusedKeys`], because the remedy is not about keys.
+    RecordNotHeld {
+        /// The direction the record travelled.
+        direction: Direction,
+        /// Its [`EncryptedRecord::index`].
+        index: u64,
+    },
 }
 
 /// An encrypted flow, as the report shows it.
@@ -797,9 +811,20 @@ pub struct EncryptedRecord {
     ///
     /// `0` on every record of a direction the capture saw whole.
     pub lost_before: u64,
-    /// The record, header included, exactly as the wire carried it. The header
-    /// is the AEAD's additional data.
-    pub bytes: Vec<u8>,
+    /// How long the record is, header included: its bytes are
+    /// `stream_offset..stream_offset + len` of the direction's reassembled stream.
+    ///
+    /// ## Why a length and not the bytes
+    ///
+    /// The stream already holds them, and a copy here was a second copy of every
+    /// encrypted flow's ciphertext (up to [`MAX_KEPT_RECORDS_PER_DIRECTION`] records
+    /// a direction, 16 KiB each). A record is a VIEW into the stream: the bytes
+    /// are read where the stream keeps them
+    /// ([`crate::FlowDissection::encrypted_record_bytes`]) and are handed to
+    /// [`RecordOpener::open`] beside the record, header included, because the
+    /// header is the AEAD's additional data. The stream does not give up a kept
+    /// record's bytes while the record is kept.
+    pub len: usize,
 }
 
 /// R311y666 (§1.2a) — the smallest a TLS 1.3 protected record can be.
@@ -863,17 +888,24 @@ pub trait RecordOpener {
     /// Open one record of the flow most recently announced.
     ///
     /// R311y666 — the whole [`EncryptedRecord`] rather than an index and a
-    /// slice. It carries the bytes (header included, because the header is the
-    /// AEAD's additional data), the index, and — the reason the signature
-    /// changed — [`EncryptedRecord::lost_before`], without which a decryptor
-    /// cannot tell a record whose sequence jumped from one whose key changed.
+    /// slice. It carries the index and — the reason the signature changed —
+    /// [`EncryptedRecord::lost_before`], without which a decryptor cannot tell a
+    /// record whose sequence jumped from one whose key changed. `bytes` is the
+    /// record as the wire carried it (header included, because the header is the
+    /// AEAD's additional data), read from the stream the record is a view of and
+    /// `record.len` long.
     ///
     /// `None` means this record did not open. It is not "no more records": the
     /// caller stops the direction and reports
     /// [`NotDecrypted::RecordRefusedKeys`] naming this index, because a gap in
     /// the middle of a byte stream cannot be skipped over — the bytes after it
     /// no longer begin where the reader thinks they do.
-    fn open(&mut self, direction: Direction, record: &EncryptedRecord) -> Option<OpenedRecord>;
+    fn open(
+        &mut self,
+        direction: Direction,
+        record: &EncryptedRecord,
+        bytes: &[u8],
+    ) -> Option<OpenedRecord>;
 
     /// R311y668 (§1.2a) — does this opener hold key material for `direction` of
     /// the flow most recently announced?
@@ -897,7 +929,7 @@ impl core::fmt::Debug for EncryptedRecord {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("EncryptedRecord")
             .field("index", &self.index)
-            .field("bytes", &format_args!("<{} byte(s)>", self.bytes.len()))
+            .field("len", &self.len)
             .finish()
     }
 }
@@ -954,9 +986,10 @@ pub struct TlsFlowState {
     /// direction's reassembled stream, so each kept record can carry its own
     /// [`EncryptedRecord::stream_offset`].
     ///
-    /// Advanced by what the walk CONSUMED and by what a hole swallowed, which
-    /// is the only way it stays true across one: the bytes after a lost segment
-    /// begin further along the stream than the bytes before it ended.
+    /// Advanced by what the walk CONSUMED and by the held tail a hole drops, and
+    /// not by what the hole swallowed: the reassembled stream is contiguous
+    /// across a forced gap, so this is the assembler's own offset of the next
+    /// byte, which is what makes a kept record a view it can be read back from.
     pub(crate) stream_at: [usize; 2],
     /// R311y661 — what [`crate::Dissection::decrypt_with`] found, or `None`
     /// where no decryption pass has run over this flow.
@@ -999,25 +1032,39 @@ pub struct TlsFlowState {
 
 impl TlsFlowState {
     /// Bytes this flow holds on the heap that follow its record count: the
-    /// encrypted records kept for a decryptor, each with its own ciphertext, and
-    /// the bytes of a record still arriving.
+    /// encrypted records kept for a decryptor (each a view of the stream, so its
+    /// own size and no ciphertext) and the bytes of a record still arriving.
     ///
     /// Bounded: [`MAX_KEPT_RECORDS_PER_DIRECTION`] a direction, so a flow holds at
-    /// most that many records however long it runs. It is reported because a
-    /// program that budgets by what a handle says it holds would otherwise be short
-    /// of it by up to that bound for every encrypted flow, which is the size of a
-    /// small capture.
+    /// most that many records however long it runs. The ciphertext they point at
+    /// is the stream's, and the stream reports it.
     pub(crate) fn memory(&self) -> usize {
-        let records = |records: &Vec<EncryptedRecord>| {
-            wz_session_core::heap_account::vec_bytes(records)
-                + records.iter().map(|r| r.bytes.capacity()).sum::<usize>()
-        };
-        self.kept.iter().map(records).sum::<usize>()
+        self.kept
+            .iter()
+            .map(wz_session_core::heap_account::vec_bytes)
+            .sum::<usize>()
             + self
                 .pending
                 .iter()
                 .map(wz_session_core::heap_account::vec_bytes)
                 .sum::<usize>()
+    }
+
+    /// The offset of `direction`'s stream that nothing before may be given up
+    /// from: the oldest kept record's first byte, or, where none is kept, the
+    /// first byte of the record still arriving (which a record kept later will
+    /// begin at).
+    ///
+    /// A kept record is a view of the stream, so the stream's trim stops here
+    /// ([`crate::FlowDissection::trim_stream_before`]). That makes the bound on
+    /// kept records ([`MAX_KEPT_RECORDS_PER_DIRECTION`]) the bound on the
+    /// ciphertext an encrypted flow holds, in one place and one copy: before it,
+    /// the stream was cut to its own byte ceiling and the records kept a second
+    /// copy of what they covered.
+    pub(crate) fn trim_floor(&self, index: usize) -> usize {
+        self.kept[index]
+            .first()
+            .map_or(self.stream_at[index], |record| record.stream_offset)
     }
 
     /// Fold one run of a direction's bytes, keeping whatever tail did not
@@ -1043,7 +1090,7 @@ impl TlsFlowState {
             // consumes no sequence number, so keeping it would put every later
             // record one place too far along.
             if content_type == CT_APPLICATION_DATA {
-                kept.push((run_base + walked, record.to_vec()));
+                kept.push((run_base + walked, record.len()));
             }
             walked += record.len();
         }) else {
@@ -1068,7 +1115,7 @@ impl TlsFlowState {
         // followed by anything -- which is every capture where it matters.
         counted.lost_bytes = self.pending_gap_bytes[index];
         self.per_direction[index].add(&counted);
-        for (stream_offset, bytes) in kept {
+        for (stream_offset, len) in kept {
             // The bound is made room for FIRST, and that ordering is what makes
             // the numbering testable rather than merely stated: with the drop
             // taken afterwards, `next_index` and `kept.len()` agree in every
@@ -1088,7 +1135,7 @@ impl TlsFlowState {
                 // R311y666 — charged to the FIRST record after the hole and to
                 // no other, which is where the sequence jump actually is.
                 lost_before: core::mem::take(&mut self.pending_gap_bytes[index]),
-                bytes,
+                len,
             });
             self.next_index[index] += 1;
         }
@@ -1099,18 +1146,22 @@ impl TlsFlowState {
     }
 
     /// R311y661 (§1.2a) — a hole was announced for one direction: drop the held
-    /// tail and step the stream coordinate over what was lost.
+    /// tail, step the stream coordinate over it, and remember the loss.
     ///
     /// The drop is R311y648's rule (a record is not joined across a gap). The
-    /// STEP is this round's: the bytes after a lost segment sit further along
-    /// the stream than the bytes before it, so a coordinate that ignored the
-    /// hole would name, for every later record, a position occupied by
-    /// something else — and `packet_for` would resolve it without complaint.
+    /// STEP is over the held tail only, and not over what the hole swallowed: the
+    /// reassembled stream is contiguous across a forced gap (the assembler's
+    /// offsets count the bytes it delivered, and the splice is the one place the
+    /// discontinuity is stated), so the first byte after the hole is the byte
+    /// after the held tail in that stream. R311y661 stepped over the hole as
+    /// well, which named a position the stream does not have: a later record's
+    /// instant and packet were looked up where nothing, or something else,
+    /// stood, and a kept record could not be read back as the view it is. The
+    /// hole is [`EncryptedRecord::lost_before`]'s, which is where a decryptor
+    /// needs it.
     pub(crate) fn note_gap(&mut self, index: usize, bytes_missing: u64) {
         let held = core::mem::take(&mut self.pending[index]).len();
-        self.stream_at[index] = self.stream_at[index]
-            .saturating_add(held)
-            .saturating_add(bytes_missing as usize);
+        self.stream_at[index] = self.stream_at[index].saturating_add(held);
         // R311y666 — and the loss is REMEMBERED for the next kept record. The
         // held tail goes with it: those bytes were part of a record this reader
         // will never complete, so whatever the hole did not swallow of it is

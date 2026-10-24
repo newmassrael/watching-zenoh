@@ -188,8 +188,14 @@ fn a_captured_tls_flow_is_decrypted_with_the_captures_own_key_log() {
 
     // AND THE PLAINTEXT COMES OUT.
     let keys = TrafficKeys::derive(SUITE, from_log);
+    let record_bytes = |record: &wz_capture::tls::EncryptedRecord| -> Vec<u8> {
+        d.flows()[0]
+            .encrypted_record_bytes(wz_capture::tls::Direction::A, record)
+            .expect("the stream holds a kept record's bytes")
+            .into_owned()
+    };
     for (record, expected) in flows[0].kept_records[0].iter().zip(payloads.iter()) {
-        let mut bytes = record.bytes.clone();
+        let mut bytes = record_bytes(record);
         let opened = keys
             .open(record.index, &mut bytes)
             .unwrap_or_else(|e| panic!("record {} did not open: {e:?}", record.index));
@@ -206,7 +212,7 @@ fn a_captured_tls_flow_is_decrypted_with_the_captures_own_key_log() {
     // was decryptable: the SECOND record must NOT open at the first one's
     // index, so the numbering the capture assigned is load bearing rather than
     // decorative.
-    let mut second = flows[0].kept_records[0][1].bytes.clone();
+    let mut second = record_bytes(&flows[0].kept_records[0][1]);
     assert!(
         keys.open(0, &mut second).is_err(),
         "record 1 opened at index 0 -- the index is not being used"
@@ -277,7 +283,10 @@ fn a_mid_session_flow_keeps_its_records_and_cannot_be_matched_to_a_log() {
     // Given the secret BY OTHER MEANS the records open, which is what makes
     // the missing piece an identity problem and not a decryption one.
     let keys = TrafficKeys::derive(SUITE, &secret);
-    let mut bytes = flows[0].kept_records[0][1].bytes.clone();
+    let mut bytes = d.flows()[0]
+        .encrypted_record_bytes(wz_capture::tls::Direction::A, &flows[0].kept_records[0][1])
+        .expect("the stream holds a kept record's bytes")
+        .into_owned();
     let opened = keys.open(1, &mut bytes).expect("record 1");
     assert_eq!(opened.plaintext, b"zenoh");
 }

@@ -2501,6 +2501,7 @@ fn decryption_reason(reason: crate::tls::NotDecrypted) -> &'static str {
         crate::tls::NotDecrypted::NoKeyForSession => "no_key_for_session",
         crate::tls::NotDecrypted::RecordRefusedKeys { .. } => "record_refused_keys",
         crate::tls::NotDecrypted::NoKeyForDirection { .. } => "no_key_for_direction",
+        crate::tls::NotDecrypted::RecordNotHeld { .. } => "record_not_held",
     }
 }
 

@@ -249,9 +249,10 @@ question.
 What a row costs is read off the kinds, not argued: 49 to 130 bytes after the
 replay on the two transports the C gate reads (UDP and TCP, handed and lent),
 and 41 to 181 across every kind after every read a consumer makes. The cost per
-row of one kind does not change with the size of the capture, and a structure
-that does (the TLS flow's kept encrypted records, bounded per flow and not per
-row) is named as such.
+row of one kind does not change with the size of the capture. An encrypted
+flow's kept records are views of its stream (an offset and a length, 32 bytes
+each, at most 4096 a direction), so the ciphertext they cover is held once, by
+the stream, and the stream's byte ceiling stops at the oldest kept record.
 
 ### D8. Every list reads its units from a byte source; a datagram list's is a unit log
 
@@ -563,10 +564,18 @@ from. So the order is now:
   map. A fragment row went from 323 and 366 bytes to 135 and 179. Every
   redecode gate passes unchanged over all of it, and the report equals the
   allocator, to the byte, for every kind and for the C ABI's handle.
-  Not done, and named: the TLS flow's kept encrypted records duplicate bytes the
-  TCP stream holds and could be read from it, but the record type is public and
-  the opener trait in another crate reads its bytes, so it is a change across a
-  crate boundary and is reported (bounded, 4096 a direction) and not touched.
+  The TLS flow's kept encrypted records were a second copy of the ciphertext the
+  TCP stream holds; they are views now. `EncryptedRecord` keeps `stream_offset`
+  and `len`, `RecordOpener::open` is handed the bytes beside the record (read
+  from the assembler, or the container a lent flow reads from), and
+  `FlowDissection::encrypted_record_bytes` reads one for a caller that holds the
+  snapshot. The stream's trim stops at the oldest kept record, so what a decryptor
+  can open is exactly what it could before (the last 4096 records a direction) and
+  the ciphertext is held once. This surfaced a wrong coordinate: a record after a
+  hole carried its offset with the hole added, a position the contiguous stream
+  does not have, so its instant and packet were looked up where something else
+  stood; the offset is the stream's now and the hole is `lost_before`. A TLS row
+  went from 144.7 to 128.7 bytes.
 - 6. Random access to a row's field document (D9), taken before 4c's remaining
   landings because it is what the consumer's budget waits on: (a) the tables
   that do not depend on a window survive a walk that begins again; (b) the

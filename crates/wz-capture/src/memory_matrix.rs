@@ -573,7 +573,7 @@ fn is_stream(o: &MessageListOrigin) -> bool {
 /// | tcp                 | 102.5  |  90.2  | one Frame a segment                  |
 /// | serial              |  68.4  |  68.4  | batches of one to three              |
 /// | websocket           | 158.2  | 150.2  | one message a frame                  |
-/// | tls                 | 144.7  | (none) | records of 9 to 27 bytes             |
+/// | tls                 | 128.7  | (none) | records of 9 to 27 bytes             |
 /// | scouting            |  57.3  |  41.0  | a SCOUT, a HELLO, a SCOUT with tail  |
 /// | quic datagram       |  60.1  | (none) | recovered plaintext                  |
 /// | quic stream         |  79.1  | (none) | recovered plaintext                  |
@@ -633,8 +633,8 @@ fn cases() -> Vec<Case> {
             build: tls,
             lendable: false,
             expect: Expect::List(is_stream),
-            ceiling: 160.0,
-            ceiling_lent: 160.0,
+            ceiling: 142.0,
+            ceiling_lent: 142.0,
         },
         Case {
             name: "scouting",

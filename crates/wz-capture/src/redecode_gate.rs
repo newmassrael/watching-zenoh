@@ -924,9 +924,10 @@ impl crate::tls::RecordOpener for PlainOpener {
     fn open(
         &mut self,
         _: Direction,
-        record: &crate::tls::EncryptedRecord,
+        _: &crate::tls::EncryptedRecord,
+        bytes: &[u8],
     ) -> Option<crate::tls::OpenedRecord> {
-        let body = record.bytes.get(5..)?;
+        let body = bytes.get(5..)?;
         Some(crate::tls::OpenedRecord {
             content_type: *body.first()?,
             plaintext: body[1..].to_vec(),

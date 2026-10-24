@@ -350,9 +350,10 @@ impl crate::tls::RecordOpener for SliceOpener {
     fn open(
         &mut self,
         _direction: Direction,
-        record: &crate::tls::EncryptedRecord,
+        _record: &crate::tls::EncryptedRecord,
+        bytes: &[u8],
     ) -> Option<crate::tls::OpenedRecord> {
-        let body = record.bytes.get(5..)?;
+        let body = bytes.get(5..)?;
         Some(crate::tls::OpenedRecord {
             content_type: *body.first()?,
             plaintext: body[1..].to_vec(),
