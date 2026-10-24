@@ -624,6 +624,170 @@ fn a_recovered_quic_stream_reads_again_from_its_kept_plaintext() {
     }
 }
 
+/// Open-debt item 924, step 4c — A WEBSOCKET FLOW'S ENTRIES. A ws message's
+/// payload is unmasked and joined out of its frames by the deframer and stands
+/// nowhere in the TCP stream, so the flow's list logs it and keeps the end of
+/// the message's last frame apart. On a capture with a batch in one message, a
+/// masked message, a frame split across two segments and a message fragmented
+/// into two frames, every list reads as the reading that kept every message
+/// whole, plain, under message and byte ceilings and lent; every message's bytes
+/// are its payload's from the message's first byte to the end of its unit.
+#[test]
+fn a_websocket_flows_entries_read_again_from_their_logged_payloads() {
+    let (file, payloads) = websocket_capture();
+    let parsed = crate::pcap::parse(&file).expect("the capture reads");
+    let mut limits = alloc::vec![crate::DissectionLimits::default()];
+    limits.extend(ceilings());
+    for limits in limits {
+        let what = format!("websocket, {limits:?}");
+        let indexed = Dissection::from_pcap_declaring_bounded(&file, &[], &[], limits)
+            .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let mut whole = Dissection::with_limits(limits);
+        whole.keep_messages_whole();
+        for packet in &parsed.packets {
+            whole.push_packet_at_nanos(
+                parsed.link_type,
+                packet.index,
+                Some(packet.ts_nanos(parsed.timestamp_unit)),
+                &packet.data,
+            );
+        }
+        whole.finish();
+        let flow = &indexed.flows()[0];
+        assert!(flow.framing().is_websocket(), "{what}: a ws flow");
+        let read_from_bytes = assert_reads_as_whole(&what, &indexed, &whole);
+        let held = flow.frames().len();
+        assert!(held > 0, "{what}: messages held");
+        assert_eq!(read_from_bytes, held, "{what}: every message is an entry");
+        assert_eq!(indexed.drops(), whole.drops(), "{what}: drops");
+        assert_eq!(
+            indexed.dropped_frame_census(),
+            whole.dropped_frame_census(),
+            "{what}: what was discarded"
+        );
+        for (index, row) in flow.frames().iter().enumerate() {
+            let message = payloads
+                .iter()
+                .find(|m| (m.direction, m.offset) == (row.direction, row.stream_offset))
+                .unwrap_or_else(|| panic!("{what}: message {index} names a ws message"));
+            let want = &message.payload[row.unit_offset..row.unit_len];
+            match indexed.message_bytes_at(flow.flow, crate::MessageListOrigin::Stream, index) {
+                crate::MessageBytes::Retained(bytes) => {
+                    assert_eq!(&bytes[..], want, "{what}: message {index}")
+                }
+                other => panic!("{what}: message {index}: {other:?}"),
+            }
+        }
+        assert_lent_reads_as_handed(&what, &file, limits, &[file.len() / 2]);
+    }
+}
+
+/// One ws message of [`websocket_capture`].
+struct WsSent {
+    direction: Direction,
+    /// The stream offset the message's first frame began at.
+    offset: usize,
+    payload: Vec<u8>,
+}
+
+/// The capture the WebSocket gate reads, and every ws message it carries.
+fn websocket_capture() -> (Vec<u8>, Vec<WsSent>) {
+    use crate::datagram_tests::{
+        framed_frame, framed_keepalive, init_datagram, open_datagram, tcp_packet_on,
+        tcp_packet_reverse,
+    };
+    use crate::ws::tests::frame;
+    let unframed = |framed: Vec<u8>| framed[2..].to_vec();
+    let upgrade = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n".to_vec();
+    let switching = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n".to_vec();
+    let mask = Some([0x37, 0xFA, 0x21, 0x3D]);
+    let mut batch = unframed(framed_keepalive());
+    batch.extend_from_slice(&unframed(framed_frame(1)));
+    // Each direction's segments, each a list of (payload of a ws message, the
+    // segments its frames are cut into).
+    let mut low: Vec<(Vec<u8>, Vec<Vec<u8>>)> = alloc::vec![
+        (init_datagram(false, &[]), Vec::new()),
+        (open_datagram(false), Vec::new()),
+        (batch, Vec::new()),
+        (unframed(framed_frame(2)), Vec::new()),
+        (unframed(framed_frame(3)), Vec::new()),
+        (unframed(framed_frame(4)), Vec::new()),
+    ];
+    for (k, (payload, segments)) in low.iter_mut().enumerate() {
+        let framed = match k {
+            // Masked, as a client sends.
+            1 | 2 => frame(true, 0x2, payload, mask),
+            // Split across two segments.
+            3 => frame(true, 0x2, payload, None),
+            // Fragmented into two frames.
+            4 => {
+                let (front, back) = payload.split_at(3);
+                segments.push(frame(false, 0x2, front, None));
+                segments.push(frame(true, 0x0, back, None));
+                continue;
+            }
+            _ => frame(true, 0x2, payload, None),
+        };
+        if k == 3 {
+            let (head, tail) = framed.split_at(3);
+            segments.push(head.to_vec());
+            segments.push(tail.to_vec());
+        } else {
+            segments.push(framed);
+        }
+    }
+    let high: Vec<(Vec<u8>, Vec<Vec<u8>>)> = [
+        init_datagram(true, &[]),
+        open_datagram(true),
+        unframed(framed_frame(1)),
+    ]
+    .into_iter()
+    .map(|payload| {
+        let framed = frame(true, 0x2, &payload, None);
+        (payload, alloc::vec![framed])
+    })
+    .collect();
+    let mut packets: Vec<Vec<u8>> = alloc::vec![
+        tcp_packet_on(1111, 1_000, &upgrade),
+        tcp_packet_reverse(9_000, &switching),
+    ];
+    let mut payloads: Vec<WsSent> = Vec::new();
+    let (mut at_low, mut at_high) = (upgrade.len(), switching.len());
+    for i in 0..low.len().max(high.len()) {
+        if let Some((payload, segments)) = low.get(i) {
+            payloads.push(WsSent {
+                direction: Direction::A,
+                offset: at_low,
+                payload: payload.clone(),
+            });
+            for segment in segments {
+                packets.push(tcp_packet_on(1111, 1_000 + at_low as u32, segment));
+                at_low += segment.len();
+            }
+        }
+        if let Some((payload, segments)) = high.get(i) {
+            payloads.push(WsSent {
+                direction: Direction::B,
+                offset: at_high,
+                payload: payload.clone(),
+            });
+            for segment in segments {
+                packets.push(tcp_packet_reverse(9_000 + at_high as u32, segment));
+                at_high += segment.len();
+            }
+        }
+    }
+    let rows: Vec<(u32, u32, &[u8])> = packets
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (i as u32, 0, p.as_slice()))
+        .collect();
+    (
+        crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &rows),
+        payloads,
+    )
+}
+
 /// Open-debt item 924, step 4c — A LENT DATAGRAM IS READ WHERE IT SITS: a
 /// dissection lent a capture of UDP datagrams logs no copy of their payloads,
 /// so a flow whose container is taken away has nothing to read a row from. A

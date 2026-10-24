@@ -2327,7 +2327,7 @@ fn push_stream_flow(
             }
             // A counter is a fact about the frames before this one, so a row
             // the cursor passes over still moves the slots it belongs to.
-            if let Ok(bytes) = flow.message_bytes(frame) {
+            if let Ok(bytes) = flow.message_bytes(&row) {
                 judge_unwritten_row(RowWalk {
                     bytes: &bytes,
                     space: MidSpace::of_frame(frame),
@@ -2389,7 +2389,7 @@ fn push_stream_flow(
             w,
         );
         push_selected(tags.selection, frame, w);
-        match flow.message_bytes(frame) {
+        match flow.message_bytes(&row) {
             Err(why) => {
                 declined = true;
                 push_declined(&why, w)

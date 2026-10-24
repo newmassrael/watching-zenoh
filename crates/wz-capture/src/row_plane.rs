@@ -87,7 +87,7 @@ impl RowPlane {
                         .flows()
                         .get(list)
                         .filter(|f| f.flow == flow)
-                        .and_then(|f| f.message_bytes(frame).ok());
+                        .and_then(|f| f.message_bytes(&row).ok());
                     plane.whole(&base, key, bytes.as_deref());
                 }
             }

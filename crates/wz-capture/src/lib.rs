@@ -2553,7 +2553,8 @@ impl FlowDissection {
     /// Open-debt item 924, step 4b — a flow whose bytes are the zenoh session
     /// keeps its messages as index entries and reads each again from this
     /// flow's reassembled stream when it is asked for; this is the list with
-    /// that stream as its source.
+    /// that stream as its source. A WebSocket flow's list reads each message
+    /// again from the payload it logged (step 4c).
     pub fn frames(&self) -> messages::Messages<'_> {
         self.frames.read(self)
     }
@@ -2955,15 +2956,39 @@ impl FlowDissection {
     /// decompressed message's bytes: those live in the frame, and a frame a list
     /// decodes on demand is the reader's for as long as it reads it, so its bytes
     /// cannot be lent out past that.
+    ///
+    /// # A message a layer below framed
+    ///
+    /// A WebSocket message is anchored at the stream offset of its first
+    /// frame's header, and its payload, unmasked and joined out of its frames,
+    /// stands nowhere in the stream: a slice there is the frame header and a
+    /// masked prefix. Its bytes are the payload the list logged with the row
+    /// (open-debt item 924, step 4c), which is why this takes the ROW, whose
+    /// place in the list names that payload, and not a frame.
     pub fn message_bytes<'a>(
         &'a self,
-        frame: &PassiveFrame,
+        row: &messages::Row<'_>,
     ) -> Result<alloc::borrow::Cow<'a, [u8]>, alloc::string::String> {
         use core::fmt::Write as _;
         use messages::UnitBytes as _;
 
+        let frame: &PassiveFrame = row;
         if let Some(own) = &frame.decompressed {
             return Ok(alloc::borrow::Cow::Owned(own.clone()));
+        }
+        if frame.offset_space == wz_session_core::passive::OffsetSpace::PacketIndex {
+            let list = self.frames();
+            let first = list.produced() - list.len() as u64;
+            let payload = row
+                .produced()
+                .checked_sub(first)
+                .and_then(|position| list.unit_bytes(usize::try_from(position).ok()?))
+                .ok_or_else(|| {
+                    alloc::string::String::from(
+                        "this message's payload is not among the ones its flow keeps",
+                    )
+                })?;
+            return message_in_unit(payload, frame);
         }
         let assembler = self.assembler(frame.direction);
         let origin = assembler.retained_from();
@@ -3614,20 +3639,28 @@ impl FlowDissection {
                 .assembler(direction)
                 .instant_of_offset(offset)
                 .or(self.session.observed_at_nanos());
-            let mut batch = self.session.next_datagram_at(
-                direction,
-                &payload,
-                offset,
-                wz_session_core::passive::LinkHandshake::Present,
-                instant,
-            );
+            let handshake = wz_session_core::passive::LinkHandshake::Present;
+            let Some(mut unit) = self
+                .session
+                .next_datagram_unit_at(direction, &payload, offset, handshake, instant)
+            else {
+                continue;
+            };
             // The observer saw a payload and cannot know the frame headers,
             // masks and fragments it came out of; the deframer can.
-            for frame in &mut batch {
+            for frame in &mut unit.frames {
                 frame.wire_end = Some(end);
             }
-            self.ingest.observe_frames(&batch);
-            self.frames.append(batch);
+            self.ingest.observe_frames(&unit.frames);
+            match self.keep {
+                // Open-debt item 924, step 4c — the payload is unmasked and
+                // joined out of its frames in this call and stands nowhere in
+                // the stream, so the list logs a copy of it, as it does a
+                // recovered datagram's, and keeps the end apart.
+                Keep::Entries => self.frames.push_datagram(unit, &payload, None, handshake),
+                #[cfg(test)]
+                Keep::Whole => self.frames.append(unit.frames),
+            }
         }
     }
 
@@ -3718,24 +3751,36 @@ impl FlowDissection {
 /// for a message the list does not keep as an entry, and past the end.
 fn unit_message_bytes(messages: messages::Messages<'_>, index: usize) -> Option<MessageBytes<'_>> {
     let (payload, frame) = (messages.unit_bytes(index)?, messages.get(index)?);
+    Some(match message_in_unit(payload, &frame) {
+        Ok(bytes) => MessageBytes::Retained(bytes),
+        Err(why) => MessageBytes::Retired(why),
+    })
+}
+
+/// The bytes of the message `frame` stands for, out of `payload`, the framing
+/// unit it was read from: from the message's first byte to the unit's end.
+fn message_in_unit<'a>(
+    payload: alloc::borrow::Cow<'a, [u8]>,
+    frame: &PassiveFrame,
+) -> Result<alloc::borrow::Cow<'a, [u8]>, alloc::string::String> {
     let span = frame.unit_offset..frame.unit_len;
     let short = |held: usize| {
-        MessageBytes::Retired(alloc::format!(
+        alloc::format!(
             "this message stands {} byte(s) into a unit of {} and the payload holds {held}",
             frame.unit_offset,
             frame.unit_len,
-        ))
+        )
     };
-    Some(match payload {
+    match payload {
         alloc::borrow::Cow::Borrowed(payload) => match payload.get(span) {
-            Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Borrowed(bytes)),
-            None => short(payload.len()),
+            Some(bytes) => Ok(alloc::borrow::Cow::Borrowed(bytes)),
+            None => Err(short(payload.len())),
         },
         alloc::borrow::Cow::Owned(payload) => match payload.get(span) {
-            Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Owned(bytes.to_vec())),
-            None => short(payload.len()),
+            Some(bytes) => Ok(alloc::borrow::Cow::Owned(bytes.to_vec())),
+            None => Err(short(payload.len())),
         },
-    })
+    }
 }
 
 /// What the serial line keeps beside each message it decoded: the envelope of
