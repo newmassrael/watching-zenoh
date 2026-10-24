@@ -281444,6 +281444,56 @@
         "The hosted CI runs holding rounds 3485 and 3488 were all cancelled before a job ran; read the first completed run that holds them and this round, and tell the consumer session which pin to take if it is red"
       ]
     },
+    "Round 3498": {
+      "decision_summary": "The second slice of zenoh-keyexpr, the key expression formats, lands with the parser's search order followed step by step, since which parse a format returns is defined by that order and by nothing else; where upstream is wrong (a spec's default has its pattern cut wrong, and two inputs make it panic) wz follows the documented syntax and the class is pinned and counted, never copied (user-delegated order of 2026-10-24).",
+      "changes_bullets": [
+        "`key_expr::format` of `zenoh-keyexpr`: `KeFormat` with its `Vec` and `[Segment; N]` storages, `Segment`, `IKeFormatStorage`, the formatter with `set`, `get`, `clear` and `build`, `FormatSetError`, `OwnedKeFormat`, `Parsed` and its iterator, and the doc-hidden macro support (`SegmentBuilder`, `specs`, `const_new`); 199 of upstream's 356 default lines and 211 of 368 unstable ones, none extra, so the missing count per arm falls from 229 to 157.",
+        "The parser keeps upstream's search order as written down in its module: the leftmost spec takes as much as it can, a `**` of the key expression may be taken by one spec and still be there for the next, and a `**` spec may take nothing; the cuts of a key expression are rebuilt over chunk offsets and are an internal detail.",
+        "Three faults of upstream's are not copied, each by the documented syntax: the offset of the `#` that ends a spec's pattern is stored relative to the pattern and read as an offset into the spec, so every spec with a default has its pattern cut wrong and its format panics or is refused (wz stores it in the whole spec's measure, parses such a spec as the spec without the default and uses the default for a field nothing was set for); a format ending in `$` and a format with no spec at all panic in upstream and are answered in wz.",
+        "`conformance/differential/tests/zenoh_keyexpr_format.rs`, five tests: 3,460 formats compared on construction (display and debug text, fault and message), 1,999 constructible formats parsed against 552 key expressions (479,136 comparisons equal, 65,037 of them successful parses, with the default and panic classes counted apart: 602,784 and 21,528), and every format filled by the formatter with values of every kind, one or two at a time, and built; Layer E18 guards the binary with a count of 5.",
+        "The surface ratchet of the member, the atom's reason, the design document's member list and THIRD_PARTY.md are brought up to it."
+      ],
+      "verification_bullets": [
+        "The format differential passes (5 of 5) with the counts above; two faults injected into the crate, the parser trying the cuts left to right where it tries them right to left and the formatter keeping a trailing slash, turned three of the five red, at `${x:*}/${y:**}` against `**/a/a` and at a built key expression `1/`; both were reverted.",
+        "The crate's own tests pass (the format syntax, the refusals, the formatter, the default, greedy parsing, inverse formatting and parsing, the owned format and the iterator) with `unstable` and `internal`; rustfmt, clippy with warnings denied and the build without `std` pass; the surface gate reads 199 of 356 and 211 of 368 with 0 extra, and the ratchet is moved in this round.",
+        "Layer E18 passes through run-ci with its counts guarded (6, 4, 6, 7, 5, 3 and 1); the static gate bundle including the upstream citation gate passes; the facade builds with the feature; validate-workspace reads orphans 14 against 14 carried and 0 new.",
+        "Not run here: the hosted run of Layer E18, which has not yet been judged hosted for any push of this family."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "carry_forward_bullets": [
+        "The last slice of zenoh-keyexpr: `keyexpr_tree` (157 default lines: the tree traits, `KeBoxTree`, `KeArcTree`, the iterators and the implementations over `HashMap`, `Vec` and `keyed-set`), which depends on `keyed-set` and `token-cell` as upstream's does, and the `internal` prefix-stripping items `get_nonwild_prefix`, `strip_prefix` and `strip_nonwild_prefix`; then zenoh-macros, zenoh-buffers, zenoh-protocol, zenoh-config, zenoh-util and `zenoh`.",
+        "The format faults of upstream's found here (defaults, a trailing `$`, no spec) are worth reporting upstream; that is the owner's to decide and nothing was sent.",
+        "The parser's search order was followed because it is the behaviour; a cleaner formulation that returns the same parse for every format (a proof, or a search over all parses ranked by the stated greedy rule) would remove the one place where the crate is not written from a definition, and the differential is what would check it.",
+        "Read the hosted runs of this push per job, Layer E18 first; it now links upstream's keyexpr, rand, serde and schemars."
+      ],
+      "publishable_decision_summary": "The second slice of zenoh-keyexpr, the key expression formats, lands with the parser's search order followed step by step, since which parse a format returns is defined by that order and by nothing else; where upstream is wrong (a spec's default has its pattern cut wrong, and two inputs make it panic) wz follows the documented syntax and the class is pinned and counted, never copied (user-delegated order of 2026-10-24).",
+      "publishable_changes_bullets": [
+        "`key_expr::format` of `zenoh-keyexpr`: `KeFormat` with its `Vec` and `[Segment; N]` storages, `Segment`, `IKeFormatStorage`, the formatter with `set`, `get`, `clear` and `build`, `FormatSetError`, `OwnedKeFormat`, `Parsed` and its iterator, and the doc-hidden macro support (`SegmentBuilder`, `specs`, `const_new`); 199 of upstream's 356 default lines and 211 of 368 unstable ones, none extra, so the missing count per arm falls from 229 to 157.",
+        "The parser keeps upstream's search order as written down in its module: the leftmost spec takes as much as it can, a `**` of the key expression may be taken by one spec and still be there for the next, and a `**` spec may take nothing; the cuts of a key expression are rebuilt over chunk offsets and are an internal detail.",
+        "Three faults of upstream's are not copied, each by the documented syntax: the offset of the `#` that ends a spec's pattern is stored relative to the pattern and read as an offset into the spec, so every spec with a default has its pattern cut wrong and its format panics or is refused (wz stores it in the whole spec's measure, parses such a spec as the spec without the default and uses the default for a field nothing was set for); a format ending in `$` and a format with no spec at all panic in upstream and are answered in wz.",
+        "`conformance/differential/tests/zenoh_keyexpr_format.rs`, five tests: 3,460 formats compared on construction (display and debug text, fault and message), 1,999 constructible formats parsed against 552 key expressions (479,136 comparisons equal, 65,037 of them successful parses, with the default and panic classes counted apart: 602,784 and 21,528), and every format filled by the formatter with values of every kind, one or two at a time, and built; Layer E18 guards the binary with a count of 5.",
+        "The surface ratchet of the member, the atom's reason, the design document's member list and THIRD_PARTY.md are brought up to it."
+      ],
+      "publishable_verification_bullets": [
+        "The format differential passes (5 of 5) with the counts above; two faults injected into the crate, the parser trying the cuts left to right where it tries them right to left and the formatter keeping a trailing slash, turned three of the five red, at `${x:*}/${y:**}` against `**/a/a` and at a built key expression `1/`; both were reverted.",
+        "The crate's own tests pass (the format syntax, the refusals, the formatter, the default, greedy parsing, inverse formatting and parsing, the owned format and the iterator) with `unstable` and `internal`; rustfmt, clippy with warnings denied and the build without `std` pass; the surface gate reads 199 of 356 and 211 of 368 with 0 extra, and the ratchet is moved in this round.",
+        "Layer E18 passes through run-ci with its counts guarded (6, 4, 6, 7, 5, 3 and 1); the static gate bundle including the upstream citation gate passes; the facade builds with the feature; validate-workspace reads orphans 14 against 14 carried and 0 new.",
+        "Not run here: the hosted run of Layer E18, which has not yet been judged hosted for any push of this family."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-5-preset-ap-full"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The last slice of zenoh-keyexpr: `keyexpr_tree` (157 default lines: the tree traits, `KeBoxTree`, `KeArcTree`, the iterators and the implementations over `HashMap`, `Vec` and `keyed-set`), which depends on `keyed-set` and `token-cell` as upstream's does, and the `internal` prefix-stripping items `get_nonwild_prefix`, `strip_prefix` and `strip_nonwild_prefix`; then zenoh-macros, zenoh-buffers, zenoh-protocol, zenoh-config, zenoh-util and `zenoh`.",
+        "The format faults of upstream's found here (defaults, a trailing `$`, no spec) are worth reporting upstream; that is the owner's to decide and nothing was sent.",
+        "The parser's search order was followed because it is the behaviour; a cleaner formulation that returns the same parse for every format (a proof, or a search over all parses ranked by the stated greedy rule) would remove the one place where the crate is not written from a definition, and the differential is what would check it.",
+        "Read the hosted runs of this push per job, Layer E18 first; it now links upstream's keyexpr, rand, serde and schemars."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
