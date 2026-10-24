@@ -96,6 +96,26 @@ handle must reach bytes on its own; a reference into the file is the only
 way to do that without a copy, and an owned copy is the safe default. Keeping
 the reassembled stream as well would be a second copy of the same bytes.
 
+Corrected in step 3 (2026-10-24), on what the bytes are. A stream's payload is
+the smallest form of its bytes a handle can OWN: a packet arena holds the link,
+IP and TCP headers too, so replacing the reassembled stream with an owned arena
+of packets would grow the handle, not shrink it. What the handle owns stays the
+payload stream; what changes is how it is held and what replaces it:
+
+- the stream is held as kept payload bytes behind a compact run map (one
+  32-byte run per segment, in 1024-run chunks), and is read by range
+  (`StreamAssembler::bytes(from, to, container)`), borrowed when one place holds
+  the range and gathered otherwise;
+- a run whose payload sits in a capture container the caller LENDS
+  (`Dissection::follow_lent`, `LentCapture`; the C doors
+  `wz_dissect_pcap_replay_lent` and `wz_dissect_live_follow_lent`) remembers
+  where it sits and keeps no copy. A TCP segment borrows its payload from its
+  packet, so that place is where the slice is.
+
+So the second copy goes exactly where the caller keeps the first: a replayed
+file the caller holds anyway. A handle handed bytes it cannot keep a reference
+to (`push`, the copying replay and follow doors) still owns the payload stream.
+
 ### D2. A row is a fixed-size index entry
 
 A row is the record drain already hands out (`WzDissectRecord`, 56 B in the
@@ -274,16 +294,35 @@ from. So the order is now:
   551 ms; fields windows 2,185 to 2,590 ms (+19%) and 7,699 to 9,368 ms (+22%),
   the price section 5 states, and what D5 then took to +12% and +11% (section 7).
 - 3. The byte source, and the reassembled stream copy goes.
+  Landed, as D1 now reads: the run map is compact and chunked, the stream is
+  read by range, and a lent container replaces the copy of every TCP payload in
+  it (ABI 50). A `Segment` borrows its payload from its packet, which removed a
+  copy on both paths and the second header walk the lent path first used. The
+  gate holds a dissection lent a capture equal to one handed the same bytes
+  (every list row for row and head for head, every message's bytes, the drops
+  and the census of what was discarded), read whole, grown through cuts into
+  containers at new addresses, and under message and byte ceilings, and checks
+  that the lent one kept no payload while the handed one kept every retained
+  byte; a C consumer drives both doors, the second over a container that moves
+  and whose first home is overwritten and freed. Measured with the section 2
+  instrument, handed against lent on the same build (three runs each, every
+  run equal): peak RSS 176 to 141 MB (409,064 rows, file 61 MB) and 577 to 461
+  MB (1,386,564 rows, file 206 MB), the handle's heap after replay 88.8 to 34.7
+  MiB and 333.4 to 117.4 MiB, so peak RSS, the file included, is 2.3x and 2.2x
+  the file, against 6.6x at 270780967. Instructions at 40,064 rows (replay,
+  drain, census): handed 612.9 to 604.5 M, lent 632.9 to 603.0 M once the
+  segment borrowed its payload.
 - 4c. Datagram, serial and QUIC rows become index entries too, their bytes read
   from the source.
-- 5. The memory gate and the lent-buffer door.
+- 5. The memory gate.
 
 ## 7. Open
 
-- The lent-buffer door's exact shape (a flag on replay or a new function) is
-  decided in step 5.
+- Closed: the lent-buffer door is a pair of new functions, not a flag on
+  replay, because what the caller promises differs (bytes read during the call
+  against bytes kept for the life of the handle). Decided and landed in step 3.
 - QUIC streams and the serial line produce rows outside the TCP segment map;
-  their byte source is decided when step 3 reaches them.
+  step 3 did not reach them, and their byte source is decided in step 4c.
 - Closed: D5 is decided (section 4). After the declaration absorption rode on
   the pairing's walk, a capture read the way the consumer reads it decodes each
   row three times: the census walk, the field document's shared walk and the
