@@ -600,6 +600,12 @@ pub fn fields_json_since_remembering_progress(
     // * no QUIC list holds a message, because the datagram walk folds those into
     //   the table after each flow and that fold is not repeatable;
     // * the container is the one the saved cursor was walking.
+    let quic_held = d.message_lists_with_origin().any(|(_, origin, list)| {
+        matches!(
+            origin,
+            crate::MessageListOrigin::QuicStream(_) | crate::MessageListOrigin::QuicDatagram
+        ) && list.produced() > 0
+    });
     let resume_plans = (|| {
         let saved = memory.saved.as_ref()?;
         let (_, _) = advance.as_ref()?;
@@ -611,22 +617,13 @@ pub fn fields_json_since_remembering_progress(
                 .iter()
                 .chain(memory.walk.datagram.iter())
                 .any(|w| w.unnumbered)
-            || d.message_lists_with_origin().any(|(_, origin, list)| {
-                matches!(
-                    origin,
-                    crate::MessageListOrigin::QuicStream(_)
-                        | crate::MessageListOrigin::QuicDatagram
-                ) && list.produced() > 0
-            })
+            || quic_held
             || memory.walk.stream.len() > d.flows().len()
             || memory.walk.datagram.len() > d.datagram_flows().len()
         {
             return None;
         }
-        let kept = memory.walk.reread.as_ref()?;
-        if capture.len() < kept.cursor.consumed()
-            || container_fingerprint(capture, kept.cursor.consumed()) != kept.fingerprint
-        {
+        if !memory.walk.reread.as_ref()?.reads(capture) {
             return None;
         }
         for (walk, flow) in memory.walk.datagram.iter().zip(d.datagram_flows()) {
@@ -674,6 +671,16 @@ pub fn fields_json_since_remembering_progress(
         Some(plans)
     })();
     let resume = resume_plans.is_some();
+    // Open-debt item 924, D9 — WHETHER THE KEYEXPR TABLE OUTLIVES THE WALK. The
+    // table is a function of the capture and the session grouping, stamped by
+    // packet so that each row resolves at its own: nothing in it depends on the
+    // window. So a walk that begins again because the window moved behind the
+    // last one, or because a list's walk cannot continue, keeps the table the
+    // last walk filled and absorbs only what arrived since, on the conditions
+    // the table itself depends on: the capture is a prefix-extension under the
+    // same grouping and origin (`advance`), the last walk filled the table, and
+    // no QUIC list holds a message (for the reason the resume rule gives).
+    let keep_table = resume || (advance.is_some() && memory.walk.table_whole && !quic_held);
     // Which request each `ResponseFinal` row closed: the exchange plane's own
     // pairing, continued from where the last call stopped (it begins again only
     // when the capture is not a prefix-extension of the one it folded, which is
@@ -705,7 +712,7 @@ pub fn fields_json_since_remembering_progress(
             walk,
             ..
         } = &mut *memory;
-        let into: &mut crate::agg::KeyexprSpaces = if resume {
+        let into: &mut crate::agg::KeyexprSpaces = if keep_table {
             &mut walk.spaces
         } else {
             &mut absorbed_anew
@@ -717,7 +724,7 @@ pub fn fields_json_since_remembering_progress(
                 into.absorb_frame(frame);
             };
         let wanted = match saved.as_ref() {
-            Some(saved) if resume => crate::ordered_fold::Wanted::Since(&saved.marks),
+            Some(saved) if keep_table => crate::ordered_fold::Wanted::Since(&saved.marks),
             _ => crate::ordered_fold::Wanted::Everything,
         };
         let mut share = crate::ordered_fold::Share {
@@ -737,9 +744,9 @@ pub fn fields_json_since_remembering_progress(
         match fold {
             Some(fold) => (fold.table(), fed),
             None => {
-                // Stopped: a walk that goes on may have absorbed some of the new
-                // messages into the table it keeps, so it begins again next time.
-                if resume {
+                // Stopped: a walk that keeps its table may have absorbed some of
+                // the new messages into it, so it begins again next time.
+                if keep_table {
                     memory.saved = None;
                     memory.walk = WalkState::default();
                 }
@@ -819,12 +826,13 @@ pub fn fields_json_since_remembering_progress(
     // message (which is a sort of every message and would put the cost back).
     // Messages the pairing's walk already absorbed are not absorbed again.
     let (new_frames, advance_marks) = match advance {
-        Some((frames, marks)) => ((resume && !absorbed).then_some(frames), Some(marks)),
+        Some((frames, marks)) => ((keep_table && !absorbed).then_some(frames), Some(marks)),
         None => (None, None),
     };
-    // A walk that begins takes the table the pairing's walk filled, when it did.
+    // A walk that begins with a new table takes the one the pairing's walk filled,
+    // when it did.
     #[cfg(feature = "network-codecs")]
-    let absorbed_anew = (!resume && absorbed).then_some(absorbed_anew);
+    let absorbed_anew = (!keep_table && absorbed).then_some(absorbed_anew);
     #[cfg(not(feature = "network-codecs"))]
     let absorbed_anew = None;
     let document = fields_json_selected(
@@ -843,6 +851,7 @@ pub fn fields_json_since_remembering_progress(
             walk: Some(WalkRun {
                 state: &mut memory.walk,
                 resume,
+                keep_table,
                 plans: resume_plans.unwrap_or_default(),
                 new_frames,
                 absorbed: absorbed_anew,
@@ -1346,6 +1355,13 @@ impl RereadResume {
         }
     }
 
+    /// Whether `capture` is the container this walk was walking: it holds every
+    /// byte the walk read, and the digest of them is the one the walk left.
+    fn reads(&self, capture: &[u8]) -> bool {
+        capture.len() >= self.cursor.consumed()
+            && container_fingerprint(capture, self.cursor.consumed()) == self.fingerprint
+    }
+
     /// Walk `capture` from where the last call stopped to where its bytes end,
     /// leaving a checkpoint at the start of every chunk it passes. `false` when the
     /// bytes are not a container this can read a second time (see
@@ -1426,6 +1442,10 @@ fn oldest_held_packet(d: &crate::Dissection) -> usize {
 pub(crate) struct WalkState {
     /// The keyexpr table with every declaration of the capture absorbed.
     spaces: crate::agg::KeyexprSpaces,
+    /// `spaces` holds every declaration of the capture the last walk saw: what
+    /// lets a walk that begins again keep it (open-debt item 924, D9). Only a
+    /// walk that filled it sets it, and a state made afresh has it clear.
+    table_whole: bool,
     stream: Vec<ListWalk>,
     datagram: Vec<ListWalk>,
     reread: Option<RereadResume>,
@@ -1437,6 +1457,10 @@ pub(crate) struct WalkRun<'a> {
     /// `true`: continue the state. `false`: begin it afresh and leave it holding
     /// where this walk stopped.
     resume: bool,
+    /// For a walk that begins afresh: the keyexpr table it holds is still the
+    /// capture's, so it is kept and only the messages that arrived since are
+    /// absorbed into it (open-debt item 924, D9). Implied by `resume`.
+    keep_table: bool,
     /// For a continuing walk, each stream flow's capture-order plan from where
     /// it stopped.
     plans: Vec<Option<CaptureOrderPlan>>,
@@ -1526,9 +1550,16 @@ fn fields_json_selected(
     // does not gets a throwaway one and every producer is told to keep nothing,
     // so the document it writes is the document it always wrote.
     let tracking = walk.is_some();
-    let (resume, mut plans, new_frames, absorbed, kept) = match walk {
-        Some(w) => (w.resume, w.plans, w.new_frames, w.absorbed, Some(w.state)),
-        None => (false, Vec::new(), None, None, None),
+    let (resume, keep_table, mut plans, new_frames, absorbed, kept) = match walk {
+        Some(w) => (
+            w.resume,
+            w.resume || w.keep_table,
+            w.plans,
+            w.new_frames,
+            w.absorbed,
+            Some(w.state),
+        ),
+        None => (false, false, Vec::new(), None, None, None),
     };
     let mut throwaway = WalkState::default();
     let state: &mut WalkState = match kept {
@@ -1536,10 +1567,22 @@ fn fields_json_selected(
         None => &mut throwaway,
     };
     if !resume {
+        // Open-debt item 924, D9 — what does not depend on where a walk stands
+        // outlives its beginning again: the capture's keyexpr table when the
+        // caller says it is still the capture's, and the container's own walk
+        // when the bytes are still the container it was walking. Only the lists'
+        // walks begin again.
+        let table = keep_table.then(|| core::mem::take(&mut state.spaces));
+        let reread = state.reread.take().filter(|kept| kept.reads(capture));
         *state = WalkState::default();
+        if let Some(table) = table {
+            state.spaces = table;
+        }
+        state.reread = reread;
     }
     let WalkState {
         spaces,
+        table_whole,
         stream: stream_walks,
         datagram: datagram_walks,
         reread: reread_slot,
@@ -1556,8 +1599,10 @@ fn fields_json_selected(
     // row is rendered. See `absorb_every_declaration`. A walk that continues
     // holds the table the last one left and absorbs only the messages that
     // arrived since, which is the same table because every one of them sorts after
-    // what was absorbed (the caller holds that before it resumes).
-    if resume {
+    // what was absorbed (the caller holds that before it resumes). A walk that
+    // begins again over the same capture keeps the table as well (D9): the table
+    // is the capture's and not the window's.
+    if keep_table {
         for (_flow, list, packet, frame) in new_frames.iter().flatten() {
             spaces.enter_flow(grouping.owners(list));
             spaces.at_packet(packet);
@@ -1569,6 +1614,7 @@ fn fields_json_selected(
             None => absorb_every_declaration(d, grouping, spaces),
         }
     }
+    *table_whole = true;
     // R2100 (open-debt item 509) — the document's own revision, first key. See
     // `doc_revision`; the census document opens the same way.
     let mut out = String::from("{");
@@ -1596,10 +1642,9 @@ fn fields_json_selected(
     // after it, and reads a packet a row names from the chunk that holds it: the
     // packets the rows of THIS call name, wherever in the container they are.
     let reread = if tracking {
-        let mut kept = match (resume, reread_slot.take()) {
-            (true, Some(kept)) => kept,
-            _ => RereadResume::new(),
-        };
+        // Held only while it reads this container: a walk that begins again
+        // dropped it above if it did not.
+        let mut kept = reread_slot.take().unwrap_or_else(RereadResume::new);
         let readable = kept.advance(capture);
         if readable {
             kept.fingerprint = container_fingerprint(capture, kept.cursor.consumed());
