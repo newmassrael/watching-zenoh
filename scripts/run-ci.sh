@@ -23199,6 +23199,9 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh-keyexpr trees)" 12 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_keyexpr_tree || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh-macros)" 4 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_macros || return 1
     _runci_guarded_test "Layer E18 (the patched graph)" 3 \
         cargo test --locked --manifest-path ../conformance/patch-scenario/Cargo.toml || return 1
     _runci_guarded_test "Layer E18 (the control graph)" 1 \

@@ -181,6 +181,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-stub-up"
+version = "0.0.0"
+dependencies = [
+ "zenoh-keyexpr 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "probe-stub-wz"
+version = "0.0.0"
+dependencies = [
+ "zenoh-keyexpr 1.10.1",
+ "zenoh-result 1.10.1",
+]
+
+[[package]]
+name = "probe-up"
+version = "0.0.0"
+dependencies = [
+ "lazy_static",
+ "probe-stub-up",
+ "ron",
+ "serde",
+ "zenoh-macros 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "probe-wz"
+version = "0.0.0"
+dependencies = [
+ "lazy_static",
+ "probe-stub-wz",
+ "ron",
+ "serde",
+ "zenoh-macros 1.10.1",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,6 +530,8 @@ name = "wz-family-differential"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "probe-up",
+ "probe-wz",
  "rand",
  "serde_json",
  "token-cell",
@@ -561,6 +601,16 @@ dependencies = [
 [[package]]
 name = "zenoh-macros"
 version = "1.10.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+ "zenoh-keyexpr 1.10.1",
+]
+
+[[package]]
+name = "zenoh-macros"
+version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f483b343fd79b6c1bd7d79f130b5c6c208e7fef243a4d7966a6bf9fdecbd70f8"
 dependencies = [
@@ -609,7 +659,7 @@ dependencies = [
  "serde",
  "tokio",
  "tracing",
- "zenoh-macros",
+ "zenoh-macros 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 

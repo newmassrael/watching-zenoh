@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# zenoh-macros -- the procedural macros of the zenoh family: the compile-time checked key expression
+# literals `ke!` and `nonwild_ke!`, the key expression format macros `kedefine!`, `kewrite!` and
+# `keformat!`, the attributes that mark an item unstable or internal, and the derives of the runtime
+# pool's configuration, over watching-zenoh (inventory atom `api-compat-rust`, open-debt item 910,
+# docs/build-configuration.md C13).
+#
+# Named `zenoh-macros` and versioned as the pinned zenoh, like every crate of the family (see
+# `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). The macros of this crate are
+# re-exported by `zenoh`, and the code they expand to names `zenoh::` paths, so a crate that uses them
+# needs the `zenoh` of the same graph, as it does with upstream's.
+
+[package]
+name = "zenoh-macros"
+version = "1.10.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Procedural macros of the zenoh family (1.10.1), as a drop-in over watching-zenoh."
+build = "build.rs"
+
+[lib]
+name = "zenoh_macros"
+path = "src/lib.rs"
+proc-macro = true
+
+# The parsers and the token builder are upstream's, at its semver line, so a graph that holds both
+# this crate and another proc-macro crate meets one `syn`. `zenoh-keyexpr` is what a literal is
+# checked with at compile time, with `std` and without its default features as upstream's is.
+[dependencies]
+proc-macro2 = "1.0.101"
+quote = "1.0.40"
+syn = { version = "2.0.110", features = ["full"] }
+zenoh-keyexpr = { path = "../wz-zenoh-keyexpr", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

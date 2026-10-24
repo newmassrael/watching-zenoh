@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# A crate that uses every macro of `zenoh-macros` (`../body.rs`) against UPSTREAM's crate, and
+# returns what it computed as text. Its twin `../probe-wz` is the same source against wz's, so the
+# two transcripts are the same program run under the two crates' macros; `tests/zenoh_macros.rs`
+# holds them equal. The features are the ones the attribute macros gate on.
+[package]
+name = "probe-up"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["unstable", "internal"]
+unstable = []
+internal = []
+
+[dependencies]
+zenoh = { package = "probe-stub-up", path = "../stub-up" }
+zenoh-macros = { version = "=1.10.1" }
+lazy_static = "1.5.0"
+ron = "0.12.0"
+serde = { version = "1.0.225", default-features = false, features = ["derive"] }

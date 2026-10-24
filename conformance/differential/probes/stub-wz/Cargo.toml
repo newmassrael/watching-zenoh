@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The `zenoh` that the code wz's macros expand to names, over wz's family crates. See `../stub-up`.
+[package]
+name = "probe-stub-wz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "zenoh"
+path = "src/lib.rs"
+
+[dependencies]
+zenoh-keyexpr = { path = "../../../../crates/wz-zenoh-keyexpr", features = ["unstable", "internal"] }
+zenoh-result = { path = "../../../../crates/wz-zenoh-result" }

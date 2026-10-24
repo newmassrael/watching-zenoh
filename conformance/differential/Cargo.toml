@@ -41,6 +41,11 @@ up_keyexpr = { package = "zenoh-keyexpr", version = "=1.10.1", features = ["unst
 wz_keyexpr = { package = "zenoh-keyexpr", path = "../../crates/wz-zenoh-keyexpr", features = ["unstable", "internal"] }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
 serde_json = "1"
+# `zenoh-macros`: a macro cannot be called with the same input to two crates, so each crate's macros
+# are compiled into a probe program (`probes/`) and the programs' transcripts are compared. Each probe
+# has its own stub of the `zenoh` that the expanded code names.
+probe-up = { path = "probes/probe-up" }
+probe-wz = { path = "probes/probe-wz" }
 # The trees whose nodes are shared are read through `token-cell`'s trait, which both crates take from
 # the one registry package, so the tests name it too.
 token-cell = { version = "2", default-features = false }

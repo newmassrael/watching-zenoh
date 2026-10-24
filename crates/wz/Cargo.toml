@@ -84,6 +84,7 @@ zenoh-result = { path = "../wz-zenoh-result", optional = true }
 zenoh-runtime = { path = "../wz-zenoh-runtime", optional = true }
 zenoh-core = { path = "../wz-zenoh-core", optional = true }
 zenoh-keyexpr = { path = "../wz-zenoh-keyexpr", optional = true }
+zenoh-macros = { path = "../wz-zenoh-macros", optional = true }
 wz-runtime-core = { path = "../wz-runtime-core", optional = true, default-features = false }
 # R311ax — wz-runtime-coop enters the facade as an optional dep.
 # The `runtime-coop` feature pulls this crate with its `alloc`
@@ -1197,7 +1198,13 @@ rest-sse-subscribe = ["rest-http-bridge", "wz-rest?/rest-sse-subscribe"]
 # api-compat-rust (open-debt item 910): the zenoh family's public Rust API as a drop-in over wz.
 # It carries the compatibility crates built so far, each under upstream's package name; a member
 # joins this edge with its slice. The facade re-exports them as `wz::zenoh_family`.
-api-compat-rust = ["dep:zenoh-result", "dep:zenoh-runtime", "dep:zenoh-core", "dep:zenoh-keyexpr"]
+api-compat-rust = [
+    "dep:zenoh-result",
+    "dep:zenoh-runtime",
+    "dep:zenoh-core",
+    "dep:zenoh-keyexpr",
+    "dep:zenoh-macros",
+]
 # R311y498 — api-compat-c BUILT (slice 1: upstream's own z_put.c links and runs
 # against the wz cdylib). Pulls the wz-capi-c cdylib and the tokio runtime it
 # wraps, rather than the no-op `= []` facade it was — the

@@ -159,6 +159,7 @@ MEMBERS: tuple[Member, ...] = (
     Member("zenoh-keyexpr", "zenoh_keyexpr", "zenoh-keyexpr",
            (("default", ""), ("unstable", "unstable")), {"default": 0, "unstable": 0},
            split_wz=True),
+    Member("zenoh-macros", "zenoh_macros", "zenoh-macros", DEFAULT_ARM, {"default": 0}),
 )
 
 

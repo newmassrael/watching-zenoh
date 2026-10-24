@@ -96,6 +96,7 @@ pub use wz_capi_pico as capi_pico;
 pub mod zenoh_family {
     pub use zenoh_core;
     pub use zenoh_keyexpr;
+    pub use zenoh_macros;
     pub use zenoh_result;
     pub use zenoh_runtime;
 }

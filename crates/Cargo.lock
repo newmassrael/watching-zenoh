@@ -2877,6 +2877,7 @@ dependencies = [
  "wz-session-lwip",
  "zenoh-core",
  "zenoh-keyexpr",
+ "zenoh-macros",
  "zenoh-result",
  "zenoh-runtime",
 ]
@@ -3652,6 +3653,16 @@ dependencies = [
  "serde",
  "token-cell",
  "zenoh-result",
+]
+
+[[package]]
+name = "zenoh-macros"
+version = "1.10.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+ "zenoh-keyexpr",
 ]
 
 [[package]]

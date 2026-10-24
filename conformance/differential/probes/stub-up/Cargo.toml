@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The `zenoh` that the code upstream's macros expand to names (`::zenoh::key_expr::...`,
+# `::zenoh::Result`), as far as that code reaches: the key expression crate and the error type.
+# `zenoh` itself is not buildable here (wz's is empty, upstream's is a whole session stack), and
+# what the expansions need of it is these two re-exports. Its library is named `zenoh`; the package
+# is not, because a workspace holds one package of each name and this is one of a pair.
+[package]
+name = "probe-stub-up"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "zenoh"
+path = "src/lib.rs"
+
+[dependencies]
+zenoh-keyexpr = { version = "=1.10.1", features = ["unstable", "internal"] }
+zenoh-result = { version = "=1.10.1" }
