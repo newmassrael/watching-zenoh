@@ -1268,6 +1268,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
 name = "pem"
 version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2222,6 +2228,17 @@ name = "tinyvec_macros"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
+
+[[package]]
+name = "token-cell"
+version = "2.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb48920ae769b58126c8c93269805011c793201f95fde28b479b81a9a531bbde"
+dependencies = [
+ "paste",
+ "portable-atomic",
+ "rustversion",
+]
 
 [[package]]
 name = "tokio"
@@ -3621,6 +3638,7 @@ dependencies = [
  "rand 0.8.6",
  "schemars",
  "serde",
+ "token-cell",
  "zenoh-result",
 ]
 

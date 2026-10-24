@@ -43,6 +43,9 @@ fn zenoh_keyexpr::key_expr::keyexpr::new<'0, T, E>(&'0 T) -> core::result::Resul
 fn zenoh_keyexpr::key_expr::nonwild_keyexpr::from_str_unchecked(&str) -> &Self ; const unsafe ; in impl zenoh_keyexpr::key_expr::nonwild_keyexpr
 fn zenoh_keyexpr::key_expr::nonwild_keyexpr::new<'0, T, E>(&'0 T) -> core::result::Result<&'0 Self, zenoh_result::Error> where &'0 zenoh_keyexpr::key_expr::keyexpr: core::convert::TryFrom<&'0 T, Error = E>, E: core::convert::Into<zenoh_result::Error>, T: ?core::marker::Sized ; in impl zenoh_keyexpr::key_expr::nonwild_keyexpr
 fn zenoh_keyexpr::keyexpr_tree::TreeIter::with_depth(Self) -> zenoh_keyexpr::keyexpr_tree::iters::tree_iter::DepthInstrumented<Self> ; in impl<'0, Children: zenoh_keyexpr::keyexpr_tree::traits::IChildrenProvider<Node>, Node: UIKeyExprTreeNode<Weight>, Weight> zenoh_keyexpr::keyexpr_tree::TreeIter<'0, Children, Node, Weight> where <Children as zenoh_keyexpr::keyexpr_tree::traits::IChildrenProvider>::Assoc: '0 + zenoh_keyexpr::keyexpr_tree::traits::IChildren<Node>
+fn zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTree::new() -> core::result::Result<(Self, zenoh_keyexpr::keyexpr_tree::arc_tree::DefaultToken), <zenoh_keyexpr::keyexpr_tree::arc_tree::DefaultToken as token_cell::core::TokenTrait>::ConstructionError> ; in impl<Weight, Wildness: zenoh_keyexpr::keyexpr_tree::support::IWildness, Children: zenoh_keyexpr::keyexpr_tree::traits::IChildrenProvider<alloc::sync::Arc<token_cell::core::TokenCell<zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeNode<Weight, alloc::sync::Weak<()>, Wildness, Children, zenoh_keyexpr::keyexpr_tree::arc_tree::DefaultToken>, zenoh_keyexpr::keyexpr_tree::arc_tree::DefaultToken>>>> zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTree<Weight, zenoh_keyexpr::keyexpr_tree::arc_tree::DefaultToken, Wildness, Children>
+fn zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTree::with_token(&Token) -> Self ; in impl<Weight, Wildness: zenoh_keyexpr::keyexpr_tree::support::IWildness, Children: zenoh_keyexpr::keyexpr_tree::traits::IChildrenProvider<alloc::sync::Arc<token_cell::core::TokenCell<zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeNode<Weight, alloc::sync::Weak<()>, Wildness, Children, Token>, Token>>>, Token: token_cell::core::TokenTrait> zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTree<Weight, Token, Wildness, Children>
+fn zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeNode::is_zombie(&Self) -> bool ; in impl<Weight, Wildness: zenoh_keyexpr::keyexpr_tree::support::IWildness, Children: zenoh_keyexpr::keyexpr_tree::traits::IChildrenProvider<alloc::sync::Arc<token_cell::core::TokenCell<zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeNode<Weight, alloc::sync::Weak<()>, Wildness, Children, Token>, Token>>>, Token: token_cell::core::TokenTrait> zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeNode<Weight, alloc::sync::Weak<()>, Wildness, Children, Token> where <Children as zenoh_keyexpr::keyexpr_tree::traits::IChildrenProvider>::Assoc: zenoh_keyexpr::keyexpr_tree::traits::IChildren<alloc::sync::Arc<token_cell::core::TokenCell<zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeNode<Weight, alloc::sync::Weak<()>, Wildness, Children, Token>, Token>>>
 fn zenoh_keyexpr::keyexpr_tree::box_tree::KeBoxTree::new() -> Self ; in impl<Weight> zenoh_keyexpr::keyexpr_tree::box_tree::KeBoxTree<Weight, bool, zenoh_keyexpr::keyexpr_tree::impls::DefaultChildrenProvider> where zenoh_keyexpr::keyexpr_tree::impls::DefaultChildrenProvider: zenoh_keyexpr::keyexpr_tree::traits::IChildrenProvider<alloc::boxed::Box<zenoh_keyexpr::keyexpr_tree::box_tree::KeyExprTreeNode<Weight, bool, zenoh_keyexpr::keyexpr_tree::impls::DefaultChildrenProvider>>>
 impl alloc::borrow::ToOwned for zenoh_keyexpr::key_expr::keyexpr
 impl alloc::borrow::ToOwned for zenoh_keyexpr::key_expr::nonwild_keyexpr
@@ -55,6 +58,7 @@ impl core::clone::Clone for zenoh_keyexpr::key_expr::format::FormatSetError
 impl core::clone::Clone for zenoh_keyexpr::key_expr::format::KeFormat
 impl core::clone::Clone for zenoh_keyexpr::key_expr::format::KeFormatter
 impl core::clone::Clone for zenoh_keyexpr::key_expr::format::Segment
+impl core::clone::Clone for zenoh_keyexpr::keyexpr_tree::arc_tree::WeakConvertError
 impl core::clone::Clone for zenoh_keyexpr::keyexpr_tree::support::NonWild
 impl core::clone::Clone for zenoh_keyexpr::keyexpr_tree::support::UnknownWildness
 impl core::cmp::Eq for zenoh_keyexpr::key_expr::Chunks
@@ -95,6 +99,7 @@ impl core::convert::From for alloc::string::String
 impl core::convert::From for alloc::sync::Arc
 impl core::convert::From for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl core::convert::From for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
+impl core::convert::From for zenoh_keyexpr::keyexpr_tree::arc_tree::Tokenized
 impl core::convert::From for zenoh_keyexpr::keyexpr_tree::support::IterOrOption
 impl core::convert::TryFrom for &zenoh_keyexpr::key_expr::keyexpr
 impl core::convert::TryFrom for &zenoh_keyexpr::key_expr::nonwild_keyexpr
@@ -130,6 +135,12 @@ impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::Intersection
 impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::IntersectionMut
 impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::TreeIter
 impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::TreeIterMut
+impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTree
+impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeInner
+impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeNode
+impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::arc_tree::TokenPacker
+impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::arc_tree::Tokenized
+impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::arc_tree::WeakConvertError
 impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::box_tree::KeBoxTree
 impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::box_tree::KeyExprTreeNode
 impl core::fmt::Debug for zenoh_keyexpr::keyexpr_tree::impls::FilterMap
@@ -171,12 +182,14 @@ impl core::iter::traits::iterator::Iterator for zenoh_keyexpr::keyexpr_tree::Int
 impl core::iter::traits::iterator::Iterator for zenoh_keyexpr::keyexpr_tree::IntersectionMut
 impl core::iter::traits::iterator::Iterator for zenoh_keyexpr::keyexpr_tree::TreeIter
 impl core::iter::traits::iterator::Iterator for zenoh_keyexpr::keyexpr_tree::TreeIterMut
+impl core::iter::traits::iterator::Iterator for zenoh_keyexpr::keyexpr_tree::arc_tree::TokenPacker
 impl core::iter::traits::iterator::Iterator for zenoh_keyexpr::keyexpr_tree::impls::FilterMap
 impl core::iter::traits::iterator::Iterator for zenoh_keyexpr::keyexpr_tree::support::IterOrOption
 impl core::marker::Copy for zenoh_keyexpr::key_expr::Chunks
 impl core::marker::Copy for zenoh_keyexpr::key_expr::format::FormatSetError
 impl core::marker::Copy for zenoh_keyexpr::key_expr::format::KeFormat
 impl core::marker::Copy for zenoh_keyexpr::key_expr::format::Segment
+impl core::marker::Copy for zenoh_keyexpr::keyexpr_tree::arc_tree::WeakConvertError
 impl core::marker::Copy for zenoh_keyexpr::keyexpr_tree::support::NonWild
 impl core::marker::Copy for zenoh_keyexpr::keyexpr_tree::support::UnknownWildness
 impl core::marker::Send for zenoh_keyexpr::keyexpr_tree::box_tree::KeyExprTreeNode
@@ -199,6 +212,8 @@ impl core::ops::deref::Deref for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
 impl core::ops::deref::Deref for zenoh_keyexpr::key_expr::format::OwnedKeFormat
 impl core::ops::deref::Deref for zenoh_keyexpr::key_expr::keyexpr
 impl core::ops::deref::Deref for zenoh_keyexpr::key_expr::nonwild_keyexpr
+impl core::ops::deref::Deref for zenoh_keyexpr::keyexpr_tree::arc_tree::Tokenized
+impl core::ops::deref::DerefMut for zenoh_keyexpr::keyexpr_tree::arc_tree::Tokenized
 impl core::str::traits::FromStr for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl core::str::traits::FromStr for zenoh_keyexpr::key_expr::format::OwnedKeFormat
 impl schemars::JsonSchema for zenoh_keyexpr::key_expr::OwnedKeyExpr
@@ -207,20 +222,27 @@ impl serde_core::de::Deserialize for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl serde_core::de::Deserialize for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
 impl serde_core::ser::Serialize for zenoh_keyexpr::key_expr::OwnedKeyExpr
 impl serde_core::ser::Serialize for zenoh_keyexpr::key_expr::OwnedNonWildKeyExpr
+impl token_cell::core::TokenTrait for zenoh_keyexpr::keyexpr_tree::arc_tree::DefaultToken
 impl zenoh_keyexpr::key_expr::include::Includer for zenoh_keyexpr::key_expr::include::LTRIncluder
 impl zenoh_keyexpr::key_expr::intersect::Intersector for zenoh_keyexpr::key_expr::intersect::ClassicIntersector
 impl zenoh_keyexpr::keyexpr_tree::impls::IFilter for zenoh_keyexpr::keyexpr_tree::impls::Inclusion
 impl zenoh_keyexpr::keyexpr_tree::impls::IFilter for zenoh_keyexpr::keyexpr_tree::impls::Intersection
 impl zenoh_keyexpr::keyexpr_tree::support::IWildness for zenoh_keyexpr::keyexpr_tree::support::NonWild
 impl zenoh_keyexpr::keyexpr_tree::support::IWildness for zenoh_keyexpr::keyexpr_tree::support::UnknownWildness
+impl zenoh_keyexpr::keyexpr_tree::traits::HasChunk for zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeNode
 impl zenoh_keyexpr::keyexpr_tree::traits::HasChunk for zenoh_keyexpr::keyexpr_tree::box_tree::KeyExprTreeNode
 impl zenoh_keyexpr::keyexpr_tree::traits::IChildrenProvider for zenoh_keyexpr::keyexpr_tree::impls::HashMapProvider
 impl zenoh_keyexpr::keyexpr_tree::traits::IChildrenProvider for zenoh_keyexpr::keyexpr_tree::impls::KeyedSetProvider
 impl zenoh_keyexpr::keyexpr_tree::traits::IChildrenProvider for zenoh_keyexpr::keyexpr_tree::impls::VecSetProvider
 impl zenoh_keyexpr::keyexpr_tree::traits::IKeyExprTree for zenoh_keyexpr::keyexpr_tree::box_tree::KeBoxTree
 impl zenoh_keyexpr::keyexpr_tree::traits::IKeyExprTreeMut for zenoh_keyexpr::keyexpr_tree::box_tree::KeBoxTree
+impl zenoh_keyexpr::keyexpr_tree::traits::IKeyExprTreeNode for zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeNode
+impl zenoh_keyexpr::keyexpr_tree::traits::IKeyExprTreeNode for zenoh_keyexpr::keyexpr_tree::arc_tree::Tokenized
 impl zenoh_keyexpr::keyexpr_tree::traits::IKeyExprTreeNode for zenoh_keyexpr::keyexpr_tree::box_tree::KeyExprTreeNode
+impl zenoh_keyexpr::keyexpr_tree::traits::IKeyExprTreeNodeMut for zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeNode
+impl zenoh_keyexpr::keyexpr_tree::traits::IKeyExprTreeNodeMut for zenoh_keyexpr::keyexpr_tree::arc_tree::Tokenized
 impl zenoh_keyexpr::keyexpr_tree::traits::IKeyExprTreeNodeMut for zenoh_keyexpr::keyexpr_tree::box_tree::KeyExprTreeNode
+impl zenoh_keyexpr::keyexpr_tree::traits::ITokenKeyExprTree for zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTree
 mod zenoh_keyexpr::canon
 mod zenoh_keyexpr::format
 mod zenoh_keyexpr::format::macro_support
@@ -235,6 +257,7 @@ mod zenoh_keyexpr::key_expr::fuzzer
 mod zenoh_keyexpr::key_expr::include
 mod zenoh_keyexpr::key_expr::intersect
 mod zenoh_keyexpr::keyexpr_tree
+mod zenoh_keyexpr::keyexpr_tree::arc_tree
 mod zenoh_keyexpr::keyexpr_tree::box_tree
 mod zenoh_keyexpr::keyexpr_tree::default_impls
 mod zenoh_keyexpr::keyexpr_tree::impls
@@ -268,15 +291,24 @@ struct zenoh_keyexpr::key_expr::intersect::ClassicIntersector
 struct zenoh_keyexpr::key_expr::keyexpr
 struct zenoh_keyexpr::key_expr::nonwild_keyexpr
 struct zenoh_keyexpr::keyexpr
+struct zenoh_keyexpr::keyexpr_tree::DefaultToken
 struct zenoh_keyexpr::keyexpr_tree::Includer
 struct zenoh_keyexpr::keyexpr_tree::IncluderMut
 struct zenoh_keyexpr::keyexpr_tree::Inclusion
 struct zenoh_keyexpr::keyexpr_tree::InclusionMut
 struct zenoh_keyexpr::keyexpr_tree::Intersection
 struct zenoh_keyexpr::keyexpr_tree::IntersectionMut
+struct zenoh_keyexpr::keyexpr_tree::KeArcTree
 struct zenoh_keyexpr::keyexpr_tree::KeBoxTree
 struct zenoh_keyexpr::keyexpr_tree::TreeIter
 struct zenoh_keyexpr::keyexpr_tree::TreeIterMut
+struct zenoh_keyexpr::keyexpr_tree::arc_tree::DefaultToken
+struct zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTree
+struct zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeInner
+struct zenoh_keyexpr::keyexpr_tree::arc_tree::KeArcTreeNode
+struct zenoh_keyexpr::keyexpr_tree::arc_tree::TokenPacker
+struct zenoh_keyexpr::keyexpr_tree::arc_tree::Tokenized
+struct zenoh_keyexpr::keyexpr_tree::arc_tree::WeakConvertError
 struct zenoh_keyexpr::keyexpr_tree::box_tree::KeBoxTree
 struct zenoh_keyexpr::keyexpr_tree::box_tree::KeyExprTreeNode
 struct zenoh_keyexpr::keyexpr_tree::impls::FilterMap
@@ -308,6 +340,8 @@ trait zenoh_keyexpr::keyexpr_tree::IKeyExprTreeNode
 trait zenoh_keyexpr::keyexpr_tree::IKeyExprTreeNodeMut
 trait zenoh_keyexpr::keyexpr_tree::ITokenKeyExprTree
 trait zenoh_keyexpr::keyexpr_tree::ITokenKeyExprTreeNode
+trait zenoh_keyexpr::keyexpr_tree::arc_tree::IArc
+trait zenoh_keyexpr::keyexpr_tree::arc_tree::IArcProvider
 trait zenoh_keyexpr::keyexpr_tree::impls::IFilter
 trait zenoh_keyexpr::keyexpr_tree::support::IWildness
 trait zenoh_keyexpr::keyexpr_tree::traits::AsNode

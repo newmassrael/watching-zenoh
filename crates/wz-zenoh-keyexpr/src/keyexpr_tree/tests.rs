@@ -8,8 +8,10 @@
 use alloc::{collections::BTreeSet, string::ToString, vec::Vec};
 
 use rand::{rngs::StdRng, SeedableRng};
+use token_cell::prelude::{TokenCellTrait, TokenTrait};
 
 use super::{
+    arc_tree::Tokenized,
     impls::{HashMapProvider, KeyedSetProvider, VecSetProvider},
     support::{NonWild, UnknownWildness},
     *,
@@ -178,6 +180,185 @@ fn a_nonwild_tree_refuses_a_wild_key_and_a_tree_remembers_wildness() {
     );
     tree.prune_where(|n| n.weight().is_some());
     assert!(tree.node(ke("a/*")).is_none());
+}
+
+fn arc_sample() -> (KeArcTree<i32>, DefaultToken) {
+    let (tree, mut token): (KeArcTree<i32>, _) = KeArcTree::new().unwrap();
+    for (key, weight) in [
+        ("a/b", 0),
+        ("a/b/c", 1),
+        ("a/b/d", 2),
+        ("a/e", 3),
+        ("a/@f", 4),
+    ] {
+        assert_eq!(tree.insert(&mut token, ke(key), weight), None);
+    }
+    (tree, token)
+}
+
+#[test]
+fn a_shared_tree_holds_the_weights_it_was_given_through_its_token() {
+    let (tree, mut token) = arc_sample();
+    assert_eq!(tree.node(&token, ke("a/b/c")).unwrap().weight(), Some(&1));
+    assert_eq!(tree.node(&token, ke("a")).unwrap().weight(), None);
+    assert!(tree.node(&token, ke("x")).is_none());
+    assert_eq!(tree.insert(&mut token, ke("a/b"), 10), Some(0));
+    assert_eq!(tree.node(&token, ke("a/b")).unwrap().weight(), Some(&10));
+    let mut node = tree.node_mut(&mut token, ke("a/e")).unwrap();
+    *node.weight_mut().unwrap() += 1;
+    assert_eq!(tree.node(&token, ke("a/e")).unwrap().weight(), Some(&4));
+    let node = tree.node(&token, ke("a/b/c")).unwrap();
+    assert_eq!(node.keyexpr().as_str(), "a/b/c");
+    assert_eq!(
+        node.parent()
+            .unwrap()
+            .upgrade()
+            .unwrap()
+            .try_borrow(&token)
+            .unwrap()
+            .chunk()
+            .as_str(),
+        "b"
+    );
+    let keys: BTreeSet<_> = tree
+        .tree_iter(&token)
+        .map(|n| n.keyexpr().to_string())
+        .collect();
+    assert_eq!(keys.len(), 6);
+    // The four weighted nodes under `a`; `**` does not match the verbatim `@f`.
+    assert_eq!(tree.intersecting_keys(&token, ke("a/**")).count(), 4);
+}
+
+#[test]
+fn a_token_that_is_not_the_trees_is_refused() {
+    let (tree, _token) = arc_sample();
+    let (_other, other_token): (KeArcTree<i32>, _) = KeArcTree::new().unwrap();
+    assert!(std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+        tree.node(&other_token, ke("a/b"));
+    }))
+    .is_err());
+    // A pair built by hand from a cell and a token of another tree is refused at its first use.
+    let (tree, token) = arc_sample();
+    let (_other, other_token): (KeArcTree<i32>, _) = KeArcTree::new().unwrap();
+    let node = tree.node(&token, ke("a/b")).unwrap().0;
+    let forged = Tokenized(node, &other_token);
+    assert!(std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| {
+        let _ = forged.weight();
+    }))
+    .is_err());
+}
+
+#[test]
+fn a_node_held_after_its_tree_is_dropped_is_a_zombie_and_has_no_key() {
+    let (tree, token) = arc_sample();
+    let held = tree.node(&token, ke("a/b/c")).unwrap().0.clone();
+    assert!(!held.try_borrow(&token).unwrap().is_zombie());
+    drop(tree);
+    let node = held.try_borrow(&token).unwrap();
+    assert!(node.is_zombie());
+    assert!(std::panic::catch_unwind(core::panic::AssertUnwindSafe(|| node.keyexpr())).is_err());
+}
+
+#[test]
+fn pruning_leaves_a_node_something_else_holds_and_keeps_the_wildness_it_has() {
+    let (mut tree, mut token): (KeArcTree<i32>, _) = KeArcTree::new().unwrap();
+    tree.insert(&mut token, ke("a/*"), 1);
+    let held = tree.node(&token, ke("a/*")).unwrap().0.clone();
+    assert_eq!(tree.remove(&mut token, ke("a/*")), Some(1));
+    tree.prune(&mut token);
+    assert!(
+        tree.node(&token, ke("a/*")).is_some(),
+        "a held node is not pruned"
+    );
+    // A query with no wildcard is answered by a lookup unless the tree may hold a wild key; the
+    // node that is still there must be found, as it is by a tree with nothing held.
+    assert_eq!(tree.intersecting_nodes(&token, ke("a/b")).count(), 1);
+    drop(held);
+    tree.prune(&mut token);
+    assert!(tree.node(&token, ke("a/*")).is_none());
+    assert_eq!(tree.intersecting_nodes(&token, ke("a/b")).count(), 0);
+}
+
+#[test]
+fn a_shared_tree_is_iterated_and_changed_through_its_mutable_iterators() {
+    let (tree, mut token) = arc_sample();
+    for mut node in tree.intersecting_nodes_mut(&mut token, ke("a/**")) {
+        if let Some(w) = node.weight_mut() {
+            *w += 100;
+        }
+    }
+    let pairs: BTreeSet<_> = tree
+        .tree_iter(&token)
+        .filter_map(|n| n.weight().map(|w| (n.keyexpr().to_string(), *w)))
+        .collect();
+    assert!(pairs.contains(&("a/b/d".to_string(), 102)), "{pairs:?}");
+    // `a/**` does not include the verbatim `a/@f`, so that weight is the one that did not move.
+    assert!(pairs.contains(&("a/@f".to_string(), 4)), "{pairs:?}");
+    for mut node in tree.tree_iter_mut(&mut token) {
+        if let Some(w) = node.weight_mut() {
+            *w = 0;
+        }
+    }
+    assert!(tree
+        .tree_iter(&token)
+        .all(|n| n.weight().is_none_or(|w| *w == 0)));
+}
+
+macro_rules! check_a_shared_tree_against_the_relations {
+    ($tree:ty, $seed:expr) => {{
+        let mut rng = StdRng::seed_from_u64($seed);
+        let mut token = DefaultToken::new().unwrap();
+        let tree = <$tree>::with_token(&token);
+        for (n, k) in KeyExprFuzzer(&mut rng).take(120).enumerate() {
+            tree.insert(&mut token, &k, n as u32);
+        }
+        let nodes: Vec<_> = tree.tree_iter(&token).map(|n| n.keyexpr()).collect();
+        assert!(
+            nodes.len() > 120,
+            "the generated tree has {} nodes",
+            nodes.len()
+        );
+        for q in KeyExprFuzzer(&mut rng).take(80) {
+            let want = |f: &dyn Fn(&keyexpr, &keyexpr) -> bool| -> BTreeSet<alloc::string::String> {
+                nodes
+                    .iter()
+                    .filter(|n| f(n, &q))
+                    .map(|n| n.to_string())
+                    .collect()
+            };
+            let got: BTreeSet<_> = tree
+                .intersecting_nodes(&token, &q)
+                .map(|n| n.keyexpr().to_string())
+                .collect();
+            assert_eq!(got, want(&|n, q| n.intersects(q)), "intersecting `{q}`");
+            let got: BTreeSet<_> = tree
+                .included_nodes(&token, &q)
+                .map(|n| n.keyexpr().to_string())
+                .collect();
+            assert_eq!(got, want(&|n, q| q.includes(n)), "included by `{q}`");
+            let got: BTreeSet<_> = tree
+                .nodes_including(&token, &q)
+                .map(|n| n.keyexpr().to_string())
+                .collect();
+            assert_eq!(got, want(&|n, q| n.includes(q)), "including `{q}`");
+        }
+    }};
+}
+
+#[test]
+fn a_shared_trees_relational_iterators_agree_with_the_relations_over_every_node() {
+    check_a_shared_tree_against_the_relations!(
+        KeArcTree<u32, DefaultToken, bool, KeyedSetProvider>,
+        21
+    );
+    check_a_shared_tree_against_the_relations!(
+        KeArcTree<u32, DefaultToken, bool, VecSetProvider>,
+        22
+    );
+    check_a_shared_tree_against_the_relations!(
+        KeArcTree<u32, DefaultToken, UnknownWildness, HashMapProvider>,
+        23
+    );
 }
 
 #[test]

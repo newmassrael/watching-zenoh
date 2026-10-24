@@ -14,10 +14,10 @@
 //! programs over chunks. `conformance/differential` holds each to upstream's over every string of a
 //! small alphabet up to a length, which is the evidence that the two agree.
 //!
-//! The crate is built in slices: the key expression types, their canonization and the relations,
-//! and the generator of random key expressions; the key expression formats; and the key expression
-//! trees ([`keyexpr_tree`]), of which the shared-ownership one, `KeArcTree`, arrives in the slice
-//! after this.
+//! The crate holds the key expression types, their canonization and the relations, and the
+//! generator of random key expressions; the key expression formats; and the key expression trees
+//! ([`keyexpr_tree`]), with an owning root, [`keyexpr_tree::KeBoxTree`], and with shared nodes
+//! reached through a token, [`keyexpr_tree::KeArcTree`].
 
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;

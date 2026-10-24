@@ -24,7 +24,7 @@
 //! # Ownership
 //! KeTrees come in two flavours:
 //! - [`KeBoxTree`] is the easier flavour. Much like a HashMap, it uniquely owns all of its nodes and data.
-//! - `KeArcTree` allows the shared ownership of nodes, allowing you to store subsections of the tree elsewhere
+//! - [`KeArcTree`] allows the shared ownership of nodes, allowing you to store subsections of the tree elsewhere
 //!   without worrying about lifetimes.
 //!
 //! # Usage
@@ -53,6 +53,10 @@ use crate::{keyexpr, OwnedKeyExpr};
 /// Allows importing all of the KeTree traits at once.
 pub mod traits;
 pub use traits::*;
+
+/// An implementation of a KeTree whose nodes are shared, and accessed through a token.
+pub mod arc_tree;
+pub use arc_tree::{DefaultToken, KeArcTree};
 
 /// An implementation of a KeTree that owns all of its nodes.
 pub mod box_tree;

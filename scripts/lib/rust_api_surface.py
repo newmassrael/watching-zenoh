@@ -157,7 +157,7 @@ MEMBERS: tuple[Member, ...] = (
     Member("zenoh-runtime", "zenoh_runtime", "zenoh-runtime", DEFAULT_ARM, {"default": 0}),
     Member("zenoh-core", "zenoh_core", "zenoh-core", DEFAULT_ARM, {"default": 0}),
     Member("zenoh-keyexpr", "zenoh_keyexpr", "zenoh-keyexpr",
-           (("default", ""), ("unstable", "unstable")), {"default": 34, "unstable": 34},
+           (("default", ""), ("unstable", "unstable")), {"default": 0, "unstable": 0},
            split_wz=True),
 )
 

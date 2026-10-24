@@ -2775,7 +2775,10 @@ PIN_NO_SYMBOL = 0
 # tree slice and cites two files for it: `keyexpr_tree.rs` (the module the slice
 # built) and the differential test that holds the trees to upstream's. READ off
 # the census's own FAIL line, `wz citations: 24 against a pin of 22`.
-PIN_WZ_CITATIONS = 24
+# R3503 -- 24 -> 25, one atom. `api-compat-rust`'s reason gains the shared-tree slice and cites
+# `arc_tree.rs`, the file that holds it. READ off the census's own FAIL line, `wz citations: 25
+# against a pin of 24`.
+PIN_WZ_CITATIONS = 25
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

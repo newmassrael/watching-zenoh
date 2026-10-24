@@ -40,9 +40,10 @@ normal state once nothing remains.
 | atom | file | blob | round |
 |---|---|---|---|
 | api-compat-rust | conformance/differential/tests/zenoh_keyexpr.rs | 69e68e8a35dbb05a0666ca60491e8acc8c3e87f2 | R3498 |
-| api-compat-rust | conformance/differential/tests/zenoh_keyexpr_tree.rs | 1011d70fab8129bf4743e4b0422958333d30ae27 | R3500 |
+| api-compat-rust | conformance/differential/tests/zenoh_keyexpr_tree.rs | 387fe0ad8557e41fbe2e3af1820936987eac7f99 | R3503 |
 | api-compat-rust | conformance/patch-scenario/tests/one_zenoh_result.rs | 6ec323ad91aff120e1b3b597f22f37ec284a2fe7 | R3483 |
-| api-compat-rust | crates/wz-zenoh-keyexpr/src/keyexpr_tree.rs | d98c16cffa207edb8aa44ec4dbb0b2bcbea3ca09 | R3500 |
+| api-compat-rust | crates/wz-zenoh-keyexpr/src/keyexpr_tree.rs | 47877a38eb6deaa57c3c6807c55d43a95022b2a4 | R3503 |
+| api-compat-rust | crates/wz-zenoh-keyexpr/src/keyexpr_tree/arc_tree.rs | fe51b4dcf1e94be08e1d3de05039f228bcbdd3ba | R3503 |
 | session-close-ingress | crates/wz-integration-tests/tests/wz_router_hat_connect_reconcile.rs | 31cee437ba6c4c3bf6eeab254f30dcdf9c7bd423 | R3450 |
 | session-close-ingress | crates/wz-routing-graph/src/lib.rs | 2123f96404cdfc158a6c875d4440a7febca3e3c5 | R3450 |
 | session-close-ingress | crates/wz-runtime-coop/src/session_drive.rs | 6905f2746973377266d6459dd9f5bd1ceecb7c9d | R3478 |

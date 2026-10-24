@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! `zenoh-keyexpr`, key expression trees: upstream's crate (`up_keyexpr`) and wz's (`wz_keyexpr`)
-//! given the same operations on a `KeBoxTree`, observations equal.
+//! given the same operations on a `KeBoxTree` and on a `KeArcTree`, observations equal.
 //!
 //! A scenario builds a tree from generated key expressions, observes it, removes some, observes it,
 //! adds to the weights of the nodes that intersect a few queries through the mutable iterator,
@@ -12,7 +12,8 @@
 //! included by it and include it. The ORDER of an iteration is not part of the contract (the module
 //! documents only that a parent comes before its children), so every iteration is compared as a set.
 //!
-//! Each of the five children providers a tree can be built on is run on its own seeds, and a
+//! Each of the five children providers a tree can be built on is run on its own seeds, for both
+//! kinds of tree, and a
 //! control confirms the comparison can fail: the same scenario with one key left out of one side
 //! is seen to differ.
 
@@ -140,11 +141,86 @@ macro_rules! scenario_body {
     }};
 }
 
+/// The same scenario on a `KeArcTree`: the operations take the token, and what a node reports is
+/// read through it. A node's depth is the number of chunks of its key expression, which is what
+/// the owning tree's iterator reports.
+macro_rules! arc_scenario_body {
+    ($tree:ty, $keys:expr, $removals:expr, $probes:expr, $queries:expr) => {{
+        fn ke(s: &str) -> &keyexpr {
+            keyexpr::new(s).unwrap()
+        }
+        let observe = |tree: &$tree, token: &DefaultToken| -> Observation {
+            let mut o = Observation::default();
+            for node in tree.tree_iter(token) {
+                let key = node.keyexpr().to_string();
+                let depth = key.matches('/').count() + 1;
+                let parent = node.parent().map(|p| {
+                    let p = p.upgrade().expect("a node of the tree has its parent");
+                    p.try_borrow(token).unwrap().keyexpr().to_string()
+                });
+                o.nodes.insert((key, node.weight().copied(), parent, depth));
+            }
+            for node in tree.tree_iter(token) {
+                if let Some(w) = node.weight() {
+                    o.pairs.insert((node.keyexpr().to_string(), *w));
+                }
+            }
+            for p in $probes {
+                o.probes.push((
+                    tree.node(token, ke(p)).and_then(|n| n.weight().copied()),
+                    tree.node(token, ke(p)).map(|n| n.keyexpr().to_string()),
+                ));
+            }
+            for q in $queries {
+                let q = ke(q);
+                let set = |it: &mut dyn Iterator<Item = (String, Option<i32>)>| -> BTreeSet<_> {
+                    it.collect()
+                };
+                o.relations.push([
+                    set(&mut tree
+                        .intersecting_nodes(token, q)
+                        .map(|n| (n.keyexpr().to_string(), n.weight().copied()))),
+                    set(&mut tree
+                        .included_nodes(token, q)
+                        .map(|n| (n.keyexpr().to_string(), n.weight().copied()))),
+                    set(&mut tree
+                        .nodes_including(token, q)
+                        .map(|n| (n.keyexpr().to_string(), n.weight().copied()))),
+                ]);
+            }
+            o
+        };
+        let mut out = Scenario::default();
+        let mut token = DefaultToken::new().unwrap();
+        let mut tree = <$tree>::with_token(&token);
+        for (n, k) in $keys.iter().enumerate() {
+            out.replaced.push(tree.insert(&mut token, ke(k), n as i32));
+        }
+        out.observed.push(observe(&tree, &token));
+        for k in $removals {
+            out.removed.push(tree.remove(&mut token, ke(k)));
+        }
+        out.observed.push(observe(&tree, &token));
+        for q in $queries.iter().take(8) {
+            for mut node in tree.intersecting_nodes_mut(&mut token, ke(q)) {
+                if let Some(w) = node.weight_mut() {
+                    *w += 1000;
+                }
+            }
+        }
+        out.observed.push(observe(&tree, &token));
+        tree.prune(&mut token);
+        out.observed.push(observe(&tree, &token));
+        out
+    }};
+}
+
 macro_rules! tree_cases {
     ($name:ident, $ke:ident) => {
         mod $name {
             use super::{Observation, Scenario};
             use std::collections::BTreeSet;
+            use token_cell::prelude::{TokenCellTrait, TokenTrait};
             use $ke::{
                 keyexpr,
                 keyexpr_tree::{
@@ -175,13 +251,93 @@ macro_rules! tree_cases {
                 scenario_body!(KeBoxTree<i32, NonWild, KeyedSetProvider>, k, r, p, q)
             }
 
-            /// Whether a non-wild tree built from `keys` is told it holds a wild key.
+            pub fn arc_keyed_set(
+                k: &[String],
+                r: &[String],
+                p: &[String],
+                q: &[String],
+            ) -> Scenario {
+                arc_scenario_body!(
+                    KeArcTree<i32, DefaultToken, bool, KeyedSetProvider>,
+                    k,
+                    r,
+                    p,
+                    q
+                )
+            }
+            pub fn arc_vec_set(
+                k: &[String],
+                r: &[String],
+                p: &[String],
+                q: &[String],
+            ) -> Scenario {
+                arc_scenario_body!(
+                    KeArcTree<i32, DefaultToken, bool, VecSetProvider>,
+                    k,
+                    r,
+                    p,
+                    q
+                )
+            }
+            pub fn arc_hash_map(
+                k: &[String],
+                r: &[String],
+                p: &[String],
+                q: &[String],
+            ) -> Scenario {
+                arc_scenario_body!(
+                    KeArcTree<i32, DefaultToken, bool, HashMapProvider>,
+                    k,
+                    r,
+                    p,
+                    q
+                )
+            }
+            pub fn arc_unknown_wildness(
+                k: &[String],
+                r: &[String],
+                p: &[String],
+                q: &[String],
+            ) -> Scenario {
+                arc_scenario_body!(
+                    KeArcTree<i32, DefaultToken, UnknownWildness, KeyedSetProvider>,
+                    k,
+                    r,
+                    p,
+                    q
+                )
+            }
+            pub fn arc_non_wild(
+                k: &[String],
+                r: &[String],
+                p: &[String],
+                q: &[String],
+            ) -> Scenario {
+                arc_scenario_body!(
+                    KeArcTree<i32, DefaultToken, NonWild, KeyedSetProvider>,
+                    k,
+                    r,
+                    p,
+                    q
+                )
+            }
+
+            /// Whether a non-wild tree, owning or shared, is told it holds a wild key and refuses.
             pub fn non_wild_refuses(key: &str) -> bool {
-                let result = std::panic::catch_unwind(|| {
+                let owning = std::panic::catch_unwind(|| {
                     let mut tree: KeBoxTree<i32, NonWild, KeyedSetProvider> = KeBoxTree::default();
                     tree.insert(keyexpr::new(key).unwrap(), 0);
-                });
-                result.is_err()
+                })
+                .is_err();
+                let shared = std::panic::catch_unwind(|| {
+                    let mut token = DefaultToken::new().unwrap();
+                    let tree: KeArcTree<i32, DefaultToken, NonWild, KeyedSetProvider> =
+                        KeArcTree::with_token(&token);
+                    tree.insert(&mut token, keyexpr::new(key).unwrap(), 0);
+                })
+                .is_err();
+                assert_eq!(owning, shared, "the two kinds of tree disagree on `{key}`");
+                owning
             }
         }
     };
@@ -267,6 +423,16 @@ agree!(
     400..420
 );
 agree!(non_wild_trees_agree, non_wild, false, 500..520);
+agree!(arc_keyed_set_trees_agree, arc_keyed_set, true, 600..620);
+agree!(arc_vec_set_trees_agree, arc_vec_set, true, 700..720);
+agree!(arc_hash_map_trees_agree, arc_hash_map, true, 800..820);
+agree!(
+    arc_unknown_wildness_trees_agree,
+    arc_unknown_wildness,
+    true,
+    900..920
+);
+agree!(arc_non_wild_trees_agree, arc_non_wild, false, 1000..1020);
 
 #[test]
 fn a_non_wild_tree_refuses_a_wild_key_in_both_crates() {

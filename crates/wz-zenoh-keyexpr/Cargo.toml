@@ -11,9 +11,10 @@
 # the public API of `zenoh` (`keyexpr`, `OwnedKeyExpr` and their traits are re-exported there), and
 # `zenoh-macros` checks a literal against it at compile time.
 #
-# It is built in slices, each landing whole with the ratchet of `scripts/lib/rust_api_surface.py`
-# lowered in its own round: the key expression types, then formats, then the key expression trees.
-# Until a slice lands its items are missing lines of the surface gate, not stubs here.
+# It was built in slices, each landing whole with the ratchet of `scripts/lib/rust_api_surface.py`
+# lowered in its own round: the key expression types, the formats, the key expression trees with an
+# owning root, and the tree whose nodes are shared. The surface of the default and the `unstable` arm is
+# complete; what no arm lists, the `internal` prefix-stripping items, joins with the `zenoh` slice.
 
 [package]
 name = "zenoh-keyexpr"
@@ -52,6 +53,9 @@ keyed-set = "1.1.0"
 rand ={ version = "0.8.5", default-features = false, features = ["alloc", "getrandom"] }
 schemars = { version = "1.1.0", features = ["either1"], optional = true }
 serde = { version = "1.0.225", default-features = false, features = ["alloc", "derive"] }
+# `token-cell` is what `KeArcTree` shares its nodes through: a `TokenCell` is read and written only
+# with the tree's token, and `DefaultToken` is a type of the public API.
+token-cell = { version = "2.0.0", default-features = false }
 zenoh-result = { path = "../wz-zenoh-result", default-features = false }
 
 [dev-dependencies]

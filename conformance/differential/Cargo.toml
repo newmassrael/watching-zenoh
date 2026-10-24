@@ -41,6 +41,9 @@ up_keyexpr = { package = "zenoh-keyexpr", version = "=1.10.1", features = ["unst
 wz_keyexpr = { package = "zenoh-keyexpr", path = "../../crates/wz-zenoh-keyexpr", features = ["unstable", "internal"] }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
 serde_json = "1"
+# The trees whose nodes are shared are read through `token-cell`'s trait, which both crates take from
+# the one registry package, so the tests name it too.
+token-cell = { version = "2", default-features = false }
 
 # The exhaustive comparisons run every string of a small alphabet to a length, which is millions of
 # calls of two dynamic programs; optimised, they take seconds.
