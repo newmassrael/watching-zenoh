@@ -6760,6 +6760,10 @@ async fn run_router_hat_until(
     // costs were recorded on admits fewer, and the bound a burst meets is the calibrated one once
     // the first sessions of it are up. Taken before the admin host below because the capacity
     // report reads the refusals the accept loop counts on this handle.
+    // The host's own speed, timed on a private socket before any session exists, so that the first
+    // sessions of a burst are admitted on a figure of this host and not only on the recorded one.
+    let probed = wz::runtime_tokio::calibrate_with_probe();
+    log::info!("wz-ap-demo router-hat: keepalive cost probe timed {probed} writes");
     let session_ceiling = {
         let cfg = host_cfg.borrow().clone();
         wz::runtime_tokio::accept_loop::SessionCeiling::new(move || {

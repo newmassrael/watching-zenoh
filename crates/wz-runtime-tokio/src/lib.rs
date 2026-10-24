@@ -113,7 +113,9 @@ pub(crate) mod emission_cost;
 /// The median cost of one keepalive emission of this process, measured; `None` until enough
 /// emissions were timed.
 #[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
-pub use emission_cost::{keepalive_emission_cost_floor_ns, keepalive_emission_cost_median_ns};
+pub use emission_cost::{
+    calibrate_with_probe, keepalive_emission_cost_floor_ns, keepalive_emission_cost_median_ns,
+};
 
 /// The longest a keepalive timer of this process was served after its time: what the
 /// lease depends on, read where it is made (see the function's own doc).

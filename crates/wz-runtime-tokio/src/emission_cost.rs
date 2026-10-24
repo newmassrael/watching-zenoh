@@ -11,9 +11,10 @@
 //! is the node's own reading of the figure the bound needs.
 //!
 //! Every emission of the process, from the session loop or from the pacer, is timed by
-//! [`check_keepalive_timed`], which keeps the last [`WINDOW`] durations, and the first sessions
-//! of a process make one on purpose ([`calibrate_on_establishment`]) so that the figure exists
-//! before the first one falls due. [`keepalive_emission_cost_floor_ns`] is the lower decile of
+//! [`check_keepalive_timed`], which keeps the last [`WINDOW`] durations, and a host that wants the
+//! figure before the first session may seed it with [`calibrate_with_probe`]. A KeepAlive sent
+//! at the moment of establishment would seed it too, and is wrong (see the probe's doc).
+//! [`keepalive_emission_cost_floor_ns`] is the lower decile of
 //! them once [`MIN_SAMPLES`] have been taken, and `None` before, so a node that has emitted
 //! nothing yet is bounded by the recorded model alone. It is the lower decile and not the median
 //! because a duration also holds how long the thread waited for a core, which the declared share
@@ -54,11 +55,6 @@ impl Meter {
         }
     }
 
-    /// Whether fewer than [`MIN_SAMPLES`] emissions were recorded, so that a median cannot be read.
-    fn wants_samples(&self) -> bool {
-        self.written.load(Ordering::Relaxed) < MIN_SAMPLES
-    }
-
     fn record(&self, ns: u64) {
         let slot = self.written.fetch_add(1, Ordering::Relaxed) % WINDOW;
         self.ring[slot].store(ns, Ordering::Relaxed);
@@ -92,23 +88,66 @@ impl Meter {
 
 static METER: Meter = Meter::new();
 
-/// The emission a session makes the moment it is established, while the process has not yet timed
-/// [`MIN_SAMPLES`] of them: one KeepAlive, timed.
+/// How many small frames [`calibrate_with_probe`] writes: more than [`MIN_SAMPLES`], so that the
+/// figure it leaves is readable at once, and fewer than [`WINDOW`], so that the node's own
+/// emissions replace it as they are timed.
+const PROBE_FRAMES: usize = 128;
+
+/// The size of a probe frame: the 2-byte length prefix of the stream framing and the one byte of
+/// a KeepAlive, which is what an emission writes.
+const PROBE_FRAME: [u8; 3] = [1, 0, 0x04];
+
+/// Time [`PROBE_FRAMES`] KeepAlive-sized writes on a private loopback socket, and keep them as the
+/// first samples of the meter, so that the figure the capacity bound is calibrated with exists
+/// before the first session does.
 ///
-/// Without it the first real emission of a session is a third of a lease after it is established
+/// A node that waits for its own emissions has none until a session is a third of a lease old
 /// (3.3 s at a 10 s lease), and a burst of peers that arrives in that time is admitted on the
-/// recorded cost alone, on a host that may charge four times it. A KeepAlive is legal at any time
-/// after the open, and costs the peer one small frame; the first [`MIN_SAMPLES`] sessions of a
-/// process pay it, and the figure the bound is calibrated with then exists before the burst is
-/// over. It is the same call a due emission makes ([`SessionLinkActions::send_keep_alive`]), so
-/// the cost it reads is the cost the bound is about.
-pub(crate) fn calibrate_on_establishment(actions: &SessionLinkActions) {
-    if !METER.wants_samples() {
-        return;
+/// recorded cost alone, on a host that may charge four times it. The obvious way to have one at
+/// once, a KeepAlive sent the moment a session is established, is wrong and was measured to be: on
+/// a lowlatency link the stream length prefix changes width (2 to 4 bytes) after the open returns,
+/// so a frame written inside the open is read by the peer as garbage and the link is lost
+/// (`lowlatency_e2e`). The probe touches no peer: it writes to its own socket pair, so it cannot
+/// be a frame on anyone's wire, and what it times is the dominant cost of an emission, a small
+/// write to a stream socket. Called by a host before it accepts sessions; a host that does not
+/// call it has the node's own emissions only, which is also correct, only later.
+///
+/// Returns how many frames were timed; `0` when the socket pair could not be made, in which case
+/// the recorded model stands.
+pub fn calibrate_with_probe() -> usize {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    let Ok(listener) = TcpListener::bind("127.0.0.1:0") else {
+        return 0;
+    };
+    let Ok(addr) = listener.local_addr() else {
+        return 0;
+    };
+    let Ok(mut writer) = TcpStream::connect(addr) else {
+        return 0;
+    };
+    let Ok((mut reader, _)) = listener.accept() else {
+        return 0;
+    };
+    // Frames go out as they are written, as an emission's do.
+    let _ = writer.set_nodelay(true);
+    // Drained as it arrives, so that the writes are never waiting on a full buffer.
+    let drain = std::thread::spawn(move || {
+        let mut sink = [0u8; 512];
+        while matches!(reader.read(&mut sink), Ok(n) if n > 0) {}
+    });
+    let mut timed = 0;
+    for _ in 0..PROBE_FRAMES {
+        let started = Instant::now();
+        if writer.write_all(&PROBE_FRAME).is_err() {
+            break;
+        }
+        METER.record(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+        timed += 1;
     }
-    let started = Instant::now();
-    actions.send_keep_alive();
-    METER.record(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+    drop(writer);
+    let _ = drain.join();
+    timed
 }
 
 /// [`check_keepalive_deadline`], timing the emission when it emits. The one call every emitter of
@@ -154,19 +193,33 @@ mod tests {
         assert_eq!(meter.median_ns(), Some(40_000));
     }
 
+    /// The probe leaves a figure a host can read at once, times what it says it timed, touches no
+    /// session (it has none to touch), and what it records is a duration of a write on a socket,
+    /// not nothing and not seconds.
     #[test]
-    fn a_meter_wants_samples_until_it_can_read_a_median() {
-        let meter = Meter::new();
-        for _ in 0..MIN_SAMPLES - 1 {
-            assert!(meter.wants_samples());
-            meter.record(1);
-        }
-        assert!(meter.wants_samples());
-        meter.record(1);
-        assert!(
-            !meter.wants_samples(),
-            "from here emissions are timed as they fall due"
+    fn the_probe_seeds_the_meter_before_any_session_exists() {
+        let timed = calibrate_with_probe();
+        assert_eq!(
+            timed, PROBE_FRAMES,
+            "every probe frame was written and timed"
         );
+        let floor = keepalive_emission_cost_floor_ns().expect("a floor after the probe");
+        let median = keepalive_emission_cost_median_ns().expect("a median after the probe");
+        assert!(floor > 0, "a write takes time");
+        assert!(floor <= median, "the lower decile is not above the median");
+        assert!(
+            median < 50_000_000,
+            "a 3-byte write on loopback is not 50 ms: {median} ns"
+        );
+    }
+
+    /// The probe is a host's call and not an implicit one: a process that never calls it has no
+    /// figure from it, and the meter says so as `None` until its own emissions fill it.
+    #[test]
+    fn a_fresh_meter_has_no_figure_until_it_is_fed() {
+        let meter = Meter::new();
+        assert_eq!(meter.floor_ns(), None);
+        assert_eq!(meter.median_ns(), None);
     }
 
     #[test]

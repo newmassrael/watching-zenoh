@@ -471,9 +471,16 @@ forwarded message there was 46 to 52 us at 8000 messages/s where this host reads
 and the recorded `c_k` of 10 us was a figure for another machine. A constant recorded on one host is not a
 promise about another, so the router now measures the cost on its own host. Every keepalive emission of the
 process is timed (`wz-runtime-tokio`, `emission_cost`: the session loop's and the pacer's, one population, the
-last 256 kept), and the first 64 sessions of a process make one on purpose at establishment, so that the
-figure exists within milliseconds and not a third of a lease after the first session (a burst of peers that
-arrives in that time would be admitted on the recorded cost alone). The figure compared is the LOWER DECILE of
+last 256 kept). Its own emissions come a third of a lease after the first session, and a burst of peers
+that arrives sooner would be admitted on the recorded cost alone, so the router seeds the meter before it
+accepts anything (`calibrate_with_probe`: 128 KeepAlive-sized writes timed on a private loopback socket pair,
+which touches no peer). The first version of the seed was a KeepAlive sent at the establishment of each of the
+first 64 sessions, and it was wrong in a way only a test of a different transport showed: on a lowlatency link
+the stream length prefix changes from two bytes to four after the open returns, a frame written inside the open
+is read by the peer as garbage and the link is lost (hosted Layer C1ad,
+`lowlatency_negotiates_and_delivers_put_over_real_tcp`, red from the calibration's first push to this fix; found
+by a peer's bisection and confirmed by making the emission a no-op, which passed). A frame that the node puts on
+a peer's wire for its own purposes is a protocol act and not a measurement. The figure compared is the LOWER DECILE of
 the window, not the median, and that was learned by running it: the first version used the median, and on
 the build host under 32 hogs the median swings between 4 and 19 us with the load of the moment (a duration
 holds how long the thread waited for a core, which the declared share already accounts for), so the router

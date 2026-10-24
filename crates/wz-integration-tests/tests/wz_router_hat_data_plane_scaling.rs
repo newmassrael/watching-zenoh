@@ -613,11 +613,12 @@ fn measure(scenario: Scenario) -> Window {
             subscribers - up
         );
         // The router measures its own host, so on a dearer one it admits fewer than the build
-        // host's costs allow; a router that admits under a quarter of that is not calibrating,
-        // it is refusing.
+        // host's costs allow (a hosted runner read 178 where 1100 are recorded, its floor 2.5 to
+        // 6 times the build host's); a router that admits under a tenth of that is not
+        // calibrating, it is refusing.
         assert!(
-            up >= expected_up / 4,
-            "the router admitted {up} sessions, under a quarter of the {expected_up} the recorded \
+            up >= expected_up / 10,
+            "the router admitted {up} sessions, under a tenth of the {expected_up} the recorded \
              costs allow; the router said:{}",
             router
                 .capacity_line

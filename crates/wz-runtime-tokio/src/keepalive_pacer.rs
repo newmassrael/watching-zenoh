@@ -84,7 +84,6 @@ pub(crate) fn spawn_keepalive_pacer(actions: &Arc<SessionLinkActions>, clock: To
     let Some(generation) = established_at(actions) else {
         return;
     };
-    crate::emission_cost::calibrate_on_establishment(actions);
     let weak = Arc::downgrade(actions);
     drop(WzRuntime::Control.spawn(pace(weak, clock, generation)));
 }

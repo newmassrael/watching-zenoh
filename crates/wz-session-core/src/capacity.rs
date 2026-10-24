@@ -824,8 +824,11 @@ mod tests {
     fn scaling_document() -> std::string::String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/router-data-plane-scaling.md");
+        // A checkout with CRLF line endings (Windows) reads the same document: the tests match
+        // text that spans a line break, and the break is not what they are about.
         std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{} is read by the capacity tests: {e}", path.display()))
+            .replace("\r\n", "\n")
     }
 
     /// The costs the document states are the costs the code carries: a constant moved without the
