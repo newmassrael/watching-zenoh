@@ -35,6 +35,8 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use wz_session_core::sorted_chunks::SortedChunks;
+
 use crate::filter::Truth;
 use crate::payload::{RowKey, RowVerdict};
 
@@ -158,12 +160,16 @@ impl Base {
 
     /// This base with `delta` written over it, in blocks of exactly the size
     /// they hold.
-    fn merged(&self, delta: &BTreeMap<RowKey, u32>) -> Self {
+    fn merged(&self, delta: &SortedChunks<RowKey, u32>) -> Self {
         let mut counts: BTreeMap<(usize, usize), usize> = BTreeMap::new();
         for b in &self.blocks {
             *counts.entry((b.list, b.direction)).or_default() += b.at.len();
         }
-        for key in delta.keys().filter(|key| self.find(key).is_none()) {
+        for key in delta
+            .iter()
+            .map(|(key, _)| key)
+            .filter(|key| self.find(key).is_none())
+        {
             let (list, direction, _) = key.parts();
             *counts.entry((list, direction)).or_default() += 1;
         }
@@ -213,7 +219,7 @@ impl Base {
 pub(crate) struct VerdictColumn {
     patterns: Arc<Patterns>,
     base: Arc<Base>,
-    delta: BTreeMap<RowKey, u32>,
+    delta: SortedChunks<RowKey, u32>,
 }
 
 impl VerdictColumn {
@@ -246,19 +252,17 @@ impl VerdictColumn {
     pub(crate) fn len(&self) -> usize {
         let fresh = self
             .delta
-            .keys()
-            .filter(|key| self.base.find(key).is_none())
+            .iter()
+            .filter(|(key, _)| self.base.find(key).is_none())
             .count();
         self.base.rows + fresh
     }
 
-    /// Bytes the column holds: the sorted rows, the recent writes (a model of
-    /// their map), and the patterns.
+    /// Bytes the column holds: the sorted rows, the recent writes and the
+    /// patterns, each as its own allocations say.
     #[cfg(any(test, feature = "dissect"))]
     pub(crate) fn memory(&self) -> usize {
-        self.base.bytes()
-            + wz_session_core::heap_account::btree_bytes::<RowKey, u32>(self.delta.len())
-            + self.patterns.bytes()
+        self.base.bytes() + self.delta.allocated_bytes() + self.patterns.bytes()
     }
 
     /// Fold `delta` into the sorted rows when it has grown past a fraction of

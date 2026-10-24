@@ -72,10 +72,9 @@
 
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
-use crate::ascending_map::AscendingMap;
 use crate::byte_log::{LogPlace, UnitLog};
 use crate::chunk_log::{ChunkLog, Iter};
 use crate::inbound::InboundFrame;
@@ -87,6 +86,7 @@ use crate::passive::{
 };
 #[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::IngestOutcome;
+use crate::sorted_chunks::SortedChunks;
 
 /// Decoded transport messages, in the order the observer produced them.
 ///
@@ -178,7 +178,7 @@ struct ChainFacts {
     fold: ChainFold,
     /// By produced-index, the outcome and identity of every held row the fold
     /// moved; a row it did not move (no fragment, or no outcome) has none.
-    rows: AscendingMap<(IngestOutcome, Option<u64>)>,
+    rows: SortedChunks<u64, (IngestOutcome, Option<u64>)>,
 }
 
 /// The key a fragment chain is held under: the direction it travelled, whether
@@ -306,7 +306,7 @@ impl MessageList {
     /// row that is not a fragment or carries no outcome, and for one not held.
     #[cfg(feature = "reassembly")]
     pub fn chain_of(&self, produced: u64) -> Option<(IngestOutcome, Option<u64>)> {
-        self.chains.rows.get(produced).copied()
+        self.chains.rows.get(&produced).copied()
     }
 
     /// Move the chain fold by the message about to be appended at `produced`.
@@ -488,7 +488,7 @@ impl MessageList {
         let _ = self.chain_prefix.observe(&frame);
         // A row no longer held has no fact to be read.
         #[cfg(feature = "reassembly")]
-        self.chains.rows.remove(first_produced);
+        self.chains.rows.remove(&first_produced);
         Some(Discarded {
             // `produced` deliberately does NOT move here. It counts what was
             // ever appended, and a trim is the one event a consumer's watermark
@@ -694,7 +694,7 @@ struct Index {
     log: UnitLog,
     /// The frames of the rows kept whole, by produced-index. Few: a list keeps
     /// a row whole only where it cannot read it again.
-    held: BTreeMap<u64, PassiveFrame>,
+    held: SortedChunks<u64, PassiveFrame>,
     /// Per direction, the produced-index below which no row of that direction
     /// is an entry any more: where [`Self::keep_whole_before`] resumes, so a
     /// source that releases bytes on every packet does not walk the rows it
@@ -705,8 +705,8 @@ struct Index {
     /// at a handshake message, so this stays a few long.
     contexts: Vec<FlowContext>,
     /// The facts few rows have, by the row's produced-index
-    /// ([`AscendingMap`]: the keys arrive in order and leave from the front).
-    sparse: AscendingMap<Sparse>,
+    /// ([`SortedChunks`]: the keys arrive in order and leave from the front).
+    sparse: SortedChunks<u64, Sparse>,
     /// What each fragment row came to, apart from [`Self::sparse`] because a
     /// completed chain's fate owns a buffer and the others are three bytes.
     #[cfg(feature = "reassembly")]
@@ -724,7 +724,7 @@ struct Index {
     /// record's plaintext) ends where the layer's own unit does. Kept once per
     /// unit for the rows flagged [`WIRE_END`], a flagged row with no end here
     /// has none, and the unit's last row lets it go.
-    wire_ends: BTreeMap<(u16, u64), u64>,
+    wire_ends: SortedChunks<(u16, u64), u64>,
 }
 
 /// What a [`MessageList`] holds on the heap, by structure (open-debt item 924,
@@ -811,9 +811,9 @@ impl Index {
         ListMemory {
             rows: self.entries.allocated_bytes(),
             unit_log: self.log.allocated(),
-            whole_rows: crate::heap_account::btree_bytes::<u64, PassiveFrame>(self.held.len()),
+            whole_rows: self.held.allocated_bytes(),
             sparse: self.sparse.allocated_bytes() + fates,
-            wire_ends: crate::heap_account::btree_bytes::<(u16, u64), u64>(self.wire_ends.len()),
+            wire_ends: self.wire_ends.allocated_bytes(),
             joined,
             // The list's, which owns the chain facts and adds them.
             chains: 0,
@@ -1035,8 +1035,8 @@ enum FateClass {
 #[cfg(feature = "reassembly")]
 #[derive(Debug, Default)]
 struct Fates {
-    classes: AscendingMap<FateClass>,
-    joined: AscendingMap<Vec<u8>>,
+    classes: SortedChunks<u64, FateClass>,
+    joined: SortedChunks<u64, Vec<u8>>,
 }
 
 #[cfg(feature = "reassembly")]
@@ -1058,9 +1058,9 @@ impl Fates {
 
     /// The fate of the row at `key`, the joined message copied.
     fn get(&self, key: u64) -> Option<FragmentFate> {
-        Some(match *self.classes.get(key)? {
+        Some(match *self.classes.get(&key)? {
             FateClass::Joined => {
-                FragmentFate::Joined(self.joined.get(key).cloned().unwrap_or_default())
+                FragmentFate::Joined(self.joined.get(&key).cloned().unwrap_or_default())
             }
             FateClass::WithoutResolution => FragmentFate::WithoutResolution,
             FateClass::Pending(outcome) => FragmentFate::Pending(outcome),
@@ -1069,8 +1069,8 @@ impl Fates {
 
     /// Take the fate of the row at `key` out.
     fn remove(&mut self, key: u64) -> Option<FragmentFate> {
-        Some(match self.classes.remove(key)? {
-            FateClass::Joined => FragmentFate::Joined(self.joined.remove(key).unwrap_or_default()),
+        Some(match self.classes.remove(&key)? {
+            FateClass::Joined => FragmentFate::Joined(self.joined.remove(&key).unwrap_or_default()),
             FateClass::WithoutResolution => FragmentFate::WithoutResolution,
             FateClass::Pending(outcome) => FragmentFate::Pending(outcome),
         })
@@ -1430,7 +1430,7 @@ impl Index {
                 if let Some(slot) = self.entries.get_mut(position) {
                     *slot = UnitRow::HELD_ROW;
                 }
-                self.sparse.remove(key);
+                self.sparse.remove(&key);
                 // The frame kept whole carries what the fate says.
                 #[cfg(feature = "reassembly")]
                 let _ = self.fates.remove(key);
@@ -1517,7 +1517,7 @@ impl Index {
                 break;
             }
             let sparse = (member.flags & SPARSE != 0)
-                .then(|| self.sparse.get(first_produced + (from + at) as u64))
+                .then(|| self.sparse.get(&(first_produced + (from + at) as u64)))
                 .flatten();
             if messages.is_empty() {
                 resync = sparse.and_then(|s| s.resync);
@@ -1658,7 +1658,7 @@ impl Index {
             Entry::Unit(row) => {
                 let frame = self.read_unit(0, first_produced, source).take(0);
                 let _ = self.entries.pop_front();
-                let sparse = self.sparse.remove(first_produced);
+                let sparse = self.sparse.remove(&first_produced);
                 #[cfg(feature = "reassembly")]
                 let fate = self.fates.remove(first_produced);
                 #[cfg(not(feature = "reassembly"))]

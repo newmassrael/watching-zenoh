@@ -1967,6 +1967,7 @@ impl FlowDissection {
         for held in &self.held {
             into.plaintext += wz_session_core::heap_account::vec_bytes(held);
         }
+        into.plaintext += self.session.buffer_capacity();
         if let Framing::Encrypted(state) = &self.framing {
             into.tls_records += state.memory();
         }
@@ -1986,6 +1987,7 @@ impl DatagramDissection {
         into.scouting += self.scouting.memory();
         for stream in &self.quic_streams {
             into.lists = into.lists.plus(&stream.frames.memory());
+            into.plaintext += stream.session.buffer_capacity();
             for plaintext in &stream.plaintext {
                 into.plaintext += wz_session_core::heap_account::vec_bytes(&plaintext.bytes);
             }
@@ -10710,7 +10712,7 @@ mod datagram_tests {
     /// The payload is an opaque tail to `parse_inbound`, so the frame still
     /// decodes as the frame it is — the entropy is in the part the transport
     /// layer does not read, exactly as it is on the wire.
-    fn framed_frame_with_payload(sn: u8, len: usize, seed: u32) -> Vec<u8> {
+    pub(crate) fn framed_frame_with_payload(sn: u8, len: usize, seed: u32) -> Vec<u8> {
         assert!(sn < 0x80, "the one-byte VLE arm");
         let mut wire = alloc::vec![
             wz_session_core::wire_const::T_MID_FRAME | wz_session_core::wire_const::FLAG_T_FRAME_R,

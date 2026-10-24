@@ -348,7 +348,8 @@ pub struct LiveMemory {
     pub census: wz_capture::FoldMemory,
     /// What the field walk keeps between calls.
     pub fields: wz_capture::FoldMemory,
-    /// The drain's marks and the runs that map a message to its number.
+    /// The runs that map a message to its number, one per drain mark. The marks
+    /// themselves follow the count of lists and are not in the report.
     pub drain: usize,
     /// The word each selector said of each row, which the selection door keeps to
     /// say which moved.
@@ -660,9 +661,7 @@ impl LiveDissection {
             census,
             selection: self.selection_said.memory(),
             fields: self.fields_memory.memory(),
-            drain: wz_session_core::heap_account::btree_bytes::<(FlowKey, MessageListOrigin), Mark>(
-                self.marks.len(),
-            ) + self
+            drain: self
                 .marks
                 .values()
                 .chain(self.scouting_marks.values())

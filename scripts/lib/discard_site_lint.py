@@ -181,7 +181,7 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "let sparse = self.sparse.remove(first_produced);",
+        "let sparse = self.sparse.remove(&first_produced);",
         "Open-debt item 924, step 4b — the facts kept apart for the row the "
         "door is taking. The row was read again with them before this line; "
         "what reading the rest of its unit still needs of them is kept in the "
@@ -204,7 +204,7 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "self.chains.rows.remove(first_produced);",
+        "self.chains.rows.remove(&first_produced);",
         "Open-debt item 924, D9 — the chain fact of the row the door is "
         "taking: the row itself leaves in the `#[must_use] Discarded` receipt, "
         "and the fact is what the fold decided for that row and is read for no "
@@ -228,7 +228,7 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "self.sparse.remove(key);",
+        "self.sparse.remove(&key);",
         "Open-debt item 924, step 4b — a row turned from an entry into a frame "
         "kept whole: its facts are in the frame now, read from it, and the "
         "row itself stays in the list",
@@ -250,7 +250,7 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "Some(match self.classes.remove(key)? {",
+        "Some(match self.classes.remove(&key)? {",
         "Open-debt item 924, step 5 — `Fates::remove`, the storage under the two "
         "sites above: it returns the fate it takes out, so the caller holds what "
         "went and either keeps it (a unit still being read) or drops it with the "
@@ -258,7 +258,7 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
-        "FateClass::Joined => FragmentFate::Joined(self.joined.remove(key).unwrap_or_default()),",
+        "FateClass::Joined => FragmentFate::Joined(self.joined.remove(&key).unwrap_or_default()),",
         "Open-debt item 924, step 5 — the joined message of a completed chain, "
         "taken out with its class by `Fates::remove` and returned inside the "
         "fate it belongs to, not dropped here",

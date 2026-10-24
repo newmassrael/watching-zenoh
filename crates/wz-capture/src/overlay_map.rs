@@ -26,24 +26,28 @@
 //! reading makes (the verdicts of exchanges it judges unclosed) land in the
 //! reading's own `delta` and are gone with it.
 //!
-//! The amortised cost of a write is the cost of one `BTreeMap` insertion, and the
-//! cost of a copy no longer depends on how many keys the map holds.
+//! The amortised cost of a write is the cost of one insertion into a sorted chunk
+//! (`wz_session_core::sorted_chunks`), and the cost of a copy no longer depends on
+//! how many keys the map holds. Both layers are sorted chunks and not B-trees so
+//! that the bytes they hold are the capacities of what they allocated, which a
+//! memory report can state exactly.
 
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
+
+use wz_session_core::sorted_chunks::SortedChunks;
 
 /// A map whose copies share what was written before them. See the module docs.
 #[derive(Debug, Clone)]
 pub(crate) struct OverlayMap<K: Ord, V> {
-    base: Arc<BTreeMap<K, V>>,
-    delta: BTreeMap<K, V>,
+    base: Arc<SortedChunks<K, V>>,
+    delta: SortedChunks<K, V>,
 }
 
 impl<K: Ord, V> Default for OverlayMap<K, V> {
     fn default() -> Self {
         Self {
-            base: Arc::new(BTreeMap::new()),
-            delta: BTreeMap::new(),
+            base: Arc::new(SortedChunks::new()),
+            delta: SortedChunks::new(),
         }
     }
 }
@@ -74,20 +78,19 @@ impl<K: Ord + Clone, V: Clone + Default> OverlayMap<K, V> {
     pub(crate) fn len(&self) -> usize {
         let fresh = self
             .delta
-            .keys()
-            .filter(|key| !self.base.contains_key(*key))
+            .iter()
+            .filter(|(key, _)| !self.base.contains_key(key))
             .count();
         self.base.len() + fresh
     }
 
-    /// Bytes the two layers hold: a model of each map's nodes
-    /// ([`wz_session_core::heap_account::btree_bytes`]), and what `owned` says
-    /// each value holds beyond its slot. It reads every value, so its cost
-    /// follows the map; it is asked for on a report, not on a walk.
+    /// Bytes the two layers hold, as their chunks' capacities say, and what
+    /// `owned` says each value holds beyond its slot. It reads every value, so its
+    /// cost follows the map; it is asked for on a report, not on a walk.
     #[cfg(all(feature = "dissect", feature = "network-codecs"))]
     pub(crate) fn memory(&self, owned: impl Fn(&V) -> usize) -> usize {
-        wz_session_core::heap_account::btree_bytes::<K, V>(self.base.len())
-            + wz_session_core::heap_account::btree_bytes::<K, V>(self.delta.len())
+        self.base.allocated_bytes()
+            + self.delta.allocated_bytes()
             + self
                 .base
                 .values()
@@ -111,6 +114,7 @@ impl<K: Ord + Clone, V: Clone + Default> OverlayMap<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::collections::BTreeMap;
 
     /// A map and a plain one given the same writes read the same, through folds
     /// into the base and through copies that were written to and dropped.

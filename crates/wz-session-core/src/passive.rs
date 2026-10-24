@@ -2089,6 +2089,7 @@ impl PassiveSession {
         }
         let body: Vec<u8> = stream.buf[width..width + payload_len].to_vec();
         stream.buf.drain(..width + payload_len);
+        stream.give_back_capacity();
         stream.consumed += width + payload_len;
         let resync = stream.pending_resync.take();
         // A message's instant is that of ITS first byte, which the walk names as
@@ -2286,6 +2287,13 @@ impl PassiveSession {
     /// caller's own bookkeeping is a bound nobody can check.
     pub fn buffered(&self, direction: Direction) -> usize {
         self.stream(direction).buf.len()
+    }
+
+    /// Bytes the two directions' stream buffers hold allocated, consumed or not:
+    /// what a handle that keeps this observer holds for it, which
+    /// [`Self::buffered`] (the bytes waiting) does not say.
+    pub fn buffer_capacity(&self) -> usize {
+        self.a.buf.capacity() + self.b.buf.capacity()
     }
 
     /// R311y609 (C12) — judge one decoded frame's sequence number against the
@@ -3530,6 +3538,17 @@ fn candidate_at(buf: &[u8], at: usize, width: usize) -> Candidate {
 pub const RESYNC_SCAN_WINDOW: usize = MAX_FRAME_PAYLOAD + PREFIX_WIDTH_LOWLATENCY;
 
 impl DirectionStream {
+    /// Hand back the buffer's capacity past twice what it holds now. A caller
+    /// that pushes a whole recovered stream at once (a decrypted TLS flow) grows
+    /// the buffer to it, and draining the frames out of it leaves the capacity,
+    /// which no row reads. As the TCP stream's kept bytes do (R3358).
+    fn give_back_capacity(&mut self) {
+        let held = self.buf.len();
+        if self.buf.capacity() > 2 * held + 4096 {
+            self.buf.shrink_to(held + held / 4 + 4096);
+        }
+    }
+
     /// R311y609 — judge this direction desynchronised and start a scan.
     ///
     /// Consumes NOTHING. That is the load-bearing part: the scan begins at the

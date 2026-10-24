@@ -115,11 +115,23 @@ impl ByteLog {
         {
             let _ = self.chunks.pop_front();
         }
+        // A deque does not give back what it grew to as its front goes; a log
+        // that held many chunks and now holds few would keep the peak's list.
+        if self.chunks.len() * 4 <= self.chunks.capacity() {
+            self.chunks.shrink_to_fit();
+        }
     }
 
-    /// Bytes the log holds allocated, logged or not.
+    /// Bytes the log holds allocated, logged or not: every chunk's buffer and the
+    /// list of chunks that holds them, which doubles as the log grows and is as
+    /// much the log's as the bytes are.
     pub(crate) fn allocated(&self) -> usize {
-        self.chunks.iter().map(|c| c.bytes.capacity()).sum()
+        self.chunks.capacity() * core::mem::size_of::<Chunk>()
+            + self
+                .chunks
+                .iter()
+                .map(|c| c.bytes.capacity())
+                .sum::<usize>()
     }
 }
 

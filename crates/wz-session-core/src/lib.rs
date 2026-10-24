@@ -1250,10 +1250,10 @@ pub mod passive_messages;
 #[cfg(feature = "alloc")]
 pub mod chunk_log;
 
-// Open-debt item 924, step 5 — a map for keys that arrive ascending and leave from
-// the front, in a chunked log. Undocumented on this line for the reason above.
+// Open-debt item 924, step 5 — an ordered map in sorted chunks whose every byte is
+// counted. Undocumented on this line for the reason above.
 #[cfg(feature = "alloc")]
-pub mod ascending_map;
+pub mod sorted_chunks;
 
 // Open-debt item 924, step 5 — the arithmetic a holder's memory report shares.
 // Undocumented on this line for the reason the module above gives.
