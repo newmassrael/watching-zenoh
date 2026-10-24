@@ -18,7 +18,9 @@
 # Images are the keys of the stack gate: zephyr-client-fixed, zephyr-client-fixed-batching (they answer,
 # and the host measures a GET through a router) and zephyr-client-fixed-get (it asks a responder, and its
 # own console line carries the round trip). A MEASURE image (zephyr-tls-fit, the secure channel's fit)
-# runs alone, with no router: it is flashed, reset, and held to its own console verdict.
+# runs alone, with no router: it is flashed, reset, and held to its own console verdict. A VERIFY image
+# (zephyr-client-fixed-tls) dials a router over the secure channel: the lane configures the router to
+# pin the certificate the image prints, and holds the run to the image's line that its peer is verified.
 #
 # WHERE IT RUNS: from a checkout of this repository on the host the kit is attached to (the lane builds
 # from the tree it lives in, so what was measured is what is in front of you). Send a tree there with
@@ -100,6 +102,13 @@ image_spec() {
             OVERLAYS="overlays/t2g_zeth.conf;overlays/t2g_client.conf;overlays/t2g_client_fixed.conf;overlays/t2g_client_get.conf"
             KIND=ask
             ;;
+        # A VERIFY image dials a router over the secure channel (decision D9) and its console says
+        # whether it reads the router as the holder of the key the router's zid names. The router
+        # is configured from what the image prints: the certificate it pins is the image's own.
+        zephyr-client-fixed-tls)
+            OVERLAYS="overlays/t2g_zeth.conf;overlays/t2g_client.conf;overlays/t2g_client_fixed.conf;overlays/t2g_client_tls.conf"
+            KIND=verify
+            ;;
         *) return 1 ;;
     esac
 }
@@ -107,6 +116,11 @@ IMAGES=(zephyr-client-fixed zephyr-client-fixed-batching zephyr-client-fixed-get
 # The measure images: not the stack gate's (their stack is what they report) and not yet a resource
 # row's (the row is set from what they measure).
 MEASURE_IMAGES=(zephyr-tls-fit)
+# The verify images: not yet the stack gate's nor a resource row's, for the reason the measure
+# images are not; their first runs on the kit are what those rows will be set from.
+VERIFY_IMAGES=(zephyr-client-fixed-tls)
+# The port a verify image's router listens on for `tls/` (the image's CONFIG_WZ_CLIENT_ENDPOINT).
+TLS_PORT=7448
 
 load_lab() {
     if [[ ! -r "$LAB_ENV" ]]; then
@@ -289,6 +303,8 @@ PY
     ok "$key" "$(arm-none-eabi-size "$elf" | awk 'NR==2 {printf "text %s, data %s, bss %s", $1, $2, $3}'); padded image sha256 ${sha:0:16}"
     if [[ "$KIND" == measure ]]; then
         ok "$key" "a measure image: its stack is one of the figures it reports, not the stack gate's"
+    elif [[ "$KIND" == verify ]]; then
+        ok "$key" "a verify image: no stack gate row yet, its first runs on the kit set it"
     elif python3 "$ROOT/scripts/lib/stack_frame_gate.py" --check "$key" --elf "$elf" >"$out/stack-gate.log" 2>&1; then
         ok "$key" "the stack gate holds the image ($(grep -a 'stack-chain: OK' "$out/stack-gate.log" | head -n 1 | cut -c1-120))"
     else
@@ -380,8 +396,12 @@ run() {
     PIDS=()
     ADDR_ADDED=""
     trap stop_all EXIT
-    if [[ "$KIND" == measure ]]; then
-        run_measure "$key"
+    if [[ "$KIND" == measure || "$KIND" == verify ]]; then
+        if [[ "$KIND" == measure ]]; then
+            run_measure "$key"
+        else
+            run_verify "$key"
+        fi
         stop_all
         trap - EXIT
         [[ "$fails" -eq "$before" ]]
@@ -541,6 +561,95 @@ run_measure() {
     fi
 }
 
+# A verify image after its flash: the interface's address, the console, and a reset with no router
+# yet. The image prints its certificate (PEM) before it dials; the router is then configured as an
+# operator configures one for that device: mutual TLS on, the image's certificate as the root it
+# pins, and a zid that is the one the router's own key names (decision D1: the first 16 bytes of
+# SHA-256 over the key's DER SubjectPublicKeyInfo, which zenoh's configuration spells as hex of
+# those bytes read little-endian). The verdict is the image's own line once its session is up.
+run_verify() {
+    local key="$1"
+    if ! sudo -n ip addr add "$KIT_HOST_IP/24" dev "$KIT_IFACE" 2>"$OUT/ip.log"; then
+        bad "$key" "the interface $KIT_IFACE did not take $KIT_HOST_IP ($OUT/ip.log)"
+        return 1
+    fi
+    ADDR_ADDED=1
+    stty -F "$KIT_CONSOLE" 115200 raw -echo -hupcl
+    setsid timeout 600 cat "$KIT_CONSOLE" >"$OUT/console.raw" 2>"$OUT/console.err" </dev/null &
+    PIDS+=("$!")
+    sleep 2
+    local mark
+    mark="$(stat -c %s "$OUT/console.raw")"
+    if timeout 60 "$KIT_PROGTOOLS/openocd/bin/openocd" -s "$KIT_PROGTOOLS/openocd/scripts" \
+        -f interface/kitprog3.cfg -f target/infineon/cyt4bf.cfg -c "init" -c "reset run" -c "shutdown" \
+        >"$OUT/reset.log" 2>&1; then
+        ok "$key" "the kit was reset ($OUT/reset.log)"
+    else
+        bad "$key" "the reset failed ($OUT/reset.log)"
+        return 1
+    fi
+    # The run's lines are the ones after the reset.
+    since() { tail -c +"$((mark + 1))" "$OUT/console.raw" | tr -d '\r'; }
+    local waited=0
+    while [[ "$waited" -lt 60 ]] && ! since | grep -aq -- '-----END CERTIFICATE-----'; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    since | sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' >"$OUT/device.pem"
+    if ! openssl x509 -in "$OUT/device.pem" -noout -subject >"$OUT/device.subject" 2>&1; then
+        bad "$key" "the image printed no certificate a router can read in 60 s ($OUT/console.raw)"
+        return 1
+    fi
+    ok "$key" "the image printed its certificate ($(cat "$OUT/device.subject"))"
+
+    # The router's identity: a P-256 key, a certificate self-signed over it, and the zid it names.
+    if ! { openssl ecparam -name prime256v1 -genkey -noout -out "$OUT/router.key" 2>"$OUT/router-id.log" &&
+        openssl req -new -x509 -key "$OUT/router.key" -subj /CN=wz-kit-router -days 3650 \
+            -out "$OUT/router.pem" 2>>"$OUT/router-id.log"; }; then
+        bad "$key" "the router's identity could not be made ($OUT/router-id.log)"
+        return 1
+    fi
+    local digest le="" i id
+    digest="$(openssl pkey -in "$OUT/router.key" -pubout -outform DER 2>>"$OUT/router-id.log" | sha256sum)"
+    digest="${digest:0:32}"
+    for ((i = 30; i >= 0; i -= 2)); do
+        le+="${digest:i:2}"
+    done
+    # zenoh refuses an id with leading zeros.
+    id="${le#"${le%%[!0]*}"}"
+    cat >"$OUT/router.json5" <<EOF
+{ id: "$id", mode: "router",
+  transport: { link: { tls: {
+    listen_certificate: "$OUT/router.pem", listen_private_key: "$OUT/router.key",
+    root_ca_certificate: "$OUT/device.pem", enable_mtls: true } } } }
+EOF
+    setsid "$KIT_ZENOHD" --config "$OUT/router.json5" -l "tls/$KIT_HOST_IP:$TLS_PORT" \
+        --no-multicast-scouting --rest-http-port none >"$OUT/router.log" 2>&1 </dev/null &
+    PIDS+=("$!")
+    ok "$key" "a router pins the image's certificate and claims zid $id ($OUT/router.json5)"
+
+    waited=0
+    while [[ "$waited" -lt 120 ]] && ! since | grep -aq 'session established, peer '; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    local verdict
+    verdict="$(since | grep -a 'session established, peer ' | head -n 1)"
+    if [[ -z "$verdict" ]]; then
+        bad "$key" "no session in 120 s after the router came up ($OUT/console.raw, $OUT/router.log)"
+    elif [[ "$verdict" == *"peer verified"* ]]; then
+        ok "$key" "the image and the router verify each other: $verdict"
+    else
+        bad "$key" "the session is up but the image does not read the router as verified: $verdict"
+    fi
+    sleep 5
+    if since | grep -aq 'wz: FAIL'; then
+        bad "$key" "the console says 'wz: FAIL' ($(since | grep -a 'wz: FAIL' | head -n 1))"
+    else
+        ok "$key" "the console has no 'wz: FAIL' line"
+    fi
+}
+
 build_responder() {
     # The host node with the getter, built here from this tree: the peer the asking image asks.
     mkdir -p "$LANE_HOME"
@@ -601,6 +710,23 @@ PY
             ok selftest "$key is a measure image of deploy/$APP that ends on '$DONE_TAG done'"
         fi
     done
+    for key in "${VERIFY_IMAGES[@]}"; do
+        if ! image_spec "$key" || [[ "$KIND" != verify ]]; then
+            bad selftest "$key is listed as a verify image and the table does not make it one"
+            continue
+        fi
+        IFS=';' read -ra files <<<"$OVERLAYS"
+        for overlay in "${files[@]}"; do
+            if [[ ! -f "$ROOT/deploy/zephyr-admin-node/$overlay" ]]; then
+                bad selftest "$key names $overlay, which is not in deploy/zephyr-admin-node"
+            fi
+        done
+        if grep -q "tls/[0-9.]*:$TLS_PORT" "$ROOT/deploy/zephyr-admin-node/overlays/t2g_client_tls.conf"; then
+            ok selftest "$key dials the port its router is given ($TLS_PORT)"
+        else
+            bad selftest "$key's overlay does not dial tls/ on port $TLS_PORT, where its router listens"
+        fi
+    done
     [[ "$fails" -eq 0 ]]
 }
 
@@ -620,7 +746,7 @@ case "$cmd" in
         done
         ;;
     build-responder) build_responder ;;
-    list) printf '%s\n' "${IMAGES[@]}" "${MEASURE_IMAGES[@]}" ;;
+    list) printf '%s\n' "${IMAGES[@]}" "${MEASURE_IMAGES[@]}" "${VERIFY_IMAGES[@]}" ;;
     --selftest) selftest ;;
     *)
         sed -n '9,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
