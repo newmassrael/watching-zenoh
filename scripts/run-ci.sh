@@ -9004,7 +9004,7 @@ layer_c1y_cargo_test_routing_peer() {
     # the pin, not the test.
     # Round 3372 -- 11 -> 13: the same two tests as C1v above, which are not feature-gated.
     # Round 3377 -- 13 -> 14: the local-faces control of C1v above, which is not feature-gated.
-    # Round 3506 -- 14 -> 15: `a_moving_ceiling_refuses_the_peer_past_it_and_counts_it_apart`,
+    # Round 3507 -- 14 -> 15: `a_moving_ceiling_refuses_the_peer_past_it_and_counts_it_apart`,
     # which is `routing-peer`-gated like R2761's. Read off what the command PRINTED.
     _runci_guarded_test "C1y accept_loop" 15 \
         cargo test -p wz-runtime-tokio --features routing-peer --lib accept_loop --quiet || return 1
