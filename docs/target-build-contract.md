@@ -76,16 +76,31 @@ what it was given: the rustc release line and the first line of the C compiler's
 `--version`, never a path. Rejected: the entry installing SDKs (the lanes of the
 owner's machines differ and a licence may bind them).
 
-**T3. A target is a row of the declaration.** `deploy/wz-config.toml` gains `[[target]]`:
-`id`, `triple`, `os`, `libc` (`glibc`, `bionic`, `nto`), `network_stack` (QNX only),
-the toolchain variables required, the system libraries the row ASSUMES the target
-provides (`system_assumed`, see T5), the profiles it can build and the lane that
-grades it. The two QNX stacks are two rows (`io-sock`, `io-pkt`) that share a triple:
-the consumer measured that their artifacts cannot be the same, because the io-sock
-network library is `libsocket.so.4` (under the io-sock library directory) where the
-default SDP has `.so.3`, so the NEEDED entries differ whatever the code does. A target
-whose row is absent, or whose profile combination fails an axis `requires` (C6), is
-refused by the entry with the reason; it never builds something "close".
+**T3. A platform is a row of the declaration.** `deploy/wz-config.toml` has
+`[[platform]]` (not `[[target]]`: the `target` axis of `build-configuration.md` is the
+class above, a host Linux or an MCU image, and a platform is one concrete operating
+system, libc and triple within it): `id`, `triple`, `os`, `libc` (`glibc`, `bionic`,
+`nto`), `network_stack` (QNX only), `std` (`prebuilt`, or `build-std` for a tier-3
+triple), the SDK variables beyond those the triple gives (`toolchain_env_extra`), the
+facilities the operating system provides (`os_provides`, T9), the system libraries the
+row ASSUMES a device has (`system_assumed`, see T5) and the lane that grades it. The
+two QNX stacks are two rows with two triples (`aarch64-unknown-nto-qnx710_iosock` and
+`aarch64-unknown-nto-qnx710`): the consumer measured that their artifacts cannot be
+the same, because the io-sock network library is `libsocket.so.4` (under the io-sock
+library directory) where the default SDP has `.so.3`, so the NEEDED entries differ
+whatever the code does.
+
+A row is declared and CHECKED against the compiler (`wz_config.py --check`): the triple
+must be a target of the pinned rustc, `os` must be its `target_os`, and `libc` what its
+`target_os` and `target_env` give. The variables a build reads for the triple
+(`CC_<triple>`, `AR_<triple>`, `CARGO_TARGET_<TRIPLE>_LINKER`) are derived from it, so
+they cannot drift. A key a row leaves out is NOT ASSESSED, never guessed: today none of
+the four rows states `os_provides`, and only Android states `system_assumed` (measured
+on the probe); the entry refuses a platform it has no such statement for. `lane` is
+`none` for all four until a lane exists and has passed. Which registered profiles a
+platform can build is not a key yet: the mapping from a profile to the artifacts and
+their features is step 3's. A platform whose row is absent is refused by the entry with
+the reason; it never builds something "close".
 
 **T4. Facts come in three classes and the manifest says which.**
 
@@ -93,7 +108,7 @@ refused by the entry with the reason; it never builds something "close".
 |---|---|---|
 | measured | read from the artifact's bytes by a host tool that never runs the artifact | sha256, size, ELF class and machine, interpreter, SONAME, NEEDED, linking (`static` or `dynamic`), RUNPATH and RPATH (present or absent, with the value), the highest symbol-version tag, the API level in `.note.android.ident`, the ABI stamp (T6) |
 | build | recorded by the entry from its own inputs | commit, profile id and version, the resolved features, capabilities and limits, the driver-role table |
-| catalog | read from the declaration | target row, the `requires` a capability declares, the lane |
+| catalog | read from the declaration | platform row, the `os_needs` a capability declares, the lane |
 
 Nothing in the first class is typed by hand. A gate re-measures every artifact the
 entry produced and compares it with the manifest, with a deliberately damaged
@@ -101,7 +116,7 @@ artifact as its control; a gate that read the value the writer had written would
 one statement checked against itself.
 
 **T5. The closure is closed or refused, and what is "system" is the device's fact.**
-Every NEEDED is either `system` (named in the target row's `system_assumed`) or
+Every NEEDED is either `system` (named in the platform row's `system_assumed`) or
 `bundled` (a file in the output directory, listed with its own measurements, and the
 NEEDED entry names that artifact). An artifact that needs anything else makes the
 entry fail naming the library. A `system` entry carries its full SONAME, never a
@@ -169,12 +184,21 @@ version (7.1). A floor the entry could not measure is `null`, never a pass; the 
 that turns floors into "this device may run it" is the consumer's.
 
 **T9. Device requirements are derived from the declaration, not measured.** A
-capability's `requires` (C6) gains the operating-system facilities it needs
-(`threads`, `sockets` by kind, `multicast`, `filesystem`, `entropy`), and the
-manifest lists their union for the resolved profile. They are not measured because
-measuring them means running the artifact. Memory and stack figures are not in
-schema 1: they are the resource gates of step 13 and the manifest names the profile
-they belong to.
+capability's `os_needs` (a key of its own: `requires` is the axis condition of C6) is
+the set of operating-system facilities it MAY ask for, from a closed vocabulary
+(`threads`, `sockets-tcp`, `sockets-udp`, `multicast`, `raw-ethernet`,
+`unix-sockets`, `filesystem`, `entropy`, `wall-clock`). It is an upper bound: a device
+that lacks one is told which capability to turn off, and it does not say a given
+configuration uses it (a TLS plane reads certificate files when its keys name files and
+not when they hold the PEM inline). `[os] base` is what every host build asks for
+(`threads`, `sockets-tcp`, `entropy`). Every capability states `os_needs`, an empty
+list when it asks for nothing beyond the base: a capability nobody assessed has no
+entry and `--check` refuses it. The manifest lists the union for the resolved
+capability set (`os_needs_of`), and `platform_gaps` names what a platform lacks and
+which capability asks for it; a platform with no `os_provides` is unassessed, and the
+answer is "unknown", not "none". They are not measured because measuring them means
+running the artifact. Memory and stack figures are not in schema 1: they are the
+resource gates of step 13 and the manifest names the profile they belong to.
 
 **T10. A refusal writes no manifest.** The entry exits non-zero with the reason on
 stderr and removes a partial output directory. The consumer's tool never meets a
@@ -295,10 +319,16 @@ the owner approves each use; steps 5 and 6 begin there.
    not do: a `capi-pico` header macro and door (see T6), and a run of the gate over a
    cross-built artifact in the lane (the stamp of an `aarch64-linux-android` build was
    read once, by hand, as the probe).
-2. **The target rows and the requires table.** `[[target]]` in the declaration, the
-   capability `requires` of T9, generated checks. Done when `--check` fails on a row
-   naming a profile the declaration cannot build and on a capability with no
-   requirement entry.
+2. **The platform rows and the facility table (landed).** `[[platform]]`, `[os]` and
+   each capability's `os_needs` in `deploy/wz-config.toml`, validated by
+   `scripts/lib/wz_config.py` (`--check` against the pinned rustc, `--selftest` with
+   a case for each refusal). What it does not do: state `os_provides` or
+   `system_assumed` for any platform but Android's measured libraries (they are
+   unassessed, and `--check` lists them), and name the profiles a platform can build
+   (step 3 defines the profile-to-artifacts mapping first). The `os_needs` of the 31
+   capabilities were assessed from each capability's help text and the code that reads
+   files (the TLS, QUIC, user/password and public-key planes, and the timestamp
+   source); `scout` is marked `multicast` as an upper bound.
 3. **The entry and the manifest.** `package`, the measuring tool (the standard-library
    Python reader `scripts/lib/elf_facts.py`, extended from notes to the dynamic section
    and the version needs, so the gate and the entry share one reader), the
@@ -325,7 +355,7 @@ the owner approves each use; steps 5 and 6 begin there.
 - Whether wz-ap-demo's session-node role and a consumer-built driver linking the
   zenoh-c drop-in need any coordination beyond the two roles being listed (for
   example the same layout arm on both sides of one device).
-- Whether the target row's `system_assumed` list should be generated from the SDK's
+- Whether the platform row's `system_assumed` list should be generated from the SDK's
   own library directories instead of written, so an assumption cannot drift from the
   SDK it names.
 - Where manifests and artifacts are published for a consumer that does not build

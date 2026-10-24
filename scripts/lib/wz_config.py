@@ -85,6 +85,15 @@ limit and binds the name the code uses to the generated value.
      and binds nothing else to the generated module; no `pub const <NAME>: usize = <number>;`
      there is a bare literal, and none reads `WZ_LIMIT_*` itself: a limit outside the declaration
      could not be stated by an image.
+  7. Every capability states the operating-system facilities it may ask for (`os_needs`, an
+     empty list when it asks for none beyond the `[os]` base), from the closed vocabulary
+     `OS_FACILITIES`: a capability that was never assessed has no entry, and is refused rather
+     than read as "needs nothing".
+  8. Every `[[platform]]` (`docs/target-build-contract.md` T3) names a triple the pinned rustc
+     knows, an `os` equal to that triple's `target_os`, and a `libc` the pair (`target_os`,
+     `target_env`) gives: a platform row is declared and checked against the compiler, never
+     typed twice. A platform that states what it provides states at least the base, and one that
+     does not is UNASSESSED, which the entry of the contract refuses and this check reports.
 
 Usage:
     wz_config.py --check | --selftest | --write | --check-presets
@@ -105,6 +114,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 
@@ -232,6 +242,8 @@ def decl_of(data: dict) -> dict:
         "options": list(data.get("axis_option", [])),
         "rules": list(data.get("cargo_rule", [])),
         "switches": list(data.get("upstream_switch", [])),
+        "os_base": list(data["os"]["base"]),
+        "platforms": list(data["platform"]),
     }
 
 
@@ -241,12 +253,14 @@ def validate_decl(data: dict) -> list[str]:
         out.append(f"schema_version is {data.get('schema_version')!r}, this reader is {SCHEMA_VERSION}")
     if not isinstance(data.get("catalog_version"), int):
         out.append("catalog_version is not an integer")
-    for kind in ("base", "capability", "limit"):
+    for kind in ("base", "capability", "limit", "os", "platform"):
         if kind not in data:
             out.append(f"the declaration has no `{kind}`")
     if out:
         return out
+    out += validate_os(data)
     out += validate_caps(data)
+    out += validate_platforms(data)
     out += validate_limits(data["limit"])
     out += validate_images(data)
     out += validate_switches(data)
@@ -383,6 +397,7 @@ def validate_caps(data: dict) -> list[str]:
             if not flag.startswith("Z_FEATURE_"):
                 out.append(f"{c['id']}: pico switch `{flag}` is not Z_FEATURE_*")
         out += validate_upstream_defaults(c)
+        out += validate_os_needs(c, set(data.get("os", {}).get("base", [])))
     # A dependency cycle would make the closure below loop.
     for start in caps:
         seen: set[str] = set()
@@ -396,6 +411,213 @@ def validate_caps(data: dict) -> list[str]:
                 seen.add(cur)
                 stack.extend(d for d in caps[cur]["implies"] if d in caps)
     return out
+
+
+# ─── The operating-system facilities and the platforms (docs/target-build-contract.md T3, T9) ───
+#
+# A FACILITY is something an artifact may ask of the operating system that not every one gives: a
+# kind of socket, threads, a file system, a source of entropy. The vocabulary is closed, so a typo
+# is a finding and a facility nobody declared cannot be required. A capability's `os_needs` is the
+# set it MAY ask for: an upper bound, so a device that lacks one is told which capability to turn
+# off; it does not say that a given configuration uses it (a TLS plane reads certificate files when
+# its keys name files, and not when they hold the PEM inline). `[os] base` is what every host
+# build asks for whatever its capabilities. A platform's `os_provides` is what its operating
+# system gives; a platform that does not state it is UNASSESSED, never read as "provides all".
+OS_FACILITIES = (
+    "threads",
+    "sockets-tcp",
+    "sockets-udp",
+    "multicast",
+    "raw-ethernet",
+    "unix-sockets",
+    "filesystem",
+    "entropy",
+    "wall-clock",
+)
+PLATFORM_KEYS = {
+    "id", "triple", "os", "libc", "network_stack", "std", "toolchain_env_extra",
+    "os_provides", "system_assumed", "lane", "help",
+}
+PLATFORM_REQUIRED = {"id", "triple", "os", "libc", "std", "lane", "help"}
+# The strongest lane that is green for the platform, as the catalogue states it
+# (`docs/target-build-contract.md` T11): `none` until a lane exists and has passed.
+LANES = ("none", "build", "run", "interop")
+LIBCS = ("glibc", "bionic", "nto")
+STD_KINDS = ("prebuilt", "build-std")
+NETWORK_STACKS = ("io-sock", "io-pkt")
+PLATFORM_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+TRIPLE_RE = re.compile(r"^[a-z0-9_]+(-[a-z0-9_.]+)+$")
+
+
+def facility_findings(who: str, value: object, what: str) -> list[str]:
+    """What is wrong with a list that must be facilities of the vocabulary, each once."""
+    if not isinstance(value, list):
+        return [f"{who}: {what} is not a list"]
+    out = [f"{who}: {what} names `{f}`, which is not a facility ({', '.join(OS_FACILITIES)})"
+           for f in value if f not in OS_FACILITIES]
+    if len(value) != len(set(value)):
+        out.append(f"{who}: {what} names a facility twice")
+    return out
+
+
+def validate_os(data: dict) -> list[str]:
+    base = data["os"].get("base")
+    out = facility_findings("[os]", base, "`base`")
+    if isinstance(base, list) and not base:
+        out.append("[os]: `base` is empty, and a host build always asks for threads, sockets and entropy")
+    extra = set(data["os"]) - {"base"}
+    if extra:
+        out.append(f"[os] has the unknown key(s) {', '.join(sorted(extra))}")
+    return out
+
+
+def validate_os_needs(cap: dict, base: set[str]) -> list[str]:
+    needs = cap.get("os_needs")
+    if needs is None:
+        return [f"{cap['id']} has no os_needs (an empty list says it asks for nothing beyond the base)"]
+    out = facility_findings(cap["id"], needs, "os_needs")
+    if isinstance(needs, list):
+        out += [f"{cap['id']}: os_needs names `{f}`, which is in the [os] base already"
+                for f in needs if f in base]
+    return out
+
+
+def validate_platforms(data: dict) -> list[str]:
+    out: list[str] = []
+    base = set(data["os"].get("base", []))
+    platforms = data["platform"]
+    ids = [p.get("id") for p in platforms]
+    triples = [p.get("triple") for p in platforms]
+    if len(ids) != len(set(ids)):
+        out.append("a platform id is declared twice")
+    if len(triples) != len(set(triples)):
+        out.append("two platforms name the same triple; a triple names one platform")
+    for p in platforms:
+        who = f"platform {p.get('id')!r}"
+        for key in sorted(set(p) - PLATFORM_KEYS):
+            out.append(f"{who} has the unknown key `{key}`")
+        for key in sorted(PLATFORM_REQUIRED - set(p)):
+            out.append(f"{who} has no `{key}`")
+        if not isinstance(p.get("id"), str) or not PLATFORM_ID_RE.match(p.get("id", "")):
+            out.append(f"{who}: the id is not lower-case words joined by `-`")
+        if not isinstance(p.get("triple"), str) or not TRIPLE_RE.match(p.get("triple", "")):
+            out.append(f"{who}: `{p.get('triple')}` is not a target triple")
+        if p.get("libc") not in LIBCS:
+            out.append(f"{who}: libc is `{p.get('libc')}`, not one of {', '.join(LIBCS)}")
+        if p.get("std") not in STD_KINDS:
+            out.append(f"{who}: std is `{p.get('std')}`, not one of {', '.join(STD_KINDS)}")
+        if p.get("lane") not in LANES:
+            out.append(f"{who}: lane is `{p.get('lane')}`, not one of {', '.join(LANES)}")
+        if p.get("os") == "nto":
+            if p.get("network_stack") not in NETWORK_STACKS:
+                out.append(f"{who}: a QNX platform names its network stack ({', '.join(NETWORK_STACKS)})")
+        elif "network_stack" in p:
+            out.append(f"{who}: only a QNX platform has a network stack")
+        for key in ("toolchain_env_extra", "system_assumed"):
+            if key in p and (not isinstance(p[key], list) or not p[key]
+                             or not all(isinstance(x, str) and x for x in p[key])):
+                out.append(f"{who}: `{key}` is not a non-empty list of names (leave it out when unassessed)")
+        if "os_provides" in p:
+            out += facility_findings(who, p["os_provides"], "os_provides")
+            if isinstance(p["os_provides"], list):
+                for lacking in sorted(base - set(p["os_provides"])):
+                    out.append(f"{who} does not provide `{lacking}`, which every host build asks for")
+    return out
+
+
+def os_needs_of(decl: dict, on: set[str]) -> dict[str, list[str]]:
+    """Each facility a build with the capabilities `on` may ask for, and who asks.
+
+    The base is asked for by the build itself (`base`), the rest by the capabilities of the
+    closure of `on`.
+    """
+    asks: dict[str, list[str]] = {f: ["base"] for f in decl["os_base"]}
+    for cid in sorted(closure(decl["caps"], on)):
+        for facility in decl["caps"][cid]["os_needs"]:
+            asks.setdefault(facility, []).append(cid)
+    return asks
+
+
+def platform_gaps(decl: dict, platform_id: str, on: set[str]) -> dict[str, list[str]] | None:
+    """The facilities a build with `on` may ask for that the platform does not provide.
+
+    `None` when the platform states no `os_provides`: it is unassessed, and nothing can be said
+    about a build on it. An empty answer is a platform that gives everything the build may ask.
+    """
+    platform = next((p for p in decl["platforms"] if p["id"] == platform_id), None)
+    if platform is None:
+        raise KeyError(f"no platform `{platform_id}` is declared")
+    if "os_provides" not in platform:
+        return None
+    provided = set(platform["os_provides"])
+    return {f: who for f, who in os_needs_of(decl, on).items() if f not in provided}
+
+
+def toolchain_env(platform: dict) -> list[str]:
+    """The variables cargo and the C compiler wrapper read for the platform's triple.
+
+    Derived from the triple, so it cannot drift from it; `toolchain_env_extra` adds what the
+    platform's SDK needs on top (a QNX SDK's host and target roots).
+    """
+    words = platform["triple"].replace("-", "_")
+    return [f"CC_{words}", f"AR_{words}", f"CARGO_TARGET_{words.upper()}_LINKER",
+            *platform.get("toolchain_env_extra", [])]
+
+
+def libc_of(target_os: str, target_env: str) -> str | None:
+    """The libc kind the compiler's own (`target_os`, `target_env`) says, or None when unknown."""
+    if target_os == "android":
+        return "bionic"
+    if target_os == "linux" and target_env == "gnu":
+        return "glibc"
+    if target_os == "nto":
+        return "nto"
+    return None
+
+
+def platform_rustc_findings(platforms: list[dict], known: set[str], cfg_of) -> list[str]:
+    """What the compiler says against what each platform row declares.
+
+    `known` is the compiler's target list and `cfg_of(triple)` its `target_os` / `target_env`;
+    both are passed in so a test can drive a mismatch the installed compiler never produces.
+    """
+    out: list[str] = []
+    for p in platforms:
+        who = f"platform {p['id']!r}"
+        if p["triple"] not in known:
+            out.append(f"{who}: the pinned rustc has no target `{p['triple']}`")
+            continue
+        cfg = cfg_of(p["triple"])
+        if cfg.get("target_os") != p["os"]:
+            out.append(f"{who}: os is `{p['os']}` and rustc says target_os is "
+                       f"`{cfg.get('target_os')}` for {p['triple']}")
+        want = libc_of(cfg.get("target_os", ""), cfg.get("target_env", ""))
+        if want is None:
+            out.append(f"{who}: rustc's (target_os `{cfg.get('target_os')}`, target_env "
+                       f"`{cfg.get('target_env')}`) is a pair this check does not classify")
+        elif want != p["libc"]:
+            out.append(f"{who}: libc is `{p['libc']}` and rustc's target says `{want}`")
+    return out
+
+
+def rustc_target_list() -> set[str]:
+    run = subprocess.run(["rustc", "--print", "target-list"], capture_output=True, text=True, check=False)
+    if run.returncode != 0:
+        raise ValueError(f"rustc --print target-list failed: {run.stderr.strip()}")
+    return set(run.stdout.split())
+
+
+def rustc_cfg(triple: str) -> dict[str, str]:
+    run = subprocess.run(["rustc", "--print", "cfg", "--target", triple],
+                         capture_output=True, text=True, check=False)
+    if run.returncode != 0:
+        raise ValueError(f"rustc --print cfg --target {triple} failed: {run.stderr.strip()}")
+    cfg: dict[str, str] = {}
+    for line in run.stdout.splitlines():
+        match = re.fullmatch(r'(target_os|target_env)="([^"]*)"', line.strip())
+        if match:
+            cfg[match.group(1)] = match.group(2)
+    return cfg
 
 
 def upstream_families(cap: dict) -> set[str]:
@@ -1351,14 +1573,28 @@ def cmd_check() -> int:
             print(f"  wz-config FAIL: {abi}: {exc}", file=sys.stderr)
             return 1
         findings += check_manifest(decl, abi, feats)
+    # The platform rows against the compiler that builds for them. A compiler that is absent is a
+    # finding and not a skip: a gate that cannot reach its input must not report green.
+    if shutil.which("rustc") is None:
+        findings.append("rustc is absent, so the platform triples cannot be checked against it")
+    else:
+        try:
+            findings += platform_rustc_findings(decl["platforms"], rustc_target_list(), rustc_cfg)
+        except ValueError as exc:
+            findings.append(str(exc))
     for finding in findings:
         print(f"  wz-config FAIL: {finding}", file=sys.stderr)
     if findings:
         return 1
     n_global = len(global_axes(decl))
+    unassessed = [p["id"] for p in decl["platforms"] if "os_provides" not in p]
     print(f"  wz-config: {len(decl['order'])} capabilities, {len(decl['limits'])} limits, "
           f"{n_global} global and {len(decl['axes']) - n_global} image axes, {len(files)} "
-          f"generated files current, caps.rs bound, {len(MANIFESTS)} manifests agree")
+          f"generated files current, caps.rs bound, {len(MANIFESTS)} manifests agree, "
+          f"{len(decl['platforms'])} platforms agree with rustc")
+    if unassessed:
+        print(f"  wz-config: platforms with no os_provides (unassessed, refused by the entry): "
+              f"{', '.join(unassessed)}")
     return 0
 
 
@@ -1379,13 +1615,27 @@ core = []
 pico = ["p"]
 c = []
 
+[os]
+base = ["threads", "sockets-tcp", "entropy"]
+
 [[capability]]
 id = "a"
 kconfig = "WZ_CAP_A"
 abis = ["core", "pico"]
 upstream_on = ["zenoh-pico"]
 implies = []
+os_needs = ["sockets-udp"]
 help = "A."
+
+[[platform]]
+id = "linux-x"
+triple = "x86_64-unknown-linux-gnu"
+os = "linux"
+libc = "glibc"
+std = "prebuilt"
+lane = "none"
+os_provides = ["threads", "sockets-tcp", "sockets-udp", "entropy"]
+help = "A sample platform."
 
 [[limit]]
 id = "MAX_A"
@@ -1439,6 +1689,7 @@ kconfig = "WZ_CAP_B"
 abis = ["core"]
 default = "off"
 implies = []
+os_needs = []
 help = "B."
 
 [[axis]]
@@ -1653,6 +1904,102 @@ def cmd_selftest() -> int:
     expect("a capability stating an original its ABIs do not reach is refused",
            caps_refused('upstream_on = ["zenoh-pico"]', 'upstream_on = ["zenoh-pico", "zenoh-c"]',
                         "judged against"))
+    # The operating-system facilities and the platforms (docs/target-build-contract.md T3, T9).
+    expect("a capability that was never assessed for facilities is refused",
+           caps_refused('os_needs = ["sockets-udp"]\n', "", "has no os_needs"))
+    expect("a facility outside the vocabulary is refused",
+           caps_refused('os_needs = ["sockets-udp"]', 'os_needs = ["sockets-udpp"]', "not a facility"))
+    expect("a facility named twice is refused",
+           caps_refused('os_needs = ["sockets-udp"]', 'os_needs = ["sockets-udp", "sockets-udp"]', "twice"))
+    expect("a facility the base already asks for is refused in a capability",
+           caps_refused('os_needs = ["sockets-udp"]', 'os_needs = ["threads"]', "in the [os] base already"))
+    expect("an assessed capability that asks for nothing validates",
+           validate_decl(read_decl_toml(SAMPLE.replace('os_needs = ["sockets-udp"]', "os_needs = []"))) == [])
+    expect("an empty [os] base is refused", caps_refused('base = ["threads", "sockets-tcp", "entropy"]',
+                                                        "base = []", "`base` is empty"))
+    expect("a platform needs every required key",
+           caps_refused('lane = "none"\n', "", "has no `lane`"))
+    expect("a platform with an unknown key is refused",
+           caps_refused('lane = "none"\n', 'lane = "none"\nextra = "x"\n', "unknown key `extra`"))
+    expect("a platform with a libc outside the list is refused",
+           caps_refused('libc = "glibc"', 'libc = "musl"', "not one of glibc"))
+    expect("a platform with an unknown lane is refused",
+           caps_refused('lane = "none"', 'lane = "green"', "lane is `green`"))
+    expect("a platform with an unknown std kind is refused",
+           caps_refused('std = "prebuilt"', 'std = "nightly"', "std is `nightly`"))
+    expect("a network stack on a platform that is not QNX is refused",
+           caps_refused('lane = "none"\n', 'lane = "none"\nnetwork_stack = "io-sock"\n',
+                        "only a QNX platform has a network stack"))
+    qnx = SAMPLE.replace('id = "linux-x"', 'id = "qnx-x"').replace(
+        'triple = "x86_64-unknown-linux-gnu"', 'triple = "aarch64-unknown-nto-qnx710"').replace(
+        'os = "linux"', 'os = "nto"').replace('libc = "glibc"', 'libc = "nto"').replace(
+        'std = "prebuilt"', 'std = "build-std"')
+    expect("a QNX platform without a network stack is refused",
+           any("names its network stack" in p for p in validate_decl(read_decl_toml(qnx))))
+    expect("a QNX platform with a network stack validates",
+           validate_decl(read_decl_toml(qnx.replace('lane = "none"\n', 'lane = "none"\nnetwork_stack = "io-pkt"\n'))) == [])
+    expect("a platform that states what it provides must provide the base",
+           caps_refused('"threads", "sockets-tcp", "sockets-udp", "entropy"]',
+                        '"sockets-tcp", "sockets-udp", "entropy"]', "does not provide `threads`"))
+    expect("a platform providing a facility outside the vocabulary is refused",
+           caps_refused('"sockets-udp", "entropy"]', '"sockets-udp", "entropy", "gpu"]', "not a facility"))
+    twice = SAMPLE + SAMPLE[SAMPLE.index("[[platform]]"):]
+    expect("a platform declared twice is refused", any("declared twice" in p for p in validate_decl(read_decl_toml(twice))))
+    expect("two platforms with one triple are refused",
+           any("same triple" in p for p in validate_decl(read_decl_toml(
+               SAMPLE + SAMPLE[SAMPLE.index("[[platform]]"):].replace('id = "linux-x"', 'id = "linux-y"')))))
+    expect("a platform with no platform at all is refused",
+           any("no `platform`" in p for p in validate_decl(read_decl_toml(SAMPLE[: SAMPLE.index("[[platform]]")]
+                                                                           + SAMPLE[SAMPLE.index("[[limit]]"):]))))
+    pdecl = decl_of(read_decl_toml(SAMPLE))
+    asks = os_needs_of(pdecl, {"a"})
+    expect("a build asks for the base and what its capabilities ask",
+           asks == {"threads": ["base"], "sockets-tcp": ["base"], "entropy": ["base"], "sockets-udp": ["a"]})
+    expect("a platform that provides what the build asks leaves no gap",
+           platform_gaps(pdecl, "linux-x", {"a"}) == {})
+    lacking = decl_of(read_decl_toml(SAMPLE.replace('"threads", "sockets-tcp", "sockets-udp", "entropy"]',
+                                                    '"threads", "sockets-tcp", "entropy"]')))
+    expect("a platform lacking a facility a capability asks for names the capability",
+           platform_gaps(lacking, "linux-x", {"a"}) == {"sockets-udp": ["a"]})
+    expect("the same platform has no gap for a build that does not turn that capability on",
+           platform_gaps(lacking, "linux-x", set()) == {})
+    unassessed = decl_of(read_decl_toml(SAMPLE.replace(
+        'os_provides = ["threads", "sockets-tcp", "sockets-udp", "entropy"]\n', "")))
+    expect("a platform with no os_provides is unassessed, not empty",
+           platform_gaps(unassessed, "linux-x", {"a"}) is None)
+    try:
+        platform_gaps(pdecl, "nowhere", set())
+    except KeyError:
+        pass
+    else:
+        expect("a platform nobody declared raised nothing", False)
+    expect("the toolchain variables follow the triple",
+           toolchain_env({"triple": "aarch64-linux-android"})
+           == ["CC_aarch64_linux_android", "AR_aarch64_linux_android",
+               "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"])
+    expect("a platform's own SDK variables come after them",
+           toolchain_env({"triple": "aarch64-unknown-nto-qnx710_iosock",
+                          "toolchain_env_extra": ["QNX_HOST", "QNX_TARGET"]})[3:] == ["QNX_HOST", "QNX_TARGET"]
+           and toolchain_env({"triple": "aarch64-unknown-nto-qnx710_iosock"})[0]
+           == "CC_aarch64_unknown_nto_qnx710_iosock")
+    expect("the compiler's (os, env) pairs give the libc kinds",
+           [libc_of("android", ""), libc_of("linux", "gnu"), libc_of("nto", "nto71"), libc_of("linux", "musl")]
+           == ["bionic", "glibc", "nto", None])
+    row = {"id": "p", "triple": "t-1", "os": "linux", "libc": "glibc"}
+    fake = {"t-1": {"target_os": "linux", "target_env": "gnu"}}
+    expect("a row the compiler agrees with has no finding",
+           platform_rustc_findings([row], {"t-1"}, lambda t: fake[t]) == [])
+    expect("a triple the compiler does not know is a finding",
+           any("has no target" in f for f in platform_rustc_findings([row], set(), lambda t: fake[t])))
+    expect("an os the compiler disagrees with is a finding",
+           any("target_os" in f for f in platform_rustc_findings(
+               [{**row, "os": "android"}], {"t-1"}, lambda t: fake[t])))
+    expect("a libc the compiler disagrees with is a finding",
+           any("libc is `bionic`" in f for f in platform_rustc_findings(
+               [{**row, "libc": "bionic"}], {"t-1"}, lambda t: fake[t])))
+    expect("a pair nobody classified is a finding, not a pass",
+           any("does not classify" in f for f in platform_rustc_findings(
+               [row], {"t-1"}, lambda t: {"target_os": "linux", "target_env": "musl"})))
     expect("an original in both upstream_on and upstream_off is refused",
            caps_refused('upstream_on = ["zenoh-pico"]',
                         'upstream_on = ["zenoh-pico"]\nupstream_off = ["zenoh-pico"]', "in both"))
