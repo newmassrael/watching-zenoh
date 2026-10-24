@@ -284600,6 +284600,46 @@
         "Before a push run Layer C1bf and the reduced-features gate of the changed packages by hand, and the whole round-fed array; read the hosted runs of this family's pushes per job, Layer C1bf, C1cf, E18 and Z first."
       ]
     },
+    "Round 3570": {
+      "decision_summary": "Open-debt item 924, step 5: the structures the unit-size sweep found holding a unit more than once (owner: fix every found problem, long-term correct). A TLS flow's kept encrypted records were a second copy of the ciphertext the TCP stream holds; they are views now (stream_offset and len), the opener is handed the bytes beside the record, and the stream's trim stops at the oldest kept record, so what a decryptor can open is unchanged. That showed a wrong coordinate: a record after a hole carried its offset with the hole added, a position the contiguous stream does not have; it is the stream's now and the hole is lost_before. The TCP assembler's kept bytes, one doubling buffer (1.37 times the stream at 4 KiB), are a ByteLog. A WebSocket message that is one unmasked frame is a LogPlace::Stream: the list keeps where its payload stands and reads it from the stream; masked or fragmented payloads are still logged. Rows at 4 KiB: tcp 5710 to 4462 B, ws lent 4511 to 139.",
+      "changes_bullets": [
+        "wz-capture: tls.rs (EncryptedRecord.len replaces bytes, RecordOpener::open takes the bytes, NotDecrypted::RecordNotHeld, TlsFlowState::trim_floor, note_gap steps over the held tail only); lib.rs (FlowDissection::encrypted_record_bytes, the trim clamp, decrypt_with reads the stream, feed_websocket places a payload in the stream); tcp.rs (kept bytes are a ByteLog, StreamAssembler::holds); ws.rs (WsMessage.payload_at); report.rs (record_not_held); memory_matrix.rs (masked websocket kind, bounds, ceilings); redecode_gate.rs",
+        "wz-session-core: byte_log.rs (ByteLog public, LogPlace::Stream), passive_messages.rs (push_datagram_in_stream, UnitRow::stream_dependence, stream-placed units read through the source and kept whole before a release)",
+        "wz-tls-record: capture.rs and end_to_end.rs take the record's bytes beside it; run-ci.sh pins the renamed hole test; accessor_reach_census.py files the new accessor; docs/dissect-row-index.md"
+      ],
+      "verification_bullets": [
+        "cargo test wz-session-core all features, wz-capture (dissect, fixtures and no default features), wz-capi-dissect (the handle memory gate) and wz-tls-record pass; the matrix holds the report equal to the allocator in every case and the sweep's bounds hold for udp, tcp, websocket and masked websocket; a mutation that removes the stream trim floor fails a_byte_ceiling_stops_at_the_oldest_kept_record",
+        "clippy -D warnings wz-session-core all and no default features, wz-capture default, all and no default features, wz-tls-record; cargo check wz-analyze, wz-replay, wz-capi-dissect and wz-tls-record; rustfmt; discard_site_lint; the hook's round_fed_gates array (112, each exit code read from the rc file, all 0 on the second run after two filings)",
+        "docs: wz-session-core 495 (a link to a private item removed), wz-capture 0, wz-capi-dissect 0, wz-tls-record 0"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "A masked WebSocket payload (every client frame) and a fragmented one are still logged as an unmasked copy: they stand nowhere in the stream, and keeping them in place would need the XOR undone on read",
+        "Hosted CI for the rounds since 3504 has not been read by this session; wz-runtime-tokio (478 against 474) and wz-tls-mbedtls (1 against 0) measured over their doc budgets on the tree of the previous round, which belong to other sessions"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 5: the structures the unit-size sweep found holding a unit more than once (owner: fix every found problem, long-term correct). A TLS flow's kept encrypted records were a second copy of the ciphertext the TCP stream holds; they are views now (stream_offset and len), the opener is handed the bytes beside the record, and the stream's trim stops at the oldest kept record, so what a decryptor can open is unchanged. That showed a wrong coordinate: a record after a hole carried its offset with the hole added, a position the contiguous stream does not have; it is the stream's now and the hole is lost_before. The TCP assembler's kept bytes, one doubling buffer (1.37 times the stream at 4 KiB), are a ByteLog. A WebSocket message that is one unmasked frame is a LogPlace::Stream: the list keeps where its payload stands and reads it from the stream; masked or fragmented payloads are still logged. Rows at 4 KiB: tcp 5710 to 4462 B, ws lent 4511 to 139.",
+      "publishable_changes_bullets": [
+        "wz-capture: tls.rs (EncryptedRecord.len replaces bytes, RecordOpener::open takes the bytes, NotDecrypted::RecordNotHeld, TlsFlowState::trim_floor, note_gap steps over the held tail only); lib.rs (FlowDissection::encrypted_record_bytes, the trim clamp, decrypt_with reads the stream, feed_websocket places a payload in the stream); tcp.rs (kept bytes are a ByteLog, StreamAssembler::holds); ws.rs (WsMessage.payload_at); report.rs (record_not_held); memory_matrix.rs (masked websocket kind, bounds, ceilings); redecode_gate.rs",
+        "wz-session-core: byte_log.rs (ByteLog public, LogPlace::Stream), passive_messages.rs (push_datagram_in_stream, UnitRow::stream_dependence, stream-placed units read through the source and kept whole before a release)",
+        "wz-tls-record: capture.rs and end_to_end.rs take the record's bytes beside it; run-ci.sh pins the renamed hole test; accessor_reach_census.py files the new accessor; docs/dissect-row-index.md"
+      ],
+      "publishable_verification_bullets": [
+        "cargo test wz-session-core all features, wz-capture (dissect, fixtures and no default features), wz-capi-dissect (the handle memory gate) and wz-tls-record pass; the matrix holds the report equal to the allocator in every case and the sweep's bounds hold for udp, tcp, websocket and masked websocket; a mutation that removes the stream trim floor fails a_byte_ceiling_stops_at_the_oldest_kept_record",
+        "clippy -D warnings wz-session-core all and no default features, wz-capture default, all and no default features, wz-tls-record; cargo check wz-analyze, wz-replay, wz-capi-dissect and wz-tls-record; rustfmt; discard_site_lint; the hook's round_fed_gates array (112, each exit code read from the rc file, all 0 on the second run after two filings)",
+        "docs: wz-session-core 495 (a link to a private item removed), wz-capture 0, wz-capi-dissect 0, wz-tls-record 0"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A masked WebSocket payload (every client frame) and a fragmented one are still logged as an unmasked copy: they stand nowhere in the stream, and keeping them in place would need the XOR undone on read",
+        "Hosted CI for the rounds since 3504 has not been read by this session; wz-runtime-tokio (478 against 474) and wz-tls-mbedtls (1 against 0) measured over their doc budgets on the tree of the previous round, which belong to other sessions"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
