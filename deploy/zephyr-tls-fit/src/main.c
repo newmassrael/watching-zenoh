@@ -43,6 +43,10 @@ struct ring {
 	uint8_t buf[RING_BYTES];
 	size_t head;
 	size_t len;
+	/* The largest single write the sending side made: Mbed TLS writes a record at a time, so
+	 * this is the largest record that crossed in this direction (header and tag included).
+	 */
+	size_t max_write;
 };
 
 static struct ring to_server;
@@ -68,6 +72,9 @@ static int pipe_send(void *ctx, const unsigned char *data, size_t len)
 		r->buf[(r->head + r->len + i) % RING_BYTES] = data[i];
 	}
 	r->len += len;
+	if (len > r->max_write) {
+		r->max_write = len;
+	}
 	return (int)len;
 }
 
@@ -96,6 +103,7 @@ struct identity {
 	mbedtls_pk_context pk;
 	mbedtls_x509_crt crt;
 	uint8_t zid[ZID_BYTES];
+	size_t cert_der_len;
 };
 
 static int zid_of(mbedtls_pk_context *pk, uint8_t zid[ZID_BYTES])
@@ -165,6 +173,7 @@ static int identity_make(struct identity *id, const char *name, uint8_t serial)
 		return -1;
 	}
 
+	id->cert_der_len = (size_t)n;
 	mbedtls_x509_crt_init(&id->crt);
 	rc = mbedtls_x509_crt_parse_der(&id->crt, der + sizeof(der) - n, (size_t)n);
 	if (rc != 0) {
@@ -352,11 +361,13 @@ static int round_run(int n, const uint8_t expect_client[ZID_BYTES], bool must_re
 	}
 
 	printk("TLS-FIT round=%d ok=%d suite=%s hs_client_us=%u hs_server_us=%u "
-	       "arena_peak=%u arena_blocks_peak=%u stack_used=%u\n",
+	       "arena_peak=%u arena_blocks_peak=%u stack_used=%u "
+	       "max_record_to_client=%u max_record_to_server=%u\n",
 	       n, ok && client_pins && server_pins && data_ok,
 	       ok ? mbedtls_ssl_get_ciphersuite(&client.ssl) : "none", us(client.cycles),
 	       us(server.cycles), (unsigned int)peak, (unsigned int)blocks,
-	       (unsigned int)stack_used());
+	       (unsigned int)stack_used(), (unsigned int)to_client.max_write,
+	       (unsigned int)to_server.max_write);
 	peer_free(&client);
 	peer_free(&server);
 	return ok && client_pins && server_pins && data_ok ? 0 : -1;
@@ -385,8 +396,10 @@ int main(void)
 	size_t blocks = 0;
 	mbedtls_memory_buffer_alloc_max_get(&peak, &blocks);
 	printk("TLS-FIT identities: two keys and self-signed certificates in %u us together, "
-	       "arena_peak=%u\n",
-	       identity_us, (unsigned int)peak);
+	       "arena_peak=%u cert_der=%u,%u record_in=%u record_out=%u\n",
+	       identity_us, (unsigned int)peak, (unsigned int)id_client.cert_der_len,
+	       (unsigned int)id_server.cert_der_len, (unsigned int)CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN,
+	       (unsigned int)CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN);
 
 	int failed = 0;
 	for (int n = 1; n <= CONFIG_TLS_FIT_ROUNDS; n++) {

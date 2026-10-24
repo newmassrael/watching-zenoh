@@ -269,10 +269,34 @@ handshake derived, which is the binding D1 requires.
     - The main thread used 2,336 B of stack.
     - The link map puts Mbed TLS at about 72.7 KB of code and read-only
       data: crypto 42.4 KB, TLS 18.2 KB, X.509 12.2 KB.
+  - **The record buffers, decided and measured (Round 3494).**
+    - The receive buffer is the protocol's maximum of 2^14 bytes. rustls
+      0.23, which zenohd 1.10.1 links, does not implement the record size
+      limit (its source has no such extension). zenoh's TLS link leaves
+      rustls's fragment size at its 16 kB default
+      (`io/zenoh-links/zenoh-link-tls/src/lib.rs`).
+    - Data records from a zenoh peer do stay within the negotiated batch,
+      because both establishment sides take the smaller batch
+      (`unicast/establishment/accept.rs`, `open.rs`) and rustls writes a
+      record per write. That is an implementation's behaviour, though, not
+      a bound the protocol gives.
+    - rustls also joins a whole handshake flight into one record
+      (`HandshakeFlight`), so how large that record is depends on the
+      certificate the peer presents.
+    - The send buffer is ours to bound. The largest record this end wrote
+      was 341 B, a certificate message over a 293 B self-signed P-256
+      certificate. A data record is a batch of at most 1,024 B with its
+      2-byte length, so 1,500 B holds both.
+    - Measured on the kit with 16,384 B receive and 1,500 B send: the
+      arena's peak is 44,136 B for both peers together, about 22 KB per
+      session, against 14,368 B with 1,500 B both ways.
+    - The handshake took about 1.45 s per role, and the identities 1.28 s.
+      That is 18 % below the first run's figures, and the record lengths
+      do not change the arithmetic, so the difference is not explained.
+    - Negotiating the record size limit with peers that implement it, and
+      then shrinking the receive buffer, is a later saving. It is not a
+      bound the channel can rely on today.
   - What this leaves open:
-    - The 1,500 B records hold only while the peer honours the record size
-      limit. A peer that sends 16 KiB records needs a receive buffer that
-      large, so the extension and the peers' behaviour are measured next.
     - The handshake time is software P-256 throughout. The p256-m driver
       and the chip's crypto block, which is reached as a PSA driver, are
       the two ways to shorten it.
