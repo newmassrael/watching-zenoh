@@ -135,8 +135,13 @@ PUBLIC_ITEM = re.compile(r"^\s*pub\s+" + _QUAL + _KW)
 RESTRICTED_ITEM = re.compile(r"^\s*pub\s*\([^)]*\)\s+" + _QUAL + _KW)
 PRIVATE_ITEM = re.compile(r"^\s*" + _QUAL + _KW)
 # An assertion is a macro too, and it is never an item; checked FIRST so the
-# macro class stays the genuinely ambiguous one.
-ASSERTION = re.compile(r"^\s*(?:debug_)?assert(?:_eq|_ne|_matches)?!\s*\(")
+# macro class stays the genuinely ambiguous one. `compile_error!` is the same: it
+# expands to a build failure, never to an item (the guard of decision D2 in
+# docs/session-lifecycle-intent.md is the first one these packages gate on a
+# feature).
+ASSERTION = re.compile(
+    r"^\s*(?:(?:debug_)?assert(?:_eq|_ne|_matches)?|compile_error)!\s*\("
+)
 MACRO_CALL = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*!\s*[({\[]")
 # R2973 — `mut name: T,` is a gated function PARAMETER, the same non-item as
 # `name: T,`; `mut` was the one qualifier a parameter carries that a field does
@@ -267,7 +272,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "api-compat-pico",
                 "api-compat-rust",
                 "platform-freertos",
-                "platform-zephyr",
+                # `platform-zephyr` LEFT this set: its only "public" sites were the
+                # facade's `compile_error!` guards (one RTOS per deploy), which the
+                # scan counted as macro calls that might expand to an item until it
+                # learned that a `compile_error!` never does. It gates no public
+                # item, so there is nothing for a probe to wait on.
                 "platform-zephyr-fixed",
                 "rest-http-bridge",
                 "runtime-coop-core",
@@ -1016,7 +1025,8 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "api-compat-pico",
             "api-compat-rust",
             "platform-freertos",
-            "platform-zephyr",
+            # `platform-zephyr` left with the OFF_AXIS row above, for the same
+            # reason: its sites are `compile_error!` guards, never an item.
             "platform-zephyr-fixed",
             "rest-http-bridge",
             "runtime-coop-core",
@@ -2431,6 +2441,8 @@ def _fixture() -> dict[str, str]:
         "demo/src/field.rs": f"pub struct S {{\n    {a}\n    pub n: usize,\n}}\n",
         # an assertion is a macro call and must NOT reach the denominator
         "demo/src/assertion.rs": f"fn t() {{\n    {a}\n    assert!(true);\n}}\n",
+        # a build guard expands to an error, never to an item
+        "demo/src/guard.rs": f"{a}\ncompile_error!(\"needs a companion\");\n",
         # a long attribute stack: the item is several lines down, and a bounded
         # window reported these as having no following line at all
         "demo/src/stacked.rs": (
@@ -3151,8 +3163,8 @@ def selftest() -> int:
         "restricted-item": 1,
         # private, macro_rules
         "private-item": 2,
-        # expr, field, assertion, inline, param
-        "not-an-item": 5,
+        # expr, field, assertion, guard, inline, param
+        "not-an-item": 6,
         "UNCLASSIFIED": 1,
         # wrapped_stack's second attribute, cfg_attr
         "conditional-attribute": 2,
