@@ -1003,6 +1003,20 @@ transport-link-unixpipe,transport-link-ws|"
     # pure mapping assertion, quick and network-free. The filter is the MODULE, so
     # a test added beside it is covered without touching this row.
     "wz-capi-c|hook|zenoh-c-no-unstable-api|publisher::congestion_tests::"
+    # ── R3506 — zenoh-keyexpr, the family crate that carries upstream's feature names ──
+    #
+    # `internal` gates the doc-hidden items zenoh's own crates use (`chunks`, `is_wild`) and
+    # `unstable` the set-relation API (`relation_to`); both are non-default, so the changed-crate
+    # gate at default features compiles the tests behind them to nothing, and no lane turned either
+    # on. `--census` said so on the hosted run of the crate's first slice: two tests, among them
+    # `key_expr::tests::chunks_come_from_both_ends`, claimed by no leg. The crate's whole test
+    # target runs in about a second and touches no network, so the leg is `hook` and its filter is
+    # empty: a test added to the crate under either feature is covered without touching this row.
+    # The two features are named, one per line, because the table refuses `--all-features` (the
+    # header says why): a feature added to the crate later must come here by a decision.
+    "zenoh-keyexpr|hook|\
+        internal,\
+        unstable|"
 )
 
 # package|test-path|reason
