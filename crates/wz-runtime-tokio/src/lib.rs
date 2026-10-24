@@ -2232,6 +2232,18 @@ pub mod storage_gc_service;
 /// (nor pays for `futures-util`).
 #[cfg(feature = "routing-accept")]
 pub mod accept_loop;
+/// Decision D5 of `docs/session-lifecycle-intent.md` — the nodes a face loop is
+/// told to hold by zid, each driven by its connection machine: a planner that
+/// performs the machine's duties against the loop's directory and retry
+/// schedule and hands the loop the dials, waits and drops to take. Gated as
+/// the `AddNode` reconcile it serves is: the lifecycle opener is its one
+/// producer.
+#[cfg(all(
+    feature = "routing-accept",
+    feature = "router-connect-reconcile",
+    feature = "session-close-ingress"
+))]
+pub mod node_peers;
 /// R2864 (open-debt item 751) — the pin's region-keyed routing structure
 /// (`RegionMap`, the `Auto` region set, the hat per region), ported before any
 /// forwarder routes on it. Gated on `routing-accept`, the lowest routing atom,

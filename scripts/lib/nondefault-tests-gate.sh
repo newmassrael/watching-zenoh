@@ -198,6 +198,18 @@ LEGS=(
     # there and report a population of zero as green.
     "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
 router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast|session_lifecycle_open::"
+    # Decision D5 (Round 3557) — the node an `open` names, held by its connection
+    # machine: the planner's unit tests (`node_peers`, gated as the opener is), the
+    # reconcile's hand-back of a node (named by its full path, the census's rule for
+    # one test in a large module), and the two-loop witness. The same feature list
+    # as the row above, which is what the planner's `cfg(all(..))` names.
+    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
+router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast|node_peers::"
+    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
+router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast|\
+accept_loop::tests::an_added_node_is_handed_to_the_planner_and_added_locators_name_no_node"
+    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
+router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast|--test=node_peer_open_e2e"
     # The close verb as a QUERY: the runtime half of it, in two rows for the reason
     # the row above gives (an integration TARGET and lib unit tests share no
     # build filter). The census reported five of them `unclaimed` on the hosted
@@ -699,6 +711,17 @@ transport-link-unixpipe,transport-link-ws|"
         session-unicast-open,\
         static-link-storage\
         |--test=session_dial_exhaustion"
+    # Decision D4 on the fixed-memory host (`tests/session_dial_for_a_node.rs`, Round
+    # 3542): the same profile as the dialler's row above, which is the file's
+    # `required-features`, and the target by name.
+    "wz-session-lwip|hook|\
+        codec-close,\
+        pubsub-put,\
+        session-slot,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        static-link-storage\
+        |--test=session_dial_for_a_node"
     # S9c: the multicast pump on the slot profile (`tests/multicast_slot.rs`): its
     # reply queue and its cell table, with the group socket out of the static pool.
     # The file's `required-features`; the group transport and a reply variant that

@@ -595,10 +595,36 @@ Each step lands with its own done-when; sizes are not estimated here.
      to hold. The duty record the multicast machines kept privately is now
      `duty_outbox`, shared with this machine. Witness: the table's seven
      unit tests.
-   - Left of D5: AP's face loop holds a `PeerTable` in place of the
-     `ConnectReconcile` desired set. It performs the duties against its
-     directory, its dials and `RetryPeriod`, and the lifecycle opener drives
-     `open` and `close` through it.
+   - **5b, the nodes an `open` names, on AP (Round 3557).** The face loop
+     no longer puts a lifecycle `open`'s node (`ConnectReconcile::AddNode`)
+     into the desired connect-set. `apply_connect_reconcile` hands the node
+     back, and the loop holds it by its machine. The host of the machine is
+     `wz_runtime_tokio::node_peers`, a planner: each call returns the dials,
+     retry waits and drops for the loop to take, so the lifecycle is reachable
+     by a unit test.
+     - The planner resolves from the loop's directory. It dials the node's
+       candidate for its zid as a fresh face, and arms the node's retry on
+       upstream's `connect/retry` schedule (`RedialSchedule`, now generic
+       over the key). It starts the schedule over once a session is up.
+     - The loop reports every end of a node dial:
+       - established, and the face is held;
+       - the node already held by another face, which then holds it;
+       - no room under `max_sessions` or the measured ceiling (`NoSlot`);
+       - another node at the InitAck (`IdentityMismatch`, decision D4);
+       - any other failure, which backs off.
+     - The loss of the face that holds the node is reported too, and the
+       node is dialled again.
+     - A node dial is held single-link.
+     - `PeerTable` is generic over the peer's key and has `forget`. It
+       removes an entry with no duty, upstream's shape for an endpoint a
+       config write stops listing.
+     Witness: `crates/wz-runtime-tokio/tests/node_peer_open_e2e.rs`, two
+     real loops. The node's own zid is held. Another zid fails once at the
+     InitAck and is not dialled again, where the desired set re-dialled such
+     a node for ever. An unreachable node is dialled again on the schedule.
+   - Left of D5: the configured endpoints move from the desired set to the
+     table, keyed by endpoint (`forget` is their removal). The `close` verb
+     reaches the node's machine as `manual.stop`; that is D6's intent.
 5. **D6.** Intent and status, `reset` with a generation, and the status GET.
 6. **The MCU opener** over `SessionHost`, `wz-session-lwip` forwarding the
    feature, and a witness on the fixed-memory image.

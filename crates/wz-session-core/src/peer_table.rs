@@ -5,7 +5,8 @@
 //! (decision D5 of `docs/session-lifecycle-intent.md`).
 //!
 //! One [`peer_connection`](crate::peer_connection) machine per peer, keyed by
-//! the peer's zid, in a table of `N` entries with no allocator, so the
+//! what names the peer to its host (a node's zid, or a configured endpoint),
+//! in a table of `N` entries with no allocator, so the
 //! fixed-memory profile holds the same table as AP. The lifecycle verbs are the
 //! machine's administrative events (BGP's ManualStart and ManualStop, RFC 4271,
 //! section 8): [`PeerTable::open`] and [`PeerTable::close`]. What the host
@@ -27,7 +28,6 @@ use sce_rust_runtime::Engine;
 
 use crate::constant_session_id::built_under_constant_id;
 use crate::duty_outbox::{Duties, DutyOutbox};
-use crate::locator_directory::DirectoryZid;
 use crate::peer_connection::{
     PeerConnectionActions, PeerConnectionEvent, PeerConnectionPolicy, PeerConnectionState,
 };
@@ -36,8 +36,9 @@ use crate::peer_connection::{
 /// machine its id). A constant, so the generated constructor never refuses it.
 const PEER_CONNECTION_SESSION_ID: &str = "wz-peer-connection";
 
-/// What the host is asked to do for a peer after an event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What the host is asked to do for a peer after an event. The default asks
+/// for nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PeerDuties(Duties);
 
 impl PeerDuties {
@@ -142,13 +143,13 @@ impl PeerConnectionActions for PeerBinding {
 }
 
 /// One peer and its machine.
-struct PeerEntry {
-    zid: DirectoryZid,
+struct PeerEntry<K> {
+    key: K,
     engine: Engine<PeerConnectionPolicy<PeerBinding>>,
 }
 
-impl PeerEntry {
-    fn new(zid: DirectoryZid) -> Self {
+impl<K> PeerEntry<K> {
+    fn new(key: K) -> Self {
         let mut engine = Engine::new(built_under_constant_id(
             PeerConnectionPolicy::new_with_session_id(
                 PEER_CONNECTION_SESSION_ID,
@@ -158,7 +159,7 @@ impl PeerEntry {
         ));
         // W3C SCXML 3.3: enter the initial `Idle` leaf.
         engine.initialize();
-        Self { zid, engine }
+        Self { key, engine }
     }
 
     fn drive(&mut self, event: PeerConnectionEvent) -> PeerDuties {
@@ -171,19 +172,24 @@ impl PeerEntry {
     }
 }
 
-/// The peers a node is told to hold, `N` at most.
-pub struct PeerTable<const N: usize> {
-    entries: heapless::Vec<PeerEntry, N>,
+/// The peers a node is told to hold, `N` at most, each named by a `K`.
+///
+/// `K` is what names a peer to its host: a node's zid where the host dials a
+/// node, or a configured endpoint where it dials a locator for no node
+/// (decision D7: a target is a zid or a locator). The table compares keys and
+/// nothing else.
+pub struct PeerTable<K, const N: usize> {
+    entries: heapless::Vec<PeerEntry<K>, N>,
     refused: usize,
 }
 
-impl<const N: usize> Default for PeerTable<N> {
+impl<K: PartialEq, const N: usize> Default for PeerTable<K, N> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const N: usize> PeerTable<N> {
+impl<K: PartialEq, const N: usize> PeerTable<K, N> {
     /// An empty table.
     pub const fn new() -> Self {
         Self {
@@ -192,52 +198,60 @@ impl<const N: usize> PeerTable<N> {
         }
     }
 
-    /// `open` for `zid`: the authority `admitted` it or refused it. A peer the
+    /// `open` for `key`: the authority `admitted` it or refused it. A peer the
     /// node already holds, or is working to hold, is unchanged (decision D6: a
     /// second `open` changes nothing).
-    pub fn open(
-        &mut self,
-        zid: DirectoryZid,
-        admitted: bool,
-    ) -> Result<PeerDuties, PeerTableRefusal> {
+    pub fn open(&mut self, key: K, admitted: bool) -> Result<PeerDuties, PeerTableRefusal> {
         let event = if admitted {
             PeerConnectionEvent::ManualStart
         } else {
             PeerConnectionEvent::ManualRefused
         };
-        let at = match self.position(&zid) {
+        let at = match self.position(&key) {
             Some(at) => at,
-            None => self.take_entry(zid)?,
+            None => self.take_entry(key)?,
         };
         Ok(self.entries[at].drive(event))
     }
 
-    /// `close` for `zid`: the node no longer holds the peer. A peer it does not
-    /// hold, or holds no intent for, is unchanged.
-    pub fn close(&mut self, zid: &DirectoryZid) -> PeerDuties {
-        self.report(zid, PeerConnectionEvent::ManualStop)
+    /// `close` for `key`: the node no longer holds the peer, and its session is
+    /// closed. A peer it does not hold, or holds no intent for, is unchanged.
+    pub fn close(&mut self, key: &K) -> PeerDuties {
+        self.report(key, PeerConnectionEvent::ManualStop)
     }
 
-    /// What came of a duty the host performed for `zid`. An event the peer's
+    /// Take `key` out of the table without asking for anything: the node stops
+    /// working to hold the peer and leaves a session it has standing. Upstream's
+    /// shape for an endpoint a `connect/endpoints` write no longer lists: it is
+    /// not dialled again when it drops, and a live session to it is not closed
+    /// (`zenoh/src/net/runtime/orchestrator.rs`
+    /// @ `if peers.contains(&endpoint) && zwrite!(session.endpoints).remove(&endpoint) {`).
+    /// The state the peer was in, or `None` for a peer the table did not hold.
+    pub fn forget(&mut self, key: &K) -> Option<PeerConnectionState> {
+        let at = self.position(key)?;
+        Some(self.entries.swap_remove(at).state())
+    }
+
+    /// What came of a duty the host performed for `key`. An event the peer's
     /// state has no transition for changes nothing, and a peer the table does
     /// not hold is not taken in by a report.
-    pub fn report(&mut self, zid: &DirectoryZid, event: PeerConnectionEvent) -> PeerDuties {
-        match self.position(zid) {
+    pub fn report(&mut self, key: &K, event: PeerConnectionEvent) -> PeerDuties {
+        match self.position(key) {
             Some(at) => self.entries[at].drive(event),
             None => PeerDuties(Duties::default()),
         }
     }
 
-    /// The state of `zid`'s machine, or `None` for a peer the table does not
+    /// The state of `key`'s machine, or `None` for a peer the table does not
     /// hold. A refusal is read as its cause (`NoLocator`, `NoSlot`,
     /// `IdentityMismatch`, `AuthorityRefused`).
-    pub fn state(&self, zid: &DirectoryZid) -> Option<PeerConnectionState> {
-        self.position(zid).map(|at| self.entries[at].state())
+    pub fn state(&self, key: &K) -> Option<PeerConnectionState> {
+        self.position(key).map(|at| self.entries[at].state())
     }
 
     /// Every peer in the table and its state.
-    pub fn peers(&self) -> impl Iterator<Item = (&DirectoryZid, PeerConnectionState)> + '_ {
-        self.entries.iter().map(|entry| (&entry.zid, entry.state()))
+    pub fn peers(&self) -> impl Iterator<Item = (&K, PeerConnectionState)> + '_ {
+        self.entries.iter().map(|entry| (&entry.key, entry.state()))
     }
 
     /// How many `open`s were refused for want of an entry.
@@ -245,15 +259,15 @@ impl<const N: usize> PeerTable<N> {
         self.refused
     }
 
-    fn position(&self, zid: &DirectoryZid) -> Option<usize> {
-        self.entries.iter().position(|entry| entry.zid == *zid)
+    fn position(&self, key: &K) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.key == *key)
     }
 
     /// An entry for a new peer: a free one, or one whose peer is in `Idle`.
-    fn take_entry(&mut self, zid: DirectoryZid) -> Result<usize, PeerTableRefusal> {
+    fn take_entry(&mut self, key: K) -> Result<usize, PeerTableRefusal> {
         if !self.entries.is_full() {
             // Not full, so the push cannot fail.
-            let _ = self.entries.push(PeerEntry::new(zid));
+            let _ = self.entries.push(PeerEntry::new(key));
             return Ok(self.entries.len() - 1);
         }
         match self
@@ -262,7 +276,7 @@ impl<const N: usize> PeerTable<N> {
             .position(|entry| entry.state() == PeerConnectionState::Idle)
         {
             Some(at) => {
-                self.entries[at] = PeerEntry::new(zid);
+                self.entries[at] = PeerEntry::new(key);
                 Ok(at)
             }
             None => {
@@ -276,6 +290,7 @@ impl<const N: usize> PeerTable<N> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locator_directory::DirectoryZid;
     use PeerConnectionEvent as E;
     use PeerConnectionState as S;
 
@@ -284,7 +299,7 @@ mod tests {
 
     #[test]
     fn an_open_peer_is_resolved_dialled_and_held_and_a_close_gives_its_session_back() {
-        let mut table = PeerTable::<2>::new();
+        let mut table = PeerTable::<DirectoryZid, 2>::new();
         let duties = table.open(A, true).unwrap();
         assert!(duties.resolve(), "open asks the host to resolve");
         assert_eq!(table.state(&A), Some(S::Resolving));
@@ -298,7 +313,7 @@ mod tests {
 
     #[test]
     fn a_second_open_and_a_second_close_change_nothing() {
-        let mut table = PeerTable::<2>::new();
+        let mut table = PeerTable::<DirectoryZid, 2>::new();
         table.open(A, true).unwrap();
         table.report(&A, E::ResolveFound);
         table.report(&A, E::DialEstablished);
@@ -315,7 +330,7 @@ mod tests {
 
     #[test]
     fn a_failure_backs_off_and_retries_and_a_lost_session_does_too() {
-        let mut table = PeerTable::<1>::new();
+        let mut table = PeerTable::<DirectoryZid, 1>::new();
         table.open(A, true).unwrap();
         table.report(&A, E::ResolveFound);
         assert!(table.report(&A, E::DialFailed).arm_retry());
@@ -337,7 +352,7 @@ mod tests {
             (E::DialMismatch, S::IdentityMismatch),
         ];
         for (event, cause) in cases {
-            let mut table = PeerTable::<1>::new();
+            let mut table = PeerTable::<DirectoryZid, 1>::new();
             table.open(A, true).unwrap();
             if event != E::ResolveEmpty {
                 table.report(&A, E::ResolveFound);
@@ -353,7 +368,7 @@ mod tests {
                 "the next open tries again"
             );
         }
-        let mut table = PeerTable::<1>::new();
+        let mut table = PeerTable::<DirectoryZid, 1>::new();
         table.open(A, false).unwrap();
         assert_eq!(table.state(&A), Some(S::AuthorityRefused));
         assert!(table.close(&A).is_empty());
@@ -362,7 +377,7 @@ mod tests {
 
     #[test]
     fn a_close_while_working_drops_the_attempt() {
-        let mut table = PeerTable::<1>::new();
+        let mut table = PeerTable::<DirectoryZid, 1>::new();
         table.open(A, true).unwrap();
         assert!(table.close(&A).abandon_dial(), "closed while resolving");
         table.open(A, true).unwrap();
@@ -373,7 +388,7 @@ mod tests {
 
     #[test]
     fn a_full_table_reuses_an_idle_entry_and_refuses_when_none_is() {
-        let mut table = PeerTable::<1>::new();
+        let mut table = PeerTable::<DirectoryZid, 1>::new();
         table.open(A, true).unwrap();
         assert_eq!(table.open(B, true), Err(PeerTableRefusal::Full));
         assert_eq!(table.refused(), 1, "the refusal is counted");
@@ -388,9 +403,30 @@ mod tests {
 
     #[test]
     fn a_report_for_a_peer_the_table_does_not_hold_takes_nothing_in() {
-        let mut table = PeerTable::<1>::new();
+        let mut table = PeerTable::<DirectoryZid, 1>::new();
         assert!(table.report(&A, E::DialEstablished).is_empty());
         assert_eq!(table.state(&A), None);
         assert_eq!(table.peers().count(), 0);
+    }
+
+    /// A forgotten peer leaves the table with no duty asked, whatever its state:
+    /// its session is the host's to leave standing, as upstream leaves one to an
+    /// endpoint a config write stops listing. The key is any type that names a
+    /// peer to its host.
+    #[test]
+    fn a_forgotten_peer_leaves_without_a_duty_and_its_session_stands() {
+        let mut table = PeerTable::<&str, 2>::new();
+        table.open("tcp/10.0.0.1:7447", true).unwrap();
+        table.report(&"tcp/10.0.0.1:7447", E::ResolveFound);
+        table.report(&"tcp/10.0.0.1:7447", E::DialEstablished);
+        assert_eq!(table.forget(&"tcp/10.0.0.1:7447"), Some(S::Established));
+        assert_eq!(table.state(&"tcp/10.0.0.1:7447"), None);
+        assert!(
+            table
+                .report(&"tcp/10.0.0.1:7447", E::SessionLost)
+                .is_empty(),
+            "a forgotten peer is not dialled again when it drops"
+        );
+        assert_eq!(table.forget(&"tcp/10.0.0.1:7447"), None);
     }
 }
