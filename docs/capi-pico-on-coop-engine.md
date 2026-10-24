@@ -118,7 +118,19 @@ it behaves as pico behaves in both of pico's threading arms.
   both), and `PublishOptions`, `PlainPutParams` and `PublishError` to
   `wz_session_core::publish_options` (`wz-runtime-tokio` re-exports them and keeps the loopback
   leg, which is its own). The ABI layer now names `Reliability` and `WhatAmI` where they live too.
-- Next: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
+- 2026-10-24: the port is a crate, `wz-capi-port`: the vocabulary a C ABI and its engine both
+  name and `SessionEngine`, the operations the client surface makes (publish, subscribe, hold a
+  key expression, match, filter writes, batch, the peers' identities). `wz-capi-core` implements
+  it; the pico ABI's key, publisher, subscriber, matching and write-filter state hold
+  `Arc<dyn SessionEngine>` and name no engine. Measured cost: pico-client +6 KB (0.3%),
+  pico-default +5 KB. The first cut cost 35 KB, all of it a second copy of the registry's drop
+  glue: a release build does not share generics across crates, so the trait object must be made
+  in the engine's crate (`SharedSession::as_engine`, `#[inline(never)]`) and the boxed session
+  freed there (`SessionState::release`); an implicit coercion in the ABI crate brings the copy
+  back.
+- Next: `SessionDrive`, the C session handle's half of the port (open, close, the read task, read,
+  spin, keep-alive), then the cooperative engine.
+- Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
   engine's session, and the modules of capabilities the cooperative engine does not have yet
   (query, liveliness, scouting, the advanced publisher) build with the tokio engine only.
