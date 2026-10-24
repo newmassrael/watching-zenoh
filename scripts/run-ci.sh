@@ -6211,8 +6211,8 @@ layer_c1ax_cargo_test_routing_namespace() {
 #   7. §5.21 router-connect-reconcile (R311y202): the runtime dynamic connect-list
 #      reconcile (zenoh `update_peers`) + peer auto-reconnect (`closed_session`) — a
 #      reconcile channel on the shared face_drive_loop that dials a newly-listed
-#      connect endpoint (address dedup) AND `schedule_redial` re-dials a dropped
-#      still-desired peer. The reconcile state + Step::Reconcile handler + the redial
+#      connect endpoint (address dedup) AND re-dials a dropped still-desired
+#      peer (its connection machine since decision D5, `loop_peers`). The reconcile state + Step::Reconcile handler + the redial
 #      arms are `#[cfg(feature="router-connect-reconcile")]`-gated in accept_loop,
 #      NEVER compiled by the plain routing-router-hat arm above, so the
 #      `routing-router-hat,router-connect-reconcile` clippy arm lints the reconcile

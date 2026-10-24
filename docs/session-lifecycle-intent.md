@@ -599,7 +599,7 @@ Each step lands with its own done-when; sizes are not estimated here.
      no longer puts a lifecycle `open`'s node (`ConnectReconcile::AddNode`)
      into the desired connect-set. `apply_connect_reconcile` hands the node
      back, and the loop holds it by its machine. The host of the machine is
-     `wz_runtime_tokio::node_peers`, a planner: each call returns the dials,
+     `wz_runtime_tokio::node_peers` (`loop_peers` since 5c), a planner: each call returns the dials,
      retry waits and drops for the loop to take, so the lifecycle is reachable
      by a unit test.
      - The planner resolves from the loop's directory. It dials the node's
@@ -622,9 +622,46 @@ Each step lands with its own done-when; sizes are not estimated here.
      real loops. The node's own zid is held. Another zid fails once at the
      InitAck and is not dialled again, where the desired set re-dialled such
      a node for ever. An unreachable node is dialled again on the schedule.
-   - Left of D5: the configured endpoints move from the desired set to the
-     table, keyed by endpoint (`forget` is their removal). The `close` verb
-     reaches the node's machine as `manual.stop`; that is D6's intent.
+   - **5c, the configured endpoints, on AP (Round 3563).** The loop's
+     desired connect-set is gone. A configured endpoint (the startup
+     `connect/endpoints` and each reconcile of them) is a peer of the same
+     table, keyed by its locator, so one machine kind holds every peer the
+     loop is told to hold (decision D7: a target is a zid or a locator). The
+     planner is `wz_runtime_tokio::loop_peers` (it was `node_peers`), keyed
+     by `PeerKey::{Node, Endpoint}`, and gated as the connect reconcile is.
+     - `fold_connect_reconcile` folds a request into a plan, and
+       `LoopPeers::set_endpoints` applies it: an add opens each member, and a
+       replace also forgets each member it leaves out. A forgotten endpoint
+       is not dialled again, a session it holds is left standing, and a dial
+       of it that is running ends unowned. Its retry growth goes with it.
+     - An endpoint is dialled as written, for no node, and is retried on its
+       own `#` retry span laid over `connect/retry`. It is named by its
+       address, so one address listed twice is one endpoint; the startup list
+       dialled each entry before, and a reconcile already named it once. Two
+       links to one node come from two of its endpoints, as upstream's do.
+     - Each retry timer carries the generation of its arming. A timer whose
+       arming is no longer its peer's (the peer was forgotten, or reached
+       another way) dials nothing; the timer of the old address-keyed re-dial
+       had no such guard and was a sleep inside the dial itself.
+     - One face can hold several peers. An endpoint whose dial meets a remote
+       already held (a gossip dial reached it first, or its multilink link
+       joined that session) is held by the face that holds the remote, and is
+       lost and dialled again with it. The address index that kept a gossip
+       dial and an endpoint dial apart is gone.
+     - With `max_links > 1` an endpoint's dial aggregates, and a reconcile's
+       does too (it dialled single-link before). The link stays the per-link
+       re-add's; the endpoint is the machine's, and the session's collapse,
+       which the re-add does not answer, is now reported to it. A link the
+       session refuses for its key is a failed dial.
+     Witness: the planner's ten unit tests, the reconcile arity test on
+     the planner, and `router_redial_backoff_e2e`, whose removal and re-add
+     now arrive together, after which the endpoint's first retry is the
+     initial wait. Layer E7b's re-dial witness now reads the dial itself (a
+     face that failed at the dropped router's address) rather than a log
+     line announcing one, and the multilink dial-side fixture dials its
+     node at two endpoints.
+   - Left of D5: the `close` verb reaches the node's machine as
+     `manual.stop`; that is D6's intent.
 5. **D6.** Intent and status, `reset` with a generation, and the status GET.
 6. **The MCU opener** over `SessionHost`, `wz-session-lwip` forwarding the
    feature, and a witness on the fixed-memory image.

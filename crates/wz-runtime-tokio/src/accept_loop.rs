@@ -448,7 +448,8 @@ pub type ReconcileReceiver = tokio::sync::mpsc::UnboundedReceiver<ConnectReconci
 pub enum ConnectReconcile {
     /// Adopt this as the whole desired connect-set. An endpoint absent from it
     /// stops being RE-DIALLED; its live face is not closed (the add-only /
-    /// close-removed asymmetry the module doc states).
+    /// close-removed asymmetry the module doc states). Decision D5 — the loop
+    /// forgets its connection machine ([`crate::loop_peers`]).
     Replace(Vec<AnyLocator>),
     /// Add these to the desired connect-set, leaving every existing member —
     /// including the DNS-resolved startup seed — in place.
@@ -463,7 +464,7 @@ pub enum ConnectReconcile {
     /// candidates there (decision D3), a Hello's among them.
     ///
     /// Decision D5 — a node is not a member of the desired connect-set: the
-    /// loop holds it by its connection machine ([`crate::node_peers`]), which
+    /// loop holds it by its connection machine ([`crate::loop_peers`]), which
     /// resolves, dials, backs off and names a refusal. The lifecycle opener is
     /// the one producer, so the variant is that feature's.
     #[cfg(feature = "session-close-ingress")]
@@ -486,9 +487,10 @@ pub type ConnectReconcile = Vec<AnyLocator>;
 /// channel exactly as `RouterLinkWeightSink` is for the router weights slice.
 ///
 /// ⭐ THIS EXISTS BECAUSE THE CONSUMER IS A LOOP-LOCAL, which is the one shape
-/// the other two sinks did not have to face. The desired connect-set is a
-/// `HashMap` living inside `face_drive_loop`, not a field on a long-lived
-/// object, so nothing can implement a sink "on" it. What CAN be implemented on
+/// the other two sinks did not have to face. The desired connect-set is the
+/// endpoints of the loop's peers ([`crate::loop_peers::LoopPeers`]), living
+/// inside `face_drive_loop`, not a field on a long-lived object, so nothing can
+/// implement a sink "on" it. What CAN be implemented on
 /// is the SENDER the loop already drains, and that is what this abstracts: the
 /// config seam names a sink, the host holds the channel.
 ///
@@ -509,45 +511,66 @@ pub trait ConnectEndpointsSink {
     fn set_connect_endpoints(&self, endpoints: Vec<AnyLocator>) -> bool;
 }
 
-/// R2671 (open-debt item 770) — APPLY one [`ConnectReconcile`] to the desired
-/// connect-set, and the ONE place that decides replace-versus-add.
+/// What one [`ConnectReconcile`] asks of the loop's peers, its members folded
+/// into dial plans: the input of [`crate::loop_peers::LoopPeers::set_endpoints`]
+/// or of its `open_node`.
+#[cfg(feature = "router-connect-reconcile")]
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConnectPlan {
+    /// Configured endpoints: `targets` join the set, and with `replace` they
+    /// are the whole of it.
+    Endpoints {
+        /// The members, each keyed by its pre-handshake identity.
+        targets: Vec<MeshDialTarget>,
+        /// Whether they are the whole set.
+        replace: bool,
+    },
+    /// A node, and the locators the graph holds for it (decision D5).
+    #[cfg(feature = "session-close-ingress")]
+    Node {
+        /// The node's zid in its sixteen-byte form.
+        zid: DirectoryZid,
+        /// The locators the graph holds for the node, as the node advertised them.
+        locators: Vec<String>,
+    },
+}
+
+/// R2671 (open-debt item 770) — FOLD one [`ConnectReconcile`] into the plan the
+/// loop's peers take, and the ONE place that reads its verb.
 ///
 /// ⭐ EXTRACTED RATHER THAN INLINED, and that is the repair rather than a
 /// tidy-up. The merge used to live inside `face_drive_loop`'s `select!` arm,
 /// where the only way to reach it is to stand up a loop, a listener and a host —
 /// so the arity defect above was structurally untestable, and the integration
 /// test that does exist never built a node whose desired set was non-empty,
-/// which is exactly the case where subset-versus-whole differs. A free function
-/// over a `HashMap` is reachable by a unit test in microseconds.
+/// which is exactly the case where subset-versus-whole differs. The fold and
+/// the set it lands in ([`crate::loop_peers::LoopPeers`], decision D5) are
+/// both reachable by a unit test in microseconds.
 ///
 /// Refusals are reported through `on_refused` rather than logged here, so the
 /// caller keeps the loop's wording and a test can count them without a logger.
 #[cfg(feature = "router-connect-reconcile")]
-///
-/// Decision D5 — a node's add ([`ConnectReconcile::AddNode`]) is not a member
-/// of the set: it is handed back untouched, for the loop's node planner
-/// ([`crate::node_peers`]), as `(zid, locators)`.
-#[must_use = "a node's add is handed back for the node planner, not applied here"]
-pub fn apply_connect_reconcile(
-    desired: &mut std::collections::HashMap<MeshDialKey, MeshDialTarget>,
+pub fn fold_connect_reconcile(
     request: ConnectReconcile,
     mut on_refused: impl FnMut(AnyLocator),
-) -> Option<(DirectoryZid, Vec<String>)> {
+) -> ConnectPlan {
     let (rows, replace) = match request {
         ConnectReconcile::Replace(rows) => (rows, true),
         ConnectReconcile::Add(rows) => (rows, false),
         #[cfg(feature = "session-close-ingress")]
-        ConnectReconcile::AddNode { zid, locators } => return Some((zid, locators)),
+        ConnectReconcile::AddNode { zid, locators } => {
+            return ConnectPlan::Node { zid, locators };
+        }
     };
     // R2233 — fold each through the ONE classification and refuse a member with
     // no pre-handshake identity, exactly as the startup seed does. Keyed by the
     // identity (R2900: a `MeshDialKey`, the resolved address for the IP family),
     // so a re-listed endpoint spelled differently still dedups to one dial.
-    let folded: std::collections::HashMap<MeshDialKey, MeshDialTarget> = rows
+    let targets = rows
         .into_iter()
         .filter_map(
             |locator| match crate::session_open::mesh_dial_plan(locator) {
-                Ok(target) => Some((target.key.clone(), target)),
+                Ok(target) => Some(target),
                 Err(rejected) => {
                     on_refused(rejected);
                     None
@@ -555,14 +578,7 @@ pub fn apply_connect_reconcile(
             },
         )
         .collect();
-    if replace {
-        *desired = folded;
-    } else {
-        // An ADD leaves every existing member in place -- including the
-        // DNS-resolved startup seed, which no producer could have respelled.
-        desired.extend(folded);
-    }
-    None
+    ConnectPlan::Endpoints { targets, replace }
 }
 
 /// The production [`ConnectEndpointsSink`]: the channel end itself. Sending on a
@@ -1359,7 +1375,7 @@ async fn dial_face_multilink(
 }
 
 /// R311y212 (transport-multilink per-link auto-re-add) — the backoff + 0x4 re-dial
-/// twin: [`dial_face_after`]'s delay composed with [`dial_face_multilink`]'s
+/// twin: a backoff sleep composed with [`dial_face_multilink`]'s
 /// 0x4-negotiating establishment. Because the re-dial reaches the SAME peer (the
 /// retained `SocketAddr`), it captures the SAME REMOTE ephemeral multilink pubkey
 /// the survivor is bound to, so `join_link`'s `authorize_link` config-equality
@@ -1414,15 +1430,13 @@ async fn dial_face_multilink_after(
 /// delay exactly. The address is what persists across an outage, and it is
 /// already the key both substrates track their dials by.
 ///
-/// Shared by the loop's two re-dial substrates — `router-connect-reconcile`
-/// peer auto-reconnect and the `transport-multilink` per-link re-add — as the
-/// single constant was. They are mutually exclusive per address in a
-/// both-features build (the `ml_handled` gate hands each failed id to exactly
-/// one arm), so sharing one map is not two writers racing on one counter.
-///
-/// Decision D5 — generic over what names a peer (`K`): the address, for the two
-/// substrates above, and a node's zid, for the peers a lifecycle `open` names
-/// ([`crate::node_peers`]), whose outage is the node's and not one address's.
+/// Decision D5 — generic over what names a peer (`K`). The `transport-multilink`
+/// per-link re-add keys it by address. The loop's peers
+/// ([`crate::loop_peers`], `router-connect-reconcile`) key their own instance
+/// by [`crate::loop_peers::PeerKey`]: a configured endpoint's outage is its
+/// address's, a node's is the node's and not one of its addresses'. The two
+/// instances are two schedules, one per substrate, and a dial belongs to one
+/// substrate (the planner's are its own; the others are the re-add's).
 #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
 pub(crate) struct RedialSchedule<K = MeshDialKey> {
     policy: RetryPolicy,
@@ -1476,144 +1490,14 @@ impl<K: Ord + Clone> RedialSchedule<K> {
     }
 }
 
-/// Dial a peer after a fixed backoff — the delayed twin of [`dial_face`] used by the
-/// `router-connect-reconcile` peer auto-reconnect (the wz analogue of zenoh's
-/// `peer_connector_retry` sleep-then-connect loop, `orchestrator.rs:820`). A dropped
-/// or failed outbound dial to a still-desired peer is re-scheduled through this so
-/// the retry does not hot-loop on an unreachable peer; it completes into the SAME
-/// `opening` -> [`Step::Opened`] path as an immediate dial, so a successful re-dial
-/// is held + registered identically, and a failed one surfaces as `FaceFailed` and
-/// is re-scheduled again (retry-until-success-or-removed-from-`desired`).
-#[cfg(feature = "router-connect-reconcile")]
-#[allow(clippy::too_many_arguments)]
-async fn dial_face_after(
-    id: FaceId,
-    target: MeshDialTarget,
-    dial_config: Arc<DialConfig>,
-    backoff_ms: u64,
-    params: FaceTemplate,
-    offer: SessionOffer,
-    clock: TokioTime,
-    tick_interval_ms: u64,
-) -> OpenResult {
-    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
-    dial_face(
-        id,
-        target,
-        dial_config,
-        params,
-        offer,
-        clock,
-        tick_interval_ms,
-    )
-    .await
-}
-
-/// Schedule a re-dial of a dropped/failed outbound peer IF it is still desired
-/// (`router-connect-reconcile` peer auto-reconnect — the wz analogue of zenoh's
-/// `closed_session` Peer/Router arm --
-/// `zenoh/src/net/runtime/orchestrator.rs` @ `if session.runtime.whatami() != WhatAmI::Client {`,
-/// gated on the still-desired read
-/// `zenoh/src/net/runtime/orchestrator.rs` @ `if peers.contains(&endpoint) && zwrite!(session.endpoints).remove(&endpoint) {`).
-/// R2500 — those two were `orchestrator.rs:1210` and `:1225`, written against
-/// zenoh 1.5.0; at the 1.10.0 pin :1210 is a multicast-group link check and the
-/// file is 1497 lines, so both landed a reader on plausible unrelated code.
-/// Anchored rather than renumbered: a corrected number rots at the next bump,
-/// and a root-less `file.rs:N` is scored by no citation gate at all.
-/// Re-keys the dial-address index to the fresh
-/// [`FaceId`] BEFORE the backoff so the address stays CLAIMED across the drop->redial
-/// gap (a concurrent reconcile then dedups against it instead of opening a second
-/// link). A peer no longer in `desired` (removed from the connect list) is dropped,
-/// not re-dialed — the removal is honoured for RECONNECTION even though the router
-/// never actively closes a live face (the close-removed asymmetry, faithful to
-/// zenoh's Client-only teardown branch).
-///
-/// A re-dial is NOT counted in `summary.dialed` — that counter is the number of
-/// distinct configured/reconciled peers dialed, not TCP connect attempts, so a
-/// permanently-unreachable peer does not inflate it without bound. `announce`
-/// controls the log level: the FIRST re-dial after a drop (an operator-visible peer
-/// flap) logs at `info`; subsequent retries against a still-unreachable peer log at
-/// `debug`, so a down configured peer does not emit an `info` storm (the retry
-/// cadence is bounded by [`RedialSchedule`], and since R311y786 it BACKS OFF —
-/// under the default policy a peer that stays down settles at one attempt per
-/// `period_max_ms` rather than the 1 Hz the fixed delay held forever).
-#[cfg(feature = "router-connect-reconcile")]
-#[allow(clippy::too_many_arguments)]
-fn schedule_redial(
-    addr: MeshDialKey,
-    // R2233 (open-debt item 585) — a MAP, not a set. The desired connect-set is
-    // keyed by address exactly as before (that is the pre-handshake identity),
-    // but its value is now HOW to dial that address: the re-dial has to reach
-    // the peer over the scheme the operator configured, and a set of bare
-    // addresses had already thrown that away. One lookup answers both "is this
-    // still wanted" and "what do I dial".
-    desired: &std::collections::HashMap<MeshDialKey, MeshDialTarget>,
-    dial_config: &Arc<DialConfig>,
-    dialed_targets: &mut BTreeMap<FaceId, MeshDialKey>,
-    redial: &mut RedialSchedule,
-    opening: &mut FuturesUnordered<OpenFuture>,
-    next_id: &mut u64,
-    announce: bool,
-    params: &FaceTemplate,
-    // R311y506 (session-extqos) / R2095 — a re-dial must carry the SAME offer as
-    // the original. Without it a peer flap would silently re-establish with the
-    // capabilities dropped — the containment a declared band configures, and
-    // since R2095 the lowlatency / compression / shm offers too — and nothing
-    // downstream would report the downgrade.
-    offer: SessionOffer,
-    clock: TokioTime,
-    tick_interval_ms: u64,
-) {
-    let Some(target) = desired.get(&addr).cloned() else {
-        // No longer desired: drop any growth state with it, so a peer re-added to
-        // the connect list later starts from `period_init_ms` rather than
-        // inheriting the ceiling of the outage that preceded its removal.
-        redial.forget(&addr);
-        return;
-    };
-    let id = FaceId(*next_id);
-    *next_id += 1;
-    // R311y786 — consume THIS peer's next wait (and grow it for the attempt after).
-    // Read once and reused in both the log and the dial, so the line an operator
-    // sees is the delay actually applied, not a second call that would double the
-    // growth.
-    let backoff_ms = redial.next_ms(&addr, target.retry());
-    // Reserve the address under the new id before the backoff so a reconcile that
-    // arrives during the wait does not also dial it (the drop->redial dedup gap).
-    dialed_targets.insert(id, addr.clone());
-    if announce {
-        log::info!(
-            "reconcile: re-dialing desired peer {addr} in {backoff_ms}ms (face {})",
-            id.0
-        );
-    } else {
-        log::debug!(
-            "reconcile: retrying re-dial of desired peer {addr} in {backoff_ms}ms (face {})",
-            id.0
-        );
-    }
-    opening.push(Box::pin(dial_face_after(
-        id,
-        target,
-        Arc::clone(dial_config),
-        backoff_ms,
-        params.clone(),
-        offer,
-        clock,
-        tick_interval_ms,
-    )));
-}
-
 /// R311y212 (transport-multilink) — schedule a re-dial + re-JOIN of a dropped
-/// aggregated link this node DIALED (the multilink twin of [`schedule_redial`],
-/// its own substrate, NOT gated on `router-connect-reconcile`). Unlike the peer
-/// auto-reconnect there is no `desired` connect-list gate — every retained
-/// multilink dial endpoint is permanently wanted. R311y786 — it draws its wait
-/// from the SAME [`RedialSchedule`] the peer auto-reconnect does, as it drew from
-/// the same constant before: a PER-LINK policy is still the deferred slice, so N
-/// links to one address share that address's schedule (which is also why keying
-/// it by address rather than by link is not a compromise here — the two arms are
-/// mutually exclusive per failed id). Re-keys the retained endpoint to a fresh [`FaceId`] BEFORE
+/// aggregated link this node DIALED (its own substrate, NOT gated on
+/// `router-connect-reconcile`). Unlike a configured endpoint, which the loop's
+/// peers hold by its connection machine ([`crate::loop_peers`]), every retained
+/// multilink link is permanently wanted while its session lives. R311y786 — its
+/// waits come from a [`RedialSchedule`] keyed by address: a PER-LINK policy is
+/// still the deferred slice, so N links to one address share that address's
+/// schedule. Re-keys the retained endpoint to a fresh [`FaceId`] BEFORE
 /// the backoff (so the re-add is tracked across the drop->redial gap and the Err
 /// arm can retry it), carrying the DEAD link's QoS-priority `band` so the
 /// re-added link restores its priority band (a fresh-id band would flip on
@@ -1934,58 +1818,110 @@ enum Step {
     /// attribute (tokio's `select!` rejects branch attributes), and its handler body
     /// is `#[cfg]`-gated — inert without the feature.
     Reconcile(ConnectReconcile),
-    /// Decision D5 — the retry timer of a node a lifecycle `open` named fired.
-    /// Always present, like [`Self::Reconcile`], because `select!` takes no branch
+    /// Decision D5 — the retry timer of a peer the loop holds fired. Always
+    /// present, like [`Self::Reconcile`], because `select!` takes no branch
     /// attribute; the queue that produces it is empty in a build without the
-    /// node planner.
-    NodeRetry(DirectoryZid),
+    /// loop's peers.
+    PeerRetry(PeerRetryDue),
 }
 
-/// Decision D5 — the retry timers of the nodes the loop holds by zid: each yields
-/// its node when it fires. Empty in a build without the node planner.
-type NodeRetries = FuturesUnordered<Pin<Box<dyn Future<Output = DirectoryZid>>>>;
+/// Decision D5 — what a peer's retry timer yields: the peer, and which arming
+/// of its timer fired ([`crate::loop_peers::PeerAction::Retry`]).
+#[cfg(feature = "router-connect-reconcile")]
+type PeerRetryDue = (crate::loop_peers::PeerKey, u64);
+/// Nothing is ever armed in a build without the loop's peers; this exists so
+/// the queue's type names something.
+#[cfg(not(feature = "router-connect-reconcile"))]
+type PeerRetryDue = std::convert::Infallible;
 
-/// Decision D5 — take what the node planner asked for: dial a node's candidate
-/// as a fresh face, arm a node's retry timer, or close a session its node no
-/// longer wants.
-#[cfg(all(
-    feature = "router-connect-reconcile",
-    feature = "session-close-ingress"
-))]
-#[allow(clippy::too_many_arguments)]
-fn take_node_actions(
-    actions: Vec<crate::node_peers::NodeAction>,
-    opening: &mut FuturesUnordered<OpenFuture>,
-    node_retries: &mut NodeRetries,
-    node_sessions: &BTreeMap<FaceId, Arc<SessionLinkActions>>,
-    dial_config: &Arc<DialConfig>,
-    params: &FaceTemplate,
+/// Decision D5 — the retry timers of the peers the loop holds: each yields its
+/// peer when it fires. Empty in a build without the loop's peers.
+type PeerRetries = FuturesUnordered<Pin<Box<dyn Future<Output = PeerRetryDue>>>>;
+
+/// Decision D5 — the parts of the face loop the actions of its peers
+/// ([`crate::loop_peers`]) are taken on, borrowed for one batch of them.
+#[cfg(feature = "router-connect-reconcile")]
+struct PeerHost<'a> {
+    opening: &'a mut FuturesUnordered<OpenFuture>,
+    retries: &'a mut PeerRetries,
+    /// The sessions of the faces a peer is held by, which a `close` may drop.
+    #[cfg(feature = "session-close-ingress")]
+    sessions: &'a BTreeMap<FaceId, Arc<SessionLinkActions>>,
+    #[cfg(feature = "transport-multilink")]
+    max_links: usize,
+    #[cfg(feature = "transport-multilink")]
+    ml_dial_endpoints: &'a mut BTreeMap<FaceId, (MeshDialTarget, (Priority, Priority))>,
+    dial_config: &'a Arc<DialConfig>,
+    params: &'a FaceTemplate,
     offer: SessionOffer,
     clock: TokioTime,
     tick_interval_ms: u64,
-) {
-    use crate::node_peers::NodeAction;
-    for action in actions {
-        match action {
-            NodeAction::Dial { id, target } => opening.push(Box::pin(dial_face(
-                id,
-                target,
-                Arc::clone(dial_config),
-                params.clone(),
-                offer,
-                clock,
-                tick_interval_ms,
-            ))),
-            NodeAction::Retry { zid, after_ms } => node_retries.push(Box::pin(async move {
-                tokio::time::sleep(Duration::from_millis(after_ms)).await;
-                zid
-            })),
-            NodeAction::Close { id } => {
-                if let Some(actions) = node_sessions.get(&id) {
-                    actions.request_close();
+}
+
+#[cfg(feature = "router-connect-reconcile")]
+impl PeerHost<'_> {
+    /// Take what the loop's peers asked for: dial a peer's target as a fresh
+    /// face, arm a peer's retry timer, or close a session its peer no longer
+    /// wants. Returns how many dials it opened.
+    ///
+    /// A configured endpoint's dial aggregates (`transport-multilink`,
+    /// `max_links > 1`) as every dial of an aggregating node does, and its link
+    /// is retained for the per-link re-add; a node's dial is held by one face.
+    fn take(self, actions: Vec<crate::loop_peers::PeerAction>) -> usize {
+        use crate::loop_peers::PeerAction;
+        #[cfg(feature = "transport-multilink")]
+        use crate::loop_peers::PeerKey;
+        let mut dials = 0;
+        for action in actions {
+            match action {
+                PeerAction::Dial { id, key, target } => {
+                    dials += 1;
+                    #[cfg(feature = "transport-multilink")]
+                    if self.max_links > 1 && matches!(key, PeerKey::Endpoint(_)) {
+                        self.ml_dial_endpoints
+                            .insert(id, (target.clone(), multilink_priority_range(id)));
+                        self.opening.push(Box::pin(dial_face_multilink(
+                            id,
+                            target,
+                            Arc::clone(self.dial_config),
+                            self.offer,
+                            multilink_priority_range(id),
+                            self.params.clone(),
+                            self.clock,
+                            self.tick_interval_ms,
+                        )) as OpenFuture);
+                        continue;
+                    }
+                    // Only an aggregating build reads which peer a dial is for.
+                    #[cfg(not(feature = "transport-multilink"))]
+                    let _ = key;
+                    self.opening.push(Box::pin(dial_face(
+                        id,
+                        target,
+                        Arc::clone(self.dial_config),
+                        self.params.clone(),
+                        self.offer,
+                        self.clock,
+                        self.tick_interval_ms,
+                    )));
+                }
+                PeerAction::Retry {
+                    key,
+                    generation,
+                    after_ms,
+                } => self.retries.push(Box::pin(async move {
+                    tokio::time::sleep(Duration::from_millis(after_ms)).await;
+                    (key, generation)
+                })),
+                #[cfg(feature = "session-close-ingress")]
+                PeerAction::Close { id } => {
+                    if let Some(actions) = self.sessions.get(&id) {
+                        actions.request_close();
+                    }
                 }
             }
         }
+        dials
     }
 }
 
@@ -2717,51 +2653,18 @@ where
     let mut faces: BTreeMap<FaceId, Option<Vec<u8>>> = BTreeMap::new();
     // R2951 — the ids of opens the loop ACCEPTED, from the accept push until the
     // open resolves either way. What is not in it is a dial, which is how
-    // `Face::dialed` is answered without `router-connect-reconcile`'s index.
+    // `Face::dialed` is answered in every build, the loop's peers or not.
     let mut accepted_ids: std::collections::BTreeSet<FaceId> = std::collections::BTreeSet::new();
-    // The address index of the OUTBOUND dials (`router-connect-reconcile`): every
-    // dialed face's `FaceId -> SocketAddr`, populated at each dial-push (startup
-    // seed, gossip `Step::Dial`, reconcile-add) and pruned when the face leaves.
-    // A runtime reconcile dedups additions against this (dial `addr` iff `addr` is
-    // not already an in-flight/held dial) — the address dedup the zid-keyed `faces`
-    // map structurally cannot do (a config endpoint carries no zid until the
-    // handshake completes, and a star router keeps N faces regardless of zid).
-    // Accepted faces are never indexed here (their `SocketAddr` is the remote's
-    // ephemeral source port, never a connect-list target), so a reconcile never
-    // touches an inbound peer. Maintained only when the feature is compiled.
-    #[cfg(feature = "router-connect-reconcile")]
-    let mut dialed_targets: BTreeMap<FaceId, MeshDialKey> = BTreeMap::new();
-    // The DESIRED outbound connect-set (`router-connect-reconcile` peer auto-
-    // reconnect): the addresses the node WANTS to hold a dial to — seeded from the
-    // static `dial_targets` and updated by each runtime reconcile (grows on add,
-    // shrinks on remove). A dropped/failed dial is re-dialed iff its address is still
-    // in this set (the zenoh `closed_session` `peers.contains(endpoint)` gate,
-    // `orchestrator.rs:1225`); a removed address simply leaves the set and is not
-    // reconnected (the router never actively closes a live face — the close-removed
-    // asymmetry). Maintained only when the feature is compiled.
-    //
-    // R2233 (open-debt item 585) — a MAP address -> dial plan, where it was a set
-    // of addresses. The KEY is unchanged, and deliberately so: the address is the
-    // pre-handshake identity, so two spellings of one endpoint still dedup to one
-    // dial. What the value adds is the SCHEME, without which a re-dial of a
-    // `quic/...` peer would silently come back as TCP. R2900 — and the key is a
-    // `MeshDialKey`, the address for the IP family and the naming value for the
-    // four shapes that have none.
-    #[cfg(feature = "router-connect-reconcile")]
-    let mut desired: std::collections::HashMap<MeshDialKey, MeshDialTarget> = dial_targets
-        .iter()
-        .map(|t| (t.key.clone(), t.clone()))
-        .collect();
     // Decision D3 — where the nodes this loop dials by zid may be reached: the
     // hints the discovery planes and the lifecycle opener give, read just after
     // each gives them. Boxed, because a table of its rows is too large for the
     // loop's future to carry inline.
     let mut directory: Box<LoopDirectory> = Box::new(LoopDirectory::new());
-    // R311y786 — the per-address re-dial waits, replacing the fixed
-    // `RECONNECT_BACKOFF_MS`. Loop-local (not per-face) because the growth must
-    // survive the FaceId churn of the retries it is pacing, and one instance for
-    // both re-dial substrates because they shared the constant it replaced.
-    #[cfg(any(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+    // R311y786 — the per-address re-dial waits of the multilink per-link re-add,
+    // replacing the fixed `RECONNECT_BACKOFF_MS`. Loop-local (not per-face)
+    // because the growth must survive the FaceId churn of the retries it is
+    // pacing. The loop's peers keep their own (decision D5).
+    #[cfg(feature = "transport-multilink")]
     let mut redial = RedialSchedule::new(retry);
     // The FIELD is unconditional (so no construction site carries a cfg) but a build
     // with NEITHER re-dial substrate schedules nothing to pace, so the local is
@@ -2795,59 +2698,88 @@ where
     let mut ml_rejected: BTreeSet<FaceId> = BTreeSet::new();
     // R311y212 (transport-multilink per-link auto-re-add) — the retained dial
     // endpoint (+ traffic-class pref) for every aggregated link THIS node dialed,
-    // keyed by FaceId. Its own substrate (not `router-connect-reconcile`'s
-    // `dialed_targets`, which is removed at the JOIN and dial-vs-accept-gated on a
-    // different feature): a dialed link keeps its entry across the JOIN so that on
-    // a PARTIAL loss it can be re-dialed + re-JOINed onto the surviving session. An
+    // keyed by FaceId. Its own substrate (not the connection machine of a
+    // configured endpoint, which holds the endpoint by its session and is
+    // `router-connect-reconcile`'s): a dialed link keeps its entry across the JOIN
+    // so that on a PARTIAL loss it can be re-dialed + re-JOINed onto the surviving
+    // session. An
     // ACCEPTED link has no entry (no re-dial owner — the peer re-dials it).
     #[cfg(feature = "transport-multilink")]
     let mut ml_dial_endpoints: BTreeMap<FaceId, (MeshDialTarget, (Priority, Priority))> =
         BTreeMap::new();
     let mut summary = AcceptLoopSummary::default();
     let mut opening: FuturesUnordered<OpenFuture> = FuturesUnordered::new();
-    // Decision D5 — the nodes a lifecycle `open` names, each held by its
-    // connection machine rather than by the desired connect-set: the planner, the
-    // sessions it may be asked to close, and the retry timers it arms.
+    // Decision D5 — the peers the loop is told to hold, each by its connection
+    // machine: the configured endpoints (`connect/endpoints`, and each reconcile
+    // of them) and the nodes a lifecycle `open` names. The planner, the sessions
+    // a `close` may drop, and the retry timers it arms.
+    #[cfg(feature = "router-connect-reconcile")]
+    let mut peers = crate::loop_peers::LoopPeers::new(retry);
     #[cfg(all(
         feature = "router-connect-reconcile",
         feature = "session-close-ingress"
     ))]
-    let mut node_peers = crate::node_peers::NodePeers::new(retry);
-    #[cfg(all(
-        feature = "router-connect-reconcile",
-        feature = "session-close-ingress"
-    ))]
-    let mut node_sessions: BTreeMap<FaceId, Arc<SessionLinkActions>> = BTreeMap::new();
-    let mut node_retries: NodeRetries = FuturesUnordered::new();
-    // Report how a node dial ended and take what its machine asks next; the value
-    // is whether the loop is to hold the face (`true` for a face that is not a node
-    // dial). Every arm that ends a dial reports through this one spelling.
-    #[cfg(all(
-        feature = "router-connect-reconcile",
-        feature = "session-close-ingress"
-    ))]
-    macro_rules! node_dial_ended {
-        ($id:expr, $end:expr) => {{
-            let cx = crate::node_peers::NodeContext {
+    let mut peer_sessions: BTreeMap<FaceId, Arc<SessionLinkActions>> = BTreeMap::new();
+    let mut peer_retries: PeerRetries = FuturesUnordered::new();
+    // The planner's view of the loop at this moment.
+    #[cfg(feature = "router-connect-reconcile")]
+    macro_rules! peer_cx {
+        () => {
+            crate::loop_peers::PeerContext {
                 directory: &directory,
                 now_ms: clock.now_monotonic_ms(),
-            };
-            match node_peers.dial_ended($id, $end, &cx, &mut next_id) {
+            }
+        };
+    }
+    // Take what the loop's peers asked for; the value is how many dials it opened.
+    #[cfg(feature = "router-connect-reconcile")]
+    macro_rules! take_peer_actions {
+        ($actions:expr) => {
+            PeerHost {
+                opening: &mut opening,
+                retries: &mut peer_retries,
+                #[cfg(feature = "session-close-ingress")]
+                sessions: &peer_sessions,
+                #[cfg(feature = "transport-multilink")]
+                max_links,
+                #[cfg(feature = "transport-multilink")]
+                ml_dial_endpoints: &mut ml_dial_endpoints,
+                dial_config: &dial_config,
+                params: &params,
+                offer,
+                clock,
+                tick_interval_ms,
+            }
+            .take($actions)
+        };
+    }
+    // Report how a peer's dial ended and take what its machine asks next; the
+    // value is whether the loop is to hold the face (`true` for a face that is
+    // not a peer's dial). Every arm that ends a dial reports through this one
+    // spelling.
+    #[cfg(feature = "router-connect-reconcile")]
+    macro_rules! peer_dial_ended {
+        ($id:expr, $end:expr) => {{
+            let cx = peer_cx!();
+            match peers.dial_ended($id, $end, &cx, &mut next_id) {
                 Some((keep, actions)) => {
-                    take_node_actions(
-                        actions,
-                        &mut opening,
-                        &mut node_retries,
-                        &node_sessions,
-                        &dial_config,
-                        &params,
-                        offer,
-                        clock,
-                        tick_interval_ms,
-                    );
+                    take_peer_actions!(actions);
                     keep
                 }
                 None => true,
+            }
+        }};
+    }
+    // Report a face's death to the peers it held, and take what their machines
+    // ask next.
+    #[cfg(feature = "router-connect-reconcile")]
+    macro_rules! peer_face_down {
+        ($id:expr) => {{
+            #[cfg(feature = "session-close-ingress")]
+            peer_sessions.remove(&$id);
+            let cx = peer_cx!();
+            if let Some(actions) = peers.face_down($id, &cx, &mut next_id) {
+                take_peer_actions!(actions);
             }
         }};
     }
@@ -2882,14 +2814,21 @@ where
     // below. Boxed into the shared `opening` set because `dial_face` and
     // `open_face` are distinct future types (see [`OpenFuture`]). Empty for a
     // pure acceptor, so [`accept_loop`] seeds nothing here.
+    //
+    // Decision D5 — with `router-connect-reconcile` the configured targets are
+    // the loop's endpoints, each held by its connection machine, which dials it
+    // now and again whenever its session is lost, until a reconcile forgets it.
+    #[cfg(feature = "router-connect-reconcile")]
+    {
+        let cx = peer_cx!();
+        let actions = peers.set_endpoints(dial_targets, false, &cx, &mut next_id);
+        summary.dialed += take_peer_actions!(actions);
+    }
+    #[cfg(not(feature = "router-connect-reconcile"))]
     for target in dial_targets {
         let id = FaceId(next_id);
         next_id += 1;
         summary.dialed += 1;
-        // Index the static dial so a later reconcile does not re-dial an address
-        // already seeded here (dedup includes still-in-flight opens).
-        #[cfg(feature = "router-connect-reconcile")]
-        dialed_targets.insert(id, target.key.clone());
         // R311y205 (transport-multilink) — a `max_links > 1` node dials with the
         // 0x4-negotiating variant so its outbound links aggregate (the pref tags
         // this link's traffic class); the `#[cfg(not)]` arm is the byte-identical
@@ -2940,7 +2879,7 @@ where
         let step = tokio::select! {
             _ = &mut shutdown => Step::Shutdown,
             Some(opened) = opening.next() => Step::Opened(Box::new(opened)),
-            Some(zid) = node_retries.next() => Step::NodeRetry(zid),
+            Some(due) = peer_retries.next() => Step::PeerRetry(due),
             Some(driven) = driving.next() => Step::Driven(driven),
             Some(driven) = next_spawned(&mut spawned_drives, &mut spawned_faces) => {
                 Step::Driven(driven)
@@ -2965,22 +2904,18 @@ where
 
             Step::Opened(opened) => {
                 let (id, peer, result) = *opened;
-                // Decision D5 — whether this is a dial the node planner asked for:
-                // its end is reported to the node's machine at whichever arm below
-                // ends it, and it is held as a single-link face.
-                #[cfg(all(
-                    feature = "router-connect-reconcile",
-                    feature = "session-close-ingress"
-                ))]
-                let node_dial = node_peers.is_dialing(id);
+                // Decision D5 — whether this is a dial the loop's peers asked for:
+                // its end is reported to its peer's machine at whichever arm below
+                // ends it. A node's dial is held as a single-link face.
+                #[cfg(feature = "router-connect-reconcile")]
+                let peer_dial = peers.is_dialing(id);
+                #[cfg(all(feature = "router-connect-reconcile", feature = "transport-multilink"))]
+                let node_dial = peers.dials_a_node(id);
                 // Without the planner no dial is a node's; only the multilink JOIN
                 // branch reads the answer then.
                 #[cfg(all(
                     feature = "transport-multilink",
-                    not(all(
-                        feature = "router-connect-reconcile",
-                        feature = "session-close-ingress"
-                    ))
+                    not(feature = "router-connect-reconcile")
                 ))]
                 let node_dial = false;
                 match result {
@@ -2995,18 +2930,8 @@ where
                         // Placed BEFORE the multilink JOIN branch below, which
                         // `continue`s: a joined link is a successful dial too, and a
                         // reset written after that branch would never run for one.
-                        // R311y786 — NO WITNESS: deleting both calls below reds
-                        // nothing in this crate's 912 tests (measured, y786). The
-                        // reconcile remove/re-add e2e binds `forget` and the loop's
-                        // call to it, but nothing yet observes THIS call site — a
-                        // build that forgot only on a reconcile removal, never on a
-                        // successful dial, would make a recovered-then-flapped peer
-                        // wait its old ceiling. Witnessing it needs a peer that
-                        // reaches Established and then drops.
-                        #[cfg(feature = "router-connect-reconcile")]
-                        if let Some(addr) = dialed_targets.get(&id) {
-                            redial.forget(addr);
-                        }
+                        // A peer's dial resets its own schedule when its machine
+                        // reaches Established (`reset_retry`, decision D5).
                         #[cfg(feature = "transport-multilink")]
                         if let Some((target, _)) = ml_dial_endpoints.get(&id) {
                             redial.forget(&target.key);
@@ -3085,11 +3010,19 @@ where
                                             // dropping it at the faces.get gate. A
                                             // no-op for observation-only forwarders.
                                             forwarder.register_joined(id, primary_id, &joined);
-                                            // Drop its dial-address index — a joined
-                                            // link is not a standalone reconnectable
-                                            // dial (no-op for an accepted link).
+                                            // Decision D5 — an endpoint whose dial
+                                            // joined a session is held by that
+                                            // session's face, and is lost with it;
+                                            // the link itself is the re-add's.
                                             #[cfg(feature = "router-connect-reconcile")]
-                                            dialed_targets.remove(&id);
+                                            if peer_dial {
+                                                peer_dial_ended!(
+                                                    id,
+                                                    crate::loop_peers::DialEnd::AlreadyHeld {
+                                                        held: primary_id,
+                                                    }
+                                                );
+                                            }
                                             driving.push(Box::pin(drive_joined_face(
                                                 face, opened, joined, forwarder,
                                             ))
@@ -3103,8 +3036,17 @@ where
                                                 max_links,
                                                 peer_zid
                                             );
+                                            // Decision D5 — the session is full, but
+                                            // it is the endpoint's: held by its face.
                                             #[cfg(feature = "router-connect-reconcile")]
-                                            dialed_targets.remove(&id);
+                                            if peer_dial {
+                                                peer_dial_ended!(
+                                                    id,
+                                                    crate::loop_peers::DialEnd::AlreadyHeld {
+                                                        held: primary_id,
+                                                    }
+                                                );
+                                            }
                                             // R311y212 — a REJECTED dialed link is not
                                             // re-added; drop its retained endpoint so it
                                             // does not leak past the ml_rejected drain
@@ -3123,8 +3065,16 @@ where
                                                 id.0,
                                                 peer_zid
                                             );
+                                            // Decision D5 — a link the session refuses
+                                            // is a dial that failed: the endpoint
+                                            // backs off and tries again.
                                             #[cfg(feature = "router-connect-reconcile")]
-                                            dialed_targets.remove(&id);
+                                            if peer_dial {
+                                                peer_dial_ended!(
+                                                    id,
+                                                    crate::loop_peers::DialEnd::Failed
+                                                );
+                                            }
                                             // R311y212 — see the MAX_LINKS arm: drop the
                                             // rejected link's retained endpoint so it does
                                             // not leak past the ml_rejected drain.
@@ -3170,35 +3120,28 @@ where
                                         "dropping redundant face {} to an already-held peer",
                                         id.0
                                     );
-                                    // The dropped face never enters `faces`; drop its
-                                    // dial-address index too so a later reconcile does
-                                    // not treat the abandoned id as a live dial (no-op
-                                    // for an accepted face, which is not indexed).
+                                    // Decision D5 — a peer's dial that met the remote
+                                    // already held: the peer is held by that face (a
+                                    // configured endpoint a gossip dial reached first
+                                    // is lost, and dialled again, with that face).
                                     #[cfg(feature = "router-connect-reconcile")]
-                                    dialed_targets.remove(&id);
-                                    // Decision D5 — a node dial that met the node
-                                    // already held: the node is held by that face.
-                                    #[cfg(all(
-                                        feature = "router-connect-reconcile",
-                                        feature = "session-close-ingress"
-                                    ))]
-                                    if node_dial {
+                                    if peer_dial {
                                         let end = match faces.iter().find(|(_, held)| {
                                             held.as_deref().is_some_and(|held| {
                                                 crate::zid_hex::same_zid(held, z)
                                             })
                                         }) {
                                             Some((held, _)) => {
-                                                crate::node_peers::DialEnd::AlreadyHeld {
+                                                crate::loop_peers::DialEnd::AlreadyHeld {
                                                     held: *held,
                                                 }
                                             }
                                             // Held by the forwarder alone, by no face
                                             // this loop can watch: not a hold the
                                             // machine can keep, so the dial failed.
-                                            None => crate::node_peers::DialEnd::Failed,
+                                            None => crate::loop_peers::DialEnd::Failed,
                                         };
-                                        node_dial_ended!(id, end);
+                                        peer_dial_ended!(id, end);
                                     }
                                     continue;
                                 }
@@ -3217,25 +3160,18 @@ where
                         // admission is not a bound.
                         //
                         // A rejected face is dropped exactly the way a
-                        // redundant one is: it never enters `faces`, and its
-                        // dial index is released so a later reconcile does not
-                        // read the abandoned id as a live dial.
+                        // redundant one is: it never enters `faces`.
                         if faces.len() >= max_sessions {
                             log::debug!(
                                 "refusing face {} — max_sessions {} reached",
                                 id.0,
                                 max_sessions
                             );
-                            #[cfg(feature = "router-connect-reconcile")]
-                            dialed_targets.remove(&id);
-                            // Decision D5 — no room for the session: the node's
+                            // Decision D5 — no room for the session: the peer's
                             // machine names the refusal `NoSlot`.
-                            #[cfg(all(
-                                feature = "router-connect-reconcile",
-                                feature = "session-close-ingress"
-                            ))]
-                            if node_dial {
-                                node_dial_ended!(id, crate::node_peers::DialEnd::NoSlot);
+                            #[cfg(feature = "router-connect-reconcile")]
+                            if peer_dial {
+                                peer_dial_ended!(id, crate::loop_peers::DialEnd::NoSlot);
                             }
                             summary.refused_over_max_sessions += 1;
                             if let Some(ceiling) = ceiling.as_ref() {
@@ -3262,13 +3198,8 @@ where
                                     limit
                                 );
                                 #[cfg(feature = "router-connect-reconcile")]
-                                dialed_targets.remove(&id);
-                                #[cfg(all(
-                                    feature = "router-connect-reconcile",
-                                    feature = "session-close-ingress"
-                                ))]
-                                if node_dial {
-                                    node_dial_ended!(id, crate::node_peers::DialEnd::NoSlot);
+                                if peer_dial {
+                                    peer_dial_ended!(id, crate::loop_peers::DialEnd::NoSlot);
                                 }
                                 summary.refused_over_capacity += 1;
                                 host_ceiling
@@ -3288,13 +3219,8 @@ where
                         if let Some(why) = forwarder.refuses_face(&opened.actions) {
                             log::warn!("refusing face {} -- {why}", id.0);
                             #[cfg(feature = "router-connect-reconcile")]
-                            dialed_targets.remove(&id);
-                            #[cfg(all(
-                                feature = "router-connect-reconcile",
-                                feature = "session-close-ingress"
-                            ))]
-                            if node_dial {
-                                node_dial_ended!(id, crate::node_peers::DialEnd::Failed);
+                            if peer_dial {
+                                peer_dial_ended!(id, crate::loop_peers::DialEnd::Failed);
                             }
                             on_event(&AcceptEvent::FaceRefused {
                                 id,
@@ -3303,18 +3229,17 @@ where
                             });
                             continue;
                         }
-                        // Decision D5 — a node dial that came up: its machine holds
-                        // the node by this face, unless the node stopped wanting it
-                        // while it ran, when the session is dropped here unheld.
-                        #[cfg(all(
-                            feature = "router-connect-reconcile",
-                            feature = "session-close-ingress"
-                        ))]
-                        if node_dial {
-                            if !node_dial_ended!(id, crate::node_peers::DialEnd::Established) {
+                        // Decision D5 — a peer's dial that came up: its machine
+                        // holds the peer by this face, unless the peer stopped
+                        // wanting it while it ran, when the session is dropped here
+                        // unheld.
+                        #[cfg(feature = "router-connect-reconcile")]
+                        if peer_dial {
+                            if !peer_dial_ended!(id, crate::loop_peers::DialEnd::Established) {
                                 continue;
                             }
-                            node_sessions.insert(id, opened.actions.clone());
+                            #[cfg(feature = "session-close-ingress")]
+                            peer_sessions.insert(id, opened.actions.clone());
                         }
                         faces.insert(id, face.peer_zid.clone());
                         summary.established += 1;
@@ -3361,29 +3286,27 @@ where
                     Err(cause) => {
                         // R2951 — an accept that never opened leaves no mark behind.
                         accepted_ids.remove(&id);
-                        // Decision D5 — a node dial that did not open: another node
-                        // answered (D4), or the node was not reached.
-                        #[cfg(all(
-                            feature = "router-connect-reconcile",
-                            feature = "session-close-ingress"
-                        ))]
-                        if node_dial {
+                        // Decision D5 — a peer's dial that did not open: another
+                        // node answered (D4), or the peer was not reached. Its
+                        // machine backs off and dials again, so the link the dial
+                        // retained for the multilink re-add is not the re-add's.
+                        #[cfg(feature = "router-connect-reconcile")]
+                        if peer_dial {
                             let end = if matches!(cause, OpenError::InitAckPeerMismatch) {
-                                crate::node_peers::DialEnd::Mismatch
+                                crate::loop_peers::DialEnd::Mismatch
                             } else {
-                                crate::node_peers::DialEnd::Failed
+                                crate::loop_peers::DialEnd::Failed
                             };
-                            node_dial_ended!(id, end);
+                            #[cfg(feature = "transport-multilink")]
+                            ml_dial_endpoints.remove(&id);
+                            peer_dial_ended!(id, end);
                         }
-                        // R311y212 — a failed retained MULTILINK dial (a re-add or an
-                        // initial aggregating dial that never connected) is
-                        // re-scheduled: retry-until-success. Handled FIRST and
-                        // mutually exclusive with the router-connect-reconcile redial
-                        // below (a multilink dial handled here is removed from
-                        // `ml_dial_endpoints`, and `ml_handled` gates the other arm),
-                        // so a both-features build never double-dials one id.
+                        // R311y212 — a failed retained MULTILINK dial (a re-add, or a
+                        // discovered peer's aggregating dial that never connected) is
+                        // re-scheduled: retry-until-success. A peer's dial left
+                        // `ml_dial_endpoints` above, so no id is dialled again twice.
                         #[cfg(feature = "transport-multilink")]
-                        let ml_handled = if max_links > 1 {
+                        if max_links > 1 {
                             if let Some((target, band)) = ml_dial_endpoints.remove(&id) {
                                 schedule_multilink_redial(
                                     target,
@@ -3399,39 +3322,8 @@ where
                                     clock,
                                     tick_interval_ms,
                                 );
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
-                        #[cfg(not(feature = "transport-multilink"))]
-                        let ml_handled = false;
-                        // Drop its dial-address index; if it was a still-DESIRED
-                        // outbound dial, re-schedule with backoff (peer auto-reconnect,
-                        // zenoh's `peer_connector_retry`). A failed ACCEPT is not
-                        // indexed, so the `desired` gate is a no-op for it.
-                        #[cfg(feature = "router-connect-reconcile")]
-                        if !ml_handled {
-                            if let Some(addr) = dialed_targets.remove(&id) {
-                                schedule_redial(
-                                    addr,
-                                    &desired,
-                                    &dial_config,
-                                    &mut dialed_targets,
-                                    &mut redial,
-                                    &mut opening,
-                                    &mut next_id,
-                                    false,
-                                    &params,
-                                    offer,
-                                    clock,
-                                    tick_interval_ms,
-                                );
                             }
                         }
-                        let _ = ml_handled;
                         on_event(&AcceptEvent::FaceFailed { id, peer, cause });
                     }
                 }
@@ -3476,8 +3368,10 @@ where
                                 ml_sessions.remove(&peer_zid)
                             {
                                 faces.remove(&primary_id);
+                                // Decision D5 — the session is gone: the peers its
+                                // primary face held back off and dial again.
                                 #[cfg(feature = "router-connect-reconcile")]
-                                dialed_targets.remove(&primary_id);
+                                peer_face_down!(primary_id);
                                 forwarder.deregister(primary_id);
                                 if let Some(stats) = &stats {
                                     stats.transport_closed(primary_id.0);
@@ -3538,57 +3432,17 @@ where
                 #[cfg(feature = "transport-multilink")]
                 ml_dial_endpoints.remove(&face.id);
                 faces.remove(&face.id);
-                // Decision D5 — the face a node was held by died: the node's
-                // machine backs off and asks for the retry.
-                #[cfg(all(
-                    feature = "router-connect-reconcile",
-                    feature = "session-close-ingress"
-                ))]
-                {
-                    node_sessions.remove(&face.id);
-                    let cx = crate::node_peers::NodeContext {
-                        directory: &directory,
-                        now_ms: clock.now_monotonic_ms(),
-                    };
-                    if let Some(actions) = node_peers.face_down(face.id, &cx, &mut next_id) {
-                        take_node_actions(
-                            actions,
-                            &mut opening,
-                            &mut node_retries,
-                            &node_sessions,
-                            &dial_config,
-                            &params,
-                            offer,
-                            clock,
-                            tick_interval_ms,
-                        );
-                    }
-                }
-                // A held face left. Drop its dial-address index; if it was a
-                // still-DESIRED outbound dial, re-schedule it with backoff — the peer
-                // auto-reconnect (zenoh's `closed_session` Peer/Router re-dial of a
-                // dropped configured peer, `orchestrator.rs:1210`). A dropped ACCEPTED
-                // face is not indexed, so `schedule_redial`'s gate is a no-op for it
-                // (a router does not dial a peer that connected inbound).
+                // Decision D5 — the face a peer was held by died: each peer's
+                // machine backs off and asks for the retry. This is the peer
+                // auto-reconnect, upstream's re-dial of a configured endpoint
+                // its closed session still lists
+                // (`zenoh/src/net/runtime/orchestrator.rs`
+                // @ `if peers.contains(&endpoint) && zwrite!(session.endpoints).remove(&endpoint) {`):
+                // an endpoint a reconcile no longer lists was forgotten, and a
+                // face no peer holds (an accepted one, a discovered peer's)
+                // reports nothing.
                 #[cfg(feature = "router-connect-reconcile")]
-                if let Some(addr) = dialed_targets.remove(&face.id) {
-                    // An established face dropped — announce the first re-dial at info
-                    // (an operator-visible peer flap); its retries fall to debug.
-                    schedule_redial(
-                        addr,
-                        &desired,
-                        &dial_config,
-                        &mut dialed_targets,
-                        &mut redial,
-                        &mut opening,
-                        &mut next_id,
-                        true,
-                        &params,
-                        offer,
-                        clock,
-                        tick_interval_ms,
-                    );
-                }
+                peer_face_down!(face.id);
                 forwarder.deregister(face.id);
                 if let Some(stats) = &stats {
                     stats.transport_closed(face.id.0);
@@ -3623,10 +3477,6 @@ where
                             DialIntentOrigin::Gossip => summary.gossip_dialed += 1,
                             DialIntentOrigin::MulticastScout => summary.scout_dialed += 1,
                         }
-                        // Index the gossip dial so a reconcile does not re-dial the
-                        // same address (and vice-versa).
-                        #[cfg(feature = "router-connect-reconcile")]
-                        dialed_targets.insert(id, target.key.clone());
                         // R311y205 (transport-multilink) — a `max_links > 1` node
                         // dials the discovered peer with the 0x4-negotiating variant
                         // (aggregation), else the byte-identical single-link dial.
@@ -3685,8 +3535,6 @@ where
                                     let id = FaceId(next_id);
                                     next_id += 1;
                                     summary.dialed += 1;
-                                    #[cfg(feature = "router-connect-reconcile")]
-                                    dialed_targets.insert(id, target.key.clone());
                                     // R311y212 — retain the aggregation-relax dial
                                     // endpoint for partial-loss re-add. R311y219 —
                                     // retain the priority band.
@@ -3770,32 +3618,26 @@ where
             }
 
             // A runtime connect-list reconcile arrived (`router-connect-reconcile`):
-            // dial each newly-listed connect endpoint not already being dialed. This
-            // is the wz analogue of zenoh's `update_peers` Peer/Router branch
-            // (`orchestrator.rs:449-467`) — ADD-ONLY. A removed endpoint is
-            // deliberately NOT torn down (the Client close-removed branch `427-448`
-            // is router-inapplicable: closing a live federation face on a static-list
-            // edit would blackhole the mesh). Dedup is by ADDRESS against
-            // `dialed_targets` (a config endpoint carries no zid until the handshake,
-            // so the gossip `holds_zid` zid dedup cannot apply, and the address set
-            // covers still-in-flight opens the zid set never would). The arm parks
-            // when `reconcile` is `None`, so a non-router / feature-off loop never
-            // reaches here; the body is `#[cfg]`-gated so a feature-off build compiles
-            // none of the reconcile dial logic.
+            // the loop's endpoints change, and each newly-listed one is dialled by
+            // its connection machine (decision D5). This is the wz analogue of
+            // zenoh's `update_peers` Peer/Router branch (`orchestrator.rs:449-467`)
+            // — ADD-ONLY. A removed endpoint is forgotten, NOT torn down (the
+            // Client close-removed branch `427-448` is router-inapplicable: closing
+            // a live federation face on a static-list edit would blackhole the
+            // mesh). An endpoint is named by its ADDRESS (a config endpoint carries
+            // no zid until the handshake, so the gossip `holds_zid` zid dedup
+            // cannot apply), and one already held or being reached is unchanged.
+            // The arm parks when `reconcile` is `None`, so a non-router /
+            // feature-off loop never reaches here; the body is `#[cfg]`-gated so a
+            // feature-off build compiles none of the reconcile dial logic.
             Step::Reconcile(_desired_set) => {
                 #[cfg(feature = "router-connect-reconcile")]
                 {
-                    // Apply the request per its own verb — `Replace` adopts the
-                    // whole set, `Add` leaves the existing members standing. The
-                    // peer auto-reconnect re-dial gate (`schedule_redial`) reads
-                    // this map, so an added endpoint is both dialed now AND
-                    // reconnected if it later drops, and an endpoint a REPLACE
-                    // drops stops being reconnected (its live face is NOT closed
-                    // — the add-only / close-removed asymmetry).
-                    // R2671 — the fold, the refusal and the replace/add decision
-                    // all live in `apply_connect_reconcile` so a unit test can
-                    // reach them; this arm keeps only the loop's own wording.
-                    let node = apply_connect_reconcile(&mut desired, _desired_set, |rejected| {
+                    // R2671 — the fold, the refusal and the verb are read in
+                    // `fold_connect_reconcile`, and the set it lands in is the
+                    // planner's, so a unit test reaches both; this arm keeps only
+                    // the loop's own wording.
+                    let plan = fold_connect_reconcile(_desired_set, |rejected| {
                         log::warn!(
                             "reconcile: refusing connect endpoint {rejected:?} — a {} \
                              endpoint has no address to identify it by before the \
@@ -3803,96 +3645,54 @@ where
                             crate::session_open::locator_scheme(&rejected)
                         );
                     });
-                    // Decision D5 — a node's add goes to its connection machine:
-                    // the graph's locators become its link-state hints (D3), and
-                    // the machine resolves and dials them for its zid (D4).
-                    #[cfg(feature = "session-close-ingress")]
-                    if let Some((zid, locators)) = node {
-                        let now_ms = clock.now_monotonic_ms();
-                        learn_locators(
-                            &mut directory,
-                            &zid,
-                            &locators,
-                            LocatorSource::Linkstate,
-                            now_ms,
-                        );
-                        let cx = crate::node_peers::NodeContext {
-                            directory: &directory,
-                            now_ms,
-                        };
-                        let actions = node_peers.open(zid, &cx, &mut next_id);
-                        take_node_actions(
-                            actions,
-                            &mut opening,
-                            &mut node_retries,
-                            &node_sessions,
-                            &dial_config,
-                            &params,
-                            offer,
-                            clock,
-                            tick_interval_ms,
-                        );
-                    }
-                    #[cfg(not(feature = "session-close-ingress"))]
-                    let _ = node;
-                    // The addresses already being dialed (in-flight or held) — dial
-                    // only the desired endpoints NOT among them (the address dedup;
-                    // `desired` is keyed by address, so there are no intra-request
-                    // dups).
-                    let already: std::collections::HashSet<MeshDialKey> =
-                        dialed_targets.values().cloned().collect();
-                    for (addr, target) in desired
-                        .iter()
-                        .map(|(a, t)| (a.clone(), t.clone()))
-                        .collect::<Vec<_>>()
-                    {
-                        if already.contains(&addr) {
-                            continue;
+                    match plan {
+                        // `Replace` adopts the whole set and `Add` leaves the
+                        // existing members standing. An added endpoint is dialled
+                        // now AND again whenever its session is lost; one a
+                        // replace drops is not dialled again, and its live face
+                        // is NOT closed (the add-only / close-removed asymmetry).
+                        ConnectPlan::Endpoints { targets, replace } => {
+                            let cx = peer_cx!();
+                            let actions = peers.set_endpoints(targets, replace, &cx, &mut next_id);
+                            let dials = take_peer_actions!(actions);
+                            if dials > 0 {
+                                log::debug!(
+                                    "reconcile: dialing {dials} newly-listed connect endpoint(s)"
+                                );
+                            }
+                            summary.dialed += dials;
                         }
-                        let id = FaceId(next_id);
-                        next_id += 1;
-                        summary.dialed += 1;
-                        dialed_targets.insert(id, addr.clone());
-                        log::debug!(
-                            "reconcile: dialing newly-listed connect endpoint {addr} (face {})",
-                            id.0
-                        );
-                        opening.push(Box::pin(dial_face(
-                            id,
-                            target,
-                            Arc::clone(&dial_config),
-                            params.clone(),
-                            offer,
-                            clock,
-                            tick_interval_ms,
-                        )));
+                        // Decision D5 — a node's add goes to its connection
+                        // machine: the graph's locators become its link-state
+                        // hints (D3), and the machine resolves and dials them for
+                        // its zid (D4).
+                        #[cfg(feature = "session-close-ingress")]
+                        ConnectPlan::Node { zid, locators } => {
+                            learn_locators(
+                                &mut directory,
+                                &zid,
+                                &locators,
+                                LocatorSource::Linkstate,
+                                clock.now_monotonic_ms(),
+                            );
+                            let cx = peer_cx!();
+                            let actions = peers.open_node(zid, &cx, &mut next_id);
+                            take_peer_actions!(actions);
+                        }
                     }
                 }
             }
 
-            Step::NodeRetry(_zid) => {
-                #[cfg(all(
-                    feature = "router-connect-reconcile",
-                    feature = "session-close-ingress"
-                ))]
+            Step::PeerRetry(_due) => {
+                #[cfg(feature = "router-connect-reconcile")]
                 {
-                    let cx = crate::node_peers::NodeContext {
-                        directory: &directory,
-                        now_ms: clock.now_monotonic_ms(),
-                    };
-                    let actions = node_peers.retry_due(_zid, &cx, &mut next_id);
-                    take_node_actions(
-                        actions,
-                        &mut opening,
-                        &mut node_retries,
-                        &node_sessions,
-                        &dial_config,
-                        &params,
-                        offer,
-                        clock,
-                        tick_interval_ms,
-                    );
+                    let (key, generation) = _due;
+                    let cx = peer_cx!();
+                    let actions = peers.retry_due(key, generation, &cx, &mut next_id);
+                    take_peer_actions!(actions);
                 }
+                #[cfg(not(feature = "router-connect-reconcile"))]
+                match _due {}
             }
 
             Step::Accepted(Ok((accepted, peer))) => {
@@ -4341,9 +4141,10 @@ mod tests {
     /// The `connect-add` defect was invisible for exactly one reason -- every
     /// fixture that exercised the reconcile path started from an empty desired
     /// set, and on an empty set a subset IS the whole set, so the arity mismatch
-    /// had no observable consequence anywhere it was tested. This seeds the map
+    /// had no observable consequence anywhere it was tested. This seeds the set
     /// the way `face_drive_loop` seeds it from `dial_targets` and then asks the
-    /// question the operator asks.
+    /// question the operator asks. Decision D5 — the set is the loop's peers'
+    /// configured endpoints ([`crate::loop_peers::LoopPeers`]).
     ///
     /// ⚠ BOTH VERBS ARE ASSERTED AGAINST THE SAME SEED, deliberately. A fixture
     /// that only checked `Add` would pass just as well if `Add` and `Replace`
@@ -4352,24 +4153,50 @@ mod tests {
     #[cfg(all(feature = "router-connect-reconcile", feature = "routing-peer"))]
     #[test]
     fn an_add_keeps_the_startup_seed_and_a_replace_does_not() {
+        use crate::loop_peers::{LoopPeers, PeerContext};
+
         let ep: Vec<SocketAddr> = ["127.0.0.1:7001", "127.0.0.1:7002", "127.0.0.1:7003"]
             .iter()
             .map(|s| s.parse().expect("fixture addr"))
             .collect();
+        let directory = LoopDirectory::new();
+        let cx = PeerContext {
+            directory: &directory,
+            now_ms: 0,
+        };
+        let mut next_id = 0;
 
         // Seeded the way the loop seeds it: the resolved startup dial targets.
-        let seed = |m: &mut std::collections::HashMap<MeshDialKey, MeshDialTarget>| {
-            m.clear();
-            for a in &ep[..2] {
-                let t = crate::session_open::mesh_dial_plan(tcp_dial(*a)).expect("ip locator");
-                m.insert(t.key.clone(), t);
+        let seeded = |next_id: &mut u64| {
+            let mut peers = LoopPeers::new(RetryPolicy::ZENOH_DEFAULT);
+            let seed = ep[..2]
+                .iter()
+                .map(|a| crate::session_open::mesh_dial_plan(tcp_dial(*a)).expect("ip locator"))
+                .collect();
+            peers.set_endpoints(seed, false, &cx, next_id);
+            peers
+        };
+        let keys = |peers: &LoopPeers| {
+            let mut keys: Vec<MeshDialKey> = peers.endpoints().map(|t| t.key.clone()).collect();
+            keys.sort();
+            keys
+        };
+        let reconcile = |peers: &mut LoopPeers,
+                         request: ConnectReconcile,
+                         refused: &mut usize,
+                         next_id: &mut u64| {
+            match fold_connect_reconcile(request, |_| *refused += 1) {
+                ConnectPlan::Endpoints { targets, replace } => {
+                    peers.set_endpoints(targets, replace, &cx, next_id)
+                }
+                #[cfg(feature = "session-close-ingress")]
+                ConnectPlan::Node { .. } => panic!("an endpoint request plans no node"),
             }
         };
 
-        let mut desired = std::collections::HashMap::new();
-        seed(&mut desired);
+        let mut peers = seeded(&mut next_id);
         assert_eq!(
-            desired.len(),
+            keys(&peers).len(),
             2,
             "the seed itself must be the two startup targets"
         );
@@ -4378,32 +4205,32 @@ mod tests {
         // this evicted them, because the host sent its fragment on a channel the
         // loop always read as a whole-set replace.
         let mut refused = 0usize;
-        assert!(apply_connect_reconcile(
-            &mut desired,
+        let dials = reconcile(
+            &mut peers,
             ConnectReconcile::Add(vec![tcp_dial(ep[2])]),
-            |_| refused += 1,
-        )
-        .is_none());
+            &mut refused,
+            &mut next_id,
+        );
         assert_eq!(refused, 0, "every fixture endpoint is mesh-dialable");
-        let mut got: Vec<MeshDialKey> = desired.keys().cloned().collect();
-        got.sort();
+        assert_eq!(dials.len(), 1, "only the new member is dialled: {dials:?}");
         let mut want: Vec<MeshDialKey> = ep.iter().map(|a| MeshDialKey::Ip(*a)).collect();
         want.sort();
         assert_eq!(
-            got, want,
+            keys(&peers),
+            want,
             "an ADD must leave the startup seed in the desired set"
         );
 
         // REPLACE: the same input, the opposite outcome -- the anti-vacuity arm.
-        seed(&mut desired);
-        assert!(apply_connect_reconcile(
-            &mut desired,
+        let mut peers = seeded(&mut next_id);
+        reconcile(
+            &mut peers,
             ConnectReconcile::Replace(vec![tcp_dial(ep[2])]),
-            |_| refused += 1,
-        )
-        .is_none());
+            &mut refused,
+            &mut next_id,
+        );
         assert_eq!(
-            desired.keys().cloned().collect::<Vec<_>>(),
+            keys(&peers),
             vec![MeshDialKey::Ip(ep[2])],
             "a REPLACE must adopt only what it carries -- otherwise the two verbs \
              are the same verb and this distinction buys nothing"
@@ -4411,26 +4238,30 @@ mod tests {
 
         // The refusal arm still reports, and an unusable member does not take the
         // rest of the request with it.
-        seed(&mut desired);
+        let mut peers = seeded(&mut next_id);
         refused = 0;
         let named = wz_session_core::locator::parse_any_locator("tcp/example.org:7447")
             .expect("a NAMED locator parses; it is the dial plan that refuses it");
-        assert!(apply_connect_reconcile(
-            &mut desired,
+        reconcile(
+            &mut peers,
             ConnectReconcile::Add(vec![named, tcp_dial(ep[2])]),
-            |_| refused += 1,
-        )
-        .is_none());
+            &mut refused,
+            &mut next_id,
+        );
         assert_eq!(
             refused, 1,
             "a pre-handshake-identityless endpoint is refused by name"
         );
-        assert_eq!(desired.len(), 3, "and the rest of the ADD still applies");
+        assert_eq!(
+            keys(&peers).len(),
+            3,
+            "and the rest of the ADD still applies"
+        );
     }
 
     /// Decision D5 — an add of a NODE is not a member of the desired set: it is
-    /// handed back, untouched, for the node planner, which holds the node by its
-    /// connection machine. An add of locators plans them for no node.
+    /// planned as the node, untouched, for the loop's peers, which hold the node
+    /// by its connection machine. An add of locators plans them for no node.
     #[cfg(all(
         feature = "router-connect-reconcile",
         feature = "routing-peer",
@@ -4441,28 +4272,34 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:7004".parse().expect("fixture addr");
         let mut zid = [0u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES];
         zid[..2].copy_from_slice(&[0xab, 0x01]);
-        let key = MeshDialKey::Ip(addr);
 
-        let mut desired = std::collections::HashMap::new();
-        assert!(apply_connect_reconcile(
-            &mut desired,
-            ConnectReconcile::Add(vec![tcp_dial(addr)]),
-            |_| panic!("a tcp locator is mesh-dialable"),
-        )
-        .is_none());
-        assert_eq!(desired[&key].expected_zid, None, "a locator names no node");
+        let plan = fold_connect_reconcile(ConnectReconcile::Add(vec![tcp_dial(addr)]), |_| {
+            panic!("a tcp locator is mesh-dialable")
+        });
+        match plan {
+            ConnectPlan::Endpoints { targets, replace } => {
+                assert!(!replace);
+                assert_eq!(targets.len(), 1);
+                assert_eq!(targets[0].key, MeshDialKey::Ip(addr));
+                assert_eq!(targets[0].expected_zid, None, "a locator names no node");
+            }
+            ConnectPlan::Node { .. } => panic!("an add of locators plans no node"),
+        }
 
-        let handed = apply_connect_reconcile(
-            &mut desired,
+        let handed = fold_connect_reconcile(
             ConnectReconcile::AddNode {
                 zid,
                 locators: vec![format!("tcp/{addr}")],
             },
-            |_| panic!("nothing is planned here"),
+            |_| panic!("nothing is folded here"),
         );
-        assert_eq!(handed, Some((zid, vec![format!("tcp/{addr}")])));
-        assert_eq!(desired.len(), 1, "the node did not join the desired set");
-        assert_eq!(desired[&key].expected_zid, None);
+        assert_eq!(
+            handed,
+            ConnectPlan::Node {
+                zid,
+                locators: vec![format!("tcp/{addr}")],
+            }
+        );
     }
 
     use futures_util::future::join_all;

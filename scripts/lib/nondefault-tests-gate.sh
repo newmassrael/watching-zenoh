@@ -199,12 +199,13 @@ LEGS=(
     "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
 router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast|session_lifecycle_open::"
     # Decision D5 (Round 3557) — the node an `open` names, held by its connection
-    # machine: the planner's unit tests (`node_peers`, gated as the opener is), the
-    # reconcile's hand-back of a node (named by its full path, the census's rule for
-    # one test in a large module), and the two-loop witness. The same feature list
-    # as the row above, which is what the planner's `cfg(all(..))` names.
-    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
-router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast|node_peers::"
+    # machine: the reconcile's hand-back of a node (named by its full path, the
+    # census's rule for one test in a large module), and the two-loop witness. The
+    # same feature list as the row above, which is what the opener's `cfg(all(..))`
+    # names. The planner's own unit tests (`loop_peers`, since the configured
+    # endpoints joined it) are gated as the connect reconcile is, and the row lists
+    # that module's `cfg(all(..))` whole.
+    "wz-runtime-tokio|hook|routing-accept,router-connect-reconcile|loop_peers::"
     "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
 router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast|\
 accept_loop::tests::an_added_node_is_handed_to_the_planner_and_added_locators_name_no_node"

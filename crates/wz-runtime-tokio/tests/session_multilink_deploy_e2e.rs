@@ -465,12 +465,23 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
     let b_fwd = CapturingForwarder {
         state: b_state.clone(),
     };
+    // Two listeners, so the dial side has two endpoints that reach one node: a
+    // configured endpoint is named by its address, and one address listed twice
+    // is one endpoint (decision D5), as upstream's links to a peer are made over
+    // its several endpoints.
     let b_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind B");
     let b_addr = b_listener.local_addr().expect("B addr");
+    let b_listener_2 = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind B again");
+    let b_addr_2 = b_listener_2.local_addr().expect("B's second addr");
     let (b_shut_tx, b_shut_rx) = watch::channel(false);
     let b_loop = peer_loop(
         FaceSources {
-            listeners: vec![BoundListener::Tcp(b_listener)],
+            listeners: vec![
+                BoundListener::Tcp(b_listener),
+                BoundListener::Tcp(b_listener_2),
+            ],
             dial_targets: vec![],
             // Accept-only in this fixture: no dial, so no client trust material.
             dial_config: Arc::new(wz_runtime_tokio::session_open::DialConfig::default()),
@@ -499,8 +510,9 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
         &b_fwd,
     );
 
-    // Dial side (A): a max_links = 2 peer that dials B TWICE (two outbound links
-    // to the same peer), aggregating them through the loop's dial path.
+    // Dial side (A): a max_links = 2 peer that dials B TWICE, once at each of its
+    // endpoints (two outbound links to the same peer), aggregating them through
+    // the loop's dial path.
     let a_state: Arc<StdMutex<CapState>> = Arc::new(StdMutex::new(CapState::default()));
     let a_fwd = CapturingForwarder {
         state: a_state.clone(),
@@ -510,7 +522,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
     let a_loop = peer_loop(
         FaceSources {
             listeners: vec![BoundListener::Tcp(a_listener)],
-            dial_targets: vec![tcp_dial(b_addr), tcp_dial(b_addr)],
+            dial_targets: vec![tcp_dial(b_addr), tcp_dial(b_addr_2)],
             // The dial half of this fixture is plain tcp — no cert material.
             dial_config: Arc::new(wz_runtime_tokio::session_open::DialConfig::default()),
             dial_intents: None,

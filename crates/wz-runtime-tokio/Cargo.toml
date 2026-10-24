@@ -1183,9 +1183,9 @@ routing-interest-pending-gc = ["routing-peer"]
 # gains (1) a reconcile channel that dials each newly-listed connect endpoint not
 # already being dialed (ADD-ONLY, address dedup — a config endpoint has no zid
 # until the handshake; the Client close-removed branch is NOT ported, it would
-# blackhole a router mesh) and (2) `schedule_redial`/`dial_face_after`, which
-# re-dial a dropped/failed still-desired outbound peer with a fixed backoff
-# (retry-until-success). Composes only the RouterForwarder foundation (both live on
+# blackhole a router mesh) and (2) the re-dial of a dropped/failed configured
+# peer with a growing backoff (retry-until-success), by the peer's connection
+# machine since decision D5 (`loop_peers`). Composes only the RouterForwarder foundation (both live on
 # the shared accept/peer loop under the router-hat run mode).
 router-connect-reconcile = ["routing-router-hat"]
 # §5.21 router-multicast-faces (slice-3 EGRESS run-mode) — the router forwards a

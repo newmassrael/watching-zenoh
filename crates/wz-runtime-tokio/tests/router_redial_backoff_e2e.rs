@@ -12,7 +12,8 @@
 //!
 //! This is the LOOP-level witness, and it exists because the unit tests on
 //! `RedialSchedule` cannot supply it: they prove the schedule computes a growing
-//! sequence, not that `schedule_redial` consults one. Until R311y786 the loop
+//! sequence, not that the loop's re-dial consults one (since decision D5 the
+//! endpoint's connection machine, `wz_runtime_tokio::loop_peers`). Until R311y786 the loop
 //! sleeps a `const RECONNECT_BACKOFF_MS = 1000` — a build with a perfectly
 //! correct `RedialSchedule` sitting unused would pass every unit test in the
 //! crate while re-dialing an unreachable configured peer at a fixed cadence
@@ -262,20 +263,17 @@ async fn a_peer_removed_and_re_added_starts_over_at_the_initial_wait() {
             let mut v = sink.lock().expect("stamps");
             v.push(Instant::now());
             match v.len() {
-                // Gaps so far: 50, 200. The schedule is now AT the 800ms ceiling,
-                // and the re-dial scheduled by this very failure will wait it.
-                3 => {
-                    // A REPLACE with an empty set is how this test REMOVES the
-                    // target; an `Add` of nothing would be a no-op, so the verb
-                    // is load-bearing here rather than cosmetic.
+                // Gaps so far: 50, 200, 800. The schedule is AT the 800ms
+                // ceiling, and the re-dial this very failure arms would wait it.
+                4 => {
+                    // Decision D5 — remove, then re-add. A REPLACE with an empty
+                    // set is how this test REMOVES the target (an `Add` of nothing
+                    // would be a no-op, so the verb is load-bearing): the loop
+                    // forgets the endpoint, its growth and its armed wait, which
+                    // is the moment `forget` runs. The re-add dials it at once.
                     reconcile_tx
                         .send(ConnectReconcile::Replace(Vec::new()))
                         .expect("send remove");
-                }
-                // That ceiling-length wait has now elapsed and failed, and because
-                // the address was no longer desired the loop dropped it instead of
-                // re-scheduling — which is the moment `forget` runs. Re-add it.
-                4 => {
                     reconcile_tx
                         .send(ConnectReconcile::Replace(vec![tcp_dial(target)]))
                         .expect("send re-add");

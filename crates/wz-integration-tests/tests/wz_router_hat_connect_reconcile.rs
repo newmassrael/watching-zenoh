@@ -257,11 +257,14 @@ fn wz_router_hat_reconnect_redials_dropped_peer() {
     // list), so R1 must schedule a re-dial.
     graceful_terminate(r2_guard.child_mut(), Duration::from_secs(5));
 
-    // The re-dial FIRE for R2's address — the deterministic peer-auto-reconnect
-    // witness (logged the moment the drop is observed, before the backoff sleep).
+    // The re-dial ITSELF for R2's address — the peer-auto-reconnect witness. R2 is
+    // gone, so the dial is refused and R1 reports it as a face that failed at R2's
+    // address; read after the convergence, such a line can only be a re-dial (the
+    // startup dial succeeded). Decision D5 — the endpoint's connection machine
+    // dials it, and the witness is the attempt rather than a line announcing one.
     let redialed = wait_for_substring(
         &mut r1_reader,
-        &format!("reconcile: re-dialing desired peer {addr_r2}"),
+        &format!("FAILED (peer {addr_r2},"),
         Duration::from_secs(15),
     );
 

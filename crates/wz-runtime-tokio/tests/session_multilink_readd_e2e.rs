@@ -21,7 +21,7 @@
 //! loop observe a single-link death is a socket close from the peer).
 //!
 //! `readd_dialed_link_auto_reconnects_onto_surviving_session`:
-//!   1. A (`peer_loop`, max_links = 2, dials B twice) aggregates its two OUTBOUND
+//!   1. A (`peer_loop`, max_links = 2, dials B at its two endpoints) aggregates its two OUTBOUND
 //!      links into ONE session (`live_link_count() == 2`, one registered face).
 //!   2. The harness kills ONE of B's accepted links (aborts its drive → the socket
 //!      closes) — A's loop observes the partial loss (`live_link_count() == 1`).
@@ -169,18 +169,11 @@ fn live_links(state: &Arc<StdMutex<CapState>>) -> usize {
 /// and driven identically.
 type BLinks = Arc<StdMutex<Vec<(tokio::task::JoinHandle<()>, Arc<SessionLinkActions>)>>>;
 
-/// The core slice-2 gate: A's production loop auto-re-adds a dropped dialed link.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
-    let b_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind B");
-    let b_addr = b_listener.local_addr().expect("B addr");
-    let b_links: BLinks = Arc::new(StdMutex::new(Vec::new()));
-
-    // Node B — manual acceptor loop (accepts, drives, retains kill levers).
-    let b_links_acc = b_links.clone();
-    let b_accept = tokio::spawn(async move {
+/// Run B's manual acceptor on `listener`, retaining each accepted link in `b_links`.
+fn spawn_b_acceptor(listener: TcpListener, b_links: BLinks) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         loop {
-            let (stream, _peer) = match b_listener.accept().await {
+            let (stream, _peer) = match listener.accept().await {
                 Ok(v) => v,
                 Err(_) => break,
             };
@@ -209,13 +202,35 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
             };
             let actions = opened.actions.clone();
             let task = spawn_drive(opened, actions.clone());
-            b_links_acc.lock().unwrap().push((task, actions));
+            b_links.lock().unwrap().push((task, actions));
         }
-    });
+    })
+}
+
+/// The core slice-2 gate: A's production loop auto-re-adds a dropped dialed link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
+    // Two listeners, so A has two endpoints that reach one node: a configured
+    // endpoint is named by its address, and one address listed twice is one
+    // endpoint (decision D5), as upstream's links to a peer are made over its
+    // several endpoints.
+    let b_listener = TcpListener::bind("127.0.0.1:0").await.expect("bind B");
+    let b_addr = b_listener.local_addr().expect("B addr");
+    let b_listener_2 = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind B again");
+    let b_addr_2 = b_listener_2.local_addr().expect("B's second addr");
+    let b_links: BLinks = Arc::new(StdMutex::new(Vec::new()));
+
+    // Node B — a manual acceptor loop on each listener (accepts, drives, retains
+    // kill levers).
+    let b_accept = spawn_b_acceptor(b_listener, b_links.clone());
+    let b_accept_2 = spawn_b_acceptor(b_listener_2, b_links.clone());
 
     // Node A — the SYSTEM UNDER TEST: a real peer_loop, max_links = 2, dialing B
-    // TWICE (two outbound links to the same peer), aggregating them through the
-    // loop's dial path. It is the side that owns per-link re-dial.
+    // TWICE, once at each of its endpoints (two outbound links to the same peer),
+    // aggregating them through the loop's dial path. It is the side that owns
+    // per-link re-dial.
     let a_state: Arc<StdMutex<CapState>> = Arc::new(StdMutex::new(CapState::default()));
     let a_fwd = CapturingForwarder {
         state: a_state.clone(),
@@ -230,7 +245,7 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
             dial_targets: vec![
                 wz_session_core::locator::parse_any_locator(&format!("tcp/{b_addr}"))
                     .expect("tcp/<addr> locator"),
-                wz_session_core::locator::parse_any_locator(&format!("tcp/{b_addr}"))
+                wz_session_core::locator::parse_any_locator(&format!("tcp/{b_addr_2}"))
                     .expect("tcp/<addr> locator"),
             ],
             // Plain tcp dials — no client trust material.
@@ -359,6 +374,7 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
 
         let _ = a_shut_tx.send(true);
         b_accept.abort();
+        b_accept_2.abort();
     };
 
     tokio::time::timeout(Duration::from_secs(40), async {
