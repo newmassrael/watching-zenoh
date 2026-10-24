@@ -350,12 +350,19 @@ pub struct LiveMemory {
     pub fields: wz_capture::FoldMemory,
     /// The drain's marks and the runs that map a message to its number.
     pub drain: usize,
+    /// The word each selector said of each row, which the selection door keeps to
+    /// say which moved.
+    pub selection: usize,
 }
 
 impl LiveMemory {
     /// Every structure's bytes together.
     pub fn total(&self) -> usize {
-        self.dissection.total() + self.census.total() + self.fields.total() + self.drain
+        self.dissection.total()
+            + self.census.total()
+            + self.fields.total()
+            + self.drain
+            + self.selection
     }
 }
 
@@ -651,6 +658,7 @@ impl LiveDissection {
         LiveMemory {
             dissection: self.dissection.memory(),
             census,
+            selection: self.selection_said.memory(),
             fields: self.fields_memory.memory(),
             drain: wz_session_core::heap_account::btree_bytes::<(FlowKey, MessageListOrigin), Mark>(
                 self.marks.len(),
@@ -1078,7 +1086,7 @@ impl LiveDissection {
              \"lists\":{{\"rows\":{},\"unit_log\":{},\"whole_rows\":{},\"sparse\":{},\
              \"wire_ends\":{},\"small\":{}}},\
              \"streams\":{{\"kept\":{},\"runs\":{},\"pending\":{}}},\
-             \"plaintext\":{},\"scouting\":{},\"packets\":{},\
+             \"plaintext\":{},\"scouting\":{},\"packets\":{},\"selection\":{},\
              \"census\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
              \"fields\":{{\"payload_rows\":{},\"exchange_rows\":{},\"row_digests\":{}}},\
              \"drain\":{}}}",
@@ -1095,6 +1103,7 @@ impl LiveDissection {
             m.dissection.plaintext,
             m.dissection.scouting,
             m.dissection.packets,
+            m.selection,
             m.census.payload_rows,
             m.census.exchange_rows,
             m.census.row_digests,

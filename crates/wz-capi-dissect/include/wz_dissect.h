@@ -6479,7 +6479,7 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  * Writes {"document":{"name":"memory","revision":R},"unit":"bytes",
  * "scope":"rows","total":T,"lists":{"rows":..,"unit_log":..,"whole_rows":..,
  * "sparse":..,"wire_ends":..,"small":..},"streams":{"kept":..,"runs":..,
- * "pending":..},"plaintext":P,"scouting":S,"packets":K,"census":{"payload_rows":
+ * "pending":..},"plaintext":P,"scouting":S,"packets":K,"selection":W,"census":{"payload_rows":
  * ..,"exchange_rows":..,"row_digests":..},"fields":{"payload_rows":..,
  * "exchange_rows":..,"row_digests":..},"drain":D} to *out.
  *
@@ -6500,6 +6500,9 @@ int wz_dissect_live_retention(const wz_dissect_live *h, char **out);
  *     not changed. It grows with the rows a consumer has paged through, which is
  *     why a consumer that pages a whole capture holds more than one that read the
  *     first window.
+ *   - selection is what wz_dissect_live_selection_since keeps between calls: the
+ *     word each selector said of each row, which is how a later call says which
+ *     moved. It is a nibble a row, for every selector the handle keeps one for.
  *   - A new structure is a new key and not a new symbol: read it by name and
  *     tolerate keys you do not know, as every document here asks.
  *

@@ -3597,6 +3597,7 @@ pub const MEMORY_R1_KEYS: &[&str] = &[
     "runs",
     "scope",
     "scouting",
+    "selection",
     "small",
     "sparse",
     "streams",
