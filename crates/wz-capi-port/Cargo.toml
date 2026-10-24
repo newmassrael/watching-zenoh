@@ -34,10 +34,17 @@ path = "src/lib.rs"
 crate-type = ["rlib"]
 
 [dependencies]
-# The sample view a subscriber callback reads, and the session-core types the vocabulary is
-# spelled in. `alloc` for the owned suffix of a key's wire form; nothing else named, so this
-# crate adds no feature to any dependent (R311y614).
-wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
+# The sample view a subscriber callback reads, and the session-core types the vocabulary and the
+# engine's operations are spelled in. `alloc` for the owned suffix of a key's wire form and the
+# publish options; `session-matching` and `declare-interest` for `InterestForm`, which a write
+# filter's declaration takes: matching and write filtering are what a zenoh-pico client does on
+# every publisher, so the port has them in every build (R311y614 asks that a feature named here
+# be one the port structurally needs, since it becomes every dependent's).
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "alloc",
+    "session-matching",
+    "declare-interest",
+] }
 
 [lints]
 workspace = true

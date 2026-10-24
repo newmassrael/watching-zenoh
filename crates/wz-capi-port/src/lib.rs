@@ -18,6 +18,9 @@
 //! what a filtered put did ([`FilteredPut`], [`FanoutError`]). They lived in `wz-capi-core`'s
 //! face registry, which re-exports them, so the zenoh-c ABI keeps its paths.
 //!
+//! The operations an engine implements are [`SessionEngine`]: what a zenoh-pico client asks of a
+//! session, which an ABI reaches through `Arc<dyn SessionEngine>` and nothing else.
+//!
 //! What stays with an engine is everything that names its sessions: a callback factory that
 //! receives a face's session (the queryable's), the liveliness sample of the tokio runtime, and
 //! the registry itself.
@@ -33,6 +36,9 @@
 use std::sync::Arc;
 
 use wz_session_core::sink::SampleView;
+
+mod engine;
+pub use engine::SessionEngine;
 
 /// A C-level subscription id — what a `z_owned_subscriber_t` handle carries. It keys whatever an
 /// engine holds for the one C subscription (the per-face subscribers it spawned, on an engine
