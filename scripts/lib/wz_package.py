@@ -318,6 +318,12 @@ def verify_dir(out: pathlib.Path, decl: dict) -> list[str]:
         findings.append(f"platform {plat} differs from its declaration {want_platform}")
     if "system_assumed" not in row or manifest["system_assumed"] != row["system_assumed"]:
         findings.append("system_assumed differs from the platform row's")
+    sdk = manifest["toolchain"]["sdk"]
+    if (sdk or {}).get("kind") != row.get("sdk_kind") and sdk is not None:
+        findings.append(f"toolchain.sdk is a `{sdk.get('kind')}` and the platform row names "
+                        f"`{row.get('sdk_kind')}`")
+    if sdk is not None and set(sdk) != {"kind", "revision"}:
+        findings.append(f"toolchain.sdk has the keys {sorted(sdk)}, the entry writes kind and revision")
     if "os_provides" not in row or "system_assumed" not in row:
         return findings + [f"platform {row['id']} is unassessed in the declaration"]
     listed = set()
@@ -386,6 +392,44 @@ def cc_identity(platform: dict, cross: bool) -> str | None:
             raise Refusal(f"CC_{words} ({command}) did not answer --version")
         return None
     return text.splitlines()[0] if text.strip() else None
+
+
+def read_ndk_revision(cc: str) -> str | None:
+    """The NDK release a compiler path belongs to: `Pkg.Revision` of the `source.properties` the
+    first directory above it that has one. Only the value is returned, never the path."""
+    first = shlex.split(cc)[0] if cc.strip() else ""
+    here = pathlib.Path(first).resolve().parent if first else None
+    while here is not None and here != here.parent:
+        props = here / "source.properties"
+        if props.is_file():
+            for line in props.read_text(encoding="utf-8", errors="replace").splitlines():
+                key, _, value = line.partition("=")
+                if key.strip() == "Pkg.Revision":
+                    return value.strip()
+            return None
+        here = here.parent
+    return None
+
+
+def sdk_identity(platform: dict, cross: bool) -> dict | None:
+    """What identifies the SDK a cross build used; None for a native build (T2).
+
+    Only the kinds the entry can read are read: a platform that names another is refused, so the
+    manifest never carries a guessed identity.
+    """
+    if not cross:
+        return None
+    kind = platform.get("sdk_kind")
+    if kind is None:
+        raise Refusal(f"platform {platform['id']} is a cross build and names no sdk_kind")
+    if kind != "android-ndk":
+        raise Refusal(f"platform {platform['id']}: the entry cannot read a `{kind}` SDK yet")
+    cc = os.environ.get(f"CC_{platform['triple'].replace('-', '_')}", "")
+    revision = read_ndk_revision(cc)
+    if revision is None:
+        raise Refusal(f"CC_{platform['triple'].replace('-', '_')} is not inside an NDK "
+                      "(no source.properties with a Pkg.Revision above it)")
+    return {"kind": kind, "revision": revision}
 
 
 def check_toolchain_env(platform: dict, cross: bool) -> None:
@@ -458,7 +502,7 @@ def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.
     created = not out.exists()
     out.mkdir(parents=True, exist_ok=True)
     try:
-        toolchain = {"rustc": rustc, "cc": cc_identity(platform, cross), "sdk": None}
+        toolchain = {"rustc": rustc, "cc": cc_identity(platform, cross), "sdk": sdk_identity(platform, cross)}
         entries = []
         for row in rows:
             built, features, resolved = cargo_build(platform, cross, row, cargo_profile)
@@ -536,7 +580,8 @@ def _selftest() -> int:
 
     # The refusals before a build starts.
     refuses("an undeclared platform", "no platform", lambda: preflight(decl, "nowhere", ["capi-pico"]))
-    refuses("an unassessed platform", "unassessed", lambda: preflight(decl, "android-arm64", ["capi-pico"]))
+    refuses("an unassessed platform", "unassessed",
+            lambda: preflight(decl, "linux-aarch64-glibc", ["capi-pico"]))
     refuses("an undeclared artifact", "no artifact", lambda: preflight(decl, host, ["nope"]))
     cross_platform = next(p for p in decl["platforms"] if p["id"] == "android-arm64")
     saved = {k: os.environ.pop(k) for k in wz_config.toolchain_env(cross_platform) if k in os.environ}
@@ -684,6 +729,56 @@ def _selftest() -> int:
            artifact_entry(decl, platform, pico, "lib/libwz_capi_pico.so", pico_blob, ["multicast-transport"])
            ["device_requires"] is not None)
 
+    # Which cross platforms a machine can package.
+    env_android = {name: "x" for name in wz_config.toolchain_env(
+        next(p for p in decl["platforms"] if p["id"] == "android-arm64"))}
+    expect("a cross platform with its toolchain variables set is ready",
+           ready_platforms(decl, "x86_64-unknown-linux-gnu", env_android) == ["android-arm64"])
+    expect("a cross platform with one variable missing is not ready",
+           ready_platforms(decl, "x86_64-unknown-linux-gnu",
+                           {k: v for k, v in env_android.items() if k != "AR_aarch64_linux_android"}) == [])
+    expect("nothing is ready with no variables", ready_platforms(decl, "x86_64-unknown-linux-gnu", {}) == [])
+    expect("the host's own triple is never a cross platform",
+           "linux-x86_64-glibc" not in ready_platforms(decl, "x86_64-unknown-linux-gnu", env_android))
+    expect("an unassessed platform is never ready, whatever the environment",
+           "linux-aarch64-glibc" not in ready_platforms(
+               decl, "x86_64-unknown-linux-gnu", {**env_android, "CC_aarch64_unknown_linux_gnu": "x",
+                                                  "AR_aarch64_unknown_linux_gnu": "x",
+                                                  "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER": "x"}))
+
+    # The SDK identity of a cross build (T2).
+    with tempfile.TemporaryDirectory(prefix="wz-ndk-") as ndk:
+        root = pathlib.Path(ndk)
+        (root / "toolchains" / "llvm" / "bin").mkdir(parents=True)
+        (root / "source.properties").write_text("Pkg.Desc = Android NDK\nPkg.Revision = 30.0.1-beta1\n")
+        clang = root / "toolchains" / "llvm" / "bin" / "clang"
+        clang.write_text("")
+        expect("the NDK revision is read from the source.properties above the compiler",
+               read_ndk_revision(f"{clang} --target=x") == "30.0.1-beta1")
+        expect("a compiler outside any NDK has no revision", read_ndk_revision("/usr/bin/true") is None)
+        (root / "source.properties").write_text("Pkg.Desc = Android NDK\n")
+        expect("a source.properties with no revision gives none", read_ndk_revision(str(clang)) is None)
+        (root / "source.properties").write_text("Pkg.Revision = 30.0.1-beta1\n")
+        android = next(p for p in decl["platforms"] if p["id"] == "android-arm64")
+        var = "CC_aarch64_linux_android"
+        saved_cc = os.environ.get(var)
+        os.environ[var] = str(clang)
+        try:
+            expect("an Android build records the NDK revision and kind only",
+                   sdk_identity(android, True) == {"kind": "android-ndk", "revision": "30.0.1-beta1"})
+            os.environ[var] = "/usr/bin/true"
+            refuses("a compiler outside an NDK", "not inside an NDK", lambda: sdk_identity(android, True))
+        finally:
+            if saved_cc is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = saved_cc
+    expect("a native build has no SDK identity", sdk_identity(platform, False) is None)
+    refuses("a cross platform that names no sdk kind", "names no sdk_kind",
+            lambda: sdk_identity({"id": "x", "triple": "t-1"}, True))
+    refuses("an sdk kind the entry cannot read", "cannot read a `yocto` SDK",
+            lambda: sdk_identity({"id": "x", "triple": "t-1", "sdk_kind": "yocto"}, True))
+
     # The declaration and the stamp gate agree on which families exist.
     import abi_stamp_gate
 
@@ -695,7 +790,33 @@ def _selftest() -> int:
     return 0
 
 
+def ready_platforms(decl: dict, host: str, environ: dict[str, str]) -> list[str]:
+    """The cross platforms this machine can package: assessed rows whose triple is not the
+    compiler's host and whose toolchain variables are all set in `environ`.
+
+    The lane runs exactly these, so a platform joins it by being declared and having its toolchain
+    provided, not by an edit to the lane; an unset variable is "not provisioned here", which the
+    lane reports and (when it is told the platform is required) fails.
+    """
+    out = []
+    for p in decl["platforms"]:
+        if "os_provides" not in p or "system_assumed" not in p or p["triple"] == host:
+            continue
+        if all(environ.get(name) for name in wz_config.toolchain_env(p)):
+            out.append(p["id"])
+    return out
+
+
 def main(argv: list[str]) -> int:
+    if argv in (["--ready"], ["--required-platforms"]):
+        decl = wz_config.load_decl()
+        host = rustc_identity()[1]
+        if argv == ["--ready"]:
+            print("\n".join(ready_platforms(decl, host, dict(os.environ))))
+        else:
+            print("\n".join(p["id"] for p in decl["platforms"]
+                            if p["lane"] != "none" and "os_provides" in p and p["triple"] != host))
+        return 0
     if argv == ["--selftest"]:
         try:
             return _selftest()

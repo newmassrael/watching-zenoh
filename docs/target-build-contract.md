@@ -78,15 +78,19 @@ owner's machines differ and a licence may bind them).
 
 A cross build also records the identity of its SDK, because that is what tells a
 consumer whether an artifact is for its device. `toolchain.sdk` is `null` for a native
-build and otherwise an object whose `kind` the platform row declares: `android-ndk`
-(the NDK release string and the API level, MEASURED from the artifact's
-`.note.android.ident`, so it cannot disagree with the file), `yocto` (the SDK version
-and the target architecture and OS its environment script exports, recorded as the
-values of the variables the row names, never as paths) and `qnx-sdp` (the SDP version
-the triple names, `qnx710` being 7.1, and the network stack of the row). Not
-implemented: those three rows are refused as unassessed, and the Yocto and QNX shapes
-were not exercised against a real SDK; the shape is fixed here so that the lane that
-first builds for one fills it instead of inventing it.
+build and otherwise an object whose `kind` the platform row declares (`sdk_kind`):
+`android-ndk` (IMPLEMENTED: `{kind, revision}`, the `Pkg.Revision` of the
+`source.properties` above the compiler the caller's `CC_<triple>` names, so the
+manifest holds the value and never the path; the API level is not repeated here, it is
+each artifact's `os_floor.android_api_note`, measured from its own bytes), `yocto` (the
+SDK version and the target architecture and OS its environment script exports,
+recorded as the values of the variables the row names, never as paths) and `qnx-sdp`
+(the SDP version the triple names, `qnx710` being 7.1, and the network stack of the row).
+The last two are NOT implemented: the entry refuses a platform that names them ("cannot
+read a `yocto` SDK yet"), and their shapes were not exercised against a real SDK; the
+shape is fixed here so that the lane that first builds for one fills it instead of
+inventing it. `--verify` checks that a manifest's sdk kind is the row's and has exactly
+the keys the entry writes.
 
 **T3. A platform is a row of the declaration.** `deploy/wz-config.toml` has
 `[[platform]]` (not `[[target]]`: the `target` axis of `build-configuration.md` is the
@@ -390,10 +394,20 @@ the owner approves each use; steps 5 and 6 begin there.
    refusals and not by a cross build through the entry, which is step 4; it does not
    bundle a library; and "the same bytes" is checked in one build directory, which says
    the manifest is deterministic and not that two machines' builds agree.
-4. **The Android lane at `build`.** The probe's command, run through the entry with
-   the toolchain variables named by the row. Done when the lane is green and the
-   `preset-ap-full` bindgen cause is either fixed by the row's variables or recorded
-   as a refusal with its reason.
+4. **The Android lane at `build` (landed, read on one machine).** Layer C1sp packages
+   every cross platform whose row is assessed and whose toolchain variables are set,
+   twice per declared artifact, requires the two manifests to be the same bytes and
+   verifies the first; the population is the platform rows, so a platform joins by being
+   declared and provisioned, not by an edit to the lane. On the owner's workstation
+   (NDK 30, API 36) `android-arm64` packages all three artifacts, including `capi-c`
+   (which the probe had not tried), needing only `libdl.so`, `libm.so`, `libc.so`, and
+   its row is `lane = "build"`, `support = "verified"`. The lane discriminates: with the
+   toolchain unset and `WZ_PLATFORM_REQUIRE=1` it fails, and set it passes. What it is
+   not: hosted CI has no NDK, so there it reports the platform as not provisioned and
+   passes; the green was read here only. `os_provides` of the row is what the NDK 30
+   headers declare for an API 36 device (not run on one). The `preset-ap-full` bindgen
+   refusal of the probe is not exercised: the entry builds default features, and that
+   preset is not an artifact. Nothing ran on a device.
 5. **The aarch64 glibc lane.** A build with the Yocto SDK, then `run`. Done when the
    binary opens a session on the board and the `system_needed` list is checked
    against the SDK's libraries.

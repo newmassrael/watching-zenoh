@@ -13827,6 +13827,60 @@ layer_c1st_abi_stamp() {
     return "$rc"
 }
 
+# ─── Layer C1sp — every cross platform this machine has a toolchain for packages and verifies ──
+#
+# `docs/target-build-contract.md` T11. The platform rows of `deploy/wz-config.toml` decide the
+# population, not this lane: a row is run here when it states what its operating system provides
+# and every variable its toolchain reads (`CC_<triple>`, `AR_<triple>`,
+# `CARGO_TARGET_<TRIPLE>_LINKER`, plus the SDK's own) is set in the environment. The toolchain is the
+# caller's (T2), so a platform whose variables are unset is "not provisioned on this machine": it is
+# listed by name, and a platform whose declared `lane` is not `none` and which is not provisioned
+# FAILS when `WZ_PLATFORM_REQUIRE=1`, because a lane that SKIPs where its claim says green is a claim
+# nobody is holding. Hosted CI has no cross toolchain provisioned, so there it reports and passes;
+# the result a platform's `lane` states was read where the toolchain is.
+#
+# Each ready platform is packaged twice for every declared artifact; the two manifests must be the
+# same bytes, then the first is verified against its files.
+layer_c1sp_cross_platforms() {
+    command -v python3 >/dev/null 2>&1 || { echo "  C1sp FAIL: python3 is absent"; return 1; }
+    local ready required id work rc=0
+    ready="$(python3 scripts/lib/wz_package.py --ready)" || return 1
+    required="$(python3 scripts/lib/wz_package.py --required-platforms)" || return 1
+    for id in $required; do
+        if ! grep -qx "$id" <<<"$ready"; then
+            if [ "${WZ_PLATFORM_REQUIRE:-}" = "1" ]; then
+                echo "  C1sp FAIL: platform $id states a green lane and its toolchain is not provisioned here"
+                rc=1
+            else
+                echo "  C1sp NOTE: platform $id states a green lane; its toolchain is not provisioned here, so it was not run"
+            fi
+        fi
+    done
+    [ -z "$ready" ] && { echo "  C1sp: no cross platform is provisioned on this machine"; return "$rc"; }
+    local arts=() art
+    while IFS= read -r art; do arts+=(--artifact "$art"); done < <(python3 -I - <<'PY'
+import sys
+sys.path.insert(0, "scripts/lib")
+import wz_config
+print("\n".join(a["id"] for a in wz_config.load_decl()["artifacts"]))
+PY
+)
+    for id in $ready; do
+        work="$(mktemp -d)" || return 1
+        if python3 scripts/lib/wz_package.py --platform "$id" "${arts[@]}" --out "$work/a" \
+            && python3 scripts/lib/wz_package.py --platform "$id" "${arts[@]}" --out "$work/b" \
+            && cmp "$work/a/wz-target-manifest.json" "$work/b/wz-target-manifest.json" \
+            && python3 scripts/lib/wz_package.py --verify "$work/a"; then
+            echo "  C1sp OK: $id"
+        else
+            echo "  C1sp FAIL: $id did not package, reproduce or verify"
+            rc=1
+        fi
+        rm -rf "$work"
+    done
+    return "$rc"
+}
+
 # R311y612 (§5.11) — wz-capture at `--no-default-features`, which NO lane had.
 #
 # The gap was not hypothetical. R311y609 found that `wz-capture` did not
@@ -23849,6 +23903,7 @@ run_layer C1bo layer_c1bo_dissect_c_abi || overall=1
 run_layer C1cj layer_c1cj_replay_c_abi || overall=1
 run_layer C1so layer_c1so_cdylib_soname || overall=1
 run_layer C1st layer_c1st_abi_stamp || overall=1
+run_layer C1sp layer_c1sp_cross_platforms || overall=1
 run_layer C1bt layer_c1bt_capture_no_default_features || overall=1
 run_layer C1bq layer_c1bq_zero_copy_arena || overall=1
 run_layer C1br layer_c1br_uring_fixed_buffers || overall=1

@@ -448,8 +448,11 @@ ASSESSED_PACKAGES = ("wz-runtime-tokio",)
 RUNTIME_FEATURE_KEYS = {"package", "feature", "os_needs", "help"}
 PLATFORM_KEYS = {
     "id", "triple", "os", "libc", "network_stack", "std", "toolchain_env_extra",
-    "os_provides", "system_assumed", "lane", "support", "help",
+    "os_provides", "system_assumed", "lane", "support", "sdk_kind", "help",
 }
+# What identifies the SDK a cross build used (docs/target-build-contract.md T2): the entry knows how
+# to read each kind, and a platform that names one the entry cannot read is refused by the entry.
+SDK_KINDS = ("android-ndk", "yocto", "qnx-sdp")
 PLATFORM_REQUIRED = {"id", "triple", "os", "libc", "std", "lane", "support", "help"}
 # What is known of a build for the platform, in words a person reads (docs/target-build-contract.md
 # T11). `lane` says the strongest lane that is green; `support` says why it is `none` when it is:
@@ -527,6 +530,8 @@ def validate_platforms(data: dict) -> list[str]:
             out.append(f"{who}: std is `{p.get('std')}`, not one of {', '.join(STD_KINDS)}")
         if p.get("lane") not in LANES:
             out.append(f"{who}: lane is `{p.get('lane')}`, not one of {', '.join(LANES)}")
+        if "sdk_kind" in p and p["sdk_kind"] not in SDK_KINDS:
+            out.append(f"{who}: sdk_kind is `{p['sdk_kind']}`, not one of {', '.join(SDK_KINDS)}")
         if p.get("support") not in SUPPORTS:
             out.append(f"{who}: support is `{p.get('support')}`, not one of {', '.join(SUPPORTS)}")
         elif (p.get("support") == "verified") != (p.get("lane") not in ("none", None)):
@@ -2097,6 +2102,10 @@ def cmd_selftest() -> int:
            caps_refused('libc = "glibc"', 'libc = "musl"', "not one of glibc"))
     expect("a platform with an unknown lane is refused",
            caps_refused('lane = "none"', 'lane = "green"', "lane is `green`"))
+    expect("an sdk kind outside the list is refused",
+           caps_refused('support = "built"', 'support = "built"\nsdk_kind = "gcc"', "sdk_kind is `gcc`"))
+    expect("an sdk kind of the list validates",
+           validate_decl(read_decl_toml(SAMPLE.replace('support = "built"', 'support = "built"\nsdk_kind = "android-ndk"'))) == [])
     expect("a platform that states no support is refused",
            caps_refused('support = "built"\n', "", "has no `support`"))
     expect("a platform with an unknown support word is refused",

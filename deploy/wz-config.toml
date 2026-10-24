@@ -127,10 +127,17 @@ triple = "aarch64-linux-android"
 os = "android"
 libc = "bionic"
 std = "prebuilt"
-lane = "none"
-support = "built"
+lane = "build"
+support = "verified"
+sdk_kind = "android-ndk"
+# What an API 36 device's C library declares, read from the NDK 30 sysroot headers, and NOT run on a
+# device: pthread_create, TCP and UDP sockets, AF_UNIX, IP_ADD_MEMBERSHIP, getifaddrs (introduced in
+# API 24), getrandom, files. `raw-ethernet` is left out because an app cannot open a packet socket,
+# and `multicast` is the socket option only: a device on Wi-Fi may also need the platform's multicast
+# lock, which no wz build takes.
+os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
 system_assumed = ["libdl.so", "libm.so", "libc.so"]
-help = "An Android arm64 device; wz-capi-pico and wz-ap-demo were built for it by hand (NDK 30, API 36) and link against these three and nothing else. wz-capi-c was not tried; nothing was run on a device."
+help = "An Android arm64 device (API 36). Lane `build` is Layer C1sp: capi-pico, capi-c and wz-ap-demo are packaged twice through the entry with the NDK 30 toolchain, the manifests are the same bytes and verify. It was read on the owner's workstation only: hosted CI has no NDK, so it reports the platform as not provisioned there. Nothing was run on a device."
 
 [[platform]]
 id = "qnx710-iosock-aarch64"
