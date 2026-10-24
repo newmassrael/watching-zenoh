@@ -12,6 +12,7 @@ fn zenoh_codec::Zenoh080Sliced::new(bool) -> Self ; const ; in impl<T> zenoh_cod
 fn zenoh_codec::common::extension::read<R>(&mut R, &str, u8) -> core::result::Result<(zenoh_protocol::common::extension::ZExtUnknown, bool), zenoh_buffers::reader::DidntRead> where R: zenoh_buffers::reader::Reader
 fn zenoh_codec::common::extension::skip<R>(&mut R, &str, u8) -> core::result::Result<bool, zenoh_buffers::reader::DidntRead> where R: zenoh_buffers::reader::Reader
 fn zenoh_codec::common::extension::skip_all<R>(&mut R, &str) -> core::result::Result<(), zenoh_buffers::reader::DidntRead> where R: zenoh_buffers::reader::Reader
+fn zenoh_codec::network::NetworkMessageIter::new(zenoh_protocol::core::Reliability, R) -> Self ; in impl<R> zenoh_codec::network::NetworkMessageIter<R>
 impl core::clone::Clone for zenoh_codec::Zenoh080
 impl core::clone::Clone for zenoh_codec::Zenoh080Bounded
 impl core::clone::Clone for zenoh_codec::Zenoh080Condition
@@ -28,6 +29,8 @@ impl core::fmt::Debug for zenoh_codec::Zenoh080Header
 impl core::fmt::Debug for zenoh_codec::Zenoh080Length
 impl core::fmt::Debug for zenoh_codec::Zenoh080Reliability
 impl core::fmt::Debug for zenoh_codec::Zenoh080Sliced
+impl core::fmt::Debug for zenoh_codec::network::NetworkMessageIter
+impl core::iter::traits::iterator::Iterator for zenoh_codec::network::NetworkMessageIter
 impl core::marker::Copy for zenoh_codec::Zenoh080
 impl core::marker::Copy for zenoh_codec::Zenoh080Bounded
 impl core::marker::Copy for zenoh_codec::Zenoh080Condition
@@ -43,6 +46,7 @@ impl zenoh_codec::RCodec for zenoh_codec::Zenoh080Bounded
 impl zenoh_codec::RCodec for zenoh_codec::Zenoh080Condition
 impl zenoh_codec::RCodec for zenoh_codec::Zenoh080Header
 impl zenoh_codec::RCodec for zenoh_codec::Zenoh080Length
+impl zenoh_codec::RCodec for zenoh_codec::Zenoh080Reliability
 impl zenoh_codec::RCodec for zenoh_codec::Zenoh080Sliced
 impl zenoh_codec::WCodec for zenoh_codec::Zenoh080
 impl zenoh_codec::WCodec for zenoh_codec::Zenoh080Bounded
@@ -52,6 +56,7 @@ macro zenoh_codec::impl_zextz64
 mod zenoh_codec::common
 mod zenoh_codec::common::extension
 mod zenoh_codec::core
+mod zenoh_codec::network
 mod zenoh_codec::scouting
 mod zenoh_codec::zenoh
 mod zenoh_codec::zenoh::del
@@ -66,6 +71,7 @@ struct zenoh_codec::Zenoh080Header
 struct zenoh_codec::Zenoh080Length
 struct zenoh_codec::Zenoh080Reliability
 struct zenoh_codec::Zenoh080Sliced
+struct zenoh_codec::network::NetworkMessageIter
 trait zenoh_codec::LCodec
 trait zenoh_codec::RCodec
 trait zenoh_codec::WCodec
