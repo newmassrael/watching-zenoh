@@ -472,9 +472,34 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "tokio",
+ "tracing",
+ "zenoh-core 1.10.1",
+ "zenoh-core 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-result 1.10.1",
  "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-runtime 1.10.1",
+ "zenoh-runtime 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "zenoh-core"
+version = "1.10.1"
+dependencies = [
+ "lazy_static",
+ "tokio",
+ "zenoh-result 1.10.1",
+ "zenoh-runtime 1.10.1",
+]
+
+[[package]]
+name = "zenoh-core"
+version = "1.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "975073c51353c1c33e81a98370bf3560863540913e5f30091923f5a328fc46d4"
+dependencies = [
+ "lazy_static",
+ "tokio",
+ "zenoh-result 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-runtime 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 

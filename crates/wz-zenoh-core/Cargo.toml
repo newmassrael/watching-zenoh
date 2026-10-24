@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# zenoh-core -- the resolve traits and the helper macros of the zenoh family, over watching-zenoh
+# (inventory atom `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13).
+#
+# Named `zenoh-core` and versioned as the pinned zenoh, like every crate of the family (see
+# `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). `Wait`, `Resolvable` and
+# `Resolve` are the traits every builder of `zenoh` implements, so a crate that implements one of
+# them for its own builder (`zenoh-ext` does) must meet this crate's, and the macros are what the
+# family's crates and the ecosystem expand. Its synchronous wait of a future blocks on the application
+# runtime of `zenoh-runtime`, the one crate of the family with process-global state.
+#
+# `scripts/lib/rust_api_surface.py` holds the crate to upstream's surface, `conformance/differential`
+# holds its behaviour to upstream's.
+
+[package]
+name = "zenoh-core"
+version = "1.10.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The resolve traits and helper macros of the zenoh family (1.10.1), as a drop-in over watching-zenoh."
+
+[lib]
+name = "zenoh_core"
+path = "src/lib.rs"
+
+# Upstream's two features by their names. `tracing-instrument` is the one `zenoh` forwards.
+[features]
+default = ["std"]
+std = []
+tracing-instrument = ["zenoh-runtime/tracing-instrument"]
+
+# `lazy_static` is re-exported (`zenoh_core::lazy_static`), and the macros expand to `tokio` and
+# `tracing` paths in the caller, so the requirements are upstream's.
+[dependencies]
+lazy_static = "1.5.0"
+tokio = { version = "1.47.1", default-features = false, features = ["rt"] }
+zenoh-result = { path = "../wz-zenoh-result", default-features = false }
+zenoh-runtime = { path = "../wz-zenoh-runtime" }
+
+[lints]
+workspace = true

@@ -122,7 +122,8 @@ original reproduced by naming it. Three things follow from it:
   so a path with the wrong signature is a missing line and not a present one. Members so far:
   `zenoh-result` (complete: 37 of 37 lines), `zenoh-runtime` (complete: the process-wide pool, so
   the one crate of the family that holds global state, and the reason it is a member and not a
-  detail of `zenoh-core`) and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
+  detail of `zenoh-core`), `zenoh-core` (complete: the resolve traits and the macros, its
+  synchronous wait blocking on the pool of `zenoh-runtime`) and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each
   crate against upstream's, a graph in which an upstream crate and the wz crate meet one type once

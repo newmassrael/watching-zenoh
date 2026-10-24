@@ -2747,6 +2747,7 @@ dependencies = [
  "wz-runtime-tokio",
  "wz-runtime-zephyr",
  "wz-session-lwip",
+ "zenoh-core",
  "zenoh-result",
  "zenoh-runtime",
 ]
@@ -3463,6 +3464,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
 dependencies = [
  "time",
+]
+
+[[package]]
+name = "zenoh-core"
+version = "1.10.1"
+dependencies = [
+ "lazy_static",
+ "tokio",
+ "zenoh-result",
+ "zenoh-runtime",
 ]
 
 [[package]]
