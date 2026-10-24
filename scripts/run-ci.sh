@@ -21409,7 +21409,7 @@ layer_e6u_peer_unixpipe_forward() {
 # CPU (pinned to one core at a lower priority, shared with three busy processes).
 # The first of those asserts that no face goes DOWN, the invariant a starved
 # control plane would break; the second prints how many new sessions such a
-# router still admits, and asserts nothing. A fourth (R3487) holds the promise of
+# router still admits, and asserts nothing. A fourth (R3490) holds the promise of
 # `docs/router-data-plane-scaling.md` section 7.4: a router told its CPU share (32
 # hogs, 1.32%) admits no more than the capacity model allows, refuses the rest, and
 # loses no admitted client. The count guard is 4 so that a dropped `#[ignore]`
