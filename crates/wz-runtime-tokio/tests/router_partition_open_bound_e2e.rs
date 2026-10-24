@@ -81,6 +81,7 @@ fn sources(listeners: Vec<BoundListener>, dial_targets: Vec<AnyLocator>) -> Face
         #[cfg(feature = "transport-multilink")]
         max_links: 1,
         max_sessions: usize::MAX,
+        ceiling: None,
         offer: SessionOffer::universal(),
         retry: RetryPolicy::ZENOH_DEFAULT,
         stats: None,

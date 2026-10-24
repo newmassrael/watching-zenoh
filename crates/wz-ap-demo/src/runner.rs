@@ -5328,6 +5328,7 @@ async fn run_peer_until(
             // GET renders, so the loop and the config surface cannot disagree
             // about how many peers this node will hold.
             max_sessions: wz_config.borrow().effective_max_sessions().limit,
+            ceiling: None,
             // R2095 (open-debt item 513) — the capability offer every face this
             // peer opens carries, dialed and accepted alike (upstream builds
             // `StateOpen` and `StateAccept` from the same manager config; see
@@ -7225,6 +7226,16 @@ async fn run_router_hat_until(
         log::info!("wz-ap-demo router-hat: adminspace config WRITE at {write_key}");
     }
 
+    // The sessions this router admits, worked out at each admission from the config as it stands
+    // here and from what the node has timed of its own keepalives: a host dearer than the one the
+    // costs were recorded on admits fewer, and the bound a burst meets is the calibrated one once
+    // the first sessions of it are up.
+    let session_ceiling = {
+        let cfg = host_cfg.borrow().clone();
+        wz::runtime_tokio::accept_loop::SessionCeiling::new(move || {
+            cfg.effective_max_sessions().limit
+        })
+    };
     let loop_fut = peer_loop(
         FaceSources {
             // R2099 (item 512) — EVERY bound `listen/endpoints` member.
@@ -7254,6 +7265,7 @@ async fn run_router_hat_until(
             // and is the node most likely to reach the limit. "One source, not
             // two", which is the rule the `host_cfg` comment states.
             max_sessions: host_cfg.borrow().effective_max_sessions().limit,
+            ceiling: Some(session_ceiling.clone()),
             // R2095 (open-debt item 513) — the capability offer every face this
             // router-hat opens carries, built by `mesh_offer` from the SAME argv
             // words the `--peer` mesh mode reads. The item named both run-modes
@@ -7330,6 +7342,9 @@ async fn run_router_hat_until(
     // The longest a keepalive timer of this router was served after its time, as last logged.
     let mut last_lateness_ms = 0u64;
     let mut lateness_violation_logged = false;
+    // The ceiling as last set, so a change is said once.
+    let mut last_ceiling = session_ceiling.get();
+    let mut last_cost_ns: Option<u64> = None;
     let mut last_queries_seen = 0usize;
     let mut last_deferred_client = 0usize;
     let mut announced_queryable = false;
@@ -7518,6 +7533,35 @@ async fn run_router_hat_until(
                 if seen > last_data_seen {
                     last_data_seen = seen;
                     log::info!("wz-ap-demo router-hat: forwarded mesh data ({seen} push(es))");
+                }
+                // The sessions this router admits, from what it has measured of its own
+                // keepalives (`session_ceiling` above works it out at each admission). A host
+                // dearer than the recorded one lowers it; it never rises above the recorded
+                // bound. Said once per change, with the cost behind it.
+                {
+                    let admitted = host_cfg.borrow().effective_max_sessions();
+                    let cost = wz::runtime_tokio::keepalive_emission_cost_median_ns();
+                    // A median that wobbles by a few percent moves the limit by a few
+                    // sessions and the cost by a few nanoseconds; that is not news. The cost
+                    // is said when it is first read and when it moves by a tenth, because it
+                    // is the figure a reader needs to tell whether the host is dearer than
+                    // the one the model was recorded on, even while the limit is unmoved.
+                    let cost_moved = match (cost, last_cost_ns) {
+                        (Some(now), Some(then)) => now.abs_diff(then) > then / 10,
+                        (Some(_), None) => true,
+                        (None, _) => false,
+                    };
+                    if cost_moved || admitted.limit.abs_diff(last_ceiling) > last_ceiling / 20 {
+                        log::info!(
+                            "wz-ap-demo router-hat: admitting at most {} sessions ({:?} bound; \
+                             a keepalive emission costs {:?} ns here, median)",
+                            admitted.limit,
+                            admitted.limiter,
+                            cost
+                        );
+                        last_ceiling = admitted.limit;
+                        last_cost_ns = cost;
+                    }
                 }
                 // The keepalive timer's lateness, the number the lease depends on
                 // (`docs/router-data-plane-scaling.md` section 7.4). Logged when the longest

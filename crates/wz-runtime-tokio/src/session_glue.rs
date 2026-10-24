@@ -1278,7 +1278,10 @@ async fn park_on_drain<T, F>(
                 // tearing the session down in the same wake cannot starve it).
                 #[cfg(feature = "transport-keepalive")]
                 let ka_dormant = {
-                    let ka_outcome = check_keepalive_deadline(actions, clock.now_monotonic_ms());
+                    let ka_outcome = crate::emission_cost::check_keepalive_timed(
+                        actions,
+                        clock.now_monotonic_ms(),
+                    );
                     on_event(IterationEvent::KeepAlive(ka_outcome));
                     ka_outcome == KeepAliveCheckOutcome::Inactive
                 };
@@ -1591,8 +1594,10 @@ where
                         take_what_is_waiting(&mut held, driver, actions, engine);
                         #[cfg(feature = "transport-keepalive")]
                         {
-                            let ka_outcome =
-                                check_keepalive_deadline(actions, clock.now_monotonic_ms());
+                            let ka_outcome = crate::emission_cost::check_keepalive_timed(
+                                actions,
+                                clock.now_monotonic_ms(),
+                            );
                             on_event(IterationEvent::KeepAlive(ka_outcome));
                         }
                         let lease_outcome =
@@ -1612,7 +1617,7 @@ where
                             take_what_is_waiting(&mut held, driver, actions, engine);
                             #[cfg(feature = "transport-keepalive")]
                             {
-                                let ka_outcome = check_keepalive_deadline(
+                                let ka_outcome = crate::emission_cost::check_keepalive_timed(
                                     actions,
                                     clock.now_monotonic_ms(),
                                 );

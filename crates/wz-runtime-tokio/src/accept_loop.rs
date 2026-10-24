@@ -863,6 +863,12 @@ pub struct AcceptLoopSummary {
     /// bumped by the dedup-by-zid rule and by open failures too, so asserting
     /// on it would pass on a node the bound never refused.
     pub refused_over_max_sessions: usize,
+    /// Faces refused because the held set had reached the host's moving
+    /// [`FaceSources::ceiling`] while [`FaceSources::max_sessions`] had room: the node's
+    /// measured capacity, not the configured limit. A SEPARATE counter from
+    /// [`refused_over_max_sessions`](Self::refused_over_max_sessions), so a refusal says whose
+    /// limit it was.
+    pub refused_over_capacity: usize,
     /// R311y423 — of [`dialed`](Self::dialed), the subset dialed because the
     /// GOSSIP-autoconnect policy admitted a discovered peer (the [`Step::Dial`]
     /// arm), as opposed to a configured `--connect` target or a reconcile add.
@@ -2066,6 +2072,31 @@ pub enum McastIngressBody {
     Request(RequestOwned),
 }
 
+/// A limit on the faces a loop holds that is worked out each time the loop would admit one, so
+/// that it can follow something the loop does not own (what the node has measured of itself).
+/// A face already held is not closed by a lower ceiling: the ceiling decides who is admitted, not
+/// who stays.
+#[derive(Clone)]
+pub struct SessionCeiling(Arc<dyn Fn() -> usize + Send + Sync>);
+
+impl SessionCeiling {
+    /// A ceiling that is `limit()` faces at the moment of each admission.
+    pub fn new(limit: impl Fn() -> usize + Send + Sync + 'static) -> Self {
+        Self(Arc::new(limit))
+    }
+
+    /// The faces the loop may hold now.
+    pub fn get(&self) -> usize {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for SessionCeiling {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SessionCeiling").field(&self.get()).finish()
+    }
+}
+
 pub struct FaceSources {
     /// The bound listeners for inbound peers (accept source), each scheme-keyed
     /// ([`BoundListener`]) so a router/peer accepts the whole stream family
@@ -2219,6 +2250,17 @@ pub struct FaceSources {
     /// bound whose absence is invisible is the one that is discovered by a
     /// peer rather than by a reader.
     pub max_sessions: usize,
+    /// A ceiling worked out at each admission, or `None` for a node whose only bound is
+    /// [`Self::max_sessions`]. A face is refused when the held set has reached the SMALLER of
+    /// the two, and the refusal is counted under
+    /// [`AcceptLoopSummary::refused_over_capacity`] when this one was the smaller, so an operator
+    /// can tell the node's measured limit from the configured one.
+    ///
+    /// The capacity model's number is not known at construction: it is calibrated by the
+    /// emissions the node has timed ([`crate::config::WzConfig::effective_max_sessions`]), which
+    /// the first sessions of the process produce, so the bound a burst meets is the calibrated
+    /// one once the first few of it are up.
+    pub ceiling: Option<SessionCeiling>,
     /// R2095 (open-debt item 513) — the capability SET every face this loop
     /// opens OFFERS at its handshake, dialed and accepted alike.
     ///
@@ -2324,6 +2366,7 @@ where
         #[cfg(feature = "transport-multilink")]
         max_links,
         max_sessions,
+        ceiling,
         offer,
         retry,
         stats,
@@ -2794,6 +2837,27 @@ where
                                 held: faces.len(),
                             });
                             continue;
+                        }
+                        // The host's moving ceiling, read at the same moment and for the same
+                        // reason: the capacity the node has measured is a bound on admission,
+                        // and a bound applied after the face is held is not one.
+                        if let Some(ceiling) = ceiling.as_ref().map(SessionCeiling::get) {
+                            if faces.len() >= ceiling {
+                                log::debug!(
+                                    "refusing face {} — measured capacity {} reached",
+                                    id.0,
+                                    ceiling
+                                );
+                                #[cfg(feature = "router-connect-reconcile")]
+                                dialed_targets.remove(&id);
+                                summary.refused_over_capacity += 1;
+                                on_event(&AcceptEvent::FaceRefused {
+                                    id,
+                                    peer_zid: face.peer_zid.clone(),
+                                    held: faces.len(),
+                                });
+                                continue;
+                            }
                         }
                         // Item 751 -- a remote the forwarder's region rules cannot
                         // place is refused here, before it is held, as the pin
@@ -3626,6 +3690,7 @@ fn accept_only_sources(listener: BoundListener, offer: SessionOffer) -> FaceSour
         // always compares against it. A caller that needs a different bound
         // reaches `peer_loop`, which takes the configured `FaceSources`.
         max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
+        ceiling: None,
         // The caller's: [`accept_loop`] passes the zero offer, an accept-only
         // node with a configuration of its own passes that configuration's.
         // A mesh node reaches `peer_loop`, which is where R2095 threads the
@@ -4835,6 +4900,7 @@ mod tests {
                 max_links: 1,
                 // THE SUBJECT.
                 max_sessions: 1,
+                ceiling: None,
                 offer: SessionOffer::universal(),
                 retry: RetryPolicy::ZENOH_DEFAULT,
                 stats: None,
@@ -4866,6 +4932,87 @@ mod tests {
         assert_eq!(
             summary.refused_over_max_sessions, 1,
             "the second peer was refused BY THE BOUND, not by a handshake failure"
+        );
+    }
+
+    /// The host's moving ceiling bounds admission like `max_sessions` does and is counted apart
+    /// from it: a node whose configured bound has room refuses the second peer because its
+    /// measured capacity is one, and the summary says so. The configured counter stays at zero,
+    /// which is what lets an operator tell whose limit it was.
+    ///
+    /// Observation-driven like the test above: shutdown waits for both a `FaceUp` and a
+    /// `FaceRefused`, so the loop cannot end before the refusal this asserts on.
+    #[cfg(feature = "routing-peer")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_moving_ceiling_refuses_the_peer_past_it_and_counts_it_apart() {
+        let (listener, addr) = bind_loopback().await;
+
+        let (go_tx, go_rx) = watch::channel(false);
+        let up = Arc::new(AtomicUsize::new(0));
+        let refused = Arc::new(AtomicUsize::new(0));
+        let on_event = {
+            let up = up.clone();
+            let refused = refused.clone();
+            let go_tx = go_tx.clone();
+            move |event: &AcceptEvent| {
+                match event {
+                    AcceptEvent::FaceUp(_) => {
+                        up.fetch_add(1, SeqCst);
+                    }
+                    AcceptEvent::FaceRefused { .. } => {
+                        refused.fetch_add(1, SeqCst);
+                    }
+                    _ => {}
+                }
+                if up.load(SeqCst) >= 1 && refused.load(SeqCst) >= 1 {
+                    let _ = go_tx.send(true);
+                }
+            }
+        };
+
+        let node = peer_loop(
+            FaceSources {
+                listeners: vec![listener],
+                dial_targets: vec![],
+                dial_config: Arc::new(DialConfig::default()),
+                dial_intents: None,
+                mcast_ingress: None,
+                mcast_members: None,
+                mcast_group_subs: None,
+                reconcile: None,
+                #[cfg(feature = "transport-multilink")]
+                max_links: 1,
+                max_sessions: usize::MAX,
+                // THE SUBJECT.
+                ceiling: Some(SessionCeiling::new(|| 1)),
+                offer: SessionOffer::universal(),
+                retry: RetryPolicy::ZENOH_DEFAULT,
+                stats: None,
+            },
+            acceptor_params(),
+            TokioTime::new(),
+            DEFAULT_OPEN_TICK_MS,
+            shutdown_on(go_rx.clone()),
+            on_event,
+            &NoOpForwarder,
+        );
+        let initiators = (0..2u8).map(|i| idle_initiator(addr, i + 1, go_rx.clone()));
+
+        let summary = tokio::time::timeout(Duration::from_secs(20), async {
+            let (summary, _) = tokio::join!(node, join_all(initiators));
+            summary
+        })
+        .await
+        .expect("the node with a ceiling completes within 20s");
+
+        assert_eq!(summary.established, 1, "a ceiling of one admits one peer");
+        assert_eq!(
+            summary.refused_over_capacity, 1,
+            "the second peer was refused BY THE MEASURED CAPACITY"
+        );
+        assert_eq!(
+            summary.refused_over_max_sessions, 0,
+            "the configured bound had room and refused nobody"
         );
     }
 
@@ -4936,6 +5083,7 @@ mod tests {
                 #[cfg(feature = "transport-multilink")]
                 max_links: 1,
                 max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
+                ceiling: None,
                 offer: SessionOffer::universal(),
                 retry: RetryPolicy::ZENOH_DEFAULT,
                 // THE SUBJECT.
@@ -5958,6 +6106,7 @@ mod tests {
                 max_links: 1,
                 // R2758 — unbounded, so these fixtures keep the subject they had.
                 max_sessions: usize::MAX,
+                ceiling: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -6092,6 +6241,7 @@ mod tests {
                 max_links: 1,
                 // R2758 — unbounded, so these fixtures keep the subject they had.
                 max_sessions: usize::MAX,
+                ceiling: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -6194,6 +6344,7 @@ mod tests {
                 max_links: 1,
                 // R2758 — unbounded, so these fixtures keep the subject they had.
                 max_sessions: usize::MAX,
+                ceiling: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -6296,6 +6447,7 @@ mod tests {
                 max_links: 1,
                 // R2758 — unbounded, so these fixtures keep the subject they had.
                 max_sessions: usize::MAX,
+                ceiling: None,
             },
             peer_params(),
             TokioTime::new(),

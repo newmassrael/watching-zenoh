@@ -30,7 +30,7 @@
 //!
 //! The pacer wakes a little after the loop's own keepalive deadline and, if the
 //! line is still idle, emits through the same
-//! [`check_keepalive_deadline`] the loop uses. That function needs no engine and
+//! [`wz_session_core::drive::check_keepalive_deadline`] the loop uses. That function needs no engine and
 //! takes the idleness from `last_outbound_at`, so the two emitters cannot send
 //! twice for one idle window: whichever runs first re-stamps the window. The
 //! slack is what makes the loop the normal emitter and this one the backstop; a
@@ -60,9 +60,10 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use wz_runtime_core::{Runtime, TimeSource};
-use wz_session_core::drive::{check_keepalive_deadline, keepalive_wake_deadline};
+use wz_session_core::drive::keepalive_wake_deadline;
 use wz_session_core::lease::{KeepAliveCheckOutcome, LEASE_EXPIRE_FACTOR};
 
+use crate::emission_cost::check_keepalive_timed;
 use crate::runtime_impl::{TokioRuntime, TokioTime};
 use crate::runtime_pool::WzRuntime;
 use crate::session_glue::SessionLinkActions;
@@ -82,6 +83,7 @@ pub(crate) fn spawn_keepalive_pacer(actions: &Arc<SessionLinkActions>, clock: To
     let Some(generation) = established_at(actions) else {
         return;
     };
+    crate::emission_cost::calibrate_on_establishment(actions);
     let weak = Arc::downgrade(actions);
     drop(WzRuntime::Control.spawn(pace(weak, clock, generation)));
 }
@@ -108,7 +110,7 @@ fn step(weak: &Weak<SessionLinkActions>, clock: &TokioTime, generation: u64) -> 
         }
         // Past the backstop, so `now >= due` and the check either emits or
         // finds the transport gone; it cannot answer `WithinInterval`.
-        if check_keepalive_deadline(&actions, now) == KeepAliveCheckOutcome::Inactive {
+        if check_keepalive_timed(&actions, now) == KeepAliveCheckOutcome::Inactive {
             return None;
         }
     }

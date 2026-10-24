@@ -261,6 +261,7 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
             max_links: 1,
             // R2758 — unbounded: this test's subject is gossip autoconnect.
             max_sessions: usize::MAX,
+            ceiling: None,
         },
         peer_params,
         TokioTime::new(),

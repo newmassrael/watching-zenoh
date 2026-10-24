@@ -283,6 +283,7 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
             // R2758 — unbounded: this test's subject is link aggregation, and
             // an aggregated peer is ONE session however many links it brings.
             max_sessions: usize::MAX,
+            ceiling: None,
         },
         fixture_params_with_zid(0x0B),
         TokioTime::new(),
@@ -488,6 +489,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             // R2758 — unbounded: this test's subject is link aggregation, and
             // an aggregated peer is ONE session however many links it brings.
             max_sessions: usize::MAX,
+            ceiling: None,
         },
         fixture_params_with_zid(0x0B),
         TokioTime::new(),
@@ -526,6 +528,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             // R2758 — unbounded: this test's subject is link aggregation, and
             // an aggregated peer is ONE session however many links it brings.
             max_sessions: usize::MAX,
+            ceiling: None,
         },
         fixture_params_with_zid(0x0A),
         TokioTime::new(),
@@ -638,6 +641,7 @@ async fn deploy_active_qos_priority_segregates_across_links() {
             // R2758 — unbounded: this test's subject is link aggregation, and
             // an aggregated peer is ONE session however many links it brings.
             max_sessions: usize::MAX,
+            ceiling: None,
         },
         fixture_params_with_zid(0x0B),
         TokioTime::new(),

@@ -105,6 +105,16 @@ pub mod session_glue;
 #[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
 pub(crate) mod keepalive_pacer;
 
+/// What one keepalive emission costs on this host, timed where it is paid: the figure the capacity
+/// bound is calibrated with (see the module's own doc).
+#[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
+pub(crate) mod emission_cost;
+
+/// The median cost of one keepalive emission of this process, measured; `None` until enough
+/// emissions were timed.
+#[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
+pub use emission_cost::keepalive_emission_cost_median_ns;
+
 /// The longest a keepalive timer of this process was served after its time: what the
 /// lease depends on, read where it is made (see the function's own doc).
 #[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]

@@ -97,6 +97,7 @@ fn sources(
         // existed. A test that does not exercise `max_sessions` must not
         // acquire it by default, or its subject changes silently.
         max_sessions: usize::MAX,
+        ceiling: None,
         offer: SessionOffer::universal(),
         retry: RetryPolicy::ZENOH_DEFAULT,
         stats: None,

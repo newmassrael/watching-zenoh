@@ -120,6 +120,7 @@ async fn observed_gaps_ms(retry: RetryPolicy, want: usize) -> Vec<u128> {
             max_links: 1,
             // R2758 — unbounded: this test's subject is the re-dial schedule.
             max_sessions: usize::MAX,
+            ceiling: None,
             offer: SessionOffer::universal(),
             retry,
             stats: None,
@@ -241,6 +242,7 @@ async fn a_peer_removed_and_re_added_starts_over_at_the_initial_wait() {
             max_links: 1,
             // R2758 — unbounded: this test's subject is the re-dial schedule.
             max_sessions: usize::MAX,
+            ceiling: None,
             offer: SessionOffer::universal(),
             retry: RetryPolicy {
                 period_init_ms: 50,

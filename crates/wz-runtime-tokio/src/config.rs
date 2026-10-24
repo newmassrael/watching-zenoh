@@ -1424,13 +1424,31 @@ impl WzConfig {
     /// declared [`Self::capacity`] says the node cannot keep that many leases at its share. The
     /// lease the bound is computed for is this node's own when it set one, upstream's default
     /// (10 s) when it adopts the peer's at the handshake.
+    ///
+    /// The costs are the recorded model's, tightened by the keepalive emission cost this process
+    /// has measured on its own host ([`wz_session_core::capacity::ControlModel::calibrated`]), so
+    /// the answer can fall while the node runs and never rises above the recorded one.
     pub fn effective_max_sessions(&self) -> wz_session_core::capacity::EffectiveBound {
+        #[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
+        let measured = crate::emission_cost::keepalive_emission_cost_median_ns();
+        #[cfg(not(all(feature = "transport-unicast", feature = "transport-keepalive")))]
+        let measured = None;
+        self.effective_max_sessions_under(
+            wz_session_core::capacity::RECORDED_HOST_MODEL.calibrated(measured),
+        )
+    }
+
+    /// [`Self::effective_max_sessions`] for the costs `model` states.
+    pub fn effective_max_sessions_under(
+        &self,
+        model: wz_session_core::capacity::ControlModel,
+    ) -> wz_session_core::capacity::EffectiveBound {
         wz_session_core::capacity::effective_max_sessions(
             self.max_sessions,
             self.capacity.as_ref(),
             self.effective_lease_ms(),
             wz_session_core::capacity::LOOP_TURN_UNITS,
-            wz_session_core::capacity::RECORDED_HOST_MODEL,
+            model,
         )
     }
 
@@ -2983,14 +3001,18 @@ pub fn is_plugins_key(key: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wz_session_core::capacity::{ControlModel, RECORDED_HOST_MODEL};
 
     /// The sessions a node admits is its configured bound unless it declared the CPU it may count
     /// on; a declaration can only lower it, and says which limit did.
     #[test]
     fn a_declared_cpu_share_lowers_the_sessions_a_node_admits_and_nothing_else_does() {
         use wz_session_core::capacity::{CapacityContract, Limiter};
+        // The recorded costs, not the process's meter: a test binary that has run keepalives has
+        // measured its own debug build.
+        const RECORDED: ControlModel = RECORDED_HOST_MODEL;
         let plain = WzConfig::new().with_max_sessions(10_000);
-        let bound = plain.effective_max_sessions();
+        let bound = plain.effective_max_sessions_under(RECORDED);
         assert_eq!(
             (bound.limit, bound.limiter),
             (10_000, Limiter::Configured),
@@ -2999,13 +3021,19 @@ mod tests {
 
         // 1.32% of a core, the router at 32 hogs: 1100 with the recorded costs.
         let declared = plain.with_capacity_contract(CapacityContract::new(13_200).unwrap());
-        let bound = declared.effective_max_sessions();
+        let bound = declared.effective_max_sessions_under(RECORDED);
         assert_eq!((bound.limit, bound.limiter), (1_100, Limiter::Liveness));
 
         // A configuration below the model's number stays, and says it was the configuration's.
-        let small = declared.with_max_sessions(500);
-        let bound = small.effective_max_sessions();
+        let small = declared.clone().with_max_sessions(500);
+        let bound = small.effective_max_sessions_under(RECORDED);
         assert_eq!((bound.limit, bound.limiter), (500, Limiter::Configured));
+
+        // A host whose emissions have a median four times the build host's (5.7 us) admits a
+        // quarter of what the build host does.
+        let slow = RECORDED.calibrated(Some(22_800));
+        let bound = declared.effective_max_sessions_under(slow);
+        assert_eq!((bound.limit, bound.limiter), (275, Limiter::Liveness));
     }
 
     /// The bound is computed for the node's own lease when it set one, and for upstream's default
@@ -3021,8 +3049,12 @@ mod tests {
         let mut at_double = at_default.clone();
         at_double.lease_ms = 20_000;
         let (one, two) = (
-            at_default.effective_max_sessions().limit,
-            at_double.effective_max_sessions().limit,
+            at_default
+                .effective_max_sessions_under(RECORDED_HOST_MODEL)
+                .limit,
+            at_double
+                .effective_max_sessions_under(RECORDED_HOST_MODEL)
+                .limit,
         );
         assert_eq!(
             one, 1_100,

@@ -341,8 +341,9 @@ once instead of refusing the one that does not fit. This section states the prom
 the router does at the number. Built: the bound (`wz-session-core`, `capacity`), the declaration
 (`WzConfig::with_capacity_contract`, the demo's `--cpu-share` and `--max-data-wait`), the refusal at the
 bound (the existing `max_sessions` refusal, now fed the smaller number) and the test of the promise.
-Also built: the keepalive timer lateness meter and its assertion. Not built: the separate refusal counter,
-the admin-space export of the lateness, the drop policy.
+Also built: the keepalive timer lateness meter and its assertion, the router's own measurement of what a
+keepalive costs on its host and the bound calibrated with it, and the separate refusal counter. Not built:
+the admin-space export of the lateness and of the cost, the drop policy.
 
 **The promise.** While the process receives at least the CPU share `s` that its operator declared, each
 session of up to `N_max(s)` keeps its lease. It is conditional on `s` on purpose: a router cannot promise
@@ -445,17 +446,39 @@ recorded as `RECORDED_HOST_MODEL` in `wz-session-core`'s `capacity` module (inte
 computes the same number from the same inputs): `c_k` 10 us, `c_u` 11 us, `b` 4, with no further margin,
 because the room a margin is for is already measured (1100 against 1536 with no loss and 2048 with loss).
 A unit test holds that room: the bound at 32 hogs must stay under 1536 and above two thirds of it. They
-are the costs of this host and this runtime; another host re-reads them, and a lane that re-derives the
-table above and fails when it drifts is not built.
+are the costs of this host and this runtime, which a hosted run showed (next paragraph), and a lane that
+re-derives the table above and fails when it drifts is not built.
+
+**The first hosted run of the promise failed, and what it showed.** On the hosted runner (CI run of
+`2ea53d076`, E7s job) the test of the promise ended 308 admitted client sessions: the router's cost per
+forwarded message there was 46 to 52 us at 8000 messages/s where this host reads 12 to 13, about four times,
+and the recorded `c_k` of 10 us was a figure for another machine. A constant recorded on one host is not a
+promise about another, so the router now measures the cost on its own host. Every keepalive emission of the
+process is timed (`wz-runtime-tokio`, `emission_cost`: the session loop's and the pacer's, one population, the
+last 256 kept), and the first 64 sessions of a process make one on purpose at establishment, so that the
+figure exists within milliseconds and not a third of a lease after the first session (a burst of peers that
+arrives in that time would be admitted on the recorded cost alone). The median of the window is compared
+with the recorded cost after it is given the room the recorded cost has over its own median,
+`MEDIAN_HEADROOM_PERCENT` = 175: the build host reads a median of 5.4 to 5.8 us under 32 hogs (two runs of
+the promise test) and the recorded cost is 10, so a median of 22.8 us on a host four times dearer is bound at
+39.9 us and `N_max` there is 275, with the same room under the loss that 1100 has here. The larger of the two
+is the cost the bound uses: a measurement can only tighten the bound, never loosen it, because a few
+emissions read on a quiet moment are not evidence for a larger promise. The ceiling is worked out at each
+admission (`FaceSources::ceiling`), the router logs the figure and the limit when either moves, and the test
+prints the router's last such line with a failure. Measured on this host: the median reads 5.4 and 5.8 us in
+two runs, the recorded cost stays, 1100 is admitted, no client ended. NOT measured: a host that is dearer; the
+hosted run of this change is the first reading of the calibration where it matters, and the headroom of 175
+is one host's ratio.
 
 **What the router does at the number.** One value, the effective `max_sessions`, is the smaller of the
 configured `transport/unicast/max_sessions` (upstream's key, enforced in the accept loop already, default
 1000) and `N_max(s)` (`WzConfig::effective_max_sessions`, read by the accept loop in place of the bare
 configured number). A session past it is refused at accept and the sessions already admitted are kept:
 refuse the new one, not degrade the old. The router says once at startup that it admits fewer than
-configured and which bound did it. The refusal is the existing one, so it counts with the configured
-bound's (`refused_over_max_sessions`); a counter that tells an operator whether the limit was theirs or the
-model's is not built.
+configured and which bound did it. The refusal by the configured number is counted as it was
+(`refused_over_max_sessions`) and the refusal by the calibrated one apart from it
+(`refused_over_capacity`), so an operator can tell whether the limit was theirs or the model's; the demo does
+not yet print either in its shutdown summary.
 
 **What the router sheds.** Control frames are never dropped. Data is shed per face from a bounded lane and
 counted per lane on the admin space. Whether a message that asked to block is dropped, waited for, or

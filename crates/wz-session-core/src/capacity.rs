@@ -83,6 +83,35 @@ impl ControlModel {
             busy_threads: self.busy_threads,
         }
     }
+
+    /// This model with the keepalive emission cost the node measured on its own host, when that is
+    /// dearer than the recorded one. A host slower than the one the costs were read on holds fewer
+    /// leases, and only the host knows how much slower; a host faster than it keeps the recorded
+    /// cost, because a figure read from a few emissions on a quiet moment is not evidence for a
+    /// larger promise. The measurement can therefore only tighten the bound, never loosen it.
+    ///
+    /// `measured_median_ns` is the MEDIAN of the node's emissions, and the recorded cost is not a
+    /// median: it carries the room the bound keeps under the loss
+    /// ([`MEDIAN_HEADROOM_PERCENT`]). The measurement gets the same room before it is compared, so
+    /// that a host four times dearer is bound four times tighter and not to the edge of the loss.
+    pub const fn calibrated(self, measured_median_ns: Option<u64>) -> Self {
+        let emission_ns = match measured_median_ns {
+            Some(median) => {
+                let with_room = median.saturating_mul(MEDIAN_HEADROOM_PERCENT) / 100;
+                if with_room > self.emission_ns {
+                    with_room
+                } else {
+                    self.emission_ns
+                }
+            }
+            None => self.emission_ns,
+        };
+        Self {
+            emission_ns,
+            loop_unit_ns: self.loop_unit_ns,
+            busy_threads: self.busy_threads,
+        }
+    }
 }
 
 /// The model read on the build host for the tokio runtime (`wz-runtime-tokio`), release build:
@@ -100,6 +129,13 @@ impl ControlModel {
 /// all five (2048), which is the room a margin is for. Read in `docs/router-data-plane-scaling.md`
 /// section 7.4.
 pub const RECORDED_HOST_MODEL: ControlModel = ControlModel::new(10_000, 11_000, 4);
+
+/// The room [`RECORDED_HOST_MODEL`]'s emission cost has over the median of the emissions it stands
+/// for, in percent: 10 us against the 5.4 to 5.8 us median that `wz-runtime-tokio`'s emission meter
+/// reads on the build host under 32 hogs (two runs of the promise test), 1.75 times. It is what
+/// keeps the bound at 0.72 of the largest population that lost no client; a cost measured on
+/// another host is a median too and takes the same room ([`ControlModel::calibrated`]).
+pub const MEDIAN_HEADROOM_PERCENT: u64 = 175;
 
 /// What an operator declares about the CPU a node may count on, and how stale a frame may get.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -314,6 +350,25 @@ mod tests {
             service_bound(SHARE_32_HOGS, 5_000, 8, dear)
                 < service_bound(SHARE_32_HOGS, 5_000, 8, MEASURED)
         );
+    }
+
+    #[test]
+    fn a_dearer_measured_emission_tightens_the_bound_and_a_cheaper_one_does_not_loosen_it() {
+        // A host four times dearer than the build host's 5.7 us median holds a quarter of what
+        // the recorded model admits there, with the same room under the loss: 22.8 us measured
+        // is 39.9 us bound, and 0.0132 * 10 s / (3 * 4 * 39.9 us) = 275.
+        let slow = MEASURED.calibrated(Some(22_800));
+        assert_eq!(slow.emission_ns, 39_900);
+        assert_eq!(liveness_bound(SHARE_32_HOGS, LEASE_MS, slow), 275);
+        // The build host's own medians keep the recorded cost: its room is already in it.
+        assert_eq!(MEASURED.calibrated(Some(5_700)), MEASURED);
+        // A quiet moment's cheap emissions are not a reason to promise more.
+        assert_eq!(MEASURED.calibrated(Some(4_500)), MEASURED);
+        // No measurement yet: the recorded model.
+        assert_eq!(MEASURED.calibrated(None), MEASURED);
+        // Only the emission cost is measured; the loop unit and the thread count stay.
+        assert_eq!(slow.loop_unit_ns, MEASURED.loop_unit_ns);
+        assert_eq!(slow.busy_threads, MEASURED.busy_threads);
     }
 
     #[test]
