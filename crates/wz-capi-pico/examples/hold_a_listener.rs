@@ -11,23 +11,27 @@
 //!
 //! A line `get <key>` on its standard input asks a query on `<key>`: it prints `reply <payload>`
 //! for each data reply and `done <key>` when the query has ended, which is what a test of the
-//! answering end of a query in the build that cannot listen reads.
+//! answering end of a query in the build that cannot listen reads. It holds a queryable on
+//! `demo/listener/**` that answers each query with `listened` on the query's key, which is what
+//! a test of the asking end reads.
 
 use std::ffi::{c_void, CStr, CString};
 use std::io::BufRead;
 use std::time::Duration;
 
 use wz_capi_pico::{
-    z_bytes_copy_from_str, z_bytes_move, z_bytes_to_slice, z_close, z_closure_reply,
-    z_closure_reply_move, z_closure_sample, z_closure_sample_move, z_config_default,
-    z_config_loan_mut, z_config_move, z_declare_subscriber, z_get, z_get_options_default,
-    z_get_options_t, z_keyexpr_as_view_string, z_loaned_reply_t, z_loaned_sample_t, z_open,
-    z_owned_closure_reply_t, z_owned_config_t, z_owned_session_t, z_owned_slice_t,
-    z_owned_subscriber_t, z_put, z_query_consolidation_none, z_reply_is_ok, z_reply_ok,
-    z_sample_keyexpr, z_sample_payload, z_session_drop, z_session_loan, z_session_loan_mut,
-    z_session_move, z_slice_data, z_slice_drop, z_slice_len, z_slice_loan, z_slice_move,
-    z_string_data, z_string_len, z_view_keyexpr_from_str, z_view_keyexpr_loan, z_view_keyexpr_t,
-    z_view_string_loan, z_view_string_t, zp_config_insert, Z_CONFIG_LISTEN_KEY, Z_OK,
+    z_bytes_copy_from_str, z_bytes_move, z_bytes_to_slice, z_close, z_closure_query,
+    z_closure_query_move, z_closure_reply, z_closure_reply_move, z_closure_sample,
+    z_closure_sample_move, z_config_default, z_config_loan_mut, z_config_move, z_declare_queryable,
+    z_declare_subscriber, z_get, z_get_options_default, z_get_options_t, z_keyexpr_as_view_string,
+    z_loaned_query_t, z_loaned_reply_t, z_loaned_sample_t, z_open, z_owned_closure_reply_t,
+    z_owned_config_t, z_owned_queryable_t, z_owned_session_t, z_owned_slice_t,
+    z_owned_subscriber_t, z_put, z_query_consolidation_none, z_query_keyexpr, z_query_reply,
+    z_reply_is_ok, z_reply_ok, z_sample_keyexpr, z_sample_payload, z_session_drop, z_session_loan,
+    z_session_loan_mut, z_session_move, z_slice_data, z_slice_drop, z_slice_len, z_slice_loan,
+    z_slice_move, z_string_data, z_string_len, z_view_keyexpr_from_str, z_view_keyexpr_loan,
+    z_view_keyexpr_t, z_view_string_loan, z_view_string_t, zp_config_insert, Z_CONFIG_LISTEN_KEY,
+    Z_OK,
 };
 
 unsafe extern "C" fn on_sample(sample: *const z_loaned_sample_t, _ctx: *mut c_void) {
@@ -59,6 +63,20 @@ unsafe fn put(session: &z_owned_session_t, key: &CStr, payload: &CStr) {
             std::ptr::null(),
         ),
         Z_OK
+    );
+}
+
+/// Answer a query with `listened` on the query's key.
+unsafe extern "C" fn on_query(query: *const z_loaned_query_t, _ctx: *mut c_void) {
+    let mut bytes = std::mem::zeroed();
+    if z_bytes_copy_from_str(&mut bytes, c"listened".as_ptr()) != Z_OK {
+        return;
+    }
+    let _ = z_query_reply(
+        query,
+        z_query_keyexpr(query),
+        z_bytes_move(&mut bytes),
+        std::ptr::null(),
     );
 }
 
@@ -155,6 +173,27 @@ fn main() {
                 &mut sub,
                 z_view_keyexpr_loan(&ke),
                 z_closure_sample_move(&mut closure),
+                std::ptr::null(),
+            ),
+            Z_OK
+        );
+        let mut answer = std::mem::zeroed();
+        assert_eq!(
+            z_closure_query(&mut answer, Some(on_query), None, std::ptr::null_mut()),
+            Z_OK
+        );
+        let mut answered: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(
+            z_view_keyexpr_from_str(&mut answered, c"demo/listener/**".as_ptr()),
+            Z_OK
+        );
+        let mut queryable: z_owned_queryable_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_queryable(
+                z_session_loan(&session),
+                &mut queryable,
+                z_view_keyexpr_loan(&answered),
+                z_closure_query_move(&mut answer),
                 std::ptr::null(),
             ),
             Z_OK

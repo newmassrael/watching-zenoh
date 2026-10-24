@@ -126,8 +126,10 @@ link-udp = ["wz-capi-core?/link-udp"]
 # `scout` (`Z_FEATURE_SCOUTING`): `z_scout`, the one-shot survey of the group and the
 # `z_hello` family that reads its answers.
 scout = ["engine-tokio", "link-udp", "wz-capi-core/scout"]
-# `query`: `z_get` and the querier, the requesting end of a query.
-query = ["engine-tokio", "wz-capi-core/query"]
+# `query`: `z_get` and the querier, the requesting end of a query. Both engines ask a get, so it
+# selects neither; the querier, which watches whether a queryable matches, is in a build with the
+# tokio engine only, until the cooperative engine has that plane.
+query = ["wz-capi-core?/query", "wz-capi-coop?/query"]
 # `queryable`: `z_declare_queryable` and the replies, the answering end of a query. Both engines
 # answer queries, so it selects neither: it turns the queryable on in the one the build has.
 queryable = ["wz-capi-core?/queryable", "wz-capi-coop?/queryable"]
@@ -351,10 +353,10 @@ name = "serial_link_roundtrip"
 required-features = ["peer"]
 
 # The node that `client_only_dials_a_listener` dials: a build that cannot listen needs one of
-# the full build to talk to. It asks queries, so the build has the requesting end of one.
+# the full build to talk to. It asks queries and answers them, so the build has both ends of one.
 [[example]]
 name = "hold_a_listener"
-required-features = ["peer", "query"]
+required-features = ["peer", "query", "queryable"]
 
 [lints]
 workspace = true

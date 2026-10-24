@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! The build without the `peer` feature opens a client session to a node that listens, and
-//! publishes to it and hears from it.
+//! The build without the `peer` feature opens a client session to a node that listens, publishes
+//! to it and hears from it, answers its queries and asks it queries.
 //!
 //! Such a build cannot listen, so the node it dials is the `hold_a_listener` example of the
 //! FULL build, run as a process. The two are built by two invocations (a feature set is one per
-//! build), which is why the example's path is a named input:
+//! build), which is why the example's path is a named input. The client is either engine's, so
+//! the test is run once for each:
 //!
 //! ```text
 //! cargo build --release -p wz-capi-pico --example hold_a_listener
 //! WZ_PICO_LISTENER_BIN=target/release/examples/hold_a_listener \
-//!     cargo test --release -p wz-capi-pico --no-default-features --test client_only_dials_a_listener
+//!     cargo test --release -p wz-capi-pico --no-default-features \
+//!     --features engine-coop,link-udp,query,queryable --test client_only_dials_a_listener
 //! ```
+//!
+//! and again with `engine-tokio` in place of `engine-coop`.
 //!
 //! A missing example is a failure and not a skip: a test that passes by not running would say a
 //! stripped build connects when nothing has shown it.
@@ -157,23 +161,8 @@ fn a_client_only_build_publishes_to_a_listener_and_hears_from_it() {
     let seen = Arc::new(Mutex::new(BTreeSet::new()));
     // SAFETY: a fresh config, session and subscriber, all released before the function returns.
     unsafe {
-        let mut cfg: z_owned_config_t = std::mem::zeroed();
-        assert_eq!(z_config_default(&mut cfg), Z_OK);
-        let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
-        assert_eq!(
-            zp_config_insert(
-                z_config_loan_mut(&mut cfg),
-                Z_CONFIG_CONNECT_KEY,
-                endpoint.as_ptr()
-            ),
-            Z_OK
-        );
-        let mut session: z_owned_session_t = std::mem::zeroed();
-        assert_eq!(
-            z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
-            Z_OK,
-            "a client-only build opens a client session to a listener"
-        );
+        // A client-only build opens a client session to a listener.
+        let mut session = open_to(port);
 
         let ctx = Box::into_raw(Box::new(SetCtx { seen: seen.clone() })) as *mut c_void;
         let mut closure = std::mem::zeroed();
@@ -234,6 +223,40 @@ fn a_client_only_build_publishes_to_a_listener_and_hears_from_it() {
     }
 }
 
+/// Open a client session to the listener on `port`.
+unsafe fn open_to(port: u16) -> z_owned_session_t {
+    let mut cfg: z_owned_config_t = std::mem::zeroed();
+    assert_eq!(z_config_default(&mut cfg), Z_OK);
+    let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
+    assert_eq!(
+        zp_config_insert(
+            z_config_loan_mut(&mut cfg),
+            Z_CONFIG_CONNECT_KEY,
+            endpoint.as_ptr()
+        ),
+        Z_OK
+    );
+    let mut session: z_owned_session_t = std::mem::zeroed();
+    assert_eq!(
+        z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
+        Z_OK
+    );
+    session
+}
+
+/// Step the session for `span`, in the single-threaded arm; the read task steps it otherwise.
+#[cfg(any(feature = "query", feature = "queryable"))]
+unsafe fn step_for(session: &z_owned_session_t, span: Duration) {
+    #[cfg(feature = "multi-thread")]
+    let _ = session;
+    let end = Instant::now() + span;
+    while Instant::now() < end {
+        #[cfg(not(feature = "multi-thread"))]
+        assert_eq!(zp_read(z_session_loan(session), std::ptr::null()), Z_OK);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// The answering end of a query in the build that cannot listen: the listener asks, the client's
 /// queryable answers at once and keeps the query, answers again later from the program's own
 /// thread, and the query ends only when the program lets go of the copy it kept. The CONTROL is
@@ -291,40 +314,13 @@ mod answering {
         drop(Arc::from_raw(ctx as *const Kept));
     }
 
-    /// Step the session for `span`, in the single-threaded arm; the read task steps it otherwise.
-    unsafe fn step_for(session: &z_owned_session_t, span: Duration) {
-        #[cfg(feature = "multi-thread")]
-        let _ = session;
-        let end = Instant::now() + span;
-        while Instant::now() < end {
-            #[cfg(not(feature = "multi-thread"))]
-            assert_eq!(zp_read(z_session_loan(session), std::ptr::null()), Z_OK);
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
     #[test]
     fn a_client_only_build_answers_a_listeners_query_and_ends_it_when_let_go() {
         let port = free_port();
         let mut listener = Listener::start(port);
         // SAFETY: a fresh config, session and queryable, all released before the function returns.
         unsafe {
-            let mut cfg: z_owned_config_t = std::mem::zeroed();
-            assert_eq!(z_config_default(&mut cfg), Z_OK);
-            let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
-            assert_eq!(
-                zp_config_insert(
-                    z_config_loan_mut(&mut cfg),
-                    Z_CONFIG_CONNECT_KEY,
-                    endpoint.as_ptr()
-                ),
-                Z_OK
-            );
-            let mut session: z_owned_session_t = std::mem::zeroed();
-            assert_eq!(
-                z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
-                Z_OK
-            );
+            let mut session = open_to(port);
 
             let kept = Arc::new(Kept(Mutex::new(None)));
             let mut closure = std::mem::zeroed();
@@ -380,6 +376,105 @@ mod answering {
             listener.wait_for("done demo/q/x");
 
             z_undeclare_queryable(z_queryable_move(&mut queryable));
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+}
+
+/// The asking end of a query in the build that cannot listen: the client asks the listener,
+/// whose queryable answers, and the get ends when the listener's Final comes, as the drop of the
+/// reply closure. The CONTROL is a key nobody answers: that get ends too, with no reply.
+#[cfg(feature = "query")]
+mod asking {
+    use super::*;
+    use wz_capi_pico::{
+        z_bytes_to_slice, z_closure_reply, z_closure_reply_move, z_get, z_loaned_reply_t,
+        z_owned_closure_reply_t, z_owned_slice_t, z_reply_is_ok, z_reply_ok, z_sample_payload,
+        z_slice_data, z_slice_drop, z_slice_len, z_slice_loan, z_slice_move,
+    };
+
+    /// What a get's closure saw: each reply's payload (`err` for an error reply), and whether
+    /// the closure has been dropped.
+    #[derive(Default)]
+    struct Asked {
+        replies: Vec<String>,
+        done: bool,
+    }
+
+    unsafe extern "C" fn on_reply(reply: *mut z_loaned_reply_t, ctx: *mut c_void) {
+        let asked = &*(ctx as *const Mutex<Asked>);
+        if !z_reply_is_ok(reply) {
+            asked.lock().unwrap().replies.push("err".to_owned());
+            return;
+        }
+        let mut slice: z_owned_slice_t = std::mem::zeroed();
+        assert_eq!(
+            z_bytes_to_slice(z_sample_payload(z_reply_ok(reply)), &mut slice),
+            Z_OK
+        );
+        let loaned = z_slice_loan(&slice);
+        let bytes = std::slice::from_raw_parts(z_slice_data(loaned), z_slice_len(loaned));
+        asked
+            .lock()
+            .unwrap()
+            .replies
+            .push(String::from_utf8_lossy(bytes).into_owned());
+        z_slice_drop(z_slice_move(&mut slice));
+    }
+
+    unsafe extern "C" fn on_reply_drop(ctx: *mut c_void) {
+        let asked = Arc::from_raw(ctx as *const Mutex<Asked>);
+        asked.lock().unwrap().done = true;
+    }
+
+    /// Ask a get on `key` and step the session until it has ended: what it saw.
+    unsafe fn ask(session: &z_owned_session_t, key: &CStr) -> Vec<String> {
+        let asked = Arc::new(Mutex::new(Asked::default()));
+        let mut closure: z_owned_closure_reply_t = std::mem::zeroed();
+        assert_eq!(
+            z_closure_reply(
+                &mut closure,
+                Some(on_reply),
+                Some(on_reply_drop),
+                Arc::into_raw(asked.clone()) as *mut c_void
+            ),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+        assert_eq!(
+            z_get(
+                z_session_loan(session),
+                z_view_keyexpr_loan(&ke),
+                std::ptr::null(),
+                z_closure_reply_move(&mut closure),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !asked.lock().unwrap().done {
+            assert!(Instant::now() < deadline, "the get on {key:?} never ended");
+            step_for(session, Duration::from_millis(20));
+        }
+        let replies = std::mem::take(&mut asked.lock().unwrap().replies);
+        replies
+    }
+
+    #[test]
+    fn a_client_only_build_asks_a_listeners_queryable_and_the_final_ends_the_get() {
+        let port = free_port();
+        let _listener = Listener::start(port);
+        // SAFETY: a fresh config and session, released before the function returns.
+        unsafe {
+            let mut session = open_to(port);
+            assert_eq!(ask(&session, c"demo/listener/a"), vec!["listened"]);
+            assert_eq!(
+                ask(&session, c"demo/nobody/a"),
+                Vec::<String>::new(),
+                "CONTROL: a get nobody answers ends with the Final alone"
+            );
             z_close(z_session_loan_mut(&mut session), std::ptr::null());
             z_session_drop(z_session_move(&mut session));
         }

@@ -28,6 +28,8 @@ use wz_session_core::locality::Locality;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::publish_options::PublishOptions;
+#[cfg(feature = "query")]
+use wz_session_core::query_sink::{BoxedQuerySink, QueryView, ReplyOut};
 use wz_session_core::session_init_params::{LinkRxConf, SessionInitParams, TxQueueConf};
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::signing_key::SigningKey;
@@ -66,6 +68,12 @@ enum Command {
     /// Ask a query of request id `.0` on the key.
     #[cfg(feature = "queryable")]
     Query(u64, &'static str),
+    /// Hold a queryable on the key that answers each query with the payload, on the query's key.
+    #[cfg(feature = "query")]
+    Answer(&'static str, &'static [u8]),
+    /// Answer no query from now on, as a peer gone quiet: a frame that carries one is dropped.
+    #[cfg(feature = "query")]
+    Silence,
 }
 
 /// What reached the router.
@@ -80,6 +88,13 @@ struct Seen {
     /// `final` for a ResponseFinal.
     #[cfg(feature = "queryable")]
     answers: Vec<&'static str>,
+    /// The queries the session asked.
+    #[cfg(feature = "query")]
+    queries: usize,
+    /// Whether the router has done what the test told it about queries: holds the queryable it
+    /// was told to, or has gone quiet.
+    #[cfg(feature = "query")]
+    settled: bool,
 }
 
 /// Whether the router holds a catch-all subscriber. It is a subscriber like any other: the router
@@ -185,6 +200,14 @@ fn run_router(
             )
             .expect("the router's catch-all");
     }
+    #[cfg(feature = "query")]
+    let answering = observer.clone();
+    #[cfg(feature = "query")]
+    let silent = std::rc::Rc::new(std::cell::Cell::new(false));
+    #[cfg(feature = "query")]
+    let silenced = silent.clone();
+    #[cfg(feature = "query")]
+    let counted_queries = seen.clone();
     let mut dispatch = dispatch_to(observer, actions.clone());
     let counted = seen;
     let _task = spawn_session(
@@ -209,8 +232,18 @@ fn run_router(
                         NetworkMessage::Response(_) => seen.answers.push("reply"),
                         #[cfg(feature = "queryable")]
                         NetworkMessage::ResponseFinal(_) => seen.answers.push("final"),
+                        #[cfg(feature = "query")]
+                        NetworkMessage::Request(_) => seen.queries += 1,
                         _ => {}
                     }
+                }
+                #[cfg(feature = "query")]
+                if silenced.get()
+                    && messages
+                        .iter()
+                        .any(|m| matches!(m, NetworkMessage::Request(_)))
+                {
+                    return;
                 }
             }
             dispatch(event);
@@ -233,6 +266,29 @@ fn run_router(
             #[cfg(feature = "queryable")]
             Ok(Command::Query(rid, key)) => {
                 let _ = actions.send_request_query(rid, 0, Some(key));
+            }
+            #[cfg(feature = "query")]
+            Ok(Command::Answer(key, value)) => {
+                answering
+                    .borrow_mut()
+                    .queryables
+                    .register_sink(
+                        key,
+                        Locality::Any,
+                        false,
+                        BoxedQuerySink::new(
+                            move |query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                                let _ = out.reply_keyed(query.keyexpr(), value);
+                            },
+                        ),
+                    )
+                    .expect("the router's queryable");
+                counted_queries.lock().unwrap().settled = true;
+            }
+            #[cfg(feature = "query")]
+            Ok(Command::Silence) => {
+                silent.set(true);
+                counted_queries.lock().unwrap().settled = true;
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => return,
@@ -608,5 +664,7 @@ fn a_session_that_redials_none_ends_with_its_link() {
     assert!(SessionDrive::read(&*engine, false).is_err());
 }
 
+#[cfg(feature = "query")]
+mod get;
 #[cfg(feature = "queryable")]
 mod queryable;

@@ -317,7 +317,7 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
     feature = "advanced",
     feature = "connectivity",
     feature = "liveliness",
-    feature = "query"
+    all(feature = "query", feature = "engine-tokio")
 ))]
 pub(crate) unsafe fn tokio_session<'a>(
     zs: *const z_loaned_session_t,
@@ -1269,7 +1269,7 @@ pub unsafe extern "C" fn z_publisher_id(
 ///
 /// # Safety
 /// `querier` must be null or a live loaned querier.
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "engine-tokio"))]
 #[no_mangle]
 pub unsafe extern "C" fn z_querier_keyexpr(
     querier: *const crate::querier::z_loaned_querier_t,
@@ -1290,7 +1290,7 @@ pub unsafe extern "C" fn z_querier_keyexpr(
 ///
 /// # Safety
 /// `querier` must be null or a live loaned querier.
-#[cfg(all(feature = "query", feature = "unstable-api"))]
+#[cfg(all(feature = "query", feature = "engine-tokio", feature = "unstable-api"))]
 #[no_mangle]
 pub unsafe extern "C" fn z_querier_id(
     querier: *const crate::querier::z_loaned_querier_t,

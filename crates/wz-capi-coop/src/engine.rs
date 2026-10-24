@@ -81,6 +81,17 @@ use {
 #[cfg(feature = "queryable")]
 mod query;
 
+#[cfg(feature = "query")]
+mod get;
+#[cfg(feature = "query")]
+use {
+    get::{GetEvent, GetPlane, PendingGet},
+    wz_capi_port::{cancellation::CancellableFan, ReplyCallback},
+    wz_session_core::query_options::QueryOptions,
+    wz_session_core::reply_acceptance::ReplyAcceptance,
+    wz_session_core::reply_sink::ConsolidatingSink,
+};
+
 /// How a session is opened: what the ABI's config says, which the engine turns into the
 /// session's parameters.
 pub struct CoopConfig {
@@ -160,6 +171,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// The queries waiting for their callbacks and the Finals held for them (`query`).
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
+    /// What the session's gets queued for their callbacks (`get`).
+    #[cfg(feature = "query")]
+    gets: Arc<GetPlane>,
     zid: [u8; 16],
     closed: AtomicBool,
     next_entity: AtomicU64,
@@ -219,6 +233,9 @@ enum Target {
     Matching(MatchingSink),
     #[cfg(feature = "queryable")]
     Queryable(QueryableCallback),
+    /// One leg of a get, locked while it runs.
+    #[cfg(feature = "query")]
+    Reply(Arc<Mutex<ReplyCallback>>),
 }
 
 /// The read task: a thread that steps the session until it is told to stop.
@@ -255,6 +272,11 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     queryables: Vec<QblEntry>,
     #[cfg(feature = "queryable")]
     plane: Arc<QueryPlane>,
+    /// The legs of the session's gets still pending on its link.
+    #[cfg(feature = "query")]
+    pending_gets: Vec<PendingGet>,
+    #[cfg(feature = "query")]
+    gets: Arc<GetPlane>,
 }
 
 /// The session's link: up, being dialled, or waiting to be.
@@ -653,6 +675,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let mut observer = self.observer.borrow_mut();
         observer.flush_declarations_on_link_loss();
         observer.flush_liveliness_on_link_loss();
+        // A get's legs went with the link: the peer that owed their Finals is gone, so each
+        // pending entry is dropped, which ends its leg (`get`).
+        #[cfg(feature = "query")]
+        for pending in self.pending_gets.drain(..) {
+            observer.replies.unregister(pending.rid);
+        }
     }
 
     /// Declare again, over a link that has just come up, what the session holds, under the ids it
@@ -682,6 +710,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// the same way, on a socket whose receive timeout is that long (`Z_CONFIG_SOCKET_TIMEOUT`).
     fn idle_wait(&self) -> IdleWait {
         let most = self.config.idle_wait_ms;
+        // A get whose deadline comes first is swept when it is due, not up to a whole wait late.
+        #[cfg(feature = "query")]
+        let most = match self.observer.borrow().replies.next_deadline_ms() {
+            Some(due_ms) => {
+                let left_us = due_ms
+                    .saturating_mul(1000)
+                    .saturating_sub(self.clock.now_us());
+                u32::try_from(left_us.div_ceil(1000)).map_or(most, |left| left.min(most))
+            }
+            None => most,
+        };
+        if most == 0 {
+            return IdleWait::None;
+        }
         match &self.link {
             Link::Up(wire) | Link::Dialing { wire, .. } => match &wire.readiness {
                 Some(readiness) if !wire.link.holds_input() => {
@@ -755,9 +797,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             queryables: Vec::new(),
             #[cfg(feature = "queryable")]
             plane: Arc::new(QueryPlane::default()),
+            #[cfg(feature = "query")]
+            pending_gets: Vec::new(),
+            #[cfg(feature = "query")]
+            gets: Arc::new(GetPlane::default()),
         };
         #[cfg(feature = "queryable")]
         let plane = core.plane.clone();
+        #[cfg(feature = "query")]
+        let gets = core.gets.clone();
         core.link = core.dial_from(0, OpenError::NoEndpoint)?;
         while !matches!(core.link, Link::Up(_)) {
             core.idle_wait().wait();
@@ -771,6 +819,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             targets: Mutex::new(Vec::new()),
             #[cfg(feature = "queryable")]
             plane,
+            #[cfg(feature = "query")]
+            gets,
             zid,
             closed: AtomicBool::new(false),
             next_entity: AtomicU64::new(1),
@@ -857,6 +907,47 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             // undeclared before its query was delivered lets go of the hold all the same.
             self.answer(generation, query.rid(), replies, true);
         }
+        #[cfg(feature = "query")]
+        loop {
+            let next = lock(&self.gets.events).pop_front();
+            match next {
+                None => break,
+                Some(GetEvent::Reply(leg, reply)) => {
+                    let callback =
+                        lock(&self.targets)
+                            .iter()
+                            .find_map(|(t, target)| match target {
+                                Target::Reply(cb) if *t == leg => Some(cb.clone()),
+                                _ => None,
+                            });
+                    if let Some(callback) = callback {
+                        (lock(&callback))(&reply);
+                    }
+                }
+                // The leg is over: its callback is dropped here, with no lock held, which is
+                // how the C program learns it (the reply closure's `drop(context)`).
+                Some(GetEvent::End(leg)) => {
+                    if let Some(mut core) = self.live() {
+                        core.0.pending_gets.retain(|pending| pending.leg != leg);
+                    }
+                    drop(self.take_target(leg));
+                }
+            }
+        }
+    }
+
+    /// Cancel leg `leg` of request `rid` (its get's cancellation token was cancelled): its
+    /// pending entry is dropped, and its callback with it, here, with no lock held, so a
+    /// `cancel` that waits for the leg's callback to be dropped returns whether or not the
+    /// session is stepped.
+    #[cfg(feature = "query")]
+    fn cancel_get(&self, leg: u64, rid: u64) {
+        if let Some(mut core) = self.live() {
+            let core = &mut core.0;
+            core.observer.borrow_mut().replies.unregister(rid);
+            core.pending_gets.retain(|pending| pending.leg != leg);
+        }
+        drop(self.take_target(leg));
     }
 
     /// Send `replies` to the query `rid` on the link of `generation` and, with `release`, let go
@@ -895,6 +986,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// that ended.
     fn step(&self, core: &mut Core<L, C>) -> bool {
         core.local.run_until_idle();
+        // A get whose deadline has passed ends with zenoh's timeout reply and its Final, here,
+        // because this is what runs on every step and the entries are the observer's.
+        #[cfg(feature = "query")]
+        {
+            let now_ms = core.clock.now_us() / 1000;
+            core.observer.borrow_mut().replies.sweep_timed_out(now_ms);
+        }
         let redial_ms = core.config.redial_ms;
         if core.poll_link(redial_ms).is_err() {
             self.closed.store(true, Ordering::Release);
@@ -1422,6 +1520,80 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         Some(id)
     }
 
+    #[cfg(feature = "query")]
+    fn get_on_wire(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        opts: &QueryOptions,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Option<usize> {
+        // The one peer this session reaches is its link's; it asks no queryable of its own
+        // (`get`). A get that may not leave the session, or a session with no link up, reaches
+        // nobody, and is over at once.
+        if !opts.allowed_destination.allows_remote() {
+            return Some(0);
+        }
+        let leg_id = self.next_entity_id();
+        let Some(mut guard) = self.live() else {
+            return Some(0);
+        };
+        let core = &mut guard.0;
+        let Some(actions) = core.up().cloned() else {
+            return Some(0);
+        };
+        let rid = actions.alloc_next_request_id();
+        let timeout_ms = opts.effective_timeout_ms();
+        // Rounded up, so a get whose deadline the sweep reads in whole milliseconds never ends
+        // before its timeout.
+        let deadline_ms =
+            (timeout_ms > 0).then(|| core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+        let sink = ConsolidatingSink::new(
+            opts.resolved_consolidation(),
+            get::reply_sink(leg_id, &self.gets),
+        );
+        // One Final: the link's peer's.
+        let registered = core.observer.borrow_mut().replies.register_sink(
+            rid,
+            1,
+            deadline_ms,
+            ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
+            sink,
+        );
+        if registered.is_err() {
+            return Some(0);
+        }
+        lock(&self.targets).push((leg_id, Target::Reply(Arc::new(Mutex::new(leg())))));
+        let (mapping_id, suffix) = if wire.is_literal() {
+            (0, Some(keyexpr))
+        } else {
+            (wire.mapping_id, wire.suffix.as_deref())
+        };
+        if actions
+            .send_request_query_with_meta(rid, mapping_id, suffix, &opts.query_metadata())
+            .is_err()
+        {
+            // Nothing went out: the entry and the leg go, and the get is over.
+            core.observer.borrow_mut().replies.unregister(rid);
+            drop(guard);
+            drop(self.take_target(leg_id));
+            return Some(0);
+        }
+        core.pending_gets.push(PendingGet { leg: leg_id, rid });
+        drop(guard);
+        if let Some(fan) = fan {
+            // A token cancelled while this leg was issued undoes it at once (`record` runs it).
+            let engine = self.this.clone();
+            fan.record(move || {
+                if let Some(engine) = engine.upgrade() {
+                    engine.cancel_get(leg_id, rid);
+                }
+            });
+        }
+        Some(1)
+    }
+
     #[cfg(feature = "queryable")]
     fn undeclare_queryable(&self, id: QblId) {
         let entry = self.live().and_then(|mut core| {
@@ -1476,7 +1648,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         let queryables: Vec<QblId> = core.queryables.drain(..).map(|q| q.id).collect();
         #[cfg(not(feature = "queryable"))]
         let queryables: Vec<u64> = Vec::new();
+        // A get still pending ends with its session: its entry and its leg's callback go.
+        #[cfg(feature = "query")]
+        let gets: Vec<u64> = {
+            let mut observer = core.observer.borrow_mut();
+            core.pending_gets
+                .drain(..)
+                .map(|pending| {
+                    observer.replies.unregister(pending.rid);
+                    pending.leg
+                })
+                .collect()
+        };
+        #[cfg(not(feature = "query"))]
+        let gets: Vec<u64> = Vec::new();
         drop(guard);
+        #[cfg(feature = "query")]
+        drop(std::mem::take(&mut *lock(&self.gets.events)));
         // The queries no callback will now answer, and the callbacks' C contexts, are dropped
         // with no lock held.
         #[cfg(feature = "queryable")]
@@ -1485,6 +1673,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             .into_iter()
             .chain(matches)
             .chain(queryables)
+            .chain(gets)
             .filter_map(|id| self.take_target(id))
             .collect();
         drop(taken);

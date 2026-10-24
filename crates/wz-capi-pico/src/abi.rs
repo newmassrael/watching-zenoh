@@ -129,7 +129,7 @@ impl HandleOwnership for z_owned_config_t {}
 impl HandleOwnership for crate::encoding::z_owned_encoding_t {}
 impl HandleOwnership for crate::pubsub::z_owned_publisher_t {}
 impl HandleOwnership for crate::pubsub::z_owned_subscriber_t {}
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "engine-tokio"))]
 impl HandleOwnership for crate::querier::z_owned_querier_t {}
 #[cfg(feature = "queryable")]
 impl HandleOwnership for crate::query::z_owned_queryable_t {}
