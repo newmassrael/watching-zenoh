@@ -230,7 +230,7 @@ pub(crate) fn for_each_row<'d>(
         // documents, so "the same rows in the same order" is a property of the
         // code and not of two walks agreeing.
         for position in flow.capture_order() {
-            let held = flow.frames.row(position);
+            let held = flow.frames().row(position);
             let frame: &wz_session_core::passive::PassiveFrame = &held;
             let verdict = match (verdicts, list) {
                 (Some(census), Some(list)) => Some(row_verdict_of(census, list, frame)),
@@ -256,7 +256,7 @@ pub(crate) fn for_each_row<'d>(
         let list = lists.datagram.get(i).copied();
         let list_id = list.and_then(|l| coordinates.list_id(l));
         let first_produced = flow.frames.produced() - flow.frames.len() as u64;
-        for (position, frame) in flow.frames.iter().enumerate() {
+        for (position, frame) in flow.frames().iter().enumerate() {
             let verdict = match (verdicts, list) {
                 (Some(census), Some(list)) => Some(row_verdict_of(census, list, &frame)),
                 _ => None,

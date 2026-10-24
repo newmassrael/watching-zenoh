@@ -303,7 +303,7 @@ fn the_tracked_compressed_capture_reaches_the_consumer_surface() {
     let flows = d.datagram_flows();
     assert_eq!(flows.len(), 1, "one sender and one receiver, so one flow");
     let rows: Vec<_> = flows[0]
-        .frames
+        .frames()
         .iter()
         .filter(|f| !matches!(f.carried, Carried::Nothing))
         .collect();

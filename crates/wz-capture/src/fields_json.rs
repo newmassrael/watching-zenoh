@@ -1330,16 +1330,21 @@ impl RereadResume {
 /// first held message of each list, which is the oldest of it. A message whose packet
 /// cannot be named counts as packet 0, since nothing can be said of what it needs.
 fn oldest_held_packet(d: &crate::Dissection) -> usize {
+    // Heads: only the coordinates are read, so nothing is decoded.
     let streams = d.flows().iter().map(|flow| {
-        flow.frames.first().map_or(usize::MAX, |frame| {
-            flow.packet_for(frame.direction, frame.stream_offset)
-                .unwrap_or(0)
-        })
+        flow.frames()
+            .heads_from(0)
+            .next()
+            .map_or(usize::MAX, |frame| {
+                flow.packet_for(frame.direction, frame.stream_offset)
+                    .unwrap_or(0)
+            })
     });
     let datagrams = d.datagram_flows().iter().flat_map(|flow| {
         [
-            flow.frames
-                .first()
+            flow.frames()
+                .heads_from(0)
+                .next()
                 .map_or(usize::MAX, |frame| frame.stream_offset),
             flow.scouting
                 .iter()
@@ -1818,6 +1823,12 @@ fn enter<'a>(
     }
 }
 
+/// Rows of one stream list [`push_stream_flow`]'s first pass hands to its second,
+/// so the second does not decode them again: the window a consumer asks for at a
+/// time, so a windowed walk decodes each row once and a walk over a whole list
+/// holds no more of it decoded at once than a window does.
+const ROWS_HANDED_ON: usize = 8192;
+
 // Eight: the seven a flow producer always took and the walk it resumes.
 // Folding `run` into `RowTags` would put a `&mut` in a `Copy` struct.
 #[allow(clippy::too_many_arguments)]
@@ -1912,18 +1923,34 @@ fn push_stream_flow(
     // such care -- it is filled up front from every list, and the packet a row
     // resolves AT is set per row. Only the WRITING is skipped.
     let mut folded: Vec<FoldedRow> = Vec::with_capacity(flow.frames.len() - start);
+    // The rows pass one read, handed to pass two so it does not decode them
+    // again (open-debt item 924: a stream list decodes a row each time it is
+    // read). Bounded by `ROWS_HANDED_ON`, so a document over a whole list holds
+    // no more of it decoded at once than a window does; the rows past the bound
+    // are decoded again when pass two reaches them.
+    let mut handed: Vec<Option<wz_session_core::passive_messages::Row<'_>>> = Vec::new();
     // WHERE THE WINDOW ENDS in this list: the first message numbered past the
     // document's last row. A list numbers its messages in order, so everything from
     // here on is past it. Not visited, not folded and not written: the consumer
     // asks for those rows in its next window, and a walk that began again then will
     // fold them in their turn.
     let mut end = flow.frames.len();
-    for (position, row) in flow.frames.iter().enumerate().skip(start) {
-        let frame: &PassiveFrame = &row;
+    for (position, row) in flow.frames().iter().enumerate().skip(start) {
         if tags.beyond_window(tags.frame_seq(first_produced + position as u64)) {
             end = position;
             break;
         }
+        let past_the_bound;
+        let frame: &PassiveFrame = if position - start < ROWS_HANDED_ON {
+            handed.push(Some(row));
+            handed
+                .last()
+                .and_then(Option::as_ref)
+                .expect("a row was just handed on")
+        } else {
+            past_the_bound = row;
+            &past_the_bound
+        };
         last_packet = flow
             .packet_for(frame.direction, frame.stream_offset)
             .unwrap_or(last_packet);
@@ -1975,7 +2002,11 @@ fn push_stream_flow(
         if !tags.keep_going() {
             break;
         }
-        let row = flow.frames.row(position);
+        let row = position
+            .checked_sub(start)
+            .and_then(|at| handed.get_mut(at))
+            .and_then(Option::take)
+            .unwrap_or_else(|| flow.frames().row(position));
         let frame: &PassiveFrame = &row;
         let FoldedRow {
             packet,
@@ -2180,7 +2211,7 @@ fn push_datagram_flow(
     // The walk's place is saved at it, so the next window goes on from there.
     let mut frames_end = flow.frames.len();
     let mut scouting_end = flow.scouting.len();
-    for (position, row) in flow.frames.iter().enumerate().skip(start) {
+    for (position, row) in flow.frames().iter().enumerate().skip(start) {
         let frame: &PassiveFrame = &row;
         if tags.beyond_window(tags.frame_seq(first_produced + position as u64)) {
             frames_end = position;
@@ -7807,7 +7838,7 @@ mod tests {
         let frames: Vec<(&crate::FlowDissection, crate::messages::Row<'_>)> = d
             .flows()
             .iter()
-            .flat_map(|flow| flow.frames.iter().map(move |frame| (flow, frame)))
+            .flat_map(|flow| flow.frames().iter().map(move |frame| (flow, frame)))
             .collect();
         assert!(
             frames.len() >= 2 && rows.len() >= frames.len(),
@@ -8136,7 +8167,7 @@ mod tests {
         let frames: Vec<(&crate::FlowDissection, crate::messages::Row<'_>)> = d
             .flows()
             .iter()
-            .flat_map(|flow| flow.frames.iter().map(move |frame| (flow, frame)))
+            .flat_map(|flow| flow.frames().iter().map(move |frame| (flow, frame)))
             .collect();
         assert!(
             frames.len() >= 2 && rows.len() >= frames.len(),

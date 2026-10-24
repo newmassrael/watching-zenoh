@@ -342,12 +342,12 @@ async fn a_pcap_of_a_real_handshake_dissects_end_to_end() {
 
     // The zenoh layer read a handshake out of it.
     assert!(
-        flow.frames.len() >= 4,
+        flow.frames().len() >= 4,
         "at least InitSyn/InitAck/OpenSyn/OpenAck, got {}",
-        flow.frames.len()
+        flow.frames().len()
     );
     assert!(
-        flow.frames.iter().all(|f| f.frame.is_ok()),
+        flow.frames().iter().all(|f| f.frame.is_ok()),
         "every framed message decodes"
     );
     let ctx = flow.context();
@@ -361,7 +361,7 @@ async fn a_pcap_of_a_real_handshake_dissects_end_to_end() {
 
     // Every decoded message is attributable to a PACKET. That is what makes
     // this a dissection rather than a decode.
-    for f in &flow.frames {
+    for f in flow.frames() {
         let pkt = flow
             .packet_for(f.direction, f.stream_offset)
             .unwrap_or_else(|| {
@@ -379,7 +379,7 @@ async fn a_pcap_of_a_real_handshake_dissects_end_to_end() {
     // The FIRST message in each direction sits in the first data packet of
     // that direction, which the three-way handshake put at a known index.
     let first_a = flow
-        .frames
+        .frames()
         .iter()
         .find(|f| f.direction == Direction::A)
         .expect("a client-side frame");
@@ -579,15 +579,15 @@ async fn a_fragmented_datagram_in_a_capture_file_decodes_end_to_end() {
     );
     let flow = &dissection.datagram_flows()[0];
     assert_eq!(
-        flow.frames.len(),
+        flow.frames().len(),
         1,
         "one datagram in, one message out: {:?}",
-        flow.frames
+        flow.frames()
     );
     assert!(
-        matches!(flow.frames.row(0).frame, Ok(InboundFrame::Init { .. })),
+        matches!(flow.frames().row(0).frame, Ok(InboundFrame::Init { .. })),
         "the reassembled datagram decodes to the Init the nodes really sent: {:?}",
-        flow.frames.row(0).frame
+        flow.frames().row(0).frame
     );
 
     // The reassembly must be VISIBLE, not inferred from the decode working:

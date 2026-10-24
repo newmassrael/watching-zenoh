@@ -1016,7 +1016,7 @@ fn a_flow_that_decodes_nothing_and_is_not_encrypted_is_unknown() {
     assert_eq!(row.frames, Ok(1));
     assert_eq!(row.bytes, 4);
     let kinds: Vec<&str> = d.datagram_flows()[0]
-        .frames
+        .frames()
         .iter()
         .filter_map(|f| f.frame.as_ref().ok().map(|k| k.kind_name()))
         .collect();

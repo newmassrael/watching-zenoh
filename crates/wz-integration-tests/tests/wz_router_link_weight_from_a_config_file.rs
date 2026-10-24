@@ -182,7 +182,7 @@ fn entries_written_by_the_listener(recording: &Recording) -> Vec<Flooded> {
         "the synthesised ports decide which half is Direction::A"
     );
     let mut out = Vec::new();
-    for frame in flow.frames.iter() {
+    for frame in flow.frames().iter() {
         if frame.direction != wz_session_core::passive::Direction::A {
             continue;
         }

@@ -865,7 +865,8 @@ pub struct DatagramDissection {
     /// Decoded messages, in capture order. Each one's `stream_offset` is the
     /// index of the packet that carried it — there is no stream for it to be
     /// an offset into, so the field carries the only anchor that exists.
-    pub frames: messages::MessageList,
+    /// Read through [`Self::frames`].
+    frames: messages::MessageList,
     /// R311y607 — messages decoded in the SCOUTING namespace, in capture
     /// order.
     ///
@@ -953,7 +954,8 @@ pub struct DatagramDissection {
     ///
     /// Their fields come from the sink instead, taken while the recovered
     /// plaintext was alive — the same route [`Self::quic_streams`] uses.
-    pub quic_datagrams: messages::MessageList,
+    /// Read through [`Self::quic_datagrams`].
+    quic_datagrams: messages::MessageList,
     /// Item 252 — the distinct ways this flow's packets ARRIVED.
     carriers: link::Carriers,
     /// What the session table needs of this flow that no retention bound may
@@ -1145,7 +1147,7 @@ pub enum MessageListOrigin {
 /// The structure half of [`Dissection::capture_order_since`], shared with the
 /// node census's memory, which has no use for the order half.
 pub(crate) fn list_continuations(
-    current: &[(FlowKey, MessageListOrigin, &messages::MessageList)],
+    current: &[(FlowKey, MessageListOrigin, messages::Messages<'_>)],
     prev: Option<&[ListMark]>,
 ) -> Option<alloc::vec::Vec<Option<usize>>> {
     let body = |lists: usize, serial_last: bool| lists - usize::from(serial_last);
@@ -1224,7 +1226,7 @@ pub(crate) type OrderedFrames<'a> = CaptureOrder<'a>;
 pub struct CaptureOrder<'a> {
     /// The lists, by their place in `Dissection::message_lists`, with the flow
     /// each stands under.
-    lists: Vec<(FlowKey, &'a messages::MessageList)>,
+    lists: Vec<(FlowKey, messages::Messages<'a>)>,
     /// `(packet, list, position)` in capture order.
     keys: Vec<(usize, usize, usize)>,
 }
@@ -1264,7 +1266,7 @@ impl<'b, 'a> IntoIterator for &'b CaptureOrder<'a> {
 
 /// The message a walk key names, with its flow and list.
 fn resolve_key<'a>(
-    lists: &[(FlowKey, &'a messages::MessageList)],
+    lists: &[(FlowKey, messages::Messages<'a>)],
     (packet, list, position): (usize, usize, usize),
 ) -> (FlowKey, usize, usize, messages::Row<'a>) {
     let (flow, frames) = lists[list];
@@ -1274,7 +1276,7 @@ fn resolve_key<'a>(
 /// [`CaptureOrder`] walked by reference.
 #[derive(Debug, Clone)]
 pub struct CaptureOrderIter<'b, 'a> {
-    lists: &'b [(FlowKey, &'a messages::MessageList)],
+    lists: &'b [(FlowKey, messages::Messages<'a>)],
     keys: core::slice::Iter<'b, (usize, usize, usize)>,
 }
 
@@ -1295,7 +1297,7 @@ impl ExactSizeIterator for CaptureOrderIter<'_, '_> {}
 /// [`CaptureOrder`] walked by value.
 #[derive(Debug)]
 pub struct CaptureOrderIntoIter<'a> {
-    lists: Vec<(FlowKey, &'a messages::MessageList)>,
+    lists: Vec<(FlowKey, messages::Messages<'a>)>,
     keys: alloc::vec::IntoIter<(usize, usize, usize)>,
 }
 
@@ -1462,13 +1464,20 @@ pub struct QuicStreamDissection {
     pub session: PassiveSession,
     /// Decoded transport messages. `stream_offset` is a byte offset within the
     /// RECOVERED stream of its own direction — see [`DatagramDissection`] on
-    /// why that cannot share a list with the packet-indexed ones.
-    pub frames: messages::MessageList,
+    /// why that cannot share a list with the packet-indexed ones. Read through
+    /// [`Self::frames`].
+    frames: messages::MessageList,
     /// Bytes handed to the framer, per direction.
     fed: [u64; 2],
 }
 
 impl QuicStreamDissection {
+    /// Decoded transport messages, oldest first. Kept whole: the recovered
+    /// stream's bytes are the caller's and are gone once handed in.
+    pub fn frames(&self) -> messages::Messages<'_> {
+        self.frames.read(&messages::NoBytes)
+    }
+
     /// Bytes this stream's framer was given, per direction.
     ///
     /// The denominator for "how much of what QUIC recovered turned into zenoh":
@@ -1501,7 +1510,7 @@ impl QuicStreamDissection {
         for (index, fed) in self.fed.iter().enumerate() {
             let direction = idx_direction(index);
             let consumed = self
-                .frames
+                .frames()
                 .iter()
                 .filter(|f| f.direction == direction)
                 .map(|f| (f.stream_offset + f.prefix_width + f.unit_len) as u64)
@@ -1514,6 +1523,18 @@ impl QuicStreamDissection {
 }
 
 impl DatagramDissection {
+    /// Decoded messages, in capture order, each anchored at the index of the
+    /// packet that carried it. Kept whole.
+    pub fn frames(&self) -> messages::Messages<'_> {
+        self.frames.read(&messages::NoBytes)
+    }
+
+    /// The RFC 9221 datagrams recovered on this flow, decoded, kept apart from
+    /// [`Self::frames`] for the reason the field's doc gives. Kept whole.
+    pub fn quic_datagrams(&self) -> messages::Messages<'_> {
+        self.quic_datagrams.read(&messages::NoBytes)
+    }
+
     /// What `direction` of this flow has been seen to do. A datagram link has
     /// no TCP flag, so the two are `None`: see [`HalfObservation`].
     pub fn half(&self, direction: Direction) -> HalfObservation {
@@ -1585,7 +1606,7 @@ impl DatagramDissection {
     /// second walk of the same fields. See that method for why the origin
     /// exists; this one drops it because every existing caller counts or folds
     /// and none of them needs to tell one list from another.
-    pub fn frame_lists(&self) -> impl Iterator<Item = &messages::MessageList> {
+    pub fn frame_lists(&self) -> impl Iterator<Item = messages::Messages<'_>> {
         self.frame_lists_with_origin().map(|(_, list)| list)
     }
 
@@ -1622,12 +1643,12 @@ impl DatagramDissection {
     /// cannot move — and a slice has lost it.
     pub fn frame_lists_with_origin(
         &self,
-    ) -> impl Iterator<Item = (MessageListOrigin, &messages::MessageList)> {
-        core::iter::once((MessageListOrigin::Datagram, &self.frames))
+    ) -> impl Iterator<Item = (MessageListOrigin, messages::Messages<'_>)> {
+        core::iter::once((MessageListOrigin::Datagram, self.frames()))
             .chain(
                 self.quic_streams
                     .iter()
-                    .map(|s| (MessageListOrigin::QuicStream(s.id), &s.frames)),
+                    .map(|s| (MessageListOrigin::QuicStream(s.id), s.frames())),
             )
             // R311y918 — the cleartext datagram list and this one are kept
             // apart because one consumer RESOLVES the coordinate against
@@ -1637,7 +1658,7 @@ impl DatagramDissection {
             // rather than one this enumeration asserts.
             .chain(core::iter::once((
                 MessageListOrigin::QuicDatagram,
-                &self.quic_datagrams,
+                self.quic_datagrams(),
             )))
     }
 
@@ -2250,7 +2271,13 @@ pub struct FlowDissection {
     /// The zenoh-level observer over both.
     pub session: PassiveSession,
     /// Decoded transport messages, in the order the observer produced them.
-    pub frames: messages::MessageList,
+    /// Read through [`Self::frames`].
+    frames: messages::MessageList,
+    /// How the messages read off this flow's own stream are kept: as index
+    /// entries, read again from the stream (open-debt item 924), in every
+    /// dissection but the reference reading `redecode_gate` holds them equal
+    /// to.
+    keep: Keep,
     /// R311y594b — capture index of the last packet on this flow, the key
     /// `Dissection` evicts by. A packet index rather than a timestamp because
     /// every source has one and not every source has a clock.
@@ -2288,6 +2315,62 @@ pub struct FlowDissection {
     ingest: session_table::LinkIngest,
 }
 
+/// A TCP flow's two reassembled streams, as the source its message list reads
+/// a unit's bytes from (open-debt item 924, `docs/dissect-row-index.md`).
+///
+/// A pair of borrows rather than the flow, so a caller that changes the list
+/// can hand it the streams beside it.
+struct Streams<'a> {
+    low_to_high: &'a StreamAssembler,
+    high_to_low: &'a StreamAssembler,
+}
+
+impl messages::UnitBytes for Streams<'_> {
+    fn stream_bytes(
+        &self,
+        direction: Direction,
+        from: usize,
+        to: usize,
+    ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
+        retained_bytes(self.assembler(direction), from, to)
+    }
+}
+
+impl<'a> Streams<'a> {
+    /// The stream of `direction`.
+    fn assembler(&self, direction: Direction) -> &'a StreamAssembler {
+        match direction {
+            Direction::A => self.low_to_high,
+            Direction::B => self.high_to_low,
+        }
+    }
+}
+
+impl messages::UnitBytes for FlowDissection {
+    fn stream_bytes(
+        &self,
+        direction: Direction,
+        from: usize,
+        to: usize,
+    ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
+        retained_bytes(self.assembler(direction), from, to)
+    }
+}
+
+/// The bytes of `assembler`'s stream from absolute offset `from` up to `to`,
+/// or `None` where any of them were released or have not arrived.
+fn retained_bytes(
+    assembler: &StreamAssembler,
+    from: usize,
+    to: usize,
+) -> Option<alloc::borrow::Cow<'_, [u8]>> {
+    let origin = assembler.retained_from();
+    assembler
+        .stream()
+        .get(from.checked_sub(origin)?..to.checked_sub(origin)?)
+        .map(alloc::borrow::Cow::Borrowed)
+}
+
 /// R311y612 (§4.1) — post-hole bytes held per direction while deciding whether
 /// a flow whose opening was lost carries WebSocket.
 ///
@@ -2321,6 +2404,62 @@ const STREAM_RELEASE_DIVISOR: usize = 8;
 const STREAM_RELEASE_SCAN: usize = 64;
 
 impl FlowDissection {
+    /// Decoded transport messages, in the order the observer produced them.
+    ///
+    /// Open-debt item 924, step 4b — a flow whose bytes are the zenoh session
+    /// keeps its messages as index entries and reads each again from this
+    /// flow's reassembled stream when it is asked for; this is the list with
+    /// that stream as its source.
+    pub fn frames(&self) -> messages::Messages<'_> {
+        self.frames.read(self)
+    }
+
+    /// Discard the oldest message of this flow, reading it from this flow's
+    /// stream if the list keeps it as an entry.
+    fn discard_oldest_frame(&mut self) -> Option<messages::Discarded> {
+        let Self {
+            frames,
+            low_to_high,
+            high_to_low,
+            ..
+        } = self;
+        frames.discard_oldest(&Streams {
+            low_to_high,
+            high_to_low,
+        })
+    }
+
+    /// Release the bytes of `direction`'s stream before absolute `offset`,
+    /// keeping whole first every message that would be read again from them.
+    /// Returns how many bytes went.
+    fn trim_stream_before(&mut self, direction: Direction, offset: usize) -> usize {
+        let Self {
+            frames,
+            low_to_high,
+            high_to_low,
+            ..
+        } = self;
+        frames.keep_whole_before(
+            direction,
+            offset,
+            &Streams {
+                low_to_high,
+                high_to_low,
+            },
+        );
+        match direction {
+            Direction::A => low_to_high.trim_before(offset),
+            Direction::B => high_to_low.trim_before(offset),
+        }
+    }
+
+    /// [`Self::trim_stream_before`], down to the last `keep` bytes of
+    /// `direction`'s stream.
+    fn trim_stream_to(&mut self, direction: Direction, keep: usize) -> usize {
+        let end = self.assembler(direction).len();
+        self.trim_stream_before(direction, end.saturating_sub(keep))
+    }
+
     /// R311y709 — this flow's recovered-against-fed counts.
     pub fn residue(&self) -> ByteResidue {
         self.residue
@@ -2336,13 +2475,14 @@ impl FlowDissection {
         self.chain_loss
     }
 
-    fn new(flow: FlowKey, window_ms: Option<u64>, gap_patience: Option<usize>) -> Self {
+    fn new(flow: FlowKey, window_ms: Option<u64>, gap_patience: Option<usize>, keep: Keep) -> Self {
         Self {
             flow,
             low_to_high: StreamAssembler::new().with_gap_patience(gap_patience),
             high_to_low: StreamAssembler::new().with_gap_patience(gap_patience),
             session: new_session(window_ms),
             frames: messages::MessageList::new(),
+            keep,
             last_activity: 0,
             framing: Framing::Undecided,
             held: [Vec::new(), Vec::new()],
@@ -2471,8 +2611,8 @@ impl FlowDissection {
     fn release_stream_behind_held_messages(&mut self) {
         for direction in [Direction::A, Direction::B] {
             let Some(oldest) = self
-                .frames
-                .iter()
+                .frames()
+                .heads_from(0)
                 .take(STREAM_RELEASE_SCAN)
                 .find(|frame| frame.direction == direction)
             else {
@@ -2489,10 +2629,7 @@ impl FlowDissection {
             {
                 continue;
             }
-            match direction {
-                Direction::A => self.low_to_high.trim_before(from),
-                Direction::B => self.high_to_low.trim_before(from),
-            };
+            self.trim_stream_before(direction, from);
         }
     }
 
@@ -2505,6 +2642,17 @@ impl FlowDissection {
     /// index — [`Self::packet_for`] is the door to those.
     pub fn message_at(frame: &PassiveFrame) -> usize {
         frame.stream_offset + frame.prefix_width + frame.unit_offset
+    }
+
+    /// The stream byte a message's packet is named by, read off its head: its
+    /// own first byte ([`Self::message_at`]), or, for a message read out of an
+    /// lz4 batch, which has no byte of its own on the wire, its batch's first.
+    fn first_byte(head: &messages::RowHead) -> usize {
+        if head.decompressed {
+            head.stream_offset + head.prefix_width
+        } else {
+            head.stream_offset + head.prefix_width + head.unit_offset
+        }
     }
 
     /// The positions of this flow's messages in CAPTURE ORDER: the order of the
@@ -2588,18 +2736,16 @@ impl FlowDissection {
         let base = self.frames.produced() - self.frames.len() as u64;
         let end = end.min(self.frames.len());
         let mut keyed: Vec<(usize, u64)> = Vec::with_capacity(end.saturating_sub(start));
+        // Heads: the key is what a row says about itself, so ordering a window
+        // decodes nothing.
         for (position, frame) in self
-            .frames
-            .iter()
-            .enumerate()
-            .skip(start)
+            .frames()
+            .heads_from(start)
             .take(end.saturating_sub(start))
+            .enumerate()
         {
-            let first_byte = if frame.decompressed.is_some() {
-                frame.stream_offset + frame.prefix_width
-            } else {
-                Self::message_at(&frame)
-            };
+            let position = start + position;
+            let first_byte = Self::first_byte(&frame);
             last = self.packet_for(frame.direction, first_byte).unwrap_or(last);
             keyed.push((last, base + position as u64));
         }
@@ -3339,22 +3485,31 @@ impl FlowDissection {
         let Self {
             session,
             frames,
+            keep,
             residue,
             ingest,
             low_to_high,
             high_to_low,
             ..
         } = self;
+        let streams = Streams {
+            low_to_high,
+            high_to_low,
+        };
         stream_into_session(
             session,
             frames,
             residue,
             ingest,
-            direction,
-            bytes,
-            &|dir, offset| match dir {
-                Direction::A => low_to_high.instant_of_offset(offset),
-                Direction::B => high_to_low.instant_of_offset(offset),
+            Fed {
+                direction,
+                bytes,
+                instant_of: &|dir, offset| streams.assembler(dir).instant_of_offset(offset),
+                entries_from: match keep {
+                    Keep::Entries => Some(&streams as &dyn messages::UnitBytes),
+                    #[cfg(test)]
+                    Keep::Whole => None,
+                },
             },
         );
     }
@@ -3375,10 +3530,47 @@ impl FlowDissection {
             ingest,
             ..
         } = self;
+        // Kept whole: the plaintext is this call's and is gone when it returns,
+        // and the remap after it rewrites the messages' coordinates into the
+        // ciphertext's space, where no byte of the plaintext stands.
         stream_into_session(
-            session, frames, residue, ingest, direction, bytes, instant_of,
+            session,
+            frames,
+            residue,
+            ingest,
+            Fed {
+                direction,
+                bytes,
+                instant_of,
+                entries_from: None,
+            },
         );
     }
+}
+
+/// How a TCP flow keeps the messages it reads off its own reassembled stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    /// As index entries, read again from the stream (open-debt item 924).
+    Entries,
+    /// Whole, as the first reading produced them: the reference reading the
+    /// redecode gate holds the entries equal to, and nothing else.
+    #[cfg(test)]
+    Whole,
+}
+
+/// The bytes one call of [`stream_into_session`] feeds, and where they stand.
+struct Fed<'a> {
+    /// The direction they travelled.
+    direction: Direction,
+    /// The bytes.
+    bytes: &'a [u8],
+    /// The capture instant of a byte, by its offset in its direction's stream.
+    instant_of: &'a dyn Fn(Direction, usize) -> Option<u64>,
+    /// Where the messages are read again from when they are kept as index
+    /// entries, or `None` when the bytes are in no stream the flow keeps and
+    /// the messages are kept whole.
+    entries_from: Option<&'a dyn messages::UnitBytes>,
 }
 
 /// The body both stream feeds share: push the bytes, then drain every frame
@@ -3393,10 +3585,14 @@ fn stream_into_session(
     frames: &mut messages::MessageList,
     residue: &mut ByteResidue,
     ingest: &mut session_table::LinkIngest,
-    direction: Direction,
-    bytes: &[u8],
-    instant_of: &dyn Fn(Direction, usize) -> Option<u64>,
+    fed: Fed<'_>,
 ) {
+    let Fed {
+        direction,
+        bytes,
+        instant_of,
+        entries_from,
+    } = fed;
     // R311y709 — reaches a decoder. This is also the entry point decrypted
     // PLAINTEXT arrives at, which is why `unfed` saturates: a TLS flow
     // recovers ciphertext and feeds the smaller thing inside it.
@@ -3406,10 +3602,19 @@ fn stream_into_session(
         let mut progressed = false;
         for dir in [Direction::A, Direction::B] {
             loop {
-                match session.next_frame_with(dir, &|offset| instant_of(dir, offset)) {
-                    Ok(frame) => {
-                        ingest.observe_frame(&frame);
-                        frames.push(frame);
+                // A unit at a time, so the list can keep a unit's messages side
+                // by side with the context it was read in (open-debt item 924).
+                // The order is the order one message at a time gave: a
+                // direction is drained before the other is asked.
+                match session.next_unit_with(dir, &|offset| instant_of(dir, offset)) {
+                    Ok(unit) => {
+                        for frame in &unit.frames {
+                            ingest.observe_frame(frame);
+                        }
+                        match entries_from {
+                            Some(source) => frames.push_unit(unit, source),
+                            None => frames.append(unit.frames),
+                        }
                         progressed = true;
                     }
                     Err(PassiveStall::NeedMoreBytes) => break,
@@ -3713,6 +3918,7 @@ mod message_list_census {
             capture_reported_drops: _,
             scouts: _,
             gap_patience: _,
+            stream_keep: _,
             capture_origin_ms: _,
             abandoned_chains: _,
             // The census OF discarded messages, which is the opposite of a list
@@ -3769,7 +3975,9 @@ mod message_list_census {
             // The session table's ingest facts: instants and zids, which are
             // not messages and never become a list.
             ingest: _,
-        } = FlowDissection::new(FlowKey::serial_line(), None, None);
+            // How `frames` keeps its messages, not a list of them.
+            keep: _,
+        } = FlowDissection::new(FlowKey::serial_line(), None, None, Keep::Entries);
     }
 
     /// Every field of [`DatagramDissection`], classified.
@@ -3900,7 +4108,7 @@ mod live_tap_tests {
     /// The packet index each held datagram message of flow `flow` was pushed at.
     fn datagram_packets(d: &Dissection, flow: usize) -> Vec<usize> {
         d.datagram_flows()[flow]
-            .frames
+            .frames()
             .iter()
             .map(|frame| frame.stream_offset)
             .collect()
@@ -4004,7 +4212,7 @@ mod live_tap_tests {
                 "{limits:?}: the retained stream follows the held messages, held {}",
                 flow.low_to_high.stream().len()
             );
-            for frame in [&flow.frames.row(0), &flow.frames.row(99)] {
+            for frame in [&flow.frames().row(0), &flow.frames().row(99)] {
                 assert_eq!(
                     flow.message_bytes(frame).as_deref().ok(),
                     Some(&keepalive[..]),
@@ -4916,6 +5124,10 @@ pub struct Dissection {
     /// default must be ENABLED, since a capture with a hole is not a policy
     /// choice a caller opts into.
     gap_patience: Option<usize>,
+    /// How a TCP flow created from here on keeps the messages it reads off its
+    /// own stream ([`FlowDissection`]'s `keep`): as index entries, except in the
+    /// reference reading the redecode gate builds.
+    stream_keep: Keep,
     /// R311y638 (§1.1r) — the earliest capture instant this dissection was
     /// shown, over every packet whatever it decoded to.
     ///
@@ -5032,6 +5244,7 @@ impl Default for Dissection {
             capture_reported_drops: None,
             scouts: ScoutingCorrelation::default(),
             gap_patience: Some(crate::tcp::DEFAULT_GAP_PATIENCE),
+            stream_keep: Keep::Entries,
             capture_origin_ms: None,
             abandoned_chains: 0,
             dropped_frames: DroppedFrameCensus::default(),
@@ -5067,6 +5280,17 @@ impl Dissection {
     /// nothing downstream ever sees them.
     pub fn set_gap_patience(&mut self, patience: Option<usize>) {
         self.gap_patience = patience;
+    }
+
+    /// Keep whole every message a TCP flow created from here on reads off its
+    /// own stream, rather than as an index entry read again on demand.
+    ///
+    /// The reference reading of the redecode gate: a dissection that keeps its
+    /// messages whole holds what the first reading produced, and one that keeps
+    /// entries must read every message back equal to it.
+    #[cfg(test)]
+    pub(crate) fn keep_stream_messages_whole(&mut self) {
+        self.stream_keep = Keep::Whole;
     }
 
     /// R311y609 — what the FRAMING lost, at both layers. See
@@ -5681,13 +5905,13 @@ impl Dissection {
     pub fn serial_messages(
         &self,
     ) -> impl Iterator<Item = (&serial::SerialFrame, messages::Row<'_>)> {
-        self.serial_origins.iter().zip(self.serial_frames.iter())
+        self.serial_origins.iter().zip(self.serial_frames().iter())
     }
 
     /// R311y721 — the serial line's decoded messages alone, as the census
-    /// planes take them.
-    pub fn serial_frames(&self) -> &messages::MessageList {
-        &self.serial_frames
+    /// planes take them. Kept whole.
+    pub fn serial_frames(&self) -> messages::Messages<'_> {
+        self.serial_frames.read(&messages::NoBytes)
     }
 
     /// R311y721 (§1.1f) — EVERY list of decoded transport messages this
@@ -5729,7 +5953,7 @@ impl Dissection {
     /// a frame now carries its own ([`crate::anchor_space_of`]), which is where
     /// every consumer of this iterator was already reading it from — none of
     /// them ever used the space of a list with no frames in it.
-    pub fn message_lists(&self) -> impl Iterator<Item = (FlowKey, &messages::MessageList)> {
+    pub fn message_lists(&self) -> impl Iterator<Item = (FlowKey, messages::Messages<'_>)> {
         self.message_lists_with_origin()
             .map(|(flow, _, list)| (flow, list))
     }
@@ -5759,10 +5983,10 @@ impl Dissection {
     /// [`MessageListOrigin::Datagram`] are what tell those two apart.
     pub fn message_lists_with_origin(
         &self,
-    ) -> impl Iterator<Item = (FlowKey, MessageListOrigin, &messages::MessageList)> {
+    ) -> impl Iterator<Item = (FlowKey, MessageListOrigin, messages::Messages<'_>)> {
         self.flows
             .iter()
-            .map(|f| (f.flow, MessageListOrigin::Stream, &f.frames))
+            .map(|f| (f.flow, MessageListOrigin::Stream, f.frames()))
             .chain(self.datagram_flows.iter().flat_map(|f| {
                 f.frame_lists_with_origin()
                     .map(move |(origin, frames)| (f.flow, origin, frames))
@@ -5773,7 +5997,7 @@ impl Dissection {
                 // capture. See `FlowKey::serial_line`.
                 FlowKey::serial_line(),
                 MessageListOrigin::Serial,
-                &self.serial_frames,
+                self.serial_frames(),
             )))
     }
 
@@ -5840,7 +6064,9 @@ impl Dissection {
                 .filter(|f| f.flow == flow)
                 .or_else(|| self.flows.iter().find(|f| f.flow == flow));
             let mut last = 0usize;
-            for (position, frame) in frames.iter().enumerate() {
+            // Heads, not rows: a key is read off what a row says about itself,
+            // so ordering the capture decodes nothing.
+            for (position, frame) in frames.heads_from(0).enumerate() {
                 let packet = match frame.offset_space {
                     wz_session_core::passive::OffsetSpace::PacketIndex => Some(frame.stream_offset),
                     wz_session_core::passive::OffsetSpace::StreamBytes => {
@@ -5916,7 +6142,7 @@ impl Dissection {
         prev: Option<&OrderMarks>,
         trims: TrimPolicy,
     ) -> Option<(OrderedFrames<'_>, OrderMarks)> {
-        let current: alloc::vec::Vec<(FlowKey, MessageListOrigin, &messages::MessageList)> =
+        let current: alloc::vec::Vec<(FlowKey, MessageListOrigin, messages::Messages<'_>)> =
             self.message_lists_with_origin().collect();
         let continues = list_continuations(&current, prev.map(|p| p.lists.as_slice()))?;
         let mut marks: alloc::vec::Vec<ListMark> = alloc::vec::Vec::new();
@@ -5960,7 +6186,8 @@ impl Dissection {
                 .get(list)
                 .filter(|f| f.flow == flow)
                 .or_else(|| self.flows.iter().find(|f| f.flow == flow));
-            for (position, frame) in frames.iter().enumerate().skip(start) {
+            for (position, frame) in frames.heads_from(start).enumerate() {
+                let position = start + position;
                 let packet = match frame.offset_space {
                     wz_session_core::passive::OffsetSpace::PacketIndex => Some(frame.stream_offset),
                     wz_session_core::passive::OffsetSpace::StreamBytes => {
@@ -6033,7 +6260,7 @@ impl Dissection {
                         "the flow this message came out of is no longer held",
                     ));
                 };
-                let Some(frame) = dissection.frames.get(index) else {
+                let Some(frame) = dissection.frames().get(index) else {
                     return MessageBytes::Retired(alloc::string::String::from(
                         "this message is no longer in its flow's list",
                     ));
@@ -6054,7 +6281,7 @@ impl Dissection {
                     .datagram_flows
                     .iter()
                     .find(|f| f.flow == flow)
-                    .and_then(|f| f.frames.get(index))
+                    .and_then(|f| f.frames().get(index))
                     .and_then(|frame| frame.decompressed.clone());
                 match own {
                     Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Owned(bytes)),
@@ -6078,7 +6305,7 @@ impl Dissection {
             MessageListOrigin::Serial => {
                 let (Some(carrier), Some(frame)) = (
                     self.serial_origins.get(index),
-                    self.serial_frames.get(index),
+                    self.serial_frames().get(index),
                 ) else {
                     return MessageBytes::Retired(alloc::string::String::from(
                         "this message is no longer in the serial line's list",
@@ -6317,7 +6544,7 @@ impl Dissection {
                     flow: flow.flow,
                     direction: idx_direction(index),
                     plaintext: &plaintext[index],
-                    frames: flow.frames.rows_from(before),
+                    frames: flow.frames().rows_from(before),
                     record_origins: &spans[index],
                 });
                 remap_decrypted_offsets(
@@ -6488,7 +6715,7 @@ impl Dissection {
         // defect `DissectionDrops` exists to prevent.
         if let Some(cap) = self.limits.frames_per_flow {
             while stream.frames.len() > cap {
-                let Some(receipt) = stream.frames.discard_oldest() else {
+                let Some(receipt) = stream.frames.discard_oldest(&messages::NoBytes) else {
                     break;
                 };
                 self.dropped_frames.absorb(receipt);
@@ -6518,8 +6745,8 @@ impl Dissection {
         // pushed on one direction — and costs one comparison.
         let mut walk_from = window_start;
         while walk_from < stream.frames.len()
-            && (stream.frames.row(walk_from).direction != direction
-                || (stream.frames.row(walk_from).stream_offset as u64) < base)
+            && (stream.frames().row(walk_from).direction != direction
+                || (stream.frames().row(walk_from).stream_offset as u64) < base)
         {
             walk_from += 1;
             feed.messages_straddling_offers += 1;
@@ -6533,7 +6760,7 @@ impl Dissection {
                 flow,
                 direction,
                 plaintext: bytes,
-                frames: stream.frames.rows_from(walk_from),
+                frames: stream.frames().rows_from(walk_from),
                 record_origins: &[],
             });
             for f in stream.frames.iter_mut_from(walk_from) {
@@ -6627,7 +6854,7 @@ impl Dissection {
             direction,
             packet_index,
             payload: bytes,
-            frames: dg.quic_datagrams.rows_from(before),
+            frames: dg.quic_datagrams().rows_from(before),
         });
         dg.residue.fed += bytes.len() as u64;
         let idx = self
@@ -7057,6 +7284,7 @@ impl Dissection {
                     segment.flow,
                     self.limits.reassembly_window_ms,
                     self.gap_patience,
+                    self.stream_keep,
                 ));
                 self.flows.len() - 1
             }
@@ -7161,7 +7389,7 @@ impl Dissection {
                     // counted. The `drain` this replaced could have been
                     // written without the loop body and would have compiled;
                     // this cannot.
-                    let Some(receipt) = flow.frames.discard_oldest() else {
+                    let Some(receipt) = flow.discard_oldest_frame() else {
                         break;
                     };
                     self.dropped_frames.absorb(receipt);
@@ -7171,8 +7399,8 @@ impl Dissection {
             }
         }
         if let Some(keep) = self.limits.stream_bytes_per_direction {
-            self.drops.stream_bytes += flow.low_to_high.trim(keep);
-            self.drops.stream_bytes += flow.high_to_low.trim(keep);
+            self.drops.stream_bytes += flow.trim_stream_to(Direction::A, keep);
+            self.drops.stream_bytes += flow.trim_stream_to(Direction::B, keep);
         }
         self.enforce_total_frames();
     }
@@ -7208,25 +7436,22 @@ impl Dissection {
             }
         };
         for (i, flow) in self.flows.iter().enumerate() {
-            if let Some(frame) = flow.frames.first() {
-                let first_byte = if frame.decompressed.is_some() {
-                    frame.stream_offset + frame.prefix_width
-                } else {
-                    FlowDissection::message_at(&frame)
-                };
-                let packet = flow.packet_for(frame.direction, first_byte).unwrap_or(0);
+            if let Some(head) = flow.frames().heads_from(0).next() {
+                let packet = flow
+                    .packet_for(head.direction, FlowDissection::first_byte(&head))
+                    .unwrap_or(0);
                 offer(packet, TotalList::Stream, i);
             }
         }
         for (i, flow) in self.datagram_flows.iter().enumerate() {
-            if let Some(frame) = flow.frames.first() {
-                offer(frame.stream_offset, TotalList::Datagram, i);
+            if let Some(head) = flow.frames().heads_from(0).next() {
+                offer(head.stream_offset, TotalList::Datagram, i);
             }
             if let Some(datagram) = flow.scouting.first() {
                 offer(datagram.packet_index, TotalList::Scouting, i);
             }
-            if let Some(frame) = flow.quic_datagrams.first() {
-                offer(frame.stream_offset, TotalList::QuicDatagram, i);
+            if let Some(head) = flow.quic_datagrams().heads_from(0).next() {
+                offer(head.stream_offset, TotalList::QuicDatagram, i);
             }
         }
         oldest
@@ -7256,7 +7481,7 @@ impl Dissection {
             };
             match list {
                 TotalList::Stream => {
-                    let Some(receipt) = self.flows[i].frames.discard_oldest() else {
+                    let Some(receipt) = self.flows[i].discard_oldest_frame() else {
                         return;
                     };
                     self.dropped_frames.absorb(receipt);
@@ -7264,7 +7489,10 @@ impl Dissection {
                     self.flows[i].release_stream_behind_held_messages();
                 }
                 TotalList::Datagram => {
-                    let Some(receipt) = self.datagram_flows[i].frames.discard_oldest() else {
+                    let Some(receipt) = self.datagram_flows[i]
+                        .frames
+                        .discard_oldest(&messages::NoBytes)
+                    else {
                         return;
                     };
                     self.dropped_frames.absorb(receipt);
@@ -7276,7 +7504,9 @@ impl Dissection {
                     }
                 }
                 TotalList::QuicDatagram => {
-                    let Some(receipt) = self.datagram_flows[i].quic_datagrams.discard_oldest()
+                    let Some(receipt) = self.datagram_flows[i]
+                        .quic_datagrams
+                        .discard_oldest(&messages::NoBytes)
                     else {
                         return;
                     };
@@ -7343,6 +7573,7 @@ impl Dissection {
                     record.flow,
                     self.limits.reassembly_window_ms,
                     self.gap_patience,
+                    self.stream_keep,
                 ));
                 self.flows.len() - 1
             }
@@ -7633,9 +7864,15 @@ impl Dissection {
             }
             // The oldest of the three, by the one coordinate they share.
             let oldest = [
-                flow.frames.first().map(|f| (f.stream_offset, 0u8)),
+                flow.frames()
+                    .heads_from(0)
+                    .next()
+                    .map(|f| (f.stream_offset, 0u8)),
                 flow.scouting.first().map(|s| (s.packet_index, 1u8)),
-                flow.quic_datagrams.first().map(|f| (f.stream_offset, 2u8)),
+                flow.quic_datagrams()
+                    .heads_from(0)
+                    .next()
+                    .map(|f| (f.stream_offset, 2u8)),
             ]
             .into_iter()
             .flatten()
@@ -7654,14 +7891,15 @@ impl Dissection {
                     }
                 }
                 2 => {
-                    let Some(receipt) = flow.quic_datagrams.discard_oldest() else {
+                    let Some(receipt) = flow.quic_datagrams.discard_oldest(&messages::NoBytes)
+                    else {
                         return;
                     };
                     self.dropped_frames.absorb(receipt);
                     self.drops.frames += 1;
                 }
                 _ => {
-                    let Some(receipt) = flow.frames.discard_oldest() else {
+                    let Some(receipt) = flow.frames.discard_oldest(&messages::NoBytes) else {
                         return;
                     };
                     self.dropped_frames.absorb(receipt);
@@ -10388,7 +10626,7 @@ mod datagram_tests {
         );
         assert!(
             matches!(
-                flow.frames
+                flow.frames()
                     .iter()
                     .next_back()
                     .as_deref()
@@ -10396,7 +10634,7 @@ mod datagram_tests {
                 Some(wz_session_core::passive::Carried::Undecompressible)
             ),
             "the frame after it is a body this build cannot open: {:?}",
-            flow.frames
+            flow.frames()
                 .iter()
                 .next_back()
                 .as_deref()
@@ -10426,15 +10664,15 @@ mod datagram_tests {
         );
         assert!(
             matches!(
-                flow.frames.first().as_deref().map(|f| &f.carried),
+                flow.frames().get(0).as_deref().map(|f| &f.carried),
                 Some(Carried::Fragment(IngestOutcome::Begun))
             ),
             "got {:?}",
-            flow.frames.first().as_deref().map(|f| &f.carried)
+            flow.frames().get(0).as_deref().map(|f| &f.carried)
         );
         assert!(
             matches!(
-                flow.frames
+                flow.frames()
                     .iter()
                     .next_back()
                     .as_deref()
@@ -10442,7 +10680,7 @@ mod datagram_tests {
                 Some(Carried::FragmentWithoutResolution)
             ),
             "got {:?}",
-            flow.frames
+            flow.frames()
                 .iter()
                 .next_back()
                 .as_deref()
@@ -10780,7 +11018,7 @@ mod datagram_tests {
         );
         // The recovery is reported ON a frame, so a reader sees the hole.
         let carried = f
-            .frames
+            .frames()
             .iter()
             .filter_map(|fr| fr.resync)
             .collect::<Vec<_>>();
@@ -10846,7 +11084,7 @@ mod datagram_tests {
             }
             d.finish();
             d.flows()[0]
-                .frames
+                .frames()
                 .iter()
                 .filter_map(|f| match &f.frame {
                     Ok(InboundFrame::Frame { sn, .. }) => Some(*sn),
@@ -11076,7 +11314,7 @@ mod datagram_tests {
         assert!(
             flow.frames.is_empty(),
             "a scouting message must not enter the transport list at all: {:?}",
-            flow.frames
+            flow.frames()
         );
         assert_eq!(flow.scouting.len(), 1, "it must be reported, not dropped");
         match &flow.scouting[0].frame {
@@ -11283,11 +11521,11 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1, "it stays on the transport side");
         assert!(
             matches!(
-                flow.frames.row(0).frame,
+                flow.frames().row(0).frame,
                 Ok(wz_session_core::inbound::InboundFrame::Open { .. })
             ),
             "an unsolicited 0x02 is an Open: {:?}",
-            flow.frames.row(0).frame
+            flow.frames().row(0).frame
         );
     }
 
@@ -11406,14 +11644,14 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1, "it must still be SHOWN");
         assert!(
             matches!(
-                flow.frames.row(0).frame,
+                flow.frames().row(0).frame,
                 Ok(wz_session_core::inbound::InboundFrame::Init { .. })
             ),
             "the bytes decode — that was never the problem: {:?}",
-            flow.frames.row(0).frame
+            flow.frames().row(0).frame
         );
         assert!(
-            flow.frames.row(0).inadmissible_on_link,
+            flow.frames().row(0).inadmissible_on_link,
             "and the report must say the link cannot carry it"
         );
         assert!(
@@ -11452,9 +11690,9 @@ mod datagram_tests {
         let flow = &d.datagram_flows()[0];
         assert_eq!(flow.frames.len(), 1);
         assert!(
-            !flow.frames.row(0).inadmissible_on_link,
+            !flow.frames().row(0).inadmissible_on_link,
             "a JOIN is exactly what this link exists to carry: {:?}",
-            flow.frames.row(0).frame
+            flow.frames().row(0).frame
         );
     }
 
@@ -11522,7 +11760,7 @@ mod datagram_tests {
         d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
 
         let flow = &d.datagram_flows()[0];
-        assert!(!flow.frames.row(0).inadmissible_on_link);
+        assert!(!flow.frames().row(0).inadmissible_on_link);
         assert!(
             !matches!(
                 flow.session.context().phase,
@@ -11551,11 +11789,11 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1);
         assert!(
             matches!(
-                flow.frames.row(0).frame,
+                flow.frames().row(0).frame,
                 Ok(wz_session_core::inbound::InboundFrame::Init { .. })
             ),
             "a unicast 0x01 is an Init: {:?}",
-            flow.frames.row(0).frame
+            flow.frames().row(0).frame
         );
     }
 
@@ -11595,11 +11833,11 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1);
         assert!(
             matches!(
-                flow.frames.row(0).frame,
+                flow.frames().row(0).frame,
                 Ok(wz_session_core::inbound::InboundFrame::Join { .. })
             ),
             "the multicast JOIN must still decode as a Join: {:?}",
-            flow.frames.row(0).frame
+            flow.frames().row(0).frame
         );
     }
 
@@ -11871,7 +12109,7 @@ mod datagram_tests {
             d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
             let flow = &d.datagram_flows()[0];
             assert_eq!(flow.frames.len(), 1, "{name} produced no frame at all");
-            match &flow.frames.row(0).frame {
+            match &flow.frames().row(0).frame {
                 Ok(InboundFrame::Unknown { mid }) => panic!(
                     "{name} (MID {mid:#04x}) is on zenoh's wire and this build \
                      cannot name it — a codec is missing from wz-capture's \
@@ -11939,7 +12177,7 @@ mod datagram_tests {
                  is one the decoder names and the credible-header gate refuses"
             );
             assert_eq!(flow.frames.len(), 1, "{name} produced no frame at all");
-            let f = &flow.frames.row(0);
+            let f = &flow.frames().row(0);
             assert_eq!(f.prefix_width, 2, "{name} read the wrong framing");
             assert_eq!(
                 f.reserved_header_bits, 0,
@@ -12307,7 +12545,7 @@ mod datagram_tests {
             d.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
             let flow = &d.datagram_flows()[0];
             assert_eq!(flow.frames.len(), 1, "{name}: the frame never arrived");
-            match &flow.frames.row(0).carried {
+            match &flow.frames().row(0).carried {
                 Carried::Batch(batch) => {
                     assert_eq!(
                         batch.halt, None,
@@ -12357,7 +12595,7 @@ mod datagram_tests {
                 "{name} desynchronised a synchronised stream reader"
             );
             assert_eq!(flow.frames.len(), 1, "{name}: the frame never arrived");
-            match &flow.frames.row(0).carried {
+            match &flow.frames().row(0).carried {
                 Carried::Batch(batch) => {
                     assert_eq!(batch.halt, None, "{name}: the batch walk halted");
                     if let NetworkMessage::Unknown { mid, .. } = &batch.messages[0] {
@@ -12626,7 +12864,7 @@ mod datagram_tests {
         );
         // Positioned at the packet that COMPLETED it, not at the first piece.
         // `stream_offset` is where the datagram path records the packet index.
-        assert_eq!(d.datagram_flows()[0].frames.row(0).stream_offset, 1);
+        assert_eq!(d.datagram_flows()[0].frames().row(0).stream_offset, 1);
     }
 
     /// R311y924 (open-debt item 247) — THE TWO FRAGMENT SKIP COUNTERS STAY AT
@@ -12912,8 +13150,8 @@ mod datagram_tests {
         // and a rendered comparison is the right one anyway: it fails with both
         // frames printed, which is what a byte-for-byte claim wants to show.
         assert_eq!(
-            alloc::format!("{:?}", split.datagram_flows()[0].frames.row(0).frame),
-            alloc::format!("{:?}", whole.datagram_flows()[0].frames.row(0).frame),
+            alloc::format!("{:?}", split.datagram_flows()[0].frames().row(0).frame),
+            alloc::format!("{:?}", whole.datagram_flows()[0].frames().row(0).frame),
             "reassembly must reproduce the datagram byte for byte"
         );
         assert_eq!(
@@ -14018,7 +14256,7 @@ mod datagram_tests {
         // IS that index, because there is no stream for it to be an offset
         // into. Falsified: `truncate(cap)` in place of the drain reds this.
         let kept: Vec<usize> = d.datagram_flows()[0]
-            .frames
+            .frames()
             .iter()
             .map(|f| f.stream_offset)
             .collect();
@@ -14052,7 +14290,7 @@ mod datagram_tests {
         assert_eq!(d.flows()[0].frames.len(), 3);
         assert_eq!(d.drops().frames, 7);
         let kept: Vec<usize> = d.flows()[0]
-            .frames
+            .frames()
             .iter()
             .map(|f| f.stream_offset)
             .collect();
@@ -14409,7 +14647,7 @@ mod datagram_tests {
         let stream = &d.datagram_flows()[0].quic_streams[0];
         assert_eq!(
             stream
-                .frames
+                .frames()
                 .iter()
                 .map(|f| f.stream_offset)
                 .collect::<alloc::vec::Vec<_>>(),
@@ -15296,7 +15534,7 @@ mod datagram_tests {
             1,
             "the message must decode, not merely the file parse"
         );
-        assert!(d.datagram_flows()[0].frames.row(0).frame.is_ok());
+        assert!(d.datagram_flows()[0].frames().row(0).frame.is_ok());
         #[cfg(feature = "reassembly")]
         assert_eq!(
             d.datagram_flows()[0].session.now_ms(),
@@ -15481,7 +15719,7 @@ mod datagram_tests {
         let mut stamped = Dissection::new();
         stamped.push_packet_at(LINKTYPE_ETHERNET, 0, Some(4_242), &pkt);
         assert_eq!(
-            stamped.datagram_flows()[0].frames.row(0).observed_at_ms,
+            stamped.datagram_flows()[0].frames().row(0).observed_at_ms,
             Some(4_242),
             "the instant handed to push_packet_at must reach the frame"
         );
@@ -15489,7 +15727,7 @@ mod datagram_tests {
         let mut unstamped = Dissection::new();
         unstamped.push_packet(LINKTYPE_ETHERNET, 0, &pkt);
         assert_eq!(
-            unstamped.datagram_flows()[0].frames.row(0).observed_at_ms,
+            unstamped.datagram_flows()[0].frames().row(0).observed_at_ms,
             None,
             "a source with no clock must not produce a plausible one"
         );
@@ -15536,12 +15774,12 @@ mod datagram_tests {
             flow.frames.len(),
             2,
             "both messages of the batch are reported: {:?}",
-            flow.frames
+            flow.frames()
                 .iter()
                 .map(|f| alloc::format!("{:?}", f.frame))
                 .collect::<Vec<_>>()
         );
-        for (i, f) in flow.frames.iter().enumerate() {
+        for (i, f) in flow.frames().iter().enumerate() {
             assert!(
                 matches!(
                     f.frame,
@@ -15600,7 +15838,7 @@ mod datagram_tests {
         d.push_packet_at(LINKTYPE_ETHERNET, 1, None, &pkt);
         d.push_packet_at(LINKTYPE_ETHERNET, 2, Some(3_000), &pkt);
 
-        let frames = &d.datagram_flows()[0].frames;
+        let frames = d.datagram_flows()[0].frames();
         assert_eq!(frames.len(), 3);
         assert_eq!(frames.row(0).observed_at_ms, Some(1_000));
         assert_eq!(
@@ -15634,9 +15872,9 @@ mod datagram_tests {
 
         let flow = &d.datagram_flows()[0];
         assert!(
-            flow.frames.iter().all(|f| f.observed_at_ms.is_none()),
+            flow.frames().iter().all(|f| f.observed_at_ms.is_none()),
             "no frame may carry an instant: {:?}",
-            flow.frames
+            flow.frames()
                 .iter()
                 .map(|f| f.observed_at_ms)
                 .collect::<Vec<_>>()
@@ -15710,11 +15948,11 @@ mod datagram_tests {
         assert_eq!(flow.frames.len(), 1);
         // The packet index rides through as the frame's anchor — there is no
         // stream for an offset to point into.
-        assert_eq!(flow.frames.row(0).stream_offset, 11);
+        assert_eq!(flow.frames().row(0).stream_offset, 11);
         assert!(
-            flow.frames.row(0).frame.is_ok(),
+            flow.frames().row(0).frame.is_ok(),
             "decode failed: {:?}",
-            flow.frames.row(0).frame
+            flow.frames().row(0).frame
         );
     }
 
@@ -15761,7 +15999,7 @@ mod datagram_tests {
 
         assert!(d.skipped().is_empty(), "{:?}", d.skipped());
         assert_eq!(d.datagram_flows().len(), 1);
-        let frame = &d.datagram_flows()[0].frames.row(0).frame;
+        let frame = &d.datagram_flows()[0].frames().row(0).frame;
         match frame {
             Ok(InboundFrame::Join { body, has_ext, .. }) => {
                 assert!(!has_ext, "this JOIN carries no ext chain");
@@ -15909,7 +16147,7 @@ mod ws_flow_tests {
                  census would silently be measuring the stream path again"
             );
             assert_eq!(flow.frames.len(), 1, "{name} produced no frame at all");
-            let f = &flow.frames.row(0);
+            let f = &flow.frames().row(0);
             assert_eq!(
                 f.prefix_width, 0,
                 "{name}: a ws message carries no length prefix"
@@ -16029,7 +16267,7 @@ mod ws_flow_tests {
 
         let flow = &d.flows()[0];
         assert!(flow.framing().is_websocket());
-        let stamps: Vec<Option<u64>> = flow.frames.iter().map(|f| f.observed_at_ns).collect();
+        let stamps: Vec<Option<u64>> = flow.frames().iter().map(|f| f.observed_at_ns).collect();
         assert_eq!(
             stamps,
             [Some(instant(1)), Some(instant(3))],
@@ -16070,7 +16308,7 @@ mod ws_flow_tests {
         let flow = &d.flows()[0];
         assert!(flow.framing().is_websocket());
         let carried: Vec<Option<Vec<usize>>> = flow
-            .frames
+            .frames()
             .iter()
             .map(|f| flow.packets_carrying(&f))
             .collect();
@@ -16081,7 +16319,7 @@ mod ws_flow_tests {
         );
         let upgrade_len = upgrade.len();
         assert_eq!(
-            flow.frames.row(0).wire_end,
+            flow.frames().row(0).wire_end,
             Some(upgrade_len + first.len()),
             "the first message ends where its frame does"
         );
@@ -16145,7 +16383,7 @@ mod ws_flow_tests {
                  census would silently be measuring the stream path again"
             );
             assert_eq!(flow.frames.len(), 1, "{name}: the frame never arrived");
-            match &flow.frames.row(0).carried {
+            match &flow.frames().row(0).carried {
                 Carried::Batch(batch) => {
                     assert_eq!(batch.halt, None, "{name}: the batch walk halted over ws");
                     if let NetworkMessage::Unknown { mid, .. } = &batch.messages[0] {
@@ -16215,7 +16453,7 @@ mod ws_flow_tests {
              that is the §4.1 defect, and it made every later byte a misread"
         );
         let named = flow
-            .frames
+            .frames()
             .iter()
             .filter(|f| matches!(f.frame, Ok(InboundFrame::KeepAlive { .. })))
             .count();
@@ -16223,7 +16461,7 @@ mod ws_flow_tests {
             named >= 4,
             "the messages after the hole must decode; got {named} of 8 \
              ({:?})",
-            flow.frames
+            flow.frames()
                 .iter()
                 .map(|f| alloc::format!("{:?}", f.frame))
                 .collect::<Vec<_>>()
@@ -16381,7 +16619,7 @@ mod ws_flow_tests {
             "one message from each direction — the masked half is the one that \
              goes missing on its own"
         );
-        for f in &flow.frames {
+        for f in flow.frames() {
             assert!(
                 matches!(f.frame, Ok(InboundFrame::KeepAlive { .. })),
                 "each ws message decodes to the KeepAlive it carried"
@@ -16413,7 +16651,7 @@ mod ws_flow_tests {
         assert!(!flow.framing().is_websocket());
         assert_eq!(flow.frames.len(), 1, "the stream path still decodes it");
         assert_eq!(
-            flow.frames.row(0).prefix_width,
+            flow.frames().row(0).prefix_width,
             2,
             "and still reports the 2-byte prefix it actually read"
         );
@@ -16528,7 +16766,7 @@ mod vsock_flow_tests {
         assert_eq!(d.flows().len(), 1, "both directions are one flow");
         let flow = &d.flows()[0];
         assert_eq!(flow.frames.len(), 2, "one message from each direction");
-        for f in &flow.frames {
+        for f in flow.frames() {
             assert!(matches!(f.frame, Ok(InboundFrame::KeepAlive { .. })));
             assert_eq!(f.prefix_width, 2, "a vsock link is length-prefixed");
         }
@@ -16561,7 +16799,7 @@ mod vsock_flow_tests {
             "each record advances the stream; a stuck counter loses all but the first"
         );
         // And each message is still attributable to the record that carried it.
-        for (i, f) in flow.frames.iter().enumerate() {
+        for (i, f) in flow.frames().iter().enumerate() {
             assert_eq!(
                 flow.packet_for(f.direction, f.stream_offset),
                 Some(i),
@@ -18132,7 +18370,7 @@ mod tls_flow_tests {
         d.decrypt_with(&mut FakeOpener::new());
 
         let frames: Vec<usize> = d.flows()[0]
-            .frames
+            .frames()
             .iter()
             .map(|f| f.stream_offset)
             .collect();
@@ -18150,7 +18388,7 @@ mod tls_flow_tests {
         // the packet its record actually arrived in. Packet 0 is the hello, so
         // the three records are packets 1, 2 and 3.
         let resolved: Vec<Option<usize>> = d.flows()[0]
-            .frames
+            .frames()
             .iter()
             .map(|f| d.flows()[0].packet_for(f.direction, f.stream_offset))
             .collect();
@@ -18164,10 +18402,10 @@ mod tls_flow_tests {
         // the record that held its last byte, header and tag included (each
         // record is 10 bytes here), so the packets that carried it are the
         // record's and not a plaintext measure's.
-        let ends: Vec<Option<usize>> = d.flows()[0].frames.iter().map(|f| f.wire_end).collect();
+        let ends: Vec<Option<usize>> = d.flows()[0].frames().iter().map(|f| f.wire_end).collect();
         assert_eq!(ends, alloc::vec![Some(67), Some(77), Some(87)]);
         let carried: Vec<Option<Vec<usize>>> = d.flows()[0]
-            .frames
+            .frames()
             .iter()
             .map(|f| d.flows()[0].packets_carrying(&f))
             .collect();
@@ -18213,7 +18451,7 @@ mod tls_flow_tests {
         d.decrypt_with(&mut FakeOpener::new());
 
         let stamps: Vec<Option<u64>> = d.flows()[0]
-            .frames
+            .frames()
             .iter()
             .map(|f| f.observed_at_ns)
             .collect();
@@ -18266,7 +18504,7 @@ mod tls_flow_tests {
         // frames came out of. The ticket sits at 67, between them, so a build
         // that fed it onward reads [57, 67, 77] here.
         let offsets: Vec<usize> = d.flows()[0]
-            .frames
+            .frames()
             .iter()
             .map(|f| f.stream_offset)
             .collect();

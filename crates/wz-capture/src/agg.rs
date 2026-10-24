@@ -3867,7 +3867,7 @@ pub(crate) mod tests {
         let mut spaces = KeyexprSpaces::new();
         for (list, flow) in d.datagram_flows().iter().enumerate() {
             by_hand.observe_flow_where(
-                &flow.frames,
+                flow.frames(),
                 &filter,
                 crate::node::ListContext::unattributed(list),
                 &mut spaces,
@@ -3929,7 +3929,7 @@ pub(crate) mod tests {
             1,
             &udp_packet(HIGH, 7447, LOW, 43210, &wire),
         );
-        let frames = &d.datagram_flows()[0].frames;
+        let frames = d.datagram_flows()[0].frames();
         assert_eq!(frames.row(0).direction, Direction::A, "low -> high is A");
         assert_eq!(frames.row(1).direction, Direction::B, "high -> low is B");
     }

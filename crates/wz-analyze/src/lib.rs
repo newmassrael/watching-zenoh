@@ -2486,7 +2486,7 @@ fn field_lines(
             ]),
         }
         let mut last_packet = 0usize;
-        for frame in &flow.frames {
+        for frame in flow.frames() {
             // R2519 (open-debt item 713) — anchored, not absorbed; the table was
             // filled in capture order before this loop. See the `spaces` setup.
             last_packet = flow
@@ -3866,7 +3866,7 @@ fn datagram_field_rows(
         // R311y681 — counted exactly, and named while the bound allows.
         let mut disagreed = 0usize;
         let mut named: Vec<Disagreed> = Vec::new();
-        for frame in &flow.frames {
+        for frame in flow.frames() {
             // R2519 — anchored, not absorbed. `stream_offset` IS the packet on a
             // datagram link, so it is the anchor directly.
             spaces.at_packet(frame.stream_offset);
@@ -4427,7 +4427,7 @@ pub fn samples(capture: &[u8], keylog: Option<&[u8]>) -> Result<Samples, Capture
             ]),
         }
         let mut last_packet = 0usize;
-        for frame in &flow.frames {
+        for frame in flow.frames() {
             // R2519 (open-debt item 713) — SAY WHERE, do not absorb here. The
             // binding table was filled in capture order before this loop began
             // (`absorb_every_declaration`), so a declaration on the session's
@@ -4478,7 +4478,7 @@ fn collect_datagram_samples(
         // resolve in, and that space is folded below. `unreachable`'s own doc
         // names this exact situation -- "the capture would not parse a second
         // time" -- so the rows are counted there rather than under a new word.
-        out.unreachable += flows.iter().map(|f| f.frames.len()).sum::<usize>()
+        out.unreachable += flows.iter().map(|f| f.frames().len()).sum::<usize>()
             + recovered
                 .rows
                 .iter()
@@ -4505,7 +4505,7 @@ fn collect_datagram_samples(
                 wz_capture::agg::SpaceOwner::Flow { list: 0, side: 1 },
             ]),
         }
-        for frame in &flow.frames {
+        for frame in flow.frames() {
             // R2519 — anchored, not absorbed; `stream_offset` is the packet here.
             spaces.at_packet(frame.stream_offset);
             let Some(packet) = file.packet(frame.stream_offset) else {
@@ -4977,7 +4977,7 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
         // anything a reader can add a span to. The two spaces are told apart
         // here because this is where the flow's own state is in hand.
         let rows: Vec<MessageRow> = flow
-            .frames
+            .frames()
             .iter()
             .map(|f| {
                 let space = if encrypted.is_some() {
@@ -4994,7 +4994,7 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
             &mut emitted,
             &flow.flow,
             framing,
-            flow.frames.len(),
+            flow.frames().len(),
             // A stream flow carries no scouting messages and says so with a
             // zero rather than by the key's absence, which is the same
             // structural rule the report's own `encrypted` block follows: a
@@ -5009,7 +5009,7 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
     // made a scouting-only capture report its flow count above an empty list.
     for flow in d.datagram_flows() {
         let mut rows: Vec<MessageRow> = flow
-            .frames
+            .frames()
             .iter()
             .map(|f| MessageRow::transport(&f, OffsetSpace::Packet))
             .collect();
@@ -5025,7 +5025,7 @@ fn flow_lines(d: &Dissection, format: Format, per_message: bool, cap: Option<usi
         for stream in &flow.quic_streams {
             rows.extend(
                 stream
-                    .frames
+                    .frames()
                     .iter()
                     .map(|f| MessageRow::transport(&f, MessageRow::stream_byte(&f))),
             );

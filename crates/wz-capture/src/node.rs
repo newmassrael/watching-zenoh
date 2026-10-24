@@ -518,7 +518,7 @@ impl NodeCensus {
     pub fn observe_flow(
         &mut self,
         flow: &FlowKey,
-        frames: &crate::messages::MessageList,
+        frames: crate::messages::Messages<'_>,
         // R2456 (open-debt item 701) — the list's index in
         // `Dissection::message_lists()`, which `crate::agg` and
         // `crate::interest` already take for the same reason: it is half the
@@ -542,7 +542,7 @@ impl NodeCensus {
     pub(crate) fn observe_flow_from(
         &mut self,
         flow: &FlowKey,
-        frames: &crate::messages::MessageList,
+        frames: crate::messages::Messages<'_>,
         list: usize,
         start: usize,
         ends: &mut [Option<usize>; 2],
@@ -553,8 +553,8 @@ impl NodeCensus {
         // The first frame answers for the list: every frame of one list comes
         // out of the same producer, and `the_space_a_list_reports_is_the_one_\
         // its_frames_carry` is what holds that.
-        if let Some(frame) = frames.first() {
-            self.anchors = crate::anchor_space_of(&frame);
+        if let Some(head) = frames.heads_from(0).next() {
+            self.anchors = crate::AnchorSpace::from(head.offset_space);
         }
         self.list = list;
         // Per-direction, the last zid seen naming itself on an admissible
@@ -562,7 +562,14 @@ impl NodeCensus {
         // flow that is genuinely reused by a different node names the new one —
         // taking the latest is what keeps the link current rather than
         // remembering a node that has gone.
-        for row in frames.rows_from(start) {
+        //
+        // Only an Init or a Join names a node, and a message's head says which
+        // it is, so no other message is decoded (open-debt item 924).
+        for (at, head) in frames.heads_from(start).enumerate() {
+            if !may_name_a_zid(head.kind) {
+                continue;
+            }
+            let row = frames.row(start + at);
             let frame: &PassiveFrame = &row;
             let Some((zid, whatami, kind)) = named_zid(frame) else {
                 continue;
@@ -607,8 +614,8 @@ impl NodeCensus {
         // owns a direction is settled by the handshake, and a fold that
         // attributed bytes as it walked would credit everything before the
         // INIT to nobody even on a flow whose INIT arrives one message later.
-        for row in frames.rows_from(start) {
-            let frame: &PassiveFrame = &row;
+        // Read off the heads: the unit's length and direction are all it needs.
+        for frame in frames.heads_from(start) {
             // Once per unit. See `ObservedNode::wire_bytes`.
             if frame.batch_index != 0 {
                 continue;
@@ -926,6 +933,13 @@ fn names_a_zid(frame: &PassiveFrame) -> bool {
         )
 }
 
+/// Whether a message of `kind` (a row head's [`InboundFrame::kind_code`]) can
+/// name a node: what [`names_a_zid`] and [`named_zid`] ask first, answered
+/// without decoding the message.
+fn may_name_a_zid(kind: u8) -> bool {
+    kind == InboundFrame::KIND_INIT || kind == InboundFrame::KIND_JOIN
+}
+
 /// What a [`NodeMemory`] has done: messages it took, folds it continued and folds
 /// it began again. What a test reads instead of a clock.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1011,7 +1025,7 @@ impl NodeMemory {
         let current: Vec<(
             FlowKey,
             crate::MessageListOrigin,
-            &wz_session_core::passive_messages::MessageList,
+            wz_session_core::passive_messages::Messages<'_>,
         )> = dissection.message_lists_with_origin().collect();
         if !self.resume(&current, trims) {
             self.restart(&current);
@@ -1033,7 +1047,7 @@ impl NodeMemory {
         current: &[(
             FlowKey,
             crate::MessageListOrigin,
-            &wz_session_core::passive_messages::MessageList,
+            wz_session_core::passive_messages::Messages<'_>,
         )],
     ) {
         let mut census = NodeCensus::new();
@@ -1041,7 +1055,7 @@ impl NodeMemory {
         let mut all_ends = Vec::with_capacity(current.len());
         for (list, (flow, origin, frames)) in current.iter().enumerate() {
             let mut ends = [None, None];
-            census.observe_flow_from(flow, frames, list, 0, &mut ends);
+            census.observe_flow_from(flow, *frames, list, 0, &mut ends);
             self.stats.messages_folded += frames.len() as u64;
             lists.push(crate::ListMark {
                 flow: *flow,
@@ -1068,7 +1082,7 @@ impl NodeMemory {
         current: &[(
             FlowKey,
             crate::MessageListOrigin,
-            &wz_session_core::passive_messages::MessageList,
+            wz_session_core::passive_messages::Messages<'_>,
         )],
         trims: crate::TrimPolicy,
     ) -> bool {
@@ -1096,9 +1110,9 @@ impl NodeMemory {
             }
             let start = (mark.produced.max(first) - first) as usize;
             if frames
-                .rows_from(start)
-                .iter()
-                .any(|frame| names_a_zid(&frame))
+                .heads_from(start)
+                .enumerate()
+                .any(|(at, head)| may_name_a_zid(head.kind) && names_a_zid(&frames.row(start + at)))
             {
                 return false;
             }
@@ -1119,7 +1133,7 @@ impl NodeMemory {
             if start < frames.len() {
                 saved
                     .census
-                    .observe_flow_from(flow, frames, list, start, &mut ends);
+                    .observe_flow_from(flow, *frames, list, start, &mut ends);
                 self.stats.messages_folded += (frames.len() - start) as u64;
             }
             lists.push(crate::ListMark {

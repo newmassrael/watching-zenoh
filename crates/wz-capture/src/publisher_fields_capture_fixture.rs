@@ -488,7 +488,7 @@ fn the_tracked_publisher_fields_capture_reaches_the_consumer_surface() {
     let flows = d.datagram_flows();
     assert_eq!(flows.len(), 1, "one session");
     let mut seen = Vec::new();
-    for frame in flows[0].frames.iter() {
+    for frame in flows[0].frames().iter() {
         let Carried::Batch(batch) = &frame.carried else {
             continue;
         };

@@ -458,6 +458,12 @@ impl InboundFrame {
         }
     }
 
+    /// [`Self::kind_code`] of an `Init`.
+    pub const KIND_INIT: u8 = 1;
+
+    /// [`Self::kind_code`] of a `Join`.
+    pub const KIND_JOIN: u8 = 7;
+
     /// R2102 (open-debt item 524) — the SAME fact as [`Self::kind_name`], as a
     /// number a fixed-layout record can carry.
     ///
@@ -492,7 +498,7 @@ impl InboundFrame {
     pub fn kind_code(&self) -> u8 {
         match self {
             #[cfg(feature = "codec-init-body")]
-            InboundFrame::Init { .. } => 1,
+            InboundFrame::Init { .. } => Self::KIND_INIT,
             #[cfg(feature = "codec-open-body")]
             InboundFrame::Open { .. } => 2,
             #[cfg(feature = "codec-close")]
@@ -504,7 +510,7 @@ impl InboundFrame {
             #[cfg(all(feature = "alloc", feature = "reassembly"))]
             InboundFrame::Fragment { .. } => 6,
             #[cfg(all(feature = "alloc", feature = "codec-join"))]
-            InboundFrame::Join { .. } => 7,
+            InboundFrame::Join { .. } => Self::KIND_JOIN,
             #[cfg(feature = "alloc")]
             InboundFrame::Oam { .. } => 8,
             // 255 and not 9, for the reason the doc above states: an unknown

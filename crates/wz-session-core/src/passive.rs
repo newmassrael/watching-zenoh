@@ -1975,9 +1975,55 @@ impl PassiveSession {
         direction: Direction,
         instant_of: &dyn Fn(usize) -> Option<u64>,
     ) -> Result<PassiveFrame, PassiveStall> {
-        if let Some(frame) = self.pending[usize::from(direction == Direction::B)].pop_front() {
+        let seat = usize::from(direction == Direction::B);
+        if let Some(frame) = self.pending[seat].pop_front() {
             return Ok(frame);
         }
+        let mut walked = self.read_unit(direction, instant_of)?.frames.into_iter();
+        let first = walked.next().ok_or(PassiveStall::NeedMoreBytes)?;
+        self.pending[seat].extend(walked);
+        Ok(first)
+    }
+
+    /// [`Self::next_frame_with`], a whole framing unit at a time, with the
+    /// context the unit was read in.
+    ///
+    /// What a holder needs that keeps a unit's records as index entries and reads
+    /// them again later ([`redecode_unit`]): the records come out together, so
+    /// the holder can keep them side by side, and [`ReadUnit::start`] is the
+    /// context in force before the first of them was folded, which no record
+    /// carries (each carries the context AFTER itself).
+    ///
+    /// Records [`Self::next_frame_with`] queued and has not handed out yet come
+    /// first, as a unit of their own whose start is `None`: they are the rest of
+    /// a unit whose front was handed out one record at a time, so no start can
+    /// be stated for them alone. A reader that uses only this door never sees
+    /// one.
+    pub fn next_unit_with(
+        &mut self,
+        direction: Direction,
+        instant_of: &dyn Fn(usize) -> Option<u64>,
+    ) -> Result<ReadUnit, PassiveStall> {
+        let seat = usize::from(direction == Direction::B);
+        if !self.pending[seat].is_empty() {
+            return Ok(ReadUnit {
+                start: None,
+                frames: self.pending[seat].drain(..).collect(),
+            });
+        }
+        self.read_unit(direction, instant_of)
+    }
+
+    /// Read the next framing unit of `direction`'s stream, every record of it.
+    ///
+    /// The body of [`Self::next_frame_with`] and [`Self::next_unit_with`]: frame
+    /// the unit off the stream (resynchronising first where the direction lost
+    /// its framing), then walk it. The unit handed back is never empty.
+    fn read_unit(
+        &mut self,
+        direction: Direction,
+        instant_of: &dyn Fn(usize) -> Option<u64>,
+    ) -> Result<ReadUnit, PassiveStall> {
         let width = self.context.prefix_width(direction);
         // R2803 — WHICH MESSAGE SET may begin here. Read beside `width` and for
         // the same reason: both are facts about the LINK, and the borrow below
@@ -2055,33 +2101,31 @@ impl PassiveSession {
         // A byte STREAM is a unicast link by construction — zenoh has no
         // multicast stream transport — so `inadmissible_on_link` cannot arise
         // here, which is what `LinkHandshake::Present` says.
-        let mut walked = self
-            .decode_framing_unit(
-                direction,
-                &body,
-                UnitSource {
-                    // The one caller that counts BYTES: `stream.consumed` is
-                    // where this unit's length prefix stood in the direction's
-                    // stream.
-                    anchor: Anchor::bytes(stream_offset),
-                    prefix_width: width,
-                    instant_of: &at,
-                },
-                LinkHandshake::Present,
-                resync,
-            )
-            .into_iter();
-        match walked.next() {
-            Some(first) => {
-                self.pending[usize::from(direction == Direction::B)].extend(walked);
-                Ok(first)
-            }
-            // Structurally unreachable: `payload_len == 0` desynchronised
-            // above, so the unit handed to the walk is non-empty and the walk
-            // yields at least one message for it. `NeedMoreBytes` is the answer
-            // that loses nothing if that ever stops holding.
-            None => Err(PassiveStall::NeedMoreBytes),
+        let start = self.context;
+        let frames = self.decode_framing_unit(
+            direction,
+            &body,
+            UnitSource {
+                // The one caller that counts BYTES: `stream.consumed` is
+                // where this unit's length prefix stood in the direction's
+                // stream.
+                anchor: Anchor::bytes(stream_offset),
+                prefix_width: width,
+                instant_of: &at,
+            },
+            LinkHandshake::Present,
+            resync,
+        );
+        // A unit that is a batch header alone yields no record. It was answered
+        // `NeedMoreBytes` before units were handed out whole, and is still: the
+        // bytes are consumed and the next call reads on.
+        if frames.is_empty() {
+            return Err(PassiveStall::NeedMoreBytes);
         }
+        Ok(ReadUnit {
+            start: Some(start),
+            frames,
+        })
     }
 
     /// R311y631 (§1.2b) — decode EVERY transport message in one framing unit.
@@ -2692,6 +2736,18 @@ pub struct UnitInput<'a> {
     pub handshake: LinkHandshake,
 }
 
+/// Every record of one framing unit, as [`PassiveSession::next_unit_with`]
+/// hands it out.
+#[derive(Debug)]
+pub struct ReadUnit {
+    /// The context in force before the unit's first record was folded: what
+    /// [`UnitFacts::start`] asks for. `None` for the queued rest of a unit whose
+    /// front was handed out a record at a time.
+    pub start: Option<FlowContext>,
+    /// The unit's records, in order; never empty.
+    pub frames: Vec<PassiveFrame>,
+}
+
 /// What a framing unit's walk asks of the reader it walks for.
 ///
 /// [`walk_unit`] decides everything one unit's bytes and the flow's context
@@ -3223,24 +3279,26 @@ impl UnitFacts {
             start,
             resync: first.and_then(|f| f.resync),
             unit_instant: first.and_then(|f| f.observed_at_ns),
-            messages: frames
-                .iter()
-                .map(|f| MessageFacts {
-                    unit_offset: f.unit_offset,
-                    observed_at_ns: f.observed_at_ns,
-                    #[cfg(feature = "codec-frame")]
-                    sn_verdict: f.sn_verdict,
-                    #[cfg(feature = "reassembly")]
-                    fragment: match &f.carried {
-                        Carried::Reassembled { joined, .. } => {
-                            Some(FragmentFate::Joined(joined.clone()))
-                        }
-                        Carried::FragmentWithoutResolution => Some(FragmentFate::WithoutResolution),
-                        Carried::Fragment(outcome) => Some(FragmentFate::Pending(*outcome)),
-                        _ => None,
-                    },
-                })
-                .collect(),
+            messages: frames.iter().map(|f| MessageFacts::of(f)).collect(),
+        }
+    }
+}
+
+impl MessageFacts {
+    /// What `frame`'s first reading knew that its unit's bytes do not say.
+    pub fn of(frame: &PassiveFrame) -> Self {
+        Self {
+            unit_offset: frame.unit_offset,
+            observed_at_ns: frame.observed_at_ns,
+            #[cfg(feature = "codec-frame")]
+            sn_verdict: frame.sn_verdict,
+            #[cfg(feature = "reassembly")]
+            fragment: match &frame.carried {
+                Carried::Reassembled { joined, .. } => Some(FragmentFate::Joined(joined.clone())),
+                Carried::FragmentWithoutResolution => Some(FragmentFate::WithoutResolution),
+                Carried::Fragment(outcome) => Some(FragmentFate::Pending(*outcome)),
+                _ => None,
+            },
         }
     }
 }
@@ -4360,7 +4418,10 @@ mod tests {
         let mut list = crate::passive_messages::MessageList::new();
         list.push(s.next_frame(Direction::A).expect("network body"));
         let mut census = crate::passive_messages::DroppedFrameCensus::default();
-        census.absorb(list.discard_oldest().expect("one body held"));
+        census.absorb(
+            list.discard_oldest(&crate::passive_messages::NoBytes)
+                .expect("one body held"),
+        );
         assert_eq!(census.total(), 1);
         assert_eq!(census.network(), 1);
         assert_eq!(census.frame(), 0);

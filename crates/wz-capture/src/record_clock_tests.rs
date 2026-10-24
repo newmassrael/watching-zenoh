@@ -181,7 +181,7 @@ fn assert_each_record_is_stamped_by_the_packet_of_its_first_byte(
 ) {
     let mut checked = 0usize;
     for flow in d.flows() {
-        for frame in flow.frames.iter() {
+        for frame in flow.frames().iter() {
             // The byte the row's `first_byte` names: past the length prefix and
             // whatever of the batch stands ahead of the message.
             let first_byte = crate::FlowDissection::message_at(&frame);
@@ -243,10 +243,10 @@ fn records_behind_a_hole_are_stamped_by_their_own_packets_when_the_capture_ends(
     assert_each_record_is_stamped_by_the_packet_of_its_first_byte(&wire.d, &wire.instants);
 
     // The same thing said without the helper, on the records the defect hit.
-    let sns: Vec<u64> = flow.frames.iter().map(|f| sn_of(&f)).collect();
+    let sns: Vec<u64> = flow.frames().iter().map(|f| sn_of(&f)).collect();
     assert!(!sns.contains(&5), "the lost unit left no record: {sns:?}");
     let sixth_after = flow
-        .frames
+        .frames()
         .iter()
         .find(|f| sn_of(f) == 10)
         .expect("unit 10");
@@ -257,7 +257,7 @@ fn records_behind_a_hole_are_stamped_by_their_own_packets_when_the_capture_ends(
     );
     assert_ne!(
         sixth_after.observed_at_ns,
-        flow.frames.iter().next_back().unwrap().observed_at_ns
+        flow.frames().iter().next_back().unwrap().observed_at_ns
     );
 }
 
@@ -306,7 +306,7 @@ fn a_segment_released_by_a_late_neighbour_keeps_the_instant_it_was_captured_at()
 
     let flow = &wire.d.flows()[0];
     let by_sn: Vec<(u64, Option<u64>)> = flow
-        .frames
+        .frames()
         .iter()
         .map(|f| (sn_of(&f), f.observed_at_ns))
         .collect();
@@ -342,7 +342,7 @@ fn a_unit_spanning_two_packets_is_stamped_by_its_first_and_listed_when_it_comple
 
     let flow = &wire.d.flows()[0];
     let listed: Vec<(Direction, Option<u64>)> = flow
-        .frames
+        .frames()
         .iter()
         .map(|f| (f.direction, f.observed_at_ns))
         .collect();
@@ -371,7 +371,7 @@ fn two_messages_of_one_batch_in_different_packets_each_take_their_own() {
     wire.send(&unit[3..]); // packet 1: the second message
 
     let stamps: Vec<(usize, Option<u64>)> = wire.d.flows()[0]
-        .frames
+        .frames()
         .iter()
         .map(|f| (f.batch_index, f.observed_at_ns))
         .collect();
@@ -403,7 +403,7 @@ fn a_unit_split_by_the_hole_leaves_no_record_and_the_ones_after_it_keep_their_pa
     wire.d.finish();
 
     let flow = &wire.d.flows()[0];
-    let sns: Vec<u64> = flow.frames.iter().map(|f| sn_of(&f)).collect();
+    let sns: Vec<u64> = flow.frames().iter().map(|f| sn_of(&f)).collect();
     assert!(
         !sns.contains(&5),
         "the straddling unit must not be reported as a record: {sns:?}"
@@ -427,7 +427,7 @@ fn a_record_in_an_unstamped_packet_takes_the_flows_clock_as_of_that_packet() {
     wire.send(&units[3]); // stamped again
 
     let stamps: Vec<Option<u64>> = wire.d.flows()[0]
-        .frames
+        .frames()
         .iter()
         .map(|f| f.observed_at_ns)
         .collect();
@@ -447,7 +447,7 @@ fn a_record_in_an_unstamped_packet_takes_the_flows_clock_as_of_that_packet() {
     }
     assert!(
         none.flows()[0]
-            .frames
+            .frames()
             .iter()
             .all(|f| f.observed_at_ns.is_none() && f.observed_at_ms.is_none()),
         "a capture nobody timed has no time on any record"
@@ -507,18 +507,18 @@ fn a_clean_capture_reads_the_same_millisecond_whichever_way_it_was_fed() {
     by_ms.finish();
     by_ns.finish();
     let a: Vec<_> = by_ms.flows()[0]
-        .frames
+        .frames()
         .iter()
         .map(|f| f.observed_at_ms)
         .collect();
     let b: Vec<_> = by_ns.flows()[0]
-        .frames
+        .frames()
         .iter()
         .map(|f| f.observed_at_ms)
         .collect();
     assert_eq!(a.len(), 30);
     assert_eq!(a, b, "the millisecond column does not depend on the digits");
-    for (i, f) in by_ns.flows()[0].frames.iter().enumerate() {
+    for (i, f) in by_ns.flows()[0].frames().iter().enumerate() {
         assert_eq!(
             f.observed_at_ns,
             Some(at(i)),
@@ -601,10 +601,10 @@ fn the_clock_keeps_every_digit_the_source_gave_on_both_link_kinds() {
         Some(instant + 1),
         &tcp_packet(1000, &framed_keepalive()),
     );
-    let datagram = &d.datagram_flows()[0].frames.row(0);
+    let datagram = &d.datagram_flows()[0].frames().row(0);
     assert_eq!(datagram.observed_at_ns, Some(instant));
     assert_eq!(datagram.observed_at_ms, Some(1_700_000_000_123));
-    let stream = &d.flows()[0].frames.row(0);
+    let stream = &d.flows()[0].frames().row(0);
     assert_eq!(stream.observed_at_ns, Some(instant + 1));
     assert_eq!(stream.observed_at_ms, Some(1_700_000_000_123));
 }
@@ -627,7 +627,7 @@ fn a_capture_files_sub_millisecond_digits_reach_the_records() {
     );
     let d = Dissection::from_pcap(&file).expect("reads");
     let ns: Vec<_> = d.datagram_flows()[0]
-        .frames
+        .frames()
         .iter()
         .map(|f| f.observed_at_ns)
         .collect();
@@ -656,7 +656,7 @@ fn a_capture_files_sub_millisecond_digits_reach_the_records() {
             &[(0, ticks, packet.as_slice())],
         );
         let d = Dissection::from_pcapng(&file).expect("reads");
-        let frame = &d.datagram_flows()[0].frames.row(0);
+        let frame = &d.datagram_flows()[0].frames().row(0);
         assert_eq!(
             frame.observed_at_ns,
             Some(want_ns),
@@ -1112,7 +1112,7 @@ impl crate::fields_json::RowCoordinates for EveryListNumbered {
 fn a_stream_flows_rows_come_out_in_capture_order() {
     let wire = a_unit_that_completes_after_one_that_began_later();
     let flow = &wire.d.flows()[0];
-    let decoded: Vec<Direction> = flow.frames.iter().map(|f| f.direction).collect();
+    let decoded: Vec<Direction> = flow.frames().iter().map(|f| f.direction).collect();
     assert_eq!(
         decoded,
         [Direction::B, Direction::A],
@@ -1228,7 +1228,7 @@ fn rows_behind_a_hole_are_in_capture_order_and_their_instants_agree_with_it() {
     let order = flow.capture_order();
     let instants: Vec<Option<u64>> = order
         .iter()
-        .map(|&p| flow.frames.row(p).observed_at_ns)
+        .map(|&p| flow.frames().row(p).observed_at_ns)
         .collect();
     assert!(
         instants.windows(2).all(|w| w[0] < w[1]),

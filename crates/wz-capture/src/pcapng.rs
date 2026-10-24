@@ -2471,7 +2471,7 @@ mod tests {
         let flow = &d.datagram_flows()[0];
         assert_eq!(flow.frames.len(), 1, "the packet reached a flow");
         assert_eq!(
-            flow.frames.row(0).observed_at_ms,
+            flow.frames().row(0).observed_at_ms,
             None,
             "a block with no timestamp must not produce one"
         );

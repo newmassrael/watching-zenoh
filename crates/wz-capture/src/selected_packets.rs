@@ -71,7 +71,7 @@ use alloc::vec::Vec;
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::passive::{Carried, Direction, PassiveFrame};
-use wz_session_core::passive_messages::MessageList;
+use wz_session_core::passive_messages::Messages;
 
 use crate::fields_json::{judged_by, RowCoordinates, RowVerdict};
 use crate::selection_json::{for_each_row, RowSource};
@@ -161,7 +161,7 @@ pub fn selected_packets_coordinated(
                 flow,
                 position,
             } => {
-                match flow.packets_carrying(&flow.frames.row(position)) {
+                match flow.packets_carrying(&flow.frames().row(position)) {
                     Some(packets) => picked.extend(packets),
                     None => summary.rows_unplaced += 1,
                 }
@@ -172,7 +172,7 @@ pub fn selected_packets_coordinated(
                 flow,
                 position,
             } => {
-                picked.insert(flow.frames.row(position).stream_offset);
+                picked.insert(flow.frames().row(position).stream_offset);
                 datagram_picks.entry(index).or_default().push(position);
             }
             // Scouting rows are unjudged by construction and never reach here;
@@ -198,7 +198,7 @@ pub fn selected_packets_coordinated(
             );
         }
         for (index, positions) in &datagram_picks {
-            let frames = &d.datagram_flows()[*index].frames;
+            let frames = d.datagram_flows()[*index].frames();
             for position in context_rows(frames, positions) {
                 needed.insert(frames.row(position).stream_offset);
             }
@@ -220,16 +220,16 @@ fn stream_context(
     into: &mut BTreeSet<usize>,
     unplaced: &mut u64,
 ) {
-    for position in context_rows(&flow.frames, picked) {
-        match flow.packets_carrying(&flow.frames.row(position)) {
+    for position in context_rows(flow.frames(), picked) {
+        match flow.packets_carrying(&flow.frames().row(position)) {
             Some(packets) => into.extend(packets),
             None => *unplaced += 1,
         }
     }
     for direction in [Direction::A, Direction::B] {
         let first = flow
-            .frames
-            .iter()
+            .frames()
+            .heads_from(0)
             .find(|frame| frame.direction == direction)
             .map(|frame| frame.stream_offset);
         // A TLS record is opened at a sequence number counted from the first
@@ -238,7 +238,7 @@ fn stream_context(
         let reach = if flow.framing().is_encrypted() {
             picked
                 .iter()
-                .map(|&position| flow.frames.row(position))
+                .map(|&position| flow.frames().row(position))
                 .filter(|frame| frame.direction == direction)
                 .filter_map(|frame| frame.wire_end)
                 .max()
@@ -261,7 +261,7 @@ fn stream_context(
 /// The positions in `list` that context needs when the rows at `picked` were
 /// picked: the Init and Open rows, the rows carrying a Declare, and every row of
 /// a fragment chain a picked row belongs to.
-fn context_rows(list: &MessageList, picked: &[usize]) -> Vec<usize> {
+fn context_rows(list: Messages<'_>, picked: &[usize]) -> Vec<usize> {
     let chains = chain_members(list, picked);
     list.iter()
         .enumerate()
@@ -298,7 +298,7 @@ fn carries_a_declaration(frame: &PassiveFrame) -> bool {
 /// `picked` belongs to, by the chain identity the list folds (the field
 /// document's `chain_id`), from the state its discarded messages left.
 #[cfg(feature = "reassembly")]
-fn chain_members(list: &MessageList, picked: &[usize]) -> BTreeSet<usize> {
+fn chain_members(list: Messages<'_>, picked: &[usize]) -> BTreeSet<usize> {
     let mut fold = list.chain_prefix().clone();
     let ids: Vec<Option<u64>> = list
         .iter()
@@ -314,7 +314,7 @@ fn chain_members(list: &MessageList, picked: &[usize]) -> BTreeSet<usize> {
 
 /// A build without reassembly forms no chain, so no row belongs to one.
 #[cfg(not(feature = "reassembly"))]
-fn chain_members(_list: &MessageList, _picked: &[usize]) -> BTreeSet<usize> {
+fn chain_members(_list: Messages<'_>, _picked: &[usize]) -> BTreeSet<usize> {
     BTreeSet::new()
 }
 

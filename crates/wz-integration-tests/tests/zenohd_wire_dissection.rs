@@ -268,7 +268,7 @@ fn records_on(
     let mut names = Vec::new();
     let mut failures = Vec::new();
     let mut disagreements = Vec::new();
-    for frame in flow.frames.iter() {
+    for frame in flow.frames().iter() {
         if frame.direction != side {
             continue;
         }
@@ -471,7 +471,7 @@ fn the_analyzer_parses_every_message_a_real_zenohd_puts_on_the_wire() {
     // ── THE LOAD-BEARING ASSERTION ────────────────────────────────────────
     let mut parsed: Vec<(Direction, &'static str)> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
-    for frame in flow.frames.iter() {
+    for frame in flow.frames().iter() {
         match &frame.frame {
             Ok(f) => parsed.push((frame.direction, frame_name(f))),
             Err(e) => failures.push(format!(
@@ -775,7 +775,7 @@ fn the_analyzer_parses_what_a_real_zenohd_sends_when_it_actually_routes() {
 
     let mut parsed: Vec<(Direction, &'static str)> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
-    for frame in flow.frames.iter() {
+    for frame in flow.frames().iter() {
         match &frame.frame {
             Ok(f) => parsed.push((frame.direction, frame_name(f))),
             Err(e) => failures.push(format!(
@@ -1085,7 +1085,7 @@ fn the_interest_plane_reads_a_real_zenohd_session() {
     // depends on another process.
     let flows = dissection.flows();
     assert_eq!(flows.len(), 1, "one relayed connection is one flow");
-    let decoded = flows[0].frames.len();
+    let decoded = flows[0].frames().len();
     assert!(
         decoded > 0,
         "the capture decoded no transport message at all:\n{sub_captured}"
@@ -1099,7 +1099,7 @@ fn the_interest_plane_reads_a_real_zenohd_session() {
     // `Declare` was a guess. Now it is a reading.
     let flow = &flows[0];
     let mut transport: Vec<&'static str> = Vec::new();
-    for frame in flow.frames.iter() {
+    for frame in flow.frames().iter() {
         if let Ok(f) = &frame.frame {
             transport.push(frame_name(f));
         }

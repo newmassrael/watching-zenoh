@@ -2691,7 +2691,7 @@ fn puts_by_side(recording: &Recording) -> (Vec<bool>, Vec<bool>) {
         "the synthesised ports decide which half is Direction::A"
     );
     let (mut from_listener, mut from_dialer) = (Vec::new(), Vec::new());
-    for frame in flow.frames.iter() {
+    for frame in flow.frames().iter() {
         let Ok(bytes) = flow.message_bytes(&frame) else {
             continue;
         };

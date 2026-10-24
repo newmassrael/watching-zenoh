@@ -9258,9 +9258,9 @@ pub mod wire_tap {
                 } else {
                     wz_capture::Direction::B
                 };
-                let errors = flow.frames.iter().filter(|f| f.frame.is_err()).count();
+                let errors = flow.frames().iter().filter(|f| f.frame.is_err()).count();
                 let surviving = flow
-                    .frames
+                    .frames()
                     .iter()
                     .filter(|f| f.direction == damaged_direction)
                     .count();
@@ -9404,7 +9404,7 @@ pub mod wire_tap {
             let flows = d.flows();
             assert_eq!(flows.len(), 1, "one crafted conversation is one flow");
             assert!(
-                !flows[0].frames.is_empty(),
+                !flows[0].frames().is_empty(),
                 "the crafted handshake decoded to NO frames, so a sweep over it \
                  would be classifying nothing"
             );
@@ -9821,7 +9821,7 @@ pub mod ext_bodies {
     /// yields an empty set and reds there.
     pub fn bodies_of(flow: &wz_capture::FlowDissection, depth: Depth) -> Vec<Body> {
         let mut out = Vec::new();
-        for frame in flow.frames.iter() {
+        for frame in flow.frames().iter() {
             let Ok(bytes) = flow.message_bytes(&frame) else {
                 continue;
             };

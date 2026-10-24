@@ -281,7 +281,7 @@ fn the_tracked_midsession_capture_reaches_the_consumer_surface() {
     let mut flows_with_a_ring = 0;
     for flow in flows {
         let rows: Vec<_> = flow
-            .frames
+            .frames()
             .iter()
             .filter(|f| !matches!(f.carried, Carried::Nothing))
             .collect();

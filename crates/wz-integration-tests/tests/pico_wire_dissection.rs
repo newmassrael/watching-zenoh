@@ -218,7 +218,7 @@ fn the_analyzer_parses_every_message_a_real_zenoh_pico_session_puts_on_the_wire(
     // the statement no self-authored fixture can make.
     let mut parsed: Vec<(Direction, &'static str)> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
-    for frame in flow.frames.iter() {
+    for frame in flow.frames().iter() {
         match &frame.frame {
             Ok(f) => parsed.push((frame.direction, frame_name(f))),
             Err(e) => failures.push(format!(

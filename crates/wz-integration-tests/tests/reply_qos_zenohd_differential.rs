@@ -211,7 +211,7 @@ fn answers_on_the_answerer_half(recording: &Recording) -> Answers {
         responses: Vec::new(),
         finals: Vec::new(),
     };
-    for frame in flow.frames.iter() {
+    for frame in flow.frames().iter() {
         if frame.direction != Direction::B {
             continue;
         }

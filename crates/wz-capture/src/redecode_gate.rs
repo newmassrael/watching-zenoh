@@ -31,9 +31,10 @@
 //! nothing checked.
 
 use crate::link::{self, Transport};
-use crate::messages::{MessageList, Row};
+use crate::messages::{Messages, Row, RowHead};
 use crate::{DatagramLink, Dissection};
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 #[allow(unused_imports)] // `Carried` is read by the feature-gated tests only.
 use wz_session_core::passive::Carried;
@@ -82,7 +83,7 @@ impl core::ops::AddAssign for Reach {
 /// between them, but no record of this direction can. A unit is read when its
 /// first record is produced, so the order of first records is the order the
 /// units were read in.
-fn units(frames: &MessageList) -> Vec<Vec<Row<'_>>> {
+fn units(frames: Messages<'_>) -> Vec<Vec<Row<'_>>> {
     let mut units: Vec<Vec<Row<'_>>> = Vec::new();
     let mut open: [Option<usize>; 2] = [None, None];
     for frame in frames {
@@ -103,7 +104,7 @@ fn units(frames: &MessageList) -> Vec<Vec<Row<'_>>> {
 /// unit's first record, or `None` when they cannot be re-gathered.
 fn reread(
     what: &str,
-    frames: &MessageList,
+    frames: Messages<'_>,
     mut bytes_of: impl FnMut(&PassiveFrame) -> Option<(Vec<u8>, LinkHandshake)>,
 ) -> Reach {
     let mut reach = Reach {
@@ -148,13 +149,106 @@ fn reread(
     reach
 }
 
-/// Read every unit of every stream and datagram flow of `d` again. `file` is
-/// the capture `d` was read from, which a datagram unit's bytes come out of.
-fn reread_capture(what: &str, d: &Dissection, file: &[u8]) -> Reach {
+/// `file` (a pcap) read the way [`Dissection::from_capture`] reads it, keeping
+/// every message a stream flow reads off its own stream whole: the FIRST
+/// reading, which is what every later reading is held equal to.
+fn read_whole(what: &str, file: &[u8]) -> Dissection {
+    let parsed = crate::pcap::parse(file).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+    let mut d = Dissection::new();
+    d.keep_stream_messages_whole();
+    for packet in &parsed.packets {
+        d.push_packet_at_nanos(
+            parsed.link_type,
+            packet.index,
+            Some(packet.ts_nanos(parsed.timestamp_unit)),
+            &packet.data,
+        );
+    }
+    d.finish();
+    d
+}
+
+/// Whether the row at `position` of `list` is decoded anew each time it is
+/// read: two readings alive at once are two frames, where a row the list keeps
+/// whole is the same one both times.
+fn read_again(list: Messages<'_>, position: usize) -> bool {
+    let (first, second) = (list.row(position), list.row(position));
+    !core::ptr::eq::<PassiveFrame>(&*first, &*second)
+}
+
+/// Open-debt item 924, step 4b — THE CLAIM OF THE INDEX: a dissection whose
+/// stream flows keep their messages as entries reads every list, row for row
+/// and head for head, as the reading that kept them whole, by position and
+/// walking, forward and back. Returns the rows that were read again from their
+/// bytes, which a capture with stream units must make more than zero.
+fn assert_reads_as_whole(what: &str, indexed: &Dissection, whole: &Dissection) -> usize {
+    let lists: Vec<_> = indexed.message_lists_with_origin().collect();
+    let reference: Vec<_> = whole.message_lists_with_origin().collect();
+    assert_eq!(lists.len(), reference.len(), "{what}: lists");
+    let mut read_from_bytes = 0usize;
+    for (n, ((flow, origin, list), (flow_w, origin_w, list_w))) in
+        lists.into_iter().zip(reference).enumerate()
+    {
+        assert_eq!((flow, origin), (flow_w, origin_w), "{what}: list {n}");
+        assert_eq!(list.len(), list_w.len(), "{what}: list {n} length");
+        assert_eq!(
+            list.produced(),
+            list_w.produced(),
+            "{what}: list {n} produced"
+        );
+        let walked: Vec<String> = list.iter().map(|row| format!("{:?}", *row)).collect();
+        let expected: Vec<String> = list_w.iter().map(|row| format!("{:?}", *row)).collect();
+        assert_eq!(walked, expected, "{what}: list {n}, walked forward");
+        let mut backward: Vec<String> =
+            list.iter().rev().map(|row| format!("{:?}", *row)).collect();
+        backward.reverse();
+        assert_eq!(backward, expected, "{what}: list {n}, walked backward");
+        let heads: Vec<RowHead> = list.heads_from(0).collect();
+        let heads_w: Vec<RowHead> = list_w.iter().map(|row| RowHead::of(&row)).collect();
+        assert_eq!(heads, heads_w, "{what}: list {n}, heads");
+        for (position, want) in expected.iter().enumerate() {
+            assert_eq!(
+                &format!("{:?}", *list.row(position)),
+                want,
+                "{what}: list {n}, row {position} by position"
+            );
+            assert!(
+                !read_again(list_w, position),
+                "{what}: the reference keeps list {n} row {position} whole"
+            );
+            if read_again(list, position) {
+                read_from_bytes += 1;
+            }
+        }
+    }
+    read_from_bytes
+}
+
+/// Read every unit of every stream and datagram flow of `file` again. A stream
+/// flow's messages are compared twice: the first reading against each unit read
+/// again from its bytes ([`redecode_unit`]), and a dissection that keeps entries
+/// against the first reading ([`assert_reads_as_whole`]).
+fn reread_capture(what: &str, file: &[u8]) -> Reach {
+    let indexed = Dissection::from_capture(file).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+    let d = read_whole(what, file);
+    // Every message a flow read off its own reassembled stream is an entry, and
+    // nothing else is: a datagram, a WebSocket message and a decrypted record
+    // are kept whole.
+    let read_from_bytes = assert_reads_as_whole(what, &indexed, &d);
+    let stream_rows: usize = d
+        .flows
+        .iter()
+        .filter(|flow| matches!(flow.framing(), crate::Framing::Stream))
+        .map(|flow| flow.frames().len())
+        .sum();
+    assert_eq!(
+        read_from_bytes, stream_rows,
+        "{what}: the messages kept as entries"
+    );
     let packets = crate::pcap::parse(file).ok();
     let mut reach = Reach::default();
     for flow in d.flows.iter() {
-        reach += reread(what, &flow.frames, |frame| {
+        reach += reread(what, flow.frames(), |frame| {
             if frame.offset_space != OffsetSpace::StreamBytes {
                 return None;
             }
@@ -167,7 +261,7 @@ fn reread_capture(what: &str, d: &Dissection, file: &[u8]) -> Reach {
         });
     }
     for flow in d.datagram_flows.iter() {
-        reach += reread(what, &flow.frames, |frame| {
+        reach += reread(what, flow.frames(), |frame| {
             let file = packets.as_ref()?;
             let packet = file.packets.get(frame.stream_offset)?;
             let (datagram, link) =
@@ -185,8 +279,7 @@ fn reread_capture(what: &str, d: &Dissection, file: &[u8]) -> Reach {
 
 /// A capture file read whole, then read again unit by unit.
 fn reread_file(what: &str, file: &[u8]) -> Reach {
-    let d = Dissection::from_capture(file).unwrap_or_else(|e| panic!("{what}: {e:?}"));
-    reread_capture(what, &d, file)
+    reread_capture(what, file)
 }
 
 /// THE TRACKED CAPTURES. Each is real traffic or the oracle-pinned output of
@@ -237,6 +330,104 @@ fn every_unit_of_the_tracked_captures_reads_again_the_same() {
 /// within ITS OWN stream), and bytes the framing has to resynchronise past.
 #[test]
 fn every_unit_of_a_stream_with_batches_gaps_and_garbage_reads_again_the_same() {
+    let file = stream_shapes_capture();
+    let d = Dissection::from_capture(&file).expect("the capture reads");
+    // The shapes this capture is FOR must be in what was read, or the
+    // comparison below says nothing about them.
+    let held: Vec<Row<'_>> = d.flows.iter().flat_map(|f| f.frames()).collect();
+    let verdicts: Vec<_> = held.iter().filter_map(|f| f.sn_verdict).collect();
+    use wz_session_core::passive::SnVerdict;
+    assert!(
+        held.iter().any(|f| f.batch_index == 1),
+        "a batch of two was read"
+    );
+    assert!(
+        held.iter().any(|f| f.resync.is_some()),
+        "a resynchronisation was read"
+    );
+    assert!(
+        verdicts.iter().any(|v| matches!(v, SnVerdict::Gap { .. })),
+        "a gap was judged: {verdicts:?}"
+    );
+    assert!(
+        verdicts.contains(&SnVerdict::Duplicate),
+        "a duplicate was judged: {verdicts:?}"
+    );
+    assert!(
+        verdicts.contains(&SnVerdict::WithoutResolution),
+        "a flow without a handshake was judged: {verdicts:?}"
+    );
+    assert_eq!(d.flows.len(), 3, "three stream flows");
+    reread_capture("stream shapes", &file).assert_whole("stream shapes");
+}
+
+/// Open-debt item 924, step 4b — A LIST OF ENTRIES UNDER THE CEILINGS. A
+/// message ceiling discards from the front, and on this capture it cuts a unit
+/// of two between its records, whose second must still read back; a byte
+/// ceiling releases stream bytes under messages still held, which the list keeps
+/// whole before they go. Under every ceiling, every list, the census of what was
+/// discarded and the drop counts read as the reading that kept every message
+/// whole.
+#[test]
+fn a_list_of_entries_under_message_and_byte_ceilings_reads_as_the_reference() {
+    let file = stream_shapes_capture();
+    let parsed = crate::pcap::parse(&file).expect("the capture reads");
+    let mut ceilings: Vec<crate::DissectionLimits> = Vec::new();
+    for cap in 1..=8 {
+        ceilings.push(crate::DissectionLimits {
+            frames_per_flow: Some(cap),
+            ..crate::DissectionLimits::default()
+        });
+    }
+    for keep in [6, 16, 40, 120] {
+        ceilings.push(crate::DissectionLimits {
+            stream_bytes_per_direction: Some(keep),
+            ..crate::DissectionLimits::default()
+        });
+        ceilings.push(crate::DissectionLimits {
+            stream_bytes_per_direction: Some(keep),
+            frames_per_flow: Some(3),
+            ..crate::DissectionLimits::default()
+        });
+    }
+    let mut converted = 0usize;
+    for limits in ceilings {
+        let what = format!("{limits:?}");
+        let indexed = Dissection::from_pcap_declaring_bounded(&file, &[], &[], limits)
+            .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        let mut whole = Dissection::with_limits(limits);
+        whole.keep_stream_messages_whole();
+        for packet in &parsed.packets {
+            whole.push_packet_at_nanos(
+                parsed.link_type,
+                packet.index,
+                Some(packet.ts_nanos(parsed.timestamp_unit)),
+                &packet.data,
+            );
+        }
+        whole.finish();
+        let read_from_bytes = assert_reads_as_whole(&what, &indexed, &whole);
+        let held: usize = indexed.flows.iter().map(|flow| flow.frames().len()).sum();
+        if limits.stream_bytes_per_direction.is_none() {
+            assert_eq!(read_from_bytes, held, "{what}: nothing kept whole");
+        }
+        converted += held - read_from_bytes;
+        assert_eq!(indexed.drops(), whole.drops(), "{what}: drops");
+        assert_eq!(
+            indexed.dropped_frame_census(),
+            whole.dropped_frame_census(),
+            "{what}: what was discarded"
+        );
+    }
+    assert!(
+        converted > 0,
+        "a byte ceiling released bytes under a message the list then kept whole"
+    );
+}
+
+/// The capture `every_unit_of_a_stream_with_batches_gaps_and_garbage_reads_\
+/// again_the_same` reads, built packet by packet.
+fn stream_shapes_capture() -> Vec<u8> {
     use crate::datagram_tests::{
         framed_frame, framed_keepalive, init_datagram, open_datagram, tcp_packet_on,
         tcp_packet_reverse,
@@ -312,35 +503,7 @@ fn every_unit_of_a_stream_with_batches_gaps_and_garbage_reads_again_the_same() {
         .enumerate()
         .map(|(i, p)| (i as u32, 0, p.as_slice()))
         .collect();
-    let file = crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &rows);
-    let d = Dissection::from_capture(&file).expect("the capture reads");
-    // The shapes this capture is FOR must be in what was read, or the
-    // comparison below says nothing about them.
-    let held: Vec<Row<'_>> = d.flows.iter().flat_map(|f| &f.frames).collect();
-    let verdicts: Vec<_> = held.iter().filter_map(|f| f.sn_verdict).collect();
-    use wz_session_core::passive::SnVerdict;
-    assert!(
-        held.iter().any(|f| f.batch_index == 1),
-        "a batch of two was read"
-    );
-    assert!(
-        held.iter().any(|f| f.resync.is_some()),
-        "a resynchronisation was read"
-    );
-    assert!(
-        verdicts.iter().any(|v| matches!(v, SnVerdict::Gap { .. })),
-        "a gap was judged: {verdicts:?}"
-    );
-    assert!(
-        verdicts.contains(&SnVerdict::Duplicate),
-        "a duplicate was judged: {verdicts:?}"
-    );
-    assert!(
-        verdicts.contains(&SnVerdict::WithoutResolution),
-        "a flow without a handshake was judged: {verdicts:?}"
-    );
-    assert_eq!(d.flows.len(), 3, "three stream flows");
-    reread_capture("stream shapes", &d, &file).assert_whole("stream shapes");
+    crate::pcap::write(crate::link::LINKTYPE_ETHERNET, &rows)
 }
 
 /// THE COMPRESSION ARMS on a datagram link: a raw batch behind a clear batch
@@ -373,7 +536,7 @@ fn every_unit_of_a_compressed_session_reads_again_the_same() {
         let last = d
             .datagram_flows
             .iter()
-            .flat_map(|f| &f.frames)
+            .flat_map(|f| f.frames())
             .last()
             .map(|f| {
                 (
@@ -390,7 +553,7 @@ fn every_unit_of_a_compressed_session_reads_again_the_same() {
             "lz4 batch" => assert_eq!(last, Some((false, true)), "{name}"),
             _ => assert_eq!(last, Some((false, false)), "{name}"),
         }
-        reread_capture(name, &d, &file).assert_whole(name);
+        reread_capture(name, &file).assert_whole(name);
     }
 }
 
@@ -414,18 +577,18 @@ fn every_unit_of_the_fragment_chain_captures_reads_again_the_same() {
         &[5u8; 24],
     );
     let mut total = Reach::default();
-    let (d, file) = reassembled_record_dissection_with_file(&record);
-    total += reread_capture("reassembled record", &d, &file);
-    let (d, file) = midsession_fragment_dissection_with_file();
-    total += reread_capture("midsession fragments", &d, &file);
-    let (d, file) = marked_fragment_dissection_with_file(&[
+    let (_, file) = reassembled_record_dissection_with_file(&record);
+    total += reread_capture("reassembled record", &file);
+    let (_, file) = midsession_fragment_dissection_with_file();
+    total += reread_capture("midsession fragments", &file);
+    let (_, file) = marked_fragment_dissection_with_file(&[
         (0, true, true, false),
         (1, false, false, false),
         (2, true, false, true),
     ]);
-    total += reread_capture("marked fragments", &d, &file);
-    let (d, file) = wide_sn_dissection_with_file(&[1, 2, 2, 7, 3, 1 << 40]);
-    total += reread_capture("wide sequence numbers", &d, &file);
+    total += reread_capture("marked fragments", &file);
+    let (_, file) = wide_sn_dissection_with_file(&[1, 2, 2, 7, 3, 1 << 40]);
+    total += reread_capture("wide sequence numbers", &file);
     #[cfg(feature = "fixtures")]
     {
         let file = crate::fixtures::stream_chain_sequence_capture(3);
@@ -468,8 +631,8 @@ fn the_fragment_chain_captures_reach_every_fate_a_fragment_comes_to() {
         let rows = d
             .flows
             .iter()
-            .flat_map(|f| &f.frames)
-            .chain(d.datagram_flows.iter().flat_map(|f| &f.frames));
+            .flat_map(|f| f.frames())
+            .chain(d.datagram_flows.iter().flat_map(|f| f.frames()));
         for frame in rows {
             match frame.carried {
                 Carried::Reassembled { .. } => fates[0] = true,

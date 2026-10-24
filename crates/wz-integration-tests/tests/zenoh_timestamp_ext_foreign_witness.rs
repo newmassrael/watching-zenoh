@@ -391,7 +391,7 @@ fn the_timestamp_walker_reads_what_a_stock_zenohd_stamped() {
     // ── THE INLINE STAMP, ON THE ROUTER'S HALF ────────────────────────────
     let mut stamps: Vec<&Field> = Vec::new();
     let mut walked_trees = Vec::new();
-    for frame in flow.frames.iter() {
+    for frame in flow.frames().iter() {
         if frame.direction != router_side {
             continue;
         }

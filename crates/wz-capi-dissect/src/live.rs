@@ -60,11 +60,12 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use wz_capture::link::FlowKey;
+use wz_capture::messages::RowHead;
 use wz_capture::{
     AnchorSpace, CaptureCursor, CaptureError, Dissection, DissectionLimits, FollowError,
     MessageListOrigin, ScoutingDatagram,
 };
-use wz_session_core::passive::{Direction, PassiveFrame};
+use wz_session_core::passive::Direction;
 
 /// THE CALLBACK A CALLER SET FOR LONG CALLS: asked how far a census or a field
 /// document has got, and able to stop it. See [`LiveDissection::set_progress`].
@@ -635,7 +636,7 @@ impl LiveDissection {
             // read as one run rather than looked up one position at a time.
             let start = (mark.drained - first_held) as usize;
             let take = (produced.saturating_sub(mark.drained) as usize).min(out.len() - written);
-            for frame in list.rows_from(start).iter().take(take) {
+            for frame in list.heads_from(start).take(take) {
                 out[written] = record_of(&frame, flow_id, list_id, origin);
                 written += 1;
                 mark.drained += 1;
@@ -1368,9 +1369,13 @@ impl LiveDissection {
     }
 }
 
-/// One `PassiveFrame`, projected into the record a C consumer receives.
+/// One message, projected into the record a C consumer receives.
+///
+/// Read off the message's head, which its list keeps for every message it
+/// holds: draining decodes nothing (open-debt item 924,
+/// `docs/dissect-row-index.md`, D2).
 fn record_of(
-    frame: &PassiveFrame,
+    frame: &RowHead,
     flow_id: u64,
     list_id: u64,
     origin: MessageListOrigin,
@@ -1382,7 +1387,7 @@ fn record_of(
     if frame.inadmissible_on_link {
         flags |= FLAG_INADMISSIBLE_ON_LINK;
     }
-    if frame.resync.is_some() {
+    if frame.after_resync {
         flags |= FLAG_AFTER_RESYNC;
     }
     WzDissectRecord {
@@ -1413,19 +1418,16 @@ fn record_of(
         // header's own argument for this field is that the two cannot be told
         // apart by looking, so a consumer switching on it was told to add byte
         // spans to a packet index.
-        anchor_space: match wz_capture::anchor_space_of(frame) {
+        anchor_space: match AnchorSpace::from(frame.offset_space) {
             AnchorSpace::PacketIndex => 0,
             AnchorSpace::StreamBytes => 1,
         },
         origin: origin_code(origin),
-        // The kind lives on the variant (`kind_code`) so that a message kind
-        // added upstream fails that match rather than silently taking a
-        // default here; the UNDECODABLE case is the one this side owns,
-        // because the failure is in the `Result` and not in the enum.
-        kind: match &frame.frame {
-            Ok(f) => f.kind_code(),
-            Err(_) => KIND_UNDECODABLE,
-        },
+        // The kind lives on the variant (`InboundFrame::kind_code`) so that a
+        // message kind added upstream fails that match rather than silently
+        // taking a default here; the head carries it, with the UNDECODABLE
+        // code for a message that did not decode.
+        kind: frame.kind,
         flags,
     }
 }

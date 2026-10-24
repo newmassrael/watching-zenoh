@@ -44,9 +44,10 @@
 //!
 //! # Why the API is shaped the way it is
 //!
-//! Readers get ROWS, not a slice: `len`, `get`, `first`, `last`, `iter`,
-//! `iter_mut`, indexing, and `&list` in a `for`. Two rules hold, R311y713's and
-//! open-debt item 924's:
+//! Readers get ROWS, not a slice, through [`Messages`]: the list read with the
+//! bytes of the messages it keeps as index entries ([`MessageList::read`]), which
+//! hands out [`Row`]s by position or walking, and each row's [`RowHead`] without
+//! decoding it. Two rules hold, R311y713's and open-debt item 924's:
 //!
 //! - Nothing can GROW or SHRINK the list except through a method here: the row
 //!   API has no `push`, no `extend` and no `remove`. That makes the accounting
@@ -56,9 +57,9 @@
 //!   the list was a slice behind `Deref`, which promised every reader one
 //!   contiguous run; a list of hundreds of thousands of rows kept that promise
 //!   by doubling one buffer and copying every row into each new one, and held up
-//!   to half of it as capacity no row used. The rows now sit in chunks (see
-//!   `ChunkLog`), and the next steps of `docs/dissect-row-index.md` change what a
-//!   row is behind the same API.
+//!   to half of it as capacity no row used. The rows sit in chunks (see
+//!   `ChunkLog`), and a list whose units can be read again from their bytes keeps
+//!   them as index entries and decodes a row when it is read (see `Store`).
 //!
 //! # The discard receipt
 //!
@@ -69,10 +70,18 @@
 //! y650, y656) before R311y713 ended the same shape for flow exits by making it
 //! a type. This is that ending, applied to the other list.
 
-use alloc::collections::VecDeque;
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
-use crate::passive::PassiveFrame;
+use crate::inbound::InboundFrame;
+#[cfg(feature = "reassembly")]
+use crate::passive::FragmentFate;
+use crate::passive::{
+    redecode_unit, Anchor, Direction, FlowContext, LinkHandshake, MessageFacts, OffsetSpace,
+    PassiveFrame, ReadUnit, SnVerdict, StreamResync, UnitFacts, UnitInput,
+};
 #[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::IngestOutcome;
 
@@ -99,7 +108,10 @@ pub struct MessageList {
     /// one buffer that doubles copies every row into each new buffer and holds
     /// up to half of it unused, which on a replayed file of a million rows is
     /// hundreds of megabytes. See [`ChunkLog`].
-    held: ChunkLog<PassiveFrame>,
+    ///
+    /// Open-debt item 924, step 4b — and a row whose unit can be read again
+    /// from its bytes keeps no decoded frame at all. See [`Store`].
+    rows: Store,
     /// R2102 (open-debt item 524) — messages EVER appended to this list, which
     /// is a different number from `len` the moment a bound bites.
     ///
@@ -256,7 +268,7 @@ impl MessageList {
     /// An empty list.
     pub fn new() -> Self {
         Self {
-            held: ChunkLog::new(),
+            rows: Store::default(),
             produced: 0,
             #[cfg(feature = "reassembly")]
             chain_prefix: ChainFold::default(),
@@ -271,9 +283,12 @@ impl MessageList {
         &self.chain_prefix
     }
 
-    /// Append one decoded message.
+    /// Append one decoded message, kept whole.
     pub fn push(&mut self, frame: PassiveFrame) {
-        self.held.push_back(frame);
+        match &mut self.rows {
+            Store::Held(log) => log.push_back(frame),
+            Store::Indexed(index) => index.push_held(self.produced, frame),
+        }
         self.produced += 1;
     }
 
@@ -283,6 +298,45 @@ impl MessageList {
         // an `IntoIterator` may report and not deliver.
         for frame in frames {
             self.push(frame);
+        }
+    }
+
+    /// Append every record of one framing unit, as
+    /// `PassiveSession::next_unit_with` hands it out.
+    ///
+    /// Open-debt item 924, step 4b — a unit read off a byte stream is kept as
+    /// index entries: the records are let go here, and read again from the
+    /// stream's bytes when a reader asks for them ([`Messages`]). That needs
+    /// what the session knew when it read the unit ([`ReadUnit::start`]),
+    /// coordinates an entry can carry, and the unit's bytes in `source`, whole:
+    /// a holder bounded by a byte ceiling can have released the front of a unit
+    /// before its last byte arrived. A unit that lacks any of the three, and
+    /// every unit of a list that already keeps its records whole, is kept whole
+    /// instead, which reads the same.
+    pub fn push_unit(&mut self, unit: ReadUnit, source: &dyn UnitBytes) {
+        let ReadUnit { start, frames } = unit;
+        let readable = start.filter(|_| {
+            frames.iter().all(UnitRow::can_hold)
+                && frames.first().is_some_and(|first| {
+                    let body = first.stream_offset + first.prefix_width;
+                    first.wire_end.is_some_and(|end| {
+                        source.stream_bytes(first.direction, body, end).is_some()
+                    })
+                })
+        });
+        let Some(start) = readable else {
+            self.append(frames);
+            return;
+        };
+        if matches!(&self.rows, Store::Held(log) if log.is_empty()) {
+            self.rows = Store::Indexed(Box::default());
+        }
+        match &mut self.rows {
+            Store::Indexed(index) => {
+                index.push_unit(self.produced, start, &frames);
+                self.produced += frames.len() as u64;
+            }
+            Store::Held(_) => self.append(frames),
         }
     }
 
@@ -302,88 +356,800 @@ impl MessageList {
     /// parameter would be an invitation to write a second policy. See
     /// [`Discarded`] for why the return value cannot be ignored.
     ///
+    /// `source` is where the list reads the bytes of a message it keeps as an
+    /// index entry (see [`Self::read`]): the receipt carries the decoded
+    /// message, so one kept that way is read again to be handed over.
+    ///
     /// `None` for an empty list rather than a panic: a bound that cannot be met
     /// must not take the capture down with it, which is the rule the flow caps
     /// already follow.
     #[must_use = "a discarded message must be accounted for -- see `Discarded`"]
-    pub fn discard_oldest(&mut self) -> Option<Discarded> {
-        if self.held.is_empty() {
-            return None;
-        }
-        let frame = self.held.pop_front();
+    pub fn discard_oldest(&mut self, source: &dyn UnitBytes) -> Option<Discarded> {
+        let first_produced = self.produced - self.len() as u64;
+        let frame = match &mut self.rows {
+            Store::Held(log) => log.pop_front()?,
+            Store::Indexed(index) => index.pop_front(first_produced, source)?,
+        };
         // The one moment the message is still in hand: fold what a chain's
         // identity needs of it, so the count does not depend on how much of the
         // front a ceiling has taken. See the field's doc.
         #[cfg(feature = "reassembly")]
-        if let Some(gone) = &frame {
-            let _ = self.chain_prefix.observe(gone);
-        }
+        let _ = self.chain_prefix.observe(&frame);
         Some(Discarded {
             // `produced` deliberately does NOT move here. It counts what was
             // ever appended, and a trim is the one event a consumer's watermark
             // has to be able to see across.
-            frame,
+            frame: Some(frame),
         })
     }
 
     /// Messages held now: what was appended less what a bound discarded.
     #[inline]
     pub fn len(&self) -> usize {
-        self.held.len()
+        match &self.rows {
+            Store::Held(log) => log.len(),
+            Store::Indexed(index) => index.entries.len(),
+        }
     }
 
     /// No message is held.
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.held.len() == 0
+        self.len() == 0
+    }
+
+    /// The messages from position `from` on, for an in-place rewrite of what
+    /// one call added (a remap of their coordinates).
+    ///
+    /// Only messages kept whole can be rewritten: one kept as an index entry is
+    /// read again from its bytes, so a rewrite of it would not survive the next
+    /// read. Every message a call that rewrites appends is kept whole (it was
+    /// handed to [`Self::push`] or [`Self::append`]), and a rewrite that reaches
+    /// an entry panics rather than hand back frames that are not those rows.
+    pub fn iter_mut_from(
+        &mut self,
+        from: usize,
+    ) -> Box<dyn DoubleEndedIterator<Item = &mut PassiveFrame> + '_> {
+        let first_produced = self.produced - self.len() as u64;
+        match &mut self.rows {
+            Store::Held(log) => Box::new(log.iter_mut_from(from)),
+            Store::Indexed(index) => {
+                assert!(
+                    index
+                        .entries
+                        .iter_from(from)
+                        .all(|entry| matches!(entry, Entry::Held)),
+                    "a message read again from its bytes cannot be rewritten in place"
+                );
+                Box::new(
+                    index
+                        .held
+                        .range_mut(first_produced + from as u64..)
+                        .map(|(_, frame)| frame),
+                )
+            }
+        }
+    }
+
+    /// Keep whole every message of `direction` whose unit's bytes begin before
+    /// stream offset `offset`, reading each from `source` while it still holds
+    /// them.
+    ///
+    /// What a holder calls BEFORE it releases the bytes of `direction`'s stream
+    /// that stand before `offset`: a message kept as an index entry is read
+    /// again from those bytes, and one whose bytes are gone could not be. A
+    /// message kept whole reads as it did, so every reader's answer is the one
+    /// it was before the release. A list that keeps every message whole has
+    /// nothing to do.
+    pub fn keep_whole_before(
+        &mut self,
+        direction: Direction,
+        offset: usize,
+        source: &dyn UnitBytes,
+    ) {
+        let first_produced = self.produced - self.len() as u64;
+        if let Store::Indexed(index) = &mut self.rows {
+            index.keep_whole_before(first_produced, direction, offset, source);
+        }
+    }
+
+    /// The list as a reader reads it, with `source` the bytes of the messages
+    /// it keeps as index entries.
+    ///
+    /// The source is the holder's: a flow's reassembled stream, or [`NoBytes`]
+    /// for a list whose messages are all kept whole. A list cannot keep it
+    /// itself, because the bytes belong to whatever framed the units and are
+    /// released by it.
+    #[inline]
+    pub fn read<'a>(&'a self, source: &'a dyn UnitBytes) -> Messages<'a> {
+        Messages { list: self, source }
+    }
+}
+
+/// Where a list reads the bytes of the framing units it keeps as index entries.
+///
+/// Open-debt item 924 (`docs/dissect-row-index.md`, D1): the holder of the
+/// bytes answers, by stream coordinate, so a list keeps none of them.
+pub trait UnitBytes {
+    /// The bytes of `direction`'s stream from offset `from` up to `to`, or
+    /// `None` when the source does not hold all of them.
+    fn stream_bytes(&self, direction: Direction, from: usize, to: usize) -> Option<Cow<'_, [u8]>>;
+}
+
+/// The source of a list that keeps every message whole, and so reads no bytes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoBytes;
+
+impl UnitBytes for NoBytes {
+    fn stream_bytes(&self, _: Direction, _: usize, _: usize) -> Option<Cow<'_, [u8]>> {
+        None
+    }
+}
+
+/// How a [`MessageList`] keeps its rows.
+#[derive(Debug)]
+enum Store {
+    /// Every row as its decoded frame. A list starts here, and stays here
+    /// unless its first unit can be read again from its bytes: a datagram list,
+    /// a stream a layer below framed (WebSocket) or decrypted (TLS).
+    Held(ChunkLog<PassiveFrame>),
+    /// Rows as index entries, read again on demand (see [`Index`]). Boxed, so a
+    /// list that keeps its frames does not carry the index's size.
+    Indexed(Box<Index>),
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Store::Held(ChunkLog::new())
+    }
+}
+
+/// The rows of a list that keeps its stream units as index entries.
+///
+/// Open-debt item 924, step 4b (`docs/dissect-row-index.md`, D2 and D3). One
+/// entry per row, in row order. An entry of a row read off a byte stream says
+/// where its unit lies and what the first reading knew that the unit's bytes do
+/// not; [`redecode_unit`] makes the row again from those. The few facts most
+/// rows do not have (an SN verdict other than continuous, a fragment's fate, a
+/// resynchronisation) are kept apart, by produced-index, and the context a unit
+/// was read in is kept once per change.
+///
+/// A row whose unit cannot be read that way is kept whole beside the entries,
+/// so one list can hold both, and so is a row whose bytes its source is about
+/// to release ([`MessageList::keep_whole_before`]).
+#[derive(Debug, Default)]
+struct Index {
+    /// One per row, oldest first.
+    entries: ChunkLog<Entry>,
+    /// The frames of the rows kept whole, by produced-index. Few: a list keeps
+    /// a row whole only where it cannot read it again.
+    held: BTreeMap<u64, PassiveFrame>,
+    /// Per direction, the produced-index below which no row of that direction
+    /// is an entry any more: where [`Self::keep_whole_before`] resumes, so a
+    /// source that releases bytes on every packet does not walk the rows it
+    /// already kept whole.
+    whole_below: [u64; 2],
+    /// The context each unit was read in, each value once, in the order the
+    /// units were read; a [`UnitRow`] names one by place. A context changes only
+    /// at a handshake message, so this stays a few long.
+    contexts: Vec<FlowContext>,
+    /// The facts few rows have, by the row's produced-index.
+    sparse: BTreeMap<u64, Sparse>,
+    /// The facts of the rows of the OLDEST unit a discard has already taken,
+    /// while rows of that unit are still held: what reading those rows again
+    /// needs and no entry holds any more. Empty otherwise. Only the oldest unit
+    /// can be cut, because rows are discarded from the front.
+    cut: Vec<MessageFacts>,
+    /// The resynchronisation the cut unit's first row carried.
+    cut_resync: Option<StreamResync>,
+}
+
+/// One row of an [`Index`].
+#[derive(Debug, Clone, Copy)]
+enum Entry {
+    /// Kept whole, in [`Index::held`].
+    Held,
+    /// Read again from its unit's bytes.
+    Unit(UnitRow),
+}
+
+/// What an [`Index`] keeps of a row read off a byte stream: where its unit
+/// lies, where the row sits in it, and what the first reading knew that the
+/// unit's bytes do not say. 40 bytes, against a decoded frame's 424 and what
+/// it owns.
+#[derive(Debug, Clone, Copy)]
+struct UnitRow {
+    /// The unit's length prefix, in its direction's stream.
+    stream_offset: u64,
+    /// The capture instant of the row's first byte, when [`TIMED`] is set.
+    observed_at_ns: u64,
+    /// [`PassiveFrame::unit_len`]: the unit's length as read, which for an lz4
+    /// batch is the length decompressed.
+    unit_len: u32,
+    /// The unit's length on the wire, past its prefix.
+    wire_len: u32,
+    /// [`PassiveFrame::unit_offset`].
+    unit_offset: u32,
+    /// [`PassiveFrame::batch_index`].
+    batch_index: u32,
+    /// The context the unit was read in, by its place in [`Index::contexts`].
+    context: u32,
+    /// [`PassiveFrame::prefix_width`].
+    prefix_width: u8,
+    /// [`RowHead::kind`].
+    kind: u8,
+    /// The flags below.
+    flags: u8,
+}
+
+/// The row travelled [`Direction::B`].
+const SIDE_B: u8 = 1;
+/// [`UnitRow::observed_at_ns`] is an instant.
+const TIMED: u8 = 1 << 1;
+/// [`PassiveFrame::exceeds_negotiated_batch`].
+const OVER_BATCH: u8 = 1 << 2;
+/// The row carries a resynchronisation ([`Sparse::resync`]).
+const AFTER_RESYNC: u8 = 1 << 3;
+/// The row was read out of an lz4 batch ([`PassiveFrame::decompressed`]).
+const DECOMPRESSED: u8 = 1 << 4;
+/// The row's SN verdict is [`SnVerdict::Continuous`], the common one, which is
+/// kept here rather than in [`Index::sparse`].
+const CONTINUOUS: u8 = 1 << 5;
+/// [`Index::sparse`] holds facts for this row.
+const SPARSE: u8 = 1 << 6;
+
+/// The facts few rows have.
+#[derive(Debug, Clone, Default)]
+struct Sparse {
+    /// An SN verdict that is not [`SnVerdict::Continuous`].
+    sn_verdict: Option<SnVerdict>,
+    /// What a `Fragment` came to.
+    #[cfg(feature = "reassembly")]
+    fragment: Option<FragmentFate>,
+    /// The resynchronisation a unit's first row carried.
+    resync: Option<StreamResync>,
+}
+
+impl Sparse {
+    fn has_any(&self) -> bool {
+        #[cfg(feature = "reassembly")]
+        let fragment = self.fragment.is_some();
+        #[cfg(not(feature = "reassembly"))]
+        let fragment = false;
+        self.sn_verdict.is_some() || self.resync.is_some() || fragment
+    }
+}
+
+impl UnitRow {
+    /// Whether `frame` is a row an entry can stand for: read off a byte stream
+    /// (whose unit can be read again from the stream, on a link that carries a
+    /// handshake), with coordinates the entry's fields hold.
+    fn can_hold(frame: &PassiveFrame) -> bool {
+        let fits = |n: usize| u32::try_from(n).is_ok();
+        frame.offset_space == OffsetSpace::StreamBytes
+            && !frame.inadmissible_on_link
+            && u8::try_from(frame.prefix_width).is_ok()
+            && fits(frame.unit_len)
+            && fits(frame.unit_offset)
+            && fits(frame.batch_index)
+            && frame
+                .wire_end
+                .and_then(|end| end.checked_sub(frame.stream_offset + frame.prefix_width))
+                .is_some_and(fits)
+    }
+
+    /// The entry for `frame`, read in the context at `context`, and the facts
+    /// it keeps apart. `frame` passed [`Self::can_hold`].
+    fn of(frame: &PassiveFrame, context: u32) -> (Self, Sparse) {
+        let narrow = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let body = frame.stream_offset + frame.prefix_width;
+        let facts = MessageFacts::of(frame);
+        let mut flags = 0u8;
+        if frame.direction == Direction::B {
+            flags |= SIDE_B;
+        }
+        if frame.observed_at_ns.is_some() {
+            flags |= TIMED;
+        }
+        if frame.exceeds_negotiated_batch {
+            flags |= OVER_BATCH;
+        }
+        if frame.resync.is_some() {
+            flags |= AFTER_RESYNC;
+        }
+        if frame.decompressed.is_some() {
+            flags |= DECOMPRESSED;
+        }
+        let mut sparse = Sparse {
+            resync: frame.resync,
+            #[cfg(feature = "reassembly")]
+            fragment: facts.fragment,
+            ..Sparse::default()
+        };
+        match facts.sn_verdict {
+            Some(SnVerdict::Continuous) => flags |= CONTINUOUS,
+            other => sparse.sn_verdict = other,
+        }
+        if sparse.has_any() {
+            flags |= SPARSE;
+        }
+        let row = Self {
+            stream_offset: frame.stream_offset as u64,
+            observed_at_ns: frame.observed_at_ns.unwrap_or(0),
+            unit_len: narrow(frame.unit_len),
+            wire_len: narrow(frame.wire_end.unwrap_or(body) - body),
+            unit_offset: narrow(frame.unit_offset),
+            batch_index: narrow(frame.batch_index),
+            context,
+            prefix_width: u8::try_from(frame.prefix_width).unwrap_or(u8::MAX),
+            kind: kind_of(frame),
+            flags,
+        };
+        (row, sparse)
+    }
+
+    fn direction(&self) -> Direction {
+        if self.flags & SIDE_B != 0 {
+            Direction::B
+        } else {
+            Direction::A
+        }
+    }
+
+    fn observed_at_ns(&self) -> Option<u64> {
+        (self.flags & TIMED != 0).then_some(self.observed_at_ns)
+    }
+
+    /// Where the unit's body begins and ends, in its direction's stream.
+    fn body(&self) -> (usize, usize) {
+        let from = self.stream_offset as usize + usize::from(self.prefix_width);
+        (from, from + self.wire_len as usize)
+    }
+
+    /// The row's head, which an entry answers without reading the unit.
+    fn head(&self) -> RowHead {
+        RowHead {
+            direction: self.direction(),
+            stream_offset: self.stream_offset as usize,
+            offset_space: OffsetSpace::StreamBytes,
+            batch_index: self.batch_index as usize,
+            unit_offset: self.unit_offset as usize,
+            unit_len: self.unit_len as usize,
+            prefix_width: usize::from(self.prefix_width),
+            wire_end: Some(self.body().1),
+            observed_at_ns: self.observed_at_ns(),
+            kind: self.kind,
+            decompressed: self.flags & DECOMPRESSED != 0,
+            exceeds_negotiated_batch: self.flags & OVER_BATCH != 0,
+            inadmissible_on_link: false,
+            after_resync: self.flags & AFTER_RESYNC != 0,
+        }
+    }
+
+    /// What the walk asks of this row when its unit is read again.
+    fn facts(&self, sparse: Option<&Sparse>) -> MessageFacts {
+        MessageFacts {
+            unit_offset: self.unit_offset as usize,
+            observed_at_ns: self.observed_at_ns(),
+            sn_verdict: if self.flags & CONTINUOUS != 0 {
+                Some(SnVerdict::Continuous)
+            } else {
+                sparse.and_then(|s| s.sn_verdict)
+            },
+            #[cfg(feature = "reassembly")]
+            fragment: sparse.and_then(|s| s.fragment.clone()),
+        }
+    }
+}
+
+/// One framing unit an [`Index`] read again, and where its rows stand.
+struct ReadAgain {
+    /// The list position of the unit's first row still held.
+    from: usize,
+    /// That row's place in the unit: how many of the unit's rows a discard took.
+    cut: usize,
+    /// The unit's records not taken yet, in order: the record at the front is
+    /// the unit's `next`-th.
+    frames: VecDeque<PassiveFrame>,
+    /// The place in the unit of the record at the front of `frames`.
+    next: usize,
+}
+
+impl ReadAgain {
+    /// Take the record that stands at list position `position`, if it is one
+    /// of this unit's and not passed yet. The records before it are let go: a
+    /// walk takes a unit's records in order, and a lookup takes one.
+    fn take(&mut self, position: usize) -> Option<PassiveFrame> {
+        let k = position.checked_sub(self.from)? + self.cut;
+        if k < self.next {
+            return None;
+        }
+        self.frames.drain(..(k - self.next).min(self.frames.len()));
+        self.next = k + 1;
+        self.frames.pop_front()
+    }
+}
+
+impl Index {
+    /// Append a row kept whole; `produced` is its produced-index.
+    fn push_held(&mut self, produced: u64, frame: PassiveFrame) {
+        self.entries.push_back(Entry::Held);
+        self.held.insert(produced, frame);
+    }
+
+    /// Append the rows of one unit as entries; `produced` is the produced-index
+    /// of the first of them.
+    fn push_unit(&mut self, produced: u64, start: FlowContext, frames: &[PassiveFrame]) {
+        if self.contexts.last() != Some(&start) {
+            self.contexts.push(start);
+        }
+        let context = u32::try_from(self.contexts.len() - 1).unwrap_or(u32::MAX);
+        for (k, frame) in frames.iter().enumerate() {
+            let (row, sparse) = UnitRow::of(frame, context);
+            if row.flags & SPARSE != 0 {
+                self.sparse.insert(produced + k as u64, sparse);
+            }
+            self.entries.push_back(Entry::Unit(row));
+        }
+    }
+
+    /// The frame of the row kept whole at `position`.
+    #[inline]
+    fn held(&self, position: usize, first_produced: u64) -> Option<&PassiveFrame> {
+        self.held.get(&(first_produced + position as u64))
+    }
+
+    /// Keep whole every row of `direction` whose unit's bytes begin before
+    /// stream offset `offset`: see [`MessageList::keep_whole_before`].
+    ///
+    /// A direction's rows are in stream order (its units are read in the order
+    /// their bytes arrive, and a unit's rows sit together), so the walk stops at
+    /// the first row of the direction whose bytes begin at or past `offset`.
+    fn keep_whole_before(
+        &mut self,
+        first_produced: u64,
+        direction: Direction,
+        offset: usize,
+        source: &dyn UnitBytes,
+    ) {
+        let seat = usize::from(direction == Direction::B);
+        let mut position = usize::try_from(self.whole_below[seat].saturating_sub(first_produced))
+            .unwrap_or(usize::MAX);
+        while let Some(entry) = self.entries.get(position).copied() {
+            let Entry::Unit(row) = entry else {
+                position += 1;
+                continue;
+            };
+            if row.direction() != direction {
+                position += 1;
+                continue;
+            }
+            if row.body().0 >= offset {
+                break;
+            }
+            // Every row of the unit from here on, read once.
+            let mut unit = self.read_unit(position, first_produced, source);
+            while let Some(frame) = unit.take(position) {
+                let key = first_produced + position as u64;
+                if let Some(slot) = self.entries.get_mut(position) {
+                    *slot = Entry::Held;
+                }
+                self.sparse.remove(&key);
+                self.held.insert(key, frame);
+                position += 1;
+            }
+        }
+        self.whole_below[seat] = first_produced + position.min(self.entries.len()) as u64;
+    }
+
+    /// Read again the unit of the row at `position`, which is an
+    /// [`Entry::Unit`]; `first_produced` is the produced-index of the oldest
+    /// row held.
+    ///
+    /// # Panics
+    ///
+    /// When `source` does not hold the unit's bytes, or the unit does not read
+    /// again into the records its entries describe. Either says the list and
+    /// its source have come apart: a holder releases bytes only behind the
+    /// oldest row it still holds, and the walk that read the unit is the walk
+    /// that reads it again. Reading on would hand a reader a row that is not
+    /// the one the capture holds.
+    fn read_unit(&self, position: usize, first_produced: u64, source: &dyn UnitBytes) -> ReadAgain {
+        let Some(Entry::Unit(row)) = self.entries.get(position).copied() else {
+            unreachable!("only an entry is read again, and {position} is not one");
+        };
+        let batch = row.batch_index as usize;
+        // Rows of a unit sit together, so the unit's rows begin `batch` rows
+        // before this one, unless a discard took the first of them, which
+        // leaves this unit at the front of the list.
+        let (from, cut) = match position.checked_sub(batch) {
+            Some(from) => (from, 0),
+            None => (0, self.cut.len()),
+        };
+        let mut messages: Vec<MessageFacts> = self.cut[..cut].to_vec();
+        let mut resync = if cut > 0 { self.cut_resync } else { None };
+        for (at, entry) in self.entries.iter_from(from).enumerate() {
+            let Entry::Unit(member) = entry else { break };
+            if member.batch_index as usize != messages.len() {
+                break;
+            }
+            let sparse = (member.flags & SPARSE != 0)
+                .then(|| self.sparse.get(&(first_produced + (from + at) as u64)))
+                .flatten();
+            if messages.is_empty() {
+                resync = sparse.and_then(|s| s.resync);
+            }
+            messages.push(member.facts(sparse));
+        }
+        let facts = UnitFacts {
+            start: self.contexts[row.context as usize],
+            resync,
+            unit_instant: messages.first().and_then(|m| m.observed_at_ns),
+            messages,
+        };
+        let (body, end) = row.body();
+        let direction = row.direction();
+        let Some(bytes) = source.stream_bytes(direction, body, end) else {
+            panic!("the stream no longer holds bytes {body}..{end} of a unit a list holds");
+        };
+        let frames = redecode_unit(
+            UnitInput {
+                direction,
+                bytes: &bytes,
+                anchor: Anchor::bytes(row.stream_offset as usize),
+                prefix_width: usize::from(row.prefix_width),
+                // A byte stream is a unicast link by construction, which is what
+                // `UnitRow::can_hold` admitted.
+                handshake: LinkHandshake::Present,
+            },
+            &facts,
+        )
+        .unwrap_or_else(|e| panic!("a unit a list holds did not read again as it was read: {e:?}"));
+        ReadAgain {
+            from,
+            cut,
+            frames: VecDeque::from(frames),
+            next: 0,
+        }
+    }
+
+    /// The row at `position` as a reader is handed it.
+    fn row<'a>(
+        &'a self,
+        position: usize,
+        first_produced: u64,
+        source: &dyn UnitBytes,
+    ) -> Option<Row<'a>> {
+        match *self.entries.get(position)? {
+            Entry::Held => self.held(position, first_produced).map(Row::held),
+            Entry::Unit(_) => self
+                .read_unit(position, first_produced, source)
+                .take(position)
+                .map(Row::read),
+        }
+    }
+
+    /// The head of the row at `position`.
+    #[inline]
+    fn head(&self, position: usize, first_produced: u64) -> Option<RowHead> {
+        match *self.entries.get(position)? {
+            Entry::Held => self.held(position, first_produced).map(RowHead::of),
+            Entry::Unit(row) => Some(row.head()),
+        }
+    }
+
+    /// Release the oldest row and hand back its frame.
+    fn pop_front(&mut self, first_produced: u64, source: &dyn UnitBytes) -> Option<PassiveFrame> {
+        match *self.entries.get(0)? {
+            Entry::Held => {
+                let _ = self.entries.pop_front();
+                // A cut unit whose rows were kept whole since needs no facts.
+                self.cut.clear();
+                self.cut_resync = None;
+                self.held.remove(&first_produced)
+            }
+            Entry::Unit(row) => {
+                let frame = self.read_unit(0, first_produced, source).take(0);
+                let _ = self.entries.pop_front();
+                let sparse = self.sparse.remove(&first_produced);
+                // The rest of the unit is still held: keep what reading it again
+                // needs of the row going. Otherwise the cut, if any, ends here.
+                let continues = matches!(
+                    self.entries.get(0),
+                    Some(Entry::Unit(next)) if next.batch_index == row.batch_index + 1
+                );
+                if continues {
+                    if self.cut.is_empty() {
+                        self.cut_resync = sparse.as_ref().and_then(|s| s.resync);
+                    }
+                    self.cut.push(row.facts(sparse.as_ref()));
+                } else {
+                    self.cut.clear();
+                    self.cut_resync = None;
+                }
+                frame
+            }
+        }
+    }
+}
+
+/// What a row says about itself without being decoded: the coordinates, the
+/// instant and the flags a list keeps for every row it holds.
+///
+/// Open-debt item 924 (`docs/dissect-row-index.md`, D2). A reader that needs
+/// only these (draining records, ordering rows by packet) reads them here and
+/// costs no decode; the fields are the [`PassiveFrame`] fields of the same name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowHead {
+    /// [`PassiveFrame::direction`].
+    pub direction: Direction,
+    /// [`PassiveFrame::stream_offset`].
+    pub stream_offset: usize,
+    /// [`PassiveFrame::offset_space`].
+    pub offset_space: OffsetSpace,
+    /// [`PassiveFrame::batch_index`].
+    pub batch_index: usize,
+    /// [`PassiveFrame::unit_offset`].
+    pub unit_offset: usize,
+    /// [`PassiveFrame::unit_len`].
+    pub unit_len: usize,
+    /// [`PassiveFrame::prefix_width`].
+    pub prefix_width: usize,
+    /// [`PassiveFrame::wire_end`].
+    pub wire_end: Option<usize>,
+    /// [`PassiveFrame::observed_at_ns`].
+    pub observed_at_ns: Option<u64>,
+    /// What the message is: [`InboundFrame::kind_code`] of the decoded
+    /// message, and `0`, which that numbering reserves for it, for one that did
+    /// not decode.
+    pub kind: u8,
+    /// [`PassiveFrame::decompressed`] is `Some`: the message was read out of an
+    /// lz4 batch, so its coordinates index that batch and not the stream.
+    pub decompressed: bool,
+    /// [`PassiveFrame::exceeds_negotiated_batch`].
+    pub exceeds_negotiated_batch: bool,
+    /// [`PassiveFrame::inadmissible_on_link`].
+    pub inadmissible_on_link: bool,
+    /// [`PassiveFrame::resync`] is `Some`.
+    pub after_resync: bool,
+}
+
+impl RowHead {
+    /// The head of a decoded row.
+    pub fn of(frame: &PassiveFrame) -> Self {
+        Self {
+            direction: frame.direction,
+            stream_offset: frame.stream_offset,
+            offset_space: frame.offset_space,
+            batch_index: frame.batch_index,
+            unit_offset: frame.unit_offset,
+            unit_len: frame.unit_len,
+            prefix_width: frame.prefix_width,
+            wire_end: frame.wire_end,
+            observed_at_ns: frame.observed_at_ns,
+            kind: kind_of(frame),
+            decompressed: frame.decompressed.is_some(),
+            exceeds_negotiated_batch: frame.exceeds_negotiated_batch,
+            inadmissible_on_link: frame.inadmissible_on_link,
+            after_resync: frame.resync.is_some(),
+        }
+    }
+}
+
+/// [`RowHead::kind`] of a decoded row.
+fn kind_of(frame: &PassiveFrame) -> u8 {
+    frame.frame.as_ref().map_or(0, InboundFrame::kind_code)
+}
+
+/// A [`MessageList`] as a reader reads it: the list and the bytes of the
+/// messages it keeps as index entries ([`MessageList::read`]).
+///
+/// The one way to read a list's rows. A row is handed out as a [`Row`], which
+/// a list that keeps the row as an entry decodes for that reader; a reader that
+/// needs only what a row says about itself reads its [`RowHead`] and decodes
+/// nothing.
+#[derive(Clone, Copy)]
+pub struct Messages<'a> {
+    list: &'a MessageList,
+    source: &'a dyn UnitBytes,
+}
+
+impl core::fmt::Debug for Messages<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Messages")
+            .field("list", self.list)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> Messages<'a> {
+    /// Messages held: [`MessageList::len`].
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    /// No message is held.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    /// [`MessageList::produced`].
+    #[inline]
+    pub fn produced(&self) -> u64 {
+        self.list.produced
+    }
+
+    /// [`MessageList::chain_prefix`].
+    #[cfg(feature = "reassembly")]
+    pub fn chain_prefix(&self) -> &'a ChainFold {
+        &self.list.chain_prefix
+    }
+
+    /// The produced-index of the oldest message held.
+    fn first_produced(&self) -> u64 {
+        self.list.produced - self.list.len() as u64
     }
 
     /// The message at position `index` among those held, oldest first.
     #[inline]
-    pub fn get(&self, index: usize) -> Option<Row<'_>> {
-        self.held.get(index).map(Row::held)
+    pub fn get(&self, index: usize) -> Option<Row<'a>> {
+        let list: &'a MessageList = self.list;
+        match &list.rows {
+            Store::Held(log) => log.get(index).map(Row::held),
+            Store::Indexed(entries) => entries.row(index, self.first_produced(), self.source),
+        }
     }
 
-    /// [`Self::get`], for an in-place rewrite of a held message (a remap of its
-    /// coordinates). There is no way to add or remove one through it.
+    /// The message at `index`; panics past the end, as indexing a slice does.
+    ///
+    /// A method and not `Index`: indexing hands out a reference into the list,
+    /// and a row the list decodes on demand has none to hand out (see [`Row`]).
     #[inline]
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut PassiveFrame> {
-        self.held.get_mut(index)
-    }
-
-    /// The oldest message held.
-    #[inline]
-    pub fn first(&self) -> Option<Row<'_>> {
-        self.get(0)
+    #[track_caller]
+    pub fn row(&self, index: usize) -> Row<'a> {
+        match self.get(index) {
+            Some(row) => row,
+            None => out_of_range(index, self.len()),
+        }
     }
 
     /// The messages held, oldest first.
     #[inline]
-    pub fn iter(&self) -> RowIter<'_> {
-        RowIter {
-            rows: self.held.iter(),
-        }
-    }
-
-    /// The messages held, oldest first, for an in-place rewrite.
-    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut PassiveFrame> {
-        self.held.iter_mut()
-    }
-
-    /// The messages from position `from` on, for an in-place rewrite of what
-    /// one call added.
-    pub fn iter_mut_from(
-        &mut self,
-        from: usize,
-    ) -> impl DoubleEndedIterator<Item = &mut PassiveFrame> {
-        self.held.iter_mut_from(from)
+    pub fn iter(&self) -> RowIter<'a> {
+        self.rows_from(0).iter()
     }
 
     /// The messages from position `from` on, as a view a reader walks: what one
     /// call added, handed on without a copy.
     #[inline]
-    pub fn rows_from(&self, from: usize) -> Rows<'_> {
-        Rows { list: self, from }
+    pub fn rows_from(&self, from: usize) -> Rows<'a> {
+        Rows {
+            messages: *self,
+            from,
+        }
+    }
+
+    /// The heads of the messages from position `from` on, oldest first: what
+    /// a reader that decodes nothing reads.
+    pub fn heads_from(&self, from: usize) -> Heads<'a> {
+        let len = self.len();
+        Heads {
+            messages: *self,
+            front: from.min(len),
+            back: len,
+        }
+    }
+}
+
+impl<'a> IntoIterator for Messages<'a> {
+    type Item = Row<'a>;
+    type IntoIter = RowIter<'a>;
+
+    #[inline]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }
 
@@ -391,23 +1157,37 @@ impl MessageList {
 ///
 /// Reads as the decoded [`PassiveFrame`] through [`Deref`](core::ops::Deref).
 /// A reader holds a `Row` for as long as it reads the message and no longer:
-/// open-debt item 924 (`docs/dissect-row-index.md`, step 4) lets a list keep a
-/// message as a small index entry and decode it again when it is asked for, and
-/// then a `Row` owns the frame decoded for that reader. Code written against
-/// `Row` keeps working when that happens; code that kept a `&PassiveFrame` to
-/// every row of a capture would have decoded the whole capture at once.
-///
-/// `Clone` and not `Copy`, for the same reason: a row that owns its decoded
-/// frame is not a bitwise copy.
-#[derive(Debug, Clone)]
+/// a list that keeps the message as an index entry (open-debt item 924,
+/// `docs/dissect-row-index.md`) decodes it again for the reader, and the `Row`
+/// owns that frame. Code that kept a frame of every row of a capture would
+/// decode the whole capture at once.
+#[derive(Debug)]
 pub struct Row<'a> {
-    frame: &'a PassiveFrame,
+    frame: RowFrame<'a>,
+}
+
+/// Where a [`Row`]'s frame is.
+#[derive(Debug)]
+enum RowFrame<'a> {
+    /// In the list, kept whole.
+    Held(&'a PassiveFrame),
+    /// Decoded again for this reader. Boxed, so a row is a pointer's size
+    /// whichever it is.
+    Read(Box<PassiveFrame>),
 }
 
 impl<'a> Row<'a> {
     #[inline]
     fn held(frame: &'a PassiveFrame) -> Self {
-        Self { frame }
+        Self {
+            frame: RowFrame::Held(frame),
+        }
+    }
+
+    fn read(frame: PassiveFrame) -> Self {
+        Self {
+            frame: RowFrame::Read(Box::new(frame)),
+        }
     }
 }
 
@@ -416,28 +1196,98 @@ impl core::ops::Deref for Row<'_> {
 
     #[inline]
     fn deref(&self) -> &PassiveFrame {
-        self.frame
+        match &self.frame {
+            RowFrame::Held(frame) => frame,
+            RowFrame::Read(frame) => frame,
+        }
     }
 }
 
 impl AsRef<PassiveFrame> for Row<'_> {
     #[inline]
     fn as_ref(&self) -> &PassiveFrame {
-        self.frame
+        self
     }
 }
 
-/// The messages of a [`MessageList`] (or of a [`Rows`] view), oldest first, as
+/// The messages of a [`Messages`] (or of a [`Rows`] view), oldest first, as
 /// [`Row`]s.
-#[derive(Debug)]
+///
+/// Walking forward, a unit read again is read once for all of its rows: the
+/// records it yields wait here until their positions are reached.
 pub struct RowIter<'a> {
-    rows: Iter<'a, PassiveFrame>,
+    walk: Walk<'a>,
+}
+
+/// How a [`RowIter`] walks.
+enum Walk<'a> {
+    /// The chunks of a list that keeps its frames, as slices.
+    Held(Iter<'a, PassiveFrame>),
+    /// The entries of a list that keeps index entries, by position.
+    Indexed {
+        index: &'a Index,
+        first_produced: u64,
+        source: &'a dyn UnitBytes,
+        front: usize,
+        back: usize,
+        /// The unit last read walking forward, until its rows are taken.
+        ahead: Option<ReadAgain>,
+    },
+}
+
+impl core::fmt::Debug for RowIter<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RowIter")
+            .field("left", &self.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Clone for RowIter<'_> {
     fn clone(&self) -> Self {
-        Self {
-            rows: self.rows.clone(),
+        let walk = match &self.walk {
+            Walk::Held(rows) => Walk::Held(rows.clone()),
+            // The unit read ahead is not copied: it is a saving, and the copy
+            // reads the unit again when it reaches it.
+            Walk::Indexed {
+                index,
+                first_produced,
+                source,
+                front,
+                back,
+                ahead: _,
+            } => Walk::Indexed {
+                index,
+                first_produced: *first_produced,
+                source: *source,
+                front: *front,
+                back: *back,
+                ahead: None,
+            },
+        };
+        Self { walk }
+    }
+}
+
+/// The row at `position` of an indexed walk, taken from `ahead` where its unit
+/// was read there, and otherwise read with its unit, which `ahead` then keeps.
+fn walk_row<'a>(
+    index: &'a Index,
+    first_produced: u64,
+    source: &dyn UnitBytes,
+    position: usize,
+    ahead: &mut Option<ReadAgain>,
+) -> Option<Row<'a>> {
+    match *index.entries.get(position)? {
+        Entry::Held => index.held(position, first_produced).map(Row::held),
+        Entry::Unit(_) => {
+            if let Some(frame) = ahead.as_mut().and_then(|unit| unit.take(position)) {
+                return Some(Row::read(frame));
+            }
+            let mut unit = index.read_unit(position, first_produced, source);
+            let frame = unit.take(position);
+            *ahead = Some(unit);
+            frame.map(Row::read)
         }
     }
 }
@@ -447,34 +1297,82 @@ impl<'a> Iterator for RowIter<'a> {
 
     #[inline]
     fn next(&mut self) -> Option<Row<'a>> {
-        self.rows.next().map(Row::held)
+        match &mut self.walk {
+            Walk::Held(rows) => rows.next().map(Row::held),
+            Walk::Indexed {
+                index,
+                first_produced,
+                source,
+                front,
+                back,
+                ahead,
+            } => {
+                if *front >= *back {
+                    return None;
+                }
+                let position = *front;
+                *front += 1;
+                walk_row(index, *first_produced, *source, position, ahead)
+            }
+        }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.rows.size_hint()
+        let left = match &self.walk {
+            Walk::Held(rows) => rows.len(),
+            Walk::Indexed { front, back, .. } => back - front,
+        };
+        (left, Some(left))
     }
 
     fn count(self) -> usize {
-        self.rows.count()
+        self.len()
     }
 
-    fn last(self) -> Option<Row<'a>> {
-        self.rows.last().map(Row::held)
+    fn last(mut self) -> Option<Row<'a>> {
+        self.next_back()
     }
 
     fn nth(&mut self, n: usize) -> Option<Row<'a>> {
-        self.rows.nth(n).map(Row::held)
+        match &mut self.walk {
+            Walk::Held(rows) => rows.nth(n).map(Row::held),
+            Walk::Indexed { front, back, .. } => {
+                *front = front.saturating_add(n).min(*back);
+                self.next()
+            }
+        }
     }
 }
 
 impl DoubleEndedIterator for RowIter<'_> {
-    #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.rows.next_back().map(Row::held)
+        match &mut self.walk {
+            Walk::Held(rows) => rows.next_back().map(Row::held),
+            Walk::Indexed {
+                index,
+                first_produced,
+                source,
+                front,
+                back,
+                ..
+            } => {
+                if *front >= *back {
+                    return None;
+                }
+                *back -= 1;
+                index.row(*back, *first_produced, *source)
+            }
+        }
     }
 
     fn nth_back(&mut self, n: usize) -> Option<Self::Item> {
-        self.rows.nth_back(n).map(Row::held)
+        match &mut self.walk {
+            Walk::Held(rows) => rows.nth_back(n).map(Row::held),
+            Walk::Indexed { front, back, .. } => {
+                *back = back.saturating_sub(n).max(*front);
+                self.next_back()
+            }
+        }
     }
 }
 
@@ -482,26 +1380,39 @@ impl ExactSizeIterator for RowIter<'_> {}
 
 impl core::iter::FusedIterator for RowIter<'_> {}
 
-/// The messages of a [`MessageList`] from one position on.
+/// The messages of a list from one position on.
 ///
 /// What a door hands a reader of "the messages this call added": the list
-/// itself, borrowed, and where they begin, so nothing is copied and nothing about
-/// how the list stores its rows leaks into the reader. Walked, and nothing else:
-/// that is all a reader of these records does, and an accessor no shipped
-/// surface asks is one `accessor_reach_census.py` would have to carry.
+/// itself, borrowed with its bytes, and where they begin, so nothing is copied
+/// and nothing about how the list stores its rows leaks into the reader. Walked,
+/// and nothing else: that is all a reader of these records does, and an
+/// accessor no shipped surface asks is one `accessor_reach_census.py` would have
+/// to carry.
 #[derive(Debug, Clone, Copy)]
 pub struct Rows<'a> {
-    list: &'a MessageList,
+    messages: Messages<'a>,
     from: usize,
 }
 
 impl<'a> Rows<'a> {
     /// The messages of the view, oldest first.
-    #[inline]
     pub fn iter(&self) -> RowIter<'a> {
-        RowIter {
-            rows: self.list.held.iter_from(self.from),
-        }
+        let list: &'a MessageList = self.messages.list;
+        let walk = match &list.rows {
+            Store::Held(log) => Walk::Held(log.iter_from(self.from)),
+            Store::Indexed(index) => {
+                let len = index.entries.len();
+                Walk::Indexed {
+                    index,
+                    first_produced: self.messages.first_produced(),
+                    source: self.messages.source,
+                    front: self.from.min(len),
+                    back: len,
+                    ahead: None,
+                }
+            }
+        };
+        RowIter { walk }
     }
 }
 
@@ -514,6 +1425,61 @@ impl<'a> IntoIterator for Rows<'a> {
         self.iter()
     }
 }
+
+/// The [`RowHead`]s of a list's messages, oldest first
+/// ([`Messages::heads_from`]).
+#[derive(Debug, Clone)]
+pub struct Heads<'a> {
+    messages: Messages<'a>,
+    front: usize,
+    back: usize,
+}
+
+impl Heads<'_> {
+    #[inline]
+    fn at(&self, position: usize) -> Option<RowHead> {
+        match &self.messages.list.rows {
+            Store::Held(log) => log.get(position).map(RowHead::of),
+            Store::Indexed(index) => index.head(position, self.messages.first_produced()),
+        }
+    }
+}
+
+impl Iterator for Heads<'_> {
+    type Item = RowHead;
+
+    #[inline]
+    fn next(&mut self) -> Option<RowHead> {
+        if self.front >= self.back {
+            return None;
+        }
+        let position = self.front;
+        self.front += 1;
+        self.at(position)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = self.back - self.front;
+        (left, Some(left))
+    }
+
+    fn nth(&mut self, n: usize) -> Option<RowHead> {
+        self.front = self.front.saturating_add(n).min(self.back);
+        self.next()
+    }
+}
+
+impl DoubleEndedIterator for Heads<'_> {
+    fn next_back(&mut self) -> Option<RowHead> {
+        if self.front >= self.back {
+            return None;
+        }
+        self.back -= 1;
+        self.at(self.back)
+    }
+}
+
+impl ExactSizeIterator for Heads<'_> {}
 
 /// Rows per chunk of a [`ChunkLog`].
 ///
@@ -658,11 +1624,6 @@ impl<T> ChunkLog<T> {
         self.chunks.get_mut(chunk)?.as_mut_slices().0.get_mut(at)
     }
 
-    /// The rows, oldest first.
-    pub fn iter(&self) -> Iter<'_, T> {
-        self.iter_from(0)
-    }
-
     /// The rows from position `from` on, oldest first: what one call added to
     /// the list, read without walking what was there before it.
     pub fn iter_from(&self, from: usize) -> Iter<'_, T> {
@@ -691,11 +1652,6 @@ impl<T> ChunkLog<T> {
                 back: run(&self.chunks[last]).iter(),
             }
         }
-    }
-
-    /// The rows, oldest first, mutably.
-    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = &mut T> {
-        self.iter_mut_from(0)
     }
 
     /// The rows from position `from` on, mutably.
@@ -1092,37 +2048,12 @@ impl Drop for Discarded {
     }
 }
 
-impl MessageList {
-    /// The message at `index`; panics past the end, as indexing a slice does.
-    ///
-    /// A method and not `Index`: indexing hands out a reference into the list,
-    /// and a row the list decodes on demand has none to hand out (see [`Row`]).
-    #[inline]
-    #[track_caller]
-    pub fn row(&self, index: usize) -> Row<'_> {
-        match self.get(index) {
-            Some(row) => row,
-            None => out_of_range(index, self.len()),
-        }
-    }
-}
-
 /// The panic of an index past the end, kept off the path that does not take it.
 #[cold]
 #[inline(never)]
 #[track_caller]
 fn out_of_range(index: usize, len: usize) -> ! {
     panic!("message {index} of a list holding {len}")
-}
-
-impl<'a> IntoIterator for &'a MessageList {
-    type Item = Row<'a>;
-    type IntoIter = RowIter<'a>;
-
-    #[inline]
-    fn into_iter(self) -> Self::IntoIter {
-        self.iter()
-    }
 }
 
 #[cfg(test)]
@@ -1166,7 +2097,7 @@ mod tests {
     fn a_discarded_message_nobody_accounts_for_panics() {
         let mut list = MessageList::new();
         list.push(frame());
-        let _ = list.discard_oldest();
+        let _ = list.discard_oldest(&NoBytes);
     }
 
     /// R311y746 (debt-carry-N11) — AND THE DISCHARGE IS THE COUNT ITSELF.
@@ -1181,7 +2112,7 @@ mod tests {
         let mut list = MessageList::new();
         list.push(frame());
         let mut census = DroppedFrameCensus::default();
-        census.absorb(list.discard_oldest().expect("a message to discard"));
+        census.absorb(list.discard_oldest(&NoBytes).expect("a message to discard"));
         assert!(list.is_empty(), "the list no longer holds it");
         assert_eq!(census.total(), 1, "and the census does");
         assert_eq!(census.keep_alive(), 1, "in the bucket the message names");
@@ -1211,7 +2142,7 @@ mod tests {
         assert_eq!(list.len(), 3, "and all three are still held");
 
         let mut census = DroppedFrameCensus::default();
-        census.absorb(list.discard_oldest().expect("a message to discard"));
+        census.absorb(list.discard_oldest(&NoBytes).expect("a message to discard"));
         assert_eq!(list.len(), 2, "the trim took one");
         assert_eq!(
             list.produced(),
@@ -1252,7 +2183,7 @@ mod tests {
         }
         let mut census = DroppedFrameCensus::default();
         for _ in 0..3 {
-            census.absorb(list.discard_oldest().expect("a message to discard"));
+            census.absorb(list.discard_oldest(&NoBytes).expect("a message to discard"));
         }
         assert_eq!(
             (
@@ -1277,7 +2208,7 @@ mod tests {
     #[test]
     fn discarding_from_an_empty_list_is_answered_not_panicked() {
         let mut list = MessageList::new();
-        assert!(list.discard_oldest().is_none());
+        assert!(list.discard_oldest(&NoBytes).is_none());
     }
 
     /// The row API reads and rewrites in place and has no way to grow or
@@ -1289,13 +2220,16 @@ mod tests {
         list.push(frame());
         list.append([frame(), frame()]);
         assert_eq!(list.len(), 3);
-        assert_eq!(list.first().expect("a frame").stream_offset, 7);
+        assert_eq!(
+            list.read(&NoBytes).get(0).expect("a frame").stream_offset,
+            7
+        );
         // In-place mutation, which is what `remap_decrypted_offsets` needs and
         // which does not change the length.
-        for f in list.iter_mut() {
+        for f in list.iter_mut_from(0) {
             f.stream_offset += 1;
         }
-        assert!(list.iter().all(|f| f.stream_offset == 8));
+        assert!(list.read(&NoBytes).iter().all(|f| f.stream_offset == 8));
         assert_eq!(list.len(), 3, "a rewrite cannot grow or shrink the list");
     }
 
@@ -1316,12 +2250,19 @@ mod tests {
         // Every receipt is absorbed: the type's own destructor refuses a
         // discard nobody accounted for, which is how this test first failed.
         for _ in 0..64 {
-            census.absorb(list.discard_oldest().expect("the list is not empty"));
+            census.absorb(
+                list.discard_oldest(&NoBytes)
+                    .expect("the list is not empty"),
+            );
             list.push(frame());
         }
         assert_eq!(census.total(), 64, "every discard was accounted for");
         assert_eq!(list.len(), 8, "a discard and a push leave the length alone");
-        assert_eq!(list.iter().count(), 8, "and the iterator agrees with it");
+        assert_eq!(
+            list.read(&NoBytes).iter().count(),
+            8,
+            "and the iterator agrees with it"
+        );
         assert_eq!(
             list.produced(),
             8 + 64,
@@ -1346,6 +2287,7 @@ mod tests {
             f
         }
         fn check(list: &MessageList, want: core::ops::Range<usize>) {
+            let list = list.read(&NoBytes);
             let want: Vec<usize> = want.collect();
             assert_eq!(list.len(), want.len());
             let by_position: Vec<usize> = (0..list.len())
@@ -1359,7 +2301,7 @@ mod tests {
             assert_eq!(backward, want, "backward");
             assert_eq!(list.iter().len(), want.len(), "the iterator's exact size");
             assert!(list.get(list.len()).is_none(), "past the end is nothing");
-            assert_eq!(list.first().map(|f| f.stream_offset), want.first().copied());
+            assert_eq!(list.get(0).map(|f| f.stream_offset), want.first().copied());
             assert_eq!(
                 list.iter().next_back().map(|f| f.stream_offset),
                 want.last().copied()
@@ -1449,14 +2391,14 @@ mod tests {
         // new first is a partial one.
         let trimmed = CHUNK_ROWS + 300;
         for _ in 0..trimmed {
-            census.absorb(list.discard_oldest().expect("held"));
+            census.absorb(list.discard_oldest(&NoBytes).expect("held"));
         }
         check(&list, trimmed..grown);
         let regrown = grown + 2 * CHUNK_ROWS;
         list.append((grown..regrown).map(numbered));
         check(&list, trimmed..regrown);
         // And down to nothing, which must leave a list that grows again.
-        while let Some(gone) = list.discard_oldest() {
+        while let Some(gone) = list.discard_oldest(&NoBytes) {
             census.absorb(gone);
         }
         check(&list, 0..0);

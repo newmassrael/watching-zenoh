@@ -230,7 +230,7 @@ fn the_join_qos_walker_reads_what_a_stock_zenohd_broadcast() {
     );
     let flow = &flows[0];
     assert!(
-        !flow.frames.is_empty(),
+        !flow.frames().is_empty(),
         "the analyzer opened the flow and decoded NO transport message out of \
          {} datagram(s) -- so what follows would be about nothing",
         datagrams.len()
@@ -242,7 +242,7 @@ fn the_join_qos_walker_reads_what_a_stock_zenohd_broadcast() {
     // bytes, so it resolves the coordinate the same way. Distinct indices only,
     // because one datagram is one framing unit and dissecting it once per
     // decoded message would double-count a batch.
-    let mut seen_packets: Vec<usize> = flow.frames.iter().map(|f| f.stream_offset).collect();
+    let mut seen_packets: Vec<usize> = flow.frames().iter().map(|f| f.stream_offset).collect();
     seen_packets.sort_unstable();
     seen_packets.dedup();
     let mut bodies: Vec<Body> = Vec::new();

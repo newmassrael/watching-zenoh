@@ -360,7 +360,7 @@ fn a_pcapng_carrying_its_own_key_log_decrypts_through_the_public_path() {
         "the flow must be recognised as encrypted"
     );
     assert_eq!(
-        d.flows()[0].frames.len(),
+        d.flows()[0].frames().len(),
         0,
         "and decode nothing until the keys are applied"
     );
@@ -385,7 +385,7 @@ fn a_pcapng_carrying_its_own_key_log_decrypts_through_the_public_path() {
 
     // AND THE FRAMES ARE ZENOH, read off the flow exactly as a cleartext
     // capture's would be.
-    let frames = &d.flows()[0].frames;
+    let frames = d.flows()[0].frames();
     assert_eq!(frames.len(), 3);
     for frame in frames {
         assert!(

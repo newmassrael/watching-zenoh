@@ -5466,7 +5466,7 @@ fn summary_json(d: &Dissection) -> String {
         if i > 0 {
             s.push(',');
         }
-        s.push_str(&format!("{{\"frames\":{}}}", f.frames.len()));
+        s.push_str(&format!("{{\"frames\":{}}}", f.frames().len()));
     }
     s.push_str("],\"datagram_flows\":[");
     for (i, f) in d.datagram_flows().iter().enumerate() {
@@ -5478,7 +5478,7 @@ fn summary_json(d: &Dissection) -> String {
         // as "nothing was on it" for the one exchange that is always there.
         s.push_str(&format!(
             "{{\"frames\":{},\"scouting\":{}}}",
-            f.frames.len(),
+            f.frames().len(),
             f.scouting.len()
         ));
     }

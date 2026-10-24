@@ -156,7 +156,12 @@ ROSTER: frozenset[tuple[str, str]] = frozenset(
         # list's other unasked accessors (`last`, and `Rows`' `len`, `get` and
         # `is_empty`) were REMOVED rather than filed, because nothing required
         # them.
-        ("MessageList", "is_empty"),
+        #
+        # Step 4b — a list is read through `Messages` (the list with the bytes
+        # of the messages it keeps as index entries), and `MessageList` left the
+        # closure: no public field or door hands one out any more. The row moved
+        # with the reading, for the same reason; `Messages::first` was REMOVED.
+        ("Messages", "is_empty"),
         # R3055 -- `StreamAssembler::fin_seen` and `StreamAssembler::rst_seen`
         # LEFT this roster by being asked: a flow's `halves` in the field document
         # reports, per direction, whether a FIN and an RST were observed, and both

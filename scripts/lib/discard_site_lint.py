@@ -143,12 +143,65 @@ ALLOWED = [
         # excusing nothing). The door has not moved -- it is the same removal
         # handing back the same `#[must_use] Discarded` -- only its spelling
         # has, which is exactly what an exact match is for.
-        "let frame = self.held.pop_front();",
+        #
+        # Open-debt item 924, step 4b — and a third time: a list now keeps its
+        # rows either whole or as index entries, so the door takes the oldest row
+        # from whichever store holds it, and the one line became the two below.
+        "Store::Held(log) => log.pop_front()?,",
         "R311y723 — THE DOOR ITSELF. This removal accounts for nothing on "
         "purpose: it hands back a `#[must_use] Discarded` whose destructor "
         "PANICS unless the caller took the frame, so the obligation is moved "
         "into the type system rather than discharged here. Registering the one "
         "site that makes every other site impossible to get wrong",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "Store::Indexed(index) => index.pop_front(first_produced, source)?,",
+        "Open-debt item 924, step 4b — THE DOOR ITSELF, for a list that keeps "
+        "index entries: the row is read again and handed back in the same "
+        "`#[must_use] Discarded` receipt as the line above",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "let _ = self.entries.pop_front();",
+        "Open-debt item 924, step 4b — the STORAGE under the door: the oldest "
+        "row's index entry leaves with the row, which `Index::pop_front` read "
+        "again (or took whole) and hands to `discard_oldest`'s receipt",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "self.held.remove(&first_produced)",
+        "Open-debt item 924, step 4b — the STORAGE under the door: the oldest "
+        "row, kept whole, is the value returned to `discard_oldest`, which "
+        "hands it back inside the receipt",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "let sparse = self.sparse.remove(&first_produced);",
+        "Open-debt item 924, step 4b — the facts kept apart for the row the "
+        "door is taking. The row was read again with them before this line; "
+        "what reading the rest of its unit still needs of them is kept in the "
+        "cut below, and nothing else reads them",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "self.sparse.remove(&key);",
+        "Open-debt item 924, step 4b — a row turned from an entry into a frame "
+        "kept whole: its facts are in the frame now, read from it, and the "
+        "row itself stays in the list",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "self.frames.drain(..(k - self.next).min(self.frames.len()));",
+        "Open-debt item 924, step 4b — records of a unit READ AGAIN for one "
+        "reader, that it passed over: a copy this read made, never the list's "
+        "rows, which stay as they are",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "self.frames.pop_front()",
+        "Open-debt item 924, step 4b — the record a reader asked for, handed "
+        "to it out of a unit read again for it: a copy, never the list's row",
     ),
     (
         "wz-session-core/passive_messages.rs",

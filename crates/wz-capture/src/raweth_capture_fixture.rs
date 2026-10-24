@@ -277,7 +277,7 @@ fn the_tracked_raweth_capture_reaches_the_consumer_surface() {
         vocabulary.len(),
         "every message in the sample must reach the reader"
     );
-    for ((name, _), got) in vocabulary.iter().zip(flow.frames.iter()) {
+    for ((name, _), got) in vocabulary.iter().zip(flow.frames().iter()) {
         let nameable = crate::datagram_tests::this_build_names(name);
         match &got.frame {
             Ok(InboundFrame::Unknown { mid }) if nameable => panic!(

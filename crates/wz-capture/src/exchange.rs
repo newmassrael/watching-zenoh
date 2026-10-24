@@ -1514,7 +1514,7 @@ pub(crate) mod tests {
     #[test]
     fn the_fixture_puts_real_request_and_response_records_on_the_wire() {
         let d = dissect(&one_query());
-        let frames = &d.datagram_flows()[0].frames;
+        let frames = d.datagram_flows()[0].frames();
         assert_eq!(frames.len(), 4, "one frame per datagram");
         let mut kinds = Vec::new();
         for f in frames {
@@ -1539,7 +1539,7 @@ pub(crate) mod tests {
     fn the_capture_clock_reaches_every_frame() {
         let d = dissect(&one_query());
         let stamps: Vec<Option<u64>> = d.datagram_flows()[0]
-            .frames
+            .frames()
             .iter()
             .map(|f| f.observed_at_ms)
             .collect();

@@ -92,7 +92,7 @@ fn query_consolidation_bytes(
     side: Direction,
 ) -> Vec<Option<u8>> {
     let mut out = Vec::new();
-    for frame in flow.frames.iter() {
+    for frame in flow.frames().iter() {
         if frame.direction != side {
             continue;
         }
