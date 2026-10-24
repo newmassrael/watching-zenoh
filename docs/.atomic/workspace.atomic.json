@@ -280636,6 +280636,48 @@
         "The lifecycle session holds an uncommitted write-end stamp in writer_queue.rs; step 2 touches the same area, so it is coordinated before it starts."
       ]
     },
+    "Round 3481": {
+      "decision_summary": "Add a capi-small cargo profile (release with panic = abort) for the C ABI cdylibs and grade it in the size gate. The release profile keeps unwinding because the ABI doors catch a panic and return an error code; a deployer who wants the smallest binary chooses capi-small, which is the like-for-like build of zenoh-pico's C, where the same bug is an assertion or a fault. The gate gains a per-case profile, and two cases built on it, pico-client-small and capic-client-small, carry exactly the features of their release twins, so the pico reference, which is derived from the features alone, is the same build for both. This re-lands the profile of round 3399's unmerged branch on the gate of round 3474; the rest of that branch is superseded by 3474.",
+      "changes_bullets": [
+        "crates/Cargo.toml: [profile.capi-small] inherits release with panic = abort.",
+        "scripts/lib/capability_cost_gate.py: a profile field per case, the library read from target/<profile>; cases pico-client-small (budget 1,498,000) and capic-client-small (1,834,000); two selftest arms: a profile twin has its base case's features, and every case's profile is one crates/Cargo.toml defines.",
+        "scripts/run-ci.sh: the Layer C1cs comment counts eight release builds and two capi-small builds."
+      ],
+      "verification_bullets": [
+        "pc2, capability_cost_gate.py --measure, rc 0: pico-client 1,790,361 text, 4.49 times zenoh-pico e1ab223a28aa built as the same build (398,573); pico-client-small 1,468,134 (-18.0 percent), 3.68 times the same reference; capic-client 2,172,515; capic-client-small 1,797,992 (-17.2 percent). Export counts unchanged: 441 and 570.",
+        "Selftest 16 of 16; each new arm fails on its mutant (a twin with one more feature; a case naming an undefined profile), 15 of 16 each.",
+        "Not run: the full --check of all ten cases, and the hosted C1cs job's wall-clock with two more builds under a new profile."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted C1cs job's duration: the two capi-small cases build every dependency again under a new profile, against a 20-minute job limit.",
+        "capi-small is a size measurement, not a shipped build: no release script or deploy recipe selects it yet, and with it a panic inside an ABI door aborts the process instead of returning an error code.",
+        "Ledger numbers 3400 to 3402 stay unfiled: they belonged to the unmerged branch whose profile this round re-lands."
+      ],
+      "publishable_decision_summary": "Add a capi-small cargo profile (release with panic = abort) for the C ABI cdylibs and grade it in the size gate. The release profile keeps unwinding because the ABI doors catch a panic and return an error code; a deployer who wants the smallest binary chooses capi-small, which is the like-for-like build of zenoh-pico's C, where the same bug is an assertion or a fault. The gate gains a per-case profile, and two cases built on it, pico-client-small and capic-client-small, carry exactly the features of their release twins, so the pico reference, which is derived from the features alone, is the same build for both. This re-lands the profile of round 3399's unmerged branch on the gate of round 3474; the rest of that branch is superseded by 3474.",
+      "publishable_changes_bullets": [
+        "crates/Cargo.toml: [profile.capi-small] inherits release with panic = abort.",
+        "scripts/lib/capability_cost_gate.py: a profile field per case, the library read from target/<profile>; cases pico-client-small (budget 1,498,000) and capic-client-small (1,834,000); two selftest arms: a profile twin has its base case's features, and every case's profile is one crates/Cargo.toml defines.",
+        "scripts/run-ci.sh: the Layer C1cs comment counts eight release builds and two capi-small builds."
+      ],
+      "publishable_verification_bullets": [
+        "pc2, capability_cost_gate.py --measure, rc 0: pico-client 1,790,361 text, 4.49 times zenoh-pico e1ab223a28aa built as the same build (398,573); pico-client-small 1,468,134 (-18.0 percent), 3.68 times the same reference; capic-client 2,172,515; capic-client-small 1,797,992 (-17.2 percent). Export counts unchanged: 441 and 570.",
+        "Selftest 16 of 16; each new arm fails on its mutant (a twin with one more feature; a case naming an undefined profile), 15 of 16 each.",
+        "Not run: the full --check of all ten cases, and the hosted C1cs job's wall-clock with two more builds under a new profile."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted C1cs job's duration: the two capi-small cases build every dependency again under a new profile, against a 20-minute job limit.",
+        "capi-small is a size measurement, not a shipped build: no release script or deploy recipe selects it yet, and with it a panic inside an ABI door aborts the process instead of returning an error code.",
+        "Ledger numbers 3400 to 3402 stay unfiled: they belonged to the unmerged branch whose profile this round re-lands."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
