@@ -282474,6 +282474,62 @@
         "Hosted CI: read the first completed run holding this round; round 3504 to 3516 left a wz-analyze clippy refusal that this round fixes, so a red clippy lane on those rounds is that, and the consumer session takes this round's pin"
       ]
     },
+    "Round 3520": {
+      "decision_summary": "Step 1b's witness is met on the host: a fixed-memory image and the reference router verify each other over the D9 channel. The image is the kit's fixed-memory client as a Linux process (host-slot-node) with a tls build: it generates its identity at start, prints its certificate as PEM for the router's operator to pin, takes the zid its key names, and dials tls/ through wz-tls-mbedtls. The router is zenohd 1.10.1 with mutual TLS on, pinning that certificate. Two controls stand beside the verdict: a router claiming another zid is admitted but not verified, and a router pinning another device admits nothing. An image declares its channel memory and identity as statics (Arena, IdentitySlot), and Mbed TLS's allocator before the arena refuses, so the image still names no allocator and no C heap. The kit remains: it needs a TCP stream socket on the Zephyr profile.",
+      "changes_bullets": [
+        "crates/wz-tls-mbedtls: Arena<N> and IdentitySlot; a refusing default allocator (wz_tls_no_calloc, wz_tls_no_free) named by the crypto configuration.",
+        "crates/wz-session-mcu: SlotClientNode::peer_verified, NodeHandle::peer_verified; the node's established line says whether the peer is verified.",
+        "deploy/host-slot-node: tls feature and src/tls.rs (identity, PEM print, key-named zid, the stack with a tls dial).",
+        "crates/wz-runtime-tokio-test-support: key_named_identity (P-256 key, self-signed certificate, SPKI).",
+        "crates/wz-integration-tests/tests/wz_fixed_memory_tls_zenohd_interop.rs: the witness and its two controls; scripts/run-ci.sh Layer Z builds the tls image and guards three legs.",
+        "scripts/lib/no_allocator_link_gate.py: host-slot-node's linux-x86_64-tls build; scripts/lib/prose_feature_gate.py: that build declared.",
+        "docs/.atomic/workspace.atomic.json: the session-close-ingress reason records the host witness; docs/session-lifecycle-intent.md: D9 and step 1b."
+      ],
+      "verification_bullets": [
+        "On pc2 (developer account, which holds the 1.97.1 toolchain the build machine's account lacks): zenohd built at the pin (reports v1.10.1), host-slot-node built with tls, and the witness run twice, the second on the final tree: 3 passed in 12.3 s (verified; unbound zid not verified; a stranger's pin admits no session).",
+        "On the build machine: wz-tls-mbedtls tests and clippy (default and slot), wz-session-mcu slot-profile tests (38) and clippy with tests, test-support and the integration test clippy; host-slot-node clean under the no-allocator gate in all three builds, the tls build with 0 C heap symbols; the gate's selftest.",
+        "Static: test_discipline_gate, lane_reach_gate, released_port_gate, prose_feature_gate (check and selftest), feature_gate_diagnostic, feature_public_surface_census, upstream_citation_anchor_gate, store_reason_citation_gate, reason_review_pin_gate, depth_axis_census; validate-workspace orphan delta 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "Step 1b on the kit: a TCP StreamSocket on the Zephyr profile, wz-tls-mbedtls compiled against Zephyr's Mbed TLS (vendored off, csrc/wz_tls.c in the image's build), and the kit image dialling zenohd over tls/.",
+        "Read the first CI run that judges Rounds 3502 to 3519 per job; Layer Z now builds host-slot-node with tls.",
+        "The build machine's bx account cannot build the pinned zenohd (no 1.97.1 toolchain): the witness was run on the developer account.",
+        "No TLS 1.3 KeyUpdate in Mbed TLS 4.1; the Round 3495 items (the 18 percent gap, p256-m, persistent keys, the in-handshake pin)."
+      ],
+      "publishable_decision_summary": "Step 1b's witness is met on the host: a fixed-memory image and the reference router verify each other over the D9 channel. The image is the kit's fixed-memory client as a Linux process (host-slot-node) with a tls build: it generates its identity at start, prints its certificate as PEM for the router's operator to pin, takes the zid its key names, and dials tls/ through wz-tls-mbedtls. The router is zenohd 1.10.1 with mutual TLS on, pinning that certificate. Two controls stand beside the verdict: a router claiming another zid is admitted but not verified, and a router pinning another device admits nothing. An image declares its channel memory and identity as statics (Arena, IdentitySlot), and Mbed TLS's allocator before the arena refuses, so the image still names no allocator and no C heap. The kit remains: it needs a TCP stream socket on the Zephyr profile.",
+      "publishable_changes_bullets": [
+        "crates/wz-tls-mbedtls: Arena<N> and IdentitySlot; a refusing default allocator (wz_tls_no_calloc, wz_tls_no_free) named by the crypto configuration.",
+        "crates/wz-session-mcu: SlotClientNode::peer_verified, NodeHandle::peer_verified; the node's established line says whether the peer is verified.",
+        "deploy/host-slot-node: tls feature and src/tls.rs (identity, PEM print, key-named zid, the stack with a tls dial).",
+        "crates/wz-runtime-tokio-test-support: key_named_identity (P-256 key, self-signed certificate, SPKI).",
+        "crates/wz-integration-tests/tests/wz_fixed_memory_tls_zenohd_interop.rs: the witness and its two controls; scripts/run-ci.sh Layer Z builds the tls image and guards three legs.",
+        "scripts/lib/no_allocator_link_gate.py: host-slot-node's linux-x86_64-tls build; scripts/lib/prose_feature_gate.py: that build declared.",
+        "docs/.atomic/workspace.atomic.json: the session-close-ingress reason records the host witness; docs/session-lifecycle-intent.md: D9 and step 1b."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (developer account, which holds the 1.97.1 toolchain the build machine's account lacks): zenohd built at the pin (reports v1.10.1), host-slot-node built with tls, and the witness run twice, the second on the final tree: 3 passed in 12.3 s (verified; unbound zid not verified; a stranger's pin admits no session).",
+        "On the build machine: wz-tls-mbedtls tests and clippy (default and slot), wz-session-mcu slot-profile tests (38) and clippy with tests, test-support and the integration test clippy; host-slot-node clean under the no-allocator gate in all three builds, the tls build with 0 C heap symbols; the gate's selftest.",
+        "Static: test_discipline_gate, lane_reach_gate, released_port_gate, prose_feature_gate (check and selftest), feature_gate_diagnostic, feature_public_surface_census, upstream_citation_anchor_gate, store_reason_citation_gate, reason_review_pin_gate, depth_axis_census; validate-workspace orphan delta 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 1b on the kit: a TCP StreamSocket on the Zephyr profile, wz-tls-mbedtls compiled against Zephyr's Mbed TLS (vendored off, csrc/wz_tls.c in the image's build), and the kit image dialling zenohd over tls/.",
+        "Read the first CI run that judges Rounds 3502 to 3519 per job; Layer Z now builds host-slot-node with tls.",
+        "The build machine's bx account cannot build the pinned zenohd (no 1.97.1 toolchain): the witness was run on the developer account.",
+        "No TLS 1.3 KeyUpdate in Mbed TLS 4.1; the Round 3495 items (the 18 percent gap, p256-m, persistent keys, the in-handshake pin)."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
