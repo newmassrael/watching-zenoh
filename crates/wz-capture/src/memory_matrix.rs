@@ -19,11 +19,13 @@
 //!
 //! * the bytes the allocator counted per row, between the two, are held to a
 //!   ceiling that is the measured value plus 10%;
-//! * the bytes `Dissection::memory` reports per row, between the two, agree with
-//!   the allocator's within 1% (4% for TLS, whose residual is not attributed and
-//!   is stated on its case): a structure that grows with the rows and that the
-//!   report leaves out is a difference here, and this is where it shows for the
-//!   kind that has it. The failure says which allocation sizes grew, so the
+//! * the bytes `Dissection::memory` reports adding, between the two, are the bytes
+//!   the allocator counted adding, to the byte. Nothing in the report is a model
+//!   (a buffer is its capacity times its element, and an ordered map is a
+//!   [`wz_session_core::sorted_chunks::SortedChunks`], whose chunks are buffers),
+//!   so a difference of one byte is a structure that grows with the rows and that
+//!   the report leaves out, and this is where it shows for the kind that has it.
+//!   The failure says which allocation sizes grew, and which shrank, so the
 //!   structure is named and not hunted for;
 //! * the dissection gives back every byte when it is dropped;
 //! * the capture produced rows of the kind the case is for, so a builder that
@@ -31,6 +33,18 @@
 //!
 //! The slope between two sizes is what is read, and not the total, so what is
 //! fixed (the flow table, the first chunk of a log) is not charged to a row.
+//!
+//! # The size of a unit
+//!
+//! The cases hold a row's unit at four bytes, where the row's own entry is most of
+//! its cost and a copy of the unit hardly shows. [`what_a_row_costs_does_not_follow_the_size_of_its_unit`]
+//! reads UDP, TCP and WebSocket at units of 16, 256 and 4096 bytes: the report
+//! still equals the allocator, a row on the lent door of a kind that reads its
+//! units where they are costs the same at every size, and the handed door holds
+//! one copy of the unit and no more than the kind's structure is built to hold
+//! (a log of chunks, a chunk's tail over; a stream's kept buffer, which doubles,
+//! up to twice). At 4096 bytes the TCP kept buffer holds 1.4 times its bytes and
+//! a WebSocket flow copies its unmasked payload on both doors; the bounds say so.
 //!
 //! # The population is derived
 //!
@@ -55,8 +69,9 @@ use std::cell::Cell;
 use wz_session_core::passive::Direction;
 
 use crate::datagram_tests::{
-    frame_carrying, framed_frame, hello_with_locators, init_datagram, open_datagram, push,
-    scout_message, sender_space, tcp_packet_on, tcp_packet_reverse, udp_packet, SCOUT_GROUP,
+    frame_carrying, framed_frame, framed_frame_with_payload, hello_with_locators, init_datagram,
+    open_datagram, push, scout_message, sender_space, tcp_packet_on, tcp_packet_reverse,
+    udp_packet, SCOUT_GROUP,
 };
 use crate::redecode_gate::PlainOpener;
 use crate::{Dissection, MessageListOrigin};
@@ -73,26 +88,43 @@ struct Counting;
 // only observes the sizes.
 /// Allocation sizes told apart by the count of live allocations of each. Sizes
 /// below [`EXACT`] are told apart exactly, and each size from there up stands for
-/// the power of two it is in, so a buffer that doubled shows as a size of its own.
+/// the sixteenth of a power of two it is in, so a buffer that doubled shows as a
+/// size of its own and a buffer of a few tens of thousands of bytes is told from
+/// one a few percent longer.
 const EXACT: usize = 4096;
-const SIZES: usize = EXACT + 48;
+/// The slots of one power of two from [`EXACT`] up.
+const PER_OCTAVE: usize = 16;
+const SIZES: usize = EXACT + PER_OCTAVE * 40;
 
 /// The slot a size is counted in.
 fn slot_of(size: usize) -> usize {
     if size < EXACT {
         size
     } else {
-        EXACT + (size.ilog2() as usize - EXACT.ilog2() as usize)
+        let octave = size.ilog2() as usize;
+        let sub = (size >> (octave - PER_OCTAVE.ilog2() as usize)) - PER_OCTAVE;
+        EXACT + (octave - EXACT.ilog2() as usize) * PER_OCTAVE + sub
     }
 }
 
-/// What a slot stands for, for a message: a size, or the range of a power of two.
+/// The smallest size a slot counts.
+fn slot_low(slot: usize) -> usize {
+    if slot < EXACT {
+        slot
+    } else {
+        let octave = (slot - EXACT) / PER_OCTAVE + EXACT.ilog2() as usize;
+        let sub = (slot - EXACT) % PER_OCTAVE;
+        (PER_OCTAVE + sub) << (octave - PER_OCTAVE.ilog2() as usize)
+    }
+}
+
+/// What a slot stands for, for a message: a size, or the range of a sixteenth of
+/// a power of two.
 fn slot_name(slot: usize) -> alloc::string::String {
     if slot < EXACT {
         alloc::format!("{slot} B")
     } else {
-        let low = 1usize << (slot - EXACT + EXACT.ilog2() as usize);
-        alloc::format!("{low}..{} B", low * 2)
+        alloc::format!("{}..{} B", slot_low(slot), slot_low(slot + 1))
     }
 }
 
@@ -197,7 +229,20 @@ fn sn(k: usize) -> u8 {
     (k % 0x80) as u8
 }
 
+/// The row's unit, length-prefixed as a stream link frames it: the fixture's Frame,
+/// or, when `payload` is given, a Frame carrying that many bytes after its header.
+fn unit_of(k: usize, payload: Option<usize>) -> Vec<u8> {
+    match payload {
+        None => framed_frame(sn(k)),
+        Some(len) => framed_frame_with_payload(sn(k), len, k as u32 + 1),
+    }
+}
+
 fn udp(n: usize, lent: bool) -> Run {
+    udp_of(n, lent, None)
+}
+
+fn udp_of(n: usize, lent: bool, payload: Option<usize>) -> Run {
     let datagram = |wire: &[u8], from_low: bool| {
         if from_low {
             udp_packet([10, 0, 0, 1], 43210, [10, 0, 0, 2], 7447, wire)
@@ -212,12 +257,16 @@ fn udp(n: usize, lent: bool) -> Run {
         datagram(&open_datagram(true), false),
     ];
     for k in 0..n {
-        packets.push(datagram(&framed_frame(sn(k))[2..], true));
+        packets.push(datagram(&unit_of(k, payload)[2..], true));
     }
     file_run(pcap_of(&packets), lent, &[])
 }
 
 fn tcp(n: usize, lent: bool) -> Run {
+    tcp_of(n, lent, None)
+}
+
+fn tcp_of(n: usize, lent: bool, payload: Option<usize>) -> Run {
     let (mut low, mut high) = (1_000u32, 9_000u32);
     let mut packets = Vec::new();
     for wire in [init_datagram(false, &[]), open_datagram(false)] {
@@ -231,7 +280,7 @@ fn tcp(n: usize, lent: bool) -> Run {
         high += unit.len() as u32;
     }
     for k in 0..n {
-        let unit = framed_frame(sn(k));
+        let unit = unit_of(k, payload);
         packets.push(tcp_packet_on(1111, low, &unit));
         low += unit.len() as u32;
     }
@@ -270,6 +319,10 @@ fn serial(n: usize, lent: bool) -> Run {
 }
 
 fn websocket(n: usize, lent: bool) -> Run {
+    websocket_of(n, lent, None)
+}
+
+fn websocket_of(n: usize, lent: bool, payload: Option<usize>) -> Run {
     use crate::ws::tests::frame;
     let unframed = |framed: Vec<u8>| framed[2..].to_vec();
     let upgrade = b"GET / HTTP/1.1\r\nHost: h\r\nUpgrade: websocket\r\n\r\n".to_vec();
@@ -290,7 +343,7 @@ fn websocket(n: usize, lent: bool) -> Run {
         high += f.len() as u32;
     }
     for k in 0..n {
-        let f = frame(true, 0x2, &unframed(framed_frame(sn(k))), None);
+        let f = frame(true, 0x2, &unframed(unit_of(k, payload)), None);
         packets.push(tcp_packet_on(1111, low, &f));
         low += f.len() as u32;
     }
@@ -504,9 +557,6 @@ struct Case {
     /// The same, lent. Equal to `ceiling` where the lent door changes nothing for
     /// this kind (a serial line logs a copy either way).
     ceiling_lent: f64,
-    /// How far the report may be from the allocator, as a fraction of the
-    /// allocator's figure.
-    tolerance: f64,
 }
 
 fn is_stream(o: &MessageListOrigin) -> bool {
@@ -514,8 +564,8 @@ fn is_stream(o: &MessageListOrigin) -> bool {
 }
 
 /// The measured bytes per row of each kind, handed and lent, on the fixtures
-/// above at `UNITS` and twice that (the allocator's figure; the report agrees
-/// with it as the `tolerance` of the case says):
+/// above at `UNITS` and twice that (the allocator's figure, which the report
+/// equals):
 ///
 /// | kind                | handed | lent   | what its rows are                    |
 /// |---------------------|--------|--------|--------------------------------------|
@@ -523,12 +573,12 @@ fn is_stream(o: &MessageListOrigin) -> bool {
 /// | tcp                 | 102.5  |  90.2  | one Frame a segment                  |
 /// | serial              |  68.4  |  68.4  | batches of one to three              |
 /// | websocket           | 158.2  | 150.2  | one message a frame                  |
-/// | tls                 | 168.1  | (none) | records of 9 to 27 bytes             |
+/// | tls                 | 144.7  | (none) | records of 9 to 27 bytes             |
 /// | scouting            |  57.3  |  41.0  | a SCOUT, a HELLO, a SCOUT with tail  |
 /// | quic datagram       |  60.1  | (none) | recovered plaintext                  |
 /// | quic stream         |  79.1  | (none) | recovered plaintext                  |
-/// | udp fragment chains | 137.6  | 115.7  | two fragments a chain                |
-/// | tcp fragment chains | 181.3  | 156.7  | two fragments a chain                |
+/// | udp fragment chains | 134.9  | 113.0  | two fragments a chain                |
+/// | tcp fragment chains | 178.6  | 154.0  | two fragments a chain                |
 ///
 /// The handshake is a fixed cost and is not in a slope. Each of these includes the
 /// SN verdict class a row carries in its flags: before that class, a capture that
@@ -539,7 +589,7 @@ fn is_stream(o: &MessageListOrigin) -> bool {
 /// log, and the joined message in another where its chain completed) and the chain
 /// it belongs to (outcome and identity, in a log of its own). It read 322 and 366
 /// when those were three B-tree maps (an 88-byte slot holding a fate that owned a
-/// buffer, and a node's header around every entry), and reads 138 and 181 as logs
+/// buffer, and a node's header around every entry), and reads 135 and 179 as logs
 /// that keep their keys in order and drop their front a chunk at a time. What is
 /// left of it is per FRAGMENT, and a fragment exists because its message did not
 /// fit a batch, so on a real capture it is amortised over a row of hundreds to
@@ -553,7 +603,6 @@ fn cases() -> Vec<Case> {
             expect: Expect::List(|o| matches!(o, MessageListOrigin::Datagram)),
             ceiling: 67.0,
             ceiling_lent: 55.0,
-            tolerance: 0.01,
         },
         Case {
             name: "tcp",
@@ -562,7 +611,6 @@ fn cases() -> Vec<Case> {
             expect: Expect::List(is_stream),
             ceiling: 113.0,
             ceiling_lent: 100.0,
-            tolerance: 0.01,
         },
         Case {
             name: "serial",
@@ -571,7 +619,6 @@ fn cases() -> Vec<Case> {
             expect: Expect::List(|o| matches!(o, MessageListOrigin::Serial)),
             ceiling: 76.0,
             ceiling_lent: 76.0,
-            tolerance: 0.01,
         },
         Case {
             name: "websocket",
@@ -580,22 +627,14 @@ fn cases() -> Vec<Case> {
             expect: Expect::List(is_stream),
             ceiling: 175.0,
             ceiling_lent: 166.0,
-            tolerance: 0.01,
         },
         Case {
             name: "tls",
             build: tls,
             lendable: false,
             expect: Expect::List(is_stream),
-            ceiling: 185.0,
-            ceiling_lent: 185.0,
-            // 168.05 B a row measured against 162.91 reported: 3.1%, about 5 bytes
-            // a row, which this gate has not attributed. Every allocation that
-            // grew between the two captures is a structure the report counts, and
-            // the model of the one map among them agrees with the allocator on its
-            // node count exactly. The bound is the figure plus a margin, so a
-            // structure that grows past it still fails.
-            tolerance: 0.04,
+            ceiling: 160.0,
+            ceiling_lent: 160.0,
         },
         Case {
             name: "scouting",
@@ -604,7 +643,6 @@ fn cases() -> Vec<Case> {
             expect: Expect::Scouting,
             ceiling: 64.0,
             ceiling_lent: 46.0,
-            tolerance: 0.01,
         },
         Case {
             name: "quic datagram",
@@ -613,7 +651,6 @@ fn cases() -> Vec<Case> {
             expect: Expect::List(|o| matches!(o, MessageListOrigin::QuicDatagram)),
             ceiling: 67.0,
             ceiling_lent: 67.0,
-            tolerance: 0.01,
         },
         Case {
             name: "quic stream",
@@ -622,7 +659,6 @@ fn cases() -> Vec<Case> {
             expect: Expect::List(|o| matches!(o, MessageListOrigin::QuicStream(_))),
             ceiling: 88.0,
             ceiling_lent: 88.0,
-            tolerance: 0.01,
         },
     ];
     #[cfg(feature = "fixtures")]
@@ -634,7 +670,6 @@ fn cases() -> Vec<Case> {
             expect: Expect::List(|o| matches!(o, MessageListOrigin::Datagram)),
             ceiling: 152.0,
             ceiling_lent: 128.0,
-            tolerance: 0.01,
         },
         Case {
             name: "tcp fragment chains",
@@ -643,7 +678,6 @@ fn cases() -> Vec<Case> {
             expect: Expect::List(is_stream),
             ceiling: 200.0,
             ceiling_lent: 173.0,
-            tolerance: 0.01,
         },
     ]);
     cases
@@ -719,25 +753,17 @@ fn sample(run: &Run, expect: Expect) -> Sample {
 fn growth_by_size(small: &Sample, large: &Sample) -> alloc::string::String {
     let mut grown: Vec<(usize, i64)> = (0..SIZES)
         .map(|size| (size, large.by_size[size] - small.by_size[size]))
-        .filter(|(_, count)| *count > 0)
+        .filter(|(_, count)| *count != 0)
         .collect();
-    // A slot's bytes: its size, or the low end of its power of two, times the count.
-    let bytes = |slot: usize| -> i64 {
-        if slot < EXACT {
-            slot as i64
-        } else {
-            1i64 << (slot - EXACT + EXACT.ilog2() as usize)
-        }
-    };
-    grown.sort_by_key(|(slot, count)| -(bytes(*slot) * count));
+    // A slot's bytes: its size, or the low end of its range, times the count.
+    grown.sort_by_key(|(slot, count)| -(slot_low(*slot) as i64 * count.abs()));
     let top: Vec<alloc::string::String> = grown
         .iter()
-        .take(10)
         .map(|(slot, count)| alloc::format!("{count} of {}", slot_name(*slot)))
         .collect();
     alloc::format!(
         "the live allocations that grew between the two captures, most bytes first \
-         (from {EXACT} B up, a power of two is one size): {}",
+         (from {EXACT} B up, a sixteenth of a power of two is one size): {}",
         top.join(", ")
     )
 }
@@ -757,9 +783,9 @@ fn check(
     door: &str,
     expect: Expect,
     ceiling: f64,
-    tolerance: f64,
     build: fn(usize, bool) -> Run,
-) {
+) -> Vec<alloc::string::String> {
+    let mut findings: Vec<alloc::string::String> = Vec::new();
     let lent = door == "lent";
     // One run before the two that are read, dropped: what a first use of the
     // library makes once and keeps (a table built on demand) is not what a
@@ -788,22 +814,32 @@ fn check(
         small.rows,
         large.rows
     );
-    assert!(
-        allocated <= ceiling,
-        "{name} ({door}): {allocated:.2} B per row, over the ceiling of {ceiling}. It reports \
-         {:?}; {}",
-        large.memory,
-        growth_by_size(&small, &large)
-    );
-    let off = (reported - allocated).abs();
-    assert!(
-        off <= (tolerance * allocated).max(0.5),
-        "{name} ({door}): the report says {reported:.2} B per row and the allocator counted \
-         {allocated:.2}: a structure that grows with the rows is unreported, or modelled \
-         wrongly. It reports {:?}; {}",
-        large.memory,
-        growth_by_size(&small, &large)
-    );
+    if allocated > ceiling {
+        findings.push(alloc::format!(
+            "{name} ({door}): {allocated:.2} B per row, over the ceiling of {ceiling}. It \
+             reports {:?}; {}",
+            large.memory,
+            growth_by_size(&small, &large)
+        ));
+    }
+    // EXACT: the bytes the dissection added going from the smaller capture to the
+    // larger are the bytes it reports adding, to the byte. Nothing in the report is a
+    // model, so a difference is a structure that grows with the rows and is not
+    // counted, and the allocation sizes that grew say which.
+    let added = large.held - small.held;
+    let reported_added = large.reported as isize - small.reported as isize;
+    if added != reported_added {
+        findings.push(alloc::format!(
+            "{name} ({door}): the dissection added {added} bytes ({allocated:.2} B per row) \
+             and reports {reported_added} ({reported:.2}): {} bytes are held and not counted. \
+             It reports {:?} for the smaller capture and {:?} for the larger; {}",
+            added - reported_added,
+            small.memory,
+            large.memory,
+            growth_by_size(&small, &large)
+        ));
+    }
+    findings
 }
 
 /// Every kind of list a dissection has is a case, and every case is a kind.
@@ -836,18 +872,154 @@ fn every_kind_of_list_has_a_case_and_every_case_a_kind() {
 /// against the report.
 #[test]
 fn every_kind_of_list_holds_what_it_reports_and_no_more_than_its_ceiling() {
+    // Every case is read and every finding is reported together, so one run says
+    // all that is wrong and not the first.
+    let mut findings: Vec<alloc::string::String> = Vec::new();
     for case in cases() {
-        let (name, expect, tolerance) = (case.name, case.expect, case.tolerance);
-        check(name, "handed", expect, case.ceiling, tolerance, case.build);
+        let (name, expect) = (case.name, case.expect);
+        findings.extend(check(name, "handed", expect, case.ceiling, case.build));
         if case.lendable {
-            check(
-                name,
-                "lent",
-                expect,
-                case.ceiling_lent,
-                tolerance,
-                case.build,
-            );
+            findings.extend(check(name, "lent", expect, case.ceiling_lent, case.build));
         }
     }
+    assert!(findings.is_empty(), "\n{}", findings.join("\n"));
+}
+
+/// The bytes after a Frame's header that a row's unit carries, which the sweep
+/// varies and the cases above hold at four.
+const PAYLOADS: [usize; 3] = [16, 256, 4096];
+
+/// A kind whose rows' unit carries a payload the sweep can size, and how many
+/// times the unit's bytes it may hold as that payload grows.
+///
+/// A multiple is a bound and not a measurement: it is what the kind's structure
+/// is built to hold, so a kind that comes to hold more (a second copy, a buffer
+/// that doubles past its bytes) fails here, and a kind that comes to hold less
+/// has its bound lowered in the same commit.
+struct Sized {
+    name: &'static str,
+    build: fn(usize, bool, Option<usize>) -> Run,
+    expect: Expect,
+    /// Per byte the unit grows, the bytes the LENT door's row may grow by: none
+    /// for a kind that reads its units where the container lends them, and one
+    /// copy and a chunk's tail for a kind that keeps a changed form of them.
+    lent_copies: f64,
+    /// Per byte the unit grows, the bytes the handed door holds beyond the lent
+    /// door: the copy it owns. A log of chunks holds the bytes and a chunk's
+    /// tail; a stream's kept buffer doubles, so it may hold twice its bytes.
+    handed_copies: f64,
+}
+
+fn sized_kinds() -> [Sized; 3] {
+    [
+        Sized {
+            name: "udp",
+            build: udp_of,
+            expect: Expect::List(|o| matches!(o, MessageListOrigin::Datagram)),
+            lent_copies: 0.0,
+            handed_copies: 1.1,
+        },
+        Sized {
+            name: "tcp",
+            build: tcp_of,
+            expect: Expect::List(is_stream),
+            lent_copies: 0.0,
+            // The assembler's kept bytes are one growable buffer.
+            handed_copies: 2.0,
+        },
+        Sized {
+            name: "websocket",
+            build: websocket_of,
+            expect: Expect::List(is_stream),
+            // The unmasked payload is a log of its own on both doors.
+            lent_copies: 1.1,
+            handed_copies: 2.0,
+        },
+    ]
+}
+
+/// What a capture of `UNITS` rows and of twice that hold, for the row count they
+/// differ by.
+fn growth(kind: &Sized, lent: bool, payload: usize) -> (usize, isize, isize) {
+    let (small, large) = (
+        sample(&(kind.build)(UNITS, lent, Some(payload)), kind.expect),
+        sample(&(kind.build)(2 * UNITS, lent, Some(payload)), kind.expect),
+    );
+    assert!(
+        small.populated && large.populated,
+        "{} ({payload} B): the capture produced no rows of this kind",
+        kind.name
+    );
+    (
+        large.rows - small.rows,
+        large.held - small.held,
+        large.reported as isize - small.reported as isize,
+    )
+}
+
+/// The heap a row costs, against the size of the unit it came from.
+///
+/// The cases above hold a unit at four bytes, where a row's own entry is most of
+/// what it costs and a copy of the unit hardly shows. A unit of kilobytes is where
+/// a structure that copies it, or copies it twice, or holds twice its bytes in a
+/// buffer that doubled, shows. For each kind and door, at each size:
+///
+/// * the report equals the allocator, to the byte, as at the cases' size;
+/// * what the row costs beyond the smallest unit's is within what the kind's
+///   structure is built to hold of the unit's bytes (see [`Sized`]): nothing on the
+///   lent door of a kind that reads its units where they are, and one copy on the
+///   handed door.
+#[test]
+fn what_a_row_costs_does_not_follow_the_size_of_its_unit() {
+    let mut findings: Vec<alloc::string::String> = Vec::new();
+    for kind in sized_kinds() {
+        // Bytes per row, by door, at each payload.
+        let mut per_row = [[0f64; PAYLOADS.len()]; 2];
+        for (door_at, lent) in [false, true].into_iter().enumerate() {
+            let door = if lent { "lent" } else { "handed" };
+            for (at, payload) in PAYLOADS.into_iter().enumerate() {
+                let (rows, held, reported) = growth(&kind, lent, payload);
+                std::eprintln!(
+                    "{} ({door}) unit of {payload} B: {:.2} B/row held, {:.2} reported",
+                    kind.name,
+                    held as f64 / rows as f64,
+                    reported as f64 / rows as f64
+                );
+                if held != reported {
+                    findings.push(alloc::format!(
+                        "{} ({door}) unit of {payload} B: holds {held} B more at twice the \
+                         rows and reports {reported}",
+                        kind.name
+                    ));
+                }
+                per_row[door_at][at] = held as f64 / rows as f64;
+            }
+        }
+        let [handed, lent] = per_row;
+        for (at, payload) in PAYLOADS.into_iter().enumerate().skip(1) {
+            // The unit's own bytes the row's unit gained over the smallest.
+            let gained = (payload - PAYLOADS[0]) as f64;
+            let lent_grew = lent[at] - lent[0];
+            if lent_grew > kind.lent_copies * gained {
+                findings.push(alloc::format!(
+                    "{} (lent) unit of {payload} B: a row holds {lent_grew:.1} B more than at \
+                     {} B, over {} times the {gained} B the unit gained",
+                    kind.name,
+                    PAYLOADS[0],
+                    kind.lent_copies
+                ));
+            }
+            let owned = (handed[at] - lent[at]) - (handed[0] - lent[0]);
+            if owned < gained || owned > kind.handed_copies * gained {
+                findings.push(alloc::format!(
+                    "{} (handed) unit of {payload} B: a row holds {owned:.1} B for the copy it \
+                     owns beyond the lent door's, where the {gained} B the unit gained is the \
+                     least and {} times it the most",
+                    kind.name,
+                    kind.handed_copies
+                ));
+            }
+        }
+    }
+    assert!(findings.is_empty(), "\n{}", findings.join("\n"));
 }

@@ -215,26 +215,36 @@ question.
   number of bytes allocated, in groups named for the structure that holds them
   (the lists' entries, their logged bytes, the facts few rows have, the TCP run
   maps, what the census and the field walk keep for the next call). A buffer is
-  counted by its capacity, which is exact; a B-tree map by a model checked
-  against the allocator (`wz-session-core`'s `btree_model` test, within 3% at
-  three sizes and three entry shapes). A new structure is a new key and not a
-  new symbol, which is why it is a document and not a fixed record. The report
+  counted by its capacity, which is exact, and an ordered map is a
+  `SortedChunks`, whose chunks are buffers, so every figure in it is a capacity
+  times an element and no figure is a model. (An ordered map from the standard
+  library would be a model, because its node holds seven entries of eleven
+  slots and a header, and a model a few percent off cannot tell a structure that
+  grew from a model that is wrong; the report holds none.) A new structure is a
+  new key and not a new symbol, which is why it is a document and not a fixed
+  record. The report
   names the structures that follow rows; what is fixed, or follows the count of
   distinct things, is not in it, and it says so (`scope`).
 - THE ORACLE. The allocator is the one reading that is not the report, so the
-  gate compares the two. A report that omits a structure growing with the rows
-  is a difference there, and the failure prints which allocation sizes grew
-  between the two captures: a size names its structure (a B-tree leaf of one
-  map, a record's ciphertext of one length), which is how each unreported
-  structure of this step was found.
+  gate compares the two, to the byte: the bytes a dissection holds more of at
+  twice the rows are the bytes it reports holding more of, and there is no
+  tolerance. A report that omits a structure growing with the rows is a
+  difference there, and the failure prints which allocation sizes grew and which
+  shrank between the two captures (a sixteenth of a power of two from 4 KiB up):
+  a size names its structure (a node of one map, a record's ciphertext of one
+  length, a buffer that doubled), which is how each unreported structure of this
+  step was found. The last two were a chunk list's own capacity (the unit log
+  counted its buffers and not the list holding them) and the session's stream
+  buffer, which a decrypted flow grows to its whole plaintext and which then kept
+  that capacity after every frame was read out of it; it is counted now and
+  gives back what it does not hold, as the stream's kept bytes do.
 - THE POPULATION. The matrix reads every kind of message list (TCP, UDP,
   serial, WebSocket, TLS, scouting, both QUIC kinds, fragment chains), handed
   and lent where the door differs, and the case list is derived: an exhaustive
   `match` over `MessageListOrigin` fails to compile when a kind has no case.
   Two sizes are read and the slope between them is judged, so what is fixed is
-  not charged to a row. Each kind has a ceiling (the measured value plus 10%)
-  and a tolerance for the report (1%; TLS 4%, a residual this step did not
-  attribute and states on its case).
+  not charged to a row. Each kind has a ceiling (the measured value plus 10%),
+  and the report of every kind equals the allocator's figure.
 
 What a row costs is read off the kinds, not argued: 49 to 130 bytes after the
 replay on the two transports the C gate reads (UDP and TCP, handed and lent),
@@ -544,13 +554,15 @@ from. So the order is now:
   bytes and is a class in the row's flags; only a `Gap`, which has a number,
   keeps one. Last, the facts few rows have and the chain facts were B-tree maps,
   which hold seven entries of an eleven-slot node and a header around each node:
-  they are `AscendingMap`s now, a chunked log with a bisected key (the keys
-  arrive in order and leave from the front, which is what `ChunkLog` already is
-  for the rows), and a fragment's fate is a class there with the joined message
-  in a log of its own, because only that fate owns a buffer. A fragment row went
-  from 323 and 366 bytes to 138 and 181. Every redecode gate passes unchanged
-  over all of it, and the report agrees with the allocator to 0.2% for every kind
-  but TLS.
+  they are `SortedChunks` now, sorted chunks of at most 64 entries with a
+  bisected key (a run of ascending keys fills its chunks, and the front leaves a
+  chunk at a time, as `ChunkLog` does for the rows), and a fragment's fate is a
+  class there with the joined message in a log of its own, because only that fate
+  owns a buffer. The selector's overlay map and the verdict column's delta are
+  the same structure, so no figure of the report is a model of a standard-library
+  map. A fragment row went from 323 and 366 bytes to 135 and 179. Every
+  redecode gate passes unchanged over all of it, and the report equals the
+  allocator, to the byte, for every kind and for the C ABI's handle.
   Not done, and named: the TLS flow's kept encrypted records duplicate bytes the
   TCP stream holds and could be read from it, but the record type is public and
   the opener trait in another crate reads its bytes, so it is a change across a

@@ -108,12 +108,6 @@ const FIELD_WINDOW: u64 = 8192;
 /// the handle every capture pays for.
 const FLOOR_BOUND: isize = 64 * 1024;
 
-/// How far the handle's report of its bytes per row may be from the allocator's:
-/// the B-tree model is held to 3% (`wz-session-core`'s `btree_model` test) and
-/// what the report leaves out is fixed and spread over the rows. Measured at 0.4%
-/// at the largest.
-const REPORT_TOLERANCE: f64 = 0.03;
-
 /// Which replay door opens the capture.
 #[derive(Clone, Copy)]
 enum Door {
@@ -373,6 +367,7 @@ fn gate(case: &Case) {
         floor.leaked
     );
 
+    let mut measured: Vec<Measured> = Vec::new();
     for pushes in [ROWS, 2 * ROWS] {
         let m = measure(pushes, case.transport, case.door);
         assert_eq!(
@@ -415,21 +410,44 @@ fn gate(case: &Case) {
             case.after_reads_ceiling,
             m.document
         );
-        for (stage, measured, reported) in [
-            ("replay", replay, reported_replay),
-            ("reads", reads, reported_reads),
-        ] {
-            let off = (reported - measured).abs() / measured;
-            assert!(
-                off <= REPORT_TOLERANCE,
-                "{name}: after the {stage} the handle reports {reported:.2} B per row and the \
-                 allocator counted {measured:.2} ({:.1}% apart, over {:.0}%): a structure that \
-                 follows the rows is unreported, or modelled wrongly. It reports {}",
-                off * 100.0,
-                REPORT_TOLERANCE * 100.0,
-                m.document
-            );
-        }
+        measured.push(m);
+    }
+
+    // Exact: the bytes the handle holds more of at twice the rows are the bytes it
+    // reports holding more of, to the byte. The report counts buffers by capacity
+    // and holds no model, so a byte of difference is a structure that follows the
+    // rows and is left out. It is the slope between two captures and not the
+    // distance from an empty handle, because what follows the count of distinct
+    // things (the first keyexpr's table, the first node's) is outside the
+    // report's `rows` scope, is the same at both sizes, and an empty handle has
+    // not made it yet.
+    let [small, large] = &measured[..] else {
+        unreachable!("two sizes were measured")
+    };
+    for (stage, held, reported) in [
+        (
+            "replay",
+            large.after_replay - small.after_replay,
+            large.reported_replay as isize - small.reported_replay as isize,
+        ),
+        (
+            "reads",
+            large.after_reads - small.after_reads,
+            large.reported_reads as isize - small.reported_reads as isize,
+        ),
+    ] {
+        assert_eq!(
+            held,
+            reported,
+            "{name}: from {} rows to {} the handle held {held} B more after the {stage} and \
+             reports {reported} more ({} B per row): a structure that follows the rows is \
+             unreported. It reports {} then {}",
+            small.rows,
+            large.rows,
+            (held - reported) as f64 / (large.rows - small.rows) as f64,
+            small.document,
+            large.document
+        );
     }
 }
 
