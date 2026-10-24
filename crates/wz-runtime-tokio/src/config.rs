@@ -1459,6 +1459,39 @@ impl WzConfig {
         let (floor, median, late) = (None, None, (0, 0, 0));
         #[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
         let late = (late.current_ms, late.last_minute_ms, late.since_start_ms);
+        // The node's bulkhead of parked senders; a build with no link has no outbound queue and
+        // so nothing parked. The cfg is `writer_queue`'s own (`lib.rs`).
+        #[cfg(any(
+            feature = "transport-multicast",
+            feature = "transport-link-tcp",
+            feature = "transport-link-tls",
+            feature = "transport-link-udp",
+            feature = "transport-link-serial",
+            feature = "transport-link-ws",
+            all(feature = "transport-link-unixsock", unix),
+            feature = "transport-link-vsock",
+            feature = "transport-link-unixpipe",
+            feature = "transport-link-quic",
+            feature = "transport-link-quic-datagram",
+        ))]
+        let park = {
+            let s = crate::writer_queue::park_stats();
+            (s.parked, s.limit, s.refused)
+        };
+        #[cfg(not(any(
+            feature = "transport-multicast",
+            feature = "transport-link-tcp",
+            feature = "transport-link-tls",
+            feature = "transport-link-udp",
+            feature = "transport-link-serial",
+            feature = "transport-link-ws",
+            all(feature = "transport-link-unixsock", unix),
+            feature = "transport-link-vsock",
+            feature = "transport-link-unixpipe",
+            feature = "transport-link-quic",
+            feature = "transport-link-quic-datagram",
+        )))]
+        let park = (0usize, 0usize, 0u64);
         wz_session_core::capacity::CapacityReport {
             lease_ms: self.effective_lease_ms(),
             share_ppm: self.capacity.as_ref().map(|c| c.share_ppm()),
@@ -1473,6 +1506,9 @@ impl WzConfig {
             lateness_since_start_ms: late.2,
             refused_over_max_sessions,
             refused_over_capacity,
+            parked_senders: park.0,
+            park_budget: park.1,
+            park_refused: park.2,
         }
     }
 

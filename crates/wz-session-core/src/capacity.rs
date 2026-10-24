@@ -430,6 +430,13 @@ pub struct CapacityReport {
     pub refused_over_max_sessions: u64,
     /// Sessions refused because the measured capacity was reached (counter).
     pub refused_over_capacity: u64,
+    /// Senders parked now, waiting for room on a lane (a gauge).
+    pub parked_senders: usize,
+    /// How many senders the node lets park at once: the bulkhead between a stopped reader and the
+    /// workers the other faces share.
+    pub park_budget: usize,
+    /// Senders turned away because the budget was spent, answered congested at once (counter).
+    pub park_refused: u64,
 }
 
 impl CapacityReport {
@@ -475,14 +482,18 @@ impl CapacityReport {
             w,
             "\"lateness_current_ms\":{},\"lateness_last_minute_ms\":{},\
              \"lateness_since_start_ms\":{},\"lateness_limit_ms\":{},\"lease_at_risk\":{},\
-             \"refused_over_max_sessions\":{},\"refused_over_capacity\":{}}}",
+             \"refused_over_max_sessions\":{},\"refused_over_capacity\":{},\
+             \"parked_senders\":{},\"park_budget\":{},\"park_refused\":{}}}",
             self.lateness_current_ms,
             self.lateness_last_minute_ms,
             self.lateness_since_start_ms,
             self.lateness_limit_ms(),
             self.lease_at_risk(),
             self.refused_over_max_sessions,
-            self.refused_over_capacity
+            self.refused_over_capacity,
+            self.parked_senders,
+            self.park_budget,
+            self.park_refused
         )
     }
 }
@@ -730,6 +741,9 @@ mod tests {
             lateness_since_start_ms: 1_263,
             refused_over_max_sessions: 0,
             refused_over_capacity: 948,
+            parked_senders: 0,
+            park_budget: 32,
+            park_refused: 0,
         }
     }
 
@@ -744,7 +758,8 @@ mod tests {
              \"sessions_held\":1093,\"emission_floor_ns\":4500,\"emission_median_ns\":null,\
              \"lateness_current_ms\":880,\"lateness_last_minute_ms\":1263,\
              \"lateness_since_start_ms\":1263,\"lateness_limit_ms\":6667,\"lease_at_risk\":false,\
-             \"refused_over_max_sessions\":0,\"refused_over_capacity\":948}"
+             \"refused_over_max_sessions\":0,\"refused_over_capacity\":948,\
+             \"parked_senders\":0,\"park_budget\":32,\"park_refused\":0}"
         );
     }
 
@@ -787,11 +802,7 @@ mod tests {
             .filter(|&i| tokens.get(i + 1).is_some_and(|t| t.starts_with(':')))
             .map(|i| tokens[i])
             .collect();
-        assert_eq!(
-            fields.len(),
-            17,
-            "the schema has seventeen fields: {fields:?}"
-        );
+        assert_eq!(fields.len(), 20, "the schema has twenty fields: {fields:?}");
         for f in &fields {
             assert!(
                 doc.contains(&std::format!("| `{f}` |")),

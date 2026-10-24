@@ -6964,6 +6964,9 @@ mod tests {
             lateness_since_start_ms: 1_263,
             refused_over_max_sessions: 0,
             refused_over_capacity: 3,
+            parked_senders: 0,
+            park_budget: 32,
+            park_refused: 0,
         }
     }
 

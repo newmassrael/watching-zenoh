@@ -564,6 +564,9 @@ read permit denied answers nothing; the second was run with the permit ignored i
 | `lease_at_risk` | report | bool | the last minute passed `lateness_limit_ms`: the promise is not being kept now |
 | `refused_over_max_sessions` | report | sessions | counter: refused because `max_sessions` was reached |
 | `refused_over_capacity` | report | sessions | counter: refused because the measured capacity was reached |
+| `parked_senders` | report | senders | senders parked now, waiting for room on a lane |
+| `park_budget` | report | senders | how many the node lets park at once (the bulkhead) |
+| `park_refused` | report | senders | counter: turned away because the budget was spent, answered congested at once |
 
 **What the router does at the number.** One value, the effective `max_sessions`, is the smaller of the
 configured `transport/unicast/max_sessions` (upstream's key, enforced in the accept loop already, default
@@ -593,14 +596,28 @@ two-worker runtime with eight senders parked on a lane that never frees an unrel
 most 1.3 to 1.8 ms late in five runs, where the same eight waiting without the release starved it by 2.38 s
 (`writer_queue::tests::senders_parked_on_a_full_lane_do_not_starve_the_runtime_that_releases_its_worker`).
 **The release has a limit**, the runtime's `max_blocking_threads`: with more senders parked than that, the
-surplus holds workers again. On a runtime capped at 8, 6 parked senders cost the timer 1.3 to 2.2 ms and 24
-cost it 1.18 s (`the_release_of_a_parked_sender_stops_at_the_blocking_thread_cap`), and a run with 700 senders on
-an uncapped-by-default runtime (512) cost it 0.56 s. The pool's default is 50 (`runtime_pool`, upstream's
-`RuntimeParam::default`), so this is upstream's limit too, tunable per subsystem (`WZ_RUNTIME='tx:max_blocking_threads=N'`);
-a router that admits more than 50 faces whose publishers `Block` towards one stopped reader is past it, and
-nothing in the capacity model counts parked senders. Not measured: that case end to end on a router with real
-faces (the demo's sessions document cannot publish with `Block`, so it needs that key first). The counters
-are the node's existing metrics and the capacity report; both are served as described above.
+surplus holds workers again. On a runtime capped at 8, 24 senders cost the timer 1.18 s, and a run with 700
+senders on a runtime whose cap is 512 cost it 0.56 s. The wz pool's default cap is 50 (`runtime_pool`, upstream's
+`RuntimeParam::default`), so upstream has the same limit, and nothing bounded the number of senders that park.
+
+**The bulkhead (built 2026-10-24).** A node now lets only so many senders park at once
+(`writer_queue::ParkBudget`, `DEFAULT_PARK_BUDGET` = 32, below both caps with room for the runtime's other
+blocking tasks; `set_park_budget` for a host whose faces run on a runtime capped lower). `link_room`, on a
+multi-thread runtime, takes a place before it waits and gives it back when it stops; a sender that finds none
+is answered congested at once and counted. For a message that may not be dropped that is upstream's own verdict
+on a lane that stays full (the session whose lane it is closes as unresponsive), reached earlier and without a
+thread. Measured on a runtime capped at 8 with 24 senders: 1.18 s of timer lateness without the bulkhead,
+1.8 to 2.1 ms with a budget of 6 (three runs; 18 of the 24 refused at once, the budget empty afterwards;
+`the_bulkhead_keeps_parked_senders_inside_the_blocking_thread_cap`). The report carries `parked_senders`,
+`park_budget` and `park_refused`. Three things it is not: it is not derived from the runtime it protects (tokio
+does not say its `max_blocking_threads`, so a host with a cap below 32 must lower the budget itself); it does
+not cover `wait_for_slot`, the wait for a pooled frame slot under `runtime-zero-copy`, which parks the same way
+and has no deadline to refuse at; and it is a bulkhead, not flow control: the structure that spends no thread
+at all on a stopped reader is credit-based, the forwarder holding a bounded queue per destination face and the
+publishing face's loop not reading while the queue is full. That needs the forwarder's fan-out and the link's
+`wait_for_room` (synchronous so that the MCU profile shares it) to change together, and is not built. Not
+measured: a router with real faces and `Block` publishers end to end (the demo's sessions document cannot
+publish with `Block`, so it needs that key first).
 
 **How it is held.** Clockless tests of the arithmetic (`capacity::tests`, and the config's effective bound
 from a declared share and a lease). The promise itself is

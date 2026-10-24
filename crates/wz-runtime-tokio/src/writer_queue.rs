@@ -1172,6 +1172,100 @@ impl LaneState {
     }
 }
 
+/// How many senders may be parked waiting for room at once, each on a thread the runtime handed
+/// over for it (`block_in_place`): the bulkhead between a stopped reader and everyone else.
+///
+/// A parked sender's wait releases its worker, and the release is paid out of the runtime's
+/// `max_blocking_threads` (50 in the wz pool, upstream's default; 512 in a plain tokio runtime).
+/// Past that number the surplus holds workers again and starves the faces that share them
+/// (measured: 24 parked senders on a cap of 8 cost an unrelated timer 1.18 s). A node therefore
+/// does not let more park than it can release: a sender that finds the budget spent is answered
+/// as congested at once, which for a message that may not be dropped is upstream's own verdict
+/// for a lane that stays full (the session whose lane it is closes as unresponsive), reached
+/// earlier and without a thread. The count of those refusals is [`ParkStats::refused`].
+///
+/// 32 is below both caps with room for the blocking tasks the runtime has besides: a host that
+/// runs the faces on a runtime capped lower sets it lower ([`set_park_budget`]).
+pub const DEFAULT_PARK_BUDGET: usize = 32;
+
+/// The bulkhead's counts. One per node ([`NODE_PARK_BUDGET`]); a value of its own for a test.
+pub struct ParkBudget {
+    limit: AtomicUsize,
+    parked: AtomicUsize,
+    refused: AtomicU64,
+}
+
+/// What a [`ParkBudget`] holds now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParkStats {
+    /// Senders that may park at once.
+    pub limit: usize,
+    /// Senders parked now.
+    pub parked: usize,
+    /// Senders turned away because the budget was spent, since the process started.
+    pub refused: u64,
+}
+
+/// A parked sender's place in the budget; released when it stops waiting.
+struct ParkPermit<'a>(&'a ParkBudget);
+
+impl Drop for ParkPermit<'_> {
+    fn drop(&mut self) {
+        self.0.parked.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl ParkBudget {
+    /// A budget of `limit` parked senders.
+    pub const fn new(limit: usize) -> Self {
+        Self {
+            limit: AtomicUsize::new(limit),
+            parked: AtomicUsize::new(0),
+            refused: AtomicU64::new(0),
+        }
+    }
+
+    /// Take a place, or count the refusal and say there is none.
+    fn try_park(&self) -> Option<ParkPermit<'_>> {
+        let limit = self.limit.load(Ordering::Acquire);
+        let took = self
+            .parked
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |parked| {
+                (parked < limit).then_some(parked + 1)
+            })
+            .is_ok();
+        if took {
+            Some(ParkPermit(self))
+        } else {
+            self.refused.fetch_add(1, Ordering::Relaxed);
+            None
+        }
+    }
+
+    /// The budget's counts now.
+    pub fn stats(&self) -> ParkStats {
+        ParkStats {
+            limit: self.limit.load(Ordering::Acquire),
+            parked: self.parked.load(Ordering::Acquire),
+            refused: self.refused.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// The node's bulkhead, read by every [`OutboundTx::link_room`] of the process.
+pub static NODE_PARK_BUDGET: ParkBudget = ParkBudget::new(DEFAULT_PARK_BUDGET);
+
+/// How many senders may park at once on this node. Zero turns every wait that would park into an
+/// immediate congested answer.
+pub fn set_park_budget(limit: usize) {
+    NODE_PARK_BUDGET.limit.store(limit, Ordering::Release);
+}
+
+/// The node's bulkhead now: what the capacity report says about parked senders.
+pub fn park_stats() -> ParkStats {
+    NODE_PARK_BUDGET.stats()
+}
+
 /// R2921 — what [`OutboundTx::wait_for_room`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Room {
@@ -1512,6 +1606,16 @@ impl OutboundTx {
         priority: Priority,
         wait: RoomWait,
     ) -> wz_session_core::link::RoomAnswer {
+        self.link_room_in(&NODE_PARK_BUDGET, priority, wait)
+    }
+
+    /// [`Self::link_room`] with the bulkhead `budget` instead of the node's.
+    pub fn link_room_in(
+        &self,
+        budget: &ParkBudget,
+        priority: Priority,
+        wait: RoomWait,
+    ) -> wz_session_core::link::RoomAnswer {
         use wz_session_core::link::{LinkRoom, RoomAnswer};
         let started = Instant::now();
         // R2923 — a sender that has to WAIT is usually on a runtime worker, and
@@ -1535,7 +1639,12 @@ impl OutboundTx {
                         if handle.runtime_flavor()
                             == tokio::runtime::RuntimeFlavor::MultiThread =>
                     {
-                        tokio::task::block_in_place(wait)
+                        // The release is paid from the runtime's blocking threads, so it is
+                        // rationed: a sender that finds none left is answered congested now.
+                        match budget.try_park() {
+                            Some(_place) => tokio::task::block_in_place(wait),
+                            None => Room::Congested,
+                        }
                     }
                     _ => wait(),
                 }
@@ -4110,6 +4219,21 @@ mod tests {
         assert_eq!(waiter.join().expect("waiter"), Room::Closed);
     }
 
+    /// How a test sender asks for room.
+    type Through = Arc<dyn Fn(&OutboundTx, RoomWait) -> Room + Send + Sync>;
+
+    /// The session's seam, [`OutboundTx::link_room_in`], under `budget`, its answer mapped back
+    /// to [`Room`] for the comparison.
+    fn through_link_room(budget: Arc<ParkBudget>) -> Through {
+        Arc::new(
+            move |tx, w| match tx.link_room_in(&budget, Priority::Data, w).room {
+                wz_session_core::link::LinkRoom::Free => Room::Free,
+                wz_session_core::link::LinkRoom::Congested => Room::Congested,
+                wz_session_core::link::LinkRoom::Gone => Room::Closed,
+            },
+        )
+    }
+
     /// The longest an unrelated 20 ms timer on a two-worker runtime was served late while
     /// `waiters` tasks each waited `wait` for room on a lane that never frees, `through` being
     /// how a task waits. A face whose peer stopped reading, with publishers that may not drop,
@@ -4122,7 +4246,7 @@ mod tests {
         waiters: usize,
         blocking_cap: usize,
         wait: Duration,
-        through: fn(&OutboundTx, RoomWait) -> Room,
+        through: Through,
     ) -> (Duration, Vec<Room>) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -4136,6 +4260,7 @@ mod tests {
             let handles: Vec<_> = (0..waiters)
                 .map(|_| {
                     let tx = tx.clone();
+                    let through = Arc::clone(&through);
                     tokio::spawn(async move { through(&tx, block(wait)) })
                 })
                 .collect();
@@ -4165,15 +4290,12 @@ mod tests {
     #[test]
     fn senders_parked_on_a_full_lane_do_not_starve_the_runtime_that_releases_its_worker() {
         let wait = Duration::from_millis(600);
-        let (worst, rooms) = timer_lateness_under_waiters(8, 64, wait, |tx, w| {
-            // `link_room` is the session's seam; its answer is mapped back to `Room` for the
-            // comparison below.
-            match tx.link_room(Priority::Data, w).room {
-                wz_session_core::link::LinkRoom::Free => Room::Free,
-                wz_session_core::link::LinkRoom::Congested => Room::Congested,
-                wz_session_core::link::LinkRoom::Gone => Room::Closed,
-            }
-        });
+        let (worst, rooms) = timer_lateness_under_waiters(
+            8,
+            64,
+            wait,
+            through_link_room(Arc::new(ParkBudget::new(DEFAULT_PARK_BUDGET))),
+        );
         assert!(
             rooms.iter().all(|r| *r == Room::Congested),
             "every sender waited out its deadline: {rooms:?}"
@@ -4185,8 +4307,12 @@ mod tests {
         );
 
         // The control: the same wait that keeps its worker.
-        let (starved, rooms) =
-            timer_lateness_under_waiters(8, 64, wait, |tx, w| tx.wait_for_room(Priority::Data, w));
+        let (starved, rooms) = timer_lateness_under_waiters(
+            8,
+            64,
+            wait,
+            Arc::new(|tx, w| tx.wait_for_room(Priority::Data, w)),
+        );
         assert!(rooms.iter().all(|r| *r == Room::Congested));
         eprintln!("timer lateness with 8 senders parked, worker kept: {starved:?}");
         assert!(
@@ -4195,33 +4321,59 @@ mod tests {
         );
     }
 
-    /// The release has a limit, and the limit is the runtime's `max_blocking_threads`: with more
-    /// senders parked than that, the surplus holds workers and the unrelated timer is starved
-    /// again. The pool's default is 50, upstream's, so this is upstream's limit too; the test
-    /// states it so that it is a measured boundary and not an assumption, and so that a change
-    /// of the default that moves it has to move this too.
+    /// The release has a limit, the runtime's `max_blocking_threads`: with more senders parked than
+    /// that, the surplus holds workers and starves the unrelated timer. The bulkhead keeps the
+    /// node inside it. On a runtime capped at 8, 24 senders with no bulkhead starve the timer
+    /// (1.18 s measured); the same 24 under a budget of 6 leave it on time, the 6 that parked wait
+    /// out their deadline, and the 18 that found the budget spent are answered congested at
+    /// once, counted, and the budget is empty again afterwards.
     #[test]
-    fn the_release_of_a_parked_sender_stops_at_the_blocking_thread_cap() {
+    fn the_bulkhead_keeps_parked_senders_inside_the_blocking_thread_cap() {
         let wait = Duration::from_millis(600);
-        let through = |tx: &OutboundTx, w: RoomWait| match tx.link_room(Priority::Data, w).room {
-            wz_session_core::link::LinkRoom::Congested => Room::Congested,
-            wz_session_core::link::LinkRoom::Free => Room::Free,
-            wz_session_core::link::LinkRoom::Gone => Room::Closed,
-        };
-        // Under the cap: released.
-        let (under, _) = timer_lateness_under_waiters(6, 8, wait, through);
-        // Over it: 24 senders, 8 threads to release into.
-        let (over, rooms) = timer_lateness_under_waiters(24, 8, wait, through);
-        eprintln!("timer lateness, 6 parked under a cap of 8: {under:?}; 24 over it: {over:?}");
-        assert!(rooms.iter().all(|r| *r == Room::Congested));
-        assert!(
-            under < Duration::from_millis(250),
-            "under the cap the release holds: {under:?}"
+        // No bulkhead (a budget no smaller than the senders): the surplus over the cap starves.
+        let (over, _) = timer_lateness_under_waiters(
+            24,
+            8,
+            wait,
+            through_link_room(Arc::new(ParkBudget::new(1_000))),
         );
+        // The bulkhead, inside the cap.
+        let budget = Arc::new(ParkBudget::new(6));
+        let (held, rooms) =
+            timer_lateness_under_waiters(24, 8, wait, through_link_room(Arc::clone(&budget)));
+        eprintln!("timer lateness, 24 senders on a cap of 8: {over:?} without a bulkhead, {held:?} with a budget of 6");
         assert!(
             over >= Duration::from_millis(300),
-            "over the cap the surplus holds workers: {over:?}"
+            "without it the surplus holds workers: {over:?}"
         );
+        assert!(
+            held < Duration::from_millis(250),
+            "with it the timer is on time: {held:?}"
+        );
+        assert!(rooms.iter().all(|r| *r == Room::Congested));
+        let stats = budget.stats();
+        assert_eq!(stats.refused, 18, "24 senders, 6 places");
+        assert_eq!(stats.parked, 0, "every place was given back");
+    }
+
+    /// A place is taken and given back, and a budget of zero parks nobody.
+    #[test]
+    fn a_park_budget_counts_its_places_and_gives_them_back() {
+        let budget = ParkBudget::new(2);
+        let first = budget.try_park().expect("first place");
+        let _second = budget.try_park().expect("second place");
+        assert!(budget.try_park().is_none(), "no third place");
+        assert_eq!(
+            budget.stats(),
+            ParkStats {
+                limit: 2,
+                parked: 2,
+                refused: 1
+            }
+        );
+        drop(first);
+        assert!(budget.try_park().is_some(), "a returned place is reusable");
+        assert!(ParkBudget::new(0).try_park().is_none());
     }
 
     /// R2924 — a session that negotiated no QoS has ONE queue, as zenoh's
