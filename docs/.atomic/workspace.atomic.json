@@ -283864,6 +283864,48 @@
         "The aarch64 QNX platform rows are still untried at the lane level; their os_provides and system_assumed are unassessed."
       ]
     },
+    "Round 3552": {
+      "decision_summary": "The session node and driver, wz-ap-demo, is built with the QNX 7.1 SDP's GCC 8.3 for both network stacks (io-pkt and io-sock), packaged through the entry and verified, and the two QNX platform rows are assessed from that build. The entry now reads a qnx-sdp SDK and builds the standard library for a row whose std is build-std, which it did not do, so neither row could be built through it before.",
+      "changes_bullets": [
+        "scripts/lib/wz_package.py: cargo_argv adds -Z build-std=std,panic_abort for a cross row whose std is build-std (a nightly cargo is the caller's); sdk_identity reads a qnx-sdp SDK as the one release directory under .packages/metadata/com.qnx.qnx<NNN> two levels above QNX_TARGET, and refuses when there is not exactly one; verify accepts the kind with the keys kind and revision. The selftest holds both, including two releases under one SDP and a native build.",
+        "deploy/wz-config.toml: qnx710-iosock-aarch64 and qnx710-iopkt-aarch64 name sdk_kind qnx-sdp and state os_provides, read from the SDP headers of each stack (no raw-ethernet: SOCK_RAW is an IP raw socket and the link level is BPF; entropy rests on the board's random device, which no header declares), and system_assumed as measured: libsocket.so.4 or libsocket.so.3, libgcc_s.so.1, libc.so.5, libm.so.3. Both stay support blocked and lane none.",
+        "scripts/qnx-toolchain-env.sh turns the SDP's environment script into CC, AR and the linker (qcc) of both triples, refusing a script that exports no QNX_HOST or QNX_TARGET and a PATH without the compilers. docs/target-build-contract.md step 6 states what builds and what does not."
+      ],
+      "verification_bullets": [
+        "On the machine that holds the QNX 7.1 SDP, inside a directory of its own with its own rust toolchain (nightly with rust-src), wz-ap-demo built, linked and, through the entry (--platform, --artifact ap-demo, debug profile), packaged and verified for both aarch64-unknown-nto-qnx710_iosock and aarch64-unknown-nto-qnx710; the second run read its variables from scripts/qnx-toolchain-env.sh. The manifests record toolchain.sdk as qnx-sdp with the SDP release name, the cc line of GCC 8.3.0, and the NEEDED set above; the ELF is an aarch64 PIE with the QNX loader, and its ABI stamp and driver-role facts survive.",
+        "wz_package.py --selftest, wz_config.py --check (5 platforms agree with rustc), gate_provenance_lint, prose_named_identifier_gate, armed_skip_guard, self_report_lint, root_relative_exclusion_lint, unwired_lane_lint and round_fed_gate_reach pass; validate-workspace shows no new orphan.",
+        "Not run: Layer C1sp or C1st after the change (the host path of cargo_argv is the list it was before; the selftest holds it), the hosted CI, anything on a board."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "capi-c and capi-pico on QNX: next is capi-c, whose ring build script needs the SDP's C compiler (now available through the env script) and, on io-sock, quinn-udp needs IP_RECVTOS, which the io-sock headers have and libc does not declare; capi-pico stops at libc (no strftime, no getrandom) and at a thread-type size contract zenoh-pico has no QNX layout for, which is a decision of whether wz owns one.",
+        "The Unsupported answers (keep-alive idle time, peer credential, IPv6 group join) wait for libc to declare TCP_KEEPIDLE, LOCAL_PEERCRED with struct xucred and ipv6_mreq for io-sock, or for a definition carried with the header-checked layout.",
+        "The rows stay blocked until all three artifacts build; then lane build needs Layer C1sp run with the SDP provisioned, and a library the SDP provides and a board may lack (the C++ runtime) needs bundling or a named assumption.",
+        "Sending the socket2, tokio and libc changes upstream is an outward act and waits for the owner."
+      ],
+      "publishable_decision_summary": "The session node and driver, wz-ap-demo, is built with the QNX 7.1 SDP's GCC 8.3 for both network stacks (io-pkt and io-sock), packaged through the entry and verified, and the two QNX platform rows are assessed from that build. The entry now reads a qnx-sdp SDK and builds the standard library for a row whose std is build-std, which it did not do, so neither row could be built through it before.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_package.py: cargo_argv adds -Z build-std=std,panic_abort for a cross row whose std is build-std (a nightly cargo is the caller's); sdk_identity reads a qnx-sdp SDK as the one release directory under .packages/metadata/com.qnx.qnx<NNN> two levels above QNX_TARGET, and refuses when there is not exactly one; verify accepts the kind with the keys kind and revision. The selftest holds both, including two releases under one SDP and a native build.",
+        "deploy/wz-config.toml: qnx710-iosock-aarch64 and qnx710-iopkt-aarch64 name sdk_kind qnx-sdp and state os_provides, read from the SDP headers of each stack (no raw-ethernet: SOCK_RAW is an IP raw socket and the link level is BPF; entropy rests on the board's random device, which no header declares), and system_assumed as measured: libsocket.so.4 or libsocket.so.3, libgcc_s.so.1, libc.so.5, libm.so.3. Both stay support blocked and lane none.",
+        "scripts/qnx-toolchain-env.sh turns the SDP's environment script into CC, AR and the linker (qcc) of both triples, refusing a script that exports no QNX_HOST or QNX_TARGET and a PATH without the compilers. docs/target-build-contract.md step 6 states what builds and what does not."
+      ],
+      "publishable_verification_bullets": [
+        "On the machine that holds the QNX 7.1 SDP, inside a directory of its own with its own rust toolchain (nightly with rust-src), wz-ap-demo built, linked and, through the entry (--platform, --artifact ap-demo, debug profile), packaged and verified for both aarch64-unknown-nto-qnx710_iosock and aarch64-unknown-nto-qnx710; the second run read its variables from scripts/qnx-toolchain-env.sh. The manifests record toolchain.sdk as qnx-sdp with the SDP release name, the cc line of GCC 8.3.0, and the NEEDED set above; the ELF is an aarch64 PIE with the QNX loader, and its ABI stamp and driver-role facts survive.",
+        "wz_package.py --selftest, wz_config.py --check (5 platforms agree with rustc), gate_provenance_lint, prose_named_identifier_gate, armed_skip_guard, self_report_lint, root_relative_exclusion_lint, unwired_lane_lint and round_fed_gate_reach pass; validate-workspace shows no new orphan.",
+        "Not run: Layer C1sp or C1st after the change (the host path of cargo_argv is the list it was before; the selftest holds it), the hosted CI, anything on a board."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "capi-c and capi-pico on QNX: next is capi-c, whose ring build script needs the SDP's C compiler (now available through the env script) and, on io-sock, quinn-udp needs IP_RECVTOS, which the io-sock headers have and libc does not declare; capi-pico stops at libc (no strftime, no getrandom) and at a thread-type size contract zenoh-pico has no QNX layout for, which is a decision of whether wz owns one.",
+        "The Unsupported answers (keep-alive idle time, peer credential, IPv6 group join) wait for libc to declare TCP_KEEPIDLE, LOCAL_PEERCRED with struct xucred and ipv6_mreq for io-sock, or for a definition carried with the header-checked layout.",
+        "The rows stay blocked until all three artifacts build; then lane build needs Layer C1sp run with the SDP provisioned, and a library the SDP provides and a board may lack (the C++ runtime) needs bundling or a named assumption.",
+        "Sending the socket2, tokio and libc changes upstream is an outward act and waits for the owner."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
