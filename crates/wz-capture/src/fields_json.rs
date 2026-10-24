@@ -565,31 +565,6 @@ pub fn fields_json_since_remembering_progress(
     // function of that history and a trim must not make every later call cost the
     // whole capture. See `crate::TrimPolicy`.
     let grouping = crate::node::SessionGrouping::of(&memory.nodes.nodes_across_trims(d));
-    // Which request each `ResponseFinal` row closed: the exchange plane's own
-    // pairing, continued from where the last call stopped (it begins again only
-    // when the capture is not a prefix-extension of the one it folded, which is
-    // what the census planes do too, and a trim of a list's front does not end
-    // the prefix), and the same table for the comparison below and for the
-    // document, so the two cannot differ on it.
-    //
-    // Its per-row tables are bounded by what the lists hold: when they have grown
-    // past a multiple of it the fold is dropped and begun again over the held
-    // messages, which costs one pass per that many new messages.
-    #[cfg(feature = "network-codecs")]
-    if memory.pairing_outgrew(d) {
-        memory.pairing = Default::default();
-    }
-    #[cfg(feature = "network-codecs")]
-    let pairing_table = memory
-        .pairing
-        .advance_across_trims(d, &grouping, &mut memory.pairing_work, progress, || {
-            crate::exchange::ExchangeFold::begin(d, &crate::filter::Filter::any(), &grouping)
-        })?
-        .table();
-    #[cfg(feature = "network-codecs")]
-    let closings: Option<&PairingTable> = Some(&pairing_table);
-    #[cfg(not(feature = "network-codecs"))]
-    let closings: Option<&PairingTable> = None;
     let origin_ms = d.capture_origin_ms();
     // The capture is a prefix-extension of the one the last call saw, and the
     // messages that arrived since, when it is. A trim of a list's FRONT does not
@@ -602,60 +577,6 @@ pub fn fields_json_since_remembering_progress(
         .filter(|saved| saved.grouping == grouping && saved.origin_ms == origin_ms)
         .and_then(|saved| d.capture_order_since_across_trims(Some(&saved.marks)));
     let continues = advance.is_some();
-
-    let mut revised = alloc::collections::BTreeSet::new();
-    if memory.saved.is_some() && !memory.digests.is_empty() {
-        if continues {
-            memory.stats.unchanged += 1;
-        } else {
-            // Every row written once into a scratch, so each current digest can
-            // be held against the one remembered. A SEPARATE ledger of the
-            // caller's declarations: this walk judges every row, and the
-            // document's own ledger must judge only the rows it writes.
-            let declared = map.map(Declarations::new);
-            let probe = RowSink::new(alloc::collections::BTreeSet::new());
-            let _ = fields_json_selected(
-                d,
-                capture,
-                None,
-                declared.as_ref(),
-                &grouping,
-                RowAttachments {
-                    verdicts: None,
-                    coordinates: Some(coordinates),
-                    since: None,
-                    sink: Some(&probe),
-                    closings,
-                    progress,
-                    walk: None,
-                },
-            );
-            // A probe that was stopped holds the digests of some rows only, and
-            // comparing them to the rows held would call every other row moved.
-            if crate::progress::cancelled(progress) {
-                memory.saved = None;
-                memory.walk = WalkState::default();
-                return None;
-            }
-            let (now, _) = probe.into_parts();
-            for (seq, was) in &memory.digests {
-                if *seq > since.after_seq {
-                    continue;
-                }
-                if let (Some(was), Some(Some(is))) = (was, now.get(seq)) {
-                    if was != is {
-                        revised.insert(*seq);
-                    }
-                }
-            }
-            // The rows still held are the ones the probe saw: a row a ceiling
-            // trimmed has no digest to keep.
-            memory.digests = now;
-            memory.stats.compared += 1;
-        }
-    }
-
-    let sink = RowSink::new(revised);
     // Whether a rule binds a key to an end-to-end profile, which makes the counters of
     // the frames before a row part of what the walk's result depends on.
     let judges_e2e = map.is_some_and(|m| m.has_e2e_rules());
@@ -753,6 +674,139 @@ pub fn fields_json_since_remembering_progress(
         Some(plans)
     })();
     let resume = resume_plans.is_some();
+    // Which request each `ResponseFinal` row closed: the exchange plane's own
+    // pairing, continued from where the last call stopped (it begins again only
+    // when the capture is not a prefix-extension of the one it folded, which is
+    // what the census planes do too, and a trim of a list's front does not end
+    // the prefix), and the same table for the comparison below and for the
+    // document, so the two cannot differ on it.
+    //
+    // Its per-row tables are bounded by what the lists hold: when they have grown
+    // past a multiple of it the fold is dropped and begun again over the held
+    // messages, which costs one pass per that many new messages.
+    //
+    // Open-debt item 924 (`docs/dissect-row-index.md`, D5): the walk below absorbs
+    // the declarations of the messages that arrived since into the table it keeps,
+    // or of every message into a new one, and a list decodes a message each time it
+    // is read. When the pairing's walk takes exactly those messages, it hands each
+    // to the absorption as well, so the call decodes it once.
+    #[cfg(feature = "network-codecs")]
+    if memory.pairing_outgrew(d) {
+        memory.pairing = Default::default();
+    }
+    #[cfg(feature = "network-codecs")]
+    let mut absorbed_anew = crate::agg::KeyexprSpaces::default();
+    #[cfg(feature = "network-codecs")]
+    let (pairing_table, absorbed) = {
+        let FieldsMemory {
+            pairing,
+            pairing_work,
+            saved,
+            walk,
+            ..
+        } = &mut *memory;
+        let into: &mut crate::agg::KeyexprSpaces = if resume {
+            &mut walk.spaces
+        } else {
+            &mut absorbed_anew
+        };
+        let mut absorb =
+            |_: &crate::link::FlowKey, list: usize, packet: usize, frame: &PassiveFrame| {
+                into.enter_flow(grouping.owners(list));
+                into.at_packet(packet);
+                into.absorb_frame(frame);
+            };
+        let wanted = match saved.as_ref() {
+            Some(saved) if resume => crate::ordered_fold::Wanted::Since(&saved.marks),
+            _ => crate::ordered_fold::Wanted::Everything,
+        };
+        let mut share = crate::ordered_fold::Share {
+            wanted,
+            tap: &mut absorb,
+            fed: false,
+        };
+        let fold = pairing.advance_across_trims(
+            d,
+            &grouping,
+            pairing_work,
+            progress,
+            || crate::exchange::ExchangeFold::begin(d, &crate::filter::Filter::any(), &grouping),
+            Some(&mut share),
+        );
+        let fed = share.fed;
+        match fold {
+            Some(fold) => (fold.table(), fed),
+            None => {
+                // Stopped: a walk that goes on may have absorbed some of the new
+                // messages into the table it keeps, so it begins again next time.
+                if resume {
+                    memory.saved = None;
+                    memory.walk = WalkState::default();
+                }
+                return None;
+            }
+        }
+    };
+    #[cfg(not(feature = "network-codecs"))]
+    let absorbed = false;
+    #[cfg(feature = "network-codecs")]
+    let closings: Option<&PairingTable> = Some(&pairing_table);
+    #[cfg(not(feature = "network-codecs"))]
+    let closings: Option<&PairingTable> = None;
+
+    let mut revised = alloc::collections::BTreeSet::new();
+    if memory.saved.is_some() && !memory.digests.is_empty() {
+        if continues {
+            memory.stats.unchanged += 1;
+        } else {
+            // Every row written once into a scratch, so each current digest can
+            // be held against the one remembered. A SEPARATE ledger of the
+            // caller's declarations: this walk judges every row, and the
+            // document's own ledger must judge only the rows it writes.
+            let declared = map.map(Declarations::new);
+            let probe = RowSink::new(alloc::collections::BTreeSet::new());
+            let _ = fields_json_selected(
+                d,
+                capture,
+                None,
+                declared.as_ref(),
+                &grouping,
+                RowAttachments {
+                    verdicts: None,
+                    coordinates: Some(coordinates),
+                    since: None,
+                    sink: Some(&probe),
+                    closings,
+                    progress,
+                    walk: None,
+                },
+            );
+            // A probe that was stopped holds the digests of some rows only, and
+            // comparing them to the rows held would call every other row moved.
+            if crate::progress::cancelled(progress) {
+                memory.saved = None;
+                memory.walk = WalkState::default();
+                return None;
+            }
+            let (now, _) = probe.into_parts();
+            for (seq, was) in &memory.digests {
+                if *seq > since.after_seq {
+                    continue;
+                }
+                if let (Some(was), Some(Some(is))) = (was, now.get(seq)) {
+                    if was != is {
+                        revised.insert(*seq);
+                    }
+                }
+            }
+            // The rows still held are the ones the probe saw: a row a ceiling
+            // trimmed has no digest to keep.
+            memory.digests = now;
+            memory.stats.compared += 1;
+        }
+    }
+
+    let sink = RowSink::new(revised);
     // The counters this walk judges against: the last walk's when it goes on from
     // there, and none when it begins.
     let ledger = match memory.e2e.take() {
@@ -763,10 +817,16 @@ pub fn fields_json_since_remembering_progress(
     // The marks a prefix-extension handed back are the marks of the capture as it
     // stands, so the walk that follows does not make them again from the first
     // message (which is a sort of every message and would put the cost back).
+    // Messages the pairing's walk already absorbed are not absorbed again.
     let (new_frames, advance_marks) = match advance {
-        Some((frames, marks)) => (resume.then_some(frames), Some(marks)),
+        Some((frames, marks)) => ((resume && !absorbed).then_some(frames), Some(marks)),
         None => (None, None),
     };
+    // A walk that begins takes the table the pairing's walk filled, when it did.
+    #[cfg(feature = "network-codecs")]
+    let absorbed_anew = (!resume && absorbed).then_some(absorbed_anew);
+    #[cfg(not(feature = "network-codecs"))]
+    let absorbed_anew = None;
     let document = fields_json_selected(
         d,
         capture,
@@ -785,6 +845,7 @@ pub fn fields_json_since_remembering_progress(
                 resume,
                 plans: resume_plans.unwrap_or_default(),
                 new_frames,
+                absorbed: absorbed_anew,
             }),
         },
     );
@@ -1380,8 +1441,13 @@ pub(crate) struct WalkRun<'a> {
     /// it stopped.
     plans: Vec<Option<CaptureOrderPlan>>,
     /// The messages that arrived since, in capture order, whose declarations are
-    /// absorbed into the kept table.
+    /// absorbed into the kept table; `None` when there are none, or when another
+    /// walk of the same call absorbed them already.
     new_frames: Option<crate::CaptureOrder<'a>>,
+    /// For a walk that begins: the table with every declaration absorbed, when
+    /// another walk of the same call filled it, so this one does not walk the
+    /// capture again to fill it.
+    absorbed: Option<crate::agg::KeyexprSpaces>,
 }
 
 /// The order in which a stream flow's new messages are written, the running
@@ -1460,9 +1526,9 @@ fn fields_json_selected(
     // does not gets a throwaway one and every producer is told to keep nothing,
     // so the document it writes is the document it always wrote.
     let tracking = walk.is_some();
-    let (resume, mut plans, new_frames, kept) = match walk {
-        Some(w) => (w.resume, w.plans, w.new_frames, Some(w.state)),
-        None => (false, Vec::new(), None, None),
+    let (resume, mut plans, new_frames, absorbed, kept) = match walk {
+        Some(w) => (w.resume, w.plans, w.new_frames, w.absorbed, Some(w.state)),
+        None => (false, Vec::new(), None, None, None),
     };
     let mut throwaway = WalkState::default();
     let state: &mut WalkState = match kept {
@@ -1498,7 +1564,10 @@ fn fields_json_selected(
             spaces.absorb_frame(&frame);
         }
     } else {
-        absorb_every_declaration(d, grouping, spaces);
+        match absorbed {
+            Some(table) => *spaces = table,
+            None => absorb_every_declaration(d, grouping, spaces),
+        }
     }
     // R2100 (open-debt item 509) — the document's own revision, first key. See
     // `doc_revision`; the census document opens the same way.
