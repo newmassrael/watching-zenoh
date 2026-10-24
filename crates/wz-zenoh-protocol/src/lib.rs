@@ -12,10 +12,12 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 extern crate alloc;
 
+pub mod common;
 pub mod core;
 pub mod network;
 pub mod scouting;
 pub mod transport;
+pub mod zenoh;
 
 // Zenoh version
 pub const VERSION: u8 = 0x09;

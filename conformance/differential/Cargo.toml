@@ -47,6 +47,8 @@ serde_json = "1"
 # runs on both.
 up_protocol = { package = "zenoh-protocol", version = "=1.10.1", features = ["unstable", "internal", "test"] }
 wz_protocol = { package = "zenoh-protocol", path = "../../crates/wz-zenoh-protocol", features = ["unstable", "internal", "test"] }
+# The timestamp of a put or a delete is `uhlc`'s, one package for both crates, so the tests name it.
+uhlc = { version = "0.8.0", default-features = false, features = ["std"] }
 # `zenoh-buffers`: the pair again, each over its own `zenoh-collections` (upstream's from the registry,
 # wz's by path, as for every family crate), built with `std`.
 up_buffers = { package = "zenoh-buffers", version = "=1.10.1" }

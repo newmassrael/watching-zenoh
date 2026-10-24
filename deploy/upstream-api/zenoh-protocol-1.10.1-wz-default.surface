@@ -3,6 +3,24 @@
 # toolchain: nightly-2026-06-07
 # format_version: 57
 const zenoh_protocol::VERSION
+const zenoh_protocol::common::extension::iext::ENC_MASK
+const zenoh_protocol::common::extension::iext::ENC_UNIT
+const zenoh_protocol::common::extension::iext::ENC_Z64
+const zenoh_protocol::common::extension::iext::ENC_ZBUF
+const zenoh_protocol::common::extension::iext::FLAG_M
+const zenoh_protocol::common::extension::iext::FLAG_Z
+const zenoh_protocol::common::extension::iext::ID_BITS
+const zenoh_protocol::common::extension::iext::ID_MASK
+const zenoh_protocol::common::iext::ENC_MASK
+const zenoh_protocol::common::iext::ENC_UNIT
+const zenoh_protocol::common::iext::ENC_Z64
+const zenoh_protocol::common::iext::ENC_ZBUF
+const zenoh_protocol::common::iext::FLAG_M
+const zenoh_protocol::common::iext::FLAG_Z
+const zenoh_protocol::common::iext::ID_BITS
+const zenoh_protocol::common::iext::ID_MASK
+const zenoh_protocol::common::imsg::HEADER_BITS
+const zenoh_protocol::common::imsg::HEADER_MASK
 const zenoh_protocol::core::CONFIG_SEPARATOR
 const zenoh_protocol::core::EMPTY_EXPR_ID
 const zenoh_protocol::core::METADATA_SEPARATOR
@@ -18,6 +36,26 @@ const zenoh_protocol::scouting::id::HELLO
 const zenoh_protocol::scouting::id::SCOUT
 const zenoh_protocol::scouting::scout::flag::I
 const zenoh_protocol::scouting::scout::flag::Z
+const zenoh_protocol::zenoh::del::flag::T
+const zenoh_protocol::zenoh::del::flag::Z
+const zenoh_protocol::zenoh::err::flag::E
+const zenoh_protocol::zenoh::err::flag::Z
+const zenoh_protocol::zenoh::id::DEL
+const zenoh_protocol::zenoh::id::ERR
+const zenoh_protocol::zenoh::id::OAM
+const zenoh_protocol::zenoh::id::PUT
+const zenoh_protocol::zenoh::id::QUERY
+const zenoh_protocol::zenoh::id::REPLY
+const zenoh_protocol::zenoh::put::flag::E
+const zenoh_protocol::zenoh::put::flag::T
+const zenoh_protocol::zenoh::put::flag::Z
+const zenoh_protocol::zenoh::query::flag::C
+const zenoh_protocol::zenoh::query::flag::P
+const zenoh_protocol::zenoh::query::flag::Z
+const zenoh_protocol::zenoh::reply::flag::C
+const zenoh_protocol::zenoh::reply::flag::Z
+enum zenoh_protocol::common::ZExtBody
+enum zenoh_protocol::common::extension::ZExtBody
 enum zenoh_protocol::core::Bits
 enum zenoh_protocol::core::Bound
 enum zenoh_protocol::core::CongestionControl
@@ -42,6 +80,39 @@ enum zenoh_protocol::core::resolution::Field
 enum zenoh_protocol::core::whatami::WhatAmI
 enum zenoh_protocol::network::Mapping
 enum zenoh_protocol::scouting::ScoutingBody
+enum zenoh_protocol::zenoh::ConsolidationMode
+enum zenoh_protocol::zenoh::PushBody
+enum zenoh_protocol::zenoh::RequestBody
+enum zenoh_protocol::zenoh::ResponseBody
+enum zenoh_protocol::zenoh::query::ConsolidationMode
+fn zenoh_protocol::common::extension::ZExtUnit::id(bool) -> u8 ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtUnit<ID>
+fn zenoh_protocol::common::extension::ZExtUnit::is_mandatory(&Self) -> bool ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtUnit<ID>
+fn zenoh_protocol::common::extension::ZExtUnit::new() -> Self ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtUnit<ID>
+fn zenoh_protocol::common::extension::ZExtUnit::transmute<const DI: u8>(Self) -> zenoh_protocol::common::extension::ZExtUnit<DI> ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtUnit<ID>
+fn zenoh_protocol::common::extension::ZExtUnknown::is_mandatory(&Self) -> bool ; const ; in impl zenoh_protocol::common::extension::ZExtUnknown
+fn zenoh_protocol::common::extension::ZExtUnknown::new(u8, bool, zenoh_protocol::common::extension::ZExtBody) -> Self ; const ; in impl zenoh_protocol::common::extension::ZExtUnknown
+fn zenoh_protocol::common::extension::ZExtZ64::id(bool) -> u8 ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtZ64<ID>
+fn zenoh_protocol::common::extension::ZExtZ64::is_mandatory(&Self) -> bool ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtZ64<ID>
+fn zenoh_protocol::common::extension::ZExtZ64::new(u64) -> Self ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtZ64<ID>
+fn zenoh_protocol::common::extension::ZExtZ64::transmute<const DI: u8>(Self) -> zenoh_protocol::common::extension::ZExtZ64<DI> ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtZ64<ID>
+fn zenoh_protocol::common::extension::ZExtZBuf::id(bool) -> u8 ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtZBuf<ID>
+fn zenoh_protocol::common::extension::ZExtZBuf::is_mandatory(&Self) -> bool ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtZBuf<ID>
+fn zenoh_protocol::common::extension::ZExtZBuf::new(zenoh_buffers::zbuf::ZBuf) -> Self ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtZBuf<ID>
+fn zenoh_protocol::common::extension::ZExtZBuf::transmute<const DI: u8>(Self) -> zenoh_protocol::common::extension::ZExtZBuf<DI> ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtZBuf<ID>
+fn zenoh_protocol::common::extension::ZExtZBufHeader::id(bool) -> u8 ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtZBufHeader<ID>
+fn zenoh_protocol::common::extension::ZExtZBufHeader::is_mandatory(&Self) -> bool ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtZBufHeader<ID>
+fn zenoh_protocol::common::extension::ZExtZBufHeader::new(usize) -> Self ; const ; in impl<const ID: u8> zenoh_protocol::common::extension::ZExtZBufHeader<ID>
+fn zenoh_protocol::common::extension::iext::eid(u8) -> u8 ; const
+fn zenoh_protocol::common::extension::iext::mid(u8) -> u8 ; const
+fn zenoh_protocol::common::iext::eid(u8) -> u8 ; const
+fn zenoh_protocol::common::iext::mid(u8) -> u8 ; const
+fn zenoh_protocol::common::imsg::flags(u8) -> u8 ; const
+fn zenoh_protocol::common::imsg::has_flag(u8, u8) -> bool ; const
+fn zenoh_protocol::common::imsg::has_option(u64, u64) -> bool ; const
+fn zenoh_protocol::common::imsg::mid(u8) -> u8 ; const
+fn zenoh_protocol::common::imsg::set_bitfield(u8, u8, u8) -> u8 ; const
+fn zenoh_protocol::common::imsg::set_flag(u8, u8) -> u8 ; const
+fn zenoh_protocol::common::imsg::unset_flag(u8, u8) -> u8 ; const
 fn zenoh_protocol::core::CowStr::as_str(&Self) -> &str ; in impl<'0> zenoh_protocol::core::CowStr<'0>
 fn zenoh_protocol::core::PriorityRange::includes(&Self, &zenoh_protocol::core::PriorityRange) -> bool ; in impl zenoh_protocol::core::PriorityRange
 fn zenoh_protocol::core::PriorityRange::is_empty(&Self) -> bool ; in impl zenoh_protocol::core::PriorityRange
@@ -160,6 +231,12 @@ fn zenoh_protocol::core::wire_expr::WireExpr::to_owned(&Self) -> zenoh_protocol:
 fn zenoh_protocol::core::wire_expr::WireExpr::try_as_id(&'0 Self) -> zenoh_result::ZResult<zenoh_protocol::core::wire_expr::ExprId> ; in impl<'0> zenoh_protocol::core::wire_expr::WireExpr<'0>
 fn zenoh_protocol::core::wire_expr::WireExpr::try_as_str(&'0 Self) -> zenoh_result::ZResult<&'0 str> ; in impl<'0> zenoh_protocol::core::wire_expr::WireExpr<'0>
 fn zenoh_protocol::core::wire_expr::WireExpr::with_suffix(Self, &'0 str) -> Self ; in impl<'0> zenoh_protocol::core::wire_expr::WireExpr<'0>
+impl core::clone::Clone for zenoh_protocol::common::extension::ZExtBody
+impl core::clone::Clone for zenoh_protocol::common::extension::ZExtUnit
+impl core::clone::Clone for zenoh_protocol::common::extension::ZExtUnknown
+impl core::clone::Clone for zenoh_protocol::common::extension::ZExtZ64
+impl core::clone::Clone for zenoh_protocol::common::extension::ZExtZBuf
+impl core::clone::Clone for zenoh_protocol::common::extension::ZExtZBufHeader
 impl core::clone::Clone for zenoh_protocol::core::Channel
 impl core::clone::Clone for zenoh_protocol::core::CongestionControl
 impl core::clone::Clone for zenoh_protocol::core::CowStr
@@ -194,6 +271,25 @@ impl core::clone::Clone for zenoh_protocol::scouting::ScoutingBody
 impl core::clone::Clone for zenoh_protocol::scouting::ScoutingMessage
 impl core::clone::Clone for zenoh_protocol::scouting::hello::HelloProto
 impl core::clone::Clone for zenoh_protocol::scouting::scout::Scout
+impl core::clone::Clone for zenoh_protocol::zenoh::DataInfo
+impl core::clone::Clone for zenoh_protocol::zenoh::PushBody
+impl core::clone::Clone for zenoh_protocol::zenoh::RequestBody
+impl core::clone::Clone for zenoh_protocol::zenoh::ResponseBody
+impl core::clone::Clone for zenoh_protocol::zenoh::del::Del
+impl core::clone::Clone for zenoh_protocol::zenoh::err::Err
+impl core::clone::Clone for zenoh_protocol::zenoh::ext::AttachmentType
+impl core::clone::Clone for zenoh_protocol::zenoh::ext::SourceInfoType
+impl core::clone::Clone for zenoh_protocol::zenoh::ext::ValueType
+impl core::clone::Clone for zenoh_protocol::zenoh::put::Put
+impl core::clone::Clone for zenoh_protocol::zenoh::query::ConsolidationMode
+impl core::clone::Clone for zenoh_protocol::zenoh::query::Query
+impl core::clone::Clone for zenoh_protocol::zenoh::reply::Reply
+impl core::cmp::Eq for zenoh_protocol::common::extension::ZExtBody
+impl core::cmp::Eq for zenoh_protocol::common::extension::ZExtUnit
+impl core::cmp::Eq for zenoh_protocol::common::extension::ZExtUnknown
+impl core::cmp::Eq for zenoh_protocol::common::extension::ZExtZ64
+impl core::cmp::Eq for zenoh_protocol::common::extension::ZExtZBuf
+impl core::cmp::Eq for zenoh_protocol::common::extension::ZExtZBufHeader
 impl core::cmp::Eq for zenoh_protocol::core::Channel
 impl core::cmp::Eq for zenoh_protocol::core::CongestionControl
 impl core::cmp::Eq for zenoh_protocol::core::CowStr
@@ -231,12 +327,31 @@ impl core::cmp::Eq for zenoh_protocol::scouting::ScoutingBody
 impl core::cmp::Eq for zenoh_protocol::scouting::ScoutingMessage
 impl core::cmp::Eq for zenoh_protocol::scouting::hello::HelloProto
 impl core::cmp::Eq for zenoh_protocol::scouting::scout::Scout
+impl core::cmp::Eq for zenoh_protocol::zenoh::DataInfo
+impl core::cmp::Eq for zenoh_protocol::zenoh::PushBody
+impl core::cmp::Eq for zenoh_protocol::zenoh::RequestBody
+impl core::cmp::Eq for zenoh_protocol::zenoh::ResponseBody
+impl core::cmp::Eq for zenoh_protocol::zenoh::del::Del
+impl core::cmp::Eq for zenoh_protocol::zenoh::err::Err
+impl core::cmp::Eq for zenoh_protocol::zenoh::ext::AttachmentType
+impl core::cmp::Eq for zenoh_protocol::zenoh::ext::SourceInfoType
+impl core::cmp::Eq for zenoh_protocol::zenoh::ext::ValueType
+impl core::cmp::Eq for zenoh_protocol::zenoh::put::Put
+impl core::cmp::Eq for zenoh_protocol::zenoh::query::ConsolidationMode
+impl core::cmp::Eq for zenoh_protocol::zenoh::query::Query
+impl core::cmp::Eq for zenoh_protocol::zenoh::reply::Reply
 impl core::cmp::Ord for zenoh_protocol::core::Priority
 impl core::cmp::Ord for zenoh_protocol::core::ZenohIdProto
 impl core::cmp::Ord for zenoh_protocol::core::region::Region
 impl core::cmp::Ord for zenoh_protocol::core::resolution::Bits
 impl core::cmp::Ord for zenoh_protocol::core::resolution::Resolution
 impl core::cmp::Ord for zenoh_protocol::core::whatami::WhatAmI
+impl core::cmp::PartialEq for zenoh_protocol::common::extension::ZExtBody
+impl core::cmp::PartialEq for zenoh_protocol::common::extension::ZExtUnit
+impl core::cmp::PartialEq for zenoh_protocol::common::extension::ZExtUnknown
+impl core::cmp::PartialEq for zenoh_protocol::common::extension::ZExtZ64
+impl core::cmp::PartialEq for zenoh_protocol::common::extension::ZExtZBuf
+impl core::cmp::PartialEq for zenoh_protocol::common::extension::ZExtZBufHeader
 impl core::cmp::PartialEq for zenoh_protocol::core::Channel
 impl core::cmp::PartialEq for zenoh_protocol::core::CongestionControl
 impl core::cmp::PartialEq for zenoh_protocol::core::CowStr
@@ -275,6 +390,19 @@ impl core::cmp::PartialEq for zenoh_protocol::scouting::ScoutingBody
 impl core::cmp::PartialEq for zenoh_protocol::scouting::ScoutingMessage
 impl core::cmp::PartialEq for zenoh_protocol::scouting::hello::HelloProto
 impl core::cmp::PartialEq for zenoh_protocol::scouting::scout::Scout
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::DataInfo
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::PushBody
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::RequestBody
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::ResponseBody
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::del::Del
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::err::Err
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::ext::AttachmentType
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::ext::SourceInfoType
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::ext::ValueType
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::put::Put
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::query::ConsolidationMode
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::query::Query
+impl core::cmp::PartialEq for zenoh_protocol::zenoh::reply::Reply
 impl core::cmp::PartialOrd for zenoh_protocol::core::Priority
 impl core::cmp::PartialOrd for zenoh_protocol::core::ZenohIdProto
 impl core::cmp::PartialOrd for zenoh_protocol::core::region::Region
@@ -297,6 +425,7 @@ impl core::convert::From for std::collections::hash::map::HashMap
 impl core::convert::From for u8
 impl core::convert::From for uhlc::id::ID
 impl core::convert::From for zenoh_keyexpr::key_expr::owned::OwnedKeyExpr
+impl core::convert::From for zenoh_protocol::common::extension::ZExtUnknown
 impl core::convert::From for zenoh_protocol::core::CowStr
 impl core::convert::From for zenoh_protocol::core::Reliability
 impl core::convert::From for zenoh_protocol::core::SizeError
@@ -310,6 +439,12 @@ impl core::convert::From for zenoh_protocol::core::resolution::Resolution
 impl core::convert::From for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::convert::From for zenoh_protocol::core::wire_expr::WireExpr
 impl core::convert::From for zenoh_protocol::scouting::ScoutingMessage
+impl core::convert::From for zenoh_protocol::zenoh::PushBody
+impl core::convert::From for zenoh_protocol::zenoh::RequestBody
+impl core::convert::From for zenoh_protocol::zenoh::ResponseBody
+impl core::convert::TryFrom for zenoh_protocol::common::extension::ZExtUnit
+impl core::convert::TryFrom for zenoh_protocol::common::extension::ZExtZ64
+impl core::convert::TryFrom for zenoh_protocol::common::extension::ZExtZBuf
 impl core::convert::TryFrom for zenoh_protocol::core::Priority
 impl core::convert::TryFrom for zenoh_protocol::core::ZenohIdProto
 impl core::convert::TryFrom for zenoh_protocol::core::endpoint::EndPoint
@@ -320,6 +455,8 @@ impl core::convert::TryFrom for zenoh_protocol::core::region::RegionName
 impl core::convert::TryFrom for zenoh_protocol::core::whatami::WhatAmI
 impl core::convert::TryFrom for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::convert::TryInto for zenoh_protocol::core::wire_expr::WireExpr
+impl core::default::Default for zenoh_protocol::common::extension::ZExtBody
+impl core::default::Default for zenoh_protocol::common::extension::ZExtUnit
 impl core::default::Default for zenoh_protocol::core::Channel
 impl core::default::Default for zenoh_protocol::core::CongestionControl
 impl core::default::Default for zenoh_protocol::core::EntityGlobalIdProto
@@ -333,11 +470,22 @@ impl core::default::Default for zenoh_protocol::core::region::Region
 impl core::default::Default for zenoh_protocol::core::resolution::Resolution
 impl core::default::Default for zenoh_protocol::core::whatami::WhatAmI
 impl core::default::Default for zenoh_protocol::network::Mapping
+impl core::default::Default for zenoh_protocol::zenoh::del::Del
+impl core::default::Default for zenoh_protocol::zenoh::put::Put
+impl core::default::Default for zenoh_protocol::zenoh::query::ConsolidationMode
+impl core::default::Default for zenoh_protocol::zenoh::query::Query
 impl core::error::Error for zenoh_protocol::core::InvalidPriorityRange
 impl core::error::Error for zenoh_protocol::core::InvalidReliability
 impl core::error::Error for zenoh_protocol::core::SizeError
 impl core::error::Error for zenoh_protocol::core::region::InvalidBoundError
 impl core::error::Error for zenoh_protocol::core::region::InvalidRegionNameError
+impl core::fmt::Debug for zenoh_protocol::common::extension::DidntConvert
+impl core::fmt::Debug for zenoh_protocol::common::extension::ZExtBody
+impl core::fmt::Debug for zenoh_protocol::common::extension::ZExtUnit
+impl core::fmt::Debug for zenoh_protocol::common::extension::ZExtUnknown
+impl core::fmt::Debug for zenoh_protocol::common::extension::ZExtZ64
+impl core::fmt::Debug for zenoh_protocol::common::extension::ZExtZBuf
+impl core::fmt::Debug for zenoh_protocol::common::extension::ZExtZBufHeader
 impl core::fmt::Debug for zenoh_protocol::core::Channel
 impl core::fmt::Debug for zenoh_protocol::core::CongestionControl
 impl core::fmt::Debug for zenoh_protocol::core::CowStr
@@ -385,6 +533,19 @@ impl core::fmt::Debug for zenoh_protocol::scouting::ScoutingBody
 impl core::fmt::Debug for zenoh_protocol::scouting::ScoutingMessage
 impl core::fmt::Debug for zenoh_protocol::scouting::hello::HelloProto
 impl core::fmt::Debug for zenoh_protocol::scouting::scout::Scout
+impl core::fmt::Debug for zenoh_protocol::zenoh::DataInfo
+impl core::fmt::Debug for zenoh_protocol::zenoh::PushBody
+impl core::fmt::Debug for zenoh_protocol::zenoh::RequestBody
+impl core::fmt::Debug for zenoh_protocol::zenoh::ResponseBody
+impl core::fmt::Debug for zenoh_protocol::zenoh::del::Del
+impl core::fmt::Debug for zenoh_protocol::zenoh::err::Err
+impl core::fmt::Debug for zenoh_protocol::zenoh::ext::AttachmentType
+impl core::fmt::Debug for zenoh_protocol::zenoh::ext::SourceInfoType
+impl core::fmt::Debug for zenoh_protocol::zenoh::ext::ValueType
+impl core::fmt::Debug for zenoh_protocol::zenoh::put::Put
+impl core::fmt::Debug for zenoh_protocol::zenoh::query::ConsolidationMode
+impl core::fmt::Debug for zenoh_protocol::zenoh::query::Query
+impl core::fmt::Debug for zenoh_protocol::zenoh::reply::Reply
 impl core::fmt::Display for zenoh_protocol::core::CowStr
 impl core::fmt::Display for zenoh_protocol::core::InvalidPriorityRange
 impl core::fmt::Display for zenoh_protocol::core::InvalidReliability
@@ -438,6 +599,8 @@ impl core::hash::Hash for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::hash::Hash for zenoh_protocol::core::wire_expr::WireExpr
 impl core::hash::Hash for zenoh_protocol::network::Mapping
 impl core::iter::traits::collect::FromIterator for zenoh_protocol::core::parameters::Parameters
+impl core::marker::Copy for zenoh_protocol::common::extension::ZExtUnit
+impl core::marker::Copy for zenoh_protocol::common::extension::ZExtZ64
 impl core::marker::Copy for zenoh_protocol::core::Channel
 impl core::marker::Copy for zenoh_protocol::core::CongestionControl
 impl core::marker::Copy for zenoh_protocol::core::EntityGlobalIdProto
@@ -458,6 +621,14 @@ impl core::marker::Copy for zenoh_protocol::core::resolution::Resolution
 impl core::marker::Copy for zenoh_protocol::core::whatami::WhatAmI
 impl core::marker::Copy for zenoh_protocol::core::whatami::WhatAmIMatcher
 impl core::marker::Copy for zenoh_protocol::network::Mapping
+impl core::marker::Copy for zenoh_protocol::zenoh::ext::SourceInfoType
+impl core::marker::Copy for zenoh_protocol::zenoh::query::ConsolidationMode
+impl core::marker::StructuralPartialEq for zenoh_protocol::common::extension::ZExtBody
+impl core::marker::StructuralPartialEq for zenoh_protocol::common::extension::ZExtUnit
+impl core::marker::StructuralPartialEq for zenoh_protocol::common::extension::ZExtUnknown
+impl core::marker::StructuralPartialEq for zenoh_protocol::common::extension::ZExtZ64
+impl core::marker::StructuralPartialEq for zenoh_protocol::common::extension::ZExtZBuf
+impl core::marker::StructuralPartialEq for zenoh_protocol::common::extension::ZExtZBufHeader
 impl core::marker::StructuralPartialEq for zenoh_protocol::core::Channel
 impl core::marker::StructuralPartialEq for zenoh_protocol::core::CongestionControl
 impl core::marker::StructuralPartialEq for zenoh_protocol::core::EntityGlobalIdProto
@@ -495,6 +666,19 @@ impl core::marker::StructuralPartialEq for zenoh_protocol::scouting::ScoutingBod
 impl core::marker::StructuralPartialEq for zenoh_protocol::scouting::ScoutingMessage
 impl core::marker::StructuralPartialEq for zenoh_protocol::scouting::hello::HelloProto
 impl core::marker::StructuralPartialEq for zenoh_protocol::scouting::scout::Scout
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::DataInfo
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::PushBody
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::RequestBody
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::ResponseBody
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::del::Del
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::err::Err
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::ext::AttachmentType
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::ext::SourceInfoType
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::ext::ValueType
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::put::Put
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::query::ConsolidationMode
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::query::Query
+impl core::marker::StructuralPartialEq for zenoh_protocol::zenoh::reply::Reply
 impl core::ops::arith::Add for zenoh_protocol::core::CowStr
 impl core::ops::bit::BitOr for zenoh_protocol::core::whatami::WhatAmI
 impl core::ops::bit::BitOr for zenoh_protocol::core::whatami::WhatAmIMatcher
@@ -524,6 +708,7 @@ impl serde_core::de::Deserialize for zenoh_protocol::core::region::RegionName
 impl serde_core::de::Deserialize for zenoh_protocol::core::resolution::Bits
 impl serde_core::de::Deserialize for zenoh_protocol::core::whatami::WhatAmI
 impl serde_core::de::Deserialize for zenoh_protocol::core::whatami::WhatAmIMatcher
+impl serde_core::de::Deserialize for zenoh_protocol::zenoh::query::ConsolidationMode
 impl serde_core::de::Visitor for zenoh_protocol::core::resolution::BitsVisitor
 impl serde_core::de::Visitor for zenoh_protocol::core::whatami::WhatAmIMatcherVisitor
 impl serde_core::de::Visitor for zenoh_protocol::core::whatami::WhatAmIVisitor
@@ -541,6 +726,14 @@ impl serde_core::ser::Serialize for zenoh_protocol::core::region::RegionName
 impl serde_core::ser::Serialize for zenoh_protocol::core::resolution::Bits
 impl serde_core::ser::Serialize for zenoh_protocol::core::whatami::WhatAmI
 impl serde_core::ser::Serialize for zenoh_protocol::core::whatami::WhatAmIMatcher
+macro zenoh_protocol::zextunit
+macro zenoh_protocol::zextz64
+macro zenoh_protocol::zextzbuf
+mod zenoh_protocol::common
+mod zenoh_protocol::common::extension
+mod zenoh_protocol::common::extension::iext
+mod zenoh_protocol::common::iext
+mod zenoh_protocol::common::imsg
 mod zenoh_protocol::core
 mod zenoh_protocol::core::encoding
 mod zenoh_protocol::core::encoding::flag
@@ -560,9 +753,38 @@ mod zenoh_protocol::scouting::id
 mod zenoh_protocol::scouting::scout
 mod zenoh_protocol::scouting::scout::flag
 mod zenoh_protocol::transport
+mod zenoh_protocol::zenoh
+mod zenoh_protocol::zenoh::del
+mod zenoh_protocol::zenoh::del::ext
+mod zenoh_protocol::zenoh::del::flag
+mod zenoh_protocol::zenoh::err
+mod zenoh_protocol::zenoh::err::ext
+mod zenoh_protocol::zenoh::err::flag
+mod zenoh_protocol::zenoh::ext
+mod zenoh_protocol::zenoh::id
+mod zenoh_protocol::zenoh::put
+mod zenoh_protocol::zenoh::put::ext
+mod zenoh_protocol::zenoh::put::flag
+mod zenoh_protocol::zenoh::query
+mod zenoh_protocol::zenoh::query::ext
+mod zenoh_protocol::zenoh::query::flag
+mod zenoh_protocol::zenoh::reply
+mod zenoh_protocol::zenoh::reply::flag
 reexport module zenoh_protocol::core::key_expr = zenoh_keyexpr::key_expr
 reexport struct zenoh_protocol::core::NTP64 = uhlc::ntp64::NTP64
 reexport struct zenoh_protocol::core::Timestamp = uhlc::timestamp::Timestamp
+struct zenoh_protocol::common::DidntConvert
+struct zenoh_protocol::common::ZExtUnit
+struct zenoh_protocol::common::ZExtUnknown
+struct zenoh_protocol::common::ZExtZ64
+struct zenoh_protocol::common::ZExtZBuf
+struct zenoh_protocol::common::ZExtZBufHeader
+struct zenoh_protocol::common::extension::DidntConvert
+struct zenoh_protocol::common::extension::ZExtUnit
+struct zenoh_protocol::common::extension::ZExtUnknown
+struct zenoh_protocol::common::extension::ZExtZ64
+struct zenoh_protocol::common::extension::ZExtZBuf
+struct zenoh_protocol::common::extension::ZExtZBufHeader
 struct zenoh_protocol::core::Address
 struct zenoh_protocol::core::AddressMut
 struct zenoh_protocol::core::BitsVisitor
@@ -618,6 +840,20 @@ struct zenoh_protocol::scouting::Scout
 struct zenoh_protocol::scouting::ScoutingMessage
 struct zenoh_protocol::scouting::hello::HelloProto
 struct zenoh_protocol::scouting::scout::Scout
+struct zenoh_protocol::zenoh::DataInfo
+struct zenoh_protocol::zenoh::Del
+struct zenoh_protocol::zenoh::Err
+struct zenoh_protocol::zenoh::Put
+struct zenoh_protocol::zenoh::Query
+struct zenoh_protocol::zenoh::Reply
+struct zenoh_protocol::zenoh::del::Del
+struct zenoh_protocol::zenoh::err::Err
+struct zenoh_protocol::zenoh::ext::AttachmentType
+struct zenoh_protocol::zenoh::ext::SourceInfoType
+struct zenoh_protocol::zenoh::ext::ValueType
+struct zenoh_protocol::zenoh::put::Put
+struct zenoh_protocol::zenoh::query::Query
+struct zenoh_protocol::zenoh::reply::Reply
 type zenoh_protocol::core::AtomicExprId
 type zenoh_protocol::core::EncodingId
 type zenoh_protocol::core::EntityId
@@ -632,3 +868,19 @@ type zenoh_protocol::network::RequestId
 type zenoh_protocol::network::request::AtomicRequestId
 type zenoh_protocol::network::request::RequestId
 type zenoh_protocol::transport::TransportSn
+type zenoh_protocol::zenoh::del::ext::Attachment
+type zenoh_protocol::zenoh::del::ext::AttachmentType
+type zenoh_protocol::zenoh::del::ext::SourceInfo
+type zenoh_protocol::zenoh::del::ext::SourceInfoType
+type zenoh_protocol::zenoh::err::ext::SourceInfo
+type zenoh_protocol::zenoh::err::ext::SourceInfoType
+type zenoh_protocol::zenoh::put::ext::Attachment
+type zenoh_protocol::zenoh::put::ext::AttachmentType
+type zenoh_protocol::zenoh::put::ext::SourceInfo
+type zenoh_protocol::zenoh::put::ext::SourceInfoType
+type zenoh_protocol::zenoh::query::ext::Attachment
+type zenoh_protocol::zenoh::query::ext::AttachmentType
+type zenoh_protocol::zenoh::query::ext::QueryBodyType
+type zenoh_protocol::zenoh::query::ext::SourceInfo
+type zenoh_protocol::zenoh::query::ext::SourceInfoType
+type zenoh_protocol::zenoh::reply::ReplyBody

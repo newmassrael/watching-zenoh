@@ -645,6 +645,7 @@ dependencies = [
  "token-cell",
  "tokio",
  "tracing",
+ "uhlc",
  "zenoh-buffers 1.10.1",
  "zenoh-buffers 1.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zenoh-collections 1.10.1",
