@@ -68,6 +68,10 @@ tls = ["dep:wz-tls-mbedtls"]
 # takes no lock: one thread runs the program.
 critical-section = "1"
 
+# The ABI stamp and the facts note `declared-node` carries, so the entry reads which node it is and
+# which declaration it was built from out of the file (`no_std`, constants only).
+wz-abi-stamp = { path = "../../crates/wz-abi-stamp" }
+
 # The composable-framework route every deploy takes: the facade's features unify onto the one
 # wz-session-core the session shell is built against. `runtime-coop-core` is the runtime tier
 # alone, with no link crate (the host has no lwIP to bundle).

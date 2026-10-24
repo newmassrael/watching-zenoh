@@ -54,6 +54,7 @@ import elf_facts  # noqa: E402
 #   capi-pico        crates/wz-capi-pico/src/revision.rs      WZ_CAPI_PICO_ABI_REVISION
 #   capi-c           crates/wz-capi-c/src/abi.rs              WZ_CAPI_C_ABI_REVISION
 #   ap-demo-surface  crates/wz-ap-demo/src/surface.rs         SURFACE_REVISION
+#   declared-node    deploy/host-slot-node/src/bin/declared_node.rs   SURFACE_REVISION
 EXPECTED = {
     "capi-pico": {
         "revision": 1,
@@ -69,6 +70,7 @@ EXPECTED = {
         "layout": {"unstable_api": True, "shared_memory": False},
     },
     "ap-demo-surface": {"revision": 1, "layout": {}},
+    "declared-node": {"revision": 1, "layout": {}},
 }
 
 REQUIRED_PROFILES = {"debug", "release"}
@@ -305,7 +307,7 @@ def selftest() -> int:
         raise Fatal(f"selftest: a non-profile path was accepted: {bad}")
 
     # The pin is not vacuous, and every family has a door entry or none.
-    expect("the pin is empty and agrees with anything", len(EXPECTED) == 3)
+    expect("the pin is empty and agrees with anything", len(EXPECTED) == 4)
     expect("a door is named for a family that is not pinned", set(DOORS) <= set(EXPECTED))
     expect("a pinned revision is not a non-negative integer",
            all(isinstance(v["revision"], int) and v["revision"] >= 0 for v in EXPECTED.values()))

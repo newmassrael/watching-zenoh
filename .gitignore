@@ -43,6 +43,9 @@ deploy/mcu-qemu-demo/target/
 # R311hl — deploy/mcu-noheap-probe is a third standalone workspace
 # (no-heap registry runtime proof; Layer Q.0). Same target/ policy.
 deploy/mcu-noheap-probe/target/
+# R3577 — deploy/host-slot-node is a standalone workspace (the fixed-memory node as a Linux
+# process, built by the link gate, Layer C1st and the entry). Same target/ policy.
+deploy/host-slot-node/target/
 # Stage 5 — deploy/mcu-session-acceptor is the fourth standalone
 # workspace (acceptor session e2e bin; Layer Q.4). Same target/ policy.
 deploy/mcu-session-acceptor/target/

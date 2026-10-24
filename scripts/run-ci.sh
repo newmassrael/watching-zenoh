@@ -13854,11 +13854,20 @@ layer_c1st_abi_stamp() {
         (cd crates && cargo build -p "$crate" --quiet) || return 1
         (cd crates && cargo build -p "$crate" --release --quiet) || return 1
     done
-    local t=crates/target
+    # The node of a declaration is a package outside the workspace (`deploy/host-slot-node`): built
+    # from the tracked generated constants, in its own directory, where its cargo config states the
+    # budgets it holds.
+    local declared="$PWD/deploy/nodes/generated/slot-answerer.rs"
+    (cd deploy/host-slot-node && WZ_DECLARED_RS="$declared" \
+        cargo build --bin declared-node --features declared --quiet) || return 1
+    (cd deploy/host-slot-node && WZ_DECLARED_RS="$declared" \
+        cargo build --bin declared-node --features declared --release --quiet) || return 1
+    local t=crates/target n=deploy/host-slot-node/target
     python3 scripts/lib/abi_stamp_gate.py --call-doors \
         "capi-pico=$t/debug/libwz_capi_pico.so" "capi-pico=$t/release/libwz_capi_pico.so" \
         "capi-c=$t/debug/libwz_capi_c.so" "capi-c=$t/release/libwz_capi_c.so" \
-        "ap-demo-surface=$t/debug/wz-ap-demo" "ap-demo-surface=$t/release/wz-ap-demo" || return 1
+        "ap-demo-surface=$t/debug/wz-ap-demo" "ap-demo-surface=$t/release/wz-ap-demo" \
+        "declared-node=$n/debug/declared-node" "declared-node=$n/release/declared-node" || return 1
     # The entry of the same note (T1, T7, T10): package the host platform twice and require the two
     # manifests to be the SAME BYTES (a manifest that differs between runs of one input is not a
     # description), then re-measure every file the first one names. Both selftests first: each
@@ -13875,6 +13884,15 @@ layer_c1st_abi_stamp() {
     [ "$rc" -eq 0 ] && { cmp "$work/a/wz-target-manifest.json" "$work/b/wz-target-manifest.json" \
         || { echo "  C1st FAIL: two packagings of one input wrote different manifests"; rc=1; }; }
     [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/a" || rc=1; }
+    # A registered node declaration as the input (5b): the node's file says which declaration it was
+    # built from, the manifest repeats it, and verifying resolves the declaration again.
+    local node=(python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc
+        --artifact declared-node --node slot-answerer)
+    [ "$rc" -eq 0 ] && { "${node[@]}" --out "$work/na" || rc=1; }
+    [ "$rc" -eq 0 ] && { "${node[@]}" --out "$work/nb" || rc=1; }
+    [ "$rc" -eq 0 ] && { cmp "$work/na/wz-target-manifest.json" "$work/nb/wz-target-manifest.json" \
+        || { echo "  C1st FAIL: two packagings of one node wrote different manifests"; rc=1; }; }
+    [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/na" || rc=1; }
     # A registered profile as the input (T13): the two libraries built from a profile's capabilities,
     # twice, the same manifest bytes, then verified, which resolves the profile again and holds each
     # library to what it turns on and leaves off. The interpreter is provisioned here (the script is

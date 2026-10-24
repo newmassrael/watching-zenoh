@@ -491,11 +491,12 @@ set against what the tree has. It is a list of obligations, not a claim that the
 | Capabilities it names: client mode, peer links over TCP (dial and listen), UDP multicast group join, publish and subscribe, liveliness, queryable and querier, fragmentation; none of router mode, scouting, admin keys | A superset: each is a capability or a default of the graph (`peer`, `link-udp`, `multicast-transport`, `liveliness`, `query`, `queryable`, the fragmentation feature) | A table that holds each named capability to a declared capability and fails when one disappears; not written. The reverse (what wz has that the path does not place) needs no table |
 | Device facts it checks: the executable's machine and interpreter, every library of the closure by SONAME, the run place's properties, process facts, the transport (ssh, adb) | The manifest carries machine, interpreter, SONAME, NEEDED with `provided_by`, `linking`, `runpath`, `rpath` and the floors | The closure must be COMPLETE and enumerable, because the path binds it by SONAME: where a platform lacks a library (a QNX board without the C++ runtime), the entry must bundle it from the SDK (`provided_by: bundled`), which it does not yet. The run-place, process and transport checks are the consumer's and are not wz's to model |
 
-## 5b. The node declaration (decided: the slot profile; first half landed)
+## 5b. The node declaration (decided: the slot profile; landed for Linux)
 
 **Decision (owner, 2026-10-25, on the recommendation):** the generated node targets the
 fixed-memory slot profile, not the heap runtime. The first half, below, is `scripts/lib/wz_node.py`
-and `deploy/nodes/`; the build step and the manifest role are the second half and are not written.
+and `deploy/nodes/`; the second half is the entry's build step and the manifest role (what landed
+is stated after the structure).
 
 What landed: a declaration file per node (`[node]`, `[[endpoint]]`, `[[entity]]`, `[limits]`),
 validated against the target's own table (`TARGETS`), with `--emit` printing the `declared.rs` the
@@ -526,12 +527,29 @@ library without changing the command-line node: its console output for a usage e
 document, too many documents and a normal start is byte for byte what it was, and no variant
 (`get,batching`, `tls`, `declared`, `declared` with `tls`) builds with a warning.
 
-Not written, in order: the entry's step that copies the declaration's build, generates, builds,
-stamps and describes it, with a role beside `session-node` and the declaration's digest in the
-manifest; the posix port is Linux only (`wz-runtime-posix` is empty on another OS), so a declared
-node can be built for a Linux platform row and not yet for QNX or Android, which the entry must
-refuse by name until a port exists; then the entities the slot profile does not build yet, each of
-which is a change to the profile before it is a word the declaration accepts.
+**The entry's step (landed).** A node is an input of the entry, like a profile: `wz_package.py
+--artifact declared-node --node ID`. The artifact row of `deploy/wz-config.toml` says `input =
+"node"` and names its own manifest and binary, because the package is not a member of the crates
+workspace. Before anything is built the entry resolves the declaration (it validates for its
+target and its generated file is current), then builds the binary in the package's own directory
+with the declaration's features (`declared`, and `tls` exactly when the endpoint is `tls/`), the
+generated constants named in `WZ_DECLARED_RS` and the declaration's budgets as `WZ_LIMIT_*`. The
+package's own cargo config states the image's budgets, and the generator reads the same file as
+the baseline of what the declaration may say, so the generator and the build cannot disagree about
+the size of a table. The binary carries the ABI stamp (family `declared-node`) and a facts note
+with the node's id and the SHA-256 of the declaration file. The manifest's `provides` repeats both
+from the file (role `declared-node`), and what the node asks of a device is the base plus the
+sockets its endpoint's scheme uses. `--verify` resolves the declaration again, so a declaration
+edited after the build, a file built from another declaration, or a file built with other features
+is a finding. The artifact row lists the operating systems its port exists for (`os`), and the
+posix port is Linux only (`wz-runtime-posix` is empty on another OS): a QNX or Android platform
+row is refused by name, with the reason, before anything is built.
+
+Not written: the entities the slot profile does not build yet (a listening endpoint, multicast, a
+publisher, a subscriber, a token, a querier), each of which is a change to the profile before it is
+a word the declaration accepts; a port of the declared node for QNX or Android; and the budgets
+that are still tuning constants of the library (the task cells, the receive and send storage),
+which the declaration cannot state.
 
 The text below is the proposal the decision answers.
 

@@ -262,6 +262,7 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "wz",
+ "wz-abi-stamp",
  "wz-runtime-coop",
  "wz-runtime-posix",
  "wz-session-core",
@@ -807,6 +808,10 @@ dependencies = [
  "wz-runtime-tokio",
  "wz-session-lwip",
 ]
+
+[[package]]
+name = "wz-abi-stamp"
+version = "0.1.0"
 
 [[package]]
 name = "wz-codecs"

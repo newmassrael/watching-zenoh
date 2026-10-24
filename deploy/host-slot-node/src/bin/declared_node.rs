@@ -50,7 +50,28 @@ mod declared {
     include!(env!("WZ_DECLARED_RS"));
 }
 
-use declared::{DOCS, DOCUMENTS, ROUTER, TLS};
+use declared::{DECLARATION_SHA256, DOCS, DOCUMENTS, NODE_ID, ROUTER, TLS};
+
+/// The revision of how this executable is driven. It takes no argument and reads no document, so the
+/// surface is the console lines a lab waits for; it moves when one of them is removed or changes
+/// meaning, and not when a node declaration changes.
+#[allow(dead_code)]
+const SURFACE_REVISION: u32 = 1;
+
+wz_abi_stamp::stamp!(
+    family = "declared-node",
+    revision = SURFACE_REVISION,
+    layout = [],
+);
+
+// Which node this is and the digest of the declaration it was built from, so a tool that describes
+// the file for another operating system reads both from it and holds them to the declaration.
+wz_abi_stamp::facts!(
+    lists = [
+        ("node_id", &[NODE_ID]),
+        ("declaration_sha256", &[DECLARATION_SHA256])
+    ]
+);
 
 const _: () = assert!(
     DOCS <= MAX_QUERYABLES,

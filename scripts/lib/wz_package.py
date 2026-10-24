@@ -6,6 +6,7 @@
 describe what was built.
 
     wz_package.py --platform ID --artifact ID... --out DIR [--cargo-profile release|debug]
+                  [--profile ID] [--node ID]
     wz_package.py --verify DIR
     wz_package.py --selftest
 
@@ -24,11 +25,20 @@ the caller sees which), a build whose capabilities ask for a facility the platfo
 (naming the capability), a NEEDED nobody assumed and nothing bundles (naming the library), and a
 stamp whose family is not the artifact's.
 
+## A node declaration as an input
+
+An artifact whose row says `input = "node"` is built from a registered node declaration
+(`deploy/nodes/ID.toml`, `docs/target-build-contract.md` 5b): `--node ID` names it, and it is
+validated with its generated constants current before anything is built. The build takes the
+declaration's features and budgets, and the file's facts note carries the node's id and the digest of
+the declaration. The manifest's `provides` repeats both from the file, and `--verify` resolves the
+declaration again, so a declaration edited after the build is a finding. The artifact row states the
+operating systems its port exists for (`os`), and a platform outside them is refused by name.
+
 ## What it does not do
 
-The profile is not an input yet: it builds each artifact's default features. Resolving a registered
-profile into an artifact's features waits for the mapping that says which profile builds which
-artifacts. A native build (the platform's triple is the compiler's host) is built without
+A registered profile builds the libraries only: it resolves to an ABI's features, which an
+executable has no mapping for. A native build (the platform's triple is the compiler's host) is built without
 `--target`, so it shares the workspace's own build directory; a cross build passes it.
 
 Exit 0 on success, 2 on a refusal, 1 on a failed `--verify` or a failure of the entry itself.
@@ -51,6 +61,7 @@ import tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import elf_facts  # noqa: E402
 import wz_config  # noqa: E402
+import wz_node  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MANIFEST_NAME = "wz-target-manifest.json"
@@ -123,12 +134,12 @@ def provides_of(decl: dict, row: dict, features: list[str], measured: dict) -> l
                 via[name] = role[key]
         if via:
             entry["via"] = via
-        if "facts_list" in role:
+        for name in ([role["facts_list"]] if "facts_list" in role else role.get("facts_lists", [])):
             lists = measured["facts"]
-            if lists is None or role["facts_list"] not in lists:
+            if lists is None or name not in lists:
                 raise Refusal(f"{row['id']} provides {role['id']} but its file has no facts list "
-                              f"`{role['facts_list']}`: it was not built with the facts note")
-            entry[role["facts_list"]] = lists[role["facts_list"]]
+                              f"`{name}`: it was not built with the facts note")
+            entry[name] = lists[name]
         out.append(entry)
     return out
 
@@ -167,6 +178,47 @@ def device_requires(decl: dict, platform: dict, row: dict, features: list[str]) 
     return sorted(wz_config.os_needs_of(decl, on))
 
 
+def node_of_file(decl: dict, row: dict, measured: dict, features: list[str]) -> dict:
+    """The declaration a node-built executable says it was built from, resolved again NOW.
+
+    The file's facts note carries the node's id and the digest of the declaration it was generated
+    from. The id names a registered declaration, which must still validate with its generated file
+    current, and its digest must be the one in the file: a declaration edited after the build, or a
+    file built from another one, describes a node that is no longer the declared one. The features
+    the build used must be the ones the declaration asks for.
+    """
+    lists = measured["facts"] or {}
+    for name in ("node_id", "declaration_sha256"):
+        if len(lists.get(name, [])) != 1:
+            raise Refusal(f"{row['id']} is built from a node declaration and its facts note has no single "
+                          f"`{name}`: it was not built by this entry")
+    node_id, built = lists["node_id"][0], lists["declaration_sha256"][0]
+    try:
+        view = wz_node.resolve(node_id, decl)
+    except (ValueError, OSError) as err:
+        raise Refusal(f"{row['id']} says it is the node `{node_id}`, which does not resolve: {err}") from err
+    if view["declaration_sha256"] != built:
+        raise Refusal(f"{row['id']} was built from declaration {built[:12]} of `{node_id}`, which is "
+                      f"{view['declaration_sha256'][:12]} now: the file describes a node nobody declares")
+    # Cargo lists the package's `default` feature among those it enabled, whatever it contains.
+    chosen = sorted(set(features) - {"default"})
+    if chosen != sorted(view["features"]):
+        raise Refusal(f"{row['id']} was built with the features {chosen}, the declaration of "
+                      f"`{node_id}` asks for {sorted(view['features'])}")
+    return view
+
+
+def node_requires(decl: dict, platform: dict, row: dict, node: dict) -> list[str]:
+    """What a node asks of a device: the base every executable asks for, and the sockets its
+    endpoints' schemes use. A facility the platform lacks is a refusal naming the node."""
+    asked = sorted(set(decl["os_base"]) | set(node["facilities"]))
+    lacking = [f for f in asked if f not in platform["os_provides"]]
+    if lacking:
+        raise Refusal(f"{row['id']} (the node `{node['id']}`) asks for {', '.join(lacking)}, which platform "
+                      f"{platform['id']} does not provide")
+    return asked
+
+
 def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: bytes, features: list[str],
                    resolved: dict[str, list[str]] | None = None) -> dict:
     """The manifest's entry for one built file, from its bytes: the same call serves `package`
@@ -181,7 +233,9 @@ def artifact_entry(decl: dict, platform: dict, row: dict, relpath: str, blob: by
         raise Refusal(f"{row['id']}'s stamp says family {stamp['family']!r}, not {row['family']!r}")
     features = sorted(features)
     kept = {p: sorted(set((resolved or {}).get(p, []))) for p in wz_config.ASSESSED_PACKAGES}
-    if row["kind"] == "executable":
+    if row.get("input") == "node":
+        requires, unassessed = node_requires(decl, platform, row, node_of_file(decl, row, measured, features)), []
+    elif row["kind"] == "executable":
         requires, unassessed = runtime_requires(decl, platform, row, kept)
     else:
         requires, unassessed = device_requires(decl, platform, row, features), []
@@ -218,6 +272,9 @@ def preflight(decl: dict, platform_id: str, artifact_ids: list[str]) -> tuple[di
         if row is None:
             raise Refusal(f"no artifact `{aid}` is declared "
                           f"(known: {', '.join(a['id'] for a in decl['artifacts'])})")
+        if row.get("os") is not None and platform["os"] not in row["os"]:
+            raise Refusal(f"artifact {aid} is not built for platform {platform_id} (operating system "
+                          f"{platform['os']}): {row['os_note']}; it is built for {', '.join(row['os'])} only")
         rows.append(row)
     # Declaration order, whatever order the caller named them in: the manifest is reproducible.
     order = {a["id"]: i for i, a in enumerate(decl["artifacts"])}
@@ -615,11 +672,17 @@ def package_name(package_id: str) -> str:
 
 
 def cargo_argv(platform: dict, cross: bool, row: dict, cargo_profile: str,
-               extra_args: list[str] | None = None) -> list[str]:
+               extra_args: list[str] | None = None, node: dict | None = None) -> list[str]:
     """The cargo command that builds one artifact. A platform whose `std` is `build-std` has no
     prebuilt standard library, so the command builds it (`-Z` needs a nightly cargo, which is the
-    caller's to put first, as it is the caller's to provide the SDK)."""
-    argv = ["cargo", "build", "-p", row["package"], "--message-format=json-render-diagnostics"]
+    caller's to put first, as it is the caller's to provide the SDK). An artifact built from a node
+    declaration is a binary of a package outside the crates workspace: its own manifest, and the
+    features the declaration asks for."""
+    if row.get("input") == "node":
+        argv = ["cargo", "build", "--manifest-path", str(ROOT / row["manifest"]), "--bin", row["bin"],
+                "--features", ",".join(node["features"]), "--message-format=json-render-diagnostics"]
+    else:
+        argv = ["cargo", "build", "-p", row["package"], "--message-format=json-render-diagnostics"]
     if cargo_profile == "release":
         argv.append("--release")
     if cross:
@@ -630,16 +693,24 @@ def cargo_argv(platform: dict, cross: bool, row: dict, cargo_profile: str,
 
 
 def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
-                extra_args: list[str] | None = None, extra_env: dict[str, str] | None = None
+                extra_args: list[str] | None = None, extra_env: dict[str, str] | None = None,
+                node: dict | None = None
                 ) -> tuple[pathlib.Path, list[str], dict[str, list[str]]]:
     """Build one artifact; the file, the features cargo built it with, and the features it
     enabled in every package of the build (the union over that package's units).
 
     `extra_args` and `extra_env` are what a profile adds: the feature selection and the limits.
+    `node` is what a declaration adds to a node-built artifact: the generated constants the build
+    includes and the budgets it states. That build runs in its package's own directory, so the
+    cargo config there (the image's budgets) applies and the declaration's override it.
     """
-    argv = cargo_argv(platform, cross, row, cargo_profile, extra_args)
-    run = subprocess.run(argv, cwd=ROOT / "crates", stdout=subprocess.PIPE, text=True, check=False,
-                         env={**os.environ, **(extra_env or {})})
+    argv = cargo_argv(platform, cross, row, cargo_profile, extra_args, node)
+    env = {**os.environ, **(extra_env or {})}
+    cwd = ROOT / "crates"
+    if row.get("input") == "node":
+        env = {**env, "WZ_DECLARED_RS": str(node["generated"]), **node["limits"]}
+        cwd = (ROOT / row["manifest"]).parent
+    run = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE, text=True, check=False, env=env)
     if run.returncode != 0:
         raise RuntimeError(f"cargo build -p {row['package']} failed ({run.returncode})")
     found = None
@@ -658,7 +729,9 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
             continue
         if kind not in msg["target"]["kind"]:
             continue
-        files = [f for f in msg["filenames"] if f.endswith(".so")] if kind == "cdylib" else [msg.get("executable")]
+        if row.get("input") == "node" and msg["target"]["name"] != row["bin"]:
+            continue
+        files =[f for f in msg["filenames"] if f.endswith(".so")] if kind == "cdylib" else [msg.get("executable")]
         if files and files[0]:
             found = (pathlib.Path(files[0]), list(msg["features"]))
     if found is None:
@@ -666,9 +739,37 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
     return found[0], found[1], {p: sorted(f) for p, f in resolved.items()}
 
 
+def node_input(decl: dict, rows: list[dict], node_id: str | None) -> dict | None:
+    """The registered node declaration the build takes, when an artifact is built from one.
+
+    A node is an input like a profile: a registered name, resolved (validated, its generated file
+    current) before anything is built. An artifact built from a declaration with none named, and a
+    declaration named when no artifact takes one, are each refused: the one would build nothing the
+    caller chose, the other would drop a word the caller meant.
+    """
+    wanting = [r["id"] for r in rows if r.get("input") == "node"]
+    if not wanting:
+        if node_id is not None:
+            raise Refusal(f"--node {node_id} names a node declaration, and none of the artifacts is built "
+                          "from one")
+        return None
+    known = sorted(p.stem for p in wz_node.NODES.glob("*.toml"))
+    if node_id is None:
+        raise Refusal(f"{', '.join(wanting)} is built from a node declaration: name one with --node "
+                      f"(known: {', '.join(known)})")
+    if node_id not in known:
+        raise Refusal(f"no registered node `{node_id}` (known: {', '.join(known)}); the entry takes a name, "
+                      "not a path, so a node is a registered declaration and not a file anyone wrote")
+    try:
+        return wz_node.resolve(node_id, decl)
+    except (ValueError, OSError) as err:
+        raise Refusal(f"node {node_id}: {err}") from err
+
+
 def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.Path, cargo_profile: str,
-            profile_id: str | None = None) -> int:
+            profile_id: str | None = None, node_id: str | None = None) -> int:
     platform, rows = preflight(decl, platform_id, artifact_ids)
+    node = node_input(decl, rows, node_id)
     view = None
     if profile_id is not None:
         # Resolved and applied-or-refused before anything is built or created.
@@ -689,7 +790,8 @@ def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.
             built, features, resolved = cargo_build(
                 platform, cross, row, cargo_profile,
                 profile_cargo_args(decl, row, view) if view else None,
-                {k: str(v) for k, v in view["limits"].items()} if view else None)
+                {k: str(v) for k, v in view["limits"].items()} if view else None,
+                node if row.get("input") == "node" else None)
             want = f"lib{row['file']}.so" if row["kind"] == "shared-library" else row["file"]
             if built.name != want:
                 raise RuntimeError(f"cargo built {built.name} for {row['id']}, the declaration says {want}")
@@ -725,15 +827,18 @@ def _stamp(family: str, revision: int = 1, layout: dict | None = None) -> bytes:
                       separators=(",", ":")).encode() + b"\x00"
 
 
-def _facts(roles: list[str]) -> bytes:
-    return json.dumps({"schema": 1, "lists": {"driver_roles": roles}}, separators=(",", ":")).encode() + b"\x00"
+def _facts(roles: list[str] | None = None, lists: dict[str, list[str]] | None = None) -> bytes:
+    lists = {"driver_roles": roles} if lists is None else lists
+    return json.dumps({"schema": 1, "lists": lists}, separators=(",", ":")).encode() + b"\x00"
 
 
 def _synthetic(row: dict, needed: list[str], roles: list[str] | None = None, family: str | None = None,
-               revision: int = 1) -> bytes:
+               revision: int = 1, facts_lists: dict[str, list[str]] | None = None) -> bytes:
     notes = [(elf_facts.STAMP_SECTION, "wz", 1, _stamp(family or row["family"], revision))]
     if roles is not None:
         notes.append((elf_facts.FACTS_SECTION, "wz", 2, _facts(roles)))
+    elif facts_lists is not None:
+        notes.append((elf_facts.FACTS_SECTION, "wz", 2, _facts(lists=facts_lists)))
     return elf_facts.build_test_elf(
         notes_=notes, needed=needed, machine=62,
         soname=f"lib{row['file']}.so" if row["kind"] == "shared-library" else None,
@@ -893,6 +998,82 @@ def _selftest() -> int:
                                    _synthetic(pico, needs, family="capi-c"), pico_features))
     refuses("an executable built without its facts note", "facts note",
             lambda: artifact_entry(decl, platform, demo, "bin/wz-ap-demo", _synthetic(demo, needs), demo_features))
+    # A node built from a declaration (T8, docs/target-build-contract.md 5b): the file says which node
+    # it is and which declaration it was built from, and the entry holds both to the declaration now.
+    node_row = next(a for a in decl["artifacts"] if a["id"] == "declared-node")
+    view = wz_node.resolve("slot-answerer", decl)
+    node_lists = {"node_id": ["slot-answerer"], "declaration_sha256": [view["declaration_sha256"]]}
+
+    def node_file(**changed) -> bytes:
+        return _synthetic(node_row, needs, facts_lists={**node_lists, **changed})
+
+    def node_entry(blob: bytes, features: list[str] | None = None, plat: dict | None = None,
+                   dec: dict | None = None) -> dict:
+        return artifact_entry(dec or decl, plat or platform, node_row, "bin/declared-node", blob,
+                              view["features"] if features is None else features)
+
+    described = node_entry(node_file())
+    expect("a node's role carries its id and the declaration's digest, read from the file",
+           described["provides"] == [{"role": "declared-node", **node_lists}])
+    expect("a node asks for the base and the sockets its endpoint uses, and nothing is unassessed",
+           described["device_requires"] == sorted(set(decl["os_base"]) | {"sockets-tcp"})
+           and described["unassessed_features"] == [])
+    with tempfile.TemporaryDirectory(prefix="wz-package-node-") as node_work:
+        node_out = pathlib.Path(node_work) / "out"
+        (node_out / "bin").mkdir(parents=True)
+        (node_out / "bin" / "declared-node").write_bytes(node_file())
+        node_manifest = assemble(decl, platform, {"commit": "0" * 40, "tree_clean": True},
+                                 {"rustc": "rustc 0", "cc": None, "sdk": None}, [described])
+        expect("the shape of a node manifest is clean", shape_findings(node_manifest) == [])
+        (node_out / MANIFEST_NAME).write_text(render(node_manifest), encoding="utf-8")
+        expect("a clean node directory verifies", verify_dir(node_out, decl) == [])
+        (node_out / "bin" / "declared-node").write_bytes(node_file(declaration_sha256=["0" * 64]))
+        found = verify_dir(node_out, decl)
+        expect(f"a node file built from another declaration is reported when verified ({found})",
+               any("nobody declares" in f for f in found))
+    refuses("a node file whose declaration has moved since it was built", "nobody declares",
+            lambda: node_entry(node_file(declaration_sha256=["0" * 64])))
+    refuses("a node file that names a node nobody registered", "does not resolve",
+            lambda: node_entry(node_file(node_id=["nope"])))
+    refuses("a node file with no facts note", "has no single",
+            lambda: node_entry(_synthetic(node_row, needs)))
+    refuses("a node file with two ids", "has no single",
+            lambda: node_entry(node_file(node_id=["slot-answerer", "other"])))
+    refuses("a node built with features its declaration does not ask for", "asks for",
+            lambda: node_entry(node_file(), features=["declared", "tls"]))
+    expect("the package's default feature, which cargo lists, is not a choice",
+           node_entry(node_file(), features=["declared", "default"])["features"] == ["declared", "default"])
+    no_tcp = copy.deepcopy(decl)
+    for p in no_tcp["platforms"]:
+        if p["id"] == host:
+            p["os_provides"] = [f for f in p["os_provides"] if f != "sockets-tcp"]
+    refuses("a node whose endpoint asks for a socket the platform lacks",
+            "which platform linux-x86_64-glibc does not provide",
+            lambda: node_entry(node_file(), plat=next(p for p in no_tcp["platforms"] if p["id"] == host),
+                               dec=no_tcp))
+    for other, os_name in (("android-arm64", "android"), ("qnx710-iosock-aarch64", "nto"),
+                           ("qnx710-iopkt-aarch64", "nto")):
+        refuses(f"a node for the {other} platform, whose port does not exist",
+                f"operating system {os_name}): its runtime is the posix port, which is written for Linux only",
+                lambda other=other: preflight(decl, other, ["declared-node"]))
+    expect("a node is accepted for a Linux platform", preflight(decl, host, ["declared-node"])[1] == [node_row])
+    node_rows = preflight(decl, host, ["declared-node"])[1]
+    refuses("a node artifact with no declaration named", "name one with --node",
+            lambda: node_input(decl, node_rows, None))
+    refuses("a node declaration nobody registered", "no registered node `nope`",
+            lambda: node_input(decl, node_rows, "nope"))
+    refuses("a node declaration named when no artifact takes one", "none of the artifacts",
+            lambda: node_input(decl, preflight(decl, host, ["capi-pico"])[1], "slot-answerer"))
+    expect("no declaration is no input when no artifact takes one",
+           node_input(decl, preflight(decl, host, ["capi-pico"])[1], None) is None)
+    expect("the registered declaration is the input of a node artifact",
+           node_input(decl, node_rows, "slot-answerer")["id"] == "slot-answerer")
+    expect("a node build runs the manifest's binary with the declaration's features",
+           cargo_argv(platform, False, node_row, "release", None, view)[:9]
+           == ["cargo", "build", "--manifest-path", str(ROOT / node_row["manifest"]), "--bin", "declared-node",
+               "--features", "declared", "--message-format=json-render-diagnostics"]
+           and "-p" not in cargo_argv(platform, False, node_row, "release", None, view))
+
     lacking = copy.deepcopy(decl)
     for p in lacking["platforms"]:
         if p["id"] == host:
@@ -1171,7 +1352,7 @@ def main(argv: list[str]) -> int:
         if not findings:
             print(f"  wz-package: {argv[1]} verifies")
         return 1 if findings else 0
-    platform_id = out = profile_id = None
+    platform_id = out = profile_id = node_id = None
     artifact_ids: list[str] = []
     cargo_profile = "release"
     it = iter(argv)
@@ -1186,6 +1367,8 @@ def main(argv: list[str]) -> int:
             cargo_profile = next(it, "")
         elif arg == "--profile":
             profile_id = next(it, None)
+        elif arg == "--node":
+            node_id = next(it, None)
         else:
             print(f"wz-package: unknown argument {arg}", file=sys.stderr)
             return 2
@@ -1193,7 +1376,7 @@ def main(argv: list[str]) -> int:
         print(__doc__.split("\n\n")[0], file=sys.stderr)
         return 2
     try:
-        return package(decl, platform_id, artifact_ids, pathlib.Path(out), cargo_profile, profile_id)
+        return package(decl, platform_id, artifact_ids, pathlib.Path(out), cargo_profile, profile_id, node_id)
     except Refusal as err:
         print(f"wz-package: REFUSED -- {err}", file=sys.stderr)
         return 2

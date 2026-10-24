@@ -5,6 +5,8 @@
 // Do not edit: a change is made in the declaration and generated again.
 
 pub const NODE_ID: &str = "slot-answerer";
+/// The digest of the declaration file this was generated from; the node's facts note carries it.
+pub const DECLARATION_SHA256: &str = "8af6a4d6460c8c0bea42ed876b509ac3bbbe060c31a12b4ade397b483f0391fe";
 /// The one endpoint the node dials, as a locator.
 pub const ROUTER: &str = "tcp/192.168.1.10:7447";
 /// Whether that endpoint is `tls/`, which the node's `tls` feature must be built for.

@@ -36,17 +36,22 @@ vocabulary is refused as a typo. A budget the target cannot give, a key longer t
 more queryables than the registry holds and a document longer than the node's storage are refused
 by name.
 
-## What it does not do yet
+## What it does not do
 
-It does not build the node: the crate that includes the generated constants and the entry's step
-that builds it, stamps it and gives it a role in the manifest are the second half (section 5b). The
-only target is `slot`, the per-session fixed-memory profile (`wz_session_mcu::slot_node`), whose
+It does not build the node: `wz_package.py --node ID` does (section 5b), through `resolve`, which
+hands it the validated declaration, the generated file that is current, the features and budgets
+the build takes and what the endpoints ask of a device. A declaration is held to the budgets of the
+image the node is built in (`image_limits`: the `WZ_LIMIT_*` of that package's cargo config), and
+what it states overrides them. The digest in the generated file is the SHA-256 of the declaration's
+bytes, so any edit of the file, a comment included, makes the generated copy stale until `--write`.
+The only target is `slot`, the per-session fixed-memory profile (`wz_session_mcu::slot_node`), whose
 node holds one dialled session and answers queries from documents; the heap runtime is not a target
 here.
 """
 
 from __future__ import annotations
 
+import hashlib
 import pathlib
 import re
 import sys
@@ -71,6 +76,8 @@ TOP_KEYS = {"node", "endpoint", "entity", "limits"}
 # one dialled session, no allocator, queries answered from documents that are prefixes of one static.
 TARGETS = {
     "slot": {
+        # The package the node is built in, whose cargo config states the budgets it holds.
+        "image": "deploy/host-slot-node",
         # The node's session table (`SESSIONS` in deploy/host-slot-node/src/main.rs).
         "max_endpoints": 1,
         "endpoint_roles": {"dial"},
@@ -94,9 +101,26 @@ TARGETS = {
 LOCATOR_RE = re.compile(r"(?P<scheme>[a-z]+)/(?P<a>\d{1,3})\.(?P<b>\d{1,3})\.(?P<c>\d{1,3})\.(?P<d>\d{1,3}):(?P<port>\d{1,5})")
 
 
-def limit_values(decl: dict, stated: dict) -> tuple[dict[str, int], list[str]]:
-    """The effective value of every declared limit: the node's, or the declaration's default."""
+def image_limits(target: dict) -> dict[str, int]:
+    """The budgets the target's image states in its own cargo config (`[env]` of
+    `<image>/.cargo/config.toml`, `WZ_LIMIT_<NAME>`): what a node of that target holds when its
+    declaration says nothing, because the build runs in the image's directory and cargo applies the
+    file there. Read from the file and not copied, so the generator and the build cannot disagree
+    about the size of a table."""
+    text = (ROOT / target["image"] / ".cargo" / "config.toml").read_text(encoding="utf-8")
+    env = wz_config.read_decl_toml(text).get("env", {})
+    return {
+        name.removeprefix("WZ_LIMIT_"): int(value)
+        for name, value in env.items()
+        if name.startswith("WZ_LIMIT_")
+    }
+
+
+def limit_values(decl: dict, stated: dict, image: dict[str, int]) -> tuple[dict[str, int], list[str]]:
+    """The effective value of every declared limit: the node's, else the image's, else the
+    declaration's default."""
     known = {lim["id"]: lim["default"] for lim in decl["limits"]}
+    known.update({k: v for k, v in image.items() if k in known})
     problems = []
     for name, value in stated.items():
         if name not in known:
@@ -137,7 +161,7 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
     if target is None:
         return out + [f"node: target is {node.get('target')!r}, not one of {', '.join(sorted(TARGETS))}"]
 
-    values, problems = limit_values(decl, data.get("limits", {}))
+    values, problems = limit_values(decl, data.get("limits", {}), image_limits(target))
     out += problems
 
     endpoints = data.get("endpoint", [])
@@ -197,7 +221,13 @@ def rust_string(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def emit(name: str, data: dict) -> str:
+def digest(name: str, directory: pathlib.Path = NODES) -> str:
+    """The SHA-256 of the declaration file's bytes, lower-case hex: what a built node says it was
+    built from, so a declaration edited after the build is a difference a tool can see."""
+    return hashlib.sha256((directory / f"{name}.toml").read_bytes()).hexdigest()
+
+
+def emit(name: str, data: dict, declaration_sha256: str) -> str:
     """The `declared.rs` the node's code includes. Valid input only: `validate` ran first."""
     endpoint = data["endpoint"][0]["locator"]
     entities = [(e["key"], e["document_bytes"]) for e in data.get("entity", []) if e["kind"] == "queryable"]
@@ -211,6 +241,8 @@ def emit(name: str, data: dict) -> str:
             "// Do not edit: a change is made in the declaration and generated again.",
             "",
             f"pub const NODE_ID: &str = {rust_string(name)};",
+            "/// The digest of the declaration file this was generated from; the node's facts note carries it.",
+            f"pub const DECLARATION_SHA256: &str = {rust_string(declaration_sha256)};",
             "/// The one endpoint the node dials, as a locator.",
             f"pub const ROUTER: &str = {rust_string(endpoint)};",
             "/// Whether that endpoint is `tls/`, which the node's `tls` feature must be built for.",
@@ -235,6 +267,44 @@ def env_lines(data: dict) -> list[str]:
     return [f"WZ_LIMIT_{k}={v}" for k, v in sorted(data.get("limits", {}).items())]
 
 
+# What a dialled endpoint's scheme asks of the device, by name from the facilities of
+# `deploy/wz-config.toml`. `tls` rides a TCP stream, so it asks for the same socket.
+SCHEME_FACILITIES = {"tcp": "sockets-tcp", "tls": "sockets-tcp", "udp": "sockets-udp"}
+
+
+def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
+    """What the entry needs of one registered node, or the reason it cannot have it: the
+    declaration validates for its target, and the tracked generated file is the one this
+    declaration generates now (a build that read a stale one would build what the file said and
+    not what the declaration says).
+
+    `features` are the cargo features the node is built with (`tls` exactly when its endpoint is
+    `tls/`, which the node's own `const` assertion holds again), `limits` the budgets it states as
+    the environment the build reads, and `facilities` what its endpoints ask of the device beyond
+    the base every executable asks.
+    """
+    data = load(name, decl, directory)
+    sha = digest(name, directory)
+    generated = generated_path(name, directory)
+    if not generated.is_file() or generated.read_text(encoding="utf-8") != emit(name, data, sha):
+        raise ValueError(f"{name}: {generated.name} is missing or stale: regenerate it with --write")
+    schemes = [LOCATOR_RE.fullmatch(ep["locator"])["scheme"] for ep in data["endpoint"]]
+    facilities = sorted({SCHEME_FACILITIES[s] for s in schemes})
+    unknown = [f for f in facilities if f not in wz_config.OS_FACILITIES]
+    if unknown:
+        raise ValueError(f"{name}: the facilities {', '.join(unknown)} that its endpoints ask for are not "
+                         "in the facility vocabulary of scripts/lib/wz_config.py")
+    return {
+        "id": name,
+        "target": data["node"]["target"],
+        "declaration_sha256": sha,
+        "generated": generated,
+        "features": ["declared"] + (["tls"] if "tls" in schemes else []),
+        "limits": dict(line.split("=", 1) for line in env_lines(data)),
+        "facilities": facilities,
+    }
+
+
 def generated_path(name: str, directory: pathlib.Path = NODES) -> pathlib.Path:
     return directory / "generated" / f"{name}.rs"
 
@@ -251,7 +321,7 @@ def check(decl: dict, directory: pathlib.Path = NODES) -> int:
             bad += 1
             continue
         out = generated_path(path.stem, directory)
-        if not out.is_file() or out.read_text(encoding="utf-8") != emit(path.stem, data):
+        if not out.is_file() or out.read_text(encoding="utf-8") != emit(path.stem, data, digest(path.stem, directory)):
             print(f"  wz-node FAIL: {out.name} is missing or stale: regenerate it with --write", file=sys.stderr)
             bad += 1
     expected = {generated_path(p.stem, directory).name for p in files}
@@ -275,7 +345,7 @@ def write(decl: dict, directory: pathlib.Path = NODES) -> int:
             return 1
         out = generated_path(path.stem, directory)
         out.parent.mkdir(exist_ok=True)
-        out.write_text(emit(path.stem, data), encoding="utf-8")
+        out.write_text(emit(path.stem, data, digest(path.stem, directory)), encoding="utf-8")
     print(f"wz-node: wrote {len(files)} generated file(s)")
     return 0
 
@@ -319,12 +389,15 @@ def _selftest() -> int:
 
     expect("the sample is a valid node", problems(SAMPLE) == [])
     data = wz_config.read_decl_toml(SAMPLE)
-    rs = emit("n", data)
+    sha = "0" * 64
+    rs = emit("n", data, sha)
     expect("the endpoint is the generated router", 'pub const ROUTER: &str = "tcp/10.0.0.1:7447";' in rs)
+    expect("the declaration's digest is a constant of the generated file",
+           f'pub const DECLARATION_SHA256: &str = "{sha}";' in rs)
     expect("a tcp endpoint is not tls", "pub const TLS: bool = false;" in rs)
     expect("the documents are the queryables", 'pub const DOCUMENTS: [(&str, usize); 1] = [("lab/doc/a", 512)];' in rs)
     expect("a tls endpoint sets the flag", "pub const TLS: bool = true;" in emit(
-        "n", wz_config.read_decl_toml(SAMPLE.replace("tcp/", "tls/"))))
+        "n", wz_config.read_decl_toml(SAMPLE.replace("tcp/", "tls/")), sha))
     expect("the file names its source and says it is generated", "GENERATED from deploy/nodes/n.toml" in rs)
     expect("the budgets become the limit environment", env_lines(data) == ["WZ_LIMIT_MAX_QUERYABLES=2"])
 
@@ -349,7 +422,14 @@ def _selftest() -> int:
     refuses("a key with an empty chunk", SAMPLE.replace("lab/doc/a", "lab//a"), "empty chunk")
     refuses("a key with a space", SAMPLE.replace("lab/doc/a", "lab doc"), "character a key expression does not")
     refuses("a key longer than the limit", SAMPLE.replace("lab/doc/a", "k" * 300), "MAX_KEYEXPR_BYTES")
-    refuses("a duplicate key", SAMPLE + '\n[[entity]]\nkind = "queryable"\nkey = "lab/doc/a"\ndocument_bytes = 1\n',
+    expect("the image's own budget is the baseline, read from its cargo config",
+           image_limits(TARGETS["slot"])["MAX_KEYEXPR_BYTES"] == 64)
+    refuses("a key over the image's budget, which is below the registry's default",
+            SAMPLE.replace("lab/doc/a", "k" * 65), "MAX_KEYEXPR_BYTES (64)")
+    expect("a node that states a larger budget holds that key",
+           problems(SAMPLE.replace("lab/doc/a", "k" * 65).replace("MAX_QUERYABLES = 2", "MAX_QUERYABLES = 2\nMAX_KEYEXPR_BYTES = 128"))
+           == [])
+    refuses("a duplicate key", SAMPLE +'\n[[entity]]\nkind = "queryable"\nkey = "lab/doc/a"\ndocument_bytes = 1\n',
             "declared twice")
     refuses("a document above the node's storage", SAMPLE.replace("512", "4097"), "document_bytes")
     refuses("more queryables than the registry holds",
@@ -372,6 +452,27 @@ def _selftest() -> int:
         expect("the generated file is current", check(decl, directory) == 0)
         generated_path("n", directory).write_text("// edited by hand\n", encoding="utf-8")
         expect("a hand-edited generated file is stale", check(decl, directory) == 1)
+        write(decl, directory)
+        view = resolve("n", decl, directory)
+        expect("a node resolves to the digest of its file", view["declaration_sha256"] == digest("n", directory))
+        expect("a tcp node is built with the declared feature alone and asks for a tcp socket",
+               view["features"] == ["declared"] and view["facilities"] == ["sockets-tcp"])
+        expect("a stated budget is the environment of the build", view["limits"] == {"WZ_LIMIT_MAX_QUERYABLES": "2"})
+        (directory / "n.toml").write_text(SAMPLE.replace("tcp/", "tls/"), encoding="utf-8")
+        try:
+            resolve("n", decl, directory)
+        except ValueError as err:
+            expect("an edited declaration is stale until it is generated again", "stale" in str(err))
+        else:
+            raise AssertionError("an edited declaration resolved against its old generated file")
+        write(decl, directory)
+        tls = resolve("n", decl, directory)
+        expect("a tls node adds the tls feature and still asks only for a stream socket",
+               tls["features"] == ["declared", "tls"] and tls["facilities"] == ["sockets-tcp"])
+        (directory / "n.toml").write_text(SAMPLE.replace("tcp/", "udp/"), encoding="utf-8")
+        write(decl, directory)
+        expect("a udp node asks for a datagram socket", resolve("n", decl, directory)["facilities"] == ["sockets-udp"])
+        (directory / "n.toml").write_text(SAMPLE, encoding="utf-8")
         write(decl, directory)
         (directory / "generated" / "gone.rs").write_text("", encoding="utf-8")
         expect("a generated file with no declaration is a finding", check(decl, directory) == 1)
@@ -405,7 +506,7 @@ def main(argv: list[str]) -> int:
         except (ValueError, OSError) as err:
             print(f"wz-node: REFUSED -- {err}", file=sys.stderr)
             return 1
-        print(emit(argv[1], data) if argv[0] == "--emit" else "\n".join(env_lines(data)))
+        print(emit(argv[1], data, digest(argv[1])) if argv[0] == "--emit" else "\n".join(env_lines(data)))
         return 0
     print(__doc__, file=sys.stderr)
     return 2

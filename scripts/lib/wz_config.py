@@ -569,11 +569,20 @@ def validate_platforms(data: dict) -> list[str]:
 # in a manifest only when its `needs_feature` is on in the build, and an executable's
 # `traffic-driver` takes its role words from the facts note the build wrote (`facts_list`), so no
 # table of them is kept here.
-ARTIFACT_KEYS = {"id", "package", "kind", "file", "family", "abi", "help"}
+#
+# An executable built from a NODE DECLARATION (`docs/target-build-contract.md` 5b) is an artifact
+# whose `input` is `node`: its cargo package is not a member of the crates workspace (`manifest`
+# names its own Cargo.toml, `bin` the binary), the declaration picks its features and constants, and
+# its `os` lists the operating systems the port under it exists for. A platform outside that list is
+# refused by name, with `os_note` as the reason, before anything is built.
+ARTIFACT_KEYS = {"id", "package", "kind", "file", "family", "abi", "help", "input", "manifest", "bin",
+                 "os", "os_note"}
 ARTIFACT_REQUIRED = {"id", "package", "kind", "file", "family", "help"}
 ARTIFACT_KINDS = ("shared-library", "executable")
-ROLE_IDS = ("pico-library", "zenoh-c-dropin", "session-node", "traffic-driver")
-ROLE_KEYS = {"artifact", "id", "needs_feature", "via_argument", "via_kind", "via_key", "facts_list", "help"}
+ARTIFACT_INPUTS = ("node",)
+ROLE_IDS = ("pico-library", "zenoh-c-dropin", "session-node", "traffic-driver", "declared-node")
+ROLE_KEYS = {"artifact", "id", "needs_feature", "via_argument", "via_kind", "via_key", "facts_list",
+             "facts_lists", "help"}
 ROLE_ABI = {"pico-library": "pico", "zenoh-c-dropin": "c"}
 
 
@@ -597,6 +606,23 @@ def validate_artifacts(data: dict) -> list[str]:
                 out.append(f"{who}: a library names the ABI whose capabilities it has ({', '.join(ABIS)})")
         elif "abi" in a:
             out.append(f"{who}: only a library has an ABI")
+        if "input" in a:
+            if a["input"] not in ARTIFACT_INPUTS:
+                out.append(f"{who}: input is `{a['input']}`, not one of {', '.join(ARTIFACT_INPUTS)}")
+            if a.get("kind") != "executable":
+                out.append(f"{who}: only an executable is built from a declaration")
+            for key in ("manifest", "bin", "os", "os_note"):
+                if key not in a:
+                    out.append(f"{who}: an artifact built from a declaration has no `{key}`")
+        else:
+            for key in ("manifest", "bin"):
+                if key in a:
+                    out.append(f"{who}: `{key}` belongs to an artifact built from a declaration")
+        if "os" in a:
+            if not isinstance(a["os"], list) or not a["os"] or not all(isinstance(o, str) for o in a["os"]):
+                out.append(f"{who}: os is a non-empty list of operating system names")
+            if "os_note" not in a:
+                out.append(f"{who}: `os` has no `os_note`, the reason a refused platform is told")
     roles = data["role"]
     seen = set()
     for r in roles:
@@ -617,8 +643,15 @@ def validate_artifacts(data: dict) -> list[str]:
             out.append(f"{who}: a `{r['id']}` is a library of the {want} ABI")
         if want is None and art.get("kind") != "executable":
             out.append(f"{who}: a `{r.get('id')}` is an executable")
-        if "facts_list" in r and art.get("kind") != "executable":
-            out.append(f"{who}: only an executable carries a facts note")
+        for key in ("facts_list", "facts_lists"):
+            if key in r and art.get("kind") != "executable":
+                out.append(f"{who}: only an executable carries a facts note")
+        if "facts_list" in r and "facts_lists" in r:
+            out.append(f"{who}: `facts_list` and `facts_lists` are two ways to say one thing")
+        if "facts_lists" in r and (not isinstance(r["facts_lists"], list) or not r["facts_lists"]):
+            out.append(f"{who}: facts_lists is a non-empty list of names")
+        if r.get("id") == "declared-node" and art.get("input") != "node":
+            out.append(f"{who}: a `declared-node` is the role of an artifact built from a declaration")
     for aid in by_id:
         if not any(r.get("artifact") == aid for r in roles):
             out.append(f"artifact {aid!r} provides no role")
