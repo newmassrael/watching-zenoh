@@ -282680,6 +282680,60 @@
         "Approved structure: steps 1 to 4 landed. Left: (5) the admission that follows the windowed lateness (the gauge exists; needs a rule for how fast the ceiling rises again, to be measured); the stopped reading face against blocking publishers (the demo has neither a stoppable client nor a blocking publisher); hosted reads of E7s (rounds 3507 and later) and of the new E7g step: runs are cancelled by later pushes, read the first that completes. The report is served by the router-hat only; the peer host and the MCU admin node do not serve it. sessions_held counts the face table, so a router with a multicast group counts its unicast faces only."
       ]
     },
+    "Round 3524": {
+      "decision_summary": "Step 1b is done: on the T2G kit, the fixed-memory client and zenohd 1.10.1 verify each other over the D9 channel, as the host image did in Round 3520. The kit dials tls/ over Zephyr's TCP, now a StreamSocket and StreamDial of the Zephyr runtime, and compiles the channel's C side against Zephyr's own Mbed TLS rather than the vendored build. The kit lane gains a verify image: it reads the certificate the image prints, configures the router to pin it and to claim the zid its own key names, and holds the run to the image's verified line. The round also repaid this line's hosted reds: vendored is no longer a default, because a checkout that has not initialised the two new submodules could not check the workspace and every session pushing from one was stopped; the witness notes named a feature without a package. The image PEM printer and the Zephyr Mbed TLS user config each exist once, in the channel crate.",
+      "changes_bullets": [
+        "crates/wz-tls-mbedtls: vendored is not a default; the crate's tests need it and a nondefault leg names it; Identity::certificate_pem; the Zephyr user config moves here (config/zephyr).",
+        "crates/zephyr-sys and crates/wz-runtime-zephyr: the stream calls and constants at Zephyr's values; ZephyrTcpSocket and ZephyrTcpDial (stream.rs).",
+        "deploy/zephyr-admin-node: CONFIG_WZ_TLS, the tls feature, fixed_tls.rs, wz_tls.c compiled by CMake against Zephyr's Mbed TLS, overlays/t2g_client_tls.conf.",
+        "deploy/host-slot-node: prints through certificate_pem. deploy/zephyr-tls-fit: reads the shared user config.",
+        "scripts/kit-lane.sh: the verify kind and the zephyr-client-fixed-tls image; scripts/lib/nondefault-tests-gate.sh: the vendored leg; the witness test's notes name the tls build of host-slot-node.",
+        "docs/session-lifecycle-intent.md: D9 and step 1b; the session-close-ingress reason records step 1b done."
+      ],
+      "verification_bullets": [
+        "On the kit (pc2, developer account, kit lane): zephyr-client-fixed-tls built (text 269,604, bss 178,127), flashed and run against zenohd 1.10.1 built at the pin; the image printed its certificate, the router pinned it and claimed the zid its key names, and the image read \"session established, peer verified\"; no 'wz: FAIL'; stack peak 6,864 of 12,288 B. zephyr-client-fixed without the channel built again and its stack gate holds (6,904 of 9,216 B). The three Kconfig and CMake warnings of the tls build appear in a pristine build without the channel too.",
+        "On pc2's developer account: the host witness, 3 of 3, on the final tree. On the build machine: wz-tls-mbedtls tests and clippy with and without vendored (0 and 5 tests), the slot profile's clippy; wz-runtime-zephyr clippy both profiles and tests; zephyr-sys clippy; host-slot-node clean under the no-allocator gate in its three builds; rustdoc C1bz for the Zephyr crates and the channel.",
+        "Static: lane_feature_membership, barrier_needle (after its owner's scope fix), test_discipline, prose_feature, feature_gate_diagnostic, feature_public_surface_census, upstream_citation_anchor, store_reason_citation, reason_review_pin, depth_axis_census, the kit lane's selftest, shellcheck; validate-workspace orphan delta 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "The kit TLS image's stack gate row and resource budget row, set from its runs; its stack peak was 6,864 of 12,288 B and its arena 49,152 B unmeasured at peak.",
+        "The steps after 1b: D4 (the expected zid on every dial path), D3, D5, D6, the MCU opener, D7.",
+        "Read the first CI run that judges Rounds 3502 to 3523 per job; none has started a job yet because each push cancelled the last.",
+        "No TLS 1.3 KeyUpdate in Mbed TLS 4.1; the Round 3495 items (the 18 percent gap, p256-m, persistent keys, the in-handshake pin)."
+      ],
+      "publishable_decision_summary": "Step 1b is done: on the T2G kit, the fixed-memory client and zenohd 1.10.1 verify each other over the D9 channel, as the host image did in Round 3520. The kit dials tls/ over Zephyr's TCP, now a StreamSocket and StreamDial of the Zephyr runtime, and compiles the channel's C side against Zephyr's own Mbed TLS rather than the vendored build. The kit lane gains a verify image: it reads the certificate the image prints, configures the router to pin it and to claim the zid its own key names, and holds the run to the image's verified line. The round also repaid this line's hosted reds: vendored is no longer a default, because a checkout that has not initialised the two new submodules could not check the workspace and every session pushing from one was stopped; the witness notes named a feature without a package. The image PEM printer and the Zephyr Mbed TLS user config each exist once, in the channel crate.",
+      "publishable_changes_bullets": [
+        "crates/wz-tls-mbedtls: vendored is not a default; the crate's tests need it and a nondefault leg names it; Identity::certificate_pem; the Zephyr user config moves here (config/zephyr).",
+        "crates/zephyr-sys and crates/wz-runtime-zephyr: the stream calls and constants at Zephyr's values; ZephyrTcpSocket and ZephyrTcpDial (stream.rs).",
+        "deploy/zephyr-admin-node: CONFIG_WZ_TLS, the tls feature, fixed_tls.rs, wz_tls.c compiled by CMake against Zephyr's Mbed TLS, overlays/t2g_client_tls.conf.",
+        "deploy/host-slot-node: prints through certificate_pem. deploy/zephyr-tls-fit: reads the shared user config.",
+        "scripts/kit-lane.sh: the verify kind and the zephyr-client-fixed-tls image; scripts/lib/nondefault-tests-gate.sh: the vendored leg; the witness test's notes name the tls build of host-slot-node.",
+        "docs/session-lifecycle-intent.md: D9 and step 1b; the session-close-ingress reason records step 1b done."
+      ],
+      "publishable_verification_bullets": [
+        "On the kit (pc2, developer account, kit lane): zephyr-client-fixed-tls built (text 269,604, bss 178,127), flashed and run against zenohd 1.10.1 built at the pin; the image printed its certificate, the router pinned it and claimed the zid its key names, and the image read \"session established, peer verified\"; no 'wz: FAIL'; stack peak 6,864 of 12,288 B. zephyr-client-fixed without the channel built again and its stack gate holds (6,904 of 9,216 B). The three Kconfig and CMake warnings of the tls build appear in a pristine build without the channel too.",
+        "On pc2's developer account: the host witness, 3 of 3, on the final tree. On the build machine: wz-tls-mbedtls tests and clippy with and without vendored (0 and 5 tests), the slot profile's clippy; wz-runtime-zephyr clippy both profiles and tests; zephyr-sys clippy; host-slot-node clean under the no-allocator gate in its three builds; rustdoc C1bz for the Zephyr crates and the channel.",
+        "Static: lane_feature_membership, barrier_needle (after its owner's scope fix), test_discipline, prose_feature, feature_gate_diagnostic, feature_public_surface_census, upstream_citation_anchor, store_reason_citation, reason_review_pin, depth_axis_census, the kit lane's selftest, shellcheck; validate-workspace orphan delta 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The kit TLS image's stack gate row and resource budget row, set from its runs; its stack peak was 6,864 of 12,288 B and its arena 49,152 B unmeasured at peak.",
+        "The steps after 1b: D4 (the expected zid on every dial path), D3, D5, D6, the MCU opener, D7.",
+        "Read the first CI run that judges Rounds 3502 to 3523 per job; none has started a job yet because each push cancelled the last.",
+        "No TLS 1.3 KeyUpdate in Mbed TLS 4.1; the Round 3495 items (the 18 percent gap, p256-m, persistent keys, the in-handshake pin)."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
