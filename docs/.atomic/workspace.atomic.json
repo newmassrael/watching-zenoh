@@ -283112,6 +283112,46 @@
         "Hosted CI: read the first completed run holding this round"
       ]
     },
+    "Round 3534": {
+      "decision_summary": "Open-debt item 924, step 4c, the scouting rows, which close step 4c (owner: long-term correct, cost not counted). The scouting list kept every SCOUT and HELLO decoded, a slice behind Deref. It now keeps each payload once in a unit log, a copy or its place in a lent container, beside a row of what the payload cannot say (direction, packet, instant), and a reader decodes it again through Scoutings; a discard lets the copy go, and the ceilings order the lists by the row's packet without decoding. The unit log is session-core's one, byte_log::UnitLog, which the message lists now use too, so placing a unit in a lent container is written once. The field document decodes a scouting message only once the cursor and the window have said it is written. Every list of a dissection now keeps rows read again from bytes it or its source holds; step 5, the memory gate, is next.",
+      "changes_bullets": [
+        "wz-session-core byte_log.rs: pub UnitLog (place, get, release_through, allocated) and LogPlace, moved out of passive_messages.rs, whose Index now holds a UnitLog",
+        "wz-capture lib.rs: ScoutingList keeps ScoutingRow entries and a UnitLog; Scoutings reads them, decoding on demand; DatagramDissection::scouting; the ceilings read oldest_packet; node, retention, selection and fields documents read Scoutings; redecode_gate.rs: SCOUTs, HELLOs and long SCOUT datagrams handed and lent under ceilings",
+        "wz-capi-dissect and wz-analyze read the scouting list through DatagramDissection::scouting; discard_site_lint.py and accessor_reach_census.py rows moved with it; docs/dissect-row-index.md: step 4c (4), its scouting part"
+      ],
+      "verification_bullets": [
+        "The scouting gate passes plain and under message ceilings of 1, 3 and 7: every message decodes as its packet's payload does, handed and lent alike, a lent list holds no copy, and a ceiling's discards give back the copies' chunks; a discard that keeps the copy fails it, and so does a lent payload copied (mutations). The session-core lists pass on the shared UnitLog unchanged",
+        "cargo test wz-capture at default and all features, wz-session-core all features, wz-capi-dissect, wz-analyze all features, wz-replay; cargo check wz-integration-tests all targets",
+        "clippy -D warnings wz-capture default, all and no default features, wz-session-core all and no default features, wz-capi-dissect, wz-analyze all and no default features; rustfmt; the hook's round_fed_gates array"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 5, the memory gate: a held row's cost measured per list against a bound, with UnitLog::allocated and the lists' own entries as the account",
+        "Hosted CI: read the first completed run holding rounds 3504 to this one; the consumer session takes this round's pin, and a dissection's scouting list is read through DatagramDissection::scouting now"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, step 4c, the scouting rows, which close step 4c (owner: long-term correct, cost not counted). The scouting list kept every SCOUT and HELLO decoded, a slice behind Deref. It now keeps each payload once in a unit log, a copy or its place in a lent container, beside a row of what the payload cannot say (direction, packet, instant), and a reader decodes it again through Scoutings; a discard lets the copy go, and the ceilings order the lists by the row's packet without decoding. The unit log is session-core's one, byte_log::UnitLog, which the message lists now use too, so placing a unit in a lent container is written once. The field document decodes a scouting message only once the cursor and the window have said it is written. Every list of a dissection now keeps rows read again from bytes it or its source holds; step 5, the memory gate, is next.",
+      "publishable_changes_bullets": [
+        "wz-session-core byte_log.rs: pub UnitLog (place, get, release_through, allocated) and LogPlace, moved out of passive_messages.rs, whose Index now holds a UnitLog",
+        "wz-capture lib.rs: ScoutingList keeps ScoutingRow entries and a UnitLog; Scoutings reads them, decoding on demand; DatagramDissection::scouting; the ceilings read oldest_packet; node, retention, selection and fields documents read Scoutings; redecode_gate.rs: SCOUTs, HELLOs and long SCOUT datagrams handed and lent under ceilings",
+        "wz-capi-dissect and wz-analyze read the scouting list through DatagramDissection::scouting; discard_site_lint.py and accessor_reach_census.py rows moved with it; docs/dissect-row-index.md: step 4c (4), its scouting part"
+      ],
+      "publishable_verification_bullets": [
+        "The scouting gate passes plain and under message ceilings of 1, 3 and 7: every message decodes as its packet's payload does, handed and lent alike, a lent list holds no copy, and a ceiling's discards give back the copies' chunks; a discard that keeps the copy fails it, and so does a lent payload copied (mutations). The session-core lists pass on the shared UnitLog unchanged",
+        "cargo test wz-capture at default and all features, wz-session-core all features, wz-capi-dissect, wz-analyze all features, wz-replay; cargo check wz-integration-tests all targets",
+        "clippy -D warnings wz-capture default, all and no default features, wz-session-core all and no default features, wz-capi-dissect, wz-analyze all and no default features; rustfmt; the hook's round_fed_gates array"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 5, the memory gate: a held row's cost measured per list against a bound, with UnitLog::allocated and the lists' own entries as the account",
+        "Hosted CI: read the first completed run holding rounds 3504 to this one; the consumer session takes this round's pin, and a dissection's scouting list is read through DatagramDissection::scouting now"
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
