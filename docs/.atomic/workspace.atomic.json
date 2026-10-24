@@ -283036,6 +283036,46 @@
         "Next layers, each with its reason: (a) credit-based flow control in the forwarder (a bounded queue per destination face; the publishing face's loop stops reading while it is full), the structure that spends no thread on a stopped reader: it needs the fan-out and the link's synchronous wait_for_room to change together because the MCU profile shares the seam; (b) the same refusal for wait_for_slot under runtime-zero-copy; (c) a key in the sessions document to publish with Block, so that the stopped-reader case can be run end to end (SIGSTOP a subscriber process); (d) the windowed-lateness admission, whose rule for how fast the ceiling rises again is not measured; (e) hosted reads of E7s and E7g (runs keep being cancelled by later pushes). A host whose faces run on a runtime capped below 32 must call set_park_budget."
       ]
     },
+    "Round 3532": {
+      "decision_summary": "Two hosted reds of this line are repaid (run 40084678735). Layer C1m: a coop dial test still expected tls/ to be refused before the stack was asked, which Round 3505 made untrue by giving tls/ a dial; the leg now dials quic/, which the parser still refuses, so what it holds is unchanged. Layer A4: the three fixed-memory TLS witnesses of Round 3520 declared no wz-proves line. They declare none, with the reason: the fixed-memory profile's channel has no catalog atom, transport-link-tls is the tokio link's feature and is not in that image, and session-close-ingress's verbs are not on the path. Whether the channel should be an atom of its own, or a profile of transport-link-tls, is an inventory question this round records and does not decide. The run's other reds are other sessions' and were reported to them first: C1ad bisected to the capacity calibration (taken by its owner), Layer E's pico keyexpr legs, C0's gate headers, E7s, C1cf and the capture reds.",
+      "changes_bullets": [
+        "crates/wz-session-mcu/src/dial.rs: the refused-before-the-stack assertion dials quic/.",
+        "crates/wz-integration-tests/tests/wz_fixed_memory_tls_zenohd_interop.rs: each of the three tests declares wz-proves none with its reason."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): cargo test -p wz-session-mcu --features adminspace-write --lib passes, 14 tests, the dial test among them.",
+        "scripts/audit-crossimpl-proof.sh: cross-impl proof audit OK, witnesses declared none 120 to 123. test_discipline_gate.py --check, lane_reach_gate.py --check and crossimpl_corpus.py --count-reasons pass.",
+        "The C1ad attribution: lowlatency_e2e passes at the parent of the capacity calibration commit and fails at it and at the tip, on pc2."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "carry_forward_bullets": [
+        "D4: the expected zid on every dial path (AP, the C ABI, the MCU host), closing at InitAck when the locator answers with another zid.",
+        "The inventory question: an atom for the fixed-memory profile's secure channel, or transport-link-tls widened to the profile, so its witnesses can claim one.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to 3532, per job."
+      ],
+      "publishable_decision_summary": "Two hosted reds of this line are repaid (run 40084678735). Layer C1m: a coop dial test still expected tls/ to be refused before the stack was asked, which Round 3505 made untrue by giving tls/ a dial; the leg now dials quic/, which the parser still refuses, so what it holds is unchanged. Layer A4: the three fixed-memory TLS witnesses of Round 3520 declared no wz-proves line. They declare none, with the reason: the fixed-memory profile's channel has no catalog atom, transport-link-tls is the tokio link's feature and is not in that image, and session-close-ingress's verbs are not on the path. Whether the channel should be an atom of its own, or a profile of transport-link-tls, is an inventory question this round records and does not decide. The run's other reds are other sessions' and were reported to them first: C1ad bisected to the capacity calibration (taken by its owner), Layer E's pico keyexpr legs, C0's gate headers, E7s, C1cf and the capture reds.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu/src/dial.rs: the refused-before-the-stack assertion dials quic/.",
+        "crates/wz-integration-tests/tests/wz_fixed_memory_tls_zenohd_interop.rs: each of the three tests declares wz-proves none with its reason."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): cargo test -p wz-session-mcu --features adminspace-write --lib passes, 14 tests, the dial test among them.",
+        "scripts/audit-crossimpl-proof.sh: cross-impl proof audit OK, witnesses declared none 120 to 123. test_discipline_gate.py --check, lane_reach_gate.py --check and crossimpl_corpus.py --count-reasons pass.",
+        "The C1ad attribution: lowlatency_e2e passes at the parent of the capacity calibration commit and fails at it and at the tip, on pc2."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-14-platform"
+      ],
+      "publishable_carry_forward_bullets": [
+        "D4: the expected zid on every dial path (AP, the C ABI, the MCU host), closing at InitAck when the locator answers with another zid.",
+        "The inventory question: an atom for the fixed-memory profile's secure channel, or transport-link-tls widened to the profile, so its witnesses can claim one.",
+        "Read the first completed hosted CI run that judges Rounds 3502 to 3532, per job."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
