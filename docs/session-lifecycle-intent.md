@@ -339,9 +339,16 @@ handshake derived, which is the binding D1 requires.
       over a channel. On the host, the posix links given the Mbed TLS
       channel open a `tls/` link to the rustls router above, and the
       router verifies the device.
-    - Not yet: the verified zid on the cooperative session, the verbs back
-      on that runtime, a zenohd process over the link, and the kit image
-      over the crate.
+    - The proven key reaches the session on every profile (Round 3510). A
+      link driver answers `peer_credential_zid`, a value rather than the
+      heap profile's `LinkSubject` reference, and
+      `peer_identity_verified` reads only it. A stream link asks its
+      stream, and `TlsStream` answers with the key its peer proved. The two
+      reconnect seams hand on their live link's answer, so a reconnecting
+      session over TLS is verified by the link it runs on now. Before this
+      the seams answered nothing and such a session was never verified.
+    - Not yet: the verbs back on the cooperative runtime, a zenohd process
+      over the link, and the kit image over the crate.
   - What this leaves open:
     - Mbed TLS 4.1 does not implement TLS 1.3 KeyUpdate. A KeyUpdate from
       the peer ends the session with an unexpected-message alert: the
