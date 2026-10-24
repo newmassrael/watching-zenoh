@@ -280970,6 +280970,50 @@
         "Read the hosted runs of this push per job at the start of the next round, Layer E18 first."
       ]
     },
+    "Round 3488": {
+      "decision_summary": "Open-debt item 924, D5 of docs/dissect-row-index.md decided (owner: long-term correct, cost not counted): one walk per call, and no cache of decoded rows between calls. The repeated reads step 4b measured are scans (exchange pairing, declaration absorption, census planes), and a bounded cache gets no hit on a scan longer than it is under any policy, while one that holds the scan holds the capture decoded; the textbook answer is a shared scan, the reference dissector's tap model. Rows are immutable, a lookup by position decodes one unit, and a cache between calls would put a lock in a no_std store and take Sync from Dissection. Applied: the field document's declaration absorption rides on the exchange pairing's walk through ordered_fold::Share whenever both readers' own rules pick the same messages, and walks alone otherwise. Each row is decoded three times per consumer pass instead of four; field windows cost +12% and +11% over the build before 4b instead of +19% and +22%.",
+      "changes_bullets": [
+        "wz-capture ordered_fold.rs: Share and Wanted; Resumable::advance_across_trims feeds a Share's reader the messages of its walk when the walk is the one the reader wants (every message, or the messages after equal marks) and says so in fed",
+        "wz-capture fields_json.rs: whether the walk resumes is decided before the pairing walk; declarations are absorbed on that walk into the kept table (resume) or a new one (restart) when shared, and absorbed alone otherwise; a stopped shared walk drops the kept walk state; WalkRun carries the table a shared walk filled",
+        "docs/dissect-row-index.md: D5 rewritten as the decision with its reasons; section 7's cache question closed with the measurement"
+      ],
+      "verification_bullets": [
+        "callgrind, consumer generator 40k capture through the C ABI: re-decodes 160,353 to 120,289 (three per row: census walk, the field document's shared walk, renderer); instructions 3.50G to 3.33G against 2.93G before 4b",
+        "Section 2 instrument against a build of 270780967, median of six at 409,064 rows and three at 1,386,564: fields windows 2,169 to 2,421 ms and 7,876 to 8,772 ms; census 207 to 155 ms and 795 to 562 ms; peak RSS unchanged at 177 and 590 MB",
+        "cargo test wz-capture all features (redecode_gate, census and field resumption equality tests among them), wz-capi-dissect and wz-analyze; cargo check wz-capture default, all and no default features, workspace all targets on the rebased tree",
+        "clippy -D warnings wz-capture all and no default features; cargo fmt; Layer C0 and C1bz on the rebased tree; discard_site_lint OK; guarded_count_gate on the range"
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Step 3 of docs/dissect-row-index.md: the byte source, so the reassembled stream copy goes; then 4c (datagram, serial and QUIC rows as entries) and 5 (memory gate, lent-buffer door)",
+        "The hosted CI of 33d459f71 was cancelled by later pushes; read the first completed run that contains it and tell the consumer session which pin to take if it is red"
+      ],
+      "publishable_decision_summary": "Open-debt item 924, D5 of docs/dissect-row-index.md decided (owner: long-term correct, cost not counted): one walk per call, and no cache of decoded rows between calls. The repeated reads step 4b measured are scans (exchange pairing, declaration absorption, census planes), and a bounded cache gets no hit on a scan longer than it is under any policy, while one that holds the scan holds the capture decoded; the textbook answer is a shared scan, the reference dissector's tap model. Rows are immutable, a lookup by position decodes one unit, and a cache between calls would put a lock in a no_std store and take Sync from Dissection. Applied: the field document's declaration absorption rides on the exchange pairing's walk through ordered_fold::Share whenever both readers' own rules pick the same messages, and walks alone otherwise. Each row is decoded three times per consumer pass instead of four; field windows cost +12% and +11% over the build before 4b instead of +19% and +22%.",
+      "publishable_changes_bullets": [
+        "wz-capture ordered_fold.rs: Share and Wanted; Resumable::advance_across_trims feeds a Share's reader the messages of its walk when the walk is the one the reader wants (every message, or the messages after equal marks) and says so in fed",
+        "wz-capture fields_json.rs: whether the walk resumes is decided before the pairing walk; declarations are absorbed on that walk into the kept table (resume) or a new one (restart) when shared, and absorbed alone otherwise; a stopped shared walk drops the kept walk state; WalkRun carries the table a shared walk filled",
+        "docs/dissect-row-index.md: D5 rewritten as the decision with its reasons; section 7's cache question closed with the measurement"
+      ],
+      "publishable_verification_bullets": [
+        "callgrind, consumer generator 40k capture through the C ABI: re-decodes 160,353 to 120,289 (three per row: census walk, the field document's shared walk, renderer); instructions 3.50G to 3.33G against 2.93G before 4b",
+        "Section 2 instrument against a build of 270780967, median of six at 409,064 rows and three at 1,386,564: fields windows 2,169 to 2,421 ms and 7,876 to 8,772 ms; census 207 to 155 ms and 795 to 562 ms; peak RSS unchanged at 177 and 590 MB",
+        "cargo test wz-capture all features (redecode_gate, census and field resumption equality tests among them), wz-capi-dissect and wz-analyze; cargo check wz-capture default, all and no default features, workspace all targets on the rebased tree",
+        "clippy -D warnings wz-capture all and no default features; cargo fmt; Layer C0 and C1bz on the rebased tree; discard_site_lint OK; guarded_count_gate on the range"
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 3 of docs/dissect-row-index.md: the byte source, so the reassembled stream copy goes; then 4c (datagram, serial and QUIC rows as entries) and 5 (memory gate, lent-buffer door)",
+        "The hosted CI of 33d459f71 was cancelled by later pushes; read the first completed run that contains it and tell the consumer session which pin to take if it is red"
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
