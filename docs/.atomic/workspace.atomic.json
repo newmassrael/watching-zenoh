@@ -283952,6 +283952,38 @@
         "Read the hosted runs of the pushes of this family per job, Layer E18 and Layer Z first."
       ]
     },
+    "Round 3554": {
+      "decision_summary": "Two hosted reds from the pico-on-the-cooperative-engine rounds, paid off in the shape the gates already name. Layer C1cf: wz-capi-pico did not build under --no-default-features, because with neither engine selected its open reached the cooperative engine's crates unlinked. A pico session runs on an engine, so a build that names neither has no z_open to give: the crate now refuses it by name (compile_error!, as wz-runtime-coop refuses a build with no task pool) and joins the reduced-features gate's minimal-profile tier at engine-coop, the smaller of the two engines. Layer C1cn: the host-lock round added a test only the host-lock feature builds (cs::tests), and no leg ran it; the coop runtime's leg now names host-lock. The same hosted run's zenoh-* family reds (C1cf, C1bf) are another session's and were routed to it, not touched here.",
+      "changes_bullets": [
+        "wz-capi-pico lib.rs: compile_error! when neither engine-tokio nor engine-coop is on; Cargo.toml comment says a build naming neither is refused.",
+        "scripts/lib/reduced-features-gate.sh: wz-capi-pico:engine-coop joins profile_min (tier 4), with the reason.",
+        "scripts/lib/nondefault-tests-gate.sh: the wz-runtime-coop leg's feature list gains host-lock."
+      ],
+      "verification_bullets": [
+        "On the build host: clippy -p wz-capi-pico --no-default-features --features engine-coop --all-targets -D warnings passes; clippy -p wz-capi-pico --all-targets -D warnings (defaults) passes; the coop leg's feature list lists 69 tests and runs cs::tests::sections_nest_on_a_thread_and_exclude_across_threads (1 passed). The hook's round_fed_gates array: 111 run, 0 failed. The reds were read from the hosted run of the commit before the A3 fix, job by job, in each gate's own sentence."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted CI of this push at the start of the next round (the runs of the last three pico pushes were cancelled by later pushes before any job ran). Then the cooperative engine's next step: redial a lost link."
+      ],
+      "publishable_decision_summary": "Two hosted reds from the pico-on-the-cooperative-engine rounds, paid off in the shape the gates already name. Layer C1cf: wz-capi-pico did not build under --no-default-features, because with neither engine selected its open reached the cooperative engine's crates unlinked. A pico session runs on an engine, so a build that names neither has no z_open to give: the crate now refuses it by name (compile_error!, as wz-runtime-coop refuses a build with no task pool) and joins the reduced-features gate's minimal-profile tier at engine-coop, the smaller of the two engines. Layer C1cn: the host-lock round added a test only the host-lock feature builds (cs::tests), and no leg ran it; the coop runtime's leg now names host-lock. The same hosted run's zenoh-* family reds (C1cf, C1bf) are another session's and were routed to it, not touched here.",
+      "publishable_changes_bullets": [
+        "wz-capi-pico lib.rs: compile_error! when neither engine-tokio nor engine-coop is on; Cargo.toml comment says a build naming neither is refused.",
+        "scripts/lib/reduced-features-gate.sh: wz-capi-pico:engine-coop joins profile_min (tier 4), with the reason.",
+        "scripts/lib/nondefault-tests-gate.sh: the wz-runtime-coop leg's feature list gains host-lock."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: clippy -p wz-capi-pico --no-default-features --features engine-coop --all-targets -D warnings passes; clippy -p wz-capi-pico --all-targets -D warnings (defaults) passes; the coop leg's feature list lists 69 tests and runs cs::tests::sections_nest_on_a_thread_and_exclude_across_threads (1 passed). The hook's round_fed_gates array: 111 run, 0 failed. The reds were read from the hosted run of the commit before the A3 fix, job by job, in each gate's own sentence."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted CI of this push at the start of the next round (the runs of the last three pico pushes were cancelled by later pushes before any job ran). Then the cooperative engine's next step: redial a lost link."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
