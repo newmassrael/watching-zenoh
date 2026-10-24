@@ -326,7 +326,9 @@ use crate::sample::Reliability;
 use crate::sample::SampleKind;
 #[cfg(all(test, feature = "pubsub-timestamp"))]
 use crate::sample::TimestampHint;
-#[cfg(feature = "transport-unicast")]
+// The owned query event a queryable keeps (`queryable.rs`); this module's tests reach the names
+// through `super::*` on the builds that have it.
+#[cfg(all(feature = "transport-unicast", feature = "query-queryable"))]
 use crate::sample::{EncodingHint, SourceInfo};
 // R311gb-2b / R311nb — `declare_subscriber` takes `impl FnMut(&dyn
 // SampleView)` and the `pubsub-allow-loop` loopback assembly
@@ -408,15 +410,9 @@ impl<'a> QuerySelector<'a> {
 // `publish_common` (importing `PushMetadata` from its ungated real home
 // `wz_session_core::metadata`). `Session::publish` only handles the *value*
 // `opts.push_metadata()` returns, never naming the type.
-// R311o — `QueryTarget` / `ConsolidationMode` are referenced from
-// the now-unconditional `QueryOptions` struct fields + builder
-// bodies, so they import unconditionally. `QueryMetadata` is only
-// returned by the private `query_metadata` helper which stays gated
-// on `query-get` (the helper is dead-code under the lower gate), so
-// its import follows the same gate.
-#[cfg(all(feature = "query-get", feature = "transport-unicast"))]
-use crate::session_glue::QueryMetadata;
-#[cfg(feature = "transport-unicast")]
+// `QueryOptions`, which named these, is session-core's now (`query_options`); this module's
+// tests still reach them through `super::*`.
+#[cfg(all(test, feature = "transport-unicast"))]
 use crate::session_glue::{ConsolidationMode, QueryTarget};
 
 // Per-cluster handle submodules split out of this file (pure refactor).

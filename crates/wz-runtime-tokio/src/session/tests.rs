@@ -83,10 +83,11 @@ fn build_session() -> (TokioSession, Arc<RecordingLinkDriver>) {
 /// A private test helper inherits its callers' cfg or it is dead somewhere.
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 fn get_opts_in_arrival_order() -> QueryOptions {
-    QueryOptions {
-        consolidation: Some(wz_session_core::query_mode::ConsolidationMode::None),
-        ..QueryOptions::get()
-    }
+    // The field is written directly, as a struct literal wrote it before the type moved to
+    // session-core (where `#[non_exhaustive]` forbids the literal here).
+    let mut opts = QueryOptions::get();
+    opts.consolidation = Some(wz_session_core::query_mode::ConsolidationMode::None);
+    opts
 }
 
 #[test]
@@ -3516,9 +3517,11 @@ fn a_local_get_hears_every_reply_while_another_thread_drains_the_plane() {
         session
             .query(
                 "home/race",
-                QueryOptions {
-                    consolidation: Some(ConsolidationMode::None),
-                    ..QueryOptions::get().with_allowed_destination(Locality::SessionLocal)
+                {
+                    let mut opts =
+                        QueryOptions::get().with_allowed_destination(Locality::SessionLocal);
+                    opts.consolidation = Some(ConsolidationMode::None);
+                    opts
                 },
                 move |_| {
                     r.fetch_add(1, Ordering::SeqCst);
@@ -13471,10 +13474,7 @@ fn remote_only_query_does_not_drain_another_planes_staged_fire() {
     );
 
     // A Remote-only query must NOT drain it.
-    let opts = QueryOptions {
-        allowed_destination: Locality::Remote,
-        ..Default::default()
-    };
+    let opts = QueryOptions::get().with_allowed_destination(Locality::Remote);
     let issued = session.query(
         "q/**",
         opts,
@@ -14099,10 +14099,8 @@ fn an_adv_recovery_selector_reads_as_accept_any() {
     use wz_session_core::reply_acceptance::ReplyKeyExpr;
 
     let selector = wz_session_core::selector_params::anyke_params(&["_sn=3..".to_string()]);
-    let opts = QueryOptions {
-        parameters: Some(selector.into_bytes()),
-        ..QueryOptions::get()
-    };
+    let mut opts = QueryOptions::get();
+    opts.parameters = Some(selector.into_bytes());
     assert_eq!(opts.effective_accept_replies(), ReplyKeyExpr::Any);
 }
 

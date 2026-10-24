@@ -762,6 +762,15 @@ multicast-ingress-gate = ["session-multicast", "alloc"]
 # reply emit); the wz-runtime-tokio side forwards its same-named features
 # here so the gated production arms compile consistently workspace-wide.
 query-queryable = ["codec-request", "codec-response"]
+# The requesting end's own capabilities, which `query_options::QueryOptions` reads (moved down
+# from `wz-runtime-tokio`, whose same-named features forward here): `query-get` asks a query at
+# all; `query-target`, `query-timeout` and `query-consolidation` are the three request slots a
+# build may or may not honour. Gate-only: the type and its wire metadata are this crate's, and
+# the last hop that knows whether a slot is honoured is now the one that defines it.
+query-get = []
+query-target = ["query-get"]
+query-timeout = ["query-get"]
+query-consolidation = ["query-get"]
 # query-attachment selects attachment-bytes (the attachment ext codec it
 # consumes on both the Query encode and decode side).
 query-attachment = ["attachment-bytes"]

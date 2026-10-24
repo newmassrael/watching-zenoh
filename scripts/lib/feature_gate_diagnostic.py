@@ -256,9 +256,15 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # DEFERRED below as `compound-cfg`, not probed.
             "pubsub-express",
             "pubsub-priority",
-            "query-queryable",
+            # `query-queryable` and `query-selector-parameters` LEFT this list by the
+            # R2386 route: the round that moved `QueryOptions` down from
+            # `wz-runtime-tokio` (`query_options.rs`) made the claim false. Each now
+            # gates METHODS of that type (`matching_needs_complete`; `with_parameters`
+            # and `with_accept_replies`), so they are deferred below as `impl-method`.
             "query-reply",
-            "query-selector-parameters",
+            # `query-target` joined with that move: it gates the BODY of
+            # `QueryOptions::with_target` and of `effective_target`, never an item.
+            "query-target",
             "reply-source-info",
             "session-reconnect",
             "session-unicast-accept",
@@ -602,6 +608,16 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # behind `all(alloc, any(pubsub-put, pubsub-delete))`.
                 "pubsub-delete",
                 "pubsub-put",
+                # Three join with `QueryOptions` (`query_options.rs`, moved down from
+                # `wz-runtime-tokio`), each gating its public items under a compound cfg:
+                # `query-timeout` the constant `DEFAULT_QUERY_TIMEOUT_MS`
+                # (`any(query-timeout, liveliness-get)`), `query-consolidation` the method
+                # `effective_consolidation` (`all(query-get, query-consolidation)`), and
+                # `query-queryable` the method `matching_needs_complete`
+                # (`any(declare-queryable, query-queryable)`).
+                "query-consolidation",
+                "query-queryable",
+                "query-timeout",
                 "session-matching",
                 # R3243 — moved here from `NO_PUBLIC_PATH` (see the note
                 # there). Its two public sites, the per-reason staging count
@@ -651,7 +667,15 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "pubsub-source-info",
                 "pubsub-timestamp",
                 "query-attachment",
+                # The requesting end's features join with `QueryOptions` (`query_options.rs`,
+                # moved down from `wz-runtime-tokio`): what each gates is METHODS of that type
+                # (`expected_finals`, the `effective_*` readings and `query_metadata` for
+                # `query-get`; `with_parameters` and `with_accept_replies` for
+                # `query-selector-parameters`). `query-consolidation` and `query-queryable`
+                # gate one method each under a compound cfg, so they are `compound-cfg` above.
+                "query-get",
                 "query-reply-err",
+                "query-selector-parameters",
                 "query-source-info",
                 "query-value",
                 "storage-mgr-garbage-collection",

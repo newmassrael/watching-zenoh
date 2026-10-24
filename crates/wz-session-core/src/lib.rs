@@ -702,6 +702,13 @@ pub mod encoding_hint;
 #[cfg(feature = "alloc")]
 pub mod publish_options;
 
+/// What one query asks for, independent of the runtime that sends it (`QueryOptions`, the
+/// default timeout, the consolidation a requester transmits and applies). Moved down from
+/// `wz-runtime-tokio`, which re-exports it, so a session on any runtime asks with one set of
+/// rules.
+#[cfg(feature = "alloc")]
+pub mod query_options;
+
 /// How a declaration names its key on the wire: the key a retraction names, and the form of a
 /// matching Interest. Moved down from `wz-runtime-tokio`, which re-exports both, so a C ABI over
 /// the cooperative engine hands them to an engine without naming that one.

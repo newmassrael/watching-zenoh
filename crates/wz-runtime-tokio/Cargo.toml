@@ -220,7 +220,9 @@ declare-undeclare = ["codec-declare", "wz-session-core/declare-undeclare"]
 # shape (no queryable capability ⇒ no local queryable to answer).
 # ap-demo + the AP MVP tests select both planes so they exercise the
 # loopback exactly as before.
-query-get = ["query-reply", "codec-request"]
+# The options a query is asked with are session-core's (`query_options`), so the requesting end's
+# capabilities forward there, this one and the three request slots below.
+query-get = ["query-reply", "codec-request", "wz-session-core/query-get"]
 # R311k — query-queryable (queryable-side reply emit) + query-reply
 # (z_get-side reply consume) both imply codec-response so the wire
 # Response surface compiles whenever the high-level query reply
@@ -493,9 +495,9 @@ adminspace-read = ["adminspace-core"]
 # host (adminspace-config-hotreload below) now require this one.
 adminspace-write = ["adminspace-core"]
 query-reply = ["codec-request", "codec-response", "wz-session-core/query-reply"]
-query-target = ["query-get"]
-query-timeout = ["query-get"]
-query-consolidation = ["query-get"]
+query-target = ["query-get", "wz-session-core/query-target"]
+query-timeout = ["query-get", "wz-session-core/query-timeout"]
+query-consolidation = ["query-get", "wz-session-core/query-consolidation"]
 # R311uy — storage-backend (§5.11 storage, atom 3/4): the StorageService
 # DRIVER (`storage_service` module). Forwards the runtime-agnostic kernel
 # (wz-session-core/storage-backend = the StorageBackend seam + the

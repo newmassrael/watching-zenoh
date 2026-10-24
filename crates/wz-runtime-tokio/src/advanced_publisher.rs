@@ -1536,11 +1536,10 @@ mod tests {
         use crate::session::QueryOptions;
         use wz_session_core::locality::Locality;
 
-        QueryOptions {
-            parameters: Some(wz_session_core::selector_params::anyke_params(&[]).into_bytes()),
-            consolidation: Some(wz_session_core::query_mode::ConsolidationMode::None),
-            ..QueryOptions::get().with_allowed_destination(Locality::SessionLocal)
-        }
+        let mut opts = QueryOptions::get().with_allowed_destination(Locality::SessionLocal);
+        opts.parameters = Some(wz_session_core::selector_params::anyke_params(&[]).into_bytes());
+        opts.consolidation = Some(wz_session_core::query_mode::ConsolidationMode::None);
+        opts
     }
 
     /// Composed session-API loopback e2e (a real `session.query` through

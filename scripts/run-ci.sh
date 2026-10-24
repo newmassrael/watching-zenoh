@@ -13206,6 +13206,11 @@ layer_c1bz_docs_resolve() {
     # `pub(super)` `priority_band` (read off this lane's command over
     # `005a50669`: `publish_common.rs:282`). There the method is public, so the
     # link resolves and wz-session-core stays at its budget.
+    # wz-runtime-tokio 474 -> 467, by removal, COUNTED on this lane's command: the
+    # tree before the change counted 475 (474 and one `writer_queue.rs` link of
+    # 7600a7709 not yet paid), and `QueryOptions` moving down to session-core
+    # (`query_options.rs`) took eight links its docs made to runtime-private items
+    # with it. Its docs in session-core resolve there, so wz-session-core stays at 495.
     budget="
         wz:4
         wz-ap-demo:25
@@ -13216,7 +13221,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:1
         wz-routing-graph:5
         wz-runtime-coop:7
-        wz-runtime-tokio:474
+        wz-runtime-tokio:467
         wz-session-core:495
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
