@@ -300,7 +300,47 @@ handshake derived, which is the binding D1 requires.
     - Negotiating the record size limit with peers that implement it, and
       then shrinking the receive buffer, is a later saving. It is not a
       bound the channel can rely on today.
+  - **The channel behind the stream port, landed (Round 3502).**
+    - The port. The cooperative runtime's stream seam is split in two:
+      `StreamSocket` is the I/O of a connected stream and `StreamDial` the
+      value a stack holds to open one
+      (`crates/wz-runtime-coop/src/stream_link.rs`). The dial carries what
+      opening needs besides an address, here the identity, so the channel
+      is a stream like a plain connection and the stream link is unchanged.
+    - The backend. `crates/wz-tls-mbedtls` builds the pinned source
+      (`vendor/mbedtls`, `vendor/tf-psa-crypto`, the revisions `west.yml`
+      pins) through its own CMake with a configuration that states the kit
+      image's choices (`crates/wz-tls-mbedtls/config/`). Its C side keeps
+      every Mbed TLS structure in the arena, and Rust holds only pointers,
+      so no layout crosses the boundary. `TlsStream<S>` is a
+      `StreamSocket` over `S`, and `TlsDial<D>` connects `D` and completes
+      the handshake before the link sees a byte.
+    - Measured on the host. Two sessions of the crate complete mutual
+      TLS 1.3 and each derives the other's zid, which equals the session
+      core's derivation over the same key
+      (`wz_session_core::credential_identity::zid_from_spki_der`). The
+      arena peak for both is 49,008 B on a 64-bit host.
+    - Measured against the peer zenohd is. The test builds a rustls 0.23
+      server the way zenohd 1.10.1 builds its TLS server with mutual TLS on
+      (`io/zenoh-links/zenoh-link-tls/src/utils.rs` @
+      `let client_auth = WebPkiClientVerifier::builder(root_cert_store.into()).build()?;`).
+      Its root store holds only the device's own self-signed certificate.
+      The dial completes, the device names the router by the key the router
+      proved, and a batch crosses both ways. A router that pins another
+      certificate refuses the device. This answers, at the rustls level,
+      the open question of whether upstream admits a pinned self-signed
+      certificate. A zenohd process over the link is the next measurement.
+    - Not yet: the `tls/` locator kind and a stack that dials it, the
+      verified zid on the session, and the kit image over the crate.
   - What this leaves open:
+    - Mbed TLS 4.1 does not implement TLS 1.3 KeyUpdate. A KeyUpdate from
+      the peer ends the session with an unexpected-message alert: the
+      post-handshake dispatch takes a NewSessionTicket and refuses every
+      other message (`vendor/mbedtls/library/ssl_msg.c` @
+      `/* Fail in all other cases. */`). rustls updates its keys before
+      AES-GCM's record limit,
+      so a link that carries that many records from one peer is cut. The
+      way out is upstream support or a link that reopens. Not measured.
     - The handshake time is software P-256 throughout. The p256-m driver
       and the chip's crypto block, which is reached as a PSA driver, are
       the two ways to shorten it.
