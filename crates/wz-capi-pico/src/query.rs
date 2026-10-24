@@ -1198,10 +1198,10 @@ pub(crate) fn declare_queryable_on(
     allowed_origin: wz_session_core::locality::Locality,
     sink: wz_capi_core::faces::QueryableSink,
 ) -> Result<(QblId, DeclaredKeyexpr), ZResult> {
-    let key = DeclaredKeyexpr::declare_non_wild_prefix(&session.shared, &keyexpr, existing)?;
+    let key = DeclaredKeyexpr::declare_non_wild_prefix(&session.engine, &keyexpr, existing)?;
     let id = session.shared.declare_queryable_on_wire(
         keyexpr,
-        key.wire(&session.shared),
+        key.wire(&*session.engine),
         complete,
         allowed_origin,
         // A peer or router-hat session retracts the queryable naming its key

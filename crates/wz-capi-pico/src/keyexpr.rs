@@ -12,7 +12,6 @@
 use std::ffi::{c_char, c_void, CStr};
 use std::sync::{Arc, Weak};
 
-use wz_capi_core::faces::SharedSession;
 use wz_capi_port::WireKey;
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::WhatAmI;
@@ -26,7 +25,7 @@ use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION, Z_ERR_NULL,
     Z_OK,
 };
-use crate::session::{session_state, z_loaned_session_t};
+use crate::session::{engine_of, engine_ref, session_state, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 
 /// Resolve a loaned keyexpr to its borrowed UTF-8 string, or `None` if null /
@@ -70,7 +69,7 @@ pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
 pub(crate) unsafe fn wire_key_of(
     ke: *const z_loaned_keyexpr_t,
-    shared: &Arc<SharedSession>,
+    shared: &Engine,
 ) -> Option<WireKey> {
     keyexpr_str(ke)?;
     Some(match declared_of(ke) {
@@ -94,7 +93,7 @@ pub(crate) unsafe fn wire_key_of(
 /// outlives its session must not keep the session alive, and retracting on a
 /// session that is gone is moot.
 pub(crate) struct WireDeclaration {
-    session: Weak<SharedSession>,
+    session: Weak<Engine>,
     id: u64,
     /// How many bytes of the key the declaration covers — pico's `_prefix_len`.
     prefix_len: usize,
@@ -104,7 +103,7 @@ impl Drop for WireDeclaration {
     /// Let go of this declaration's hold on the key. The key itself goes only
     /// when no other declaration of the same key holds it: pico's resource table
     /// counts its holders, and a second declaration of a key it already has is
-    /// the same id with one more (see [`SharedSession::acquire_keyexpr`]).
+    /// the same id with one more (the engine's `acquire_keyexpr`).
     fn drop(&mut self) {
         if let Some(session) = self.session.upgrade() {
             session.release_keyexpr(self.id);
@@ -185,10 +184,13 @@ impl DeclaredKeyexpr {
         }
     }
 
-    fn declared_on(&self, shared: &Arc<SharedSession>) -> Option<&Arc<WireDeclaration>> {
+    fn declared_on(&self, shared: &Engine) -> Option<&Arc<WireDeclaration>> {
         self.declaration
             .as_ref()
-            .filter(|d| std::ptr::eq(d.session.as_ptr(), Arc::as_ptr(shared)))
+            // By ADDRESS: both are fat pointers to one engine, and their vtable halves are
+            // not guaranteed to be one copy, so comparing them whole could say a session is
+            // not itself.
+            .filter(|d| std::ptr::addr_eq(d.session.as_ptr(), shared as *const Engine))
     }
 
     /// pico `_z_declared_keyexpr_alias_to_wire`: the declaration's id and the
@@ -198,7 +200,7 @@ impl DeclaredKeyexpr {
     /// An aliased key KEEPS its declaration: whatever records it — a registry
     /// entry replayed onto later faces — holds the id declared for as long as
     /// it names it.
-    pub(crate) fn wire(&self, shared: &Arc<SharedSession>) -> WireKey {
+    pub(crate) fn wire(&self, shared: &Engine) -> WireKey {
         // Every constructor keeps the declared prefix at the front of the
         // literal (see `extended`), so the remainder always exists; the `get`
         // turns a broken invariant into the literal rather than a panic.
@@ -222,7 +224,7 @@ impl DeclaredKeyexpr {
     /// The id is stable for as long as the key is held: the key owns its
     /// declaration, and the declaration is retracted only when the last key
     /// holding it lets go, so a publisher asks once at declare rather than per put.
-    pub(crate) fn whole_key_mapping(&self, shared: &Arc<SharedSession>) -> Option<u64> {
+    pub(crate) fn whole_key_mapping(&self, shared: &Engine) -> Option<u64> {
         self.declared_on(shared)
             .filter(|d| d.prefix_len == self.literal.len())
             .map(|d| d.id)
@@ -236,7 +238,7 @@ impl DeclaredKeyexpr {
     /// and that key is the one this is called on: for a subscriber it is not
     /// the key the subscription was announced on, which is the caller's.
     pub(crate) fn retraction_naming(&self, session: &PicoSession) -> Option<RetractionKey> {
-        self.retraction_naming_in(session.mode, &session.shared)
+        self.retraction_naming_in(session.mode, &*session.engine)
     }
 
     /// [`Self::retraction_naming`] for a caller that holds the two facts it
@@ -245,7 +247,7 @@ impl DeclaredKeyexpr {
     pub(crate) fn retraction_naming_in(
         &self,
         mode: WhatAmI,
-        shared: &Arc<SharedSession>,
+        shared: &Engine,
     ) -> Option<RetractionKey> {
         if mode == WhatAmI::Client {
             return None;
@@ -267,7 +269,7 @@ impl DeclaredKeyexpr {
     /// pico `_z_declared_keyexpr_declare`: a key whose declaration covers ALL
     /// of it on `shared`, sharing the caller's when it already does.
     pub(crate) fn declare(
-        shared: &Arc<SharedSession>,
+        shared: &Arc<Engine>,
         literal: &str,
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
@@ -277,7 +279,7 @@ impl DeclaredKeyexpr {
     /// pico `_z_declared_keyexpr_declare_non_wild_prefix`: the same, covering
     /// only the part of the key before its first wild chunk.
     pub(crate) fn declare_non_wild_prefix(
-        shared: &Arc<SharedSession>,
+        shared: &Arc<Engine>,
         literal: &str,
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
@@ -285,7 +287,7 @@ impl DeclaredKeyexpr {
     }
 
     fn declare_up_to(
-        shared: &Arc<SharedSession>,
+        shared: &Arc<Engine>,
         literal: &str,
         existing: Option<&DeclaredKeyexpr>,
         prefix_len: usize,
@@ -295,7 +297,7 @@ impl DeclaredKeyexpr {
         // `_is_non_wild_prefix_optimized` arm).
         if let Some(existing) = existing {
             if existing
-                .declared_on(shared)
+                .declared_on(&**shared)
                 .is_some_and(|d| d.prefix_len == prefix_len)
             {
                 return Ok(existing.share());
@@ -558,7 +560,7 @@ pub unsafe extern "C" fn z_declare_keyexpr(
         let Some(literal) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
-        match DeclaredKeyexpr::declare(&state.shared, literal, declared_of(keyexpr)) {
+        match DeclaredKeyexpr::declare(&engine_of(state), literal, declared_of(keyexpr)) {
             Ok(key) => {
                 store_owned_keyexpr(declared, key);
                 Z_OK
@@ -601,7 +603,7 @@ pub unsafe extern "C" fn z_undeclare_keyexpr(
         };
         if key.declaration.is_none() {
             Z_ERR_INVALID
-        } else if key.declared_on(&state.shared).is_none() {
+        } else if key.declared_on(engine_ref(state)).is_none() {
             Z_ERR_KEYEXPR_DECLARED_ON_ANOTHER_SESSION
         } else {
             Z_OK
@@ -1285,14 +1287,15 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr_autocanonize(
 mod tests {
     use super::*;
 
-    fn session() -> Arc<SharedSession> {
+    fn session() -> Arc<Engine> {
         Arc::new(
-            SharedSession::new(
+            wz_capi_core::faces::SharedSession::new(
                 wz_runtime_tokio::runtime_impl::TokioTime::new(),
                 vec![0x5a; 16],
             )
             .expect("test host entropy"),
         )
+        .as_engine()
     }
 
     /// R2959 — pico's `_z_keyexpr_non_wild_prefix_len`, case by case: up to the
@@ -1346,13 +1349,13 @@ mod tests {
         let declarations = shared.keyexpr_declarations();
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].1, "demo/kd/qbl");
-        let wire = key.wire(&shared);
+        let wire = key.wire(&*shared);
         assert_eq!(wire.mapping_id, declarations[0].0);
         assert_eq!(wire.suffix.as_deref(), Some("/*/x"));
 
         let other = session();
         assert_eq!(
-            key.wire(&other).mapping_id,
+            key.wire(&*other).mapping_id,
             0,
             "another session's id is not ours"
         );

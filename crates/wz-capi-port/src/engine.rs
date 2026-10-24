@@ -40,6 +40,16 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// A fresh entity id, for the source info and the global id of what the C program declares.
     fn next_entity_id(&self) -> u64;
 
+    /// The zid and the announced role of every established peer, the role in its 2-bit wire form
+    /// (0 router, 1 peer, 2 client), so the split between zenoh-pico's `z_info_routers_zid` and
+    /// `z_info_peers_zid` is made at the ABI, where pico makes it. A link whose handshake has not
+    /// completed is not listed.
+    fn peer_identities(&self) -> Vec<(Vec<u8>, u8)>;
+
+    /// Whether any connected peer is a ROUTER — zenoh-pico's `_z_session_has_router_peer`, the
+    /// condition under which a peer-mode session sends Interests at all.
+    fn has_router_peer(&self) -> bool;
+
     /// Publish `payload` on `keyexpr`, naming it on the wire as `wire` says, with `opts`. The
     /// count of deliveries, or why nothing could have carried it.
     fn publish_on_wire_all(

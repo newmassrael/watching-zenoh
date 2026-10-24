@@ -13,7 +13,34 @@ use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 
+use std::sync::Arc;
+
 use crate::faces::SharedSession;
+
+/// This registry as the port's engine, made HERE and handed out.
+///
+/// Turning an `Arc<SharedSession>` into an `Arc<dyn SessionEngine>` instantiates the trait
+/// object's vtable, and with it the registry's whole drop glue, in the crate where the turning
+/// happens. Done in an ABI crate, that is a second copy of code this crate already holds:
+/// measured on the pico client build, 27 KB of text, every byte of it a duplicate of a function
+/// already linked (the registry's maps, dropped twice over). So an ABI asks for the engine and
+/// never coerces the registry itself.
+///
+/// Both are `#[inline(never)]`, and that is what makes the rule hold: a function this small is
+/// inlined across crates by default, and inlined into the ABI it builds the vtable there again.
+impl SharedSession {
+    /// This registry as the engine an ABI keeps.
+    #[inline(never)]
+    pub fn as_engine(self: &Arc<Self>) -> Arc<dyn SessionEngine> {
+        self.clone()
+    }
+
+    /// This registry as the engine an ABI borrows for one call.
+    #[inline(never)]
+    pub fn engine_ref(&self) -> &dyn SessionEngine {
+        self
+    }
+}
 
 impl SessionEngine for SharedSession {
     fn is_closed(&self) -> bool {
@@ -26,6 +53,14 @@ impl SessionEngine for SharedSession {
 
     fn next_entity_id(&self) -> u64 {
         SharedSession::next_entity_id(self)
+    }
+
+    fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
+        SharedSession::peer_identities(self)
+    }
+
+    fn has_router_peer(&self) -> bool {
+        SharedSession::has_router_peer(self)
     }
 
     fn publish_on_wire_all(

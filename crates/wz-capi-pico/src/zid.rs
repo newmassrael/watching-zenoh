@@ -41,8 +41,6 @@
 
 use std::ffi::c_void;
 
-use wz_capi_core::faces::SharedSession;
-
 use crate::abi::z_owned_string_t;
 use crate::bytes::store_owned_string;
 use crate::pubsub::z_closure_drop_callback_t;
@@ -292,7 +290,7 @@ unsafe fn enumerate_peers(
                 // simply nothing to invoke.
                 None => return Z_OK,
             };
-            for (zid, whatami) in shared_of(state).peer_identities() {
+            for (zid, whatami) in crate::session::engine_ref(state).peer_identities() {
                 if (whatami == WHATAMI_WIRE_ROUTER) != routers {
                     continue;
                 }
@@ -305,7 +303,8 @@ unsafe fn enumerate_peers(
             // router, its routers being a client's alone.
             #[cfg(feature = "multicast-transport")]
             if !routers {
-                for zid in shared_of(state).group_member_zids() {
+                // The group is the tokio engine's alone so far: the port carries no multicast.
+                for zid in state.shared.group_member_zids() {
                     let id = z_id_t::from_wire(&zid);
                     call(&id, taken.context);
                 }
@@ -317,11 +316,6 @@ unsafe fn enumerate_peers(
         }
         rc
     })
-}
-
-/// The registry behind a C session handle.
-fn shared_of(state: &wz_capi_core::drive::SessionState) -> &SharedSession {
-    &state.shared
 }
 
 // --- z_id_to_string --------------------------------------------------------

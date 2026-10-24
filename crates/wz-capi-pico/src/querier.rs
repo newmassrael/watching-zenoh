@@ -431,7 +431,11 @@ pub unsafe extern "C" fn z_declare_querier(
         // (`vendor/zenoh-pico/src/net/primitives.c` @
         // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &querier->_key, keyexpr), _z_undeclare_querier(querier));`)
         // and its gets are issued on that declaration.
-        let key = match DeclaredKeyexpr::declare(&state.shared, &ke, declared_of(keyexpr)) {
+        let key = match DeclaredKeyexpr::declare(
+            &crate::session::engine_of(state),
+            &ke,
+            declared_of(keyexpr),
+        ) {
             Ok(key) => key,
             Err(rc) => return rc,
         };
@@ -587,7 +591,7 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         issue_get(
             &state.shared,
             state.key.literal().to_owned(),
-            state.key.wire(&state.shared),
+            state.key.wire(state.shared.engine_ref()),
             params_in,
             state.target,
             state.consolidation,
@@ -681,7 +685,7 @@ pub unsafe extern "C" fn z_querier_declare_background_matching_listener(
 unsafe fn declare_querier_matching(
     querier: *const z_loaned_querier_t,
     callback: *mut z_moved_closure_matching_status_t,
-) -> Result<(Arc<SharedSession>, MatchId), ZResult> {
+) -> Result<(Arc<crate::session::Engine>, MatchId), ZResult> {
     // Take the closure FIRST, so an invalid querier still releases it.
     let sink: MatchingSink = consume_matching_closure(callback)?;
     let state = match handle_ref::<z_loaned_querier_t, QuerierState>(querier) {
@@ -698,7 +702,9 @@ unsafe fn declare_querier_matching(
         state.qos.destination.allows_local(),
     );
     state.record_matching_listener(id);
-    Ok((shared, id))
+    // The listener's handle keeps the port's engine, handed out by the engine
+    // (`as_engine`) so this crate never coerces the registry itself.
+    Ok((shared.as_engine(), id))
 }
 
 #[cfg(test)]

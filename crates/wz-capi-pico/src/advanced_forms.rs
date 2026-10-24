@@ -37,11 +37,11 @@
 
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use wz_capi_core::faces::SharedSession;
 use wz_runtime_tokio::advanced_subscriber::{DeclarationForms, EntityForm};
 use wz_session_core::WhatAmI;
 
 use crate::keyexpr::DeclaredKeyexpr;
+use crate::session::Engine;
 use crate::write_filter::PicoSession;
 
 /// The four entities an advanced subscriber declares, in the order the forms
@@ -69,7 +69,7 @@ struct Anchor {
 pub(crate) struct PicoSubscriberForms {
     /// Weak, because the registry holds these forms (they are in the entry it
     /// replays) and a strong reference back is a session that can never end.
-    shared: Weak<SharedSession>,
+    shared: Weak<Engine>,
     mode: WhatAmI,
     /// The caller's key: declared when the caller's is, a literal otherwise.
     base: DeclaredKeyexpr,
@@ -84,7 +84,7 @@ impl PicoSubscriberForms {
     /// The forms of an advanced subscriber on `base`, declared on `session`.
     pub(crate) fn new(session: &PicoSession, base: DeclaredKeyexpr) -> Self {
         Self {
-            shared: Arc::downgrade(&session.shared),
+            shared: Arc::downgrade(&session.engine),
             mode: session.mode,
             base,
             answered: Mutex::new([Weak::new(), Weak::new(), Weak::new(), Weak::new()]),
@@ -94,12 +94,7 @@ impl PicoSubscriberForms {
 
     /// The declaration `entity` stands on: the one another face already holds,
     /// else a new one. `None` when the session cannot make it.
-    fn anchor(
-        &self,
-        shared: &Arc<SharedSession>,
-        entity: Entity,
-        keyexpr: &str,
-    ) -> Option<Arc<Anchor>> {
+    fn anchor(&self, shared: &Arc<Engine>, entity: Entity, keyexpr: &str) -> Option<Arc<Anchor>> {
         // Held across the declaration, so two faces asking at once cannot both
         // declare: the second finds the first's answer.
         let mut answered = self.answered.lock().unwrap_or_else(PoisonError::into_inner);
@@ -145,7 +140,7 @@ impl PicoSubscriberForms {
         let Some(anchor) = self.anchor(&shared, entity, keyexpr) else {
             return EntityForm::literal();
         };
-        let wire = anchor.announced.wire(&shared);
+        let wire = anchor.announced.wire(&*shared);
         let form = if wire.mapping_id == 0 {
             EntityForm::literal()
         } else {
@@ -153,7 +148,7 @@ impl PicoSubscriberForms {
         };
         let form = match entity {
             Entity::Subscriber | Entity::Heartbeat => {
-                form.with_retraction_naming(anchor.key.retraction_naming_in(self.mode, &shared))
+                form.with_retraction_naming(anchor.key.retraction_naming_in(self.mode, &*shared))
             }
             Entity::LatePublishers => form,
             Entity::Token => form.with_token_retraction_naming_the_key(true),
@@ -191,6 +186,7 @@ impl DeclarationForms for PicoSubscriberForms {
 mod tests {
     use super::*;
 
+    use wz_capi_core::faces::SharedSession;
     use wz_runtime_tokio::node_clock::NodeHlc;
     use wz_runtime_tokio::runtime_impl::TokioTime;
 
@@ -202,6 +198,7 @@ mod tests {
             SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy"),
         );
         let session = PicoSession {
+            engine: shared.as_engine(),
             shared: shared.clone(),
             mode: WhatAmI::Peer,
             hlc: NodeHlc::default(),

@@ -977,6 +977,20 @@ impl SessionState {
         self.read_gate.is_running()
     }
 
+    /// Close and free a session an ABI holds boxed behind its C handle (pico
+    /// `z_session_drop`): the drop runs [`Self::close`], which is idempotent.
+    ///
+    /// Freed HERE rather than by the ABI dropping the box itself. Dropping a
+    /// `Box<SessionState>` instantiates the drop glue of everything the session owns
+    /// (the face registry's maps, its subscribers, its tokens) in the crate that
+    /// drops it, and this crate holds that glue already, for the engine's trait
+    /// object (`SharedSession::as_engine`). A drop in the ABI crate is a second copy:
+    /// measured on the pico client build, 35 KB of text, every function of it a
+    /// duplicate.
+    pub fn release(self: Box<Self>) {
+        drop(self);
+    }
+
     /// Attach this ABI's per-session state. Once: a second call is refused and
     /// returns the value it was handed, so a shim cannot silently replace
     /// state a live handle already reads.

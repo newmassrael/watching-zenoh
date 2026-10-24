@@ -48,6 +48,7 @@
 use std::sync::Arc;
 
 use wz_capi_core::drive::SessionState;
+#[cfg(any(feature = "queryable", feature = "liveliness", feature = "advanced"))]
 use wz_capi_core::faces::SharedSession;
 use wz_capi_port::{FilterId, FilterPlane, FilteredPut, WireKey};
 #[cfg(feature = "advanced")]
@@ -56,6 +57,7 @@ use wz_session_core::declare_form::InterestForm;
 use wz_session_core::WhatAmI;
 
 use crate::keyexpr::DeclaredKeyexpr;
+use crate::session::{engine_of, Engine};
 use crate::session_ext::PicoSessionExt;
 
 /// This session's own role, [`WhatAmI::Client`] when none was recorded (a
@@ -81,8 +83,17 @@ pub(crate) fn session_mode(state: &SessionState) -> WhatAmI {
 /// the two facts every declaration reads are lifted out: the registry the key
 /// declarations and the entities live in, and the role the write filter and the
 /// retractions follow.
+///
+/// The registry is held twice while the cooperative engine grows
+/// (`docs/capi-pico-on-coop-engine.md`): as the port's [`Engine`], which is all the
+/// client surface (keys, publishers, subscribers, matching, write filters) may
+/// name, and as the tokio engine's own registry for the capabilities the port does
+/// not carry yet (queryables, liveliness, the advanced plane). A build with none of
+/// those has the port alone, which is what the client surface measures as.
 #[derive(Clone)]
 pub(crate) struct PicoSession {
+    pub(crate) engine: Arc<Engine>,
+    #[cfg(any(feature = "queryable", feature = "liveliness", feature = "advanced"))]
     pub(crate) shared: Arc<SharedSession>,
     pub(crate) mode: WhatAmI,
     /// The session's clock — `NodeHlc::disabled()` for a session this ABI did
@@ -96,6 +107,8 @@ impl PicoSession {
     /// The session behind a borrowed state.
     pub(crate) fn of(state: &SessionState) -> Self {
         Self {
+            engine: engine_of(state),
+            #[cfg(any(feature = "queryable", feature = "liveliness", feature = "advanced"))]
             shared: state.shared.clone(),
             mode: session_mode(state),
             #[cfg(feature = "advanced")]
@@ -114,7 +127,7 @@ impl PicoSession {
 /// retracted while the declaration it names still stands — upstream's order
 /// (`_z_undeclare_publisher` clears the filter, then the key).
 pub(crate) struct WriteFilter {
-    shared: Arc<SharedSession>,
+    shared: Arc<Engine>,
     id: FilterId,
 }
 
@@ -130,10 +143,10 @@ impl WriteFilter {
         key: &DeclaredKeyexpr,
         count_local: bool,
     ) -> Self {
-        let shared = session.shared.clone();
+        let shared = session.engine.clone();
         // The key goes on the wire as the entity's own declaration: its id and the rest of
         // the key, or the literal when nothing covers it.
-        let wire = key.wire(&shared);
+        let wire = key.wire(&*shared);
         let ask = interest_form(&shared, session.mode, key, &wire);
         let id =
             shared.declare_write_filter(plane, key.literal().to_owned(), &wire, ask, count_local);
@@ -148,14 +161,14 @@ impl WriteFilter {
 
     /// Whether the filter keeps a put, a delete or a get from being sent: [`Self::active`],
     /// unless the session holds a multicast group, where pico sends whatever the filter says
-    /// ([`SharedSession::write_filter_holds_back`]). A matching status still reads
+    /// (the engine's `write_filter_holds_back`). A matching status still reads
     /// [`Self::active`].
     pub(crate) fn holds_back(&self) -> bool {
         self.shared.write_filter_holds_back(self.id)
     }
 
     /// [`Self::active`] followed by a plain put on a declared key, in one step of the
-    /// registry ([`SharedSession::put_plain_filtered`]).
+    /// registry (the engine's `put_plain_filtered`).
     pub(crate) fn put_plain(
         &self,
         keyexpr: &str,
@@ -177,7 +190,7 @@ impl Drop for WriteFilter {
 /// How the entity's Interest is put, or `None` for none — pico's rules, see the
 /// module doc.
 fn interest_form(
-    shared: &Arc<SharedSession>,
+    shared: &Arc<Engine>,
     mode: WhatAmI,
     key: &DeclaredKeyexpr,
     wire: &WireKey,

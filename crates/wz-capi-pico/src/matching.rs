@@ -38,8 +38,9 @@
 
 use std::ffi::c_void;
 
-use wz_capi_core::faces::SharedSession;
 use wz_capi_port::{MatchId, MatchingSink};
+
+use crate::session::Engine;
 
 use crate::abi::handle_ref;
 use crate::ffi::{guarded, CClosure};
@@ -136,7 +137,7 @@ unsafe impl Sync for MatchingCClosure {}
 /// Behind a `z_owned_matching_listener_t`: the C listener's id in the session
 /// registry, plus the session it belongs to so `undeclare` can find it.
 pub(crate) struct MatchingListenerState {
-    shared: Arc<SharedSession>,
+    shared: Arc<Engine>,
     id: MatchId,
 }
 
@@ -144,10 +145,7 @@ impl MatchingListenerState {
     /// Box this state into the owned C handle. Shared with the QUERIER twin
     /// (`crate::querier`) so the two declare forms cannot drift in how they
     /// hand the id back — the asymmetry this family has already paid for once.
-    pub(crate) fn into_handle(
-        shared: Arc<SharedSession>,
-        id: MatchId,
-    ) -> z_owned_matching_listener_t {
+    pub(crate) fn into_handle(shared: Arc<Engine>, id: MatchId) -> z_owned_matching_listener_t {
         let boxed = Box::new(MatchingListenerState { shared, id });
         z_owned_matching_listener_t {
             handle: Box::into_raw(boxed) as *mut c_void,
@@ -477,7 +475,7 @@ pub unsafe extern "C" fn z_undeclare_matching_listener(
 unsafe fn declare_matching(
     publisher: *const z_loaned_publisher_t,
     callback: *mut z_moved_closure_matching_status_t,
-) -> Result<(Arc<SharedSession>, MatchId), ZResult> {
+) -> Result<(Arc<Engine>, MatchId), ZResult> {
     // Take the closure FIRST, so an invalid publisher still releases it.
     let sink: MatchingSink = consume_matching_closure(callback)?;
 
@@ -520,7 +518,7 @@ unsafe fn declare_matching(
 /// moved closure, which is consumed on every path.
 #[cfg(feature = "advanced")]
 pub(crate) unsafe fn declare_advanced_matching(
-    target: Option<(Arc<SharedSession>, String, bool)>,
+    target: Option<(Arc<Engine>, String, bool)>,
     listener: Option<*mut z_owned_matching_listener_t>,
     callback: *mut z_moved_closure_matching_status_t,
 ) -> ZResult {

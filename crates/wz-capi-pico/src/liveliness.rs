@@ -129,10 +129,10 @@ impl TokenState {
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
-        let key = DeclaredKeyexpr::declare(&session.shared, keyexpr, existing)?;
+        let key = DeclaredKeyexpr::declare(&session.engine, keyexpr, existing)?;
         let Some(id) = session.shared.declare_liveliness_token_on_wire(
             keyexpr.to_owned(),
-            key.wire(&session.shared),
+            key.wire(&*session.engine),
             LivelinessOptions::new().with_retraction_naming_the_key(true),
         ) else {
             return Err(Z_ERR_GENERIC);
@@ -353,11 +353,15 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         // (`vendor/zenoh-pico/src/net/liveliness.c` @
         // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &s._key, keyexpr), _z_subscription_clear(&s));`
         // and the `_z_make_interest(&wireexpr, ...)` on `sp_s->_key` below it).
-        let key = match DeclaredKeyexpr::declare(&state.shared, &ke, declared_of(keyexpr)) {
+        let key = match DeclaredKeyexpr::declare(
+            &crate::session::engine_of(state),
+            &ke,
+            declared_of(keyexpr),
+        ) {
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let wire = key.wire(&state.shared);
+        let wire = key.wire(crate::session::engine_ref(state));
         let id = state
             .shared
             .declare_liveliness_subscriber_on_wire(ke, wire, opts, {
@@ -371,7 +375,7 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
                 })
             });
         let mut boxed = Box::new(SubscriberState {
-            shared: state.shared.clone(),
+            shared: crate::session::engine_of(state),
             id,
             key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),

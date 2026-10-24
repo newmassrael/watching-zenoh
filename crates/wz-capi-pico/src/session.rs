@@ -263,6 +263,28 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
     Some(&*(val as *const SessionState))
 }
 
+/// The engine a session's client surface goes through: the port's [`SessionEngine`], so the
+/// modules that publish, subscribe, hold key expressions, watch for matches and filter writes
+/// name no engine (`docs/capi-pico-on-coop-engine.md`, decision D1).
+///
+/// [`SessionEngine`]: wz_capi_port::SessionEngine
+pub(crate) type Engine = dyn wz_capi_port::SessionEngine;
+
+/// The engine behind a borrowed session state, to keep: what an entity declared on the session
+/// holds for its own life.
+///
+/// The engine hands itself out (`as_engine`): this crate never turns the engine's own type into
+/// the port's, which would instantiate the engine's drop glue a second time here.
+pub(crate) fn engine_of(state: &SessionState) -> std::sync::Arc<Engine> {
+    state.shared.as_engine()
+}
+
+/// The engine behind a borrowed session state, for the length of one call: a put or a delete
+/// reaches the engine without touching its reference count.
+pub(crate) fn engine_ref(state: &SessionState) -> &Engine {
+    state.shared.engine_ref()
+}
+
 // --- z_open / z_close ------------------------------------------------------
 
 /// Open a session, consuming the moved config (pico `z_open`). A `connect`
@@ -623,8 +645,10 @@ pub unsafe extern "C" fn z_session_drop(obj: *mut z_moved_session_t) {
         }
         let val = (*obj)._this._val;
         if !val.is_null() {
-            // SessionState::drop runs close() (idempotent).
-            drop(Box::from_raw(val as *mut SessionState));
+            // SessionState::drop runs close() (idempotent). Released by the engine's
+            // own crate, so this one does not instantiate the session's drop glue
+            // a second time (see `SessionState::release`).
+            Box::from_raw(val as *mut SessionState).release();
             (*obj)._this = z_owned_session_t::null_value();
         }
         Z_OK

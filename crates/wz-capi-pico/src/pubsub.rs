@@ -48,9 +48,8 @@ use crate::option_fields::unstable_option_fields;
 use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
 };
-use crate::session::{session_state, z_loaned_session_t};
+use crate::session::{engine_of, engine_ref, session_state, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
-use wz_capi_core::faces::SharedSession;
 use wz_capi_port::{FilterPlane, FilteredPut, MatchId, SubId, WireKey};
 
 // --- opaque loaned sample --------------------------------------------------
@@ -735,7 +734,7 @@ pub unsafe extern "C" fn z_publisher_put_options_default(options: *mut z_publish
 /// — without building a C handle it never hands out, and lets it keep them on a
 /// task, which a value holding raw pointers into its own storage cannot do.
 pub(crate) struct PlainPublisher {
-    shared: Arc<SharedSession>,
+    shared: Arc<Engine>,
     /// R2962 — pico's write filter for this publisher: the Interest it asks its
     /// peers, and the state that decides whether a put or delete is SENT.
     /// Declared BEFORE `key`, so it drops first: the Interest is retracted while
@@ -875,13 +874,13 @@ impl PlainPublisher {
         existing: Option<&DeclaredKeyexpr>,
         declared: PublisherQos,
     ) -> Result<Self, ZResult> {
-        let key = DeclaredKeyexpr::declare(&session.shared, keyexpr, existing)?;
+        let key = DeclaredKeyexpr::declare(&session.engine, keyexpr, existing)?;
         // The publisher's entity id comes off the session's one counter before its filter's
         // Interest takes the next, whether or not this build reports the id: pico's
         // `_z_declare_publisher` takes it (`vendor/zenoh-pico/src/net/primitives.c` @
         // `publisher->_id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`) before `z_declare_publisher`
         // creates the filter, and a group the Interest goes to reads the id.
-        let eid = session.shared.next_entity_id();
+        let eid = session.engine.next_entity_id();
         #[cfg(not(feature = "unstable-api"))]
         let _ = eid;
         // R2962 — the filter is created AFTER the key, because its Interest names
@@ -896,11 +895,11 @@ impl PlainPublisher {
         let plain = declared
             .apply(&put_options())
             .plain_put_params()
-            .zip(key.whole_key_mapping(&session.shared));
+            .zip(key.whole_key_mapping(&*session.engine));
         Ok(Self {
             #[cfg(feature = "unstable-api")]
             eid,
-            shared: session.shared.clone(),
+            shared: session.engine.clone(),
             filter,
             key,
             declared,
@@ -957,7 +956,7 @@ impl PlainPublisher {
 
     /// [`Self::publish`] once the write filter has said the put is wanted.
     fn publish_filtered(&self, payload: &[u8], opts: &PublishOptions) -> ZResult {
-        let wire = self.key.wire(&self.shared);
+        let wire = self.key.wire(&*self.shared);
         let opts = self.declared.apply(opts);
         match self
             .shared
@@ -1064,7 +1063,7 @@ impl PublisherState {
     /// than borrowed because a matching listener outlives the borrow: its
     /// handle must reach `undeclare_matching_listener` after the publisher's
     /// `handle_ref` borrow has ended.
-    pub(crate) fn shared_session(&self) -> Arc<SharedSession> {
+    pub(crate) fn shared_session(&self) -> Arc<Engine> {
         self.core.shared.clone()
     }
 
@@ -1154,7 +1153,7 @@ impl z_owned_publisher_t {
 /// subscriber, which emits each wire undeclare and releases the last closure
 /// reference (→ the C `drop(context)`).
 pub(crate) struct SubscriberState {
-    pub(crate) shared: Arc<SharedSession>,
+    pub(crate) shared: Arc<Engine>,
     pub(crate) id: SubId,
     /// R311y559 — the keyexpr this subscription was declared on, so
     /// `z_subscriber_keyexpr` has something to borrow. The registry keys the
@@ -1708,10 +1707,11 @@ pub unsafe extern "C" fn z_put(
         // R2959 — the key's own wire form: its declaration's id plus the rest
         // of the key when it is this session's, which a PREFIX declaration now
         // makes a real case rather than only the whole-key one.
-        let Some(wire) = wire_key_of(keyexpr, &state.shared) else {
+        let engine = engine_ref(state);
+        let Some(wire) = wire_key_of(keyexpr, engine) else {
             return Z_ERR_INVALID;
         };
-        let result = state.shared.publish_on_wire_all(ke, &wire, &buf, &resolved);
+        let result = engine.publish_on_wire_all(ke, &wire, &buf, &resolved);
         match result {
             Ok(_) => Z_OK,
             Err(_) => Z_ERR_GENERIC,
@@ -1747,10 +1747,11 @@ pub unsafe extern "C" fn z_delete(
         let resolved = session_delete_options(options);
         // The empty payload is the Del body's own shape, not a stand-in for a
         // missing one: `_z_msg_del_t` has no payload field.
-        let Some(wire) = wire_key_of(keyexpr, &state.shared) else {
+        let engine = engine_ref(state);
+        let Some(wire) = wire_key_of(keyexpr, engine) else {
             return Z_ERR_INVALID;
         };
-        let result = state.shared.publish_on_wire_all(ke, &wire, &[], &resolved);
+        let result = engine.publish_on_wire_all(ke, &wire, &[], &resolved);
         match result {
             Ok(_) => Z_OK,
             Err(_) => Z_ERR_GENERIC,
@@ -2057,7 +2058,7 @@ pub unsafe extern "C" fn z_closure_sample_drop(closure: *mut z_moved_closure_sam
 /// `keyexpr` must be null or a live loaned keyexpr.
 unsafe fn subscriber_wire(
     keyexpr: *const z_loaned_keyexpr_t,
-    shared: &Arc<SharedSession>,
+    shared: &Engine,
     key: &DeclaredKeyexpr,
 ) -> Option<WireKey> {
     let wire = wire_key_of(keyexpr, shared)?;
@@ -2148,33 +2149,26 @@ pub unsafe extern "C" fn z_declare_subscriber(
         // lines on). Measured on the wire by
         // `pico_keyexpr_declaration_twice_and_diff.rs`: `DeclKexpr = demo/kd/sub`
         // then `DeclSubscriber on "demo/kd/sub/**"`.
-        let key = match DeclaredKeyexpr::declare_non_wild_prefix(
-            &state.shared,
-            &ke,
-            declared_of(keyexpr),
-        ) {
+        let engine = engine_of(state);
+        let key = match DeclaredKeyexpr::declare_non_wild_prefix(&engine, &ke, declared_of(keyexpr))
+        {
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let Some(wire) = subscriber_wire(keyexpr, &state.shared, &key) else {
+        let Some(wire) = subscriber_wire(keyexpr, &*engine, &key) else {
             return Z_ERR_INVALID;
         };
         // A peer or router-hat session retracts the subscription naming ITS key
         // (`_z_undeclare_subscriber`), which is the prefix declaration above and
         // not the caller's key the announce went out on.
         let retraction = key.retraction_naming(&PicoSession::of(state));
-        let id = state.shared.declare_subscriber_on_wire(
-            ke,
-            wire,
-            subscriber_origin(options),
-            retraction,
-            {
+        let id =
+            engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-            },
-        );
+            });
         let mut boxed = Box::new(SubscriberState {
-            shared: state.shared.clone(),
+            shared: engine,
             id,
             key,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
@@ -2234,15 +2228,13 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         // R311y554 — same Remote pin, same reason as the owned form above.
         // R2959 — and the same two keys: the declaration lives in the registry
         // entry, which is the only holder a handle-less subscriber has.
-        let key = match DeclaredKeyexpr::declare_non_wild_prefix(
-            &state.shared,
-            &ke,
-            declared_of(keyexpr),
-        ) {
+        let engine = engine_of(state);
+        let key = match DeclaredKeyexpr::declare_non_wild_prefix(&engine, &ke, declared_of(keyexpr))
+        {
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let Some(wire) = subscriber_wire(keyexpr, &state.shared, &key) else {
+        let Some(wire) = subscriber_wire(keyexpr, &*engine, &key) else {
             return Z_ERR_INVALID;
         };
         // Named before the key is dropped: the entry keeps it alive through
@@ -2250,16 +2242,11 @@ pub unsafe extern "C" fn z_declare_background_subscriber(
         // declared for as long as the entry can retract.
         let retraction = key.retraction_naming(&PicoSession::of(state));
         drop(key);
-        let _ = state.shared.declare_subscriber_on_wire(
-            ke,
-            wire,
-            subscriber_origin(options),
-            retraction,
-            {
+        let _ =
+            engine.declare_subscriber_on_wire(ke, wire, subscriber_origin(options), retraction, {
                 let closure = Arc::new(cclosure);
                 Arc::new(move || Box::new(make_subscriber_callback(closure.clone())) as Box<_>)
-            },
-        );
+            });
         Z_OK
     })
 }

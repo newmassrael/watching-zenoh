@@ -1379,11 +1379,12 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
         // (`vendor/zenoh-pico/src/api/advanced_subscriber.c` @
         // `z_liveliness_declare_subscriber(&sess_rc, liveliness_subscriber, z_keyexpr_loan(&keyexpr), callback, &opt);`),
         // so it gets that call's whole-key declaration and interest on it.
-        let key = match crate::keyexpr::DeclaredKeyexpr::declare(&state.shared, &ke, None) {
+        let engine = state.shared.as_engine();
+        let key = match crate::keyexpr::DeclaredKeyexpr::declare(&engine, &ke, None) {
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let wire = key.wire(&state.shared);
+        let wire = key.wire(&*engine);
         let id = state
             .shared
             .declare_liveliness_subscriber_on_wire(ke, wire, opts, {
@@ -1393,7 +1394,7 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers(
                 })
             });
         let mut boxed = Box::new(SubscriberState {
-            shared: state.shared.clone(),
+            shared: engine,
             id,
             key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
@@ -1546,10 +1547,10 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_background_matching_liste
 /// `pub_` must be null or a live loaned advanced publisher.
 unsafe fn advanced_publisher_match_target(
     pub_: *const ze_loaned_advanced_publisher_t,
-) -> Option<(Arc<SharedSession>, String, bool)> {
+) -> Option<(Arc<crate::session::Engine>, String, bool)> {
     crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_).map(|state| {
         (
-            state.shared.clone(),
+            state.shared.as_engine(),
             state.publisher.keyexpr().to_owned(),
             // As the wrapped publisher's own matching listener counts.
             state.publisher.publisher().counts_local(),

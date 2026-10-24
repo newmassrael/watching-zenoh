@@ -1204,7 +1204,7 @@ unsafe fn get_inner(
     };
     // R2959 — the query names the caller's key in its own wire form, as pico's
     // `_z_query` does (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)`).
-    let Some(wire) = wire_key_of(keyexpr, &state.shared) else {
+    let Some(wire) = wire_key_of(keyexpr, crate::session::engine_ref(state)) else {
         return Z_ERR_INVALID;
     };
 
