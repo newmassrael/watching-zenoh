@@ -43,79 +43,49 @@
 #![no_std]
 #![no_main]
 
-use core::cell::OnceCell;
 use core::ffi::{c_char, c_int, CStr};
-use core::fmt::{self, Write};
 
+#[cfg(not(feature = "tls"))]
+use host_slot_node_glue::fresh_zid;
+#[cfg(feature = "tls")]
+use host_slot_node_glue::tls;
+use host_slot_node_glue::tuning::{
+    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RX, SESSIONS, TASKS, TASK_BYTES_ANSWERING,
+    TASK_BYTES_ASKING, TIMERS, TX,
+};
+use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
 use wz_runtime_coop::session_drive::{IpEndpoint, Locator};
-use wz_runtime_posix::glue::{log, log_args, yield_us};
+use wz_runtime_posix::glue::log;
+#[cfg(feature = "tls")]
+use wz_runtime_posix::glue::log_args;
 #[cfg(not(feature = "tls"))]
 use wz_runtime_posix::slot::PosixStack;
 #[cfg(not(feature = "tls"))]
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps::MAX_QUERYABLES;
-use wz_session_core::connect_endpoints::{ConnectEndpoints, ConnectEntry, EndpointText};
-use wz_session_core::entropy::EntropySource;
-use wz_session_mcu::connect_manager::EndpointSource;
 use wz_session_mcu::dial::parse_locator;
 #[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_node::Answering;
 use wz_session_mcu::slot_node::{
-    ClientNode, Declared, Document, NodeIdentity, NodePort, NodeStorage,
+    documents_of, BodyPool, ClientNode, Declared, NodeIdentity, NodePort, NodeStorage,
+    SingleEndpoint,
 };
 
 wz_runtime_posix::posix_image_no_heap!();
 
 #[cfg(feature = "get")]
 mod getter;
-#[cfg(feature = "tls")]
-mod tls;
 
-/// Sessions the node holds at most: the one it dials.
-const SESSIONS: usize = 1;
-/// The runtime's task table: a pump task per session, and nothing else runs as a task.
-const TASKS: usize = SESSIONS;
-/// Bytes of one task cell: the pump's handle and the application layer's state. A task the cell
-/// cannot hold is refused and counted, and the loop says so on the console rather than run a node
-/// that never starts a session. A node that asks (`get`) keeps the session's pending queries in
-/// that state, nine rows of the key text and the sink each, which is what the larger cell is for.
-///
-/// Measured on 2026-10-23 by building the node with each size and running it against a port
-/// nobody listens on, which spawns the session's task and says whether the cell held it: the
-/// answering node is refused at 2,112 bytes and held at 2,176, and the asking node is refused at
-/// 2,304 and held at 2,560. The cells are the next steps up with about a fifth to spare. The 1,024
-/// bytes the answering node had before refused its task, and so did the revision before
-/// `slot_node` (so it is not that change's doing). The kit's cell is 384 bytes
-/// (`fixed_client.rs`) and holds the session there.
-const TASK_BYTES: usize = if cfg!(feature = "get") { 3072 } else { 2560 };
-/// Timers the runtime holds: the handshake and lease deadlines of the session.
-const TIMERS: usize = 4;
-/// The batch the node advertises: an Ethernet frame less the IPv4 and UDP headers, as the kit's.
-const BATCH_SIZE: u16 = (1500 - 20 - 8) as u16;
-/// Extra bytes a link's receive buffer holds beyond one batch, so a datagram that carries a batch
-/// and a transport header is not truncated.
-const RX_SLACK: usize = 64;
-/// The receive buffer of the session's driver.
-const RX: usize = BATCH_SIZE as usize + RX_SLACK;
-/// The storage the session's frames are encoded into: the largest frame it sends is one batch.
-const TX: usize = BATCH_SIZE as usize;
-/// How long the loop sleeps between two dials of a router that is not up: it holds no socket then,
-/// and would otherwise spin.
-const IDLE_SLEEP_US: u32 = 1_000;
-/// The most the node's link waits for a datagram when its session has nothing due sooner. This
-/// image has ONE session ([`SESSIONS`]) and its loop waits on nothing else, so the link may sleep
-/// until the session's next deadline (the lease, the keep-alive) instead of waking every
-/// millisecond; with more sessions this would leave the others' sockets unread. The link wakes
-/// for a datagram at once, and arms its timeout at a power of two not above the deadline, so no
-/// deadline is late.
-const IDLE_WAIT_MS: u32 = 1_000;
-/// The longest document a `--doc` may ask for.
-const DOC_MAX: usize = 4096;
+/// Bytes of one task cell: the answering node's, or the asking node's when it can `get`
+/// (`host_slot_node_glue::tuning` holds the measurements).
+const TASK_BYTES: usize = if cfg!(feature = "get") {
+    TASK_BYTES_ASKING
+} else {
+    TASK_BYTES_ANSWERING
+};
 /// The queryables the node declares: as many as the image's limit says (`.cargo/config.toml`).
 const DOCS: usize = 2;
-/// The longest zenoh id: 16 bytes.
-const ZID_LEN: usize = 16;
 
 type Clock = PosixClock;
 #[cfg(not(feature = "tls"))]
@@ -138,54 +108,25 @@ const _: () = assert!(
 
 /// The bytes every document is made of. A document is a prefix of this, so the body a queryable
 /// holds (`&'static str`) is a slice of one `static` and costs no allocation.
-static BODY: [u8; DOC_MAX] = [b'x'; DOC_MAX];
+static BODY: BodyPool<DOC_MAX> = BodyPool::new();
 
 /// The router the node dials, set once from the command line before the node starts.
-struct Router {
-    endpoint: OnceCell<EndpointText>,
-}
-
-// SAFETY: the profile's rule: one thread runs the program, and the cell is written once, in `run`,
-// before the node that reads it exists.
-unsafe impl Sync for Router {}
-
-static ROUTER: Router = Router {
-    endpoint: OnceCell::new(),
-};
-
-impl EndpointSource for Router {
-    fn generation(&self) -> u32 {
-        0
-    }
-
-    fn endpoints(&self) -> (u32, ConnectEndpoints) {
-        let mut out = ConnectEndpoints::new();
-        if let Some(text) = self.endpoint.get() {
-            let _ = out.push(ConnectEntry::single(text.clone()));
-        }
-        (0, out)
-    }
-}
+static ROUTER: SingleEndpoint = SingleEndpoint::new();
 
 /// The queryables the node declares on each session, in the order of their registrations: a
 /// `&'static [Declaration]` whose length the command line chose (at most [`DOCS`]), held in
 /// storage this file declares.
 static DECLARED: Declared<DOCS> = Declared::new();
 
-/// The host's console and its sleep: what the node's loop cannot know (`wz_session_mcu::slot_node`).
-struct Port;
+/// The name this front end's console lines carry.
+struct Console;
 
-impl NodePort for Port {
+impl ConsoleName for Console {
     const NAME: &'static str = "host-slot-node";
-
-    fn log(&mut self, line: fmt::Arguments<'_>) {
-        log_args(line);
-    }
-
-    fn idle(&mut self, us: u32) {
-        yield_us(us);
-    }
 }
+
+/// The host's console and its sleep: what the node's loop cannot know (`wz_session_mcu::slot_node`).
+type Port = HostPort<Console>;
 
 /// What the command line asked for.
 struct Args {
@@ -328,43 +269,33 @@ fn parse_args(argc: c_int, argv: *const *const c_char) -> Result<Args, &'static 
     })
 }
 
-/// The documents the command line asked for, as the node registers them, and how many. A document
-/// is a prefix of [`BODY`], so its text is a slice of one `static` and costs no allocation. The
-/// reason, as the console line, when one is not text.
-fn documents(
-    docs: &[Option<(&'static str, usize)>; DOCS],
-) -> Result<([Document; DOCS], usize), &'static str> {
-    let mut out = [Document { key: "", body: "" }; DOCS];
-    let mut taken = 0;
-    for (key, bytes) in docs.iter().flatten() {
-        // `BODY` is `x` throughout, so any prefix of it is text.
-        let body = core::str::from_utf8(&BODY[..*bytes]).map_err(|_| "a document is not text")?;
-        out[taken] = Document { key, body };
-        taken += 1;
-    }
-    Ok((out, taken))
-}
-
 /// Assemble the node and run it. Returns only when it cannot start (or, for a getter, when its
 /// queries have ended); the value is the process's exit code.
 fn run(args: Args) -> i32 {
     // The cookie-signing key is a secret, so it comes from the kernel's entropy and a host that
     // cannot supply it stops the node: a predictable key is worse than no node.
-    let mut key = [0u8; 32];
-    let mut zid = [0u8; ZID_LEN];
-    let mut entropy = PosixEntropy;
-    if entropy.try_fill_bytes(&mut key).is_err() || entropy.try_fill_bytes(&mut zid).is_err() {
-        log("wz: FAIL - getrandom could not fill the signing key");
-        return 2;
-    }
+    let key = match fresh_signing_key() {
+        Ok(key) => key,
+        Err(why) => {
+            log(why);
+            return 2;
+        }
+    };
+    #[cfg(not(feature = "tls"))]
+    let zid = match fresh_zid() {
+        Ok(zid) => zid,
+        Err(why) => {
+            log(why);
+            return 2;
+        }
+    };
     // Over the secure channel the node's zid is the one its key names (decision D1), and its
     // certificate is printed for the router's operator to pin.
     #[cfg(feature = "tls")]
-    let channel_identity = match tls::identity() {
+    let (channel_identity, zid) = match tls::identity() {
         Ok(identity) => {
             identity.certificate_pem(log_args);
-            zid = identity.zid();
-            identity
+            (identity, identity.zid())
         }
         Err(why) => {
             log(why);
@@ -372,18 +303,16 @@ fn run(args: Args) -> i32 {
         }
     };
 
-    let mut endpoint = EndpointText::new();
-    if write!(endpoint, "{}", args.router).is_err() {
-        log("wz: FAIL - the router endpoint is longer than a locator row");
+    if let Err(why) = ROUTER.set(&args.router) {
+        log(why.message());
         return 2;
     }
-    let _ = ROUTER.endpoint.set(endpoint);
 
     let Some(identity) = NodeIdentity::new(&zid, key) else {
         log("wz: FAIL - the zenoh id does not fit");
         return 2;
     };
-    let (documents, taken) = match documents(&args.docs) {
+    let (documents, taken) = match documents_of(&BODY, &args.docs) {
         Ok(found) => found,
         Err(why) => {
             log(why);
@@ -425,7 +354,7 @@ fn run(args: Args) -> i32 {
     let mut app = getter::app();
     // The line a lab (or a person at the console) waits for, once the node is built: who it claims
     // to be and the router it dials.
-    node.run(&mut Port, &mut app, |port, zid_hex| {
+    node.run(&mut Port::new(), &mut app, |port, zid_hex| {
         port.log(format_args!(
             "HOST-WZ-CLIENT READY {zid_hex} {}",
             args.router

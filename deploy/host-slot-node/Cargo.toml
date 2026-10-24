@@ -27,12 +27,29 @@ license = "LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-ze
 authors = ["newmassrael"]
 description = "The fixed-memory client node run as a Linux process: shared MCU session code over the host's sockets, no allocator."
 
+# What both front ends share (src/lib.rs): the link's tuning numbers, the host's console as the
+# node's port, the identity a node starts with and the secure channel.
+[lib]
+name = "host_slot_node_glue"
+path = "src/lib.rs"
+
+# The front end that reads its router and documents from the command line.
 [[bin]]
 name = "host-slot-node"
 path = "src/main.rs"
 
+# The front end that has them from a declaration (`deploy/nodes/*.toml`): its constants are the
+# file `scripts/lib/wz_node.py --emit` prints, which the build names in `WZ_DECLARED_RS`. Without
+# that file there is nothing to build, so the target is only built where the feature is asked for.
+[[bin]]
+name = "declared-node"
+path = "src/bin/declared_node.rs"
+required-features = ["declared"]
+
 [features]
 default = []
+# Build `declared-node`, which includes the generated constants named by `WZ_DECLARED_RS`.
+declared = []
 # The session coalesces the messages of one send window into one datagram (zenoh-pico's
 # `Z_FEATURE_BATCHING`): off, every message is a datagram of its own.
 batching = ["wz-runtime-coop/transport-batching", "wz-session-core/transport-batching"]

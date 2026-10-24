@@ -539,6 +539,31 @@ IMAGES: dict[str, Image] = {
             Build(HOST, None, ("tls",), label="linux-x86_64-tls"),
         ),
     ),
+    # The same node from a DECLARATION (`deploy/nodes/*.toml`): the second front end of the package,
+    # which takes its router and documents from the constants `wz_node.py --write` generated and
+    # tracks. Built with the registered sample's, so the image the gate grades is the one a
+    # declaration yields, and a declaration's generated file that went stale fails
+    # `wz_node.py --check` before it can be built here.
+    "declared-node": Image(
+        "deploy/host-slot-node/Cargo.toml",
+        "bin",
+        "declared-node",
+        "gated",
+        (
+            Build(
+                HOST,
+                None,
+                ("declared",),
+                env=(
+                    (
+                        "WZ_DECLARED_RS",
+                        str(REPO_ROOT / "deploy" / "nodes" / "generated" / "slot-answerer.rs"),
+                    ),
+                ),
+                label="linux-x86_64-slot-answerer",
+            ),
+        ),
+    ),
     # The wz half of the zenoh-pico comparison image: the CYT4BF MAC behind Zephyr's Ethernet
     # driver and nothing else. It takes the heap form of the Zephyr profile (the crates that carry
     # the seams name a task pool of their own), and the allocator is the kernel's.

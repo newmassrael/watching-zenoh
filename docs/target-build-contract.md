@@ -507,11 +507,31 @@ target builds today is what its node does: one dialled endpoint (`tcp`, `udp` or
 queryables that answer from documents. The registered node, `slot-answerer`, is the existing
 `deploy/host-slot-node` stated as data.
 
-Not written, in order: the crate that includes `declared.rs` (the host slot node reads its router
-and documents from its arguments, so it needs a build that takes them from constants); the entry's
-step that generates, builds, stamps and describes it, with a role beside `session-node`; then the
-entities the slot profile does not build yet, each of which is a change to the profile before it is
-a word the declaration accepts.
+**The structure (owner, 2026-10-25: cost ignored, the textbook one): ports and adapters.** The
+mechanism is written once (`wz_session_mcu::slot_node`: the storage, the factory, the loop). A
+front end owns only what it alone can state, the `static` tables (their sizes are const generics it
+chooses) and the way its input becomes a `ClientNode`; the rest is shared. `deploy/host-slot-node`
+is one package with a library of what both front ends share (`host_slot_node_glue`: the link's
+tuning numbers, the host's console as the node's port, the identity, the secure channel) and two
+binaries: `host-slot-node`, whose input is the command line, and `declared-node`, whose input is a
+declaration. `declared-node` includes the constants `wz_node.py --emit` prints (the build names
+the file in `WZ_DECLARED_RS`), takes its endpoint through the compile-time checked
+`StaticEndpoints`, and holds the declaration to the node's limits with `const` assertions, so the
+generator's check and the compiler's are two checks and a declaration the node cannot hold does not
+build (a declaration whose endpoint is `tls/` does not build without the `tls` feature, and the
+reverse). The generated file of each registered declaration is tracked under
+`deploy/nodes/generated/`, held current by `wz_node.py --check`, and is what the no-allocator link
+gate builds `declared-node` from. Step 1 (landed) moved the parts the two front ends share into the
+library without changing the command-line node: its console output for a usage error, an over-long
+document, too many documents and a normal start is byte for byte what it was, and no variant
+(`get,batching`, `tls`, `declared`, `declared` with `tls`) builds with a warning.
+
+Not written, in order: the entry's step that copies the declaration's build, generates, builds,
+stamps and describes it, with a role beside `session-node` and the declaration's digest in the
+manifest; the posix port is Linux only (`wz-runtime-posix` is empty on another OS), so a declared
+node can be built for a Linux platform row and not yet for QNX or Android, which the entry must
+refuse by name until a port exists; then the entities the slot profile does not build yet, each of
+which is a change to the profile before it is a word the declaration accepts.
 
 The text below is the proposal the decision answers.
 

@@ -6,14 +6,18 @@
 one file per node that says which endpoints it dials, which entities it declares and which budgets
 it runs on, held to what the target profile can build.
 
-    wz_node.py --check                  every deploy/nodes/*.toml validates for its target
+    wz_node.py --check                  every deploy/nodes/*.toml validates for its target and its
+                                        deploy/nodes/generated/<id>.rs is current
+    wz_node.py --write                  write those generated files
     wz_node.py --emit ID                print the generated `declared.rs` of the node ID
     wz_node.py --env ID                 print `WZ_LIMIT_<NAME>=<value>` for the budgets the node states
     wz_node.py --selftest
 
 A node is a declaration and not an argument vector. This module is the first half of turning one
 into an executable: it reads the file, refuses what it cannot hold to the target, and generates the
-constants the node's code reads. It does not build, and it writes no file: `--emit` prints.
+constants the node's code reads. `--emit` prints them; `--write` writes the copy the tree tracks
+under `deploy/nodes/generated/`, which the image gates build and `--check` holds current. It does
+not build the node.
 
 ## What a declaration may say
 
@@ -46,6 +50,7 @@ from __future__ import annotations
 import pathlib
 import re
 import sys
+import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import wz_config  # noqa: E402
@@ -230,17 +235,49 @@ def env_lines(data: dict) -> list[str]:
     return [f"WZ_LIMIT_{k}={v}" for k, v in sorted(data.get("limits", {}).items())]
 
 
+def generated_path(name: str, directory: pathlib.Path = NODES) -> pathlib.Path:
+    return directory / "generated" / f"{name}.rs"
+
+
 def check(decl: dict, directory: pathlib.Path = NODES) -> int:
+    """Every declaration validates and its generated file, which the image gates build, is current."""
     files = sorted(directory.glob("*.toml")) if directory.is_dir() else []
     bad = 0
     for path in files:
         try:
-            load(path.stem, decl, directory)
+            data = load(path.stem, decl, directory)
         except (ValueError, OSError) as err:
             print(f"  wz-node FAIL: {err}", file=sys.stderr)
             bad += 1
-    print(f"wz-node: {len(files)} node declaration(s), {len(files) - bad} valid")
+            continue
+        out = generated_path(path.stem, directory)
+        if not out.is_file() or out.read_text(encoding="utf-8") != emit(path.stem, data):
+            print(f"  wz-node FAIL: {out.name} is missing or stale: regenerate it with --write", file=sys.stderr)
+            bad += 1
+    expected = {generated_path(p.stem, directory).name for p in files}
+    gen = directory / "generated"
+    for stray in sorted(p.name for p in gen.glob("*.rs")) if gen.is_dir() else []:
+        if stray not in expected:
+            print(f"  wz-node FAIL: generated/{stray} has no declaration", file=sys.stderr)
+            bad += 1
+    print(f"wz-node: {len(files)} node declaration(s), {len(files) - bad} valid and current")
     return 1 if bad else 0
+
+
+def write(decl: dict, directory: pathlib.Path = NODES) -> int:
+    """Generate every declaration's file; a declaration that does not validate writes nothing."""
+    files = sorted(directory.glob("*.toml")) if directory.is_dir() else []
+    for path in files:
+        try:
+            data = load(path.stem, decl, directory)
+        except (ValueError, OSError) as err:
+            print(f"  wz-node FAIL: {err}", file=sys.stderr)
+            return 1
+        out = generated_path(path.stem, directory)
+        out.parent.mkdir(exist_ok=True)
+        out.write_text(emit(path.stem, data), encoding="utf-8")
+    print(f"wz-node: wrote {len(files)} generated file(s)")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -326,8 +363,26 @@ def _selftest() -> int:
     refuses("no help", SAMPLE.replace('help = "A node."\n', ""), "help is missing")
     refuses("no node table", "[limits]\nMAX_QUERYABLES = 2\n", "no [node] table")
 
-    # Every registered declaration validates, and the directory is the population.
-    expect("every registered declaration validates", check(decl) == 0)
+    # The generated copy is held to the declaration: missing, stale and stray are each a finding.
+    with tempfile.TemporaryDirectory(prefix="wz-node-") as tmp:
+        directory = pathlib.Path(tmp)
+        (directory / "n.toml").write_text(SAMPLE, encoding="utf-8")
+        expect("a declaration with no generated file fails the check", check(decl, directory) == 1)
+        expect("writing generates the file", write(decl, directory) == 0)
+        expect("the generated file is current", check(decl, directory) == 0)
+        generated_path("n", directory).write_text("// edited by hand\n", encoding="utf-8")
+        expect("a hand-edited generated file is stale", check(decl, directory) == 1)
+        write(decl, directory)
+        (directory / "generated" / "gone.rs").write_text("", encoding="utf-8")
+        expect("a generated file with no declaration is a finding", check(decl, directory) == 1)
+        (directory / "generated" / "gone.rs").unlink()
+        (directory / "n.toml").write_text(SAMPLE.replace('"slot"', '"heap"'), encoding="utf-8")
+        before = generated_path("n", directory).read_text(encoding="utf-8")
+        expect("a declaration that does not validate is not written", write(decl, directory) == 1)
+        expect("and leaves the file as it was", generated_path("n", directory).read_text(encoding="utf-8") == before)
+
+    # Every registered declaration validates and its tracked file is current.
+    expect("every registered declaration validates and is current", check(decl) == 0)
     print("wz-node: selftest OK")
     return 0
 
@@ -342,6 +397,8 @@ def main(argv: list[str]) -> int:
     decl = wz_config.load_decl()
     if argv == ["--check"]:
         return check(decl)
+    if argv == ["--write"]:
+        return write(decl)
     if len(argv) == 2 and argv[0] in ("--emit", "--env"):
         try:
             data = load(argv[1], decl)
