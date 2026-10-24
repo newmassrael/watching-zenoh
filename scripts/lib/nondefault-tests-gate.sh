@@ -180,7 +180,11 @@ LEGS=(
     # structural property the `zenoh_config::` / `multicast_glue` rows have for
     # free, because a module path is structural where a name prefix is a habit.
     # Test names in that file are now free to read however they read best.
-    "wz-runtime-tokio|hook|session-close-ingress,switchboard|--test=session_close_ingress"
+    #
+    # `transport-link-tls` in every row of this feature: the verbs compile only
+    # beside a secure channel (decision D2 of docs/session-lifecycle-intent.md),
+    # and wz-session-core refuses the build without one.
+    "wz-runtime-tokio|hook|session-close-ingress,switchboard,transport-link-tls|--test=session_close_ingress"
     # R2721 — the AP binding for the same grammar's `open` verb. A SECOND row
     # rather than a widening of the one above, because the two do not share a
     # build: `--test=` names an integration target and these are LIB unit tests,
@@ -193,7 +197,7 @@ LEGS=(
     # any one of them, so a leg naming fewer would build a file that is not
     # there and report a population of zero as green.
     "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
-router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_open::"
+router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast|session_lifecycle_open::"
     # The close verb as a QUERY: the runtime half of it, in two rows for the reason
     # the row above gives (an integration TARGET and lib unit tests share no
     # build filter). The census reported five of them `unclaimed` on the hosted
@@ -212,9 +216,9 @@ router-connect-reconcile,transport-link-tcp,transport-unicast|session_lifecycle_
     # tests of the router and linkstate forwarders in front of every push. A
     # lifecycle test added to either module is then reported `unclaimed` by the
     # census, which is the reminder to add its path here.
-    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-router-hat|--test=session_close_query"
-    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-router-hat|linkstate_forward::tests::a_lifecycle_close_orders_every_link_to_the_peer_and_no_other"
-    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-router-hat|router_forward::tests::a_lifecycle_close_orders_every_link_to_the_peer_and_no_other"
+    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-router-hat,transport-link-tls|--test=session_close_query"
+    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-router-hat,transport-link-tls|linkstate_forward::tests::a_lifecycle_close_orders_every_link_to_the_peer_and_no_other"
+    "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-router-hat,transport-link-tls|router_forward::tests::a_lifecycle_close_orders_every_link_to_the_peer_and_no_other"
     # R2743 — the storage MANAGER's lib unit tests, and this row exists for a
     # reason none of the rows above had: the census DID NOT ASK FOR IT.
     #
@@ -453,6 +457,7 @@ transport-link-unixpipe,transport-link-ws|"
         rx-shared-bytes,\
         scouting-active,\
         scouting-static,\
+        secure-channel,\
         session-close-ingress,\
         session-extauth,\
         session-extcompression,\

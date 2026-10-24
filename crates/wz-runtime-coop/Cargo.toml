@@ -209,7 +209,12 @@ codec-open-body = ["dep:wz-session-core", "wz-session-core/codec-open-body"]
 codec-keep-alive = ["dep:wz-session-core", "wz-session-core/codec-keep-alive"]
 codec-close = ["dep:wz-session-core", "wz-session-core/codec-close"]
 session-unicast-accept = ["dep:wz-session-core", "wz-session-core/session-unicast-accept"]
-session-close-ingress = ["dep:wz-session-core", "wz-session-core/session-close-ingress"]
+# No `session-close-ingress` forward: the lifecycle verbs compile only beside a
+# secure channel (decision D2 of docs/session-lifecycle-intent.md), and this
+# runtime has none until the fixed-memory profile gets D9's TLS 1.3 channel. A
+# forward here could only produce a build wz-session-core refuses. It returns,
+# with `wz-session-core/secure-channel` from that channel's feature, in the step
+# that builds it.
 session-unicast-open = ["dep:wz-session-core", "wz-session-core/session-unicast-open"]
 transport-keepalive = ["dep:wz-session-core", "wz-session-core/transport-keepalive"]
 transport-batching = ["dep:wz-session-core", "wz-session-core/transport-batching"]

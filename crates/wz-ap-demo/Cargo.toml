@@ -722,6 +722,9 @@ adminspace-write = ["wz/adminspace-write"]
 # the answerer) and compiles the demo's `--session-lifecycle` /
 # `--session-close-permit` host. Implies `routing-peer`: the sessions it closes are
 # the ones a mesh forwarder holds, and the directory is read off its face table.
+# It builds only beside `tls` or `quic` (decision D2 of
+# docs/session-lifecycle-intent.md: the verbs are taken over a secure channel)
+# and turns neither on, so a build that asks for the verbs names its channel.
 session-close-ingress = ["routing-peer", "wz/session-close-ingress"]
 # R311y508 — forwards the version-keyed per-(face, keyexpr) interceptor cache.
 # Implies `routing-peer` because the cache lives on the peer forwarder's ingress

@@ -947,7 +947,10 @@ transport-link-serial = [
 # folds the peer chain's earliest `not_after` exactly as the quic link does, and
 # the parse is the same one. Declared on BOTH schemes rather than moved to a
 # shared feature, because either can be built without the other.
-transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64", "dep:webpki-roots", "dep:x509-parser"]
+# `wz-session-core/secure-channel`: TLS proves the peer's key and protects every
+# later frame, so it is a channel the session lifecycle verbs may be taken over
+# (decision D2 of docs/session-lifecycle-intent.md). The QUIC link says the same.
+transport-link-tls = ["transport-link-tcp", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64", "dep:webpki-roots", "dep:x509-parser", "wz-session-core/secure-channel"]
 # R311y578 (G10) — TLS / QUIC session-key export in the NSS key-log format
 # (`crate::tls_keylog`). OFF by default and deliberately a compile-time gate
 # rather than a runtime one: exporting session keys makes the traffic readable
@@ -1026,7 +1029,7 @@ transport-link-unixpipe = ["transport-link-tcp", "dep:libc", "dep:rand"]
 # dial/accept BACKEND is gated here. Cert material the locator cannot carry is
 # threaded via `DialConfig.quic` (the tls pattern), so the generic
 # `dial_locator` returns Unsupported for `quic/...` without it. NOT default.
-transport-link-quic = ["transport-link-tcp", "dep:quinn", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64", "dep:x509-parser", "dep:webpki-roots"]
+transport-link-quic = ["transport-link-tcp", "dep:quinn", "dep:tokio-rustls", "dep:rustls-pemfile", "dep:base64", "dep:x509-parser", "dep:webpki-roots", "wz-session-core/secure-channel"]
 # R311y8 — host QUIC unreliable-DATAGRAM link backend (RFC9221). IMPLIES
 # `transport-link-quic`: it reuses that backend's `quic_config` TLS-1.3 + ALPN
 # builders + the quinn/rustls stack, swapping the bidi stream for the
@@ -1628,7 +1631,11 @@ session-unicast-open = ["wz-session-core/session-unicast-open"]
 session-unicast-accept = ["wz-session-core/session-unicast-accept"]
 # session-close-ingress — forward the session-lifetime ingress seam. Nothing
 # AP-specific is added here: the request slot, the raiser and the injector all
-# live in wz-session-core so the MCU profile gets the same interface.
+# live in wz-session-core so the MCU profile gets the same interface. It builds
+# only beside `transport-link-tls` or `transport-link-quic` (decision D2: the
+# verbs are taken over a secure channel, and wz-session-core refuses the build
+# without one); it does not turn either on, so a build that asks for the verbs
+# names the channel it takes them over.
 session-close-ingress = ["wz-session-core/session-close-ingress"]
 # R1 extauth — forward the §5.4 Z_EXT_AUTH establishment ext codec into the
 # AP runtime (the codec lives in wz-session-core; only the AP profile carries

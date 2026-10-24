@@ -640,7 +640,21 @@ session-unicast-accept = []
 # ingress stages and `drive::check_requested_close` drains, beside the lease
 # comparator that is its only production peer. Shared by AP and MCU because both
 # live in this crate.
+#
+# Decision D2 of docs/session-lifecycle-intent.md: the verbs compile only beside
+# `secure-channel` below (a `compile_error!` in `lib.rs` refuses the build
+# otherwise), because the authority accepts a verb only from a peer whose key a
+# secure channel proved, and a build with no such channel would expose a
+# destructive verb no peer can be authorised for.
 session-close-ingress = []
+# secure-channel -- this build has a link that authenticates its peer's key inside
+# a channel that protects every later frame under keys the same handshake derived
+# (decision D9 of docs/session-lifecycle-intent.md: TLS 1.3 with mutual
+# authentication). It adds no code: the link features that provide such a channel
+# turn it on (`wz-runtime-tokio`'s `transport-link-tls` and `transport-link-quic`
+# on AP), and the lifecycle verbs require it. The fixed-memory profile turns it on
+# once it has D9's channel; until then it cannot host the verbs.
+secure-channel = []
 
 # session-extauth — the Z_EXT_AUTH establishment extension (catalog
 # §5.4 session, zenoh init.rs:156 / open.rs:121 `zextzbuf!(0x3, false)`).

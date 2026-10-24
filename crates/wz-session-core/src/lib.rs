@@ -16,6 +16,19 @@
 #![no_std]
 #![cfg_attr(not(feature = "alloc"), allow(unused_extern_crates))]
 
+// Decision D2 of docs/session-lifecycle-intent.md: a lifecycle verb is accepted
+// only from a peer whose key a secure channel proved, so a build with no such
+// channel has no peer it could accept one from. It fails here, closed, rather
+// than shipping a destructive verb that every caller is refused.
+#[cfg(all(feature = "session-close-ingress", not(feature = "secure-channel")))]
+compile_error!(
+    "wz-session-core: `session-close-ingress` (the session lifecycle verbs) needs \
+     `secure-channel`, a link that proves its peer's key inside a protected channel \
+     (decision D2 of docs/session-lifecycle-intent.md). On AP enable \
+     `transport-link-tls` or `transport-link-quic`; the fixed-memory profile has no \
+     such channel yet."
+);
+
 // The `alloc` crate is linked by the heap profile (`alloc`) and by nothing else. The
 // per-session slot profile (`session-slot` without `alloc`) compiles the session
 // machinery against fixed storage and links NO allocator: a `Vec`, a `String` or a

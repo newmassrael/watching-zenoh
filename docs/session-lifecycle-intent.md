@@ -254,6 +254,14 @@ Each step lands with its own done-when; sizes are not estimated here.
      and the fixed-memory profile gets D9's channel. Done when a build with
      the lifecycle feature and no secure-channel feature fails to compile, and
      a fixed-memory image and a router each verify the other over it.
+   - **1b, the D2 guard, landed (Round 3491).** `wz-session-core` has a
+     `secure-channel` feature that adds no code. The AP's TLS and QUIC link
+     features turn it on, and a `compile_error!` refuses `session-close-ingress`
+     without it. The verbs are no longer forwarded to the cooperative runtime,
+     which has no channel. Every lane that builds the verbs now names a channel.
+     `lifecycle-channel-guard-gate.sh` builds the refused combinations, and it
+     fails when the guard is removed. Left of 1b: D9's channel on the
+     fixed-memory profile, which brings the verbs back to it.
 2. **D4.** The expected zid on every dial path. Done when a dial to a locator
    that answers with another zid closes at InitAck on AP, the C ABI and the MCU
    host.

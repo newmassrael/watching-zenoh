@@ -10694,6 +10694,9 @@ layer_c1cn_nondefault_features() {
     # names, and nothing built one until this line.
     if [[ $_shard0 -eq 1 ]]; then
         bash scripts/lib/domain-bundles-gate.sh || return 1
+        # Decision D2 of docs/session-lifecycle-intent.md: the builds the lifecycle
+        # guard refuses, which no other lane makes.
+        bash scripts/lib/lifecycle-channel-guard-gate.sh || return 1
     fi
 }
 
@@ -20459,8 +20462,10 @@ layer_e6_peer_mesh() {
     # `session-close-ingress` joins the SAME binary so the session lifecycle queries
     # (`--session-lifecycle`) are compiled in for the leg below. Additive: nothing
     # hosts them unless that flag is typed, so no other E6 leg changes behaviour.
+    # `tls` with it: the verbs compile only beside a secure channel (decision D2
+    # of docs/session-lifecycle-intent.md), and the build is refused without one.
     (cd crates && cargo build -p wz-ap-demo \
-        --features routing-peer,adminspace-write,routing-interceptor-hotreload,routing-interest-pending-gc,session-close-ingress,zenoh-config --quiet) || return 1
+        --features routing-peer,adminspace-write,routing-interceptor-hotreload,routing-interest-pending-gc,session-close-ingress,tls,zenoh-config --quiet) || return 1
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_peer_mesh -- --ignored --quiet) || return 1
     # R311rs — the subscription-filtered data-forward e2e (c3c-3) rides the

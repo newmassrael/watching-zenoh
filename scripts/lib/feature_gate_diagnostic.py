@@ -271,6 +271,16 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # Both sites are compound, so it is DEFERRED below as
             # `compound-cfg` beside `transport-tx-lend`, not probed.
         )
+    } | {
+        # Decision D2 of docs/session-lifecycle-intent.md. A marker the secure-channel
+        # links turn on; its one `#[cfg]` is the `compile_error!` in `lib.rs` that
+        # refuses the lifecycle verbs without it, and
+        # `lifecycle-channel-guard-gate.sh` builds that refusal.
+        "secure-channel": (
+            "a marker with no item: its only `#[cfg]` is the crate-level "
+            "`compile_error!` that refuses `session-close-ingress` without it, "
+            "which lifecycle-channel-guard-gate.sh builds"
+        ),
     },
     "wz-runtime-tokio": {
         f: (
