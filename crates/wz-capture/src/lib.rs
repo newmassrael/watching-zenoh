@@ -2067,7 +2067,7 @@ fn idx_direction(index: usize) -> Direction {
 /// The capture instant a decrypted frame is timed by: the instant of the packet
 /// that carried the record its first byte came out of.
 ///
-/// `spans` is the list [`remap_decrypted_offsets`] reads, and `instants` is, for
+/// `spans` is the list [`record_coordinates`] reads, and `instants` is, for
 /// each span in the same order, the instant of the packet holding that record's
 /// first byte. The span is chosen by the rule the remap uses -- the last one
 /// starting at or before the plaintext offset -- so the instant a frame carries
@@ -2102,11 +2102,17 @@ fn instant_of_plaintext(
 /// where that record ends (`record_ends`, one per span, header and tag
 /// included). So the two ends bound every record that carried a byte of the
 /// unit, and nothing in them is a plaintext measure.
-fn remap_decrypted_offsets<'f>(
-    frames: impl Iterator<Item = &'f mut PassiveFrame>,
+///
+/// Answers for one unit at plaintext `offset`, ending at plaintext `end`: the
+/// coordinates [`messages::MessageList::restate_from`] gives the unit's rows
+/// (open-debt item 924, step 4c, where the rewrite of decoded frames this was
+/// became a restatement of rows read again from the plaintext).
+fn record_coordinates(
     spans: &[(usize, usize)],
     record_ends: &[usize],
-) {
+    offset: usize,
+    end: Option<usize>,
+) -> (usize, Option<usize>) {
     // The index of the record holding plaintext byte `at`: the last span that
     // starts at or before it.
     let record_of = |at: usize| {
@@ -2114,20 +2120,15 @@ fn remap_decrypted_offsets<'f>(
             .partition_point(|(plain_at, _)| *plain_at <= at)
             .checked_sub(1)
     };
-    for frame in frames {
-        let start = record_of(frame.stream_offset);
-        let end = frame
-            .wire_end
-            .and_then(|end| record_of(end.checked_sub(1)?))
-            .and_then(|record| record_ends.get(record).copied());
-        if let Some((_, stream_offset)) = start.and_then(|record| spans.get(record)) {
-            frame.stream_offset = *stream_offset;
-            frame.wire_end = end;
-        } else {
-            // No record holds it, so its offset stays where it was; an end in
-            // plaintext space beside it would be a number in neither space.
-            frame.wire_end = None;
-        }
+    let start = record_of(offset).and_then(|record| spans.get(record));
+    let end = end
+        .and_then(|end| record_of(end.checked_sub(1)?))
+        .and_then(|record| record_ends.get(record).copied());
+    match start {
+        Some((_, stream_offset)) => (*stream_offset, end),
+        // No record holds it, so its offset stays where it was; an end in
+        // plaintext space beside it would be a number in neither space.
+        None => (offset, None),
     }
 }
 
@@ -2153,16 +2154,17 @@ pub struct DecryptedStream<'a> {
     /// — a capture they disagreed about would report one `messages decoded` and
     /// a different set underneath it.
     ///
-    /// Valid only during the call. `remap_decrypted_offsets` rewrites every one
-    /// of these `stream_offset`s into ciphertext space the moment it returns,
-    /// which is what makes this window the only one.
+    /// Valid only during the call. The pass restates every one of these
+    /// `stream_offset`s into ciphertext space the moment it returns
+    /// (`record_coordinates`), which is what makes this window the only one in
+    /// which they are plaintext offsets.
     pub frames: messages::Rows<'a>,
     /// `(offset within `plaintext`, stream offset of the RECORD it came out of)`,
     /// in increasing order of the first.
     ///
     /// The map that lets a consumer report a plaintext finding in the
     /// coordinate space the rest of the report uses — the same map
-    /// `remap_decrypted_offsets` applies to the frames, offered rather than
+    /// `record_coordinates` applies to the frames, offered rather than
     /// applied so a consumer can also stay in plaintext space if that is the
     /// question it is answering.
     pub record_origins: &'a [(usize, usize)],
@@ -2421,6 +2423,14 @@ pub struct FlowDissection {
     /// bytes of a segment that sat in it are read from it and not kept
     /// (open-debt item 924, step 3).
     lent: Option<alloc::sync::Arc<dyn LentCapture>>,
+    /// The plaintext each direction of a TLS flow decrypted into, once a
+    /// decryption pass opened it, from the first byte a held message is read
+    /// from: the source the flow's messages are read again from, in place of
+    /// the stream (open-debt item 924, step 4c). The plaintext exists only in
+    /// the pass that opens it, so this is the smallest form of it the
+    /// dissection can own, as a recovered QUIC stream's is. `None` for a flow
+    /// no pass opened, whose messages are read from its stream.
+    plaintext: Option<alloc::boxed::Box<[Plaintext; 2]>>,
     /// R311y594b — capture index of the last packet on this flow, the key
     /// `Dissection` evicts by. A packet index rather than a timestamp because
     /// every source has one and not every source has a clock.
@@ -2480,6 +2490,9 @@ struct Streams<'a> {
     /// The capture container the flow is lent, which runs located there are
     /// read from.
     container: Option<&'a [u8]>,
+    /// The plaintext a decrypted flow's messages are read from instead
+    /// ([`FlowDissection::plaintext`]).
+    plaintext: Option<&'a [Plaintext; 2]>,
 }
 
 impl messages::UnitBytes for Streams<'_> {
@@ -2489,7 +2502,12 @@ impl messages::UnitBytes for Streams<'_> {
         from: usize,
         to: usize,
     ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
-        self.assembler(direction).bytes(from, to, self.container)
+        match self.plaintext {
+            Some(plaintext) => plaintext[dir_index(direction)]
+                .get(from, to)
+                .map(alloc::borrow::Cow::Borrowed),
+            None => self.assembler(direction).bytes(from, to, self.container),
+        }
     }
 }
 
@@ -2510,8 +2528,16 @@ impl messages::UnitBytes for FlowDissection {
         from: usize,
         to: usize,
     ) -> Option<alloc::borrow::Cow<'_, [u8]>> {
-        self.assembler(direction)
-            .bytes(from, to, self.lent.as_deref().map(LentCapture::bytes))
+        match &self.plaintext {
+            Some(plaintext) => plaintext[dir_index(direction)]
+                .get(from, to)
+                .map(alloc::borrow::Cow::Borrowed),
+            None => self.assembler(direction).bytes(
+                from,
+                to,
+                self.lent.as_deref().map(LentCapture::bytes),
+            ),
+        }
     }
 }
 
@@ -2567,35 +2593,44 @@ impl FlowDissection {
             low_to_high,
             high_to_low,
             lent,
+            plaintext,
             ..
         } = self;
         frames.discard_oldest(&Streams {
             low_to_high,
             high_to_low,
             container: lent.as_deref().map(LentCapture::bytes),
+            plaintext: plaintext.as_deref(),
         })
     }
 
     /// Release the bytes of `direction`'s stream before absolute `offset`,
     /// keeping whole first every message that would be read again from them.
     /// Returns how many bytes went.
+    ///
+    /// A decrypted flow's messages are read from its plaintext, which this does
+    /// not touch, so none of them is kept whole for it.
     fn trim_stream_before(&mut self, direction: Direction, offset: usize) -> usize {
         let Self {
             frames,
             low_to_high,
             high_to_low,
             lent,
+            plaintext,
             ..
         } = self;
-        frames.keep_whole_before(
-            direction,
-            offset,
-            &Streams {
-                low_to_high,
-                high_to_low,
-                container: lent.as_deref().map(LentCapture::bytes),
-            },
-        );
+        if plaintext.is_none() {
+            frames.keep_whole_before(
+                direction,
+                offset,
+                &Streams {
+                    low_to_high,
+                    high_to_low,
+                    container: lent.as_deref().map(LentCapture::bytes),
+                    plaintext: None,
+                },
+            );
+        }
         match direction {
             Direction::A => low_to_high.trim_before(offset),
             Direction::B => high_to_low.trim_before(offset),
@@ -2633,6 +2668,7 @@ impl FlowDissection {
             frames: messages::MessageList::new(),
             keep,
             lent: None,
+            plaintext: None,
             last_activity: 0,
             framing: Framing::Undecided,
             held: [Vec::new(), Vec::new()],
@@ -2758,7 +2794,28 @@ impl FlowDissection {
     /// Called by the code that took messages from this flow's list, and only
     /// then: a dissection with no message ceiling has taken nothing and keeps its
     /// whole stream.
+    ///
+    /// A decrypted flow's messages are read from its plaintext, which goes by
+    /// the same rule from where the oldest message a direction holds is read
+    /// (open-debt item 924, step 4c).
     fn release_stream_behind_held_messages(&mut self) {
+        if let Some(plaintext) = &mut self.plaintext {
+            for (seat, direction) in [Direction::A, Direction::B].into_iter().enumerate() {
+                let Some(from) = self
+                    .frames
+                    .oldest_source_offset(direction, STREAM_RELEASE_SCAN)
+                else {
+                    continue;
+                };
+                let held = &mut plaintext[seat];
+                let unreachable = from.saturating_sub(held.from);
+                if unreachable >= STREAM_RELEASE_SLACK
+                    && unreachable >= held.bytes.len() / STREAM_RELEASE_DIVISOR
+                {
+                    held.release_before(from);
+                }
+            }
+        }
         for direction in [Direction::A, Direction::B] {
             let Some(oldest) = self
                 .frames()
@@ -2957,14 +3014,16 @@ impl FlowDissection {
     /// decodes on demand is the reader's for as long as it reads it, so its bytes
     /// cannot be lent out past that.
     ///
-    /// # A message a layer below framed
+    /// # A message a layer below framed or decrypted
     ///
     /// A WebSocket message is anchored at the stream offset of its first
     /// frame's header, and its payload, unmasked and joined out of its frames,
     /// stands nowhere in the stream: a slice there is the frame header and a
-    /// masked prefix. Its bytes are the payload the list logged with the row
-    /// (open-debt item 924, step 4c), which is why this takes the ROW, whose
-    /// place in the list names that payload, and not a frame.
+    /// masked prefix. A decrypted TLS flow's message is anchored at the record
+    /// that carried it, and a slice there is ciphertext. Their bytes are what
+    /// the list reads the row again from (the logged payload, the plaintext the
+    /// flow keeps; open-debt item 924, step 4c), which is why this takes the
+    /// ROW, whose place in the list names that unit, and not a frame.
     pub fn message_bytes<'a>(
         &'a self,
         row: &messages::Row<'_>,
@@ -2976,7 +3035,9 @@ impl FlowDissection {
         if let Some(own) = &frame.decompressed {
             return Ok(alloc::borrow::Cow::Owned(own.clone()));
         }
-        if frame.offset_space == wz_session_core::passive::OffsetSpace::PacketIndex {
+        if frame.offset_space == wz_session_core::passive::OffsetSpace::PacketIndex
+            || self.plaintext.is_some()
+        {
             let list = self.frames();
             let first = list.produced() - list.len() as u64;
             let payload = row
@@ -3690,6 +3751,7 @@ impl FlowDissection {
             low_to_high,
             high_to_low,
             container: lent.as_deref().map(LentCapture::bytes),
+            plaintext: None,
         };
         stream_into_session(
             session,
@@ -3710,24 +3772,40 @@ impl FlowDissection {
     }
 
     /// [`Self::feed_stream`] for bytes that are not the assembler's: the
-    /// plaintext a TLS flow decrypted into, whose offsets are a different space
-    /// from the TCP stream's. `instant_of` resolves an offset in THAT space.
+    /// plaintext `direction` of a TLS flow decrypted into
+    /// ([`Self::plaintext`], which must hold it), whose offsets are a different
+    /// space from the TCP stream's. `instant_of` resolves an offset in THAT
+    /// space.
+    ///
+    /// Open-debt item 924, step 4c — the messages are entries read again from
+    /// the plaintext the flow keeps; the restatement after this call moves
+    /// where they stand into the ciphertext's space and leaves where they are
+    /// read from alone.
     fn feed_decrypted_stream(
         &mut self,
         direction: Direction,
-        bytes: &[u8],
         instant_of: &dyn Fn(Direction, usize) -> Option<u64>,
     ) {
         let Self {
             session,
             frames,
+            keep,
             residue,
             ingest,
+            low_to_high,
+            high_to_low,
+            plaintext,
             ..
         } = self;
-        // Kept whole: the plaintext is this call's and is gone when it returns,
-        // and the remap after it rewrites the messages' coordinates into the
-        // ciphertext's space, where no byte of the plaintext stands.
+        let Some(plaintext) = plaintext.as_deref() else {
+            return;
+        };
+        let source = Streams {
+            low_to_high,
+            high_to_low,
+            container: None,
+            plaintext: Some(plaintext),
+        };
         stream_into_session(
             session,
             frames,
@@ -3735,9 +3813,13 @@ impl FlowDissection {
             ingest,
             Fed {
                 direction,
-                bytes,
+                bytes: &plaintext[dir_index(direction)].bytes,
                 instant_of,
-                entries_from: None,
+                entries_from: match keep {
+                    Keep::Entries => Some(&source as &dyn messages::UnitBytes),
+                    #[cfg(test)]
+                    Keep::Whole => None,
+                },
             },
         );
     }
@@ -4227,6 +4309,8 @@ mod message_list_census {
             keep: _,
             // Where the stream's bytes are read from, not a list.
             lent: _,
+            // Where a decrypted flow's messages are read from, not a list.
+            plaintext: _,
         } = FlowDissection::new(FlowKey::serial_line(), None, None, Keep::Entries);
     }
 
@@ -6696,26 +6780,24 @@ impl Dissection {
     /// R311y677 (§1.1n) — [`Self::decrypt_with`], handing the opened plaintext
     /// to a caller who asked for it, at the one moment it exists.
     ///
-    /// # Why a sink and not a stored buffer
+    /// # Why a sink beside the kept plaintext
     ///
-    /// The plaintext is built here, fed to the session, and dropped with the
-    /// call. A consumer that wants it — the field walker is the first — has no
-    /// way to ask afterwards: the frames' coordinates are remapped to the
-    /// CIPHERTEXT record they came out of (see the note above, which is
-    /// deliberate and load bearing for `packet_for`), and the plaintext offset
-    /// they had is not kept.
+    /// The plaintext is built here and fed to the session, and the frames'
+    /// coordinates are restated to the CIPHERTEXT record they came out of (see
+    /// the note above, which is deliberate and load bearing for `packet_for`).
     ///
-    /// Keeping the plaintext instead would add an eighth accumulation that grows
-    /// with the input, to a crate whose bound discipline
-    /// ([`DissectionLimits`], and a paired [`DissectionDrops`] counter for every
-    /// bound that bites) exists because seven was already too many. It is also
-    /// the third copy of a flow's bytes, which this workspace already carries as
-    /// an open item.
+    /// Open-debt item 924, step 4c — the flow KEEPS the plaintext now, from
+    /// the first byte a held message is read from, because its messages are
+    /// index entries read again from it, which is smaller than the decoded
+    /// messages the flow kept before; the message ceilings that discard those
+    /// release the plaintext behind them. A message's bytes are answered from
+    /// it ([`FlowDissection::message_bytes`]).
     ///
-    /// So the data is OFFERED rather than stored. A caller who wants it takes
-    /// what it needs under its own bound; a caller who does not pays nothing,
-    /// because `()` implements [`PlaintextSink`] as a no-op and this method is
-    /// what [`Self::decrypt_with`] has always been. Same inversion as
+    /// The plaintext coordinates a sink is handed are offered for this call
+    /// only: a caller who wants the stream with them, as it was framed, takes
+    /// it here; a caller who does not pays nothing, because `()` implements
+    /// [`PlaintextSink`] as a no-op and this method is what
+    /// [`Self::decrypt_with`] has always been. Same inversion as
     /// [`tls::RecordOpener`], for the same reason: the knowledge belongs to the
     /// caller and the moment belongs to this loop.
     pub fn decrypt_with_sink(
@@ -6824,19 +6906,27 @@ impl Dissection {
                     })
                     .collect()
             });
+            // Open-debt item 924, step 4c — the flow keeps the plaintext, which
+            // its messages are read again from: moved, not copied, before any
+            // message is read from it.
+            flow.plaintext = Some(alloc::boxed::Box::new(
+                plaintext.map(|bytes| Plaintext { bytes, from: 0 }),
+            ));
             for index in 0..2usize {
-                if plaintext[index].is_empty() {
+                let Some(plaintext) = flow.plaintext.as_deref() else {
+                    break;
+                };
+                if plaintext[index].bytes.is_empty() {
                     continue;
                 }
                 let before = flow.frames.len();
-                flow.feed_decrypted_stream(
-                    idx_direction(index),
-                    &plaintext[index],
-                    &|dir, plain_offset| {
-                        let seat = dir_index(dir);
-                        instant_of_plaintext(&spans[seat], &record_instants[seat], plain_offset)
-                    },
-                );
+                flow.feed_decrypted_stream(idx_direction(index), &|dir, plain_offset| {
+                    let seat = dir_index(dir);
+                    instant_of_plaintext(&spans[seat], &record_instants[seat], plain_offset)
+                });
+                let Some(plaintext) = flow.plaintext.as_deref() else {
+                    break;
+                };
                 // R311y678 — OFFERED here: after the session has framed the
                 // plaintext and BEFORE the remap below rewrites those frames'
                 // coordinates into ciphertext space.
@@ -6854,16 +6944,18 @@ impl Dissection {
                 sink.on_plaintext(DecryptedStream {
                     flow: flow.flow,
                     direction: idx_direction(index),
-                    plaintext: &plaintext[index],
+                    plaintext: &plaintext[index].bytes,
                     frames: flow.frames().rows_from(before),
                     record_origins: &spans[index],
                     base: 0,
                 });
-                remap_decrypted_offsets(
-                    flow.frames.iter_mut_from(before),
-                    &spans[index],
-                    &record_ends[index],
-                );
+                // Each by the records of ITS direction: feeding one direction
+                // can release messages of the other that waited on a context.
+                flow.frames
+                    .restate_from(before, &mut |direction, offset, end| {
+                        let seat = dir_index(direction);
+                        record_coordinates(&spans[seat], &record_ends[seat], offset, end)
+                    });
                 summary.frames += flow.frames.len() - before;
             }
         }

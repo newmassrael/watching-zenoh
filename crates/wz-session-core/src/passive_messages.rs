@@ -514,37 +514,63 @@ impl MessageList {
         self.len() == 0
     }
 
-    /// The messages from position `from` on, for an in-place rewrite of what
-    /// one call added (a remap of their coordinates).
+    /// Restate where the messages from position `from` on stand on the wire:
+    /// `restate` is handed each one's direction, anchor offset and end
+    /// ([`PassiveFrame::stream_offset`], [`PassiveFrame::wire_end`]) and gives
+    /// back the two it stands at instead.
     ///
-    /// Only messages kept whole can be rewritten: one kept as an index entry is
-    /// read again from its bytes, so a rewrite of it would not survive the next
-    /// read. Every message a call that rewrites appends is kept whole (it was
-    /// handed to [`Self::push`] or [`Self::append`]), and a rewrite that reaches
-    /// an entry panics rather than hand back frames that are not those rows.
-    pub fn iter_mut_from(
+    /// Open-debt item 924, step 4c — for units a layer below produced in a byte
+    /// space of its own, which the report states in the space of the wire that
+    /// carried them: a TLS flow's units are framed in the plaintext, and each
+    /// stands where the record that carried it does. A message kept as an
+    /// index entry is still read from where it was read (its locator does not
+    /// move); its anchor takes the new offset, and its end is kept beside the
+    /// entries, once per unit ([`Index::wire_ends`]). Every row of one unit
+    /// must be given the same end, which a restatement by the unit's own
+    /// coordinates does.
+    pub fn restate_from(
         &mut self,
         from: usize,
-    ) -> Box<dyn DoubleEndedIterator<Item = &mut PassiveFrame> + '_> {
+        restate: &mut dyn FnMut(Direction, usize, Option<usize>) -> (usize, Option<usize>),
+    ) {
         let first_produced = self.produced - self.len() as u64;
         match &mut self.rows {
-            Store::Held(log) => Box::new(log.iter_mut_from(from)),
-            Store::Indexed(index) => {
-                assert!(
-                    index
-                        .entries
-                        .iter_from(from)
-                        .all(|entry| matches!(entry.entry(), Entry::Held)),
-                    "a message read again from its bytes cannot be rewritten in place"
-                );
-                Box::new(
-                    index
-                        .held
-                        .range_mut(first_produced + from as u64..)
-                        .map(|(_, frame)| frame),
-                )
+            Store::Held(log) => {
+                for frame in log.iter_mut_from(from) {
+                    let (offset, end) =
+                        restate(frame.direction, frame.stream_offset, frame.wire_end);
+                    frame.stream_offset = offset;
+                    frame.wire_end = end;
+                }
             }
+            Store::Indexed(index) => index.restate_from(first_produced, from, restate),
         }
+    }
+
+    /// Where in its source the oldest message of `direction` read from a
+    /// byte stream begins being read, looked for among the first `within`
+    /// messages held: what a holder that lets the front of that stream go must
+    /// keep from. `None` when none of them is such a message of `direction`
+    /// (it is kept whole, logged, or further back).
+    ///
+    /// Open-debt item 924, step 4c — asked of the list and not of a row's
+    /// anchor, which a restated message ([`Self::restate_from`]) has moved into
+    /// another space.
+    pub fn oldest_source_offset(&self, direction: Direction, within: usize) -> Option<usize> {
+        let Store::Indexed(index) = &self.rows else {
+            return None;
+        };
+        index
+            .entries
+            .iter_from(0)
+            .take(within)
+            .filter_map(|entry| match entry.entry() {
+                Entry::Unit(row) if !row.logged() && row.direction() == direction => {
+                    Some(row.body().0)
+                }
+                _ => None,
+            })
+            .next()
     }
 
     /// Keep whole every message of `direction` whose unit's bytes begin before
@@ -688,11 +714,13 @@ struct Index {
     cut: Vec<MessageFacts>,
     /// The resynchronisation the cut unit's first row carried.
     cut_resync: Option<StreamResync>,
-    /// Where each logged unit a layer below framed ends in the stream it was
-    /// carried in ([`PassiveFrame::wire_end`] of its records), by the unit's
-    /// locator: a fact of the unit its bytes do not hold, kept once per unit
-    /// for the rows flagged [`WIRE_END`] and let go with the unit's last row.
-    wire_ends: BTreeMap<u64, u64>,
+    /// Where each unit whose end is not its bytes' ends on the wire
+    /// ([`PassiveFrame::wire_end`] of its records), by [`UnitRow::end_key`]: a
+    /// unit a layer below framed (a WebSocket message) or decrypted (a TLS
+    /// record's plaintext) ends where the layer's own unit does. Kept once per
+    /// unit for the rows flagged [`WIRE_END`], a flagged row with no end here
+    /// has none, and the unit's last row lets it go.
+    wire_ends: BTreeMap<(u16, u64), u64>,
 }
 
 /// One row of an [`Index`], as its [`UnitRow`] says.
@@ -771,8 +799,9 @@ const LOGGED: u16 = 1 << 8;
 /// gate therefore cannot tell this flag from its absence, and the flag does not
 /// depend on that holding.
 const NO_HANDSHAKE: u16 = 1 << 9;
-/// The row's unit says where its bytes end in the stream a layer below
-/// carried them in ([`Index::wire_ends`]): a WebSocket message's last frame.
+/// The row's end on the wire is the index's to say ([`Index::wire_ends`]), not
+/// the end of its bytes: a WebSocket message's last frame, the TLS record that
+/// carried a unit's last plaintext byte.
 const WIRE_END: u16 = 1 << 10;
 
 /// [`UnitRow::locator`] of a logged unit names an offset in the container the
@@ -990,6 +1019,13 @@ impl UnitRow {
         self.flags & LOGGED != 0
     }
 
+    /// The key of the row's unit in [`Index::wire_ends`]: its locator, which
+    /// names one unit among the logged ones and one among each direction's
+    /// streamed ones.
+    fn end_key(&self) -> (u16, u64) {
+        (self.flags & (LOGGED | SIDE_B), self.locator)
+    }
+
     /// Where the body of a streamed unit begins and ends, in its direction's
     /// stream.
     fn body(&self) -> (usize, usize) {
@@ -1093,18 +1129,20 @@ impl Index {
             self.contexts.push(start);
         }
         let context = u32::try_from(self.contexts.len() - 1).unwrap_or(u32::MAX);
-        if let Locus::Logged {
-            place,
-            wire_end: Some(end),
-            ..
-        } = locus
-        {
-            self.wire_ends.insert(place.locator(), end as u64);
-        }
         for (k, frame) in frames.iter().enumerate() {
             let (row, sparse) = UnitRow::of(frame, locus, context);
             if row.flags & SPARSE != 0 {
                 self.sparse.insert(produced + k as u64, sparse);
+            }
+            if let (
+                0,
+                Locus::Logged {
+                    wire_end: Some(end),
+                    ..
+                },
+            ) = (k, locus)
+            {
+                self.wire_ends.insert(row.end_key(), end as u64);
             }
             self.entries.push_back(row);
         }
@@ -1163,8 +1201,49 @@ impl Index {
                 self.held.insert(key, frame);
                 position += 1;
             }
+            // The end is in the held frames now.
+            if row.flags & WIRE_END != 0 {
+                self.wire_ends.remove(&row.end_key());
+            }
         }
         self.whole_below[seat] = first_produced + position.min(self.entries.len()) as u64;
+    }
+
+    /// [`MessageList::restate_from`] over the rows from `from` on.
+    fn restate_from(
+        &mut self,
+        first_produced: u64,
+        from: usize,
+        restate: &mut dyn FnMut(Direction, usize, Option<usize>) -> (usize, Option<usize>),
+    ) {
+        for position in from..self.entries.len() {
+            match self.entry(position) {
+                Some(Entry::Held) => {
+                    if let Some(frame) = self.held.get_mut(&(first_produced + position as u64)) {
+                        let (offset, end) =
+                            restate(frame.direction, frame.stream_offset, frame.wire_end);
+                        frame.stream_offset = offset;
+                        frame.wire_end = end;
+                    }
+                }
+                Some(Entry::Unit(row)) => {
+                    let head = self.head(position, first_produced).unwrap_or_else(|| {
+                        unreachable!("an entry at {position} has a head");
+                    });
+                    let (offset, end) = restate(head.direction, head.stream_offset, head.wire_end);
+                    let key = row.end_key();
+                    match end {
+                        Some(end) => self.wire_ends.insert(key, end as u64),
+                        None => self.wire_ends.remove(&key),
+                    };
+                    if let Some(slot) = self.entries.get_mut(position) {
+                        slot.anchor = offset as u64;
+                        slot.flags |= WIRE_END;
+                    }
+                }
+                None => break,
+            }
+        }
     }
 
     /// Read again the unit of the row at `position`, which is an
@@ -1235,9 +1314,9 @@ impl Index {
         )
         .unwrap_or_else(|e| panic!("a unit a list holds did not read again as it was read: {e:?}"));
         // The end a layer below gave the unit is no fact of its bytes.
-        if let Some(end) = self.wire_end(&row) {
+        if let Some(end) = self.stated_end(&row) {
             for frame in &mut frames {
-                frame.wire_end = Some(end);
+                frame.wire_end = end;
             }
         }
         ReadAgain {
@@ -1305,13 +1384,11 @@ impl Index {
         }
     }
 
-    /// Where the unit of the logged `row` ends in the stream a layer below
-    /// carried it in, when one did.
-    fn wire_end(&self, row: &UnitRow) -> Option<usize> {
+    /// The end on the wire the index states for `row` ([`WIRE_END`]): `None`
+    /// for a row whose end is its bytes', `Some(None)` for one that has none.
+    fn stated_end(&self, row: &UnitRow) -> Option<Option<usize>> {
         (row.flags & WIRE_END != 0)
-            .then(|| self.wire_ends.get(&row.locator))
-            .flatten()
-            .map(|&end| end as usize)
+            .then(|| self.wire_ends.get(&row.end_key()).map(|&end| end as usize))
     }
 
     /// The head of the row at `position`.
@@ -1321,8 +1398,8 @@ impl Index {
             Entry::Held => self.held(position, first_produced).map(RowHead::of),
             Entry::Unit(row) => {
                 let mut head = row.head();
-                if let Some(end) = self.wire_end(&row) {
-                    head.wire_end = Some(end);
+                if let Some(end) = self.stated_end(&row) {
+                    head.wire_end = end;
                 }
                 Some(head)
             }
@@ -1364,7 +1441,7 @@ impl Index {
                         self.log.release_before(at + u64::from(row.wire_len));
                     }
                     if row.flags & WIRE_END != 0 {
-                        self.wire_ends.remove(&row.locator);
+                        self.wire_ends.remove(&row.end_key());
                     }
                 }
                 frame
@@ -2350,11 +2427,9 @@ mod tests {
             list.read(&NoBytes).get(0).expect("a frame").stream_offset,
             7
         );
-        // In-place mutation, which is what `remap_decrypted_offsets` needs and
-        // which does not change the length.
-        for f in list.iter_mut_from(0) {
-            f.stream_offset += 1;
-        }
+        // A restatement of where the rows stand, which is what a TLS flow's
+        // records need and which does not change the length.
+        list.restate_from(0, &mut |_, offset, end| (offset + 1, end));
         assert!(list.read(&NoBytes).iter().all(|f| f.stream_offset == 8));
         assert_eq!(list.len(), 3, "a rewrite cannot grow or shrink the list");
     }
@@ -2759,6 +2834,105 @@ mod tests {
             matches!(&list.rows, Store::Held(rows) if rows.len() == 3),
             "kept whole"
         );
+    }
+
+    /// Both directions of a byte stream, as a list's source.
+    struct TwoStreams([Vec<u8>; 2]);
+
+    impl UnitBytes for TwoStreams {
+        fn stream_bytes(
+            &self,
+            direction: Direction,
+            from: usize,
+            to: usize,
+        ) -> Option<Cow<'_, [u8]>> {
+            self.0[usize::from(direction == Direction::B)]
+                .get(from..to)
+                .map(Cow::Borrowed)
+        }
+    }
+
+    /// Open-debt item 924, step 4c — A RESTATED STREAM LIST. Units framed in
+    /// one byte space and stated in another (a TLS flow's plaintext and the
+    /// records that carried it) read, row for row and head for head, as the
+    /// same units kept whole and restated alike, before and through every
+    /// discard: an entry is still read from where it was read, stands where
+    /// it was restated to, ends where it was restated to end (or nowhere),
+    /// and its unit's end goes with the unit's last row. The oldest source
+    /// offset is the locator's, not the restated anchor's.
+    #[test]
+    fn a_restated_stream_list_reads_as_one_kept_whole_and_restated_alike() {
+        // Per direction, framed units of one to three keep-alives.
+        let stream = |seed: usize| -> Vec<u8> {
+            let mut out = Vec::new();
+            for k in 0..40 {
+                let unit = alloc::vec![0x04u8; (k + seed) % 3 + 1];
+                out.extend_from_slice(&(unit.len() as u16).to_le_bytes());
+                out.extend_from_slice(&unit);
+            }
+            out
+        };
+        let source = TwoStreams([stream(0), stream(1)]);
+        let mut session = crate::passive::PassiveSession::new();
+        let mut keeping = crate::passive::PassiveSession::new();
+        let (mut indexed, mut whole) = (MessageList::new(), MessageList::new());
+        for direction in [Direction::A, Direction::B] {
+            let bytes = &source.0[usize::from(direction == Direction::B)];
+            session.push(direction, bytes);
+            keeping.push(direction, bytes);
+            while let Ok(unit) = session.next_unit_with(direction, &|_| None) {
+                indexed.push_unit(unit, &source);
+            }
+            while let Ok(unit) = keeping.next_unit_with(direction, &|_| None) {
+                whole.append(unit.frames);
+            }
+        }
+        assert!(matches!(indexed.rows, Store::Indexed(_)), "entries");
+        assert_eq!(
+            indexed.oldest_source_offset(Direction::B, usize::MAX),
+            Some(2)
+        );
+        assert_eq!(
+            indexed.oldest_source_offset(Direction::B, 1),
+            None,
+            "direction A's rows come first"
+        );
+        // A unit stands at ten thousand past twice its offset, by direction,
+        // and ends nowhere when its unrestated end is a multiple of seven.
+        let mut restate = |direction: Direction, offset: usize, end: Option<usize>| {
+            let lift = if direction == Direction::B {
+                50_000
+            } else {
+                10_000
+            };
+            (
+                lift + 2 * offset,
+                end.filter(|end| end % 7 != 0).map(|end| lift + 3 * end),
+            )
+        };
+        indexed.restate_from(0, &mut restate);
+        whole.restate_from(0, &mut restate);
+        assert!(
+            whole.read(&NoBytes).iter().any(|f| f.wire_end.is_none())
+                && whole.read(&NoBytes).iter().any(|f| f.wire_end.is_some()),
+            "both kinds of end are restated"
+        );
+        assert_reads_as_whole(&indexed, &whole, &source);
+        assert_eq!(
+            indexed.oldest_source_offset(Direction::B, usize::MAX),
+            Some(2),
+            "still read where it was read"
+        );
+        let mut census = DroppedFrameCensus::default();
+        while !indexed.is_empty() {
+            census.absorb(indexed.discard_oldest(&source).expect("a row"));
+            census.absorb(whole.discard_oldest(&NoBytes).expect("a row"));
+            assert_reads_as_whole(&indexed, &whole, &source);
+        }
+        let Store::Indexed(index) = &indexed.rows else {
+            panic!("still an index");
+        };
+        assert!(index.wire_ends.is_empty(), "an empty list keeps no end");
     }
 
     /// The row a list keeps for every message it can read again, whatever its

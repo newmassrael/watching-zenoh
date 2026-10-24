@@ -788,6 +788,214 @@ fn websocket_capture() -> (Vec<u8>, Vec<WsSent>) {
     )
 }
 
+/// Opens a record whose protected payload is `inner content type || plaintext`.
+struct PlainOpener;
+
+impl crate::tls::RecordOpener for PlainOpener {
+    fn begin_flow(
+        &mut self,
+        _: Option<&[u8; 32]>,
+        _: Option<Direction>,
+    ) -> Result<(), crate::tls::NotDecrypted> {
+        Ok(())
+    }
+
+    fn open(
+        &mut self,
+        _: Direction,
+        record: &crate::tls::EncryptedRecord,
+    ) -> Option<crate::tls::OpenedRecord> {
+        let body = record.bytes.get(5..)?;
+        Some(crate::tls::OpenedRecord {
+            content_type: *body.first()?,
+            plaintext: body[1..].to_vec(),
+        })
+    }
+
+    fn has_keys(&self, _: Direction) -> bool {
+        true
+    }
+}
+
+/// Open-debt item 924, step 4c — A DECRYPTED TLS FLOW'S ENTRIES. The flow
+/// keeps the plaintext each direction opened into and reads its messages again
+/// from it, standing where the record that carried each unit's first byte does
+/// and ending where the record carrying its last byte ends. On a capture whose
+/// units cross record boundaries both ways and batch messages, the decrypted
+/// lists read as the reading that kept every message whole, every message's
+/// bytes are its unit's plaintext, and a capture-wide message ceiling that
+/// discards them lets the plaintext before the oldest held message go.
+#[test]
+fn a_decrypted_tls_flows_entries_read_again_from_its_kept_plaintext() {
+    use crate::datagram_tests::{
+        framed_frame, framed_keepalive, tcp_packet_on, tcp_packet_reverse, udp_packet,
+    };
+    let record = |content_type: u8, payload: &[u8]| {
+        let mut out = alloc::vec![content_type, 0x03, 0x03];
+        out.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    };
+    let hello = {
+        let mut body = alloc::vec![0x03u8, 0x03];
+        body.extend_from_slice(&[7u8; 32]);
+        body.resize(0x30, 0);
+        let mut handshake = alloc::vec![0x01u8, 0x00, 0x00, body.len() as u8];
+        handshake.extend_from_slice(&body);
+        let mut out = alloc::vec![0x16u8, 0x03, 0x01];
+        out.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        out.extend_from_slice(&handshake);
+        out
+    };
+    // Per direction, the units of its plaintext stream, unframed, and the
+    // stream: keep-alives and frames, some batched behind one prefix.
+    // Enough of them that a ceiling's release passes its slack.
+    let units_of = |seed: usize| -> Vec<Vec<u8>> {
+        (0..1500usize)
+            .map(|k| {
+                let sn = ((seed + k) % 0x80) as u8;
+                match k % 3 {
+                    0 => framed_keepalive()[2..].to_vec(),
+                    1 => framed_frame(sn)[2..].to_vec(),
+                    _ => {
+                        let mut batch = framed_keepalive()[2..].to_vec();
+                        batch.extend_from_slice(&framed_frame(sn)[2..]);
+                        batch
+                    }
+                }
+            })
+            .collect()
+    };
+    let units = [units_of(1), units_of(60)];
+    let streams: Vec<Vec<u8>> = units
+        .iter()
+        .map(|units| {
+            let mut stream = Vec::new();
+            for unit in units {
+                stream.extend_from_slice(&(unit.len() as u16).to_le_bytes());
+                stream.extend_from_slice(unit);
+            }
+            stream
+        })
+        .collect();
+    // Records of odd sizes, so units cross their boundaries.
+    let records_of = |stream: &[u8]| -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let (mut at, mut k) = (0usize, 0usize);
+        while at < stream.len() {
+            let end = (at + [5, 13, 3, 21][k % 4]).min(stream.len());
+            let mut inner = alloc::vec![crate::tls::CT_APPLICATION_DATA];
+            inner.extend_from_slice(&stream[at..end]);
+            out.push(record(0x17, &inner));
+            (at, k) = (end, k + 1);
+        }
+        out
+    };
+    let (low, high) = (records_of(&streams[0]), records_of(&streams[1]));
+    let mut packets: Vec<Vec<u8>> = alloc::vec![tcp_packet_on(1111, 1_000, &hello)];
+    let (mut seq_low, mut seq_high) = (1_000 + hello.len() as u32, 9_000u32);
+    for i in 0..low.len().max(high.len()) {
+        if let Some(r) = low.get(i) {
+            packets.push(tcp_packet_on(1111, seq_low, r));
+            seq_low += r.len() as u32;
+        }
+        if let Some(r) = high.get(i) {
+            packets.push(tcp_packet_reverse(seq_high, r));
+            seq_high += r.len() as u32;
+        }
+    }
+    let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+    let later = udp_packet([10, 0, 0, 1], 4433, [10, 0, 0, 2], 7447, &keepalive);
+    let mut limits = alloc::vec![crate::DissectionLimits::default()];
+    for cap in [7, 400, 2500] {
+        limits.push(crate::DissectionLimits {
+            frames_total: Some(cap),
+            ..crate::DissectionLimits::default()
+        });
+    }
+    for limits in limits {
+        let what = format!("tls, {limits:?}");
+        let read = |whole: bool| {
+            let mut d = Dissection::with_limits(limits);
+            if whole {
+                d.keep_messages_whole();
+            }
+            for (i, packet) in packets.iter().enumerate() {
+                d.push_packet(crate::link::LINKTYPE_ETHERNET, i, packet);
+            }
+            let summary = d.decrypt_with(&mut PlainOpener);
+            assert_eq!(summary.decrypted, 1, "{what}: the flow opens");
+            // Messages of a later flow, which a capture-wide ceiling makes
+            // room for by discarding the decrypted flow's oldest.
+            for i in 0..4 {
+                d.push_packet(crate::link::LINKTYPE_ETHERNET, packets.len() + i, &later);
+            }
+            d.finish();
+            d
+        };
+        let (indexed, whole) = (read(false), read(true));
+        let flow = &indexed.flows()[0];
+        assert_reads_as_whole(&what, &indexed, &whole);
+        let held = flow.frames().len();
+        assert!(held > 0, "{what}: decrypted messages held");
+        assert!(
+            (0..held).all(|position| read_again(flow.frames(), position)),
+            "{what}: every decrypted message is an entry"
+        );
+        assert_eq!(indexed.drops(), whole.drops(), "{what}: drops");
+        assert_eq!(
+            indexed.dropped_frame_census(),
+            whole.dropped_frame_census(),
+            "{what}: what was discarded"
+        );
+        // Each held message's bytes: its unit's, from the message's first byte.
+        // A direction's rows are its units in order, a unit's first at batch
+        // index zero; a discard takes from the front, so the held rows of a
+        // direction are the last of its rows.
+        for (seat, direction) in [Direction::A, Direction::B].into_iter().enumerate() {
+            let rows: Vec<(usize, crate::messages::Row<'_>)> = flow
+                .frames()
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.direction == direction)
+                .collect();
+            // Walked back from the last unit: a row at batch index zero is its
+            // unit's first, so the row before it is the unit before's.
+            let mut unit = units[seat].len();
+            let mut first_of_unit = true;
+            for (index, row) in rows.iter().rev() {
+                if first_of_unit {
+                    unit = unit
+                        .checked_sub(1)
+                        .unwrap_or_else(|| panic!("{what}: more rows than units"));
+                }
+                first_of_unit = row.batch_index == 0;
+                let want = &units[seat][unit][row.unit_offset..row.unit_len];
+                match indexed.message_bytes_at(flow.flow, crate::MessageListOrigin::Stream, *index)
+                {
+                    crate::MessageBytes::Retained(bytes) => {
+                        assert_eq!(&bytes[..], want, "{what}: message {index}")
+                    }
+                    other => panic!("{what}: message {index}: {other:?}"),
+                }
+            }
+        }
+        let kept: usize = flow
+            .plaintext
+            .as_deref()
+            .map_or(0, |p| p.iter().map(|p| p.bytes.len()).sum());
+        let fed = streams[0].len() + streams[1].len();
+        if limits.frames_total == Some(7) {
+            assert!(
+                indexed.drops().frames > 0 && kept < fed / 2,
+                "{what}: {kept} of {fed} plaintext bytes kept under the ceiling"
+            );
+        } else if limits.frames_total.is_none() {
+            assert_eq!(kept, fed, "{what}: every plaintext byte kept");
+        }
+    }
+}
+
 /// Open-debt item 924, step 4c — A LENT DATAGRAM IS READ WHERE IT SITS: a
 /// dissection lent a capture of UDP datagrams logs no copy of their payloads,
 /// so a flow whose container is taken away has nothing to read a row from. A
