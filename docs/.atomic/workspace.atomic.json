@@ -281112,6 +281112,58 @@
         "Round 3486's carry said the stamp's share is unshown and left it; it stands."
       ]
     },
+    "Round 3491": {
+      "decision_summary": "Step 1b of the session lifecycle design, its D2 half: the lifecycle verbs compile only beside a secure channel. wz-session-core gains a secure-channel feature that adds no code; the AP runtime's TLS and QUIC link features turn it on, and a compile_error! refuses session-close-ingress without it. A verb is accepted only from a peer whose key a secure channel proved, so a build with no channel would ship a destructive verb every caller is refused; it now fails closed at build time. The cooperative runtime has no channel, so it no longer forwards the verbs; they return with D9's channel on the fixed-memory profile, the other half of step 1b. A gate builds the refused combinations, because no lane makes a build a guard refuses. The surface census learns that a compile_error! is never an item, which also moves platform-zephyr off two waiting lists whose only sites were the facade's guards.",
+      "changes_bullets": [
+        "crates/wz-session-core: feature secure-channel (a marker) and a compile_error! in lib.rs for session-close-ingress without it.",
+        "crates/wz-runtime-tokio: transport-link-tls and transport-link-quic turn on wz-session-core/secure-channel; session-close-ingress turns neither on.",
+        "crates/wz-runtime-coop and crates/wz: the coop forward of session-close-ingress is removed, with the reason; crates/wz-ap-demo states the channel requirement.",
+        "scripts/lib/lifecycle-channel-guard-gate.sh (Layer C1cn): wz-session-core and wz-runtime-tokio refused with the verbs alone, wz-session-core built with secure-channel.",
+        "scripts/lib/nondefault-tests-gate.sh: the five wz-runtime-tokio lifecycle rows add transport-link-tls, the wz-session-core union adds secure-channel; scripts/run-ci.sh: the E6 demo build adds tls.",
+        "scripts/lib/feature_gate_diagnostic.py: secure-channel in NO_PUBLIC_PATH; feature_public_surface_census.py: compile_error! is not an item (selftest case added), platform-zephyr leaves OFF_AXIS and AXIS_REACHABLE.",
+        "docs/session-lifecycle-intent.md: step 1b records the D2 guard."
+      ],
+      "verification_bullets": [
+        "pc2, lifecycle-channel-guard-gate.sh rc 0: both verb-only builds refused by the guard's own sentence, the secure-channel build compiles. Control: with the guard's cfg made always false the gate fails on both refusals (rc 1).",
+        "pc2, the changed rows: --test=session_close_ingress 17 passed, --test=session_close_query 3 passed, session_lifecycle_open:: 5 passed, each with transport-link-tls; the E6 demo build with session-close-ingress and tls builds; domain-bundles-gate 27 bundles OK.",
+        "Local: feature_gate_diagnostic, feature_public_surface_census --check and --selftest, domain_census, apfull_membership, prose_feature_gate, unwired_lane_lint, python_floor_lint, reason_review_pin_gate, store_reason_citation_gate rc 0.",
+        "Not run: the full nondefault-tests census, and the remaining two lifecycle unit rows (linkstate and router forwarders)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "Step 1b's other half: D9's TLS 1.3 channel on the fixed-memory profile (Mbed TLS 3.6 LTS is the candidate, fit not measured); with it the coop runtime forwards the verbs again and turns secure-channel on.",
+        "The secure-channel marker means a channel feature is compiled in, not that a given session ran over one; the per-session answer stays peer_identity_verified.",
+        "Read the hosted C1cn run: it runs the new gate and the census over the changed rows for the first time."
+      ],
+      "publishable_decision_summary": "Step 1b of the session lifecycle design, its D2 half: the lifecycle verbs compile only beside a secure channel. wz-session-core gains a secure-channel feature that adds no code; the AP runtime's TLS and QUIC link features turn it on, and a compile_error! refuses session-close-ingress without it. A verb is accepted only from a peer whose key a secure channel proved, so a build with no channel would ship a destructive verb every caller is refused; it now fails closed at build time. The cooperative runtime has no channel, so it no longer forwards the verbs; they return with D9's channel on the fixed-memory profile, the other half of step 1b. A gate builds the refused combinations, because no lane makes a build a guard refuses. The surface census learns that a compile_error! is never an item, which also moves platform-zephyr off two waiting lists whose only sites were the facade's guards.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core: feature secure-channel (a marker) and a compile_error! in lib.rs for session-close-ingress without it.",
+        "crates/wz-runtime-tokio: transport-link-tls and transport-link-quic turn on wz-session-core/secure-channel; session-close-ingress turns neither on.",
+        "crates/wz-runtime-coop and crates/wz: the coop forward of session-close-ingress is removed, with the reason; crates/wz-ap-demo states the channel requirement.",
+        "scripts/lib/lifecycle-channel-guard-gate.sh (Layer C1cn): wz-session-core and wz-runtime-tokio refused with the verbs alone, wz-session-core built with secure-channel.",
+        "scripts/lib/nondefault-tests-gate.sh: the five wz-runtime-tokio lifecycle rows add transport-link-tls, the wz-session-core union adds secure-channel; scripts/run-ci.sh: the E6 demo build adds tls.",
+        "scripts/lib/feature_gate_diagnostic.py: secure-channel in NO_PUBLIC_PATH; feature_public_surface_census.py: compile_error! is not an item (selftest case added), platform-zephyr leaves OFF_AXIS and AXIS_REACHABLE.",
+        "docs/session-lifecycle-intent.md: step 1b records the D2 guard."
+      ],
+      "publishable_verification_bullets": [
+        "pc2, lifecycle-channel-guard-gate.sh rc 0: both verb-only builds refused by the guard's own sentence, the secure-channel build compiles. Control: with the guard's cfg made always false the gate fails on both refusals (rc 1).",
+        "pc2, the changed rows: --test=session_close_ingress 17 passed, --test=session_close_query 3 passed, session_lifecycle_open:: 5 passed, each with transport-link-tls; the E6 demo build with session-close-ingress and tls builds; domain-bundles-gate 27 bundles OK.",
+        "Local: feature_gate_diagnostic, feature_public_surface_census --check and --selftest, domain_census, apfull_membership, prose_feature_gate, unwired_lane_lint, python_floor_lint, reason_review_pin_gate, store_reason_citation_gate rc 0.",
+        "Not run: the full nondefault-tests census, and the remaining two lifecycle unit rows (linkstate and router forwarders)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 1b's other half: D9's TLS 1.3 channel on the fixed-memory profile (Mbed TLS 3.6 LTS is the candidate, fit not measured); with it the coop runtime forwards the verbs again and turns secure-channel on.",
+        "The secure-channel marker means a channel feature is compiled in, not that a given session ran over one; the per-session answer stays peer_identity_verified.",
+        "Read the hosted C1cn run: it runs the new gate and the census over the changed rows for the first time."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
