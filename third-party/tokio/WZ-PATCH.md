@@ -20,8 +20,11 @@ that one reports `uid 0, gid 0` as a success, which would tell a caller that eve
 Nothing else changes: on every other target the file is what upstream ships, and on io-pkt the arm
 is the one upstream has. wz does not call `UnixStream::peer_cred`.
 
-Whether io-sock has an equivalent of `LOCAL_PEEREID`, and under which name, is in the SDK's headers,
-which were not read when this was written, so no value is guessed.
+Whether io-sock has an equivalent of `LOCAL_PEEREID` was not known when the patch was written, and no
+value was guessed. It has since been read: the SDK's io-sock headers declare `LOCAL_PEERCRED` as 1 in
+`sys/un.h` and `struct xucred` in `sys/ucred.h` (the FreeBSD form of the same question), and no
+`unpcbid`. So an answer exists on io-sock, with a different shape from the io-pkt one; the patch does
+not give it, because that needs a layout `libc` does not carry.
 
 ## Removal
 

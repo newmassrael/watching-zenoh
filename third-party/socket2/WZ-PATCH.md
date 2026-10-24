@@ -14,8 +14,11 @@ makes the QNX arm io-pkt only and, on io-sock, makes `TcpKeepalive::with_time` f
 `keepalive_time` fail at the get with `ErrorKind::Unsupported`. Nothing else changes: on every other
 target the file is what upstream ships, and on io-pkt the arm is the one upstream has.
 
-The value of the missing constant is NOT guessed. Whether io-sock has the option, and under which
-name, is in the SDK's `netinet/tcp.h`, which was not read when this was written.
+The value of the missing constant is NOT guessed, and it was not known when the patch was written.
+It has since been read: the SDK's io-sock `netinet/tcp.h` declares `TCP_KEEPIDLE` as 256 ("start
+keepalives after this period") and no `TCP_KEEPALIVE`, so the option exists there under the Linux
+name. The patch does not use it yet: that would define a constant `libc` does not carry, which is
+what the upstream change is for.
 
 wz itself never sets or reads the keep-alive idle time through `socket2` (no call in `crates/`), so
 no wz behaviour depends on it.

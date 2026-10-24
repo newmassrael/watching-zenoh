@@ -349,6 +349,33 @@ pinned revision for the generation-time policy.
   workspace that uses tokio builds this copy; excluded from the workspace members, not published.
   Identical to upstream on every other target.
 
+## third-party/quinn-udp — quinn-udp 0.5.14 with the QNX TOS option handled
+
+- **Origin**: the `quinn-udp` 0.5.14 package from crates.io (https://github.com/quinn-rs/quinn),
+  copied whole except its `Cargo.lock`; the sources keep their own headers (none are added).
+- **License**: MIT OR Apache-2.0 (`LICENSE-MIT` and `LICENSE-APACHE` are in the directory).
+- **Change**: `src/unix.rs` and `build.rs`, each place marked `WZ PATCH`: the IPv4 TOS option
+  (`IP_RECVTOS`), which `libc` does not declare for QNX, is defined as the io-sock headers give it
+  (68) and left out for the io-pkt stack, whose headers have none. `third-party/quinn-udp/WZ-PATCH.md`
+  says what changes, what does not, and when to delete the directory.
+- **Scope of use**: selected by `[patch.crates-io]` in `crates/Cargo.toml`, so every crate of the
+  workspace that uses quinn-udp (quinn through it) builds this copy; excluded from the workspace
+  members, not published. Identical to upstream on every other target.
+
+## third-party/ring — ring 0.17.14 with one QNX entry added
+
+- **Origin**: the `ring` 0.17.14 package from crates.io (https://github.com/briansmith/ring), copied
+  whole except its `Cargo.lock`; the sources keep their own headers (none are added).
+- **License**: Apache-2.0 AND ISC (`LICENSE`, `LICENSE-BoringSSL` and `LICENSE-other-bits` are in
+  the directory).
+- **Change**: `src/rand.rs`, marked `WZ PATCH`: `target_os = "nto"` joins the list of systems for
+  which `SystemRandom` uses the `getrandom` crate, which reads `/dev/urandom` on QNX. Without it
+  `SystemRandom` implements nothing on QNX and rustls does not compile there.
+  `third-party/ring/WZ-PATCH.md` says what changes, what does not, and when to delete the directory.
+- **Scope of use**: selected by `[patch.crates-io]` in `crates/Cargo.toml`, so every crate of the
+  workspace that uses ring (rustls and quinn through it) builds this copy; excluded from the
+  workspace members, not published. Identical to upstream on every other target.
+
 ## How this ledger is maintained
 
 - A vendor pin bump appends a new Round entry to
