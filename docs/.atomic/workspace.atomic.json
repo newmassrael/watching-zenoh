@@ -281300,6 +281300,48 @@
         "A cold build of the differential workspace now links upstream's keyexpr, rand, serde and schemars as well; read the hosted cost of Layer E18 first."
       ]
     },
+    "Round 3495": {
+      "decision_summary": "The secure channel's receive record buffer is the protocol's maximum, 2^14 bytes, and its send buffer stays at 1,500. The record size limit of RFC 8449 is the only protocol bound on what a peer sends. rustls 0.23, which zenohd 1.10.1 links, does not implement it, and zenoh's TLS link leaves rustls's fragment size at 16 kB. That a zenoh peer's data records stay within the negotiated batch is an implementation's behaviour, not a bound. rustls also sends a whole handshake flight as one record, sized by the certificate the peer presents. The send side is ours: the largest record this end wrote on the kit was 341 B, against a data record of at most a 1,024 B batch plus its 2-byte length. Shrinking the receive buffer through the limit with peers that implement it is a later saving, not a bound to rely on.",
+      "changes_bullets": [
+        "deploy/zephyr-tls-fit/prj.conf: MBEDTLS_SSL_IN_CONTENT_LEN 16384 and OUT_CONTENT_LEN 1500, with the reason for each.",
+        "deploy/zephyr-tls-fit/src/main.c: the largest record each direction carried, the certificate DER sizes and the configured record lengths on the console.",
+        "docs/session-lifecycle-intent.md: D9 records the record bounds, their sources and the kit's figures."
+      ],
+      "verification_bullets": [
+        "T2G kit through the kit lane on pc2 (preflight, build, run): `TLS-FIT done ok=1 rounds=3`, the wrong-zid round refused. With 16,384 B receive and 1,500 B send: arena peak 44,136 B for both peers (14,368 B with 1,500 B both ways in Round 3493); largest record 341 B in each direction; certificate DER 293 B each; handshake about 1.45 s per role, identities 1.28 s, both about 18 percent below Round 3493 for no reason established.",
+        "Sources read for the bound: rustls 0.23.40 and 0.23.43 (no record size limit; HandshakeFlight; max_fragment_size default 16 kB), zenoh 1.10.1 zenoh-link-tls (MTU 65535, fragment size untouched) and unicast establishment (min of both batches).",
+        "Not measured: the records a running zenohd actually sends over TLS to a peer that negotiated a small batch."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "carry_forward_bullets": [
+        "Measure the records a running zenohd 1.10.1 sends over TLS to a peer with a 1,024 B batch, once the TlsStream exists, and the handshake flight with the certificate D9 gives it.",
+        "Explain the 18 percent difference between the two kit runs before quoting either handshake time as the channel's cost.",
+        "Next: the p256-m driver or the chip's crypto block for the handshake, persistent PSA keys, the pin inside the handshake, the TlsStream and its locator kind, and a resource row for the fit image."
+      ],
+      "publishable_decision_summary": "The secure channel's receive record buffer is the protocol's maximum, 2^14 bytes, and its send buffer stays at 1,500. The record size limit of RFC 8449 is the only protocol bound on what a peer sends. rustls 0.23, which zenohd 1.10.1 links, does not implement it, and zenoh's TLS link leaves rustls's fragment size at 16 kB. That a zenoh peer's data records stay within the negotiated batch is an implementation's behaviour, not a bound. rustls also sends a whole handshake flight as one record, sized by the certificate the peer presents. The send side is ours: the largest record this end wrote on the kit was 341 B, against a data record of at most a 1,024 B batch plus its 2-byte length. Shrinking the receive buffer through the limit with peers that implement it is a later saving, not a bound to rely on.",
+      "publishable_changes_bullets": [
+        "deploy/zephyr-tls-fit/prj.conf: MBEDTLS_SSL_IN_CONTENT_LEN 16384 and OUT_CONTENT_LEN 1500, with the reason for each.",
+        "deploy/zephyr-tls-fit/src/main.c: the largest record each direction carried, the certificate DER sizes and the configured record lengths on the console.",
+        "docs/session-lifecycle-intent.md: D9 records the record bounds, their sources and the kit's figures."
+      ],
+      "publishable_verification_bullets": [
+        "T2G kit through the kit lane on pc2 (preflight, build, run): `TLS-FIT done ok=1 rounds=3`, the wrong-zid round refused. With 16,384 B receive and 1,500 B send: arena peak 44,136 B for both peers (14,368 B with 1,500 B both ways in Round 3493); largest record 341 B in each direction; certificate DER 293 B each; handshake about 1.45 s per role, identities 1.28 s, both about 18 percent below Round 3493 for no reason established.",
+        "Sources read for the bound: rustls 0.23.40 and 0.23.43 (no record size limit; HandshakeFlight; max_fragment_size default 16 kB), zenoh 1.10.1 zenoh-link-tls (MTU 65535, fragment size untouched) and unicast establishment (min of both batches).",
+        "Not measured: the records a running zenohd actually sends over TLS to a peer that negotiated a small batch."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-16-access-control"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Measure the records a running zenohd 1.10.1 sends over TLS to a peer with a 1,024 B batch, once the TlsStream exists, and the handshake flight with the certificate D9 gives it.",
+        "Explain the 18 percent difference between the two kit runs before quoting either handshake time as the channel's cost.",
+        "Next: the p256-m driver or the chip's crypto block for the handshake, persistent PSA keys, the pin inside the handshake, the TlsStream and its locator kind, and a resource row for the fit image."
+      ]
+    },
     "Round 35": {
       "decision_summary": "§4.1 multicast handshake codec lands — sources/codecs/join.scxml. Same primitive set as R34 init_body (multi-bit cbyte + dotted len-ref + parent.S gate) plus 2 always-present VLE next_sn fields. No new B5 primitive; this round is realistic-coverage advance, not primitive frontier.",
       "changes_bullets": [
