@@ -1213,28 +1213,39 @@ impl Index {
     /// The bytes of the unit `row` belongs to, from the list's log or from
     /// `source`; panics where [`Self::read_unit`] says.
     fn unit_bytes<'a>(&'a self, row: &UnitRow, source: &'a dyn UnitBytes) -> Cow<'a, [u8]> {
+        match self.held_unit_bytes(row, source) {
+            Some(bytes) => bytes,
+            None if row.logged() => panic!(
+                "the {} bytes of a datagram a list holds are not at {:?}",
+                row.wire_len,
+                LogPlace::of(row.locator)
+            ),
+            None => {
+                let (body, end) = row.body();
+                panic!("the stream no longer holds bytes {body}..{end} of a unit a list holds")
+            }
+        }
+    }
+
+    /// The bytes of the unit `row` belongs to, when the list's log or `source`
+    /// still holds them.
+    fn held_unit_bytes<'a>(
+        &'a self,
+        row: &UnitRow,
+        source: &'a dyn UnitBytes,
+    ) -> Option<Cow<'a, [u8]>> {
         let len = row.wire_len as usize;
         if !row.logged() {
             let (body, end) = row.body();
-            return source
-                .stream_bytes(row.direction(), body, end)
-                .unwrap_or_else(|| {
-                    panic!("the stream no longer holds bytes {body}..{end} of a unit a list holds")
-                });
+            return source.stream_bytes(row.direction(), body, end);
         }
-        let bytes = match LogPlace::of(row.locator) {
+        match LogPlace::of(row.locator) {
             LogPlace::Kept(at) => self.log.get(at, len),
             LogPlace::Container(offset) => source
                 .container()
                 .and_then(|container| container.get(offset..offset.checked_add(len)?)),
-        };
-        match bytes {
-            Some(bytes) => Cow::Borrowed(bytes),
-            None => panic!(
-                "the {len} bytes of a datagram a list holds are not at {:?}",
-                LogPlace::of(row.locator)
-            ),
         }
+        .map(Cow::Borrowed)
     }
 
     /// The row at `position` as a reader is handed it.
@@ -1434,6 +1445,23 @@ impl<'a> Messages<'a> {
                 .get(index)
                 .map(|frame| Row::held(frame, self.first_produced() + index as u64)),
             Store::Indexed(entries) => entries.row(index, self.first_produced(), self.source),
+        }
+    }
+
+    /// The bytes of the framing unit the message at `index` was read out of,
+    /// as they crossed the wire past any length prefix: what the list reads the
+    /// message again from (open-debt item 924, D8). `None` for a message the
+    /// list keeps whole, whose unit's bytes it does not keep, for one whose
+    /// source no longer holds them, and past the end.
+    pub fn unit_bytes(&self, index: usize) -> Option<Cow<'a, [u8]>> {
+        let list: &'a MessageList = self.list;
+        let source: &'a dyn UnitBytes = self.source;
+        match &list.rows {
+            Store::Held(_) => None,
+            Store::Indexed(entries) => match entries.entry(index)? {
+                Entry::Held => None,
+                Entry::Unit(row) => entries.held_unit_bytes(&row, source),
+            },
         }
     }
 

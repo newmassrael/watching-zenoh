@@ -357,6 +357,105 @@ fn a_lent_container_reads_as_the_same_bytes_handed() {
     }
 }
 
+/// Open-debt item 924, step 4c (2) — THE SERIAL LINE'S MESSAGES, kept as entries
+/// read again from each frame's payload, which the list logs once, read as the
+/// reading that kept them whole: every row and head, every message's bytes, and
+/// every origin (the frame's interface, control byte and packet). Frames that
+/// batch two and three messages, over both wires, so a unit's rows share one
+/// logged payload.
+#[test]
+fn the_serial_lines_entries_read_as_the_reference() {
+    use crate::datagram_tests::{frame_carrying, push, sender_space};
+    use wz_session_core::serial_link::{encode_frame, SERIAL_FLAG_ACK, SERIAL_FLAG_INIT};
+    const SERIAL_LINKTYPE: u32 = 250;
+    let keepalive = [wz_session_core::wire_const::T_MID_KEEP_ALIVE];
+    let init_a = crate::node::tests::init_wire(&[0x11, 0x22, 0x33, 0x44]);
+    let init_b = crate::node::tests::init_wire(&[0x55, 0x66, 0x77, 0x88]);
+    let mut frames: Vec<(u32, Vec<u8>)> = alloc::vec![
+        (0, encode_frame(SERIAL_FLAG_INIT, &[]).expect("encodes")),
+        (
+            1,
+            encode_frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[]).expect("encodes")
+        ),
+        (0, encode_frame(0, &init_a).expect("encodes")),
+        (1, encode_frame(0, &init_b).expect("encodes")),
+    ];
+    // Each frame's payload, by the packet that carries it.
+    let mut payloads: Vec<Vec<u8>> = alloc::vec![Vec::new(), Vec::new(), init_a, init_b];
+    for k in 0..24u8 {
+        // Keep-alives ahead of the frame, which takes the rest of the unit as its
+        // body: a batch of one to three transport messages.
+        let mut payload: Vec<u8> = keepalive.repeat(usize::from(k % 3));
+        payload.extend_from_slice(&frame_carrying(&push(
+            sender_space(0, Some("home/temp")),
+            &[k; 9],
+        )));
+        frames.push((
+            u32::from(k % 2),
+            encode_frame(0, &payload).expect("encodes"),
+        ));
+        payloads.push(payload);
+    }
+    let packets: Vec<(u32, u64, &[u8])> = frames
+        .iter()
+        .enumerate()
+        .map(|(i, (iface, bytes))| (*iface, 1_000_000 + i as u64 * 100, bytes.as_slice()))
+        .collect();
+    let file = crate::pcapng::write(&[(SERIAL_LINKTYPE, 6), (SERIAL_LINKTYPE, 6)], &packets);
+
+    let indexed = Dissection::from_capture_declaring(&file, &[], &[SERIAL_LINKTYPE])
+        .expect("the capture reads");
+    let parsed = crate::pcapng::parse(&file).expect("the capture reads");
+    let mut whole = Dissection::new();
+    whole.declared_serial_linktypes = alloc::vec![SERIAL_LINKTYPE];
+    whole.keep_messages_whole();
+    for packet in &parsed.packets {
+        whole.push_packet_on_nanos(
+            packet.link_type,
+            packet.index,
+            packet.interface_id,
+            parsed.ts_nanos(packet),
+            &packet.data,
+        );
+    }
+    whole.finish();
+    let read_from_bytes = assert_reads_as_whole("serial", &indexed, &whole);
+    let held = indexed.serial_frames().len();
+    assert!(held > 40, "{held} serial messages prove little");
+    assert_eq!(read_from_bytes, held, "every serial message is an entry");
+    // A message's bytes are its frame's payload from the message's first byte to
+    // the end of the unit: read back from the list's log, and cut here from the
+    // payload the frame was built from.
+    let (flow, origin, _) = indexed
+        .message_lists_with_origin()
+        .find(|(_, origin, _)| matches!(origin, crate::MessageListOrigin::Serial))
+        .expect("the serial list");
+    for (index, (carrier, row)) in indexed.serial_messages().enumerate() {
+        let want = &payloads[carrier.packet_index][row.unit_offset..row.unit_len];
+        match indexed.message_bytes_at(flow, origin, index) {
+            crate::MessageBytes::Retained(bytes) => {
+                assert_eq!(&bytes[..], want, "serial message {index} bytes")
+            }
+            other => panic!("serial message {index}: {other:?}"),
+        }
+    }
+    let origins: Vec<String> = indexed
+        .serial_messages()
+        .map(|(origin, row)| format!("{origin:?} {:?}", *row))
+        .collect();
+    let origins_whole: Vec<String> = whole
+        .serial_messages()
+        .map(|(origin, row)| format!("{origin:?} {:?}", *row))
+        .collect();
+    assert_eq!(origins, origins_whole, "every message's origin");
+    assert!(
+        indexed
+            .serial_messages()
+            .any(|(origin, _)| origin.interface == 1),
+        "both wires carried messages"
+    );
+}
+
 /// Open-debt item 924, step 4c — A LENT DATAGRAM IS READ WHERE IT SITS: a
 /// dissection lent a capture of UDP datagrams logs no copy of their payloads,
 /// so a flow whose container is taken away has nothing to read a row from. A

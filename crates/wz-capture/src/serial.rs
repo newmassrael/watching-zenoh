@@ -194,6 +194,24 @@ pub struct SerialFrame {
     pub payload: Vec<u8>,
 }
 
+/// Where one message decoded off the line came from: the frame's envelope,
+/// which the message's own bytes do not say.
+///
+/// Open-debt item 924 (`docs/dissect-row-index.md`, D8): the frame's payload is
+/// the unit the message is read out of, and the line's message list keeps it
+/// once per frame in its unit log; what is kept beside each message is this,
+/// and not a copy of the payload per message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SerialOrigin {
+    /// The capture interface, which is what stands in for a wire.
+    pub interface: u32,
+    /// The capture packet the bytes completing the frame arrived in: the
+    /// message's own anchor.
+    pub packet_index: usize,
+    /// The frame's control byte.
+    pub header: u8,
+}
+
 impl SerialLine {
     /// R311y722 — a line that commits its direction mapping after `limit`
     /// frames rather than waiting for a handshake that may never come.

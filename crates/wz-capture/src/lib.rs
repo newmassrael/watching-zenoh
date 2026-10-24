@@ -3628,6 +3628,25 @@ impl FlowDissection {
     }
 }
 
+/// The answer for a serial message whose unit is shorter than the message's own
+/// coordinates say, which no message the line decoded can be.
+fn serial_unit_short(frame: &PassiveFrame, held: usize) -> MessageBytes<'static> {
+    MessageBytes::Retired(alloc::format!(
+        "this message stands {} byte(s) into a unit of {} and the frame holds {held}",
+        frame.unit_offset,
+        frame.unit_len,
+    ))
+}
+
+/// What the serial line keeps beside each message it decoded: the envelope of
+/// the frame the message came out of ([`serial::SerialOrigin`] without the
+/// packet, which is the message's own anchor).
+#[derive(Debug, Clone, Copy)]
+struct SerialEnvelope {
+    interface: u32,
+    header: u8,
+}
+
 /// How a flow keeps the messages it reads off its own reassembled stream or out
 /// of its own datagrams.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5141,10 +5160,13 @@ pub struct Dissection {
     /// plane taught about serial -- which is exactly the coupling
     /// [`Self::message_lists`] exists to remove.
     serial_frames: messages::MessageList,
-    /// The serial frame each of [`Self::serial_frames`] was decoded from, at
-    /// the same index. One serial frame can yield several messages, so this is
-    /// per MESSAGE and not per frame.
-    serial_origins: alloc::vec::Vec<serial::SerialFrame>,
+    /// The envelope of the serial frame each of [`Self::serial_frames`] was
+    /// decoded from, at the same index: its interface and control byte. One
+    /// serial frame can yield several messages, so this is per MESSAGE and not
+    /// per frame. The frame's payload is the message's unit, which the list keeps
+    /// once in its unit log (open-debt item 924, D8), and its packet is the
+    /// message's anchor.
+    serial_origins: wz_session_core::chunk_log::ChunkLog<SerialEnvelope>,
     /// The zenoh session over that line. One, because a serial link is point
     /// to point: the two wires are its two directions, not two sessions.
     serial_session: PassiveSession,
@@ -5324,7 +5346,7 @@ impl Default for Dissection {
             serial: None,
             serial_pending: Vec::new(),
             serial_frames: messages::MessageList::new(),
-            serial_origins: Vec::new(),
+            serial_origins: wz_session_core::chunk_log::ChunkLog::new(),
             serial_session: new_session(DissectionLimits::default().reassembly_window_ms),
             serial_ingest: session_table::LinkIngest::default(),
             limits: DissectionLimits::default(),
@@ -5996,17 +6018,28 @@ impl Dissection {
     /// frame each came out of.
     ///
     /// Paired rather than split, because the two halves answer together: the
-    /// `PassiveFrame` says what zenoh message it was and the `SerialFrame` says
-    /// which wire and which capture packet carried it. A reader given only the
-    /// first cannot point at the bytes.
+    /// `PassiveFrame` says what zenoh message it was and the [`serial::SerialOrigin`]
+    /// says which wire and which capture packet carried it. A reader given only
+    /// the first cannot point at the bytes.
     pub fn serial_messages(
         &self,
-    ) -> impl Iterator<Item = (&serial::SerialFrame, messages::Row<'_>)> {
-        self.serial_origins.iter().zip(self.serial_frames().iter())
+    ) -> impl Iterator<Item = (serial::SerialOrigin, messages::Row<'_>)> {
+        self.serial_origins
+            .iter_from(0)
+            .zip(self.serial_frames().iter())
+            .map(|(envelope, row)| {
+                let origin = serial::SerialOrigin {
+                    interface: envelope.interface,
+                    packet_index: row.stream_offset,
+                    header: envelope.header,
+                };
+                (origin, row)
+            })
     }
 
     /// R311y721 — the serial line's decoded messages alone, as the census
-    /// planes take them. Kept whole.
+    /// planes take them. Kept as index entries read again from the frames'
+    /// payloads, which the list logs (open-debt item 924, D8).
     pub fn serial_frames(&self) -> messages::Messages<'_> {
         self.serial_frames.read(&messages::NoBytes)
     }
@@ -6400,10 +6433,13 @@ impl Dissection {
             // else, which is what makes the index correspondence an invariant
             // rather than a convention.
             MessageListOrigin::Serial => {
-                let (Some(carrier), Some(frame)) = (
-                    self.serial_origins.get(index),
-                    self.serial_frames().get(index),
-                ) else {
+                // The frame's payload is the message's unit, which the list
+                // logged when it kept the message as an entry (open-debt item
+                // 924, D8).
+                let messages = self.serial_frames();
+                let (Some(payload), Some(frame)) =
+                    (messages.unit_bytes(index), messages.get(index))
+                else {
                     return MessageBytes::Retired(alloc::string::String::from(
                         "this message is no longer in the serial line's list",
                     ));
@@ -6413,14 +6449,18 @@ impl Dissection {
                 // byte to the end of the unit. `prefix_width` is zero on this
                 // path -- a serial frame has no length prefix inside it -- so
                 // the message begins at `unit_offset`.
-                match carrier.payload.get(frame.unit_offset..frame.unit_len) {
-                    Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Borrowed(bytes)),
-                    None => MessageBytes::Retired(alloc::format!(
-                        "this message stands {} byte(s) into a unit of {} and the frame holds {}",
-                        frame.unit_offset,
-                        frame.unit_len,
-                        carrier.payload.len()
-                    )),
+                let span = frame.unit_offset..frame.unit_len;
+                match payload {
+                    alloc::borrow::Cow::Borrowed(payload) => match payload.get(span) {
+                        Some(bytes) => MessageBytes::Retained(alloc::borrow::Cow::Borrowed(bytes)),
+                        None => serial_unit_short(&frame, payload.len()),
+                    },
+                    alloc::borrow::Cow::Owned(payload) => match payload.get(span) {
+                        Some(bytes) => {
+                            MessageBytes::Retained(alloc::borrow::Cow::Owned(bytes.to_vec()))
+                        }
+                        None => serial_unit_short(&frame, payload.len()),
+                    },
                 }
             }
         }
@@ -7288,19 +7328,34 @@ impl Dissection {
                 continue;
             }
             let direction = line.direction_of(frame.interface);
-            let batch = self.serial_session.next_datagram_on(
+            let handshake = wz_session_core::passive::LinkHandshake::Present;
+            let Some(unit) = self.serial_session.next_datagram_unit_on(
                 direction,
                 &frame.payload,
                 frame.packet_index,
-                wz_session_core::passive::LinkHandshake::Present,
-            );
-            for decoded in batch {
-                // The two lists move together, here and nowhere else, which is
-                // what keeps the index correspondence a local invariant rather
-                // than a convention.
-                self.serial_ingest.observe_frame(&decoded);
-                self.serial_frames.push(decoded);
-                self.serial_origins.push(frame.clone());
+                handshake,
+            ) else {
+                continue;
+            };
+            // The two lists move together, here and nowhere else, which is what
+            // keeps the index correspondence a local invariant rather than a
+            // convention.
+            for decoded in &unit.frames {
+                self.serial_ingest.observe_frame(decoded);
+                self.serial_origins.push_back(SerialEnvelope {
+                    interface: frame.interface,
+                    header: frame.header,
+                });
+            }
+            match self.keep {
+                // Open-debt item 924, step 4c — the frame's payload is logged
+                // once and its messages read again from it.
+                Keep::Entries => {
+                    self.serial_frames
+                        .push_datagram(unit, &frame.payload, None, handshake)
+                }
+                #[cfg(test)]
+                Keep::Whole => self.serial_frames.append(unit.frames),
             }
         }
     }
