@@ -212,6 +212,14 @@ ALLOWED = [
     ),
     (
         "wz-session-core/passive_messages.rs",
+        "self.wire_ends.remove(&row.locator);",
+        "Open-debt item 924, step 4c — the stream end of a unit a layer below "
+        "framed, let go with the unit's last row: that row leaves in the "
+        "`#[must_use] Discarded` receipt with the end in its frame, and no "
+        "row still held reads it",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
         "self.sparse.remove(&key);",
         "Open-debt item 924, step 4b — a row turned from an entry into a frame "
         "kept whole: its facts are in the frame now, read from it, and the "

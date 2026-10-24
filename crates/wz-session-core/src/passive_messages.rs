@@ -399,8 +399,15 @@ impl MessageList {
         handshake: LinkHandshake,
     ) {
         let ReadUnit { start, frames } = unit;
+        // A unit a layer below framed (a WebSocket message) says where its bytes
+        // end in the stream it was carried in, which its own bytes cannot say;
+        // every record of it says the same, and the entries keep it once.
+        let wire_end = frames.first().and_then(|first| first.wire_end);
         let readable = start.filter(|_| {
-            u32::try_from(bytes.len()).is_ok() && frames.iter().all(UnitRow::can_hold_logged)
+            u32::try_from(bytes.len()).is_ok()
+                && frames
+                    .iter()
+                    .all(|frame| UnitRow::can_hold_logged(frame) && frame.wire_end == wire_end)
         });
         let Some(start) = readable else {
             self.append(frames);
@@ -423,6 +430,7 @@ impl MessageList {
                 place,
                 len: bytes.len(),
                 handshake,
+                wire_end,
             },
         );
         self.produced += frames.len() as u64;
@@ -624,7 +632,7 @@ impl UnitBytes for Datagrams<'_> {
 enum Store {
     /// Every row as its decoded frame. A list starts here, and stays here until
     /// a unit it is handed can be read again from its bytes; a list whose units
-    /// a layer below framed (WebSocket) or decrypted (TLS) is never handed one.
+    /// a layer below decrypted (TLS) is never handed one.
     Held(ChunkLog<PassiveFrame>),
     /// Rows as index entries, read again on demand (see [`Index`]). Boxed, so a
     /// list that keeps its frames does not carry the index's size.
@@ -680,6 +688,11 @@ struct Index {
     cut: Vec<MessageFacts>,
     /// The resynchronisation the cut unit's first row carried.
     cut_resync: Option<StreamResync>,
+    /// Where each logged unit a layer below framed ends in the stream it was
+    /// carried in ([`PassiveFrame::wire_end`] of its records), by the unit's
+    /// locator: a fact of the unit its bytes do not hold, kept once per unit
+    /// for the rows flagged [`WIRE_END`] and let go with the unit's last row.
+    wire_ends: BTreeMap<u64, u64>,
 }
 
 /// One row of an [`Index`], as its [`UnitRow`] says.
@@ -758,6 +771,9 @@ const LOGGED: u16 = 1 << 8;
 /// gate therefore cannot tell this flag from its absence, and the flag does not
 /// depend on that holding.
 const NO_HANDSHAKE: u16 = 1 << 9;
+/// The row's unit says where its bytes end in the stream a layer below
+/// carried them in ([`Index::wire_ends`]): a WebSocket message's last frame.
+const WIRE_END: u16 = 1 << 10;
 
 /// [`UnitRow::locator`] of a logged unit names an offset in the container the
 /// list's holder lends, not a position in the list's own log. No container or
@@ -802,6 +818,9 @@ enum Locus {
         len: usize,
         /// The link's handshake, which a datagram's reading depends on.
         handshake: LinkHandshake,
+        /// Where the unit ends in the stream a layer below carried it in, when
+        /// one did.
+        wire_end: Option<usize>,
     },
 }
 
@@ -875,13 +894,13 @@ impl UnitRow {
     }
 
     /// Whether `frame` is a row an entry can stand for read out of a datagram:
-    /// anchored at a packet, with no prefix and no end in that space, which is
-    /// what the walk writes for a datagram and what an entry gives back.
+    /// anchored at a packet, with no prefix, which is what the walk writes for
+    /// a datagram and what an entry gives back. An end it has is its unit's,
+    /// which the unit's entries keep apart ([`Index::wire_ends`]).
     fn can_hold_logged(frame: &PassiveFrame) -> bool {
         Self::fits(frame)
             && frame.offset_space == OffsetSpace::PacketIndex
             && frame.prefix_width == 0
-            && frame.wire_end.is_none()
     }
 
     /// The entry for `frame`, of a unit lying where `locus` says, read in the
@@ -899,10 +918,14 @@ impl UnitRow {
                 place,
                 len,
                 handshake,
+                wire_end,
             } => {
                 let mut flags = LOGGED;
                 if handshake == LinkHandshake::Absent {
                     flags |= NO_HANDSHAKE;
+                }
+                if wire_end.is_some() {
+                    flags |= WIRE_END;
                 }
                 (place.locator(), len, flags)
             }
@@ -994,7 +1017,8 @@ impl UnitRow {
             unit_offset: self.unit_offset as usize,
             unit_len: self.unit_len as usize,
             prefix_width: usize::from(self.prefix_width),
-            // A datagram's anchor names a packet and has no end.
+            // A datagram's anchor names a packet and has no end; the end of a
+            // unit a layer below framed is the index's to say.
             wire_end: (!self.logged()).then(|| self.body().1),
             observed_at_ns: self.observed_at_ns(),
             kind: self.kind,
@@ -1069,6 +1093,14 @@ impl Index {
             self.contexts.push(start);
         }
         let context = u32::try_from(self.contexts.len() - 1).unwrap_or(u32::MAX);
+        if let Locus::Logged {
+            place,
+            wire_end: Some(end),
+            ..
+        } = locus
+        {
+            self.wire_ends.insert(place.locator(), end as u64);
+        }
         for (k, frame) in frames.iter().enumerate() {
             let (row, sparse) = UnitRow::of(frame, locus, context);
             if row.flags & SPARSE != 0 {
@@ -1185,7 +1217,7 @@ impl Index {
         };
         let direction = row.direction();
         let bytes = self.unit_bytes(&row, source);
-        let frames = redecode_unit(
+        let mut frames = redecode_unit(
             UnitInput {
                 direction,
                 bytes: &bytes,
@@ -1202,6 +1234,12 @@ impl Index {
             &facts,
         )
         .unwrap_or_else(|e| panic!("a unit a list holds did not read again as it was read: {e:?}"));
+        // The end a layer below gave the unit is no fact of its bytes.
+        if let Some(end) = self.wire_end(&row) {
+            for frame in &mut frames {
+                frame.wire_end = Some(end);
+            }
+        }
         ReadAgain {
             from,
             cut,
@@ -1267,12 +1305,27 @@ impl Index {
         }
     }
 
+    /// Where the unit of the logged `row` ends in the stream a layer below
+    /// carried it in, when one did.
+    fn wire_end(&self, row: &UnitRow) -> Option<usize> {
+        (row.flags & WIRE_END != 0)
+            .then(|| self.wire_ends.get(&row.locator))
+            .flatten()
+            .map(|&end| end as usize)
+    }
+
     /// The head of the row at `position`.
     #[inline]
     fn head(&self, position: usize, first_produced: u64) -> Option<RowHead> {
         match self.entry(position)? {
             Entry::Held => self.held(position, first_produced).map(RowHead::of),
-            Entry::Unit(row) => Some(row.head()),
+            Entry::Unit(row) => {
+                let mut head = row.head();
+                if let Some(end) = self.wire_end(&row) {
+                    head.wire_end = Some(end);
+                }
+                Some(head)
+            }
         }
     }
 
@@ -1309,6 +1362,9 @@ impl Index {
                     // every unit logged before it went before it.
                     if let (true, LogPlace::Kept(at)) = (row.logged(), LogPlace::of(row.locator)) {
                         self.log.release_before(at + u64::from(row.wire_len));
+                    }
+                    if row.flags & WIRE_END != 0 {
+                        self.wire_ends.remove(&row.locator);
                     }
                 }
                 frame
@@ -2498,6 +2554,17 @@ mod tests {
         handshake: LinkHandshake,
         container: Option<&[u8]>,
     ) -> (MessageList, MessageList) {
+        logged_and_whole_ending(units, handshake, container, |_| None)
+    }
+
+    /// [`logged_and_whole`], with the records of the unit of packet `k` given
+    /// the end `end(k)` says, as a layer below that framed the unit does.
+    fn logged_and_whole_ending(
+        units: &[Vec<u8>],
+        handshake: LinkHandshake,
+        container: Option<&[u8]>,
+        end: impl Fn(usize) -> Option<usize>,
+    ) -> (MessageList, MessageList) {
         let mut logging = crate::passive::PassiveSession::new();
         let mut keeping = crate::passive::PassiveSession::new();
         let (mut logged, mut whole) = (MessageList::new(), MessageList::new());
@@ -2510,10 +2577,19 @@ mod tests {
             };
             let _ = logging.observe_at_nanos(1_000 * packet as u64);
             let _ = keeping.observe_at_nanos(1_000 * packet as u64);
-            if let Some(read) = logging.next_datagram_unit_on(direction, unit, packet, handshake) {
+            if let Some(mut read) =
+                logging.next_datagram_unit_on(direction, unit, packet, handshake)
+            {
+                for frame in &mut read.frames {
+                    frame.wire_end = end(packet);
+                }
                 logged.push_datagram(read, unit, container.map(|_| place), handshake);
             }
-            whole.append(keeping.next_datagram_on(direction, unit, packet, handshake));
+            let mut kept = keeping.next_datagram_on(direction, unit, packet, handshake);
+            for frame in &mut kept {
+                frame.wire_end = end(packet);
+            }
+            whole.append(kept);
             place += unit.len();
         }
         (logged, whole)
@@ -2636,6 +2712,53 @@ mod tests {
             }
             assert_eq!(logged_allocation(&logged), 0, "an empty list logs nothing");
         }
+    }
+
+    /// The ends of units a layer below framed (a WebSocket message's end in
+    /// its TCP stream) read back with every row and head, through every
+    /// discard; the last row of a unit lets its end go, and a unit whose
+    /// records disagree on their end is kept whole rather than given one.
+    #[test]
+    fn a_unit_framed_below_keeps_its_end_through_every_discard() {
+        let units = datagrams(95);
+        let end = |k: usize| (k % 5 != 4).then_some(10_000 + 7 * k);
+        let (mut logged, mut whole) =
+            logged_and_whole_ending(&units, LinkHandshake::Present, None, end);
+        let Store::Indexed(index) = &logged.rows else {
+            panic!("the units became entries");
+        };
+        assert!(index.held.is_empty(), "every unit is an entry");
+        assert_eq!(
+            index.wire_ends.len(),
+            (0..95).filter(|&k| end(k).is_some()).count(),
+            "one end per unit that has one"
+        );
+        let mut census = DroppedFrameCensus::default();
+        assert_reads_as_whole(&logged, &whole, &NoBytes);
+        while !logged.is_empty() {
+            census.absorb(logged.discard_oldest(&NoBytes).expect("a row"));
+            census.absorb(whole.discard_oldest(&NoBytes).expect("a row"));
+            assert_reads_as_whole(&logged, &whole, &NoBytes);
+        }
+        let Store::Indexed(index) = &logged.rows else {
+            panic!("still an index");
+        };
+        assert!(index.wire_ends.is_empty(), "an empty list keeps no end");
+
+        // Records of one unit that disagree on their end.
+        let mut session = crate::passive::PassiveSession::new();
+        let mut list = MessageList::new();
+        let mut read = session
+            .next_datagram_unit_on(Direction::A, &units[2], 0, LinkHandshake::Present)
+            .expect("a unit");
+        for (k, frame) in read.frames.iter_mut().enumerate() {
+            frame.wire_end = Some(100 + k);
+        }
+        list.push_datagram(read, &units[2], None, LinkHandshake::Present);
+        assert!(
+            matches!(&list.rows, Store::Held(rows) if rows.len() == 3),
+            "kept whole"
+        );
     }
 
     /// The row a list keeps for every message it can read again, whatever its
