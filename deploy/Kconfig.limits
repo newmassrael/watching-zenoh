@@ -187,4 +187,12 @@ config WZ_LIMIT_MAX_STATIC_CONNECT
 	  The locators a node is told to connect to. A list longer than this stops
 	  at the limit; a fixed deployment names a few peers.
 
+config WZ_LIMIT_MAX_QUERIERS
+	int "MAX_QUERIERS"
+	default 0
+	help
+	  The queriers a session holds at once; declaring one more is refused until
+	  one is dropped. 0 is no bound, which is upstream's behaviour. Unlike the
+	  other limits this one sizes no table: it only refuses the one more.
+
 endmenu

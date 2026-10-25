@@ -163,6 +163,12 @@ pub mod caps;
 /// build states otherwise. Unconditional, no_std and no_alloc, like [`caps`].
 pub mod policy;
 
+/// A bound on how many of one kind of resource a session holds live at once
+/// (a querier is one): [`quota::Quota`], a counting semaphore that never waits and does no
+/// synchronisation, so each runtime composes it with its own `Mutex`. `0` is no bound,
+/// which is upstream's behaviour. Unconditional, no_std and no_alloc.
+pub mod quota;
+
 /// Fixed-memory step S9b — where hand-written text goes: the [`text_out::TextOut`]
 /// seam the admin writers emit through, `String` on the growable profile and
 /// [`text_out::FixedText`] (inline bytes that refuse and count what does not fit,

@@ -1649,6 +1649,16 @@ The locators a node is told to connect to. A list longer than this stops
 at the limit; a fixed deployment names a few peers.
 '''
 
+[[limit]]
+id = "MAX_QUERIERS"
+kconfig = "WZ_LIMIT_MAX_QUERIERS"
+default = 0
+help = '''
+The queriers a session holds at once; declaring one more is refused until
+one is dropped. 0 is no bound, which is upstream's behaviour. Unlike the
+other limits this one sizes no table: it only refuses the one more.
+'''
+
 # A policy is behaviour upstream does not have; it is declared with what upstream does and
 # defaults to that, so a build that states nothing is the original's (docs/build-configuration.md,
 # C2). `kind` is `bool` (default `off`) or `choice` (`choices`, one of them the default). Each is a

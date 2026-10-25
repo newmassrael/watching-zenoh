@@ -346,3 +346,12 @@ pub const MAX_LOCATOR_LEN: usize = generated::MAX_LOCATOR_LEN;
 /// `mcu_target.yaml:263 = 8`): a static deploy is a small fixed peer set
 /// (e.g. one AP for a fixed AP<->MCU pair), so few configured locators.
 pub const MAX_STATIC_CONNECT: usize = generated::MAX_STATIC_CONNECT;
+
+/// Maximum number of queriers a session holds live at once, as a
+/// [`crate::quota::Quota`] states it: a declaration past it is refused, and a place
+/// comes back when the last handle of a declared querier drops. **`0` is no bound**,
+/// which is upstream's behaviour and the default; this is the one limit here that is a
+/// quota and not a table capacity, so `0` is not a table of no rows. It sizes no
+/// memory: a querier is not a row of a registry, it is a handle that holds a reference
+/// on the session's queryable interest.
+pub const MAX_QUERIERS: usize = generated::MAX_QUERIERS;
