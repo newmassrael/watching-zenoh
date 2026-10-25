@@ -175,6 +175,11 @@ impl<T: Copy> PlainCell<T> {
         *self.0.lock() = value;
     }
 
+    /// Replace the value, answering the one it had: a flag that is read and cleared in one step.
+    pub fn replace(&self, value: T) -> T {
+        core::mem::replace(&mut *self.0.lock(), value)
+    }
+
     /// Replace the value with what `f` makes of it, under the one lock, and answer the new value:
     /// a read and a write that no other thread's write can come between, for a value that is a
     /// successor of the last (a version, a generation).
@@ -226,6 +231,99 @@ impl<T> PlainRwLock<T> {
     /// The value for writing, waiting for every reader and writer to finish.
     pub fn write(&self) -> PlainWriteGuard<'_, T> {
         self.0.write()
+    }
+}
+
+/// A table a forwarder reads and writes through `&self`, whichever cell holds it: a `RefCell` for
+/// the forwarder that one task drives, a [`PlainRwLock`] for the router that many do.
+///
+/// The functions that compute a route from a table (`data_route`, `client_route`, the query
+/// candidates) are shared by both forwarders and take their tables through this, so that neither
+/// forwarder is made to pay for the other's cell: the single-task forwarder keeps its `RefCell`
+/// and its non-atomic borrow, the router its lock. The generic parameter is the table; the cell
+/// is the implementor.
+pub trait SharedTable<T> {
+    /// What [`read_table`](Self::read_table) holds the table with.
+    type Read<'a>: core::ops::Deref<Target = T>
+    where
+        Self: 'a;
+    /// What [`write_table`](Self::write_table) holds the table with.
+    type Write<'a>: core::ops::DerefMut<Target = T>
+    where
+        Self: 'a;
+    /// The table for reading.
+    fn read_table(&self) -> Self::Read<'_>;
+    /// The table for writing.
+    fn write_table(&self) -> Self::Write<'_>;
+}
+
+impl<T> SharedTable<T> for core::cell::RefCell<T> {
+    type Read<'a>
+        = core::cell::Ref<'a, T>
+    where
+        Self: 'a;
+    type Write<'a>
+        = core::cell::RefMut<'a, T>
+    where
+        Self: 'a;
+    fn read_table(&self) -> Self::Read<'_> {
+        self.borrow()
+    }
+    fn write_table(&self) -> Self::Write<'_> {
+        self.borrow_mut()
+    }
+}
+
+/// A table shared by handle is read through the handle, as the forwarders hold their tables
+/// (`Rc<RefCell<_>>` for one task, `Arc<PlainRwLock<_>>` for the router).
+impl<T, C: SharedTable<T> + ?Sized> SharedTable<T> for std::rc::Rc<C> {
+    type Read<'a>
+        = C::Read<'a>
+    where
+        Self: 'a;
+    type Write<'a>
+        = C::Write<'a>
+    where
+        Self: 'a;
+    fn read_table(&self) -> Self::Read<'_> {
+        (**self).read_table()
+    }
+    fn write_table(&self) -> Self::Write<'_> {
+        (**self).write_table()
+    }
+}
+
+impl<T, C: SharedTable<T> + ?Sized> SharedTable<T> for std::sync::Arc<C> {
+    type Read<'a>
+        = C::Read<'a>
+    where
+        Self: 'a;
+    type Write<'a>
+        = C::Write<'a>
+    where
+        Self: 'a;
+    fn read_table(&self) -> Self::Read<'_> {
+        (**self).read_table()
+    }
+    fn write_table(&self) -> Self::Write<'_> {
+        (**self).write_table()
+    }
+}
+
+impl<T> SharedTable<T> for PlainRwLock<T> {
+    type Read<'a>
+        = PlainReadGuard<'a, T>
+    where
+        Self: 'a;
+    type Write<'a>
+        = PlainWriteGuard<'a, T>
+    where
+        Self: 'a;
+    fn read_table(&self) -> Self::Read<'_> {
+        self.read()
+    }
+    fn write_table(&self) -> Self::Write<'_> {
+        self.write()
     }
 }
 
