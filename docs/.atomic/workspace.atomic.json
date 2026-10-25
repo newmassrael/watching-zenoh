@@ -287890,6 +287890,50 @@
         "Tell the consumer that asked (the claim of 92 bytes a row) to read its figures at this pin, and ask whether a handle that does not keep the field walk's digests is wanted: that is the 8 bytes left, and a door in the C ABI. Read the first completed hosted run holding this round."
       ]
     },
+    "Round 3647": {
+      "decision_summary": "The receive match cache is a build switch. wz remembers which subscriptions a key matched (MatchMemo) so that a key arriving again is delivered without matching it against every pattern; zenoh-pico has the same memory behind Z_FEATURE_RX_CACHE and leaves it off. wz keeps it on by default, and the new limit MATCH_MEMO_SLOTS (default 8, the size that was fixed in code) sizes it; 0 leaves it out, and every message is then matched afresh. Both builds reach the same subscribers in the same order, which the existing memory test and a new scan-count test hold. Every subscriber scan now goes through one matcher, scan_subscribers, which the borrowed and plain deliveries and the cache's refill all call. The memory stays heap-only; the bounded form for the fixed-memory profile is not built.",
+      "changes_bullets": [
+        "deploy/wz-config.toml declares the limit MATCH_MEMO_SLOTS (8, 0 leaves the cache out); caps.rs binds it and the generated files and Kconfig follow. The upstream-switch row for the pico receive-cache switch now says the limit sizes it and 0 leaves it out.",
+        "crates/wz-session-core pubsub.rs: the memo's slot count is the limit, the memo is skipped when it is 0, and fire_into, the borrowed and plain deliveries and the cache's refill call one scan_subscribers matcher (a key too deep for the matcher is not remembered, as before). A test-only per-thread scan counter backs the new test.",
+        "tests: a repeated key is matched once with slots and every time without, and a registration is seen by the next message; the existing memory test and the repeated-frame test run in both builds.",
+        "scripts/run-ci.sh: the pub/sub lane gains an arm that builds with the limit at 0 and runs the three memory tests (3 passed)."
+      ],
+      "verification_bullets": [
+        "On the build host the whole wz-session-core lib suite (2654 passed) and the wz-runtime-tokio lib suite (2327 passed, 4 ignored) pass with all features at the default, and the session-core suite passes with the limit at 0 (2654 passed).",
+        "Red first, both directions, each reverted with no trace left: a memo that never answers from a slot fails exactly the scan-count test (5 scans against 1); a zero-slot build that does not skip the memo fails the memory tests with an out-of-range slot index.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-session-core; wz_config --check and --selftest pass; session_slot_bytes --check passes; the count-guard lint counts the new arm; cargo doc counts 494 for wz-session-core, its budget; the pre-push round-fed array, 113 gates, exits 0 on the rebased tree (its first run failed resource_budget_gate on a row another session had already corrected on origin).",
+        "Not run: the hosted run, the zero-slot build under every other lane, and a throughput measurement of the cache (this change adds no claim about its speed)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "The receive match cache is heap-only: a fixed-memory profile has no counterpart. A bounded form (fixed slots, fixed key bytes, hits bounded by MAX_SUBSCRIPTIONS) over the Storage parameter is the next step, and the in-place receive reaches the matcher directly and does not use the memory.",
+        "The pico receive-cache switch is still classed always; it can become a mapped capability if a deployer needs the switch named in a pico config.h, which the limit does not give.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "The receive match cache is a build switch. wz remembers which subscriptions a key matched (MatchMemo) so that a key arriving again is delivered without matching it against every pattern; zenoh-pico has the same memory behind Z_FEATURE_RX_CACHE and leaves it off. wz keeps it on by default, and the new limit MATCH_MEMO_SLOTS (default 8, the size that was fixed in code) sizes it; 0 leaves it out, and every message is then matched afresh. Both builds reach the same subscribers in the same order, which the existing memory test and a new scan-count test hold. Every subscriber scan now goes through one matcher, scan_subscribers, which the borrowed and plain deliveries and the cache's refill all call. The memory stays heap-only; the bounded form for the fixed-memory profile is not built.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml declares the limit MATCH_MEMO_SLOTS (8, 0 leaves the cache out); caps.rs binds it and the generated files and Kconfig follow. The upstream-switch row for the pico receive-cache switch now says the limit sizes it and 0 leaves it out.",
+        "crates/wz-session-core pubsub.rs: the memo's slot count is the limit, the memo is skipped when it is 0, and fire_into, the borrowed and plain deliveries and the cache's refill call one scan_subscribers matcher (a key too deep for the matcher is not remembered, as before). A test-only per-thread scan counter backs the new test.",
+        "tests: a repeated key is matched once with slots and every time without, and a registration is seen by the next message; the existing memory test and the repeated-frame test run in both builds.",
+        "scripts/run-ci.sh: the pub/sub lane gains an arm that builds with the limit at 0 and runs the three memory tests (3 passed)."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host the whole wz-session-core lib suite (2654 passed) and the wz-runtime-tokio lib suite (2327 passed, 4 ignored) pass with all features at the default, and the session-core suite passes with the limit at 0 (2654 passed).",
+        "Red first, both directions, each reverted with no trace left: a memo that never answers from a slot fails exactly the scan-count test (5 scans against 1); a zero-slot build that does not skip the memo fails the memory tests with an out-of-range slot index.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-session-core; wz_config --check and --selftest pass; session_slot_bytes --check passes; the count-guard lint counts the new arm; cargo doc counts 494 for wz-session-core, its budget; the pre-push round-fed array, 113 gates, exits 0 on the rebased tree (its first run failed resource_budget_gate on a row another session had already corrected on origin).",
+        "Not run: the hosted run, the zero-slot build under every other lane, and a throughput measurement of the cache (this change adds no claim about its speed)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The receive match cache is heap-only: a fixed-memory profile has no counterpart. A bounded form (fixed slots, fixed key bytes, hits bounded by MAX_SUBSCRIPTIONS) over the Storage parameter is the next step, and the in-place receive reaches the matcher directly and does not use the memory.",
+        "The pico receive-cache switch is still classed always; it can become a mapped capability if a deployer needs the switch named in a pico config.h, which the limit does not give.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
