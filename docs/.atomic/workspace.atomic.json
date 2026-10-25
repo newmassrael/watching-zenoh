@@ -287158,6 +287158,48 @@
         "Read the Zephyr kit stack figure on the first hosted run holding this round: the worst chain was 8900 of 9216 bytes before the key was compacted, and the committed figure is not to be moved to it. Not done in step 6: the opener port over this manager (how NodeRefusal::NoRoom is said, the open outcome has no word for it), the sources of hints (a build's declared ones, a Hello), the verbs on the fixed-memory profile, wz-session-lwip forwarding the feature, and the witness on the image. The heap UDP dialer does not yet verify nodes. Read the first completed hosted run holding rounds 3584 to 3629 per job."
       ]
     },
+    "Round 3630": {
+      "decision_summary": "Step Sc2 of scouting on the cooperative engine: the host's network facts and the multicast sockets leave the tokio runtime. A new crate, wz-host-net (std, socket2, libc or windows-sys; no runtime), holds link_interfaces (the interface table readings: which interfaces carry multicast, which index an address selects, what an #iface= names), moved whole with its tests, and multicast, the plan under a multicast socket that was private to UdpDriver: the interface an #iface= names, what an unpinned link joins and sends on, whether a refused membership ends the bind, the loopback policy and the hop limit. bind_joined and bind_sender answer a bound non-blocking socket2 socket and the group address. The tokio runtime keeps its public paths (link_interfaces is re-exported, McastSocketConfig converts at the socket), adopts the socket and sets #dscp= through its own socket type. Behaviour is unchanged so a cooperative host can open the same sockets.",
+      "changes_bullets": [
+        "wz-host-net (new): link_interfaces (moved from wz-runtime-tokio with its tests, the builders of a link's subject and endpoints stay there); multicast (Loopback, SocketConfig, RxBind, Bound, bind_joined, bind_sender, with the plan and its tests moved from wz-runtime-tokio's lib.rs); feature locator-iface.",
+        "wz-runtime-tokio: link_interfaces re-exports wz-host-net's and keeps ip_link_endpoints, addressless_link_endpoints, ip_link_subject, multicast_link_subject and addressless_link_subject; bind_multicast_at and bind_multicast_tx_at call the neutral builders and adopt the socket; McastSocketConfig converts to the neutral config; features link-interfaces and locator-iface forward to wz-host-net.",
+        "crates/Cargo.toml and Cargo.lock name the crate; .github/workflows/platform.yml triggers on it; scripts/lib/feature_public_surface_census.py (row and PROSE_ONLY), scripts/lib/self_report_lint.py (a baseline entry that moved with its comment) and scripts/lib/nondefault-tests-gate.sh (a leg for locator-iface).",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-host-net (default, and with locator-iface), wz-runtime-tokio (all features; multicast alone; multicast with udp; scouting-active alone; scouting-responder alone), wz-capi-core, wz-capi-c, wz-capi-pico, wz-ap-demo; the lock resolves with --locked.",
+        "Tests: wz-host-net 32 passed, 41 with locator-iface; wz-runtime-tokio udp_multicast_config_tests 13 passed over the neutral builders. The nondefault-tests census reads wz-host-net as 9 only-with-features, 9 run by a leg, rc 0. C1bz for wz-host-net and wz-runtime-tokio spends exactly their budgets.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed, after adding the crate to the platform workflow's trigger paths, the feature-surface census and the self-report baseline, and refreshing the two deploy locks that resolve the tokio runtime by path."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next, scouting step Sc3: a blocking scouting window for the cooperative build over wz-host-net's sockets and the session-core pump (the group socket plus one ask socket per interface, R2611); then Sc4, the pico scout feature and z_open's open-time lookup without the tokio engine; then the advanced plane and the listening role.",
+        "wz-runtime-posix's PosixGroupTransport (raw libc, IPv4, no #iface= name lookup) is a second reading of the same host seam for the slot profile; whether it should sit on wz-host-net is its owner's call and was not touched.",
+        "Read the hosted runs of the earlier pushes at the start of the next round."
+      ],
+      "publishable_decision_summary": "Step Sc2 of scouting on the cooperative engine: the host's network facts and the multicast sockets leave the tokio runtime. A new crate, wz-host-net (std, socket2, libc or windows-sys; no runtime), holds link_interfaces (the interface table readings: which interfaces carry multicast, which index an address selects, what an #iface= names), moved whole with its tests, and multicast, the plan under a multicast socket that was private to UdpDriver: the interface an #iface= names, what an unpinned link joins and sends on, whether a refused membership ends the bind, the loopback policy and the hop limit. bind_joined and bind_sender answer a bound non-blocking socket2 socket and the group address. The tokio runtime keeps its public paths (link_interfaces is re-exported, McastSocketConfig converts at the socket), adopts the socket and sets #dscp= through its own socket type. Behaviour is unchanged so a cooperative host can open the same sockets.",
+      "publishable_changes_bullets": [
+        "wz-host-net (new): link_interfaces (moved from wz-runtime-tokio with its tests, the builders of a link's subject and endpoints stay there); multicast (Loopback, SocketConfig, RxBind, Bound, bind_joined, bind_sender, with the plan and its tests moved from wz-runtime-tokio's lib.rs); feature locator-iface.",
+        "wz-runtime-tokio: link_interfaces re-exports wz-host-net's and keeps ip_link_endpoints, addressless_link_endpoints, ip_link_subject, multicast_link_subject and addressless_link_subject; bind_multicast_at and bind_multicast_tx_at call the neutral builders and adopt the socket; McastSocketConfig converts to the neutral config; features link-interfaces and locator-iface forward to wz-host-net.",
+        "crates/Cargo.toml and Cargo.lock name the crate; .github/workflows/platform.yml triggers on it; scripts/lib/feature_public_surface_census.py (row and PROSE_ONLY), scripts/lib/self_report_lint.py (a baseline entry that moved with its comment) and scripts/lib/nondefault-tests-gate.sh (a leg for locator-iface).",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-host-net (default, and with locator-iface), wz-runtime-tokio (all features; multicast alone; multicast with udp; scouting-active alone; scouting-responder alone), wz-capi-core, wz-capi-c, wz-capi-pico, wz-ap-demo; the lock resolves with --locked.",
+        "Tests: wz-host-net 32 passed, 41 with locator-iface; wz-runtime-tokio udp_multicast_config_tests 13 passed over the neutral builders. The nondefault-tests census reads wz-host-net as 9 only-with-features, 9 run by a leg, rc 0. C1bz for wz-host-net and wz-runtime-tokio spends exactly their budgets.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed, after adding the crate to the platform workflow's trigger paths, the feature-surface census and the self-report baseline, and refreshing the two deploy locks that resolve the tokio runtime by path."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next, scouting step Sc3: a blocking scouting window for the cooperative build over wz-host-net's sockets and the session-core pump (the group socket plus one ask socket per interface, R2611); then Sc4, the pico scout feature and z_open's open-time lookup without the tokio engine; then the advanced plane and the listening role.",
+        "wz-runtime-posix's PosixGroupTransport (raw libc, IPv4, no #iface= name lookup) is a second reading of the same host seam for the slot profile; whether it should sit on wz-host-net is its owner's call and was not touched.",
+        "Read the hosted runs of the earlier pushes at the start of the next round."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
