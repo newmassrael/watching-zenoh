@@ -288966,6 +288966,38 @@
         "The keys of the configuration that upstream's tests exercise (acl, authentication, low pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers) are each a slice or a recorded refusal, not yet owned."
       ]
     },
+    "Round 3674": {
+      "decision_summary": "Step 7a of decision D7 (one contract, three transports). The owner delegated the choice of structure (cost ignored, the most correct long-term). The contract is the port the fixed profile already has, NodeOpening; the transport is which type feeds it, as docs/build-configuration.md C3 says a choice that changes the shape of the code is a type parameter and not a feature. The fixed admin queryable is generic over its opener: NoOpening (BOUND false) is the third transport, where the peers are the ones the build declared and the answer holds no open leg, and ControlledOpener is the in-band one, named by both fixed images. Steps 7b (the axis in wz-config.toml and its Kconfig), 7c (declared peers in a node declaration) and 7d (the control port and its agent) are written in the doc and not done.",
+      "changes_bullets": [
+        "crates/wz-session-mcu/src/admin_fixed.rs: NodeOpening gains the constant BOUND; NoOpening; AdminQueryState, AdminQuerySink and AdminSinks take the opener type, defaulting to NoOpening; host_admin_queryable_fixed_with_open takes the opener by reference; the answer serves the open leg only if BOUND.",
+        "deploy/mcu-admin-node/src/fixed.rs and deploy/zephyr-admin-node/rust/src/fixed_node.rs name ControlledOpener; crates/wz-session-mcu/tests/admin_open_query.rs asks through a generic helper; docs/session-lifecycle-intent.md states D7's structure and steps 7a to 7d."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): admin_open_query 5 passed, admin_reply_fits 4 passed, the lwip admin_node_slot 4 passed; the fixed mcu-admin-node image builds for thumbv7m-none-eabi; rustfmt is clean; the whole round-fed gate array passes.",
+        "Not run here: the Zephyr image (its Rust crate is built on the hosted run only), the no-allocator link gate and the stack gate rows as the hosted lanes read them, and the size the dropped open leg saves on a node that binds none."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the first finished hosted run holding this round for Qzb (the Zephyr client chain, which the type change may move; budget row and stack row move together). Next is 7b: the axis lifecycle-transport with in-band, out-of-band and declared in deploy/wz-config.toml, its cargo_rule, and the image sources naming the type by the axis; then 7c, 7d. Still open from before: the Hello hint source, the image witness (the lane owner agrees), the heap UDP dialer verifying nodes, the Qzb chain fall and the C1cn shard 1 time budget."
+      ],
+      "publishable_decision_summary": "Step 7a of decision D7 (one contract, three transports). The owner delegated the choice of structure (cost ignored, the most correct long-term). The contract is the port the fixed profile already has, NodeOpening; the transport is which type feeds it, as docs/build-configuration.md C3 says a choice that changes the shape of the code is a type parameter and not a feature. The fixed admin queryable is generic over its opener: NoOpening (BOUND false) is the third transport, where the peers are the ones the build declared and the answer holds no open leg, and ControlledOpener is the in-band one, named by both fixed images. Steps 7b (the axis in wz-config.toml and its Kconfig), 7c (declared peers in a node declaration) and 7d (the control port and its agent) are written in the doc and not done.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu/src/admin_fixed.rs: NodeOpening gains the constant BOUND; NoOpening; AdminQueryState, AdminQuerySink and AdminSinks take the opener type, defaulting to NoOpening; host_admin_queryable_fixed_with_open takes the opener by reference; the answer serves the open leg only if BOUND.",
+        "deploy/mcu-admin-node/src/fixed.rs and deploy/zephyr-admin-node/rust/src/fixed_node.rs name ControlledOpener; crates/wz-session-mcu/tests/admin_open_query.rs asks through a generic helper; docs/session-lifecycle-intent.md states D7's structure and steps 7a to 7d."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): admin_open_query 5 passed, admin_reply_fits 4 passed, the lwip admin_node_slot 4 passed; the fixed mcu-admin-node image builds for thumbv7m-none-eabi; rustfmt is clean; the whole round-fed gate array passes.",
+        "Not run here: the Zephyr image (its Rust crate is built on the hosted run only), the no-allocator link gate and the stack gate rows as the hosted lanes read them, and the size the dropped open leg saves on a node that binds none."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first finished hosted run holding this round for Qzb (the Zephyr client chain, which the type change may move; budget row and stack row move together). Next is 7b: the axis lifecycle-transport with in-band, out-of-band and declared in deploy/wz-config.toml, its cargo_rule, and the image sources naming the type by the axis; then 7c, 7d. Still open from before: the Hello hint source, the image witness (the lane owner agrees), the heap UDP dialer verifying nodes, the Qzb chain fall and the C1cn shard 1 time budget."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
