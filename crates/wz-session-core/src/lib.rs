@@ -2017,6 +2017,14 @@ pub mod duty_outbox;
 #[cfg(feature = "session-unicast")]
 pub mod peer_table;
 
+/// The host of the peer machines, written once for every profile (decision D5 of
+/// `docs/session-lifecycle-intent.md`): the bookkeeping of which face a dial
+/// opened, which peer each held face is held for and which retry timer is still its
+/// peer's, in fixed-capacity tables, with what differs between profiles answered
+/// through a port. Gated as `peer_table` is.
+#[cfg(feature = "session-unicast")]
+pub mod peer_planner;
+
 /// SCE-generated session-slot table config (Round 3278): how many sessions a
 /// fixed-memory machine holds at once (`SLOT_COUNT`, MAX_SESSIONS) and the byte
 /// ceiling of ONE session slot (`SLOT_SIZE`), so the RAM of every session of

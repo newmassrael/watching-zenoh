@@ -762,6 +762,44 @@ Each step lands with its own done-when; sizes are not estimated here.
      handling of that request, `node_peer_open_e2e`.
 6. **The MCU opener** over `SessionHost`, `wz-session-lwip` forwarding the
    feature, and a witness on the fixed-memory image.
+   - **The opener is the same host as AP's, so the host is written once
+     (decision, owner, 2026-10-25: the structure that is right in the long
+     run, whatever it costs).** The connection machine of D5 was already
+     shared. What AP's face loop did around it (which face a dial opened,
+     which peer each held face is held for, which retry timer is still its
+     peer's, which zid a peer's last session named) is the machine's host, and a
+     fixed-memory node needs the same host without an allocator. Two copies
+     would drift, so the bookkeeping moves down into one.
+   - **6.1, the planner, once for every profile (Round 3604).**
+     `wz_session_core::peer_planner::PeerPlanner<K, I, N, D>` is `LoopPeers`'
+     bookkeeping in fixed-capacity tables: `N` bounds the peers, and with
+     them the held faces, the armed timers and the remembered zids (one per
+     peer each), and `D` bounds the dials in flight together with the ones a
+     peer stopped wanting while they ran. It builds for `thumbv7m-none-eabi`
+     with no allocator.
+     - What differs between profiles is a port, `PeerPorts`: what a peer is
+       dialled at, the next retry wait, and starting the schedule over. AP
+       answers them from its loop's directory, its configured endpoints and
+       `RedialSchedule`. The planner mints a dial's face from the counter the
+       host gives it, and hands its actions to a sink the caller gives, so no
+       output size is guessed.
+     - A dial the planner has no room to track is not made: the machine is
+       told the host has no slot, which it already refuses by (`NoSlot`).
+     - A peer is one session, so the planner holds one face per peer (the
+       primary's, for a session of several links), and a face can hold several
+       peers. That bounds the table by the peers, with no overflow to decide.
+     - `wz_runtime_tokio::loop_peers::LoopPeers` is the AP wrapper: its
+       endpoints, its retry schedule, the directory lookups and the log lines.
+       Its public surface is unchanged.
+     Witness: the planner's eight tests over a fake host (dial, hold, loss and
+     retry; a refusal; a stale timer; a released and an abandoned dial; one
+     face holding two peers; a withdrawal; the machines read with their zid; a
+     dial the planner cannot track), `LoopPeers`' own thirteen, which now run
+     through it, and `node_peer_open_e2e` and `router_redial_backoff_e2e`
+     unchanged.
+   - Next in step 6: the fixed-memory host (a planner over the directory, a
+     retry timer and `SessionHost::dial`), the verbs on it, and the witness on
+     the image.
 7. **D7** transports 2 and 3 as values of the build configuration axis.
 
 ## 5. Open

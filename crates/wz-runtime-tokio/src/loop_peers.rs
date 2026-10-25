@@ -10,10 +10,15 @@
 //! zid (decision D4). A configured `connect/endpoints` member names an ENDPOINT,
 //! and the machine dials that locator for no node. Its
 //! [`PeerTable`](wz_session_core::peer_table::PeerTable) entry is
-//! the machine either way, and this module is the host the machine asks things
-//! of: it performs each duty against the directory, the configured endpoints
-//! and the retry schedule, and turns what the loop sees (a dial that ended, a
-//! face that died, a timer that fired) into the machine's events.
+//! the machine either way.
+//!
+//! The bookkeeping of the machines (which face a dial opened, which peer each held
+//! face is held for, which retry timer is still its peer's) is written once for
+//! every profile, in [`wz_session_core::peer_planner`]. This module is what an
+//! AP face loop adds to it: what names a peer ([`PeerKey`](crate::loop_peers::PeerKey)), the configured
+//! endpoints and how each is dialled, the loop's directory the candidates of a
+//! node come from, and the retry schedule (upstream's `connect/retry`, with an
+//! endpoint's own `#` overrides laid over it). Those are the planner's ports.
 //!
 //! It is a PLANNER, not a driver: every call returns the
 //! [`PeerAction`](crate::loop_peers::PeerAction)s the
@@ -25,8 +30,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use wz_session_core::locator_directory::DirectoryZid;
-use wz_session_core::peer_connection::{PeerConnectionEvent as E, PeerConnectionState};
-use wz_session_core::peer_table::{PeerDuties, PeerTable};
+use wz_session_core::peer_connection::PeerConnectionState;
+use wz_session_core::peer_planner::{PeerPlanner, PeerPorts};
 
 use crate::accept_loop::{
     candidate_locators, first_dialable_locator, FaceId, LoopDirectory, RedialSchedule,
@@ -36,6 +41,10 @@ use crate::session_open::{MeshDialKey, MeshDialTarget};
 
 /// How many peers a face loop can be told to hold, nodes and endpoints together.
 pub const LOOP_PEER_ROWS: usize = 256;
+
+/// How many dials a face loop can have in flight for its peers, with the ones a
+/// peer stopped wanting while they ran, which stay until they end.
+pub const LOOP_PEER_DIALS: usize = 2 * LOOP_PEER_ROWS;
 
 /// What names a peer the loop holds.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -58,64 +67,12 @@ impl std::fmt::Display for PeerKey {
     }
 }
 
-/// What the loop is to do for the peers it holds.
-#[derive(Debug, Clone, PartialEq)]
-pub enum PeerAction {
-    /// Dial `target` (made for `key`) as face `id`.
-    Dial {
-        /// The face the dial opens.
-        id: FaceId,
-        /// The peer the dial is made for.
-        key: PeerKey,
-        /// What to dial.
-        target: MeshDialTarget,
-    },
-    /// Report [`LoopPeers::retry_due`] for `key` and `generation` after
-    /// `after_ms`.
-    Retry {
-        /// The peer.
-        key: PeerKey,
-        /// Which arming this is. A timer of an earlier arming that fires after
-        /// its peer was forgotten, or left the wait another way, is not the
-        /// peer's retry, and [`LoopPeers::retry_due`] drops it.
-        generation: u64,
-        /// The wait, from the retry schedule.
-        after_ms: u64,
-    },
-    /// Drop face `id`: a session its peer no longer wants. Raised only by a
-    /// lifecycle `close` (`manual.stop` from Established), so only a build
-    /// with the close seam can be asked for it.
-    #[cfg(feature = "session-close-ingress")]
-    Close {
-        /// The face.
-        id: FaceId,
-    },
-}
+/// What the loop is to do for the peers it holds: dial a target as a face, report
+/// a retry timer after a wait, or (with the close seam) drop a face.
+pub type PeerAction = wz_session_core::peer_planner::PeerAction<PeerKey, FaceId, MeshDialTarget>;
 
 /// How a dial the planner asked for ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DialEnd {
-    /// A session to the peer is up, held as the dialled face.
-    Established {
-        /// The zid the session's remote named, which a `close` names it by.
-        remote: Option<DirectoryZid>,
-    },
-    /// A session to the peer is up, but the loop holds it as `held`, another face
-    /// (the peer was already reached another way, or the dialled link joined
-    /// the session `held` represents); the dialled face is not held on its own.
-    AlreadyHeld {
-        /// The face the loop holds to the peer.
-        held: FaceId,
-        /// The zid the session's remote named, which a `close` names it by.
-        remote: Option<DirectoryZid>,
-    },
-    /// The loop has no room for another session.
-    NoSlot,
-    /// Another node answered at the locator (decision D4).
-    Mismatch,
-    /// The dial failed otherwise: unreachable, refused, timed out.
-    Failed,
-}
+pub type DialEnd = wz_session_core::peer_planner::DialEnd<FaceId>;
 
 /// The loop's state the planner reads: the directory and the clock.
 pub struct PeerContext<'a> {
@@ -125,50 +82,65 @@ pub struct PeerContext<'a> {
     pub now_ms: u64,
 }
 
+/// What an AP face loop answers for the planner.
+struct LoopPorts<'a> {
+    cx: &'a PeerContext<'a>,
+    /// How to dial each configured endpoint the loop holds.
+    endpoints: &'a BTreeMap<MeshDialKey, MeshDialTarget>,
+    /// Each peer's retry schedule while it is down.
+    retry: &'a mut RedialSchedule<PeerKey>,
+}
+
+impl PeerPorts<PeerKey> for LoopPorts<'_> {
+    type Target = MeshDialTarget;
+
+    /// What to dial for `key`: a node's first candidate that can be dialled from
+    /// this loop, made for its zid, or an endpoint's own plan.
+    fn dialable(&self, key: &PeerKey) -> Option<MeshDialTarget> {
+        match key {
+            PeerKey::Node(zid) => {
+                first_dialable_locator(&candidate_locators(self.cx.directory, zid, self.cx.now_ms))
+                    .map(|target| target.for_node(*zid))
+            }
+            PeerKey::Endpoint(endpoint) => self.endpoints.get(endpoint).cloned(),
+        }
+    }
+
+    fn retry_wait_ms(&mut self, key: &PeerKey) -> u64 {
+        let overrides = match key {
+            PeerKey::Endpoint(endpoint) => {
+                self.endpoints.get(endpoint).and_then(MeshDialTarget::retry)
+            }
+            PeerKey::Node(_) => None,
+        };
+        self.retry.next_ms(key, overrides)
+    }
+
+    fn retry_restart(&mut self, key: &PeerKey) {
+        self.retry.forget(key);
+    }
+}
+
+/// The planner of an AP face loop, over the loop's own peer keys and faces.
+type LoopPlanner = PeerPlanner<PeerKey, FaceId, LOOP_PEER_ROWS, LOOP_PEER_DIALS>;
+
 /// The peers a face loop holds, and what it is doing for each.
 pub struct LoopPeers {
-    table: Box<PeerTable<PeerKey, LOOP_PEER_ROWS>>,
-    /// How to dial each configured endpoint the table holds: the scheme and
+    planner: Box<LoopPlanner>,
+    /// How to dial each configured endpoint the planner holds: the scheme and
     /// the `#` retry overrides the operator wrote, by the endpoint's key.
     endpoints: BTreeMap<MeshDialKey, MeshDialTarget>,
-    /// Dials under way, by the face they open.
-    dialing: BTreeMap<FaceId, PeerKey>,
-    /// Dials whose peer stopped wanting them while they ran: a session one opens
-    /// is dropped when it ends.
-    abandoned: BTreeSet<FaceId>,
-    /// Dials whose peer was forgotten while they ran: a session one opens is
-    /// left standing, unowned, as a forgotten peer's held session is.
-    released: BTreeSet<FaceId>,
-    /// The peers each face holds. One face can hold several: a node and an
-    /// endpoint that reach the same remote, or two endpoints of one multilink
-    /// session.
-    held: BTreeMap<FaceId, BTreeSet<PeerKey>>,
     /// Each peer's retry schedule while it is down.
     retry: RedialSchedule<PeerKey>,
-    /// The arming of each peer's retry timer that is still its own.
-    armed: BTreeMap<PeerKey, u64>,
-    /// The zid each peer's last session named, kept after the session is lost:
-    /// a `close` names a node by its zid, and an endpoint, which has none of its
-    /// own, is the node it reached (decision D6).
-    remotes: BTreeMap<PeerKey, DirectoryZid>,
-    /// The next arming's generation.
-    next_generation: u64,
 }
 
 impl LoopPeers {
     /// No peer held, retries on `policy` (upstream's `connect/retry`).
     pub fn new(policy: RetryPolicy) -> Self {
         Self {
-            table: Box::new(PeerTable::new()),
+            planner: Box::new(LoopPlanner::new()),
             endpoints: BTreeMap::new(),
-            dialing: BTreeMap::new(),
-            abandoned: BTreeSet::new(),
-            released: BTreeSet::new(),
-            held: BTreeMap::new(),
             retry: RedialSchedule::new(policy),
-            armed: BTreeMap::new(),
-            remotes: BTreeMap::new(),
-            next_generation: 0,
         }
     }
 
@@ -186,7 +158,8 @@ impl LoopPeers {
     /// The configured connect endpoints change: `targets` join them, and with
     /// `replace` they are the whole of them. An endpoint a replace leaves out is
     /// forgotten: it is not dialled again when it drops, and a live session to
-    /// it is left standing (upstream's shape, [`PeerTable::forget`]). An
+    /// it is left standing (upstream's shape, `PeerTable::forget` of
+    /// `wz_session_core::peer_table`). An
     /// endpoint already held or being reached is unchanged, and one its machine
     /// refused tries again (decision D6). A member's dial plan is taken from
     /// `targets`, so a member listed again with another scheme or another `#`
@@ -233,25 +206,21 @@ impl LoopPeers {
         cx: &PeerContext<'_>,
         next_id: &mut u64,
     ) -> Vec<PeerAction> {
-        if self.armed.get(&key) != Some(&generation) {
-            return Vec::new();
-        }
-        self.armed.remove(&key);
-        let duties = self.table.report(&key, E::RetryDue);
-        self.perform(key, duties, false, cx, next_id)
+        self.plan(cx, |planner, ports, emit| {
+            planner.retry_due(key, generation, ports, next_id, emit)
+        })
+        .1
     }
 
     /// Whether face `id` is a dial this planner asked for.
     pub fn is_dialing(&self, id: FaceId) -> bool {
-        self.dialing.contains_key(&id)
-            || self.abandoned.contains(&id)
-            || self.released.contains(&id)
+        self.planner.is_dialing(id)
     }
 
     /// Whether face `id` is a dial this planner made for a node, which the loop
     /// holds by one face.
     pub fn dials_a_node(&self, id: FaceId) -> bool {
-        matches!(self.dialing.get(&id), Some(PeerKey::Node(_)))
+        matches!(self.planner.dial_key(id), Some(PeerKey::Node(_)))
     }
 
     /// The dial of face `id` ended as `end`. `None` when the face is not one of
@@ -263,34 +232,10 @@ impl LoopPeers {
         cx: &PeerContext<'_>,
         next_id: &mut u64,
     ) -> Option<(bool, Vec<PeerAction>)> {
-        if self.abandoned.remove(&id) {
-            // Its peer stopped wanting it while it ran: a session that came up is
-            // dropped, and nothing is reported to a machine that is past it.
-            return Some((false, Vec::new()));
-        }
-        if self.released.remove(&id) {
-            // Its peer was forgotten while it ran: a session that came up stands,
-            // owned by no machine, as a forgotten peer's held session does.
-            return Some((matches!(end, DialEnd::Established { .. }), Vec::new()));
-        }
-        let key = self.dialing.remove(&id)?;
-        let (event, keep) = match end {
-            DialEnd::Established { remote } => {
-                self.held.entry(id).or_default().insert(key.clone());
-                self.learn_remote(&key, remote);
-                (E::DialEstablished, true)
-            }
-            DialEnd::AlreadyHeld { held, remote } => {
-                self.held.entry(held).or_default().insert(key.clone());
-                self.learn_remote(&key, remote);
-                (E::DialEstablished, false)
-            }
-            DialEnd::NoSlot => (E::DialNoSlot, false),
-            DialEnd::Mismatch => (E::DialMismatch, false),
-            DialEnd::Failed => (E::DialFailed, false),
-        };
-        let duties = self.table.report(&key, event);
-        Some((keep, self.perform(key, duties, false, cx, next_id)))
+        let (keep, actions) = self.plan(cx, |planner, ports, emit| {
+            planner.dial_ended(id, end, ports, next_id, emit)
+        });
+        keep.map(|keep| (keep, actions))
     }
 
     /// Face `id` died. `None` when it is not a face a peer is held by.
@@ -300,13 +245,10 @@ impl LoopPeers {
         cx: &PeerContext<'_>,
         next_id: &mut u64,
     ) -> Option<Vec<PeerAction>> {
-        let keys = self.held.remove(&id)?;
-        let mut actions = Vec::new();
-        for key in keys {
-            let duties = self.table.report(&key, E::SessionLost);
-            actions.extend(self.perform(key, duties, true, cx, next_id));
-        }
-        Some(actions)
+        let (held, actions) = self.plan(cx, |planner, ports, emit| {
+            planner.face_down(id, ports, next_id, emit)
+        });
+        held.then_some(actions)
     }
 
     /// `close` for the node `zid` (decision D6): every machine that holds it,
@@ -322,25 +264,15 @@ impl LoopPeers {
         cx: &PeerContext<'_>,
         next_id: &mut u64,
     ) -> Vec<PeerAction> {
-        let node = PeerKey::Node(*zid);
-        let mut keys: Vec<PeerKey> = self
-            .remotes
-            .iter()
-            .filter(|(key, remote)| *remote == zid && **key != node)
-            .map(|(key, _)| key.clone())
-            .collect();
-        keys.push(node);
-        let mut actions = Vec::new();
-        for key in keys {
-            let duties = self.table.close(&key);
-            actions.extend(self.perform(key, duties, false, cx, next_id));
-        }
-        actions
+        self.plan(cx, |planner, ports, emit| {
+            planner.withdraw(zid, PeerKey::Node(*zid), ports, next_id, emit)
+        })
+        .1
     }
 
     /// The state of `key`'s machine.
     pub fn state(&self, key: &PeerKey) -> Option<PeerConnectionState> {
-        self.table.state(key)
+        self.planner.state(key)
     }
 
     /// Every machine, as the loop publishes it for the status query (decision
@@ -351,10 +283,10 @@ impl LoopPeers {
     #[cfg(feature = "session-close-ingress")]
     pub fn board_rows(&self) -> crate::peer_board::BoardRows {
         let mut rows = crate::peer_board::BoardRows::new();
-        for (key, state) in self.table.peers() {
+        for (key, state, remote) in self.planner.machines() {
             let (zid, endpoint) = match key {
                 PeerKey::Node(zid) => (*zid, None),
-                PeerKey::Endpoint(endpoint) => match self.remotes.get(key) {
+                PeerKey::Endpoint(endpoint) => match remote {
                     Some(zid) => (*zid, Some(endpoint.to_string())),
                     None => continue,
                 },
@@ -375,166 +307,66 @@ impl LoopPeers {
         rows
     }
 
-    /// Keep the zid `key`'s session named, for a later `close` to name it by.
-    fn learn_remote(&mut self, key: &PeerKey, remote: Option<DirectoryZid>) {
-        if let Some(remote) = remote {
-            self.remotes.insert(key.clone(), remote);
-        }
-    }
-
-    /// `open` for `key`: the authority admitted it.
-    fn open(&mut self, key: PeerKey, cx: &PeerContext<'_>, next_id: &mut u64) -> Vec<PeerAction> {
-        match self.table.open(key.clone(), true) {
-            Ok(duties) => self.perform(key, duties, false, cx, next_id),
-            Err(why) => {
-                log::warn!("loop peers: no room to hold {key} ({why:?}); refusing the open");
-                if let PeerKey::Endpoint(endpoint) = &key {
-                    self.endpoints.remove(endpoint);
-                }
-                Vec::new()
-            }
-        }
-    }
-
-    /// Stop working to hold `key`, and leave a session it has standing.
-    fn forget(&mut self, key: &PeerKey) {
-        self.table.forget(key);
-        if let PeerKey::Endpoint(endpoint) = key {
-            self.endpoints.remove(endpoint);
-        }
-        // Its growth goes with it, so a peer listed again later starts from the
-        // initial wait rather than the ceiling of the outage before its removal.
-        self.retry.forget(key);
-        self.armed.remove(key);
-        self.remotes.remove(key);
-        let running: Vec<FaceId> = self
-            .dialing
-            .iter()
-            .filter(|(_, dialled_for)| *dialled_for == key)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in running {
-            self.dialing.remove(&id);
-            self.released.insert(id);
-        }
-        self.held.retain(|_, keys| {
-            keys.remove(key);
-            !keys.is_empty()
-        });
-    }
-
-    /// Perform `duties` for `key`, and the duties each answer raises in turn.
-    /// `lost` says whether they answer a held session's loss, the one wait an
-    /// operator is told of at `info`.
-    fn perform(
+    /// Run one call of the planner against the loop's ports, and return what it
+    /// answered with the actions it asked for. An operator is told of the wait
+    /// that follows a lost session at `info` and of the others at `debug`.
+    fn plan<R>(
         &mut self,
-        key: PeerKey,
-        mut duties: PeerDuties,
-        lost: bool,
         cx: &PeerContext<'_>,
-        next_id: &mut u64,
-    ) -> Vec<PeerAction> {
+        call: impl FnOnce(&mut LoopPlanner, &mut LoopPorts<'_>, &mut dyn FnMut(PeerAction)) -> R,
+    ) -> (R, Vec<PeerAction>) {
+        let mut ports = LoopPorts {
+            cx,
+            endpoints: &self.endpoints,
+            retry: &mut self.retry,
+        };
         let mut actions = Vec::new();
-        while !duties.is_empty() {
-            let mut next = PeerDuties::default();
-            if duties.reset_retry() || duties.cancel_retry() {
-                self.retry.forget(&key);
-            }
-            if duties.cancel_retry() {
-                self.armed.remove(&key);
-            }
-            if duties.abandon_dial() {
-                let gone: Vec<FaceId> = self
-                    .dialing
-                    .iter()
-                    .filter(|(_, dialled_for)| **dialled_for == key)
-                    .map(|(id, _)| *id)
-                    .collect();
-                for id in gone {
-                    self.dialing.remove(&id);
-                    self.abandoned.insert(id);
-                }
-            }
-            #[cfg(feature = "session-close-ingress")]
-            if duties.close_session() {
-                let mut emptied = Vec::new();
-                for (id, keys) in self.held.iter_mut() {
-                    if keys.remove(&key) {
-                        actions.push(PeerAction::Close { id: *id });
-                        if keys.is_empty() {
-                            emptied.push(*id);
-                        }
-                    }
-                }
-                for id in emptied {
-                    self.held.remove(&id);
-                }
-            }
-            if duties.arm_retry() {
-                let overrides = match &key {
-                    PeerKey::Endpoint(endpoint) => {
-                        self.endpoints.get(endpoint).and_then(MeshDialTarget::retry)
-                    }
-                    PeerKey::Node(_) => None,
-                };
-                let after_ms = self.retry.next_ms(&key, overrides);
-                let generation = self.next_generation;
-                self.next_generation += 1;
-                self.armed.insert(key.clone(), generation);
-                if lost {
+        let answer = call(&mut self.planner, &mut ports, &mut |action| {
+            actions.push(action)
+        });
+        for action in &actions {
+            if let PeerAction::Retry {
+                key,
+                after_ms,
+                after_loss,
+                ..
+            } = action
+            {
+                if *after_loss {
                     log::info!(
                         "loop peers: {key} lost its session; dialling it again in {after_ms}ms"
                     );
                 } else {
                     log::debug!("loop peers: {key} not reached; dialling it again in {after_ms}ms");
                 }
-                actions.push(PeerAction::Retry {
-                    key: key.clone(),
-                    generation,
-                    after_ms,
-                });
             }
-            if duties.resolve() {
-                let found = self.dialable(&key, cx).is_some();
-                next = self.table.report(
-                    &key,
-                    if found {
-                        E::ResolveFound
-                    } else {
-                        E::ResolveEmpty
-                    },
-                );
-            } else if duties.dial() {
-                match self.dialable(&key, cx) {
-                    Some(target) => {
-                        let id = FaceId(*next_id);
-                        *next_id += 1;
-                        self.dialing.insert(id, key.clone());
-                        actions.push(PeerAction::Dial {
-                            id,
-                            key: key.clone(),
-                            target,
-                        });
-                    }
-                    // The candidates went between the resolution and the dial.
-                    None => next = self.table.report(&key, E::DialFailed),
-                }
+        }
+        (answer, actions)
+    }
+
+    /// `open` for `key`: the authority admitted it.
+    fn open(&mut self, key: PeerKey, cx: &PeerContext<'_>, next_id: &mut u64) -> Vec<PeerAction> {
+        let (opened, actions) = self.plan(cx, |planner, ports, emit| {
+            planner.open(key.clone(), ports, next_id, emit)
+        });
+        if let Err(why) = opened {
+            log::warn!("loop peers: no room to hold {key} ({why:?}); refusing the open");
+            if let PeerKey::Endpoint(endpoint) = &key {
+                self.endpoints.remove(endpoint);
             }
-            duties = next;
         }
         actions
     }
 
-    /// What to dial for `key`: a node's first candidate that can be dialled from
-    /// this loop, made for its zid, or an endpoint's own plan.
-    fn dialable(&self, key: &PeerKey, cx: &PeerContext<'_>) -> Option<MeshDialTarget> {
-        match key {
-            PeerKey::Node(zid) => {
-                first_dialable_locator(&candidate_locators(cx.directory, zid, cx.now_ms))
-                    .map(|target| target.for_node(*zid))
-            }
-            PeerKey::Endpoint(endpoint) => self.endpoints.get(endpoint).cloned(),
+    /// Stop working to hold `key`, and leave a session it has standing.
+    fn forget(&mut self, key: &PeerKey) {
+        self.planner.forget(key);
+        if let PeerKey::Endpoint(endpoint) = key {
+            self.endpoints.remove(endpoint);
         }
+        // Its growth goes with it, so a peer listed again later starts from the
+        // initial wait rather than the ceiling of the outage before its removal.
+        self.retry.forget(key);
     }
 }
 
@@ -576,6 +408,7 @@ mod tests {
                 key,
                 generation,
                 after_ms,
+                ..
             }] => (key.clone(), *generation, *after_ms),
             other => panic!("expected one retry, got {other:?}"),
         }

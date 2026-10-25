@@ -191,6 +191,15 @@ const ACCEPT_ERROR_THROTTLE_MS: u64 = 100;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FaceId(pub u64);
 
+/// The face a counter's value names, which is how the peer planner
+/// (`wz_session_core::peer_planner`, a module of the builds with `session-unicast`)
+/// mints the face of a dial it asks for.
+impl From<u64> for FaceId {
+    fn from(id: u64) -> Self {
+        Self(id)
+    }
+}
+
 /// A held peer link: its [`FaceId`], the accepted-peer transport tag, and the
 /// remote peer's zid (R311qi — the routing identity a peer-mesh graph keys faces
 /// on, read from the [`OpenedSession`] at `FaceUp`; `None` if the handshake did
@@ -1954,6 +1963,7 @@ impl PeerHost<'_> {
                     key,
                     generation,
                     after_ms,
+                    ..
                 } => self.retries.push(Box::pin(async move {
                     tokio::time::sleep(Duration::from_millis(after_ms)).await;
                     (key, generation)
