@@ -51,8 +51,10 @@ thread-priority = "1.2.0"
 num-traits = { version = "0.2.19", default-features = false }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
 stabby = "72.1.8"
+static_assertions = "1.1.0"
 static_init = "1.0.3"
 tracing = "0.1.41"
+zenoh-buffers = { path = "../wz-zenoh-buffers", default-features = false }
 zenoh-core = { path = "../wz-zenoh-core" }
 zenoh-macros = { path = "../wz-zenoh-macros" }
 zenoh-result = { path = "../wz-zenoh-result", default-features = false }

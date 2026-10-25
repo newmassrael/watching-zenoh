@@ -143,10 +143,11 @@ original reproduced by naming it. Three things follow from it:
   the wire format, and the codec of a pointer into shared memory waits for the `zenoh-shm` member,
   so that arm is held by the surface gate only until a test package builds both crates with it),
   `zenoh-shm` (in progress: the platform segments, the segments of arrays and structures, the
-  chunk descriptors, and the metadata and watchdog that keep a buffer alive across processes,
-  174 of 496 default lines; two processes share a segment by its id and by what is in it, so the
-  layouts and the names `<id>.zenoh` are upstream's and the differential tests open each crate's
-  segments and link each crate's descriptors with the other)
+  chunk descriptors, the metadata and watchdog that keep a buffer alive across processes, and the
+  buffers with the reader that reads one another process described, 364 of 496 default lines;
+  two processes share a segment by its id and by what is in it, so the layouts and the names
+  `<id>.zenoh` are upstream's and the differential tests open each crate's segments, link each
+  crate's descriptors and read each crate's buffers with the other)
   and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each

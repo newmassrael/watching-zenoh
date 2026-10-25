@@ -16,6 +16,7 @@
 // src/init.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
 
 use crate::{
+    api::client_storage::GLOBAL_CLIENT_STORAGE,
     cleanup::CLEANUP,
     metadata::{storage::GLOBAL_METADATA_STORAGE, subscription::GLOBAL_METADATA_SUBSCRIPTION},
     watchdog::{confirmator::GLOBAL_CONFIRMATOR, validator::GLOBAL_VALIDATOR},
@@ -23,6 +24,7 @@ use crate::{
 
 pub fn init() {
     CLEANUP.init();
+    GLOBAL_CLIENT_STORAGE.init();
     GLOBAL_METADATA_STORAGE.init();
     GLOBAL_METADATA_SUBSCRIPTION.init();
     GLOBAL_CONFIRMATOR.init();
