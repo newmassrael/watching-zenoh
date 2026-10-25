@@ -48,11 +48,14 @@ use wz_runtime_coop::ClockSource;
 use wz_session_core::adminspace::{write_admin_queryable_key, AdminSessionRef};
 use wz_session_core::bounded::{BoundedVec, CapacityFull};
 use wz_session_core::caps::{self, MAX_STATIC_CONNECT};
+use wz_session_core::locator_directory::{DirectoryRefusal, DirectoryZid, Lifetime, LocatorSource};
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::text_out::FixedText;
 use wz_session_mcu::admin_fixed::{FixedAdminSession, FixedNodeStatus, RowRefused};
 use wz_session_mcu::admin_status::DialStatus;
-use wz_session_mcu::connect_manager::{ConnectManager, PeerStore, SlotState};
+use wz_session_mcu::connect_manager::{
+    ConnectManager, NodeOpener, NodeRefusal, NodeState, PeerStore, SlotState,
+};
 use wz_session_mcu::slot_dial::{events_of, Bind};
 
 use wz_link_lwip::LwipLink;
@@ -212,6 +215,53 @@ where
         }
     }
 
+    /// Call `f` for each session this node holds with a node it was asked to open by its zid,
+    /// with the zid it was dialled for, in the order the nodes were asked for.
+    pub fn for_each_dialled_node(&self, mut f: impl FnMut(&DirectoryZid, &SlotSession<C>)) {
+        for (zid, session) in self.manager.node_sessions() {
+            f(zid, session);
+        }
+    }
+
+    /// Where every node asked for by its zid stands, in the order they were asked for.
+    pub fn for_each_node(&self, mut f: impl FnMut(&DirectoryZid, NodeState)) {
+        for (zid, state) in self.manager.node_states() {
+            f(zid, state);
+        }
+    }
+
+    /// State that the node `zid` may be reached at `locator`: a hint the build declares for a
+    /// node it may be asked to open by its zid (the open is a lifecycle query, or
+    /// [`Self::open_node`]), kept until the node is given another table. A hint is where the
+    /// zid may be, and not a claim that it is: every dial of it is made for the zid, and a
+    /// session another node answers closes at the handshake.
+    pub fn declare_node(
+        &mut self,
+        zid: DirectoryZid,
+        locator: &str,
+        now_ms: u64,
+    ) -> Result<(), DirectoryRefusal> {
+        self.manager.confirm_locator(
+            zid,
+            locator,
+            LocatorSource::Declared,
+            now_ms,
+            Lifetime::Permanent,
+        )
+    }
+
+    /// Hold a session with the node `zid` at what is known of it, as the lifecycle open query
+    /// would ask. `Err` says by name why the node cannot be held.
+    pub fn open_node(&mut self, zid: DirectoryZid, now_ms: u64) -> Result<(), NodeRefusal> {
+        self.manager.open_node(zid, now_ms)
+    }
+
+    /// The opener a node's admin queryable answers `session/open/<peer>` with, which holds the
+    /// store and not the node, so it can be declared in a `static` beside the other tables.
+    pub fn node_opener(&self) -> Option<NodeOpener> {
+        self.manager.node_opener()
+    }
+
     /// Where every written endpoint stands, as the connect manager holds it.
     pub fn for_each_endpoint(&self, mut f: impl FnMut(&str, SlotState)) {
         for (endpoint, state) in self.manager.states() {
@@ -289,7 +339,8 @@ where
         let live = self
             .accepted
             .iter()
-            .chain(self.manager.sessions().map(|(_, session)| session));
+            .chain(self.manager.sessions().map(|(_, session)| session))
+            .chain(self.manager.node_sessions().map(|(_, session)| session));
         for session in live {
             if session.actions().is_established()
                 && !session.declared()
@@ -307,7 +358,8 @@ where
         let sessions = self
             .accepted
             .iter()
-            .chain(self.manager.sessions().map(|(_, session)| session));
+            .chain(self.manager.sessions().map(|(_, session)| session))
+            .chain(self.manager.node_sessions().map(|(_, session)| session));
         for session in sessions {
             if let Some(row) = session
                 .actions()

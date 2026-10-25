@@ -11948,10 +11948,20 @@ layer_c1m_session_lwip() {
     # has to hold, with the heap counted by the crate that asks for each allocation
     # (none by the shell; what remains is the codec owned mirrors'): 3 = what that
     # command PRINTED.
-    _runci_guarded_test "C1m admin node slot" 3 \
+    _runci_guarded_test "C1m admin node slot" 4 \
         cargo test -p wz-session-lwip \
         --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage,adminspace-core,adminspace-write \
         --test admin_node_slot --quiet || return 1
+    # Step 6.2b-5 -- a node opened by its zid, on the same lwIP loopback: the build declares a
+    # hint, the open is asked, and the session the node holds is dialled for the zid, has the
+    # admin space declared on it and is reported by both nodes. A build states no node by
+    # default (`MAX_PEER_NODES` is 0) and the test then asserts the refusal for want of room and
+    # returns, so this leg states two: 1 = what that command PRINTED.
+    _runci_guarded_test "C1m admin node slot nodes" 1 \
+        env WZ_LIMIT_MAX_PEER_NODES=2 \
+        cargo test -p wz-session-lwip \
+        --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage,adminspace-core,adminspace-write \
+        --test admin_node_slot a_node_opened_by_its_zid --quiet || return 1
     (cd crates \
         && cargo clippy -p wz-session-lwip --all-targets \
             --features session-unicast-open,session-unicast-accept,pubsub-put,codec-close,session-slot,static-link-storage,adminspace-core,adminspace-write \

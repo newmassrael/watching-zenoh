@@ -768,11 +768,28 @@ impl<D: Dialer> ConnectManager<D> {
     /// each was dialled for, in the list's order. A session is here from its
     /// dial until the manager sees it end, so it may still be handshaking; a
     /// caller that reports sessions asks each one whether it is established.
-    /// The sessions of nodes are not here: they have no endpoint.
+    /// The sessions of nodes are not here: they have no endpoint, and a caller that pairs this
+    /// with [`Self::states`] by position must not find one in it. They are
+    /// [`Self::node_sessions`].
     pub fn sessions(&self) -> impl Iterator<Item = (&str, &D::Session)> + '_ {
         self.rows.iter().filter_map(|row| {
             let held = row.held.as_ref()?;
             Some((row.endpoint()?, &held.session))
+        })
+    }
+
+    /// The sessions this manager holds with the nodes it was asked to open by their zid, with
+    /// the zid each was dialled for, in the order the nodes were asked for. As
+    /// [`Self::sessions`], a session is here from its dial until the manager sees it end, so it
+    /// may still be handshaking. A node's session is a session of the node like any other: the
+    /// code that declares on the node's sessions and reports them reads these beside the others.
+    pub fn node_sessions(&self) -> impl Iterator<Item = (&DirectoryZid, &D::Session)> + '_ {
+        self.rows.iter().filter_map(|row| {
+            let held = row.held.as_ref()?;
+            match &row.key {
+                Key::Node(zid) => Some((zid, &held.session)),
+                Key::Endpoint(_) => None,
+            }
         })
     }
 
@@ -1728,6 +1745,16 @@ mod tests {
         std::assert_eq!(m.node_states().count(), 1);
         std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
         std::assert_eq!(m.states().count(), 1, "the endpoints are the list's alone");
+        let nodes: Vec<(DirectoryZid, String)> = m
+            .node_sessions()
+            .map(|(zid, session)| (*zid, session.clone()))
+            .collect();
+        std::assert_eq!(nodes, [(NODE_A, String::from("udp/10.0.0.9:7447@"))]);
+        std::assert_eq!(
+            m.sessions().count(),
+            1,
+            "a node's session is not an endpoint's: states and sessions pair by position"
+        );
 
         write(&CONTROL, &["udp/10.0.0.2:7447"]);
         m.tick(2);

@@ -62,7 +62,7 @@ use wz_session_mcu::admin_fixed::{
 };
 use wz_session_mcu::admin_host::{host_connect_writes_fixed, ConnectControl};
 use wz_session_mcu::app_layer::{NoReplies, SlotApp, SlotDispatch};
-use wz_session_mcu::connect_manager::{PeerStore, SlotState};
+use wz_session_mcu::connect_manager::{NodeRefusal, NodeState, PeerStore, SlotState};
 
 #[path = "support/alloc_count.rs"]
 mod alloc_count;
@@ -300,6 +300,15 @@ impl<const S: usize> Rig<S> {
         (accepted, dialled)
     }
 
+    /// How many sessions with a node this node asked for by its zid are established.
+    fn established_nodes(&self) -> usize {
+        let mut held = 0;
+        self.node.for_each_dialled_node(|_, session| {
+            held += usize::from(session.actions().is_established());
+        });
+        held
+    }
+
     /// What this node holds, for a failure message.
     fn describe(&self) -> String {
         let mut states = Vec::new();
@@ -522,6 +531,66 @@ fn a_written_endpoint_is_dialled_and_a_remote_write_makes_the_other_node_dial_ba
 /// task too large for its cell is refused, counted (`too_large`), and the session
 /// it was to run is given back, which is what the first run of this file saw with a
 /// cell sized by hand.
+/// A node asked to hold a node by its zid dials it at the locator the build declared for it,
+/// FOR that zid, and the session it holds is a session of the node like any other: the admin
+/// space is declared on it, and each node reports the other. Nothing is written to a connect
+/// list: an endpoint names no node, and this one is named by its zid alone (decision D6 of
+/// `docs/session-lifecycle-intent.md`, step 6.2b-4).
+///
+/// A build states how many nodes a node may be asked for (`MAX_PEER_NODES`, none by default),
+/// and under the default the open is refused for want of room, by name, which is what this
+/// asserts and returns on.
+#[test]
+fn a_node_opened_by_its_zid_is_dialled_for_it_declared_on_and_reported() {
+    static A: Statics<N> = Statics::new();
+    static B: Statics<N> = Statics::new();
+    let (_serial, link) = wz_link_lwip::lwip_test_link();
+    let link: LinkRef = Box::leak(Box::new(link));
+    let mut a = rig(&A, link, 0xa1, 7611);
+    let mut b = rig(&B, link, 0xb2, 7612);
+    let a_zid = wz_session_core::credential_identity::zid_from_wire(&[0xa1; 4])
+        .expect("four bytes spell a zid");
+
+    if wz_session_core::caps::MAX_PEER_NODES == 0 {
+        assert_eq!(b.node.open_node(a_zid, 0), Err(NodeRefusal::NoRoom));
+        return;
+    }
+    assert_eq!(
+        b.node.open_node(a_zid, 0),
+        Err(NodeRefusal::NoLocator),
+        "a node nobody advertised takes no row"
+    );
+    b.node
+        .declare_node(a_zid, "udp/127.0.0.1:7611", 0)
+        .expect("the directory has room for a hint");
+    assert_eq!(b.node.open_node(a_zid, 0), Ok(()));
+
+    run(&mut a, &mut b, "B's session to A establishes", |a, b| {
+        a.established() == (1, 0) && b.established_nodes() == 1
+    });
+    run(&mut a, &mut b, "each node reports the other", |a, b| {
+        a.s.status.session_count() == 1 && b.s.status.session_count() == 1
+    });
+    let mut states = Vec::new();
+    b.node
+        .for_each_node(|zid, state| states.push((*zid, state)));
+    assert_eq!(states, vec![(a_zid, NodeState::Live)]);
+    let mut endpoints = 0;
+    b.node.for_each_endpoint(|_, _| endpoints += 1);
+    assert_eq!(
+        endpoints, 0,
+        "the node is held by its zid, not by an endpoint"
+    );
+    assert_eq!(
+        b.established(),
+        (0, 0),
+        "no session was dialled for an endpoint"
+    );
+    assert_eq!(a.s.listener.counts().admitted, 1, "A admitted B's InitSyn");
+    // Said, so that a run that returned at the default limit is told from one that held a node.
+    println!("a node was held by its zid: {states:?}");
+}
+
 #[test]
 fn the_task_cell_holds_the_application_layer_of_a_session() {
     let events = std::mem::size_of::<SlotDispatch<Frozen, NoReplies, NoReplies, Sinks<N>>>();

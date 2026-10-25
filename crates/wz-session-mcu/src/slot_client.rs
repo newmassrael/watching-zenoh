@@ -178,6 +178,7 @@ where
         self.accepted
             .iter()
             .chain(self.manager.sessions().map(|(_, session)| session))
+            .chain(self.manager.node_sessions().map(|(_, session)| session))
     }
 
     /// How many sessions a peer opened to this node it holds now.

@@ -942,12 +942,33 @@ Each step lands with its own done-when; sizes are not estimated here.
      of a node that was built to hold none; a build that states more, and has
      hints, holds the node. The lwIP image builds, and the no-allocator link
      gate holds it; the Zephyr image is read on the hosted run.
-   - Next in step 6 (6.2b-5): the sources of hints (a build's declared ones, a
-     Hello), `wz-session-lwip` forwarding the feature, and the witness on the
-     image, which is a step of the lane (a node image built with room for one
-     node, a hint for a peer the lane runs, an open by its zid and the status
-     read after it). The lane's grammar is shared with the board, so the step
-     is the lane owner's to agree.
+   - 6.2b-5 (landed, first half): a node held by its zid is a session of the
+     node like any other. It was dialled and held, but nothing declared the
+     admin space on it and no node reported it: the slot node and the slot
+     client read the manager's `sessions()`, which is the endpoints' (and
+     must stay so, since the status pairs it with `states()` by position).
+     `ConnectManager::node_sessions()` is the nodes', and both read it beside
+     the others, so the open of a node ends in a session whose declarations
+     went out and which the admin root lists. The node (`SlotAdminNode`)
+     gains the build's source of hints, `declare_node(zid, locator)` (a hint
+     is where the zid may be, kept until the node is given another table),
+     `open_node`, `node_opener`, and `for_each_dialled_node` /
+     `for_each_node`. Witnessed on the lwIP loopback with two nodes: B,
+     built with room for two nodes, is told A's locator, refused a zid it has
+     no hint for (`NoLocator`), opens A by its zid, dials it FOR that zid,
+     and both report one session (leg `C1m admin node slot nodes`).
+     Decision: `wz-session-lwip` needs nothing forwarded (it re-exports the
+     manager's module whole, and the images build over it).
+   - Not done in step 6, and why. The Hello source of hints: no scouting
+     receive exists on the fixed profile (the slot node never reads a Hello),
+     so it waits on the scouting work on the cooperative engine and is that
+     track's to hand over. The witness on a built image: it is a step of the
+     lane (`admin_node_verdict.py`), whose grammar the board shares, so it is
+     the lane owner's to agree (an image built with room for one node and a
+     declared hint for the peer the lane runs, an open by its zid, then the
+     admin root's `sessions[]` read). The node's STATE (`NodeState`) is not in
+     the status documents: the heap profile has a status verb for it, the
+     fixed profile has none, and the sessions row is what an operator reads.
 7. **D7** transports 2 and 3 as values of the build configuration axis.
 
 ## 5. Open
