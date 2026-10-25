@@ -162,8 +162,11 @@ original reproduced by naming it. Three things follow from it:
   fixtures, by the interface functions asked of the interfaces of the machine and by a timer run on
   the clock; the time range parser refuses a duration that is a lone unit or that an instant cannot
   hold, the loader skips a file name that is its prefix and its suffix at once, the Windows adapter
-  filter moves on to the next adapter, and the timer drops an event whose future a clone shares,
-  where upstream panics or asks the first adapter for ever or ends the timer)
+  filter moves on to the next adapter, the Windows address conversion answers an error for a null
+  or short socket address and reads the scope identifier from its own field, the Windows interface
+  index is the one of the address's family, and the timer drops an event whose future a clone
+  shares, where upstream panics or asks the first adapter for ever or ends the timer or loses the
+  IPv6 addresses; the Windows half is run on a Windows host by the unit tests of `ffi/win.rs`)
   and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each

@@ -56,6 +56,7 @@ normal state once nothing remains.
 | api-compat-rust | conformance/differential/tests/zenoh_util_loader.rs | 75508e2028d7f1d4004f54984e27ed677a9c60e7 | R3632 |
 | api-compat-rust | conformance/differential/tests/zenoh_util_net.rs | e3a366075f62c066ad89dc15e14aee88bd941b8e | R3640 |
 | api-compat-rust | conformance/differential/tests/zenoh_util_timer.rs | 9ba872417af41a66f3dbd70809c5e8e479f193c3 | R3645 |
+| api-compat-rust | crates/wz-zenoh-util/src/ffi/win.rs | 05728f93f2df332aff377decec22187a31977621 | R3650 |
 | api-compat-rust | conformance/differential/tests/zenoh_protocol_network.rs | ff1b88360290937b8d76ca3785657a8c96299782 | R3545 |
 | api-compat-rust | conformance/differential/tests/zenoh_protocol_common.rs | 05f5b189986cf72e17d40c9e85a618c10c01f35c | R3540 |
 | api-compat-rust | conformance/differential/tests/zenoh_protocol_core.rs | cd3b503814501026e5a9f33b12173fa938a2ad90 | R3538 |

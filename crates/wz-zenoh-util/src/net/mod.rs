@@ -307,7 +307,10 @@ pub fn get_index_of_interface(addr: IpAddr) -> ZResult<u32> {
 
             use crate::ffi;
 
-            let buffer = get_adapters_addresses(winapi::shared::ws2def::AF_INET)?;
+            // Upstream asks for the IPv4 addresses only and answers the IPv6 index of the adapter:
+            // an IPv6 address is never found, and an IPv4 address gets the index zero from an
+            // adapter that has no IPv6. Here both families are read and each gets its own index.
+            let buffer = get_adapters_addresses(winapi::shared::ws2def::AF_UNSPEC)?;
 
             let mut next_iface = (buffer.as_ptr() as *mut IP_ADAPTER_ADDRESSES_LH).as_ref();
             while let Some(iface) = next_iface {
@@ -315,7 +318,11 @@ pub fn get_index_of_interface(addr: IpAddr) -> ZResult<u32> {
                 while let Some(ucast_addr) = next_ucast_addr {
                     if let Ok(ifaddr) = ffi::win::sockaddr_to_addr(ucast_addr.Address) {
                         if ifaddr.ip() == addr {
-                            return Ok(iface.Ipv6IfIndex);
+                            return Ok(if addr.is_ipv4() {
+                                iface.u.s().IfIndex
+                            } else {
+                                iface.Ipv6IfIndex
+                            });
                         }
                     }
                     next_ucast_addr = ucast_addr.Next.as_ref();
