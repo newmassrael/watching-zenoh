@@ -447,7 +447,7 @@ mod egress_tests;
 mod shed;
 #[cfg(test)]
 mod shed_tests;
-pub use egress::EgressBudget;
+pub use egress::{EgressBudget, EgressView};
 pub use shed::{ShedBatch, ShedRegistry};
 
 /// R2866 (open-debt item 751, step 2) — the router's faces, planes and tables
@@ -1881,7 +1881,10 @@ pub struct RouterForwarder {
     hats: RegionMap<Hat>,
     /// What the destinations hold back, and which faces are not read for it: the router's
     /// credit-based flow control (see [`egress`]).
-    credit: egress::Credit,
+    ///
+    /// Behind an `Rc` so that the capacity report, whose handler is stored inside this forwarder
+    /// and so cannot capture it, can read what is held ([`Self::egress_view`]).
+    credit: Rc<egress::Credit>,
     /// The sessions this router holds, as far as closing the newest of them for capacity needs
     /// them (see [`shed`]). Behind a lock and not in [`faces`](Self#structfield.faces), so that
     /// the capacity control, a task of the control runtime, can shed while the loop is starved.
@@ -2442,7 +2445,7 @@ impl RouterForwarder {
                 timestamping,
             ),
             faces: Rc::new(RefCell::new(HashMap::new())),
-            credit: egress::Credit::default(),
+            credit: Rc::new(egress::Credit::default()),
             shed_registry: Arc::default(),
             #[cfg(feature = "session-close-ingress")]
             joined_links: Rc::new(RefCell::new(HashMap::new())),

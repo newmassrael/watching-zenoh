@@ -161,6 +161,17 @@ fn wz_router_hat_serves_its_capacity_report_beside_upstreams_admin_space() {
         "\"sessions_held\":1,",
         "\"lease_ms\":10000,",
         "\"lease_at_risk\":false,",
+        // A router holds back nothing for a face that reads, and says so in numbers and not in
+        // nulls: it is a router, which is what a null would say it is not. The pool is its
+        // default budget.
+        "\"shed_over_capacity\":0,",
+        "\"egress_held\":0,",
+        "\"egress_held_bytes\":0,",
+        "\"egress_pool_bytes\":67108864,",
+        "\"egress_released\":0,",
+        "\"egress_abandoned\":0,",
+        "\"egress_destinations_closed\":0,",
+        "\"egress_gated_faces\":0}",
     ] {
         assert!(body.contains(fact), "the report lacks {fact}\n{body}");
     }

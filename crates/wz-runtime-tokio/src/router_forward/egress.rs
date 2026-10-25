@@ -62,6 +62,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -276,6 +277,27 @@ impl Credit {
     pub(super) fn routing_from(&self, id: FaceId) -> Routing<'_> {
         self.source.set(Some(id));
         Routing(self)
+    }
+}
+
+/// A read-only handle on what the router holds back (see [`RouterForwarder::egress_view`]).
+#[derive(Clone)]
+pub struct EgressView(Rc<Credit>);
+
+impl EgressView {
+    /// What the router holds back now, as the capacity report carries it.
+    pub fn counts(&self) -> wz_session_core::capacity::EgressCounts {
+        let credit = &*self.0;
+        let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+        wz_session_core::capacity::EgressCounts {
+            held: credit.held.get(),
+            held_bytes: credit.held_bytes.get(),
+            pool_bytes: credit.budget.pool_bytes,
+            released: count(credit.released.get()),
+            abandoned: count(credit.abandoned.get()),
+            destinations_closed: count(credit.closed.get()),
+            gated_faces: credit.gated.borrow().len(),
+        }
     }
 }
 
@@ -600,8 +622,21 @@ impl RouterForwarder {
     /// Where this router's faces are gated, in bytes held for a destination and in all
     /// ([`EgressBudget`]). Set before the router serves, as its other builders are.
     pub fn with_egress_budget(mut self, budget: EgressBudget) -> Self {
-        self.credit.budget = budget;
+        // Before the router serves and so before any view of the credit was handed out.
+        match Rc::get_mut(&mut self.credit) {
+            Some(credit) => credit.budget = budget,
+            None => log::warn!(
+                "wz-runtime-tokio: the egress budget was set after a view of it was taken; \
+                 it is kept as it was"
+            ),
+        }
         self
+    }
+
+    /// A handle that reads what the router holds back, for the capacity report: the handler of
+    /// that report is stored inside this forwarder, so it cannot hold the forwarder itself.
+    pub fn egress_view(&self) -> EgressView {
+        EgressView(Rc::clone(&self.credit))
     }
 
     /// What the held messages cost together, in bytes: the pool [`EgressBudget::pool_bytes`]

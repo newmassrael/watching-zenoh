@@ -7098,6 +7098,7 @@ async fn run_router_hat_until(
             let capacity_cfg = std::rc::Rc::clone(&host_cfg);
             let capacity_sessions = forwarder.sessions_view();
             let capacity_counters = session_ceiling.clone();
+            let capacity_egress = forwarder.egress_view();
             let capacity_handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
                 let read = wz::runtime_tokio::admin_read_permit(
                     &capacity_cfg.borrow().admin_permissions(),
@@ -7107,6 +7108,7 @@ async fn run_router_hat_until(
                     capacity_counters.refused_over_max_sessions(),
                     capacity_counters.refused_over_capacity(),
                     capacity_counters.shed_over_capacity(),
+                    Some(capacity_egress.counts()),
                 );
                 if answer_capacity_query(view, out, &capacity_zid, read, &report)
                     == AdminAnswerOutcome::DeniedRead

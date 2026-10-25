@@ -277,6 +277,42 @@ fn a_blocking_put_that_finds_no_room_is_held_and_leaves_when_there_is_room() {
     assert_eq!(rig.fwd.egress_abandoned(), 0, "and nothing was lost");
 }
 
+/// The view the capacity report reads says what the router holds, in the units the report names,
+/// and goes on saying it as the router holds and releases: it is a handle on the router's own
+/// counters and not a copy taken when it was made.
+#[test]
+fn the_egress_view_reads_what_the_router_holds_as_it_holds_and_releases() {
+    let rig = Rig::new(true);
+    let view = rig.fwd.egress_view();
+    let none = wz_session_core::capacity::EgressCounts {
+        pool_bytes: EgressBudget::default().pool_bytes,
+        ..Default::default()
+    };
+    assert_eq!(
+        view.counts(),
+        none,
+        "a router that holds nothing says zeros"
+    );
+
+    forward_frame(&rig.fwd, SOURCE, vec![blocking_put(b"first")]);
+    let held = view.counts();
+    assert_eq!(held.held, 1);
+    assert_eq!(held.held_bytes, rig.fwd.egress_held_bytes());
+    assert!(held.held_bytes > 0, "a held message costs bytes");
+    assert_eq!(held.released, 0);
+
+    rig.link.set_full(false);
+    rig.fwd.drain_egress();
+    let after = view.counts();
+    assert_eq!((after.held, after.held_bytes), (0, 0));
+    assert_eq!(after.released, 1);
+    assert_eq!(after.abandoned, 0);
+    assert_eq!(
+        after.pool_bytes, held.pool_bytes,
+        "the budget does not move"
+    );
+}
+
 /// What a destination holds leaves in the order it arrived, and a message that arrives when the
 /// destination has room again still goes behind what it holds: one source's messages to one
 /// destination are not reordered by the stage.

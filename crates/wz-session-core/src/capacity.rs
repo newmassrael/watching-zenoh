@@ -595,6 +595,33 @@ pub struct CapacityReport {
     /// Sessions the node ordered closed because it held more than it measured it can keep the
     /// leases of ([`AdmissionControl`]) (counter).
     pub shed_over_capacity: u64,
+    /// What the node holds back for destinations that have no room: `None` for a node that
+    /// holds nothing back (anything but a router), and not zeros.
+    pub egress: Option<EgressCounts>,
+}
+
+/// What a router holds back for the destinations that have no room, at one moment: its
+/// credit-based egress, which keeps a face that stopped reading from costing the faces that do
+/// not feed it. Gauges are readings of now; `released`, `abandoned` and `destinations_closed`
+/// only rise.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EgressCounts {
+    /// Messages held now, over every destination (gauge).
+    pub held: usize,
+    /// What they cost together, in bytes: the pool the router's budget is spent from (gauge).
+    pub held_bytes: usize,
+    /// The most bytes the router holds in all before it stops reading the faces that fed them:
+    /// the budget, so that `held_bytes` is read against it.
+    pub pool_bytes: usize,
+    /// Messages that were held and then sent when their destination had room (counter).
+    pub released: u64,
+    /// Messages that were held and did not leave: their destination was closed for not taking
+    /// them in time, or went away (counter).
+    pub abandoned: u64,
+    /// Destinations closed for not taking a held message within `wait_before_close` (counter).
+    pub destinations_closed: u64,
+    /// Faces that are not being read now, for a destination they fed that has no room (gauge).
+    pub gated_faces: usize,
 }
 
 impl CapacityReport {
@@ -642,7 +669,7 @@ impl CapacityReport {
              \"lateness_since_start_ms\":{},\"lateness_limit_ms\":{},\"lease_at_risk\":{},\
              \"refused_over_max_sessions\":{},\"refused_over_capacity\":{},\
              \"parked_senders\":{},\"park_budget\":{},\"park_refused\":{},\
-             \"shed_over_capacity\":{}}}",
+             \"shed_over_capacity\":{},",
             self.lateness_current_ms,
             self.lateness_last_minute_ms,
             self.lateness_since_start_ms,
@@ -654,7 +681,30 @@ impl CapacityReport {
             self.park_budget,
             self.park_refused,
             self.shed_over_capacity
-        )
+        )?;
+        // A node that holds nothing back says `null` for each, and not zero: a router that holds
+        // nothing and a node that cannot hold anything are different statements.
+        match self.egress {
+            Some(e) => write!(
+                w,
+                "\"egress_held\":{},\"egress_held_bytes\":{},\"egress_pool_bytes\":{},\
+                 \"egress_released\":{},\"egress_abandoned\":{},\
+                 \"egress_destinations_closed\":{},\"egress_gated_faces\":{}}}",
+                e.held,
+                e.held_bytes,
+                e.pool_bytes,
+                e.released,
+                e.abandoned,
+                e.destinations_closed,
+                e.gated_faces
+            ),
+            None => write!(
+                w,
+                "\"egress_held\":null,\"egress_held_bytes\":null,\"egress_pool_bytes\":null,\
+                 \"egress_released\":null,\"egress_abandoned\":null,\
+                 \"egress_destinations_closed\":null,\"egress_gated_faces\":null}}"
+            ),
+        }
     }
 }
 
@@ -905,6 +955,15 @@ mod tests {
             park_budget: 32,
             park_refused: 0,
             shed_over_capacity: 0,
+            egress: Some(EgressCounts {
+                held: 3,
+                held_bytes: 4_096,
+                pool_bytes: 67_108_864,
+                released: 17,
+                abandoned: 2,
+                destinations_closed: 1,
+                gated_faces: 4,
+            }),
         }
     }
 
@@ -920,7 +979,10 @@ mod tests {
              \"lateness_current_ms\":880,\"lateness_last_minute_ms\":1263,\
              \"lateness_since_start_ms\":1263,\"lateness_limit_ms\":6667,\"lease_at_risk\":false,\
              \"refused_over_max_sessions\":0,\"refused_over_capacity\":948,\
-             \"parked_senders\":0,\"park_budget\":32,\"park_refused\":0,\"shed_over_capacity\":0}"
+             \"parked_senders\":0,\"park_budget\":32,\"park_refused\":0,\"shed_over_capacity\":0,\
+             \"egress_held\":3,\"egress_held_bytes\":4096,\"egress_pool_bytes\":67108864,\
+             \"egress_released\":17,\"egress_abandoned\":2,\"egress_destinations_closed\":1,\
+             \"egress_gated_faces\":4}"
         );
     }
 
@@ -929,11 +991,19 @@ mod tests {
         let mut r = a_report();
         r.share_ppm = None;
         r.emission_floor_ns = None;
+        r.egress = None;
         let mut out = std::string::String::new();
         r.write_json(&mut out).unwrap();
         assert!(out.contains("\"share_ppm\":null,"));
         assert!(out.contains("\"emission_floor_ns\":null,"));
         assert!(!out.contains("\"share_ppm\":0"));
+        // A node that holds nothing back is not a router that holds nothing: seven nulls, ending
+        // the object, and not seven zeros.
+        assert!(out.ends_with(
+            "\"egress_held\":null,\"egress_held_bytes\":null,\"egress_pool_bytes\":null,\
+             \"egress_released\":null,\"egress_abandoned\":null,\
+             \"egress_destinations_closed\":null,\"egress_gated_faces\":null}"
+        ));
     }
 
     #[test]
@@ -965,8 +1035,8 @@ mod tests {
             .collect();
         assert_eq!(
             fields.len(),
-            21,
-            "the schema has twenty-one fields: {fields:?}"
+            28,
+            "the schema has twenty-eight fields: {fields:?}"
         );
         for f in &fields {
             assert!(

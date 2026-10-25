@@ -6968,6 +6968,7 @@ mod tests {
             park_budget: 32,
             park_refused: 0,
             shed_over_capacity: 0,
+            egress: None,
         }
     }
 

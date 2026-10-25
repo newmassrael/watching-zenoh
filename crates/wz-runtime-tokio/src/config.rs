@@ -1441,14 +1441,17 @@ impl WzConfig {
     /// What this node says about its capacity now ([`wz_session_core::capacity::CapacityReport`]):
     /// the declared contract and lease, the limit [`Self::effective_max_sessions`] derives, what
     /// the process has measured of its own keepalives and how late their timers were, with the
-    /// sessions held, the refusals and the sessions closed for capacity the caller counted. The
-    /// caller owns those four because the face table, the accept loop and the host's governor do.
+    /// sessions held, the refusals and the sessions closed for capacity the caller counted, and
+    /// what a router holds back for destinations with no room (`None` for a node that holds
+    /// nothing back). The caller owns those because the face table, the accept loop, the
+    /// capacity control and the router's credit do.
     pub fn capacity_report(
         &self,
         sessions_held: usize,
         refused_over_max_sessions: u64,
         refused_over_capacity: u64,
         shed_over_capacity: u64,
+        egress: Option<wz_session_core::capacity::EgressCounts>,
     ) -> wz_session_core::capacity::CapacityReport {
         #[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
         let (floor, median, late) = (
@@ -1511,6 +1514,7 @@ impl WzConfig {
             park_budget: park.1,
             park_refused: park.2,
             shed_over_capacity,
+            egress,
         }
     }
 

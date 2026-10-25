@@ -575,6 +575,13 @@ read permit denied answers nothing; the second was run with the permit ignored i
 | `park_budget` | report | senders | how many the node lets park at once (the bulkhead) |
 | `park_refused` | report | senders | counter: turned away because the budget was spent, answered congested at once |
 | `shed_over_capacity` | report | sessions | counter: ordered closed because the node held more than it measured it can keep the leases of |
+| `egress_held` | report | messages | messages held now for destinations that have no room, over every destination; `null` for a node that holds nothing back |
+| `egress_held_bytes` | report | bytes | what they cost together: the pool the router's budget is spent from |
+| `egress_pool_bytes` | report | bytes | the most the router holds in all before it stops reading the faces that fed them, so that `egress_held_bytes` is read against it |
+| `egress_released` | report | messages | counter: held, and sent when their destination had room |
+| `egress_abandoned` | report | messages | counter: held, and did not leave (their destination was closed for not taking them in time, or went away) |
+| `egress_destinations_closed` | report | destinations | counter: closed for not taking a held message within `wait_before_close` |
+| `egress_gated_faces` | report | faces | faces not being read now, for a destination they fed that has no room |
 
 **What the router does at the number.** One value, the effective `max_sessions`, is the smaller of the
 configured `transport/unicast/max_sessions` (upstream's key, enforced in the accept loop already, default
@@ -754,7 +761,8 @@ the relay, whose mapping of the payload for the destination cannot be undone and
 as before. A declaration, a query and a reply are rare and are not held. A link behind the reconnect wrapper
 (`reconnect.rs`) forwards the notice to its live link, as it forwards `wait_for_room`; a swap replaces the link
 and the waker with it, and the gated face's 25 ms recheck covers the interval. Counters are on the forwarder (`egress_held`, `egress_held_bytes`, `egress_released`, `egress_abandoned`,
-`egress_destinations_closed`, `egress_gated_faces`) and not in the capacity report yet. `wait_for_slot`, the
+`egress_destinations_closed`, `egress_gated_faces`) and are in the capacity report (7.4, `RouterForwarder::egress_view`,
+`null` for a node that holds nothing back). `wait_for_slot`, the
 wait for a pooled frame slot under `runtime-zero-copy`, is not touched.
 
 ### 7.6 Room as a reservation: what a sender waits for, and what it holds while it waits
