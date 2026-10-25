@@ -288868,6 +288868,60 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3672": {
+      "decision_summary": "A flow's framing units now say how they read, and the selector can name the flow's word. unit_readings (explained, residual, undecoded, each with units and bytes) is counted at ingest from the walk's own whole-unit stamp, on every flow object (fields 42) and every session row and flow (session_table 4), beside the zenoh verdict and not inside it: a session joined after its handshake reads unproven as arbitrary bytes do, and reads explained unit after unit where arbitrary bytes mostly do not. Measured: 3000 random datagrams read 6.3 percent explained (a Frame or Fragment takes the rest of its datagram), random TCP bytes form no unit, the share narrows as the unit count grows, and a compressed real session reads two of six units undecoded, so the count is evidence and no verdict. The selector gains zenoh (== != in), judged by the row's flow word and undecided where a plane holds no census; a kept fold whose selector reads it begins again when a word moves.",
+      "changes_bullets": [
+        "wz-session-core `passive.rs`: `UnitReading`, `UnitTally` and `ReadingEvidence`; the three classes partition a flow's units, classified from the unit's front record and the walk's `unit_read_whole` stamp.",
+        "wz-capture `session_table.rs`: `LinkIngest::observe_unit` counts a unit beside its messages at the six ingest sites (WebSocket, stream, QUIC stream, datagram, QUIC datagram, serial) and `observe_scouting` counts a scouting datagram as a unit of one message; `Link` and `SessionRow` carry `readings`.",
+        "Documents: the field document at 42 and `session_table` at 4 carry `unit_readings`; `selector_fields` at 3 and `selector_diagnose` at 8 list `zenoh`; the header and the C consumer follow; the ABI revision does not move.",
+        "`filter.rs`: `Field::Zenoh`, `Term::Zenoh` and `RowFacts::zenoh`; `node.rs`: `NodeCensus::words`, `SessionGrouping` words per list and `ListContext::zenoh`; `Dissection::list_zenoh_words` derives them from the list origins, not from a second enumeration.",
+        "`ordered_fold.rs`: `OrderedFold::reads_flow_word` and `SessionGrouping::continues_as`: a kept fold begins again on a moved flow word only when its selector reads `zenoh`."
+      ],
+      "verification_bullets": [
+        "`cargo test -p wz-capture --features dissect`: 1594 passed, 6 ignored, run after the rebase onto the tip; `cargo test -p wz-capi-dissect`: 227 passed.",
+        "Layer C1bo passed on a build host: the C consumer compiled with -Werror and ran at the new revisions, and the ABI pin read the same 65 symbols.",
+        "Clippy with -D warnings on wz-capture (dissect, all targets), wz-session-core (with the codec features) and wz-capi-dissect; `cargo check` of wz-capture without default features and of wz-analyze.",
+        "Measured and pinned by tests: 3000 random datagrams read 189 explained, 285 residual and 2526 undecoded; 5 random TCP streams form no unit; explained share of random flows has a maximum of 0.40 at 10 units, 0.30 at 20 and 0.24 at 50 over 600 flows each; the repository's compressed capture reads 4 explained and 2 undecoded units.",
+        "A fold whose selector reads zenoh begins again once when a foreign-version Init moves a flow's word, and one that does not folds the single new message and begins nothing."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "carry_forward_bullets": [
+        "No threshold of how many units are enough is declared: the spread by unit count is measured and pinned in session_table_tests, and a consumer draws the line from it.",
+        "A kept fold under a selector that reads zenoh begins again whenever a flow's word moves, at most a few times in a flow's life; the planes are not told which flows moved.",
+        "The since door reports a row whose flow word moved as revised, with no key saying the evidence behind the word changed.",
+        "A compressed zenoh session reads undecoded units because the lz4 body is refused; the count cannot tell it from arbitrary bytes by that class alone, and the verdict beside it is the answer."
+      ],
+      "publishable_decision_summary": "A flow's framing units now say how they read, and the selector can name the flow's word. unit_readings (explained, residual, undecoded, each with units and bytes) is counted at ingest from the walk's own whole-unit stamp, on every flow object (fields 42) and every session row and flow (session_table 4), beside the zenoh verdict and not inside it: a session joined after its handshake reads unproven as arbitrary bytes do, and reads explained unit after unit where arbitrary bytes mostly do not. Measured: 3000 random datagrams read 6.3 percent explained (a Frame or Fragment takes the rest of its datagram), random TCP bytes form no unit, the share narrows as the unit count grows, and a compressed real session reads two of six units undecoded, so the count is evidence and no verdict. The selector gains zenoh (== != in), judged by the row's flow word and undecided where a plane holds no census; a kept fold whose selector reads it begins again when a word moves.",
+      "publishable_changes_bullets": [
+        "wz-session-core `passive.rs`: `UnitReading`, `UnitTally` and `ReadingEvidence`; the three classes partition a flow's units, classified from the unit's front record and the walk's `unit_read_whole` stamp.",
+        "wz-capture `session_table.rs`: `LinkIngest::observe_unit` counts a unit beside its messages at the six ingest sites (WebSocket, stream, QUIC stream, datagram, QUIC datagram, serial) and `observe_scouting` counts a scouting datagram as a unit of one message; `Link` and `SessionRow` carry `readings`.",
+        "Documents: the field document at 42 and `session_table` at 4 carry `unit_readings`; `selector_fields` at 3 and `selector_diagnose` at 8 list `zenoh`; the header and the C consumer follow; the ABI revision does not move.",
+        "`filter.rs`: `Field::Zenoh`, `Term::Zenoh` and `RowFacts::zenoh`; `node.rs`: `NodeCensus::words`, `SessionGrouping` words per list and `ListContext::zenoh`; `Dissection::list_zenoh_words` derives them from the list origins, not from a second enumeration.",
+        "`ordered_fold.rs`: `OrderedFold::reads_flow_word` and `SessionGrouping::continues_as`: a kept fold begins again on a moved flow word only when its selector reads `zenoh`."
+      ],
+      "publishable_verification_bullets": [
+        "`cargo test -p wz-capture --features dissect`: 1594 passed, 6 ignored, run after the rebase onto the tip; `cargo test -p wz-capi-dissect`: 227 passed.",
+        "Layer C1bo passed on a build host: the C consumer compiled with -Werror and ran at the new revisions, and the ABI pin read the same 65 symbols.",
+        "Clippy with -D warnings on wz-capture (dissect, all targets), wz-session-core (with the codec features) and wz-capi-dissect; `cargo check` of wz-capture without default features and of wz-analyze.",
+        "Measured and pinned by tests: 3000 random datagrams read 189 explained, 285 residual and 2526 undecoded; 5 random TCP streams form no unit; explained share of random flows has a maximum of 0.40 at 10 units, 0.30 at 20 and 0.24 at 50 over 600 flows each; the repository's compressed capture reads 4 explained and 2 undecoded units.",
+        "A fold whose selector reads zenoh begins again once when a foreign-version Init moves a flow's word, and one that does not folds the single new message and begins nothing."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat",
+        "wire-spec-subset--watching-zenoh-mvp/3-scouting-layer",
+        "wire-spec-subset--watching-zenoh-mvp/4-1-control-messages"
+      ],
+      "publishable_carry_forward_bullets": [
+        "No threshold of how many units are enough is declared: the spread by unit count is measured and pinned in session_table_tests, and a consumer draws the line from it.",
+        "A kept fold under a selector that reads zenoh begins again whenever a flow's word moves, at most a few times in a flow's life; the planes are not told which flows moved.",
+        "The since door reports a row whose flow word moved as revised, with no key saying the evidence behind the word changed.",
+        "A compressed zenoh session reads undecoded units because the lz4 body is refused; the count cannot tell it from arbitrary bytes by that class alone, and the verdict beside it is the answer."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
