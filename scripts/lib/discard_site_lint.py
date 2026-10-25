@@ -90,6 +90,9 @@ SRC_FILES = [
     # rows in moved to a module of its own when the TCP run map came to use it
     # too; the gate follows the removal it already watched.
     ROOT / "crates" / "wz-session-core" / "src" / "chunk_log.rs",
+    # Open-debt item 924, D10 — the packed log the index entries and the TCP run map
+    # moved to; its release is the same removal the file above watches.
+    ROOT / "crates" / "wz-session-core" / "src" / "column_log.rs",
 ]
 
 REMOVAL = re.compile(r"\.(drain|remove|pop|pop_front|swap_remove|retain)\s*\(")
@@ -537,6 +540,69 @@ ALLOWED = [
         'let done = self.pending.remove(&key).expect("present");',
         "a chain COMPLETING. The reassembled message is returned to the "
         "caller on the next line -- the opposite of a discard",
+    ),
+    (
+        "wz-session-core/column_log.rs",
+        "self.chunks.pop_front();",
+        "Open-debt item 924, D10 — drops an EMPTY chunk: the branch is taken "
+        "only when the row returned above was the last the first chunk held, "
+        "so no row goes with it",
+    ),
+    (
+        "wz-session-core/column_log.rs",
+        "assert_eq!(log.pop_front(), Some(rising(i)));",
+        "Open-debt item 924, D10 — a TEST of the log itself: each released "
+        "row is compared with the one it must be, so nothing is lost unseen",
+    ),
+    (
+        "wz-session-core/column_log.rs",
+        "while log.pop_front().is_some() {}",
+        "Open-debt item 924, D10 — a TEST of the log itself: the log is "
+        "emptied, and the next line holds that it reads as empty",
+    ),
+    (
+        "wz-session-core/column_log.rs",
+        "assert!(log.pop_front().is_some());",
+        "Open-debt item 924, D10 — a TEST of the log itself: rows are released "
+        "to move its front, and the positions read after are compared with a "
+        "scan",
+    ),
+    (
+        "wz-session-core/column_log.rs",
+        "assert!(sorted.pop_front().is_some());",
+        "Open-debt item 924, D10 — a TEST of the log itself: rows are released "
+        "to move its front, and the positions read after are compared with a "
+        "scan",
+    ),
+    (
+        "wz-capture/tcp.rs",
+        "let _ = self.log.pop_front();",
+        "Open-debt item 924, D10 — `RunMap::pop_front`, the storage under the "
+        "release above: the run is read first and handed back to the caller "
+        "(`let run = self.get(0)?` ... `Some(run)`), so this drops the packed "
+        "copy of a value the function returns",
+    ),
+    (
+        "wz-capture/tcp.rs",
+        "let _ = self.skipped.pop_front();",
+        "Open-debt item 924, D10 — the overlap of the run `RunMap::pop_front` "
+        "has just released, which the run it hands back already carries "
+        "(`segment_offset`)",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "self.log.pop_front().map(UnitRow::from_columns)",
+        "Open-debt item 924, D10 — `UnitRows::pop_front`, the storage under "
+        "the doors that release a row: the oldest row leaves the packed log "
+        "and is returned to the caller as a `UnitRow`, which the caller "
+        "accounts for (`discard_oldest` hands the row back in its receipt)",
+    ),
+    (
+        "wz-session-core/passive_messages.rs",
+        "while rows.pop_front().is_some() {",
+        "Open-debt item 924, D10 — a TEST of the entry log: every row is "
+        "released and counted against the number pushed, so nothing is lost "
+        "unseen",
     ),
     (
         "wz-capture/tcp.rs",
