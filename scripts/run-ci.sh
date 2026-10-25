@@ -12253,8 +12253,14 @@ layer_c1bf_cargo_clippy_all_features() {
     # struct literal of either names the fields of the build its author made. An entry is a
     # DIRECTORY of `crates/`; a family crate keeps upstream's package name under a `wz-` directory,
     # so the package is read from the manifest below rather than assumed equal to the directory.
+    #
+    # `wz-session-mcu` joined it with the slot node's entities: the schedule's deadline of a
+    # publisher or a querier (`Active`'s `queries` and `state`) and the node's `get` rows exist with
+    # `query-get`, so a struct literal of either names the fields of the build its author made.
+    # Its features are independent axes, so `--all-features` is a real arm and no narrowing is
+    # needed.
     local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c wz-capi-core wz-capi-pico
-        wz-zenoh-buffers wz-zenoh-protocol)
+        wz-zenoh-buffers wz-zenoh-protocol wz-session-mcu)
 
     # Drift audit: re-derive the hazard class from source. A crate qualifies when
     # a `#[cfg(feature ...)]` attribute is immediately followed by a `pub <field>:`
