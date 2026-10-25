@@ -110,26 +110,44 @@ The test is a gate (Layer C1AY, a guarded step of exactly one test): each of fou
 figures against `BUDGET`. A deliberate `push.clone()` at the head of `route_push` turned all four red, naming
 the new figures (two to three allocations and 24 to 88 bytes more a forward); it was removed.
 
-The uncongested path as of this round, per forward of one Put:
+The uncongested path, per forward of one Put, as first read and after the buffer was sized from the message
+(section 6.1):
 
-| Case | Allocations | Bytes |
-|---|---|---|
-| droppable, 1 subscriber | 9 | 2 939 |
-| blocking, 1 subscriber | 11 | 3 067 |
-| droppable, 16 subscribers | 69 | 45 374 |
-| blocking, 16 subscribers | 86 | 46 462 |
+| Case | Allocations | Bytes first read | Bytes now |
+|---|---|---|---|
+| droppable, 1 subscriber | 9 | 2 939 | 569 |
+| blocking, 1 subscriber | 11 | 3 067 | 708 |
+| droppable, 16 subscribers | 69 | 45 374 | 7 454 |
+| blocking, 16 subscribers | 86 | 46 462 | 8 718 |
 
-The reading worth keeping: each further delivered copy costs about 2.8 KiB and four allocations (69 minus 9
-over fifteen more subscribers; the first copy costs 2.9 KiB), for a Put whose payload is eighteen bytes. The
-sizes of the allocations of one forward, recorded by a temporary instrument in the allocator (not kept), read
-per delivered copy `6 18 336 2469` bytes: the key expression, the payload, the cloned carrier, and a frame
-buffer of 2 469 bytes, which is `Push::MAX_ENCODED_BYTES` (2 456, the generated codec's reserve hint, not a
-bound) plus the 13 bytes of frame header and extension slack the frame writer reserves
-(`1 + 10 + 2 + worst_case_payload`; `dispatch_push_at` passes the constant as `worst_case_payload`). So 2.4 KiB
-of every 2.8 is a buffer an eighteen-byte Put does not fill; on glibc, whose thread cache serves sizes up to
-about 1 KiB, that is also an allocation the cache does not serve (not measured here). Sizing it from the message is a gain this instrument will read, and the next phases do not have to find
-it; it is a change to `wz-session-core`'s send path under its feature matrix and is its own round. It is also the
-figure phase 3's lock will be paid against: the lock has to cost less than the allocator it sits beside.
+The first reading: each further delivered copy cost about 2.8 KiB and four allocations (69 minus 9 over
+fifteen more subscribers; the first copy cost 2.9 KiB), for a Put whose payload is eighteen bytes. The sizes
+of the allocations of one forward, recorded by a temporary instrument in the allocator (not kept), read per
+delivered copy `6 18 336 2469` bytes: the key expression, the payload, the cloned carrier, and a frame buffer
+of 2 469 bytes, which is `Push::MAX_ENCODED_BYTES` (2 456, the generated codec's reserve hint, not a bound)
+plus the 13 bytes of frame header and extension slack the frame writer reserves
+(`1 + 10 + 2 + worst_case_payload`; `dispatch_push_at` passed the constant as `worst_case_payload`). So 2.4 KiB
+of every 2.8 was a buffer an eighteen-byte Put does not fill.
+
+### 6.1 Sizing the buffer from the message (round 3617)
+
+`frame_encode::push_capacity_hint` reads the bound off the message's own fields (every variable-width
+integer at ten bytes, text and byte fields at their length, each extension entry at the widest body its kind
+carries) and replaces the constant in `dispatch_push`, `dispatch_push_at` and the multicast group send. It is an
+UPPER bound, not an estimate, because the lend path asks a link for a slot of that size and a slot a byte too
+small is a refused send. A unit test holds it never under what `push_body` writes, for eight shapes (literal,
+empty, a 201 byte key, a 2 KiB payload, aliased, delete, and a Put and a Delete carrying every metadata slot),
+and far under the constant for the four plain ones.
+
+Allocations did not move (9, 11, 69, 86): the buffer is still one allocation per copy. Bytes fell by 3.4 to
+6.2 times (569 against 2 939 for one subscriber, 7 454 against 45 374 for sixteen), and a further copy now
+costs about 460 bytes in place of 2.8 KiB. What the figure does not say is what that is worth in time: the
+nanoseconds printed beside it swing by a factor of four between two runs on the same host and are not evidence.
+Where the allocation is now served from (glibc's thread cache holds sizes to about 1 KiB, and 569 bytes is under
+it, 2 469 was not) is the likely mechanism and was not measured.
+
+It is also the figure phase 3's lock will be paid against: the lock has to cost less than the allocator it sits
+beside.
 
 ## 7. What is not decided, and what could make this wrong
 

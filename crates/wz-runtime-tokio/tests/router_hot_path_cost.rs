@@ -253,10 +253,10 @@ fn measure(case: &str, congestion: CongestionControl, subscribers: usize, n: usi
 /// The cases and the allocations and bytes one forward of each costs, as of the commit that recorded
 /// them. `(case, congestion control, subscribers, allocations, bytes)`.
 const BUDGET: [(&str, CongestionControl, usize, usize, usize); 4] = [
-    ("drop_k1", CongestionControl::Drop, 1, 9, 2_939),
-    ("block_k1", CongestionControl::Block, 1, 11, 3_067),
-    ("drop_k16", CongestionControl::Drop, 16, 69, 45_374),
-    ("block_k16", CongestionControl::Block, 16, 86, 46_462),
+    ("drop_k1", CongestionControl::Drop, 1, 9, 569),
+    ("block_k1", CongestionControl::Block, 1, 11, 708),
+    ("drop_k16", CongestionControl::Drop, 16, 69, 7_454),
+    ("block_k16", CongestionControl::Block, 16, 86, 8_718),
 ];
 
 /// Frames per case. Few, because the figure is exact and not a mean: it is the same at 100 as at

@@ -496,7 +496,9 @@ where
         #[cfg(feature = "codec-push")]
         MulticastTxItem::Push { push, .. } => push_frame(
             meta,
-            wz_codecs::push::Push::MAX_ENCODED_BYTES,
+            // What THIS Push can encode to, as the unicast send reserves it, and not the codec's
+            // reserve hint for any message.
+            crate::frame_encode::push_capacity_hint(&push),
             crate::frame_encode::push_body(&push),
             tx_sn,
             params,

@@ -327,6 +327,103 @@ pub(crate) fn push_body(
     }
 }
 
+/// The most bytes `push` can encode to, read off its own fields: what a frame buffer for it needs to
+/// reserve, in place of [`Push::MAX_ENCODED_BYTES`], which is the generated codec's reserve hint for a
+/// message of any shape and is 2 456 bytes for an eighteen-byte Put (measured: it was 2.4 of the 2.8 KiB
+/// a delivered copy cost the router, and the whole of the difference between a Put to one subscriber and
+/// to sixteen).
+///
+/// An UPPER bound and not an estimate, because the lend path asks a link for a slot of this size
+/// (`send_lent`) and a slot too small is a refused send: every variable-width integer is counted at its
+/// widest, every text and byte field at its length, and every extension entry at the widest body its
+/// kind can carry. It is allowed to be too large by tens of bytes; the test beside it asserts it never
+/// falls under what [`push_body`] writes, for the shapes a message takes.
+///
+/// Its callers are the unicast send (`SessionLinkActions::dispatch_push` and `dispatch_push_at`) and the
+/// multicast group send (`multicast_tx_push`, behind `session-multicast`). Inside this crate alone only
+/// the second is reached: the unicast methods are `pub` entry points that the runtime crates call, and a
+/// build of this crate with the Push codec and `alloc` and none of `session-multicast` has no caller of
+/// its own (measured, with `codec-request`, `codec-response`, `declare-subscriber` and `liveliness-token`
+/// added one at a time: dead in each). The allowance is for that build and is not a decision that the
+/// function is optional.
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[cfg_attr(not(feature = "session-multicast"), allow(dead_code))]
+pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
+    use crate::wire::{parts::ExtEntryOwned, PushOwnedVariant};
+    use sce_forge_runtime::codec::{SceByteBuf, SceList, SceStr};
+    use wz_codecs::ext_entry::ExtEntryOwnedVariant;
+
+    // A variable-width integer is at most ten bytes on the wire.
+    const VLE: usize = 10;
+    // Header, and a margin for the part of the layout this function does not read field by field.
+    const FIXED: usize = 16;
+
+    fn ext_chain<'a>(entries: impl Iterator<Item = &'a ExtEntryOwned>) -> usize {
+        entries
+            .map(|entry| {
+                1 + match &entry.body {
+                    ExtEntryOwnedVariant::CodecZenohExtUnit(_)
+                    | ExtEntryOwnedVariant::Default { .. } => 0,
+                    ExtEntryOwnedVariant::CodecZenohExtZint(_) => VLE,
+                    ExtEntryOwnedVariant::CodecZenohExtZbuf(zbuf) => {
+                        VLE + SceByteBuf::as_slice(&zbuf.value).len()
+                    }
+                }
+            })
+            .sum()
+    }
+
+    let (_id, suffix) = crate::wireexpr_resolve::id_and_suffix(&push.keyexpr.body);
+    let mut bytes = FIXED + VLE + VLE + suffix.map_or(0, str::len);
+    if let Some(entries) = &push.extensions {
+        bytes += ext_chain(SceList::as_slice(entries).iter());
+    }
+    // A timestamp is a time, a zid length and a zid of at most sixteen bytes.
+    const TIMESTAMP: usize = VLE + VLE + 16;
+    bytes += match &push.body {
+        PushOwnedVariant::CodecZenohMsgPut(put) | PushOwnedVariant::Default { body: put, .. } => {
+            let mut put_bytes = FIXED;
+            if put.timestamp.is_some() {
+                put_bytes += TIMESTAMP;
+            }
+            if let Some(encoding) = &put.encoding {
+                put_bytes += VLE
+                    + VLE
+                    + encoding
+                        .schema
+                        .as_ref()
+                        .map_or(0, |schema| SceStr::as_str(schema).len());
+            }
+            if let Some(entries) = &put.extensions {
+                put_bytes += ext_chain(SceList::as_slice(entries).iter());
+            }
+            put_bytes += VLE;
+            if let Some(payload) = &put.payload {
+                put_bytes += SceByteBuf::as_slice(payload).len();
+            }
+            if let Some(slices) = &put.slices {
+                put_bytes += VLE
+                    + SceList::as_slice(slices)
+                        .iter()
+                        .map(|slice| VLE + VLE + SceByteBuf::as_slice(&slice.bytes).len())
+                        .sum::<usize>();
+            }
+            put_bytes
+        }
+        PushOwnedVariant::CodecZenohMsgDel(del) => {
+            let mut del_bytes = FIXED;
+            if del.timestamp.is_some() {
+                del_bytes += TIMESTAMP;
+            }
+            if let Some(entries) = &del.extensions {
+                del_bytes += ext_chain(SceList::as_slice(entries).iter());
+            }
+            del_bytes
+        }
+    };
+    bytes
+}
+
 /// The `OAM_LINKSTATE` body encoder — the linkstate-peer routing TX path
 /// (c3d) floods a self-built OAM carrier through the same
 /// `dispatch_network_message` chokepoint as the data-plane senders. Same
@@ -1575,6 +1672,10 @@ mod tests {
     use crate::response_final_build::build_response_final;
     #[cfg(feature = "codec-push")]
     use wz_codecs::push::Push;
+    // `vec!` and `Vec` for the tests that build a message of several shapes; `Vec` is the crate's
+    // `alloc` one, which the module root already imports.
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    use alloc::vec;
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-declare",
@@ -1604,6 +1705,83 @@ mod tests {
         }
         push.try_into_owned_in::<crate::wire::WireStorage>()
             .unwrap()
+    }
+
+    /// The capacity hint of a Push is an UPPER bound on what [`push_body`] writes, for the shapes a
+    /// Push takes, and not the codec's 2 456 byte constant: the lend path asks a link for a slot of
+    /// this size, and a slot a byte too small is a refused send, while a hint far above is the buffer
+    /// an eighteen-byte Put paid 2.4 KiB for.
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    #[test]
+    fn the_push_capacity_hint_is_never_under_what_the_body_writes_and_is_far_under_the_constant() {
+        use crate::metadata::PushMetadata;
+        use crate::push_build::{
+            build_push_aliased, build_push_del_literal, build_push_del_literal_with_meta,
+            build_push_literal, build_push_literal_with_meta,
+        };
+        use crate::qos::CongestionControl;
+        use crate::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
+
+        let long_key = "a/".repeat(100) + "z";
+        let everything = PushMetadata {
+            timestamp: Some(TimestampHint {
+                time: u64::MAX,
+                zid: vec![0xAB; 16],
+            }),
+            encoding: Some(EncodingHint {
+                packed_id: u32::MAX,
+                schema: Some("application/x-schema".repeat(3)),
+            }),
+            source_info: Some(SourceInfo {
+                zid: [0xCD; 16],
+                zid_len: 16,
+                eid: u32::MAX,
+                sn: u32::MAX,
+            }),
+            attachment: Some(vec![7; 300]),
+            qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block)),
+        };
+        let shapes: Vec<(&str, crate::wire::PushOwned)> = vec![
+            ("literal", build_push_literal("demo/x", b"payload").unwrap()),
+            ("empty", build_push_literal("", b"").unwrap()),
+            ("long key", build_push_literal(&long_key, b"p").unwrap()),
+            (
+                "2 KiB",
+                build_push_literal("demo/x", &vec![1u8; 2048]).unwrap(),
+            ),
+            (
+                "aliased",
+                build_push_aliased(u64::MAX >> 8, Some("tail"), b"v").unwrap(),
+            ),
+            ("delete", build_push_del_literal("demo/x").unwrap()),
+            (
+                "all metadata",
+                build_push_literal_with_meta("demo/x", b"payload", &everything).unwrap(),
+            ),
+            (
+                "delete with metadata",
+                build_push_del_literal_with_meta("demo/x", &everything).unwrap(),
+            ),
+        ];
+        for (shape, push) in shapes {
+            let mut wire = Vec::new();
+            {
+                let mut sink = TxSink::new(&mut wire);
+                push_body(&push)(&mut sink).expect("a Vec grows");
+            }
+            let hint = push_capacity_hint(&push);
+            assert!(
+                hint >= wire.len(),
+                "{shape}: the hint {hint} is under the {} bytes the body writes",
+                wire.len()
+            );
+            if matches!(shape, "literal" | "empty" | "delete" | "aliased") {
+                assert!(
+                    hint < Push::MAX_ENCODED_BYTES / 10,
+                    "{shape}: the hint {hint} is not far under the constant it replaces"
+                );
+            }
+        }
     }
 
     /// ARCHITECTURE section 9.1: the codec writes directly into a pool slot. A

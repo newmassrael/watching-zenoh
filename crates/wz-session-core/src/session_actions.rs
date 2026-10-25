@@ -10456,7 +10456,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // OWN ext_qos, as upstream's `congestion_control()` reads it
             // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
             crate::declare_ext_qos::read_push_qos(&push),
-            wz_codecs::push::Push::MAX_ENCODED_BYTES,
+            // What THIS message can encode to, and not the codec's reserve hint for any message.
+            crate::frame_encode::push_capacity_hint(&push),
             class,
             crate::frame_encode::push_body(&push),
         )
@@ -10480,7 +10481,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             priority,
             reliable,
             crate::declare_ext_qos::read_push_qos(push),
-            wz_codecs::push::Push::MAX_ENCODED_BYTES,
+            // What THIS message can encode to, and not the codec's reserve hint for any message
+            // (a delivered copy cost 2.4 KiB of buffer an eighteen-byte Put never filled).
+            crate::frame_encode::push_capacity_hint(push),
             class,
             as_encoder(&encode_body),
         )
