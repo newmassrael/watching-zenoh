@@ -3641,6 +3641,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-ext-pubsub"
+version = "0.1.0"
+dependencies = [
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-host-interop-tests"
 version = "0.1.0"
 dependencies = [
@@ -3894,6 +3901,7 @@ dependencies = [
  "wz-capture",
  "wz-codecs",
  "wz-codecs-test-support",
+ "wz-ext-pubsub",
  "wz-host-net",
  "wz-packet-socket",
  "wz-plugin-abi",

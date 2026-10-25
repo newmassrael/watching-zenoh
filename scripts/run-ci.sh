@@ -13410,12 +13410,16 @@ layer_c1bz_docs_resolve() {
     # wz-runtime-tokio 467 -> 466, by removal: the public `Permit` doc in
     # `writer_queue.rs` linked the private `LaneState::has_room`; it is plain
     # code there now (the one finding the line above left standing).
+    # wz-capi-pico 41 -> 40, by removal: the scouting plane's module doc linked
+    # `ScoutedHello`, which that file does not import, and names the scouted hello in plain words
+    # now that the window is the session's and not the tokio engine's (the cooperative scouting
+    # step of docs/capi-pico-on-coop-engine.md). The lane's own finding line named it.
     budget="
         wz:4
         wz-ap-demo:25
         wz-capi-c:40
         wz-capi-core:7
-        wz-capi-pico:41
+        wz-capi-pico:40
         wz-link-lwip:9
         wz-mcu-session-acceptor:1
         wz-routing-graph:5

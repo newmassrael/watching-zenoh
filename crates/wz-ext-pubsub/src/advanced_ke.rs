@@ -10,12 +10,16 @@
 //! drift on either side would silently break the recovery round-trip. zenoh's
 //! analogue is the `KE_ADV_PREFIX` / `KE_EMPTY` consts + the `ke_liveliness`
 //! builders (zenoh-ext admin.rs:48/58, advanced_publisher.rs:317-329).
+//!
+//! The functions are not gated by the advanced atoms' features: a runtime that hosts one half
+//! (the publisher without the subscriber, say) links only the ones it calls, and the grammar
+//! stays one text for every host.
 
 /// The `@adv` namespace prefix (zenoh `KE_ADV_PREFIX`, admin.rs:48).
-pub(crate) const KE_ADV_PREFIX: &str = "@adv";
+pub const KE_ADV_PREFIX: &str = "@adv";
 
 /// The publisher kind chunk under `@adv` (zenoh `pub`): `@adv/pub/...`.
-pub(crate) const KE_ADV_PUB: &str = "pub";
+pub const KE_ADV_PUB: &str = "pub";
 
 /// R2552 — the `<eid|uhlc>` discriminator's TIMESTAMPED spelling, i.e. the
 /// chunk that says a publisher orders by the timestamp's own id rather than by
@@ -29,44 +33,23 @@ pub(crate) const KE_ADV_PUB: &str = "pub";
 /// `@adv` SSOT precisely so the emit and the parse cannot disagree, and the
 /// chunk that decides WHICH SHAPE a token names is the last one that should
 /// have been left to two independent string literals.
-///
-/// R2818 — gated on its readers: the publisher's emit and the recovery-side
-/// parser. The module now compiles in a `-subscriber` build without recovery,
-/// where neither exists.
-#[cfg(any(
-    feature = "ext-pubsub-advanced-publisher",
-    feature = "ext-pubsub-advanced-recovery"
-))]
-pub(crate) const KE_ADV_UHLC: &str = "uhlc";
+pub const KE_ADV_UHLC: &str = "uhlc";
 
 /// The subscriber kind chunk under `@adv` (zenoh `KE_SUB`, admin.rs:56):
 /// `@adv/sub/...`. The sibling of [`KE_ADV_PUB`] — a subscriber that opts into
 /// detection publishes a liveliness token here so a third party can see it,
 /// exactly as a publisher does under `pub`.
 ///
-/// Gated on `-subscriber`, where its only consumer lives: the detection
-/// option on `AdvancedSubscriberOptions`.
-///
-/// R2819 — it was gated on `-recovery`, because the options type was, and this
-/// note said the gate would move when the options type was lifted to the
-/// `-subscriber` level. R2819 lifted it: upstream keeps
-/// `.subscriber_detection()` independent of `.recovery()`.
-#[cfg(feature = "ext-pubsub-advanced-subscriber")]
-pub(crate) const KE_ADV_SUB: &str = "sub";
+/// R2819 — upstream keeps `.subscriber_detection()` independent of `.recovery()`, so the
+/// reading of this chunk does not depend on the recovery plane.
+pub const KE_ADV_SUB: &str = "sub";
 
 /// The trailing empty meta chunk zenoh appends to the `@adv` suffix
 /// (`KE_EMPTY = ke!("_")`, zenoh admin.rs:58) "because of a routing matching bug"
 /// (advanced_publisher.rs:328-329): the wildcard-tailed detection / recovery queries
 /// (`.../@adv/*/<zid>/<eid>/**`) stay matchable through a zenoh router thanks to the
 /// concrete `_` chunk. wz mirrors it so the `@adv` namespace is byte-identical.
-///
-/// R2819 — `-subscriber` rather than `-recovery` on the reading side, with
-/// `subscriber_adv_ke`, its subscriber-side reader.
-#[cfg(any(
-    feature = "ext-pubsub-advanced-publisher",
-    feature = "ext-pubsub-advanced-subscriber"
-))]
-pub(crate) const KE_EMPTY: &str = "_";
+pub const KE_EMPTY: &str = "_";
 
 /// The publisher's own `@adv` KE: `<base>/@adv/pub/<zid_hex>/<discriminator>/_`
 /// (the cache queryable + liveliness token + heartbeat-beacon KE). `discriminator`
@@ -86,8 +69,7 @@ pub(crate) const KE_EMPTY: &str = "_";
 /// `check_outbound_keyexpr_pico_safe` is what stands between this and the wire.
 /// That check already ran on this expression; it now has a subject it did not
 /// have before, and a bad chunk surfaces as `AdvancedPublisherError::InvalidAdvKeyexpr`.
-#[cfg(feature = "ext-pubsub-advanced-publisher")]
-pub(crate) fn publisher_adv_ke(
+pub fn publisher_adv_ke(
     base: &str,
     zid_hex: &str,
     discriminator: &str,
@@ -112,8 +94,7 @@ pub(crate) fn publisher_adv_ke(
 /// `meta` is a caller-supplied key expression appended to convey application
 /// metadata; it may itself be multi-chunk, which is why it substitutes for the
 /// single `_` chunk rather than being appended after it.
-#[cfg(feature = "ext-pubsub-advanced-subscriber")]
-pub(crate) fn subscriber_adv_ke(base: &str, zid_hex: &str, eid: u32, meta: Option<&str>) -> String {
+pub fn subscriber_adv_ke(base: &str, zid_hex: &str, eid: u32, meta: Option<&str>) -> String {
     let tail = meta.unwrap_or(KE_EMPTY);
     format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_SUB}/{zid_hex}/{eid}/{tail}")
 }
@@ -122,15 +103,13 @@ pub(crate) fn subscriber_adv_ke(base: &str, zid_hex: &str, eid: u32, meta: Optio
 /// The `*` matches the publisher's `pub` kind chunk and the `**` its trailing `_`
 /// meta chunk, so it resolves a specific `(zid, eid)` source's cache (zenoh
 /// advanced_subscriber.rs:710-715).
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-pub(crate) fn recovery_get_ke(base: &str, zid_hex: &str, eid: u32) -> String {
+pub fn recovery_get_ke(base: &str, zid_hex: &str, eid: u32) -> String {
     format!("{base}/{KE_ADV_PREFIX}/*/{zid_hex}/{eid}/**")
 }
 
 /// The startup history GET KE: `<base>/@adv/**` (every cached sample under the
 /// `@adv` namespace, across all publishers).
-#[cfg(feature = "ext-pubsub-advanced-history")]
-pub(crate) fn history_get_ke(base: &str) -> String {
+pub fn history_get_ke(base: &str) -> String {
     format!("{base}/{KE_ADV_PREFIX}/**")
 }
 
@@ -142,14 +121,9 @@ pub(crate) fn history_get_ke(base: &str) -> String {
 /// R2816 — `AdvancedSubscriber::detect_publishers`, upstream's
 /// `zenoh-ext/src/advanced_subscriber.rs` @ `.declare_subscriber(self.subscriber.key_expr() / KE_ADV_PREFIX / KE_PUB / KE_STARSTAR)`.
 ///
-/// R2816 — renamed from `heartbeat_sub_ke`, and gated on the SUBSCRIBER rather
-/// than on recovery. The old name was one consumer's, and the recovery gate was
-/// that consumer's; the third consumer exists in every advanced-subscriber
-/// build, as upstream's does. Not ungated: every consumer is subscriber-side,
-/// and a publisher-only build compiles this module — C1aq caught the ungated
-/// first draft as dead code under `-D warnings`.
-#[cfg(feature = "ext-pubsub-advanced-subscriber")]
-pub(crate) fn publisher_detection_ke(base: &str) -> String {
+/// R2816 — renamed from `heartbeat_sub_ke`: the old name was one consumer's, and the third
+/// consumer exists in every advanced-subscriber build, as upstream's does.
+pub fn publisher_detection_ke(base: &str) -> String {
     format!("{base}/{KE_ADV_PREFIX}/{KE_ADV_PUB}/**")
 }
 
@@ -166,7 +140,7 @@ pub(crate) fn publisher_detection_ke(base: &str) -> String {
 /// holds pico's `in_big_wild` window open, and the chunk immediately after the
 /// base is always `@adv` — four bytes. Every derived channel of every base wz
 /// accepts is therefore safe, pinned by
-/// [`tests::no_accepted_base_derives_a_refused_adv_channel`] on the wz side and
+/// `tests::no_accepted_base_derives_a_refused_adv_channel` on the wz side and
 /// by `layer3_keyexpr_canon::canon_derived_adv_keyexprs_do_not_abort_pico`
 /// against a real `_z_keyexpr_canonize` in a subprocess.
 ///
@@ -177,13 +151,14 @@ pub(crate) fn publisher_detection_ke(base: &str) -> String {
 /// logs a warning and reports the outcome through
 /// `AdvancedSubscriber::heartbeat_channel_is_live` — instead of a silent
 /// amputation of the recovery plane.
-#[cfg(feature = "ext-pubsub-advanced-recovery")]
-pub(crate) fn adv_ke_is_outbound_safe(ke: &str) -> bool {
-    crate::keyexpr_canon::check_outbound_keyexpr_pico_safe(ke).is_ok()
+pub fn adv_ke_is_outbound_safe(ke: &str) -> bool {
+    wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(ke).is_ok()
 }
 
 #[cfg(test)]
 mod tests {
+    use super::{adv_ke_is_outbound_safe, history_get_ke, publisher_detection_ke, recovery_get_ke};
+
     /// R311y544 — this test used to assert the OPPOSITE, and pinned the
     /// premise of R311y543's degradation: that the derived heartbeat keyexpr
     /// for a `**`-tailed base is refused by wz's own outbound gate. The
@@ -193,10 +168,8 @@ mod tests {
     /// shows every derived `@adv` form canonizing to itself, and the gate has
     /// been narrowed to pico's actual bug window. So a `**`-tailed base — which
     /// is upstream's own `z_advanced_sub.c` default — gets its recovery plane.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
     #[test]
     fn a_double_star_base_derives_adv_keyexprs_the_outbound_gate_accepts() {
-        use super::{adv_ke_is_outbound_safe, publisher_detection_ke};
         assert!(adv_ke_is_outbound_safe("demo/example/**"));
         let derived = publisher_detection_ke("demo/example/**");
         assert_eq!(derived, "demo/example/**/@adv/pub/**");
@@ -216,15 +189,8 @@ mod tests {
     /// The predicate stays in the code as a guard — it is cheap, and the
     /// alternative to a wrong answer here is a remote SIGABRT — but this
     /// pins that it is a guard and not a live degradation.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
     #[test]
     fn no_accepted_base_derives_a_refused_adv_channel() {
-        #[cfg(feature = "ext-pubsub-advanced-history")]
-        use super::history_get_ke;
-        #[cfg(feature = "ext-pubsub-advanced-recovery")]
-        use super::recovery_get_ke;
-        use super::{adv_ke_is_outbound_safe, publisher_detection_ke};
-
         for base in [
             "demo/example/**",
             "**",
@@ -243,7 +209,6 @@ mod tests {
                 adv_ke_is_outbound_safe(&publisher_detection_ke(base)),
                 "heartbeat channel refused for base `{base}`"
             );
-            #[cfg(feature = "ext-pubsub-advanced-history")]
             assert!(
                 adv_ke_is_outbound_safe(&history_get_ke(base)),
                 "history channel refused for base `{base}`"
@@ -258,10 +223,8 @@ mod tests {
     /// The other half: an EXACT base derives a safe heartbeat keyexpr, so the
     /// degradation must not fire for it. Without this the fix could be "never
     /// declare a heartbeat subscriber" and the test above would still pass.
-    #[cfg(feature = "ext-pubsub-advanced-recovery")]
     #[test]
     fn an_exact_base_derives_a_heartbeat_ke_the_outbound_gate_accepts() {
-        use super::{adv_ke_is_outbound_safe, publisher_detection_ke};
         let derived = publisher_detection_ke("demo/example/thing");
         assert_eq!(derived, "demo/example/thing/@adv/pub/**");
         assert!(adv_ke_is_outbound_safe(&derived));

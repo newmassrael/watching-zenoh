@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-ext-pubsub — the rules of the advanced publisher and subscriber (atom 5.25), with no runtime
+# in them.
+#
+# zenoh-ext is an extension protocol over zenoh's own pub/sub, query and liveliness. Its mechanism
+# lived in `wz-runtime-tokio`, so an engine that is not the tokio one (the cooperative engine behind
+# the pico C ABI) could not host it without linking that crate. What is not a runtime's is here: the
+# `@adv` key grammar, the time-range grammar of a `_time` selector, the sample ring and the answer a
+# cache gives out of it, and (as they move) the sequencing and miss rules, the recovery plan and the
+# history merge. Nothing here reads a clock, spawns a task or holds a socket: time is an argument,
+# and each engine is a host that drives the rules (docs/advanced-pubsub-on-a-neutral-core.md).
+#
+# `std`, not `no_std`: the advanced plane is a host-profile capability (it is not in the MCU
+# profile), and the time-range grammar and the ring use `std::time` and `std::sync`.
+#
+# `rlib` only: a Rust-internal seam, like `wz-capi-port` and `wz-host-net`.
+
+[package]
+name = "wz-ext-pubsub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The rules of the advanced publisher and subscriber (the @adv key grammar, the _time selector, the sample cache), independent of any runtime."
+publish = false
+
+[lib]
+name = "wz_ext_pubsub"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+# The selector-parameter dialect and the outbound key-expression gate. `alloc` is the heap profile,
+# which is the only profile the advanced plane runs on.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
+
+[lints]
+workspace = true

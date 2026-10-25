@@ -962,6 +962,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-ext-pubsub"
+version = "0.1.0"
+dependencies = [
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-host-net"
 version = "0.1.0"
 dependencies = [
@@ -1036,6 +1043,7 @@ dependencies = [
  "tokio",
  "windows-sys",
  "wz-codecs",
+ "wz-ext-pubsub",
  "wz-host-net",
  "wz-runtime-core",
  "wz-session-core",

@@ -64,6 +64,7 @@ on:
       - "crates/wz-analyze/**"
       - "crates/wz-packet-socket/**"
       - "crates/wz-host-net/**"
+      - "crates/wz-ext-pubsub/**"
       - "crates/wz-tls-record/**"
       - "crates/wz-capture/**"
       - "crates/wz-cdylib-build/**"

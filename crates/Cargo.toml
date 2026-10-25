@@ -98,6 +98,10 @@ members = [
     # built from it: the one reading both the tokio runtime and the cooperative host use, so the
     # policy under a multicast socket is written once.
     "wz-host-net",
+    # The rules of the advanced publisher and subscriber that no runtime owns: the `@adv` key
+    # grammar, the `_time` selector and (as they move) the cache, sequencing and recovery rules,
+    # which the tokio runtime and the cooperative engine both host.
+    "wz-ext-pubsub",
     "wz-capi-dissect",
     # Round 2441 (open-debt item 693) — the C ABI over `wz-replay`'s PLAN half.
     # Its own crate rather than a door in `wz-capi-dissect` for the reason that

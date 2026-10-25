@@ -800,6 +800,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-ext-pubsub"
+version = "0.1.0"
+dependencies = [
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-link-lwip"
 version = "0.1.0"
 dependencies = [
@@ -847,6 +854,7 @@ dependencies = [
  "sce-rust-runtime",
  "tokio",
  "wz-codecs",
+ "wz-ext-pubsub",
  "wz-runtime-core",
  "wz-session-core",
  "zeroize",

@@ -50,7 +50,7 @@ The advanced plane is an extension protocol over the session's own pub/sub, quer
 primitives, as zenoh-ext is over zenoh. Its mechanism is therefore written once, **without a
 runtime**, and each engine is a host that drives it.
 
-- **A new crate, `wz-ext-advanced`.** Pure and std-based (a host profile: the advanced plane is
+- **A new crate, `wz-ext-pubsub`** (named after the catalog's `ext-pubsub-*` atoms). Pure and std-based (a host profile: the advanced plane is
   not in the MCU profile, so there is no `no_std` case to keep; the crate says std plainly). It holds
   the `@adv` grammar, the cache ring, the time-range grammar, the sequencing and miss rules, the
   history merge, the recovery plan and the beacon's content. It reads no clock and spawns nothing.
@@ -83,8 +83,14 @@ defect of this plane; it is documented on the plane and not worked around with a
 ## Steps
 
 1. **Neutral parts** (mechanical, no behaviour change): the `@adv` grammar, the cache ring, the time
-   range and the HLC and timestamp rules move to `wz-ext-advanced`; the tokio crate re-exports them
+   range and the HLC and timestamp rules move to `wz-ext-pubsub`; the tokio crate re-exports them
    at the same paths. The ring takes its "now" from its caller.
+   Done so far (ledger entry for the round that created the crate): the `@adv` key grammar
+   and the `_time` selector (`time_range`, with its nine tests) are in `wz-ext-pubsub`, ungated
+   and with the `ext-pubsub-advanced-*` gates dropped from the functions (a host links the ones
+   it calls); `wz-runtime-tokio` re-exports both at their old paths. Still to move: the cache
+   ring with `CacheStore` (its answer takes the NTP64 "now" it is given, and the shared-memory
+   field becomes the crate's one feature), then the HLC and timestamp rules.
 2. **The vocabulary**: events and commands of the publisher's beacon and of the subscriber, written
    as types with the tests that state each rule, from the code in `advanced_publisher.rs` and
    `advanced_subscriber.rs` and against zenoh-ext at the pinned version.
@@ -116,9 +122,11 @@ defect of this plane; it is documented on the plane and not worked around with a
 - Whether the crate's name should say "ext" (zenoh-ext is the reference) or the atom's number; the
   catalog's own wording governs and is read before the crate is created.
 - `time_range` exists twice: `wz-runtime-tokio`'s (wz's own grammar and tests) and the
-  `wz-zenoh-util` family member's (derived from upstream's file). They are not the same code.
+  `zenoh-util` family member's, in `crates/wz-zenoh-util` (derived from upstream's file). They are
+  not the same code.
   Settled with the session that lands the family (2026-10-25): the two readings are kept apart,
-  and `wz-runtime-tokio` and the neutral crate do not depend on `wz-zenoh-util`. The family copy is
+  and neither `wz-runtime-tokio` nor `wz-ext-pubsub` is to gain a dependency edge to the family
+  member (its package is named `zenoh-util`, its directory `crates/wz-zenoh-util`). The family copy is
   held to upstream by its own differential file and departs from it in two places (a lone `s` as a
   duration, and an overflow of the `start;duration` form that is an error and not a panic), so a
   test in the neutral crate that feeds both readings the same strings is welcome when the crate

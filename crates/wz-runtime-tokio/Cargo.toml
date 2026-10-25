@@ -2047,6 +2047,10 @@ log = "0.4"
 # which this crate re-exports rather than owns: the cooperative host reads the same table. Pulled
 # by `link-interfaces`, so every other build is byte-identical.
 wz-host-net = { path = "../wz-host-net", optional = true }
+# The rules of the advanced plane that no runtime owns (the `@adv` key grammar, the `_time`
+# selector), re-exported at the paths this crate has always had: the cooperative engine hosts the
+# same ones (docs/advanced-pubsub-on-a-neutral-core.md).
+wz-ext-pubsub = { path = "../wz-ext-pubsub" }
 # R311ei — the HMAC-SHA256 cookie primitive (hmac + sha2) moved to
 # wz-session-core::signing_key (runtime-agnostic, MCU-cross-compiled).
 # This crate keeps only the OS-entropy constructor (a free fn), so it
