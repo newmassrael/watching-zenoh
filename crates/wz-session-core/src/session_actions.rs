@@ -5326,6 +5326,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         })
     }
 
+    /// The remote peer's zid in its sixteen-byte form
+    /// ([`crate::credential_identity::zid_from_wire`]), or `None` before the INIT
+    /// exchange has named it. [`peer_zid`](Self::peer_zid) for a profile with no
+    /// allocator: the fixed-memory host reads which node a dial reached, and a
+    /// `close` names a node by this value (decision D6 of
+    /// `docs/session-lifecycle-intent.md`).
+    pub fn peer_zid_array(&self) -> Option<[u8; crate::credential_identity::CREDENTIAL_ZID_BYTES]> {
+        R::with_mutex_mut(&self.remote_peer_zid, |slot| {
+            slot.as_deref()
+                .and_then(crate::credential_identity::zid_from_wire)
+        })
+    }
+
     /// R311td — the remote peer's WhatAmI role as the 2-bit INIT wire form
     /// (0 Router, 1 Peer, 2 Client), or `None` before the INIT exchange populated
     /// it. The raw wire datum (see [`peer_whatami`](Self::peer_whatami)); the

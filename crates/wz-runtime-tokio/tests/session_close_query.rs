@@ -323,3 +323,34 @@ fn the_capability_query_lists_close_whatever_the_authority_says() {
         assert_eq!(bodies, vec![r#"{"verbs":["close","reset","status"]}"#]);
     }
 }
+
+/// A session names its peer in the sixteen-byte form a derived zid has, with no
+/// allocator: none before the INIT exchange, the zid once it is named, and one zid
+/// for its two spellings (trailing zero bytes), and none for bytes too long to be one.
+#[test]
+fn a_session_names_its_peer_in_sixteen_bytes() {
+    use wz_session_core::credential_identity::zid_from_wire;
+
+    let (actions, _engine) = established_session();
+    assert_eq!(
+        actions.peer_zid_array(),
+        None,
+        "no INIT exchange has named it"
+    );
+
+    let named = |bytes: &[u8]| {
+        *actions.remote_peer_zid.lock().expect("the zid slot") = Some(bytes.to_vec());
+        actions.peer_zid_array()
+    };
+    assert_eq!(named(&[0xc3, 0xd4]), zid_from_wire(&[0xc3, 0xd4]));
+    assert_eq!(
+        named(&[0xc3, 0xd4, 0, 0]),
+        zid_from_wire(&[0xc3, 0xd4]),
+        "trailing zeros are one zid"
+    );
+    assert_eq!(
+        named(&[0xc3, 0xd4]).map(|zid| zid[..2].to_vec()),
+        Some(vec![0xc3, 0xd4])
+    );
+    assert_eq!(named(&[1; 17]), None, "seventeen bytes name no zid");
+}
