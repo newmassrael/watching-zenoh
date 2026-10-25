@@ -63,9 +63,9 @@ and the engine begins, what each side owns, which engine, and in what order the 
 - **A port with two clients, one of which is not the zenoh-c ABI.** `wz-capi-port` is the
   vocabulary an ABI and an engine both name (ids, callback factories minted once per face, the held
   query, `SessionEngine` of about 35 methods, `SessionDrive`, the cancellation module). Only
-  `wz-capi-pico` goes through it. `wz-capi-c`, the zenoh-c ABI, does not name it at all: it depends
-  on `wz-runtime-tokio` directly (245 mentions) and `docs/capi-pico-on-coop-engine.md` D4 keeps it
-  there. The port states what it lacks: scouting and the advanced publisher
+  `wz-capi-pico` goes through it. The zenoh-c ABI does not: `wz-capi-c` has no dependency on
+  `wz-capi-port`, and `wz-capi-c` names `wz-runtime-tokio` 245 times (`docs/capi-pico-on-coop-engine.md`
+  D4 keeps it on that engine). The port states what it lacks: scouting and the advanced publisher
   (`engine.rs`:15-19), and `SessionDrive::as_any` is the downcast by which an ABI reaches what the
   port does not carry (`capi-pico-on-coop-engine.md` D7). **The port has no `open`**: each engine
   opens its own way (`wz_capi_core::drive::open_blocking`, `wz_capi_coop`'s `open`).
