@@ -120,11 +120,16 @@ The uncongested path as of this round, per forward of one Put:
 | blocking, 16 subscribers | 86 | 46 462 |
 
 The reading worth keeping: each further delivered copy costs about 2.8 KiB and four allocations (69 minus 9
-over fifteen more subscribers; the first copy costs 2.9 KiB), for a Put whose payload is eighteen bytes. Where
-the bytes go has not been read: the re-literalised carrier is built once and cloned per target
-(`deliver_to_client_subscribers`), and a frame buffer sized for the batch is the other candidate. It is the
-figure phase 3's lock will be paid against: the lock has to cost less than the allocator it sits beside, and
-a gain here is a gain the next phases do not have to find.
+over fifteen more subscribers; the first copy costs 2.9 KiB), for a Put whose payload is eighteen bytes. The
+sizes of the allocations of one forward, recorded by a temporary instrument in the allocator (not kept), read
+per delivered copy `6 18 336 2469` bytes: the key expression, the payload, the cloned carrier, and a frame
+buffer of 2 469 bytes, which is `Push::MAX_ENCODED_BYTES` (2 456, the generated codec's reserve hint, not a
+bound) plus the 13 bytes of frame header and extension slack the frame writer reserves
+(`1 + 10 + 2 + worst_case_payload`; `dispatch_push_at` passes the constant as `worst_case_payload`). So 2.4 KiB
+of every 2.8 is a buffer an eighteen-byte Put does not fill; on glibc, whose thread cache serves sizes up to
+about 1 KiB, that is also an allocation the cache does not serve (not measured here). Sizing it from the message is a gain this instrument will read, and the next phases do not have to find
+it; it is a change to `wz-session-core`'s send path under its feature matrix and is its own round. It is also the
+figure phase 3's lock will be paid against: the lock has to cost less than the allocator it sits beside.
 
 ## 7. What is not decided, and what could make this wrong
 
