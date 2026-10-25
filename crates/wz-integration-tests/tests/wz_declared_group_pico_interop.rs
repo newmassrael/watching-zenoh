@@ -280,7 +280,7 @@ fn the_multicast_node_counts_its_members_as_pico_joins_and_its_lease_runs_out() 
 /// as the payload, where `z_pub` cuts it to 255 bytes, so this is how a put longer than the batch is
 /// made.
 fn put_once(bytes: usize, fill: char) {
-    let value: String = std::iter::repeat_n(fill, bytes).collect();
+    let value = fill.to_string().repeat(bytes);
     let output = Command::new("stdbuf")
         .args(["-oL", "-eL"])
         .arg(zenoh_pico_cli_binary("z_put"))
