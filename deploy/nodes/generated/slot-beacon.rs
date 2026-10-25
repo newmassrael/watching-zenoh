@@ -6,7 +6,7 @@
 
 pub const NODE_ID: &str = "slot-beacon";
 /// The digest of the declaration file this was generated from; the node's facts note carries it.
-pub const DECLARATION_SHA256: &str = "5b3a93c590022a18af3bea9c4f4c79e76ee73e802b1be83db8a3090931c1d55c";
+pub const DECLARATION_SHA256: &str = "ed2b38f2ca26544ab12ad611e26d198e55d19c927e93056114cd7a5af2f79d8e";
 /// The routers the node dials, as locators.
 pub const DIALS: usize = 1;
 pub const DIALED: [&str; 1] = ["tcp/127.0.0.1:17474"];

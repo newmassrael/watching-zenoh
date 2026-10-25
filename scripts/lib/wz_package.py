@@ -708,7 +708,7 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
     env = {**os.environ, **(extra_env or {})}
     cwd = ROOT / "crates"
     if row.get("input") == "node":
-        env = {**env, "WZ_DECLARED_RS": str(node["generated"]), **node["limits"]}
+        env = {**env, "WZ_DECLARED_RS": str(node["generated"]), **node["limits"], **node["policies"]}
         cwd = (ROOT / row["manifest"]).parent
     run = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE, text=True, check=False, env=env)
     if run.returncode != 0:

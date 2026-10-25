@@ -168,7 +168,10 @@ pacing is on, and the cursor removes it; that part is worth landing as its own c
    discards it, and `CoopEngine::declarations_synced` says whether the established link's peer has
    been told everything. Not done there: the heap host's final-bookkeeping, which reads owned
    frames, has no reader on this engine, so `wait_declarations_stable` and a synced query are
-   not on it.
+   not on it. The slot node has a witness against stock peers: the declared node `slot-beacon`
+   states the policy in its `[policy]` table (two declarations a turn, 500 ms apart), and its Layer Z
+   leg sees a router that holds some of its tokens and not yet all, the last about a second after
+   the first.
 
 ## What a user of aliased sends must know
 

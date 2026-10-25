@@ -40,3 +40,14 @@ key = "lab/alive/c"
 [[entity]]
 kind = "liveliness-token"
 key = "lab/alive/d"
+
+# The node tells its peer what it declared in turns of two, half a second apart, and not in one go
+# (the `declaration-sync-pacing` policy): the five declarations of a session go out over a second, so
+# the witness can see a router that holds some of the tokens and not yet all, which is how it knows
+# the pacing is in the binary and not only that every declaration arrives.
+[limits]
+DECLARATION_SYNC_BURST_MESSAGES = 2
+DECLARATION_SYNC_INTERVAL_MS = 500
+
+[policy]
+declaration-sync-pacing = "on"

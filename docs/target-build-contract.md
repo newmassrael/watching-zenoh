@@ -498,9 +498,13 @@ fixed-memory slot profile, not the heap runtime. The first half, below, is `scri
 and `deploy/nodes/`; the second half is the entry's build step and the manifest role (what landed
 is stated after the structure).
 
-What landed: a declaration file per node (`[node]`, `[[endpoint]]`, `[[entity]]`, `[limits]`),
-validated against the target's own table (`TARGETS`), with `--emit` printing the `declared.rs` the
-node's code includes and `--env` printing the `WZ_LIMIT_*` budgets. The vocabulary is wider than
+What landed: a declaration file per node (`[node]`, `[[endpoint]]`, `[[entity]]`, `[limits]`,
+`[policy]`), validated against the target's own table (`TARGETS`), with `--emit` printing the
+`declared.rs` the node's code includes and `--env` printing the `WZ_LIMIT_*` budgets and the
+`WZ_POLICY_*` policies. A `[policy]` entry is a policy `deploy/wz-config.toml` declares and a value
+it takes (`"on"` or `"off"` for a bool, one of its choices otherwise); the build reads it as the
+environment variable that policy's Kconfig symbol names, a policy the node does not state is
+upstream's, and the SHA-256 the manifest verifies covers the table because it is the file's. The vocabulary is wider than
 the slot target builds (a listener over UDP or TLS, a group over a scheme that is not UDP, a
 queryable, querier or token on a node that is a member of a group): a word the target does not
 build is REFUSED with its reason, never dropped, so a declaration that asks for a subscriber cannot
@@ -535,7 +539,8 @@ workspace. Before anything is built the entry resolves the declaration (it valid
 target and its generated file is current), then builds the binary in the package's own directory
 with the declaration's features (`declared`, `tls` exactly when a dialled endpoint is `tls/`, `get`, `token` and
 `listen` and `multicast` as its entities and endpoints ask), the
-generated constants named in `WZ_DECLARED_RS` and the declaration's budgets as `WZ_LIMIT_*`. The
+generated constants named in `WZ_DECLARED_RS`, the declaration's budgets as `WZ_LIMIT_*` and its
+policies as `WZ_POLICY_*`. The
 package's own cargo config states the image's budgets, and the generator reads the same file as
 the baseline of what the declaration may say, so the generator and the build cannot disagree about
 the size of a table. The binary carries the ABI stamp (family `declared-node`) and a facts note

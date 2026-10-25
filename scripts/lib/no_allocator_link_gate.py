@@ -608,7 +608,9 @@ IMAGES: dict[str, Image] = {
             ),
             # A node that says it is alive: built with `token` (the `Declare(DeclToken)` written into
             # the lent slot, which is the part that had no allocator-free path), four tokens and a
-            # document, no budget of its own.
+            # document, and the paced replay of its declarations (the policy, a burst of two and an
+            # interval of 500 ms: what `wz_node.py --env slot-beacon` prints), which keeps a cursor
+            # and a next-turn time per session and so must link no allocator either.
             Build(
                 HOST,
                 None,
@@ -618,6 +620,9 @@ IMAGES: dict[str, Image] = {
                         "WZ_DECLARED_RS",
                         str(REPO_ROOT / "deploy" / "nodes" / "generated" / "slot-beacon.rs"),
                     ),
+                    ("WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES", "2"),
+                    ("WZ_LIMIT_DECLARATION_SYNC_INTERVAL_MS", "500"),
+                    ("WZ_POLICY_DECLARATION_SYNC_PACING", "on"),
                 ),
                 label="linux-x86_64-slot-beacon",
             ),

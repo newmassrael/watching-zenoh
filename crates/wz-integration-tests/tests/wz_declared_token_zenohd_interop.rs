@@ -14,7 +14,10 @@
 //! of the router that says when a token appears and when it is dropped, and `z_get_liveliness`, which
 //! asks the router for the tokens alive now. Two legs:
 //!
-//! - the watcher sees the four tokens appear when the node's session is established, and nothing else;
+//! - the watcher sees the four tokens appear when the node's session is established, in turns (the
+//!   node is declared with the `declaration-sync-pacing` policy, two declarations a turn and half a
+//!   second between turns, so a router that holds some of them and not all is seen, and the last comes
+//!   about a second after the first), and nothing else;
 //!   `z_get_liveliness` lists exactly those four on the pattern that covers them, exactly one on a key
 //!   that names one, and none on a key nothing declared, so the answer is the router's table and not an
 //!   echo; the node is stopped, and the watcher sees the four dropped and the table is empty, which is
@@ -218,6 +221,38 @@ fn expected() -> Vec<String> {
     KEYS.iter().map(|k| (*k).to_owned()).collect()
 }
 
+/// How long the node's replay of its declarations is held back between its turns, as its
+/// declaration states it (`DECLARATION_SYNC_INTERVAL_MS`), and how many turns the five declarations
+/// of a session (a document and four tokens, two to a turn) take: the first and the last token are
+/// two intervals apart.
+const REPLAY_SPAN_FLOOR: Duration = Duration::from_millis(800);
+
+/// How the four tokens reach the watcher: how long from the first of them to the last, and whether
+/// some look at the watcher found some of them and not yet all. A node that tells its declarations in
+/// one go has both at nothing; one that tells them in turns shows a router that holds a part.
+fn tokens_arrive(run: &Run) -> (Duration, bool) {
+    let until = Instant::now() + BUDGET;
+    let mut first: Option<Instant> = None;
+    let mut partial = false;
+    loop {
+        let seen = read_captured(&mut run.watcher.try_clone().expect("dup capture"));
+        let held = KEYS.iter().filter(|k| seen.contains(&appeared(k))).count();
+        if held > 0 && first.is_none() {
+            first = Some(Instant::now());
+        }
+        if held == KEYS.len() {
+            return (first.map_or(Duration::ZERO, |at| at.elapsed()), partial);
+        }
+        partial |= held > 0;
+        assert!(
+            Instant::now() < until,
+            "the four tokens appearing did not happen within {BUDGET:?}\n{}",
+            run.report()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 // wz-proves: none -- the declared node of the fixed-memory profile has no catalog atom: its token is the slot profile's own declaration (wz_session_core::lent_control::declare_token), and the catalog's liveliness atoms name the heap runtime's
 #[test]
 #[ignore = "binary-dep e2e (the packaged slot-beacon, which Layer Z makes, + zenohd and the stock liveliness examples); runs via --ignored"]
@@ -231,13 +266,23 @@ fn zenohd_sees_the_four_tokens_appear_and_drop_with_the_nodes_session() {
         router: router_out,
     };
 
-    // The four tokens appear, each once, and nothing else does.
-    wait_until(
-        "the four tokens appearing",
-        &run.watcher,
-        || run.report(),
-        |seen| KEYS.iter().all(|k| seen.contains(&appeared(k))),
+    // The four tokens appear, in turns: the router holds some of them before it holds all, and the
+    // last comes two intervals after the first. The node is built with the pacing policy on, and
+    // this is how the binary shows it.
+    let (span, partial) = tokens_arrive(&run);
+    assert!(
+        partial,
+        "a router that held some of the tokens and not all was never seen: the node told its \
+         declarations in one go\n{}",
+        run.report()
     );
+    assert!(
+        span >= REPLAY_SPAN_FLOOR,
+        "the four tokens arrived within {span:?}, less than the {REPLAY_SPAN_FLOOR:?} the node's \
+         turns are apart\n{}",
+        run.report()
+    );
+    // Each appears once, and nothing else does.
     assert!(
         wait_for_substring(&mut run.node.try_clone().expect("dup"), ESTABLISHED, BUDGET).is_ok(),
         "the node did not say its session was established\n{}",

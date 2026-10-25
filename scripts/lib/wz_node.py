@@ -11,6 +11,7 @@ it runs on, held to what the target profile can build.
     wz_node.py --write                  write those generated files
     wz_node.py --emit ID                print the generated `declared.rs` of the node ID
     wz_node.py --env ID                 print `WZ_LIMIT_<NAME>=<value>` for the budgets the node states
+                                        and `WZ_POLICY_<NAME>=<value>` for the policies it states
     wz_node.py --selftest
 
 A node is a declaration and not an argument vector. This module is the first half of turning one
@@ -41,6 +42,10 @@ not build the node.
                                kind = "liveliness-token", key (a literal, declared on every
                                session and kept by the router for as long as it lasts)
     [limits]                   <LIMIT_ID> = <integer>, any limit `deploy/wz-config.toml` declares
+    [policy]                   <policy-id> = "<value>", any policy `deploy/wz-config.toml` declares
+                               (`"on"` or `"off"` for a bool, one of its choices otherwise): the
+                               behaviour the node is built with where upstream's is not the one it
+                               wants; a policy left out is upstream's
 
 ## What it refuses, and why that is an exit and not a skip
 
@@ -87,7 +92,7 @@ ENTITY_KINDS = ("publisher", "subscriber", "queryable", "querier", "liveliness-t
 NODE_KEYS = {"id", "help", "target"}
 ENDPOINT_KEYS = {"role", "locator", "accepts", "members", "ttl"}
 ENTITY_KEYS = {"kind", "key", "document_bytes", "sample_bytes", "from", "period_ms", "timeout_ms", "reply_bytes"}
-TOP_KEYS = {"node", "endpoint", "entity", "limits"}
+TOP_KEYS = {"node", "endpoint", "entity", "limits", "policy"}
 
 # What each target builds. `slot` is the per-session fixed-memory profile of the cooperative runtime:
 # one dialled session, no allocator, queries answered from documents that are prefixes of one static.
@@ -183,6 +188,23 @@ def limit_values(decl: dict, stated: dict, image: dict[str, int]) -> tuple[dict[
     return ({**known, **{k: v for k, v in stated.items() if k in known and isinstance(v, int)}}, problems)
 
 
+def policy_problems(decl: dict, stated: dict) -> list[str]:
+    """Why a node's `[policy]` table is not a build a policy catalogue can give: a policy the
+    declaration does not have, a value that is not one the policy takes (`on` or `off` for a bool,
+    one of its choices otherwise)."""
+    known = {pol["id"]: pol for pol in decl["policies"]}
+    problems = []
+    for name, value in stated.items():
+        pol = known.get(name)
+        if pol is None:
+            problems.append(f"policy: `{name}` is not a policy deploy/wz-config.toml declares")
+            continue
+        allowed = ["on", "off"] if pol["kind"] == "bool" else list(pol["choices"])
+        if not isinstance(value, str) or value not in allowed:
+            problems.append(f"policy: `{name}` is {value!r}, one of {', '.join(allowed)}")
+    return problems
+
+
 def key_problem(key: str, limit: int) -> str | None:
     """Why `key` is not a key expression a node can declare, or None."""
     if not key:
@@ -216,6 +238,11 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
 
     values, problems = limit_values(decl, data.get("limits", {}), image_limits(target))
     out += problems
+    stated_policy = data.get("policy", {})
+    if not isinstance(stated_policy, dict):
+        out.append("policy: [policy] is a table of <policy-id> = \"<value>\"")
+    else:
+        out += policy_problems(decl, stated_policy)
 
     endpoints = data.get("endpoint", [])
     if not endpoints:
@@ -549,6 +576,16 @@ def env_lines(data: dict, decl: dict) -> list[str]:
     return [f"WZ_LIMIT_{k}={v}" for k, v in budgets(data, decl).items()]
 
 
+def policy_lines(data: dict, decl: dict) -> list[str]:
+    """The policies a node states, as the environment its build reads (`WZ_POLICY_<NAME>`), in the
+    catalogue's order. A policy it does not state is left out, which is upstream's. Valid input
+    only: `validate` ran first."""
+    stated = data.get("policy", {})
+    return [
+        f"{pol['kconfig']}={stated[pol['id']]}" for pol in decl["policies"] if pol["id"] in stated
+    ]
+
+
 # What a dialled endpoint's scheme asks of the device, by name from the facilities of
 # `deploy/wz-config.toml`. `tls` rides a TCP stream, so it asks for the same socket.
 SCHEME_FACILITIES = {"tcp": "sockets-tcp", "tls": "sockets-tcp", "udp": "sockets-udp"}
@@ -602,6 +639,7 @@ def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
         "generated": generated,
         "features": features_of(data),
         "limits": dict(line.split("=", 1) for line in env_lines(data, decl)),
+        "policies": dict(line.split("=", 1) for line in policy_lines(data, decl)),
         "facilities": facilities,
     }
 
@@ -1017,6 +1055,15 @@ document_bytes = 8
     refuses("a key the table does not have", SAMPLE.replace('help = "A node."', 'help = "A node."\ncolour = "red"'),
             "not a key of [node]")
     refuses("a table the declaration does not have", SAMPLE + "\n[extra]\nx = 1\n", "not a table")
+    refuses("a policy no catalogue has", SAMPLE + '\n[policy]\nno-such-policy = "on"\n', "not a policy")
+    refuses("a bool policy that is not on or off",
+            SAMPLE + '\n[policy]\ndeclaration-sync-pacing = "yes"\n', "one of on, off")
+    refuses("a bool policy stated as a number",
+            SAMPLE + "\n[policy]\ndeclaration-sync-pacing = 1\n", "one of on, off")
+    refuses("a choice policy outside its choices",
+            SAMPLE + '\n[policy]\nmulticast-loopback = "sometimes"\n', "one of os-default, on, off")
+    expect("a bool policy and a choice policy state their values",
+           problems(SAMPLE + '\n[policy]\ndeclaration-sync-pacing = "on"\nmulticast-loopback = "off"\n') == [])
     refuses("no help", SAMPLE.replace('help = "A node."\n', ""), "help is missing")
     refuses("no node table", "[limits]\nMAX_QUERYABLES = 2\n", "no [node] table")
 
@@ -1035,6 +1082,17 @@ document_bytes = 8
         expect("a tcp node is built with the declared feature alone and asks for a tcp socket",
                view["features"] == ["declared"] and view["facilities"] == ["sockets-tcp"])
         expect("a stated budget is the environment of the build", view["limits"] == {"WZ_LIMIT_MAX_QUERYABLES": "2"})
+        expect("a node that states no policy is built with upstream's", view["policies"] == {})
+        (directory / "n.toml").write_text(
+            SAMPLE + '\n[policy]\nmulticast-loopback = "off"\ndeclaration-sync-pacing = "on"\n',
+            encoding="utf-8",
+        )
+        write(decl, directory)
+        expect("a stated policy is the environment of the build, in the catalogue's order",
+               list(resolve("n", decl, directory)["policies"].items())
+               == [("WZ_POLICY_MULTICAST_LOOPBACK", "off"), ("WZ_POLICY_DECLARATION_SYNC_PACING", "on")])
+        (directory / "n.toml").write_text(SAMPLE, encoding="utf-8")
+        write(decl, directory)
         (directory / "n.toml").write_text(SAMPLE.replace("tcp/", "tls/"), encoding="utf-8")
         try:
             resolve("n", decl, directory)
@@ -1083,7 +1141,11 @@ def main(argv: list[str]) -> int:
         except (ValueError, OSError) as err:
             print(f"wz-node: REFUSED -- {err}", file=sys.stderr)
             return 1
-        print(emit(argv[1], data, digest(argv[1])) if argv[0] == "--emit" else "\n".join(env_lines(data, decl)))
+        print(
+            emit(argv[1], data, digest(argv[1]))
+            if argv[0] == "--emit"
+            else "\n".join(env_lines(data, decl) + policy_lines(data, decl))
+        )
         return 0
     print(__doc__, file=sys.stderr)
     return 2
