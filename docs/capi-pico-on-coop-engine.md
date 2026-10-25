@@ -482,6 +482,17 @@ it behaves as pico behaves in both of pico's threading arms.
   told, a replay cut short by a lost link begun again on the next, and the unpaced single turn.
   Not on this engine: `wait_declarations_stable` and a synced query, which need a reader of the
   peer's finals that the heap host's bookkeeping does not give an engine with no owned frames.
+- 2026-10-25: the advanced plane, surveyed (`docs/advanced-pubsub-on-a-neutral-core.md`). The
+  publisher and subscriber exist once, in the tokio crate (13,314 lines across five files, 8,486 of
+  them the subscriber), and a cooperative pico build may not link that crate. The structure chosen
+  is a new crate whose rules are pure and read no clock, the publisher's beacon and the subscriber
+  as state machines of events and commands that each engine drives as a host, and the
+  periodic jobs (heartbeat, periodic recovery queries, retention sweep) as ticks. The note
+  records what each unit depends on, the five steps (neutral parts, vocabulary, publisher,
+  subscriber, retirement behind a differential test and the interop tests), what a cooperative
+  host cannot give (a tick is as late as the next read), and the gates each step moves. Nothing is
+  built yet; `time_range` exists in two readings (the tokio crate's and the zenoh-util family's),
+  and the family's session agreed they stay apart.
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
