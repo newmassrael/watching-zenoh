@@ -93,8 +93,25 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
    not reach; four of the feature sets (token tables, shared memory, the lifecycle, all together) each showed a
    different leftover, because the code that uses a field exists only behind its feature. Check every feature
    combination that gates a moved field, not the default set alone.
-1. **Counters and HLC.** The `Cell` counters (about thirty of the 84 `Cell`s) become atomics; `NodeHlc` takes its own lock (it already
-   serialises a clock).
+1. **Counters and HLC (done, round 3623).** The 21 witnesses the router counts with (`data_seen`,
+   `data_sent`, `ingested`, `queries_seen`, `timed_out`, `fan_out_face_visits`, the shared-memory drops, the
+   interceptor drops and cache recomputes, the future-store pushes, the face-up replays, the multicast ingress
+   and peak witnesses, `recomputes`) are `Counter`s (`router_forward/counter.rs`), each an `AtomicUsize` with
+   `Relaxed` ordering: a counter publishes nothing and no decision on its value has to agree with another memory
+   location, so what it must keep is only that no increment is lost, which every read-modify-write does at any
+   ordering. Three tests: the three ways a count rises, eight threads of a hundred thousand bumps lose none, a
+   peak from many threads is the greatest offered. `NodeHlc` needed no lock of its own: it holds an
+   `Arc<NodeClock>` over `uhlc::HLC`, which serialises itself, and a compile-time test now holds it to
+   `Send + Sync`. What it cost, measured on the same host with the same command before and after (least of 25
+   repetitions of 20000 forwards, ns per forward; before | after, two runs): one subscriber, drop 498 |
+   456, 442; one subscriber, block 590 | 553, 529; sixteen, drop 4135 | 3971, 3898; sixteen, block 4780 |
+   4604, 4386. No increase: about eighteen atomic adds per forward are below the run-to-run spread of the host
+   (the two after-runs differ from one another by as much as either does from the before), and the faster figures
+   are noise, not a gain. Bytes and allocations per forward did not move (569, 708, 7454, 8718; 9, 11, 69, 86).
+   The other `Cell`s of the forwarder (the autoconnect policy, the query timeout, the interceptor version, the
+   multicast governance flag, the dirty flags of the hats) are state, not counts, and move with the tables in
+   phase 3; the forwarder is therefore still not `Sync` after this phase. Every `--lib router_forward` guard
+   moved by the three counter tests (229 231 252 234 237 276 229 231) and `node_clock::` by one (15).
 2. **The memo.** `data_routes` and `client_routes` get their own `RwLock`, as upstream's `data_routes` does.
 3. **Tables behind `RwLock`.** `Rc<RefCell<..>>` becomes `Arc<RwLock<..>>`; the forwarder is `Send + Sync`. Held
    queues and the credit move with it (`Cell` to atomic; the held queue to a `Mutex` per destination, so that

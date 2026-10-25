@@ -441,12 +441,14 @@ use wz_session_core::request_routing_context::{
 };
 use wz_session_core::wire::{PushOwned, PushOwnedVariant, RequestOwned, ResponseOwned};
 
+mod counter;
 mod egress;
 #[cfg(test)]
 mod egress_tests;
 mod shed;
 #[cfg(test)]
 mod shed_tests;
+use counter::Counter;
 pub use egress::{EgressBudget, EgressView};
 pub use shed::{ShedBatch, ShedRegistry};
 
@@ -2101,7 +2103,7 @@ pub struct RouterForwarder {
     /// Running total of `Request` (Query) messages received — the query-plane
     /// reception witness, the query twin of
     /// [`data_seen`](Self#structfield.data_seen).
-    queries_seen: Cell<usize>,
+    queries_seen: Counter,
     /// The per-query timeout (zenoh `queries_default_timeout`, 10s) — how long a
     /// forwarded Query's pending return entry lives before the C5c tick sweep
     /// abandons it. [`route_request`](Self::route_request) stamps each allocated
@@ -2113,11 +2115,11 @@ pub struct RouterForwarder {
     /// once per abandoned BRANCH (a queryable that never sent its `ResponseFinal`
     /// on a still-up face; a 2-branch fan expiring counts 2); `0` on a healthy
     /// mesh where every branch finalizes.
-    timed_out: Cell<usize>,
+    timed_out: Counter,
     /// Running total of link-state lists ingested across both nets — the
     /// control-plane work witness (the router twin of
     /// `LinkstateForwarder::ingested`).
-    ingested: Cell<usize>,
+    ingested: Counter,
     /// Running total of data `Push` messages received — the data-plane
     /// reception witness, raised ONCE on EVERY inbound Push before it is routed.
     /// The WITHIN-tier mesh fan-out that consumes it is
@@ -2127,7 +2129,7 @@ pub struct RouterForwarder {
     /// [`publish_client_push_into_meshes`](RouterForwarder::publish_client_push_into_meshes)),
     /// and, where the inter-region filter admits it, BRIDGED to the other mesh (C4,
     /// [`bridge_push_cross_mesh`](RouterForwarder::bridge_push_cross_mesh)).
-    data_seen: Cell<usize>,
+    data_seen: Counter,
     /// R2904 — running total of data `Push` messages this router SENT on, on any
     /// leg: the relay witness [`data_seen`](Self#structfield.data_seen) is not.
     /// Until R2901 the two coincided in the topologies that asserted on them,
@@ -2135,7 +2137,7 @@ pub struct RouterForwarder {
     /// R2901 a peer default-sends its own data to its gateway, as the pin's peer
     /// does, so a router RECEIVES pushes it correctly declines to relay, and "not
     /// relayed" is a question only this count answers.
-    data_sent: Cell<usize>,
+    data_sent: Counter,
     /// transport-shm -- what this router holds of the message it is routing: the chunk each
     /// shared-memory slice of it names, from the moment it is received until it has been routed
     /// (see [`crate::shm_relay`]). A router that sent a received descriptor on as it came would
@@ -2147,12 +2149,12 @@ pub struct RouterForwarder {
     /// for a link that did, and a router that opened a segment a stranger named would map
     /// whatever it was pointed at.
     #[cfg(feature = "transport-shm")]
-    shm_unnegotiated_dropped: Cell<usize>,
+    shm_unnegotiated_dropped: Counter,
     /// transport-shm -- messages this router did NOT send to a face because a descriptor in them
     /// names a chunk it holds nothing for (a stale or foreign segment). Upstream drops such a
     /// message when it is received; one send is counted per face it was meant for.
     #[cfg(feature = "transport-shm")]
-    shm_relay_dropped: Cell<usize>,
+    shm_relay_dropped: Counter,
     /// The double-delivery guard witness: the number of local-client deliveries a
     /// router DEFERRED because it does not carry the peer-source Push north
     /// (R2879: the crossing filter, until then the master gate) — the peer-source
@@ -2162,12 +2164,12 @@ pub struct RouterForwarder {
     /// correct guard delivers the client zero peer-source copies, same as a
     /// black-hole — only the counter distinguishes "suppressed a duplicate" from
     /// "never had one").
-    deferred_client_delivery: Cell<usize>,
+    deferred_client_delivery: Counter,
     /// The number of faces the fan-outs have looked at, summed over every message
     /// — the whole table for a tier-wide fan-out, the targets for a targeted one.
     /// The witness that the cost of delivering a message follows the faces it is
     /// delivered to and not the faces the router holds.
-    fan_out_face_visits: Cell<usize>,
+    fan_out_face_visits: Counter,
     /// I3c loop-safety witnesses (mcast-ingress DR plane). `mcast_ingress_federated`
     /// / `_suppressed` count the two arms of the per-keyexpr DR gate at
     /// [`route_push`](Self::route_push): federated when this router is the group DR
@@ -2179,11 +2181,11 @@ pub struct RouterForwarder {
     /// witnesses that the JOIN->router_member_zids->relay->set chain ran e2e (the
     /// leg the I3b unit tests inject past).
     #[cfg(feature = "router-multicast-faces")]
-    mcast_ingress_federated: Cell<usize>,
+    mcast_ingress_federated: Counter,
     #[cfg(feature = "router-multicast-faces")]
-    mcast_ingress_suppressed: Cell<usize>,
+    mcast_ingress_suppressed: Counter,
     #[cfg(feature = "router-multicast-faces")]
-    mcast_member_peak: Cell<usize>,
+    mcast_member_peak: Counter,
     /// §5.21 sub plane (S2/S3) — high-water count of DISTINCT on-group subscriber
     /// keyexprs this router has advertised into the unicast mesh via
     /// [`set_mcast_group_subs`](Self::set_mcast_group_subs). A non-zero peak
@@ -2192,7 +2194,7 @@ pub struct RouterForwarder {
     /// the router holds + advertised the on-group subscriber's interest before the
     /// Put — the sub-plane twin of the I3b `mcast_member_peak` barrier).
     #[cfg(feature = "router-multicast-faces")]
-    group_subs_advertised_peak: Cell<usize>,
+    group_subs_advertised_peak: Counter,
     /// Running total of unsolicited FUTURE `DeclareSubscriber` pushes emitted by
     /// [`push_future_subscription`](Self::push_future_subscription) — the y146
     /// proactive-push witness. Rises once per CLIENT face actually told a
@@ -2201,13 +2203,13 @@ pub struct RouterForwarder {
     /// BEFORE any subscriber asserts this to distinguish the FUTURE push from a
     /// raced CURRENT interest dump (which logs nothing either) — without it the
     /// two paths are separable only by timing.
-    future_pushes: Cell<usize>,
+    future_pushes: Counter,
     /// Running total of unsolicited FUTURE `DeclareQueryable` pushes emitted by
     /// [`push_future_queryable`](Self::push_future_queryable) — the R311y150
     /// query-plane proactive-push witness (twin of
     /// [`future_pushes`](Self#structfield.future_pushes)). Rises once per CLIENT
     /// face told a newly-learned OR completeness-flipped queryable.
-    future_qabl_pushes: Cell<usize>,
+    future_qabl_pushes: Counter,
     /// R2388 (open-debt item 671) — running total of declarations replayed to a
     /// face that has just come up, by
     /// [`replay_declarations_to_new_face`](Self::replay_declarations_to_new_face).
@@ -2215,14 +2217,14 @@ pub struct RouterForwarder {
     /// both emit the same unsolicited `DeclareSubscriber`, and without a counter
     /// of its own a test cannot tell "the router told the new face what it
     /// already knew" from "the router happened to learn something just then".
-    face_up_replays: Cell<usize>,
+    face_up_replays: Counter,
     /// §5.21 routing-token-tables (slice-4) — running total of unsolicited FUTURE
     /// `DeclareToken` pushes emitted by [`push_future_token`](Self::push_future_token),
     /// the token twin of [`future_pushes`](Self#structfield.future_pushes). Rises once
     /// per CLIENT face told a newly-learned token; the proactive-push witness a test
     /// asserts to separate the FUTURE push from a raced CURRENT dump.
     #[cfg(feature = "routing-token-tables")]
-    future_token_pushes: Cell<usize>,
+    future_token_pushes: Counter,
     /// §5.16 access-control INGRESS interceptor chain — consulted at the top of
     /// [`forward`](FaceForwarder::forward) before the kind-dispatch, the router twin
     /// of [`LinkstateForwarder`](crate::linkstate_forward)'s `ingress_interceptors`.
@@ -2272,20 +2274,20 @@ pub struct RouterForwarder {
     /// recomputes anyway" — a verdict assertion cannot, because bypassing the
     /// cache yields the same verdict.
     #[cfg(feature = "routing-interceptor-hotreload")]
-    interceptor_cache_recomputes: Cell<usize>,
+    interceptor_cache_recomputes: Counter,
     /// R2348 — the EGRESS recompute witness, a SEPARATE counter for the reason
     /// the single-net pair records: one relayed message computes an ingress table
     /// AND an egress table per destination, so a summed counter could not tell
     /// "the egress table was built" from "the ingress table was built twice".
     #[cfg(feature = "routing-interceptor-hotreload")]
-    egress_interceptor_cache_recomputes: Cell<usize>,
+    egress_interceptor_cache_recomputes: Counter,
     /// Count of messages ANY interceptor dropped on either flow — the router twin
     /// of the single-net `interceptor_dropped` witness (a coarse per-node count, not
     /// per-interceptor). `0` in any config with no ACL wired.
-    interceptor_dropped: Cell<usize>,
+    interceptor_dropped: Counter,
     /// Total spanning-tree recomputes flushed across both nets — the D2c
     /// coalescing witness (rises once per flushed net per tick window).
-    recomputes: Cell<usize>,
+    recomputes: Counter,
     /// The coalescing window the [`tick_period`](FaceForwarder::tick_period)
     /// reports — zenoh's `TREES_COMPUTATION_DELAY_MS`, shared with the
     /// linkstate forwarder's default.
@@ -2505,33 +2507,33 @@ impl RouterForwarder {
             #[cfg(feature = "router-multicast-faces")]
             group_subs: RefCell::new(HashSet::new()),
             pending: RefCell::new(PendingQueries::new()),
-            queries_seen: Cell::new(0),
+            queries_seen: Counter::new(),
             query_timeout: Cell::new(Self::DEFAULT_QUERY_TIMEOUT),
-            timed_out: Cell::new(0),
-            ingested: Cell::new(0),
-            data_seen: Cell::new(0),
-            data_sent: Cell::new(0),
+            timed_out: Counter::new(),
+            ingested: Counter::new(),
+            data_seen: Counter::new(),
+            data_sent: Counter::new(),
             #[cfg(feature = "transport-shm")]
             shm_relay: crate::shm_relay::ShmRelay::posix(),
             #[cfg(feature = "transport-shm")]
-            shm_unnegotiated_dropped: Cell::new(0),
+            shm_unnegotiated_dropped: Counter::new(),
             #[cfg(feature = "transport-shm")]
-            shm_relay_dropped: Cell::new(0),
-            deferred_client_delivery: Cell::new(0),
-            fan_out_face_visits: Cell::new(0),
+            shm_relay_dropped: Counter::new(),
+            deferred_client_delivery: Counter::new(),
+            fan_out_face_visits: Counter::new(),
             #[cfg(feature = "router-multicast-faces")]
-            mcast_ingress_federated: Cell::new(0),
+            mcast_ingress_federated: Counter::new(),
             #[cfg(feature = "router-multicast-faces")]
-            mcast_ingress_suppressed: Cell::new(0),
+            mcast_ingress_suppressed: Counter::new(),
             #[cfg(feature = "router-multicast-faces")]
-            mcast_member_peak: Cell::new(0),
+            mcast_member_peak: Counter::new(),
             #[cfg(feature = "router-multicast-faces")]
-            group_subs_advertised_peak: Cell::new(0),
-            future_pushes: Cell::new(0),
-            face_up_replays: Cell::new(0),
-            future_qabl_pushes: Cell::new(0),
+            group_subs_advertised_peak: Counter::new(),
+            future_pushes: Counter::new(),
+            face_up_replays: Counter::new(),
+            future_qabl_pushes: Counter::new(),
             #[cfg(feature = "routing-token-tables")]
-            future_token_pushes: Cell::new(0),
+            future_token_pushes: Counter::new(),
             ingress_interceptors: RefCell::new(InterceptorChain::new()),
             egress_interceptors: RefCell::new(InterceptorChain::new()),
             interceptor_version: Cell::new(0),
@@ -2540,11 +2542,11 @@ impl RouterForwarder {
             #[cfg(feature = "routing-interceptor-hotreload")]
             egress_keyexpr_cache: RefCell::new(hashbrown::HashMap::new()),
             #[cfg(feature = "routing-interceptor-hotreload")]
-            interceptor_cache_recomputes: Cell::new(0),
+            interceptor_cache_recomputes: Counter::new(),
             #[cfg(feature = "routing-interceptor-hotreload")]
-            egress_interceptor_cache_recomputes: Cell::new(0),
-            interceptor_dropped: Cell::new(0),
-            recomputes: Cell::new(0),
+            egress_interceptor_cache_recomputes: Counter::new(),
+            interceptor_dropped: Counter::new(),
+            recomputes: Counter::new(),
             trees_delay: Self::DEFAULT_TREES_DELAY,
             clock,
         }
@@ -2851,7 +2853,7 @@ impl RouterForwarder {
     /// Count one data `Push` that left this router, at the two send seams.
     fn note_sent(&self, was_push: bool) {
         if was_push {
-            self.data_sent.set(self.data_sent.get() + 1);
+            self.data_sent.bump();
         }
     }
 
@@ -2902,8 +2904,7 @@ impl RouterForwarder {
             .shm_relay
             .open_inbound_message(actions.as_deref(), message);
         if pass.is_none() {
-            self.shm_unnegotiated_dropped
-                .set(self.shm_unnegotiated_dropped.get() + 1);
+            self.shm_unnegotiated_dropped.bump();
         }
         pass
     }
@@ -2928,7 +2929,7 @@ impl RouterForwarder {
             {
                 RelaySend::Sent => true,
                 RelaySend::Dropped => {
-                    self.shm_relay_dropped.set(self.shm_relay_dropped.get() + 1);
+                    self.shm_relay_dropped.bump();
                     false
                 }
                 RelaySend::Failed => false,
@@ -3180,8 +3181,7 @@ impl RouterForwarder {
         };
         let verdict = chain.admit(&ctx, msg);
         if !verdict.is_admitted() {
-            self.interceptor_dropped
-                .set(self.interceptor_dropped.get() + 1);
+            self.interceptor_dropped.bump();
         }
         verdict.is_admitted()
     }
@@ -3221,7 +3221,7 @@ impl RouterForwarder {
             let mut cache = self.ingress_keyexpr_cache.borrow_mut();
             let recomputes = &self.interceptor_cache_recomputes;
             let mut compute = || {
-                recomputes.set(recomputes.get() + 1);
+                recomputes.bump();
                 chain.compute_keyexpr_cache(&ctx, &keyexpr)
             };
             let slot = cache
@@ -3267,7 +3267,7 @@ impl RouterForwarder {
             let mut cache = self.egress_keyexpr_cache.borrow_mut();
             let recomputes = &self.egress_interceptor_cache_recomputes;
             let mut compute = || {
-                recomputes.set(recomputes.get() + 1);
+                recomputes.bump();
                 chain.compute_keyexpr_cache(&ctx, &keyexpr)
             };
             let slot = cache
@@ -3585,8 +3585,7 @@ impl RouterForwarder {
     ) -> Result<usize, CodecError> {
         let mut sent = 0;
         for (id, state) in self.tables.faces.borrow().iter() {
-            self.fan_out_face_visits
-                .set(self.fan_out_face_visits.get() + 1);
+            self.fan_out_face_visits.bump();
             if state.tier != tier {
                 continue;
             }
@@ -3623,8 +3622,7 @@ impl RouterForwarder {
         let mut sent = 0;
         let faces = self.tables.faces.borrow();
         for id in targets {
-            self.fan_out_face_visits
-                .set(self.fan_out_face_visits.get() + 1);
+            self.fan_out_face_visits.bump();
             let Some(state) = faces.get(id) else {
                 continue;
             };
@@ -3662,8 +3660,7 @@ impl RouterForwarder {
         // gate; empty chain (no ACL) is a no-op fast path.
         let verdict = self.admit_outbound(id, state, &msg);
         if let Some(kind) = verdict.dropped_by() {
-            self.interceptor_dropped
-                .set(self.interceptor_dropped.get() + 1);
+            self.interceptor_dropped.bump();
             // R2371 — the router twin of the linkstate forwarder's
             // attribution: charge the drop to the DESTINATION face's own
             // session on upstream's per-reason counter.
@@ -3792,7 +3789,7 @@ impl RouterForwarder {
         // each caller because this is the one site where an ingest's `Changes`
         // originate, so a later tier cannot be added and silently miss it.
         self.emit_dial_intents(net, &changes);
-        self.ingested.set(self.ingested.get() + 1);
+        self.ingested.bump();
         changes
     }
 
@@ -5414,7 +5411,7 @@ impl RouterForwarder {
         let carrier = {
             let mut carrier = carrier;
             if self.shm_relay.into_plain_bytes(&mut carrier).is_err() {
-                self.shm_relay_dropped.set(self.shm_relay_dropped.get() + 1);
+                self.shm_relay_dropped.bump();
                 return;
             }
             carrier
@@ -5488,7 +5485,7 @@ impl RouterForwarder {
         } else {
             &self.mcast_ingress_suppressed
         };
-        counter.set(counter.get() + 1);
+        counter.bump();
         federate
     }
     /// Without `router-multicast-faces` there is no ingress plane, so nothing
@@ -5777,8 +5774,7 @@ impl RouterForwarder {
             // client sub exists, so the witness reflects a delivery actually
             // suppressed, not a vacuous defer on a router hosting no clients.
             if self.any_client_sub() {
-                self.deferred_client_delivery
-                    .set(self.deferred_client_delivery.get() + 1);
+                self.deferred_client_delivery.bump();
             }
             return;
         }
@@ -5975,7 +5971,7 @@ impl RouterForwarder {
             return;
         };
         let new_children = net.borrow_mut().compute_trees();
-        self.recomputes.set(self.recomputes.get() + 1);
+        self.recomputes.bump();
         if new_children.is_empty() {
             return;
         }
@@ -6075,7 +6071,7 @@ impl RouterForwarder {
             match build_declare_subscriber(id, 0, Some(&reply_ke)) {
                 Ok(decl) => {
                     self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
-                    self.future_pushes.set(self.future_pushes.get() + 1);
+                    self.future_pushes.bump();
                 }
                 Err(e) => log::warn!(
                     "router forward: future sub push build failed for {reply_ke:?}: {e:?}"
@@ -6108,8 +6104,7 @@ impl RouterForwarder {
             match build_declare_token(id, 0, Some(&reply_ke)) {
                 Ok(decl) => {
                     self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
-                    self.future_token_pushes
-                        .set(self.future_token_pushes.get() + 1);
+                    self.future_token_pushes.bump();
                 }
                 Err(e) => log::warn!(
                     "router forward: future token push build failed for {reply_ke:?}: {e:?}"
@@ -6189,8 +6184,7 @@ impl RouterForwarder {
             match build_declare_queryable_with_id_info(id, &reply_ke, info) {
                 Ok(decl) => {
                     self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
-                    self.future_qabl_pushes
-                        .set(self.future_qabl_pushes.get() + 1);
+                    self.future_qabl_pushes.bump();
                 }
                 Err(e) => log::warn!(
                     "router forward: future qabl push build failed for {reply_ke:?}: {e:?}"
@@ -8011,7 +8005,7 @@ impl RouterForwarder {
         if reaped.is_empty() {
             return;
         }
-        self.timed_out.set(self.timed_out.get() + reaped.len());
+        self.timed_out.add(reaped.len());
         synthesize_expired_query_returns(
             &reaped,
             |face| match classify_inbound(&self.tables.faces.borrow(), face) {
@@ -8110,7 +8104,7 @@ impl RouterForwarder {
             match build_declare_subscriber(0, 0, Some(&keyexpr)) {
                 Ok(decl) => {
                     self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
-                    self.face_up_replays.set(self.face_up_replays.get() + 1);
+                    self.face_up_replays.bump();
                 }
                 Err(e) => log::warn!(
                     "router forward: face-up sub replay build failed for {keyexpr:?}: {e:?}"
@@ -8128,7 +8122,7 @@ impl RouterForwarder {
             match build_declare_queryable_with_info(&keyexpr, info) {
                 Ok(decl) => {
                     self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
-                    self.face_up_replays.set(self.face_up_replays.get() + 1);
+                    self.face_up_replays.bump();
                 }
                 Err(e) => log::warn!(
                     "router forward: face-up qabl replay build failed for {keyexpr:?}: {e:?}"
@@ -8185,7 +8179,7 @@ impl RouterForwarder {
                 match build_declare_token(0, 0, Some(&keyexpr)) {
                     Ok(decl) => {
                         self.send_one_to_face(face, NetworkMessage::Declare(Box::new(decl)));
-                        self.face_up_replays.set(self.face_up_replays.get() + 1);
+                        self.face_up_replays.bump();
                     }
                     Err(e) => log::warn!(
                         "router forward: face-up token replay build failed for {keyexpr:?}: {e:?}"
@@ -8655,7 +8649,7 @@ impl FaceForwarder for RouterForwarder {
         {
             return;
         }
-        self.queries_seen.set(self.queries_seen.get() + 1);
+        self.queries_seen.bump();
         self.route_request(
             MCAST_INGRESS_FACE,
             mcast_ingress_region(),
@@ -8687,8 +8681,7 @@ impl FaceForwarder for RouterForwarder {
         );
         // I3c witness: high-water on-group ROUTER member count. A non-zero peak
         // means this router saw a peer router on the group (the relay chain ran).
-        self.mcast_member_peak
-            .set(self.mcast_member_peak.get().max(slot.len()));
+        self.mcast_member_peak.raise_to(slot.len());
     }
 
     /// Replace the group-SUBSCRIBER keyexpr aggregate with the live deduped view the
@@ -8718,8 +8711,7 @@ impl FaceForwarder for RouterForwarder {
         // cross-impl test can gate a mesh-side publisher on this router provably
         // holding + advertising the on-group subscriber's interest.
         let live = self.group_subs.borrow().len();
-        self.group_subs_advertised_peak
-            .set(self.group_subs_advertised_peak.get().max(live));
+        self.group_subs_advertised_peak.raise_to(live);
         for snapshot in changed {
             self.repropagate(snapshot);
         }
@@ -8791,8 +8783,7 @@ impl FaceForwarder for RouterForwarder {
             // empty-chain fast path (no ACL) is a single predicate read.
             let verdict = self.admit_inbound(id, message);
             if let Some(kind) = verdict.dropped_by() {
-                self.interceptor_dropped
-                    .set(self.interceptor_dropped.get() + 1);
+                self.interceptor_dropped.bump();
                 if let Some(face) = self.tables.faces.borrow().get(&id) {
                     crate::linkstate_forward::charge_interceptor_drop(
                         &face.actions,
@@ -8832,7 +8823,7 @@ impl FaceForwarder for RouterForwarder {
                 // head; single-router topologies elect self, so every master gate is
                 // a no-op and the behavior is the pre-C4 route.
                 NetworkMessage::Push(push) => {
-                    self.data_seen.set(self.data_seen.get() + 1);
+                    self.data_seen.bump();
                     self.route_push(id, tier, *reliable, *priority, push, None);
                 }
                 // A declaration: one owner call per plane, whichever hat owns the
@@ -8884,7 +8875,7 @@ impl FaceForwarder for RouterForwarder {
                 // router's full zenoh compute_query_route (3-block master-gated +
                 // GLOBAL BestMatching over both meshes + clients, C5b).
                 NetworkMessage::Request(request) => {
-                    self.queries_seen.set(self.queries_seen.get() + 1);
+                    self.queries_seen.bump();
                     self.route_request(id, tier, *reliable, request, None);
                 }
                 // A queryable's reply: route it BACK toward the querier via the

@@ -269,15 +269,28 @@ fn hot_path_allocation_budget() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(FRAMES);
+    // Repetitions for the time figure only (`WZ_HOT_REPS`, 1 in the gate): the least of them is
+    // what a host that is busy with something else cannot make smaller, where a mean or a single
+    // run swings by a factor of four (measured), so two builds are compared by this and not by
+    // one run of each.
+    let reps: usize = std::env::var("WZ_HOT_REPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+        .max(1);
     let mut off = Vec::new();
     for (case, congestion, subscribers, allocations, bytes) in BUDGET {
         let got = measure(case, congestion, subscribers, n);
         if n == 0 {
             continue;
         }
+        let mut least_ns = got.ns;
+        for _ in 1..reps {
+            least_ns = least_ns.min(measure(case, congestion, subscribers, n).ns);
+        }
         eprintln!(
             "HOTPATH case={case} subscribers={subscribers} allocations_per_forward={} \
-             bytes_per_forward={} ns_per_forward={}",
+             bytes_per_forward={} ns_per_forward={} least_ns_per_forward_of_{reps}={least_ns}",
             got.allocations, got.bytes, got.ns
         );
         if (got.allocations, got.bytes) != (allocations, bytes) {

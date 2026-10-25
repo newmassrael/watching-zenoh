@@ -493,6 +493,15 @@ fn hlc_id_from_zid(zid: &[u8]) -> uhlc::ID {
 mod tests {
     use super::*;
 
+    /// The clock is shared by every face's task once the router drives one task per face
+    /// (`docs/router-task-per-face.md`, phase 1), so it must be `Send + Sync`. The proof is the
+    /// compile: this function is only instantiated for types that are.
+    #[test]
+    fn the_node_clock_can_be_shared_between_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<NodeHlc>();
+    }
+
     #[test]
     fn zenoh_default_map_stamps_only_on_a_router() {
         // DEFAULT_CONFIG.json5:206 verbatim. A peer or client node must NOT
