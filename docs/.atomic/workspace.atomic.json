@@ -286888,6 +286888,44 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3623": {
+      "decision_summary": "Phase 1 of the router with a task per face (docs/router-task-per-face.md): the router's counts are atomics. RouterForwarder counted what it did with 21 Cell<usize>, which is right while one task drives every face and wrong when two do: a Cell is not Sync, and x.set(x.get() + 1) from two threads loses an increment. Each is now a Counter (router_forward/counter.rs), an AtomicUsize with Relaxed ordering: a counter publishes nothing and no decision on its value must agree with another memory location, so what it must keep is that no increment is lost, which every atomic read-modify-write does at any ordering. NodeHlc needed no lock (it holds an Arc over uhlc::HLC, which serialises itself); a compile-time test holds it to Send and Sync. Measured on the same host before and after: no increase in time per forward, bytes and allocations unchanged. The forwarder is still not Sync: its other Cells are state, and move with the tables in phase 3.",
+      "changes_bullets": [
+        "wz-runtime-tokio `router_forward/counter.rs` (new): `Counter` over `AtomicUsize` (`new`, `get`, `bump`, `add`, `raise_to`), the memory-ordering argument in its module documentation, and three tests (it rises by one, by n and to a peak; eight threads of a hundred thousand bumps lose none; a peak from many threads is the greatest offered).",
+        "`router_forward.rs`: the 21 counter fields and their initialisers are `Counter`; every `x.set(x.get() + 1)` is `bump`, the reaped count is `add`, the two peaks are `raise_to`. `node_clock.rs`: a test that `NodeHlc` is `Send + Sync`. `router_hot_path_cost.rs`: `WZ_HOT_REPS` prints the least of N repetitions (the gate still runs one). `run-ci.sh`: the eight `router_forward` guards move by three (229 231 252 234 237 276 229 231) and the two `node_clock::` guards by one (15). docs/router-task-per-face.md: phase 1 done, with the figures."
+      ],
+      "verification_bullets": [
+        "On the build host: the router_forward tests pass (229 in the default set, three more than before, the three counter tests); node_clock passes with 15; the hot path allocation budget passes with the figures it had (569, 708, 7454, 8718 bytes; 9, 11, 69, 86 allocations); clippy with warnings denied passes on wz-runtime-tokio for the router hat alone, with multicast faces, with shared memory, token tables and hot reload, and with every feature that gates a counter at once. Time per forward, least of 25 repetitions of 20000, same command before and after (before; two after-runs): one subscriber drop 498; 456, 442; block 590; 553, 529; sixteen drop 4135; 3971, 3898; block 4780; 4604, 4386. No increase; the faster figures lie within the host's run-to-run spread and are not claimed as a gain.",
+        "guarded_count_gate on the range exits 0; the reason review pin gate passes; the upstream citation anchor gate passes on the development machine; Layer C1ad passes; Layer C1bz reads wz-tls-mbedtls with 1 (the empty submodule of a worktree) and nothing in wz-runtime-tokio. The round-fed gate array passes (113 members).",
+        "Not verified: Layer E7s and E7m (run before phase 3, where the forwarder first changes shape), the full router test sweep of the repository, and the hosted runner."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Next, as designed in docs/router-task-per-face.md: phase 2 (the route memo behind its own lock), phase 3 (the tables behind a reader-writer lock, the forwarder Send and Sync, the remaining Cells moving with them), phase 4 (a task per face), phases 5 and 6 (the reservation, the chain). Each ends with the hot path budget and Layer E7s no worse.",
+        "Layer E7s and E7m were not rerun after phases 0 and 1; run both before phase 3.",
+        "The wider hot path reading stays open: where the remaining 460 bytes of a delivered copy go."
+      ],
+      "publishable_decision_summary": "Phase 1 of the router with a task per face (docs/router-task-per-face.md): the router's counts are atomics. RouterForwarder counted what it did with 21 Cell<usize>, which is right while one task drives every face and wrong when two do: a Cell is not Sync, and x.set(x.get() + 1) from two threads loses an increment. Each is now a Counter (router_forward/counter.rs), an AtomicUsize with Relaxed ordering: a counter publishes nothing and no decision on its value must agree with another memory location, so what it must keep is that no increment is lost, which every atomic read-modify-write does at any ordering. NodeHlc needed no lock (it holds an Arc over uhlc::HLC, which serialises itself); a compile-time test holds it to Send and Sync. Measured on the same host before and after: no increase in time per forward, bytes and allocations unchanged. The forwarder is still not Sync: its other Cells are state, and move with the tables in phase 3.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio `router_forward/counter.rs` (new): `Counter` over `AtomicUsize` (`new`, `get`, `bump`, `add`, `raise_to`), the memory-ordering argument in its module documentation, and three tests (it rises by one, by n and to a peak; eight threads of a hundred thousand bumps lose none; a peak from many threads is the greatest offered).",
+        "`router_forward.rs`: the 21 counter fields and their initialisers are `Counter`; every `x.set(x.get() + 1)` is `bump`, the reaped count is `add`, the two peaks are `raise_to`. `node_clock.rs`: a test that `NodeHlc` is `Send + Sync`. `router_hot_path_cost.rs`: `WZ_HOT_REPS` prints the least of N repetitions (the gate still runs one). `run-ci.sh`: the eight `router_forward` guards move by three (229 231 252 234 237 276 229 231) and the two `node_clock::` guards by one (15). docs/router-task-per-face.md: phase 1 done, with the figures."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: the router_forward tests pass (229 in the default set, three more than before, the three counter tests); node_clock passes with 15; the hot path allocation budget passes with the figures it had (569, 708, 7454, 8718 bytes; 9, 11, 69, 86 allocations); clippy with warnings denied passes on wz-runtime-tokio for the router hat alone, with multicast faces, with shared memory, token tables and hot reload, and with every feature that gates a counter at once. Time per forward, least of 25 repetitions of 20000, same command before and after (before; two after-runs): one subscriber drop 498; 456, 442; block 590; 553, 529; sixteen drop 4135; 3971, 3898; block 4780; 4604, 4386. No increase; the faster figures lie within the host's run-to-run spread and are not claimed as a gain.",
+        "guarded_count_gate on the range exits 0; the reason review pin gate passes; the upstream citation anchor gate passes on the development machine; Layer C1ad passes; Layer C1bz reads wz-tls-mbedtls with 1 (the empty submodule of a worktree) and nothing in wz-runtime-tokio. The round-fed gate array passes (113 members).",
+        "Not verified: Layer E7s and E7m (run before phase 3, where the forwarder first changes shape), the full router test sweep of the repository, and the hosted runner."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next, as designed in docs/router-task-per-face.md: phase 2 (the route memo behind its own lock), phase 3 (the tables behind a reader-writer lock, the forwarder Send and Sync, the remaining Cells moving with them), phase 4 (a task per face), phases 5 and 6 (the reservation, the chain). Each ends with the hot path budget and Layer E7s no worse.",
+        "Layer E7s and E7m were not rerun after phases 0 and 1; run both before phase 3.",
+        "The wider hot path reading stays open: where the remaining 460 bytes of a delivered copy go."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
