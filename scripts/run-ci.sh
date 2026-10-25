@@ -13944,10 +13944,10 @@ layer_c1st_abi_stamp() {
     [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/a" || rc=1; }
     # A registered node declaration as the input (5b): the node's file says which declaration it was
     # built from, the manifest repeats it, and verifying resolves the declaration again.
-    local node=(python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc
+    local declared_node_cmd=(python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc
         --artifact declared-node --node slot-answerer)
-    [ "$rc" -eq 0 ] && { "${node[@]}" --out "$work/na" || rc=1; }
-    [ "$rc" -eq 0 ] && { "${node[@]}" --out "$work/nb" || rc=1; }
+    [ "$rc" -eq 0 ] && { "${declared_node_cmd[@]}" --out "$work/na" || rc=1; }
+    [ "$rc" -eq 0 ] && { "${declared_node_cmd[@]}" --out "$work/nb" || rc=1; }
     [ "$rc" -eq 0 ] && { cmp "$work/na/wz-target-manifest.json" "$work/nb/wz-target-manifest.json" \
         || { echo "  C1st FAIL: two packagings of one node wrote different manifests"; rc=1; }; }
     [ "$rc" -eq 0 ] && { python3 scripts/lib/wz_package.py --verify "$work/na" || rc=1; }
