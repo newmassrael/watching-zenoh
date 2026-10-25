@@ -3136,7 +3136,8 @@ fn arbitrary_bytes_on_a_stream_form_no_unit() {
 /// The repository's own captures, read for what they are: every flow whose
 /// session the capture holds or joined mid-stream reads every unit as
 /// explained, and the one capture of a COMPRESSED session reads two of its six
-/// units as undecoded, because this reader refuses the compressed batch. A real
+/// units as undecoded, because this reader refuses the compressed batch (with
+/// the `compression` feature it reads one of them, and one stays undecoded). A real
 /// zenoh session can read `undecoded`, which is why the count is evidence and
 /// the word beside it is the verdict.
 #[test]
@@ -3185,8 +3186,16 @@ fn the_repositorys_captures_read_as_what_they_are() {
     ));
     let flow = compressed.first().expect("one flow");
     assert_eq!(flow.0, ZenohVerdict::Proven);
-    assert_eq!(flow.1.explained, tally(4, 26));
-    assert_eq!(flow.1.undecoded, tally(2, 74));
+    // Whether the batch is read depends on the reader's `compression` feature: off, the two
+    // compressed units are refused and read `undecoded`; on, one of them reads and its bytes
+    // are the decompressed ones.
+    if cfg!(feature = "compression") {
+        assert_eq!(flow.1.explained, tally(5, 289));
+        assert_eq!(flow.1.undecoded, tally(1, 37));
+    } else {
+        assert_eq!(flow.1.explained, tally(4, 26));
+        assert_eq!(flow.1.undecoded, tally(2, 74));
+    }
     assert_eq!(flow.1.residual, tally(0, 0));
 }
 
