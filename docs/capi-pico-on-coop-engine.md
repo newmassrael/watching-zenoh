@@ -499,6 +499,14 @@ it behaves as pico behaves in both of pico's threading arms.
   that takes events and returns the requests to issue, so the machine moves as it is with its
   clock made an argument, and the host's part is the gets, their cancel, the two timers and the
   declarations (see the note's section "The subscriber's vocabulary").
+  Step 3, the publisher, moved the composite and the plane trait to `wz-ext-pubsub` and found the
+  engine port already carries what the pico plane declares, so the cooperative engine needed one
+  thing added and not a set of declarations: periodic jobs. `SessionEngine::start_ticker` and
+  `stop_ticker` (with `Ticker`, which stops its job when dropped) are implemented by the tokio
+  session as a task of the `net` runtime and by the cooperative engine from the call that steps
+  the session, where the wait of a read is cut short to the job's time and the job runs after the
+  step with no lock held. The pico plane's heartbeat timer is that job. The advanced publisher's
+  entry points still build with the tokio engine, because the module holds the subscriber's too.
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected

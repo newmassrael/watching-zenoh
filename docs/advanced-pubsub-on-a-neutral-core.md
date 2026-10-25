@@ -174,8 +174,23 @@ defect of this plane; it is documented on the plane and not worked around with a
    `AdvancedPublisher`, a handle over the composite, because an inherent method cannot be added
    to a type of another crate. The pico plane is an adapter of the same trait. The composite's
    own tests run against a recording plane there; the session-bound ones stay with the tokio
-   host. Left for this step: the cooperative plane and the declarations it needs on the engine
-   port.
+   host.
+   Step 3b found the engine port already carries what the publisher declares: the pico plane
+   declares its publisher, cache queryable, token and beacon publisher through the port's
+   declarations (`SessionEngine::declare_queryable_on_wire`, the liveliness token, the write
+   filter and `publish_on_wire_all`), and read the tokio session for two things only, its clock
+   (the beacon's sleep) and an on-demand put. So the cooperative engine needed no declaration
+   added; it needed the one thing it had no answer to, a periodic job. `start_ticker` and
+   `stop_ticker` joined the port (with `Ticker`, which stops the job when dropped), the tokio
+   session runs one as a task of the `net` runtime (`wz-runtime-tokio`'s `periodic`, the loop the
+   publisher's own timer shares), and the cooperative engine runs it from the call that steps the
+   session: the wait of a read is cut short to the job's time as it is for a get's deadline, and
+   the job runs after the step with no lock held, one at a time, a period after its last run ended.
+   The pico plane's timer is that job, and its on-demand beacon is a port put. What is left of
+   step 3 is that pico's `advanced` feature still selects the tokio engine, because the module
+   that holds the publisher's entry points also holds the subscriber's; the cooperative
+   publisher then follows the subscriber (step 4), and its first witness is a pico build on the
+   cooperative engine that declares an advanced publisher.
 4. **The subscriber on it**: `State` and its helpers move to `wz-ext-pubsub` (about 1,500 lines,
    and the tests that drive it directly), with the clock made an argument; the tokio host keeps its wiring and calls the moved machine; the
    cooperative host writes its own. The largest step, and the moved code is not rewritten, so what

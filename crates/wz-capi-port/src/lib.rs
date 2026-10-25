@@ -71,6 +71,41 @@ pub type SubscriberSink =
 /// A C-level liveliness token id — what a `z_owned_liveliness_token_t` handle carries.
 pub type TokenId = u64;
 
+/// The id of one periodic job an engine runs ([`SessionEngine::start_ticker`]).
+pub type TickerId = u64;
+
+/// What a periodic job does each time it is due, and whether it goes on: `false` ends it.
+///
+/// It runs outside the engine's locks, so it may call back into the session (publish, declare).
+pub type Tick = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// A periodic job running on an engine, ended when this is dropped.
+///
+/// It holds the engine, so the engine lives as long as the job can be asked to stop; a job whose
+/// owner is gone does not outlive it.
+pub struct Ticker {
+    engine: Arc<dyn SessionEngine>,
+    id: TickerId,
+}
+
+impl Ticker {
+    /// Start `tick` on `engine` every `period_ms` ([`SessionEngine::start_ticker`]); `None` when
+    /// the engine has no periodic jobs in this build or is closed.
+    pub fn start(engine: &Arc<dyn SessionEngine>, period_ms: u64, tick: Tick) -> Option<Self> {
+        let id = engine.start_ticker(period_ms, tick)?;
+        Some(Self {
+            engine: Arc::clone(engine),
+            id,
+        })
+    }
+}
+
+impl Drop for Ticker {
+    fn drop(&mut self) {
+        self.engine.stop_ticker(self.id);
+    }
+}
+
 /// Mints one liveliness-subscriber callback per face: each token a peer declares on the key is a
 /// `Put`, each it retracts a `Delete`.
 pub type LivelinessSink =

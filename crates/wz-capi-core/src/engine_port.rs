@@ -369,6 +369,18 @@ impl SessionEngine for SharedSession {
         )
     }
 
+    fn start_ticker(
+        &self,
+        period_ms: u64,
+        tick: wz_capi_port::Tick,
+    ) -> Option<wz_capi_port::TickerId> {
+        Some(SharedSession::start_ticker(self, period_ms, tick))
+    }
+
+    fn stop_ticker(&self, id: wz_capi_port::TickerId) {
+        SharedSession::stop_ticker(self, id);
+    }
+
     #[cfg(feature = "liveliness")]
     fn undeclare_liveliness_token(&self, id: wz_capi_port::TokenId) {
         SharedSession::undeclare_liveliness_token(self, id);

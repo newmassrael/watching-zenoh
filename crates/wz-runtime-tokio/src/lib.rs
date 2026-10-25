@@ -1340,6 +1340,10 @@ pub mod runtime_impl;
 /// [`runtime_pool::RUNTIME_ENV`].
 pub mod runtime_pool;
 
+/// A job that runs every period on the `net` runtime: the one loop of the advanced publisher's
+/// heartbeat beacon and of the periodic jobs a C ABI starts on its engine.
+pub mod periodic;
+
 /// R311il — the engine-free unicast session FSM (the
 /// `SessionFsmUnicastState` / `SessionFsmUnicastEvent` enums, the
 /// `SessionFsmUnicastActions` host trait, and `SessionFsmUnicastPolicy<A>`)

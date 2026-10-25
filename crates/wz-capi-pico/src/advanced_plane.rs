@@ -25,12 +25,10 @@ use std::time::Duration;
 
 use wz_capi_core::runtime::advanced_cache::{CacheStore, Retained};
 use wz_capi_core::runtime::advanced_publisher::{
-    spawn_beacon_timer, AdvancedPublisherError, AdvancedPublisherPlane, BeaconTimer,
-    DeclaredPublisher,
+    AdvancedPublisherError, AdvancedPublisherPlane, DeclaredPublisher,
 };
 use wz_capi_core::runtime::node_clock::NodeHlc;
-use wz_capi_core::runtime::runtime_impl::TokioTime;
-use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
+use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink, Ticker, WireKey};
 use wz_session_core::publish_options::{PublishError, PublishOptions};
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
@@ -47,9 +45,6 @@ pub(crate) struct PicoPlane {
     /// The session's own clock: the plane's stamps come from it, as pico's do
     /// from the session's ([`crate::session_ext::PicoSessionExt::new`]).
     hlc: NodeHlc,
-    /// What a beacon's period is slept on. Any clock would do — the period is a
-    /// duration — and the session's is the one the rest of the session reads.
-    time: Arc<TokioTime>,
     /// What the advanced publisher's own publisher is declared with: the
     /// `publisher_options` the program embedded in its advanced options, which
     /// pico hands to the `z_declare_publisher` that builds it. The heartbeat
@@ -65,7 +60,6 @@ impl PicoPlane {
     pub(crate) fn new(session: PicoSession, declared: PublisherQos) -> Self {
         Self {
             hlc: session.hlc.clone(),
-            time: Arc::clone(session.shared.local_session().clock()),
             session,
             declared,
         }
@@ -98,7 +92,10 @@ impl AdvancedPublisherPlane for PicoPlane {
     type Queryable = PlainQueryable;
     type Token = TokenState;
     type Beacon = PlainPublisher;
-    type Timer = BeaconTimer;
+    /// The engine's periodic job, which is its own to run: a task of the runtime on the tokio
+    /// engine, a step of the session on the cooperative one. `None` from an engine with no
+    /// periodic jobs, whose publisher then declares and sends no heartbeat.
+    type Timer = Option<Ticker>;
 
     fn node_hlc(&self) -> &NodeHlc {
         &self.hlc
@@ -108,8 +105,10 @@ impl AdvancedPublisherPlane for PicoPlane {
         &self,
         period: Duration,
         tick: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> BeaconTimer {
-        spawn_beacon_timer(Arc::clone(&self.time), period, tick)
+    ) -> Option<Ticker> {
+        // A period under a millisecond is raised to one by the engine, as the composite does.
+        let period_ms = u64::try_from(period.as_millis()).unwrap_or(u64::MAX);
+        Ticker::start(&self.session.engine, period_ms, tick)
     }
 
     /// Always: a pico session stamps from its own clock and zid with no
@@ -208,7 +207,12 @@ impl AdvancedPublisherPlane for PicoPlane {
             // An on-demand beacon from a publisher that declared none: on the
             // key itself.
             None => {
-                let _ = self.session.shared.publish_all(keyexpr, payload, &options);
+                let _ = self.session.engine.publish_on_wire_all(
+                    keyexpr,
+                    &WireKey::literal(),
+                    payload,
+                    &options,
+                );
             }
         }
     }
@@ -218,5 +222,64 @@ impl AdvancedPublisherPlane for PicoPlane {
         // pico's does (`_z_declared_keyexpr_copy` in `_z_sample_copy_data`), so
         // the key stays declared until the ring lets the sample go.
         Some(Retained::new(Arc::new(publisher.key().share())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    use wz_capi_core::faces::SharedSession;
+    use wz_capi_core::runtime::runtime_impl::TokioTime;
+    use wz_session_core::WhatAmI;
+
+    /// The heartbeat's timer on this plane is the ENGINE's periodic job: the tick runs every
+    /// period while the handle the plane returns is held, and the job ends with the handle. The
+    /// count after the drop, and again some periods later, is what says it ended and did not
+    /// merely go quiet. (The beacon itself is not the witness: a pico publisher holds a put back
+    /// while no peer subscribes, which a session with no peer never has.)
+    #[test]
+    fn the_beacon_timer_is_the_engines_periodic_job_and_ends_with_its_handle() {
+        let shared = Arc::new(
+            SharedSession::new(TokioTime::new(), vec![0x11; 16]).expect("test host entropy"),
+        );
+        let plane = PicoPlane::new(
+            PicoSession {
+                engine: shared.as_engine(),
+                shared: shared.clone(),
+                mode: WhatAmI::Peer,
+                hlc: NodeHlc::default(),
+            },
+            PublisherQos::pico_default(),
+        );
+        let ticks = Arc::new(AtomicUsize::new(0));
+        let count = ticks.clone();
+        let timer = plane.start_beacon_timer(
+            Duration::from_millis(20),
+            Arc::new(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                true
+            }),
+        );
+        assert!(timer.is_some(), "the tokio engine runs periodic jobs");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while ticks.load(Ordering::SeqCst) < 3 {
+            assert!(Instant::now() < deadline, "no third tick in 5 s");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        drop(timer);
+        std::thread::sleep(Duration::from_millis(60));
+        let after = ticks.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(120));
+        assert_eq!(
+            ticks.load(Ordering::SeqCst),
+            after,
+            "six periods after the drop it had ticked no more"
+        );
     }
 }

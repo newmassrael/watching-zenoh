@@ -38,7 +38,7 @@ use std::thread::{JoinHandle, ThreadId};
 
 use wz_capi_port::{
     CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
-    SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey,
+    SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, Tick, TickerId, WireKey,
 };
 use wz_runtime_coop::session_drive::{
     spawn_session, LinkReadiness, OpenedLink, SessionDatagramLink, SessionDriveConfig,
@@ -83,6 +83,9 @@ mod query;
 
 mod replay;
 use replay::{Kind, OnRefusal, Replay};
+
+mod ticker;
+use ticker::Tickers;
 use wz_session_core::replay_pacing::ReplayPacing;
 
 #[cfg(feature = "connectivity")]
@@ -320,6 +323,8 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     live_subs: Vec<LiveSubEntry>,
     /// Where the telling of the lists above to the link's peer stands (`replay`).
     replay: Replay,
+    /// The periodic jobs the program started on the session ([`SessionEngine::start_ticker`]).
+    tickers: Tickers,
 }
 
 /// The session's link: up, being dialled, or waiting to be.
@@ -815,6 +820,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         due
     }
 
+    /// `most` milliseconds, or the whole milliseconds left until `due_ms` (rounded up, so a wait
+    /// never ends a clock reading before the time it waits for), whichever is less.
+    fn wait_until(&self, most: u32, due_ms: u64) -> u32 {
+        let left_us = due_ms
+            .saturating_mul(1000)
+            .saturating_sub(self.clock.now_us());
+        u32::try_from(left_us.div_ceil(1000)).map_or(most, |left| left.min(most))
+    }
+
     /// What a read waits for before it steps the session: the link's next input, for at most
     /// [`CoopConfig::idle_wait_ms`], unless the link already holds some or waits in its own loop;
     /// and while no link is open, the next dial, for no longer either. zenoh-pico's read waits
@@ -824,22 +838,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // A get whose deadline comes first is swept when it is due, not up to a whole wait late.
         #[cfg(feature = "query")]
         let most = match self.next_get_deadline_ms() {
-            Some(due_ms) => {
-                let left_us = due_ms
-                    .saturating_mul(1000)
-                    .saturating_sub(self.clock.now_us());
-                u32::try_from(left_us.div_ceil(1000)).map_or(most, |left| left.min(most))
-            }
+            Some(due_ms) => self.wait_until(most, due_ms),
             None => most,
         };
         // And so is the next turn of a replay the link owes its peer, which is not due by input.
         let most = match self.replay.next_turn_ms() {
-            Some(due_ms) => {
-                let left_us = due_ms
-                    .saturating_mul(1000)
-                    .saturating_sub(self.clock.now_us());
-                u32::try_from(left_us.div_ceil(1000)).map_or(most, |left| left.min(most))
-            }
+            Some(due_ms) => self.wait_until(most, due_ms),
+            None => most,
+        };
+        // And so is a periodic job the program started, which no input brings about either.
+        let most = match self.tickers.next_due_ms() {
+            Some(due_ms) => self.wait_until(most, due_ms),
             None => most,
         };
         if most == 0 {
@@ -930,6 +939,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "liveliness")]
             live_subs: Vec::new(),
             replay: Replay::new(),
+            tickers: Tickers::default(),
         };
         #[cfg(feature = "queryable")]
         let plane = core.plane.clone();
@@ -991,6 +1001,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return None;
         }
         Some(guard)
+    }
+
+    /// Run the periodic jobs that are due, with no lock held: what a job does (a beacon is a
+    /// publish) takes the session's lock itself. One is taken at a time, so a job that stops
+    /// another finds it not yet started, and each is put back a period after its run ended. What
+    /// is due is read against the time this call began, so a job that takes longer than its own
+    /// period runs once per call and does not keep the caller here.
+    fn run_due_tickers(&self) {
+        let Some(started_ms) = self.live().map(|core| core.0.clock.now_us() / 1000) else {
+            return;
+        };
+        loop {
+            let next = self
+                .live()
+                .and_then(|mut core| core.0.tickers.take_next_due(started_ms));
+            let Some((id, tick)) = next else {
+                return;
+            };
+            let goes_on = tick();
+            if let Some(mut core) = self.live() {
+                let now_ms = core.0.clock.now_us() / 1000;
+                core.0.tickers.rearm(id, goes_on, now_ms);
+            }
+        }
     }
 
     /// Hand out what the session delivered, with no lock held.
@@ -1503,6 +1537,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
 
     fn next_entity_id(&self) -> u64 {
         self.next_entity.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
+        let mut core = self.live()?;
+        let id = self.next_entity_id();
+        let now_ms = core.0.clock.now_us() / 1000;
+        core.0.tickers.start(id, period_ms, tick, now_ms);
+        Some(id)
+    }
+
+    fn stop_ticker(&self, id: TickerId) {
+        if let Some(mut core) = self.live() {
+            core.0.tickers.stop(id);
+        }
     }
 
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)> {
@@ -2396,6 +2444,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             None => false,
         };
         self.deliver();
+        self.run_due_tickers();
         if stepped {
             Ok(())
         } else {

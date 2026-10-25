@@ -870,3 +870,4 @@ mod queryable;
 mod replay;
 #[cfg(feature = "liveliness-get")]
 mod snapshot;
+mod ticker;

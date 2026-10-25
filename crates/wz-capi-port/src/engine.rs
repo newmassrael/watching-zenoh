@@ -27,7 +27,7 @@ use wz_session_core::query_options::QueryOptions;
 use crate::cancellation::CancellableFan;
 use crate::{
     FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
-    QueryableSink, ReplyCallback, SubId, SubscriberSink, TokenId, WireKey,
+    QueryableSink, ReplyCallback, SubId, SubscriberSink, Tick, TickerId, TokenId, WireKey,
 };
 
 /// The operations a C ABI's client surface makes on one session, whatever engine runs it.
@@ -276,5 +276,26 @@ pub trait SessionEngine: Send + Sync + 'static {
     ) -> Option<usize> {
         let _ = (keyexpr, wire, opts, fan, leg);
         None
+    }
+
+    /// Run `tick` every `period_ms` on the engine's own clock, until it answers `false` or
+    /// [`Self::stop_ticker`] is called with the id returned. At least a millisecond: a shorter
+    /// period is raised to it, so a job cannot make the engine spin.
+    ///
+    /// The first run is one period after the call, and each next one a period after the previous
+    /// run ended, so a slow tick is not run again at once to catch up. A tick runs outside the
+    /// engine's locks and never alongside itself. WHERE it runs is the engine's: a runtime that
+    /// has tasks runs it in one; the cooperative engine runs it from the call that steps the
+    /// session, so a tick is as late as the program is slow to step. `None` from an engine with
+    /// no periodic jobs in this build, which is the provided answer.
+    fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
+        let _ = (period_ms, tick);
+        None
+    }
+
+    /// End the periodic job `id`. A tick already running is not interrupted, and none starts
+    /// after this returns. Ending one already ended, or one never started, does nothing.
+    fn stop_ticker(&self, id: TickerId) {
+        let _ = id;
     }
 }

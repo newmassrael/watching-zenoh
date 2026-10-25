@@ -1615,6 +1615,10 @@ pub struct SharedSession {
     /// (`vendor/zenoh-pico/src/api/api.c`, the publisher put and delete, the querier get, the
     /// query replies and the batch calls).
     closed: Arc<std::sync::atomic::AtomicBool>,
+    /// The periodic jobs a C ABI started on the session ([`SessionEngine::start_ticker`]), each a
+    /// task of the `net` runtime that ends when its entry leaves the table. Dropped with the
+    /// session, so a job outlives neither it nor its `stop_ticker`.
+    tickers: StdMutex<BTreeMap<u64, wz_runtime_tokio::periodic::PeriodicTask>>,
 }
 
 /// R3065 -- the shared-memory reader's clients a session is opened over: a set the node's
@@ -1900,6 +1904,7 @@ impl SharedSession {
             auth,
             policy,
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tickers: StdMutex::new(BTreeMap::new()),
         })
     }
 
@@ -3858,6 +3863,32 @@ impl SharedSession {
         self.lock().take_entity_id()
     }
 
+    /// Run `tick` every `period_ms` in a task of the `net` runtime, on the session's clock, until
+    /// it answers `false` or [`Self::stop_ticker`] is called with the id returned.
+    pub fn start_ticker(&self, period_ms: u64, tick: wz_capi_port::Tick) -> u64 {
+        let id = self.next_entity_id();
+        let task = wz_runtime_tokio::periodic::spawn_periodic_ms(
+            Arc::clone(self.local.clock()),
+            period_ms,
+            tick,
+        );
+        self.tickers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(id, task);
+        id
+    }
+
+    /// End the periodic job `id`: its task is aborted, outside the table's lock.
+    pub fn stop_ticker(&self, id: u64) {
+        let task = self
+            .tickers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&id);
+        drop(task);
+    }
+
     pub fn declare_subscriber(
         &self,
         keyexpr: String,
@@ -5361,6 +5392,44 @@ mod matching_aggregate_tests {
         assert!(shared.write_filter_active(counting));
         assert_eq!(*heard.lock().unwrap(), vec![true, false]);
         shared.undeclare_subscriber(remote_sub);
+    }
+
+    /// The port's periodic job on this engine: a task of the `net` runtime that runs every period
+    /// until it is stopped, and `stop_ticker` ends it for good. The count after the stop, and
+    /// again a few periods later, is what says it ended and did not merely pause.
+    #[test]
+    fn a_periodic_job_runs_until_it_is_stopped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wz_capi_port::SessionEngine;
+
+        let shared = SharedSession::new(TokioTime::new(), test_zid()).expect("test host entropy");
+        let runs = Arc::new(AtomicUsize::new(0));
+        let count = runs.clone();
+        let id = SessionEngine::start_ticker(
+            &shared,
+            10,
+            Arc::new(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+                true
+            }),
+        )
+        .expect("this engine runs periodic jobs");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while runs.load(Ordering::SeqCst) < 3 {
+            assert!(std::time::Instant::now() < deadline, "no third run in 5 s");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        SessionEngine::stop_ticker(&shared, id);
+        SessionEngine::stop_ticker(&shared, id);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let after = runs.load(Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            after,
+            "eight periods after the stop it had run no more"
+        );
     }
 
     /// R311y557 — the CLOSING measurement for what R311y554 pinned as a named

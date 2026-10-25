@@ -11,7 +11,7 @@
 //! `AdvancedPublisherOn`, and is re-exported here at the paths it has always had. What this
 //! module keeps is what only the tokio runtime can be: `SessionPlane`, the plane of a runtime
 //! `Session` (each entity is the session's own plain declaration, on its literal key), the
-//! timer a beacon runs on (`BeaconTimer`, a task of the process's `net` runtime), the shared-memory
+//! timer a beacon runs on (`PeriodicTask`, a task of the process's `net` runtime), the shared-memory
 //! chunk this runtime maps, and `AdvancedPublisher`, the handle a caller declares from a session.
 //!
 //! Composes on already-active wz primitives: the user `Session::publish`
@@ -36,6 +36,7 @@ pub use wz_ext_pubsub::advanced_publisher::{
 
 use crate::advanced_cache::{CacheStore, Retained};
 use crate::node_clock::NodeHlc;
+use crate::periodic::{spawn_periodic, PeriodicTask};
 use crate::session::{
     LivelinessAliasError, LivelinessOptions, LivelinessToken, PublishError, PublishOptions,
     Publisher, Queryable, QueryableError, Session, Unicast,
@@ -51,49 +52,6 @@ impl From<QueryableError> for AdvancedPublisherError {
 impl From<LivelinessAliasError> for AdvancedPublisherError {
     fn from(e: LivelinessAliasError) -> Self {
         AdvancedPublisherError::Token(PlaneError::new(e))
-    }
-}
-
-/// The timer of a heartbeat beacon on this runtime: a task of the process's `net` runtime that
-/// calls the beacon's tick every period, until the tick answers `false` or this handle is
-/// dropped, which aborts the loop so a torn-down publisher stops emitting.
-///
-/// It is the `net` subsystem, which is where upstream puts this exact beacon: both arms of zenoh's
-/// advanced-publisher heartbeat are `TerminatableTask::spawn_abortable(ZRuntime::Net, ..)`
-/// (`zenoh-ext/src/advanced_publisher.rs` @ `TerminatableTask::spawn_abortable(`). A beacon is
-/// upkeep the application never waits on, so it belongs beside gossip rather than beside the API
-/// surface, and the declaring thread need not be inside a tokio runtime (R3064).
-pub struct BeaconTimer {
-    handle: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for BeaconTimer {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
-}
-
-/// Start a [`BeaconTimer`]: sleep `period` on `clock`, then run `tick`, over and over.
-///
-/// `period` is clamped to a millisecond, so a sub-millisecond `Duration` (which truncates to zero)
-/// cannot turn the loop into a busy spin (R311y87, review C4). Every host of this runtime that
-/// runs a beacon starts it through here, so the loop is written once: the runtime session's plane
-/// and the pico C ABI's plane both do.
-pub fn spawn_beacon_timer<T: TimeSource + Send + Sync + 'static>(
-    clock: Arc<T>,
-    period: Duration,
-    tick: Arc<dyn Fn() -> bool + Send + Sync>,
-) -> BeaconTimer {
-    let period_ms = (period.as_millis() as u64).max(1);
-    BeaconTimer {
-        handle: crate::runtime_pool::WzRuntime::Net.spawn(async move {
-            loop {
-                clock.sleep(period_ms).await;
-                if !tick() {
-                    return;
-                }
-            }
-        }),
     }
 }
 
@@ -139,7 +97,7 @@ where
     type Queryable = Queryable<R, T>;
     type Token = LivelinessToken<R, T>;
     type Beacon = ();
-    type Timer = BeaconTimer;
+    type Timer = PeriodicTask;
 
     fn node_hlc(&self) -> &NodeHlc {
         self.session.node_hlc()
@@ -200,8 +158,8 @@ where
         &self,
         period: Duration,
         tick: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> BeaconTimer {
-        spawn_beacon_timer(Arc::clone(self.session.clock()), period, tick)
+    ) -> PeriodicTask {
+        spawn_periodic(Arc::clone(self.session.clock()), period, tick)
     }
 
     fn publish(
