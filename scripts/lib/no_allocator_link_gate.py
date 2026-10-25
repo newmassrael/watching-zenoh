@@ -637,6 +637,24 @@ IMAGES: dict[str, Image] = {
                 ),
                 label="linux-x86_64-slot-server",
             ),
+            # A node that is a member of a multicast group: built with `multicast` (the group's pump
+            # in a cell of a table the image declared, the JOIN beacon written into an array, the
+            # put a borrowed offer framed into one lent buffer, the receive buffer an array in the
+            # transport), a publisher and a subscription, whose budget is what `wz_node.py --env
+            # slot-group` prints.
+            Build(
+                HOST,
+                None,
+                ("declared", "multicast"),
+                env=(
+                    (
+                        "WZ_DECLARED_RS",
+                        str(REPO_ROOT / "deploy" / "nodes" / "generated" / "slot-group.rs"),
+                    ),
+                    ("WZ_LIMIT_MAX_SUBSCRIPTIONS", "1"),
+                ),
+                label="linux-x86_64-slot-group",
+            ),
         ),
     ),
     # The wz half of the zenoh-pico comparison image: the CYT4BF MAC behind Zephyr's Ethernet

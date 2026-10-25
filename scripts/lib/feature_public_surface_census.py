@@ -589,6 +589,12 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 # expired queries in the dispatch. Selected by an image (`host-slot-node
                 # --features get`), never added to by a library caller.
                 "query-get",
+                # The client node as a member of a multicast group (`slot_group`, behind
+                # `all(session-slot, client-core, transport-multicast, codec-push)`): the group
+                # plane's Put offer needs `codec-push` as the group drive's own does, and
+                # `group` (the feature an image selects) is a forward of the three and gates
+                # nothing. Selected by an image (`host-slot-node --features multicast`).
+                "codec-push",
                 "session-slot",
                 "test-support",
                 "transport-multicast",
@@ -1048,6 +1054,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "adminspace-write",
             "client-core",
             "client-node",
+            "codec-push",
             "codec-response",
             "codec-response-final",
             "dial",

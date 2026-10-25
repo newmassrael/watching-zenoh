@@ -501,11 +501,12 @@ is stated after the structure).
 What landed: a declaration file per node (`[node]`, `[[endpoint]]`, `[[entity]]`, `[limits]`),
 validated against the target's own table (`TARGETS`), with `--emit` printing the `declared.rs` the
 node's code includes and `--env` printing the `WZ_LIMIT_*` budgets. The vocabulary is wider than
-the slot target builds (a multicast endpoint, a listener over UDP or TLS, a publisher, a subscriber,
-a token, a querier): a word the target does not build is REFUSED with its reason, never dropped,
-so a declaration that asks for a subscriber cannot produce a node that quietly has none. What the
-slot target builds today is what its node does: one dialled endpoint (`tcp`, `udp` or `tls`), one
-TCP listener, queryables that answer from documents, and the entities below. The registered node,
+the slot target builds (a listener over UDP or TLS, a group over a scheme that is not UDP, a
+queryable, querier or token on a node that is a member of a group): a word the target does not
+build is REFUSED with its reason, never dropped, so a declaration that asks for a subscriber cannot
+produce a node that quietly has none. What the slot target builds today is what its node does: one
+dialled endpoint (`tcp`, `udp` or `tls`), one TCP listener, one multicast group, queryables that
+answer from documents, and the entities below. The registered node,
 `slot-answerer`, is the existing `deploy/host-slot-node` stated as data.
 
 **The structure (owner, 2026-10-25: cost ignored, the textbook one): ports and adapters.** The
@@ -533,7 +534,7 @@ document, too many documents and a normal start is byte for byte what it was, an
 workspace. Before anything is built the entry resolves the declaration (it validates for its
 target and its generated file is current), then builds the binary in the package's own directory
 with the declaration's features (`declared`, `tls` exactly when a dialled endpoint is `tls/`, `get`, `token` and
-`listen` as its entities and endpoints ask), the
+`listen` and `multicast` as its entities and endpoints ask), the
 generated constants named in `WZ_DECLARED_RS` and the declaration's budgets as `WZ_LIMIT_*`. The
 package's own cargo config states the image's budgets, and the generator reads the same file as
 the baseline of what the declaration may say, so the generator and the build cannot disagree about
@@ -665,11 +666,54 @@ client, and the holder that stayed is not disturbed; two connections that say no
 at the handshake deadline and free both rows. Presenting a client to the accepted sessions fails
 all three, which is what ties the identity to the witness.
 
-Not written: multicast, which is a change to the profile before it is a word the declaration
-accepts; a UDP or a secure listener; declarations toward accepted peers that are not clients
-(they are sent as to the router today, and no peer has judged them); a port of the declared node
-for QNX or Android; and the budgets that are still tuning constants of the library (the task cells,
-the receive and send storage), which the declaration cannot state.
+**Multicast (landed, publishers and subscriptions).** `[[endpoint]] role = "multicast"`, `locator =
+"udp/<group>:<port>"` (an address from 224.0.0.0 to 239.255.255.255), `members = N` (1 to 8: the
+members of the group the node tracks at once, a row of the group's peer table each) and an optional
+`ttl` (1 to 255, default 1, the kernel's and zenoh's own). A group has no handshake and no session
+with anyone: a member announces itself with a JOIN beacon, admits the members whose beacons it
+hears and puts what it publishes on the group for all of them, so the node's plane is one task, not
+a session. The structure is the listener's again, written once. In the coop runtime
+`GroupTransport` already was the seam (lwIP's and Zephyr's implement it), and the posix port is
+`PosixGroupTransport`: the shape zenoh gives a multicast link, two sockets, a receiver bound to the
+wildcard address on the group's port with `SO_REUSEADDR` and `SO_REUSEPORT` (so it shares the port
+with every other member on the host) and joined, and a sender on a port of its own, so the source a
+peer sees names this member and no other even when two live on one host. In `wz-session-mcu`
+`slot_plane` is the node's whole knowledge of anything it takes part in beside its sessions
+(`Plane`, `PlaneRunning`, `NoPlane`), `ClientNode` holds one as a value as it holds its acceptor, and
+`slot_group` is the group: the pump of `group_drive` in a cell of a `MulticastSlots` table the image
+declared, its datagrams fanned as the same `IterationEvent`s to the same observer the sessions
+dispatch to (so a subscription keeps the latest sample of any member's put in the same cell), the
+node's publishers put on the group by the same `Schedule` that puts on a session and counted in the
+same counts, the members counted from the arrivals and departures the pump reports, and a rejoin a
+second after the group is lost or could not be joined. The parameters a group's members must agree
+on (the sequence-number resolution `0x02` and the 2,048-byte batch) are the stock peers' own, since
+a JOIN that advertises others is refused and nothing negotiates. The generator emits `GROUPS`,
+`GROUP`, `GROUP_ADDR`, `GROUP_PORT`, `GROUP_TTL` and `MEMBERS`; the `multicast` feature is built
+exactly when the declaration has the endpoint, and the node's `const` assertion holds the two to each
+other; `TASKS` is the sessions and one for the group. What a group carries with no allocator is the
+literal Put: the replies of a queryable, the Request of a querier and the answer a token gives to
+an interest are heap-only forms in the shared emit, so a node that is a member of a group may
+declare publishers and subscriptions and the validator refuses the other kinds for it, by name,
+rather than serve them on its sessions and drop them on the group. The node says `HOST-WZ-GROUP
+<locator> joins=<n> refused=<n> members=<n>` each time any of the three moves. One set of peer
+tables serves the whole group, so an alias a member declares is an id of the group: a put that names
+its key in full, which is what zenoh-pico's multicast peer sends, is unaffected, and two members that
+alias different keys under one id are not told apart. A payload longer than the batch arrives as a
+fragment chain, which this build does not reassemble. The witness is zenoh-pico's own multicast peers
+(`wz_declared_group_pico_interop.rs`, Layer M, since a multicast route is the host's): a pico
+`z_sub` hears the node's eight-byte document more than once and a `z_sub` of another key hears none;
+a pico `z_pub`'s puts reach the node's subscription, which keeps the latest, and a put on a key the
+node does not subscribe to is kept by nothing; and the node counts its members, none, one while pico
+is there and none again once its lease has run out. Advertising another sequence-number resolution
+fails all three, which is what ties the group's parameters to the witness.
+
+Not written: the group's queryables, queriers and tokens, each of which is a change to the shared
+group emit (an allocator-free Response, Request and DeclareReply) before it is a word a node with a
+group accepts; reassembly of a fragmented put on the group; peer tables of each member; a UDP or a
+secure listener; declarations toward accepted peers that are not clients (they are sent as to the
+router today, and no peer has judged them); a port of the declared node for QNX or Android; and the
+budgets that are still tuning constants of the library (the task cells, the receive and send
+storage), which the declaration cannot state.
 
 The text below is the proposal the decision answers.
 

@@ -11792,6 +11792,19 @@ layer_c1m_session_lwip() {
     # connection closed before it was taken, a port already listened on, a port freed for the next).
     _runci_guarded_test "C1m posix tcp seam" 15 \
         cargo test -p wz-runtime-posix --lib stream:: --quiet || return 1
+    # The host's multicast seam (`wz_runtime_posix::group`): the receivers of one host share the group's
+    # port, a group that is not one is not joined, a member sends from a port of its own with the hop
+    # limit it was given, and a released transport is silent: 4 = what that command PRINTED. The fifth
+    # test of the module, the datagram one member sends reaching another, needs a multicast route on
+    # the host and is `--ignored`, which Layer M runs.
+    _runci_guarded_test "C1m posix group seam" 4 \
+        cargo test -p wz-runtime-posix --lib group:: --quiet || return 1
+    # The group plane of the client node (`slot_group`, the slot profile with `group`): what a
+    # publisher offers is each due put once in the order of the declaration, and again a period on; a
+    # loop that was late owes one put and not the periods it missed; and the members follow the
+    # arrivals and departures and never go below none: 3 = what that command PRINTED.
+    _runci_guarded_test "C1m mcu slot group" 3 \
+        cargo test -p wz-session-mcu --features group --lib slot_group:: --quiet || return 1
     # Fixed-memory step S6, the exhaustion cases of the N-session pool (R1, R2, R6):
     # a node holds at most the generated MAX_SESSIONS sessions, and every table a
     # session needs is claimed before it can speak. The acceptor's side
@@ -18101,6 +18114,23 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # (the z_sub check above covers it — the same build script emits both).
     (cd crates && cargo test -p wz-integration-tests \
         --test wz_subscriber_from_pico_multicast -- --ignored --quiet) || return 1
+    # A node built from its declaration that is a MEMBER of the group, against the same pico peers: the
+    # file the ENTRY packages (`wz_package.py --node slot-group`, whose manifest verifies) joins
+    # `udp/224.0.0.224:7490`, puts a document on one key for a pico `z_sub` (and for no `z_sub` of
+    # another key), keeps the latest sample a pico `z_pub` puts on another, and counts its members as
+    # pico joins and as its lease runs out. Count-guarded at 3: the legs are `#[ignore]`.
+    local group_pkg group_rc=0
+    group_pkg="$(mktemp -d)" || return 1
+    python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc --artifact declared-node \
+        --node slot-group --out "$group_pkg/slot-group" || group_rc=1
+    [ "$group_rc" -eq 0 ] && { [ -x "$group_pkg/slot-group/bin/declared-node" ] \
+        || { echo "  Mgrp FAIL: the packaged slot-group is not executable"; group_rc=1; }; }
+    [ "$group_rc" -eq 0 ] && { _runci_guarded_test Mgrp 3 env \
+        WZ_DECLARED_NODE_GROUP="$group_pkg/slot-group/bin/declared-node" \
+        cargo test -p wz-integration-tests --test wz_declared_group_pico_interop \
+        -- --ignored --quiet --test-threads=1 || group_rc=1; }
+    rm -rf "$group_pkg"
+    [ "$group_rc" -eq 0 ] || return 1
     # Open-debt item 913 — upstream's own multicast peer test (`tests/z_test_peer_multicast.c`):
     # four sessions in one process join `udp/224.0.0.224:7447#iface=lo` and put and get among
     # themselves, first against the real libzenohpico (the calibration: can this host carry the
