@@ -288500,6 +288500,42 @@
         "Read the first finished hosted run holding this round: C1an and its sibling no-default legs compile. Still red in run 40191687498 and not claimed: C1bnl (multicast::a_frame_past_the_batch_is_fragmented_from_the_heap at datagram_tx_pool_allocations.rs:916), C1q (udp_multicast_config count 14), C1u (session_reconnect_e2e count 7), E7g (router capacity report) and C1cs (pico text over budget by 3019, 1612 and 1320), and the C1cn shard 1 job at 97 percent of its time budget."
       ]
     },
+    "Round 3663": {
+      "decision_summary": "The declared nodes were run on a real board for the first time, the RP4 on aarch64 Linux, against a stock zenohd and stock examples built for it from the pinned zenoh source. Five of six legs passed at once: a listening node answers a stock client, a dialling node's four tokens reach a stock watcher and drop with the session, a subscriber keeps a stock put, a publisher is heard by a stock subscriber, and a querier's queries reach a stock queryable. The sixth found a defect no host had shown: the group node could not join, because the board has one subnet route and no default route, so joining on the interface routing picks fails with ENODEV. The join now retries on the first interface that is up, can multicast and is not a loopback (getifaddrs), only when the first try is refused for the membership; a host whose routing answers is joined as before. The group node then joins and publishes. The board is clean: its run directory, in RAM, was removed and no process was left.",
+      "changes_bullets": [
+        "crates/wz-runtime-posix/src/net.rs: multicast_interface, the first up, multicast-capable, non-loopback IPv4 interface by getifaddrs (a test that it is never a loopback or the unspecified address).",
+        "crates/wz-runtime-posix/src/group.rs: join_by_routing_or_first_interface, the join as before and one retry on that interface when the membership is refused; deploy/host-slot-node/src/lib.rs: the node's group bind uses it."
+      ],
+      "verification_bullets": [
+        "On the RP4 board (Linux 5.15, aarch64, glibc 2.35, busybox), through the owner's route and with the owner's permission, in one directory in RAM: six legs with the nodes packaged by the entry from the final code and a stock zenohd and examples cross-built with the same SDK (server: small and large documents and a key nobody serves; beacon: four tokens appear and drop; recorder; reporter; asker; group: joins=1 and its beats), FAILS=0 on the second full run; the first run's group leg failed with refused=5 before the fix.",
+        "The posix runtime's tests and clippy pass on the build host; cargo check passes for both QNX stacks and Android; the six host images build; the round-fed array (113) passes.",
+        "Not run: the group against a stock multicast peer on the board (the stock Rust peer does not join a group at this node's batch), the other boards, the paced replay's timing on the board."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "The RP4 QNX (io-sock) board, the Orin (io-pkt) and the Galaxy Tab remain to run; the stock zenohd and examples do not build for QNX, so on those boards the legs that need a stock peer cannot be run, and what can be is a node against wz's own router or client.",
+        "Staging and tools on the pc2 host (two directories under /tmp) and the QNX build workspace on the SDK machine are still there and are removed when the board runs end."
+      ],
+      "publishable_decision_summary": "The declared nodes were run on a real board for the first time, the RP4 on aarch64 Linux, against a stock zenohd and stock examples built for it from the pinned zenoh source. Five of six legs passed at once: a listening node answers a stock client, a dialling node's four tokens reach a stock watcher and drop with the session, a subscriber keeps a stock put, a publisher is heard by a stock subscriber, and a querier's queries reach a stock queryable. The sixth found a defect no host had shown: the group node could not join, because the board has one subnet route and no default route, so joining on the interface routing picks fails with ENODEV. The join now retries on the first interface that is up, can multicast and is not a loopback (getifaddrs), only when the first try is refused for the membership; a host whose routing answers is joined as before. The group node then joins and publishes. The board is clean: its run directory, in RAM, was removed and no process was left.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-posix/src/net.rs: multicast_interface, the first up, multicast-capable, non-loopback IPv4 interface by getifaddrs (a test that it is never a loopback or the unspecified address).",
+        "crates/wz-runtime-posix/src/group.rs: join_by_routing_or_first_interface, the join as before and one retry on that interface when the membership is refused; deploy/host-slot-node/src/lib.rs: the node's group bind uses it."
+      ],
+      "publishable_verification_bullets": [
+        "On the RP4 board (Linux 5.15, aarch64, glibc 2.35, busybox), through the owner's route and with the owner's permission, in one directory in RAM: six legs with the nodes packaged by the entry from the final code and a stock zenohd and examples cross-built with the same SDK (server: small and large documents and a key nobody serves; beacon: four tokens appear and drop; recorder; reporter; asker; group: joins=1 and its beats), FAILS=0 on the second full run; the first run's group leg failed with refused=5 before the fix.",
+        "The posix runtime's tests and clippy pass on the build host; cargo check passes for both QNX stacks and Android; the six host images build; the round-fed array (113) passes.",
+        "Not run: the group against a stock multicast peer on the board (the stock Rust peer does not join a group at this node's batch), the other boards, the paced replay's timing on the board."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The RP4 QNX (io-sock) board, the Orin (io-pkt) and the Galaxy Tab remain to run; the stock zenohd and examples do not build for QNX, so on those boards the legs that need a stock peer cannot be run, and what can be is a node against wz's own router or client.",
+        "Staging and tools on the pc2 host (two directories under /tmp) and the QNX build workspace on the SDK machine are still there and are removed when the board runs end."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
