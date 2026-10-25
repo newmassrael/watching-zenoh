@@ -288354,6 +288354,42 @@
         "Read the first finished hosted run holding rounds 3649 to 3657 (the open verb on the fixed images, the lwIP and Zephyr admin images, the Zephyr stack rows with a registration that holds one more reference, Layer U). The C1cn shard 1 job ran at 97 percent of its 1800 s budget in run 40191687498: not mine, but it is one slow census away from a red of its own. Step 6.2b-5: the sources of hints (a build's declared ones, a Hello), wz-session-lwip forwarding the feature, and the witness on the image (a lane step, the grammar shared with the board)."
       ]
     },
+    "Round 3659": {
+      "decision_summary": "The declared nodes now build for Android arm64 too, so every platform the lab has a row for (aarch64 Linux, QNX io-pkt and io-sock, Android) packages all seven through the entry. The posix runtime was compiled for Linux and QNX; it now also compiles for target_os android, where only errno differs (bionic's __errno, the same address by another name) and getrandom is the entropy as on Linux. The artifact row lists linux, android and nto, so the entry no longer refuses an Android node, and the lane plan asks the Android platform for every registered node. The refusal-by-name test needed an operating system with no port; no platform row has one any more, so the test now moves the Android row to an operating system nobody ported to and asserts the entry refuses it with the reason and the lane asks it for no node.",
+      "changes_bullets": [
+        "crates/wz-runtime-posix (lib.rs, net.rs): compiled for android as well; errno by __errno on android; getrandom is the entropy on linux and android.",
+        "deploy/wz-config.toml: the declared-node artifact is built for linux, android and nto.",
+        "scripts/lib/wz_package.py: the selftest asserts the refusal with a synthetic platform whose operating system has no port, that the lane asks it for no node, and that a node is accepted for the Android and both QNX platforms."
+      ],
+      "verification_bullets": [
+        "Layer C1sp for the Android platform, read on the workstation that has the NDK 30 toolchain: capi-pico, capi-c and wz-ap-demo packaged twice with the same manifest bytes, then the seven nodes verified (293 s). cargo check of the posix runtime for aarch64-linux-android passes; wz_package selftest, wz_config check and the round-fed array pass on the rebased tree.",
+        "Not run: any node on an Android device; the posix lib tests on Android (they run on a host); the hosted run of this push, which has no NDK and reports the platform as not provisioned."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Run the packaged nodes on the lab boards: the owner has allowed all boards and asked for nothing to be left behind, but how each board is reached (the shared lab server, the RP4 QNX login held open per session) was not given to this session; ask the owner which alias or route, then run, one directory of its own per board, and remove it and any process started.",
+        "Read the hosted run of this push per job, compared by head sha. Reds found in run 40191687498 that are not this session's: the tokio lib test that calls a ReplyRegistry method (C1an), the multicast and reconnect counts and the datagram pool test (C1bnl, C1q, C1u), the router capacity report (E7g) and the C ABI text size (C1cs)."
+      ],
+      "publishable_decision_summary": "The declared nodes now build for Android arm64 too, so every platform the lab has a row for (aarch64 Linux, QNX io-pkt and io-sock, Android) packages all seven through the entry. The posix runtime was compiled for Linux and QNX; it now also compiles for target_os android, where only errno differs (bionic's __errno, the same address by another name) and getrandom is the entropy as on Linux. The artifact row lists linux, android and nto, so the entry no longer refuses an Android node, and the lane plan asks the Android platform for every registered node. The refusal-by-name test needed an operating system with no port; no platform row has one any more, so the test now moves the Android row to an operating system nobody ported to and asserts the entry refuses it with the reason and the lane asks it for no node.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-posix (lib.rs, net.rs): compiled for android as well; errno by __errno on android; getrandom is the entropy on linux and android.",
+        "deploy/wz-config.toml: the declared-node artifact is built for linux, android and nto.",
+        "scripts/lib/wz_package.py: the selftest asserts the refusal with a synthetic platform whose operating system has no port, that the lane asks it for no node, and that a node is accepted for the Android and both QNX platforms."
+      ],
+      "publishable_verification_bullets": [
+        "Layer C1sp for the Android platform, read on the workstation that has the NDK 30 toolchain: capi-pico, capi-c and wz-ap-demo packaged twice with the same manifest bytes, then the seven nodes verified (293 s). cargo check of the posix runtime for aarch64-linux-android passes; wz_package selftest, wz_config check and the round-fed array pass on the rebased tree.",
+        "Not run: any node on an Android device; the posix lib tests on Android (they run on a host); the hosted run of this push, which has no NDK and reports the platform as not provisioned."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Run the packaged nodes on the lab boards: the owner has allowed all boards and asked for nothing to be left behind, but how each board is reached (the shared lab server, the RP4 QNX login held open per session) was not given to this session; ask the owner which alias or route, then run, one directory of its own per board, and remove it and any process started.",
+        "Read the hosted run of this push per job, compared by head sha. Reds found in run 40191687498 that are not this session's: the tokio lib test that calls a ReplyRegistry method (C1an), the multicast and reconnect counts and the datagram pool test (C1bnl, C1q, C1u), the router capacity report (E7g) and the C ABI text size (C1cs)."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
