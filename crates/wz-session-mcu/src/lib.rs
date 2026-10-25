@@ -92,6 +92,20 @@ pub mod latest;
 // application layer.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_publisher;
+// When a node's periodic behaviours are due: the one schedule a publisher's puts and a querier's gets
+// are both kept on.
+#[cfg(all(feature = "session-slot", feature = "client-core"))]
+pub mod slot_schedule;
+// A querier of the client node: a query asked every period, whose latest reply the node keeps.
+#[cfg(all(
+    feature = "session-slot",
+    feature = "client-core",
+    feature = "query-get"
+))]
+pub mod slot_querier;
+// The application layer of a node that publishes and asks on its own.
+#[cfg(all(feature = "session-slot", feature = "client-core"))]
+pub mod slot_active;
 // The application of that client, written once for every platform: its storage, its factory and
 // the loop that drives it. A platform is a `NodePort` and nothing of the loop.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]

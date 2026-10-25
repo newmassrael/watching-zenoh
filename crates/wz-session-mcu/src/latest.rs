@@ -243,9 +243,22 @@ impl<const K: usize> LatestWatch<K> {
         &mut self,
         slots: &dyn LatestSlots,
         cells: usize,
+        say: impl FnMut(usize, Latest<'_>),
+    ) {
+        self.poll_range(slots, 0, cells, say);
+    }
+
+    /// [`poll`](Self::poll) for the cells from `first` to `end` (not including it): a node whose
+    /// subscriptions and queriers keep their latest in one storage says each kind with its own words.
+    /// The index `say` is given is the cell's in the whole storage.
+    pub fn poll_range(
+        &mut self,
+        slots: &dyn LatestSlots,
+        first: usize,
+        end: usize,
         mut say: impl FnMut(usize, Latest<'_>),
     ) {
-        for index in 0..cells.min(K) {
+        for index in first..end.min(K) {
             let now = slots.sequence(index);
             if now == self.seen[index] {
                 continue;
@@ -404,6 +417,29 @@ mod tests {
             said.last(),
             Some(&(0, "c".to_owned(), 3)),
             "two samples between rounds are one report with the count of both"
+        );
+    }
+
+    #[test]
+    fn the_watch_can_say_a_range_of_cells_by_the_cells_own_index() {
+        let cells = slots();
+        let mut first = LatestSink::new(cells, 0, 8);
+        let mut second = LatestSink::new(cells, 1, 8);
+        let mut watch = LatestWatch::<2>::new();
+        first.deliver(&sample("a", b"1", SampleKind::Put));
+        second.deliver(&sample("b", b"2", SampleKind::Put));
+        let mut said = Vec::new();
+        watch.poll_range(cells, 1, 2, |index, l| said.push((index, l.key.to_owned())));
+        assert_eq!(
+            said,
+            [(1, "b".to_owned())],
+            "only the second cell, under index 1"
+        );
+        watch.poll_range(cells, 0, 1, |index, l| said.push((index, l.key.to_owned())));
+        assert_eq!(
+            said.last(),
+            Some(&(0, "a".to_owned())),
+            "the first was not seen yet"
         );
     }
 
