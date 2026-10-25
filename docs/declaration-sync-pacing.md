@@ -36,69 +36,112 @@ the interval, as every limit here is checked where it is declared (`deploy/wz-co
 ## What has to stay true
 
 1. **Order.** The peer's tables are empty. A declaration that names a key expression by its
-   mapping id is valid only after the declaration of that key expression. Replay is in the order
-   the declarations were made, in every turn.
-2. **A live declaration made during the replay reaches the peer after everything the replay still
-   owes it, never before.** An aliased declaration sent ahead of the key expression it names is
-   a protocol error on the peer.
+   mapping id is valid only after the declaration of that key expression. Replay is in the host's
+   replay order, in every turn, and that order puts everything a declaration depends on before it.
+2. **A live declaration made during the replay is sent when everything it depends on has been.**
+   Its place in the replay order is after what it depends on, so there are two cases: its place is
+   at or past the cursor, and the replay will reach it, so the caller emits nothing; its place is
+   before the cursor, so everything it depends on is already at the peer, and the caller emits it
+   at once. An aliased declaration sent ahead of the key expression it names is a protocol error on
+   the peer, and neither case does that.
 3. **A live undeclaration made during the replay is sent if and only if the peer already saw the
-   declaration.** If the replay has not reached it yet, the entry is dropped from the cache and
-   nothing is sent; the peer never learned of it. If it has, the retraction is sent.
-4. **Exactly once.** Each cached declaration is emitted once per session, whatever the interleaving
-   of replay and live calls.
-5. **A reconnect during the replay starts the replay again from the beginning**: the new session's
-   peer has nothing.
-6. **Off is byte-identical to today.** A build with the policy off emits the same frames in the same
-   order as before this existed, which a pair of tests names.
+   declaration.** If the replay has not reached it yet (its place is at or past the cursor), the
+   entry is dropped and nothing is sent; the peer never learned of it. If it has (before the
+   cursor), the retraction is sent.
+4. **Exactly once.** Each declaration is emitted once per session, whatever the interleaving of
+   replay and live calls, and a refused send is retried at the entry it failed on and never from
+   the beginning of the list.
+5. **A close, reset or reconnect during the replay discards the cursor.** The next session's peer
+   has nothing, so its replay starts at the beginning, and a cursor is never resumed on another
+   session.
+6. **Off is byte-identical to today.** A build with the policy off emits the same frames in the
+   same order as before this existed, which a pair of tests names.
+7. **Every session that replays is paced, per session.** A dialled session and an accepted one
+   both replay to their peer, so each has its own cursor.
+8. **A multicast group is not paced.** It declares nothing and has no peer to wait for.
+9. **"Synced" is a statement about ESTABLISHED sessions, not about whether a session exists.** The
+   node is stable when every established session's cursor is at the end of its list, its
+   listeners are bound, and every connection it was configured to make and to wait for is
+   established. A listening node with no client yet is stable (nothing is owed); a node that must
+   connect is not stable until it has, and a session that exists but is not yet established, or
+   whose cursor is short of the end, makes the node not stable.
 
-## Why the obvious place does not hold rule 2 and 3
+## Three hosts, three shapes, one cursor
 
-The cache append and the wire emit are two steps in different places. The typed emit methods of
-`SessionLinkActions`, the seam-routed `Session::declare_*` of the runtime, and the C ABI faces
-each emit and then cache (or prune), and there is no single function every one of them passes
-through that knows both the entry and the intent. A gate on `dispatch_declare` alone misses the
-seam-routed paths and cannot tell an undeclaration of a replayed entry from one of an unreplayed
-entry without reading the id out of the frame.
+The first draft of this note put the cursor in the heap runtime's declaration cache. The owners
+showed that cannot be the shared part, because the three hosts keep their declarations in three
+different shapes:
 
-So the design puts the state where both steps already meet: the declaration cache.
+| Host | Where its declarations live | Declares at run time | Today's replay |
+|---|---|---|---|
+| Heap runtime (tokio) | one ordered `Vec` of cached declarations, `SessionCore::declaration_cache` | yes | `replay_declarations`, one call, from the reconnect driver |
+| Cooperative engine | separate lists by kind (key expressions, subscribers, interests, queryables, tokens, liveliness) | yes | `Core::redeclare`, one call, kinds in a fixed order |
+| Fixed-memory slot node | one `&'static [Declaration]` built at start, wire id = index + 1 | no | `declare_all`, one call per established session; a refused send makes the next tick REPEAT THE LIST FROM INDEX 0 |
+
+What is common is not a cache. It is a position in a sequence the host can recite in a fixed order.
+So the shared part is a pure type with no list, no clock, no heap and no I/O, in `wz-session-core`:
+
+```
+ReplayCursor { next: usize, total: usize }
+
+begin(total)                  start at the beginning of a sequence of `total` entries
+turn(burst) -> Range<usize>   the entries to emit now; advances `next` past them
+refused(at)                   a send failed at entry `at`: the next turn starts there, not at 0
+inserted(place)               a live declaration took `place` in the order
+                              -> Emit now (place < next)  |  Owed (place >= next, total grows)
+removed(place)                a live undeclaration of the entry at `place`
+                              -> Retract (place < next, next shrinks)  |  Silent (total shrinks)
+finished()                    next == total
+```
+
+Each host owns its sequence and its clock and calls the cursor:
+
+- the heap runtime reads the cache as the sequence and the supervisor runs the turns;
+- the cooperative engine maps the sequence to its lists in `redeclare`'s order (the place of an entry
+  is its kind's offset plus its index) and its pump runs the turns on its clock;
+- the slot node's sequence is the static slice, the cursor replaces the per-session `declared` flag,
+  and a refused send resumes at the entry it failed on.
+
+The cursor states rules 2 to 4 once, as the return values of `inserted` and `removed`, and a host
+cannot get them wrong without ignoring a returned value. That is the reason it is a type and not a
+convention in three files.
 
 ## Design
 
-The cache gains a **sync cursor**: the index of the first entry the current session's peer has not
-been told, held beside the cache in `SessionCore`. It exists only while a paced sync is running.
+- **Declare, while a replay runs.** The host calls `inserted(place)`. `Owed`: it stores the entry
+  and emits nothing; the cursor will reach it. `Emit now`: it stores the entry and emits it.
+- **Undeclare, while a replay runs.** The host calls `removed(place)`. `Retract`: it emits the
+  retraction. `Silent`: nothing is sent.
+- **A turn** emits the range `turn(burst)` returns, with `burst` =
+  `DECLARATION_SYNC_BURST_MESSAGES`, and a refused emit calls `refused(at)`. When the cursor is
+  `finished()` the replay is complete and a declaration made after that is emitted by its caller,
+  as before.
+- **The host owns the pacing.** The tokio supervisor sleeps `DECLARATION_SYNC_INTERVAL_MS` between
+  turns, the cooperative engine and the slot node use their clocks. The core only says "one turn,
+  and whether there is more".
+- **The wait** is `declarations_synced` per session (cursor finished and no interest of the replay
+  awaiting its final, within `DECLARATION_SYNC_FINAL_TIMEOUT_MS`), and a node-level
+  `wait_declarations_stable(timeout)` by rule 9, which also restarts if the declaration count or
+  the topology changed while it waited, so a declaration made during the wait is not missed.
 
-- **Declare, while a sync runs.** The caller appends to the cache and does not emit. The cursor
-  will reach the entry. The caller learns nothing different: it returns as it does today.
-- **Undeclare, while a sync runs.** The prune reports the position it removed. Position below the
-  cursor: the peer saw it, the retraction is emitted and the cursor moves down by one. At or above
-  the cursor: nothing is emitted.
-- **A turn** emits up to `DECLARATION_SYNC_BURST_MESSAGES` entries from the cursor and advances it.
-  When the cursor reaches the end of the cache the sync is complete and the cursor is dropped, so a
-  declaration made after that is emitted by its caller, as before.
-- **The loop owns the pacing.** The runtime drives the turns, as it already drives the reconnect:
-  the tokio supervisor sleeps `DECLARATION_SYNC_INTERVAL_MS` between turns, and the cooperative
-  engine asks its clock. The core only says "one turn, and whether there is more".
-- **The wait** is `declarations_synced`: true for a session when it has no sync running and no
-  interest of the sync is awaiting its final. A node-level `wait_declarations_stable(timeout)`
-  completes when it is true for every live session, the listeners are bound, and neither the
-  declaration count nor the topology changed across the check, so a declaration made while it
-  waits restarts it.
-
-The emit side is the part that needs the owners of the session lifecycle: the rule "append and do
-not emit" has to be applied at each declare entry point, or lifted into the one place that
-decides, and that is a change to the shared session API of the slot node, the C ABIs and the
-runtime.
+With the policy off the cursor is never used: the replay is the same single call each host makes
+today (rule 6). The slot node's repeat-from-zero after a refused send is a defect whether or not
+pacing is on, and the cursor removes it; that part is worth landing as its own change.
 
 ## Phases
 
-1. This document, and the three limits and the policy declared and generated, off.
-2. The cursor and the turn in `wz-session-core`, with the pair of tests for rules 1-4 and 6 over a
-   recording link; the reconnect driver of `wz-runtime-tokio` runs the turns (rule 5).
-3. `declarations_synced` and `wait_declarations_stable` on the session, and the per-peer completion
-   of the queryable and token planes beside the subscriber plane that has it today
+1. This document.
+2. `ReplayCursor` in `wz-session-core`, pure, with a unit test per return value of `inserted` and
+   `removed`, per rule of 2 to 5, and the policy `declaration-sync-pacing` with its three limits,
+   declared in the same change as the first code that reads them (a switch no code reads is not
+   landed). The heap runtime's `replay_declarations` is the first host: off is the same single
+   call, on is the paced turns, with the pair of tests of rule 6 over a recording link.
+3. `declarations_synced` and `wait_declarations_stable` on the heap session, and the per-peer
+   completion of the queryable and token planes beside the subscriber plane that has it today
    (`initial_final`).
-4. The cooperative engine and the fixed-memory node, which have no heap cache: their cursor is an
-   index into the node's declaration table and the turn is one call of its pump.
+4. The cooperative engine's `redeclare` and the slot node's `declare_all` take the cursor, each
+   written by the session that owns the file (the cooperative engine: session 11; the slot node:
+   session ef, who offered to do or review it). This document does not edit their files.
 
 ## Not part of this
 
@@ -113,7 +156,23 @@ resumable cursor. Agreed with the router session on 2026-10-25.
 
 ## Open for the owners
 
-- Whether rule 2 and 3 are applied at each declare entry point or lifted into the cache itself, so
-  that the emit is the cache's job and no caller can forget it. The second is the better shape and
-  the larger change.
-- Whether the sync of a multicast group, which has no peer to wait for, is paced at all.
+Settled with the owners on 2026-10-25:
+
+- The cache cannot own the emit: the cooperative engine and the slot node have no such cache. The
+  rules live in the `ReplayCursor` type each host calls (session 11 for the cooperative engine and
+  session ef for the slot node answered; the router's replay is out of scope, see above).
+- The multicast group is not paced (rule 8).
+- The reconnect driver of the heap runtime (`reconnect.rs`) has no session working in it that
+  anyone could name; its last commits are from 2026-10-18 and earlier. Phase 2 edits one call there
+  and says so in its round.
+
+Still open:
+
+- The per-peer completion of the queryable and token planes (phase 3) needs the wire's interest
+  final for those planes; whether the peers send it for every plane is to be measured against
+  upstream before the design of `declarations_synced` is final.
+- The fixed-memory profile has no allocator, so `ReplayCursor` and its returns are plain values
+  there; the cursor's `total` growing on `Owed` assumes the host's sequence can grow, which the
+  slot node's static slice cannot (it never declares at run time), and the cooperative engine's
+  fixed lists can only up to their capacity. A host that cannot grow answers its own `inserted`
+  with a refusal; the cursor does not decide that.
