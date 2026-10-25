@@ -16,4 +16,5 @@
 
 pub mod advanced_cache;
 pub mod advanced_ke;
+pub mod advanced_publisher;
 pub mod time_range;

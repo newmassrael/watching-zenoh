@@ -21,10 +21,12 @@
 //! [`AdvancedPublisherOn`]: wz_capi_core::runtime::advanced_publisher::AdvancedPublisherOn
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use wz_capi_core::runtime::advanced_cache::{CacheStore, Retained};
 use wz_capi_core::runtime::advanced_publisher::{
-    AdvancedPublisherError, AdvancedPublisherPlane, DeclaredPublisher,
+    spawn_beacon_timer, AdvancedPublisherError, AdvancedPublisherPlane, BeaconTimer,
+    DeclaredPublisher,
 };
 use wz_capi_core::runtime::node_clock::NodeHlc;
 use wz_capi_core::runtime::runtime_impl::TokioTime;
@@ -92,18 +94,22 @@ fn pico_publish(options: PublishOptions) -> PublishOptions {
 }
 
 impl AdvancedPublisherPlane for PicoPlane {
-    type Time = TokioTime;
     type Publisher = PlainPublisher;
     type Queryable = PlainQueryable;
     type Token = TokenState;
     type Beacon = PlainPublisher;
+    type Timer = BeaconTimer;
 
     fn node_hlc(&self) -> &NodeHlc {
         &self.hlc
     }
 
-    fn clock(&self) -> &Arc<TokioTime> {
-        &self.time
+    fn start_beacon_timer(
+        &self,
+        period: Duration,
+        tick: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> BeaconTimer {
+        spawn_beacon_timer(Arc::clone(&self.time), period, tick)
     }
 
     /// Always: a pico session stamps from its own clock and zid with no

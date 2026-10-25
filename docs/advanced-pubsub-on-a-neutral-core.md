@@ -163,6 +163,19 @@ defect of this plane; it is documented on the plane and not worked around with a
 3. **The publisher on it**: the composite and `AdvancedPublisherPlane` move; the tokio host and
    the pico plane are adapters; the cooperative host gets a plane and the engine port the
    declarations it needs.
+   Done so far, in `wz-ext-pubsub`: the composite (`AdvancedPublisherOn`: the four declarations
+   in the reference order, what a put stamps, retains and sends, the beacon's decision) and the
+   plane trait, with the options, the errors and the shared-memory chunk it names (`ShmChunk`,
+   which the tokio runtime's mapped chunk implements). The trait lost its clock: the composite
+   cannot read one or spawn a task, so a plane starts the beacon's timer (`start_beacon_timer`
+   hands it the tick, which answers false once the publisher is gone) and the timer's handle is
+   what the composite drops before it retracts the beacon's publisher. The tokio runtime keeps
+   `SessionPlane`, the timer (a task of the `net` runtime, shared with the pico plane) and
+   `AdvancedPublisher`, a handle over the composite, because an inherent method cannot be added
+   to a type of another crate. The pico plane is an adapter of the same trait. The composite's
+   own tests run against a recording plane there; the session-bound ones stay with the tokio
+   host. Left for this step: the cooperative plane and the declarations it needs on the engine
+   port.
 4. **The subscriber on it**: `State` and its helpers move to `wz-ext-pubsub` (about 1,500 lines,
    and the tests that drive it directly), with the clock made an argument; the tokio host keeps its wiring and calls the moved machine; the
    cooperative host writes its own. The largest step, and the moved code is not rewritten, so what

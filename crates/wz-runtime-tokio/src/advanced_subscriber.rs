@@ -4916,15 +4916,17 @@ mod tests {
         let publisher = AdvancedPublisher::declare(
             &session,
             "demo/data",
-            AdvancedPublisherOptions {
-                sequencing: Sequencing::SequenceNumber,
-                cache: Some(CacheConfig {
+            {
+                // `#[non_exhaustive]` and another crate's: no struct literal can name it here.
+                let mut options = AdvancedPublisherOptions::default();
+                options.sequencing = Sequencing::SequenceNumber;
+                options.cache = Some(CacheConfig {
                     max_samples: 8,
                     ..CacheConfig::default()
-                }),
-                publisher_detection: true,
-                sample_miss_detection: MissDetectionConfig::default(),
-                ..AdvancedPublisherOptions::default()
+                });
+                options.publisher_detection = true;
+                options.sample_miss_detection = MissDetectionConfig::default();
+                options
             },
             vec![0x09],
         )

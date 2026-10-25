@@ -13453,6 +13453,11 @@ layer_c1bz_docs_resolve() {
     # ring and its answer moved to wz-ext-pubsub (`advanced_cache.rs`), and the seven findings
     # its docs held (links to the session-bound cache, the publisher plane and a private function)
     # went with them; the new crate's docs name those in plain code and it holds the budget of 0.
+    # wz-runtime-tokio 438 -> 433, by removal, COUNTED on this lane's command: the advanced
+    # publisher's composition moved to wz-ext-pubsub (`advanced_publisher.rs`), and the five
+    # findings its docs held (links to the session-bound handle, the plane and the cache) went
+    # with them; the module doc that stays names its items in plain code and the new file holds
+    # the budget of 0.
     # wz-capi-pico 41 -> 40, by removal: the scouting plane's module doc linked
     # `ScoutedHello`, which that file does not import, and names the scouted hello in plain words
     # now that the window is the session's and not the tokio engine's (the cooperative scouting
@@ -13467,7 +13472,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:1
         wz-routing-graph:5
         wz-runtime-coop:7
-        wz-runtime-tokio:438
+        wz-runtime-tokio:433
         wz-session-core:494
         wz-switchboard-codegen:8
         zenoh-pico-sys:3

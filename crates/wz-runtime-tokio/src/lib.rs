@@ -2136,17 +2136,13 @@ pub mod advanced_cache;
 /// KE) and the advanced subscriber (matches it with the recovery / history /
 /// heartbeat GETs + the beacon parser), so the namespace has one source of truth.
 ///
-/// R2818 — gated on its two CONSUMER modules, not on one consumer's feature.
-/// It was `-publisher` or `-recovery` because recovery was where every
-/// subscriber-side reader lived; R2816 gave `publisher_detection_ke` a reader
-/// in every advanced-subscriber build and moved that item's gate, but not this
-/// one, so a `-subscriber` build without recovery referenced a module it had
-/// configured out (hosted C1bn, runs 35881424541 and 35886694647).
-/// `-recovery` implies `-subscriber`, so naming the subscriber covers it.
-#[cfg(any(
-    feature = "ext-pubsub-advanced-publisher",
-    feature = "ext-pubsub-advanced-subscriber"
-))]
+/// It is `wz-ext-pubsub`'s, and the publisher composite that constructs the key
+/// is too, so this runtime reads it for the one consumer left in it, the advanced
+/// subscriber. R2818 — gated on a consumer's feature, not on a producer's: a
+/// `-subscriber` build without recovery referenced a module it had configured out
+/// (hosted C1bn, runs 35881424541 and 35886694647). `-recovery` implies
+/// `-subscriber`, so naming the subscriber covers it.
+#[cfg(feature = "ext-pubsub-advanced-subscriber")]
 pub(crate) use wz_ext_pubsub::advanced_ke;
 
 /// R311y69 — `ext-pubsub-advanced-publisher` (§5.25): a publisher that

@@ -37,12 +37,33 @@ default = []
 # A cached sample may hold a buffer of shared memory and a recovery reply sends its descriptor
 # again (`CachedSample::shared`). The tokio runtime's feature of the same name forwards here.
 transport-shm = ["wz-session-core/transport-shm"]
+# The publisher's QoS knobs (priority, congestion control, express) reach the publish options only
+# where the setters exist; off, they are a documented no-op. The tokio runtime's feature forwards.
+pubsub-qos = ["wz-session-core/pubsub-qos"]
+# A put's encoding and attachment ride the wire publish only where their setters exist; the cache
+# keeps them either way.
+pubsub-encoding = ["wz-session-core/pubsub-encoding"]
+pubsub-attachment = ["wz-session-core/pubsub-attachment"]
+# The Zenoh serialization format, which a heartbeat beacon's sequence number is written in.
+ext-pubsub-serde-codec = ["wz-session-core/ext-pubsub-serde-codec"]
+# The heartbeat beacon: the publisher announces its last sequence number every period, so a
+# subscriber can recover a lost last sample. Off, `MissDetectionConfig` is a documented no-op.
+ext-pubsub-sample-miss-detection = ["ext-pubsub-serde-codec"]
 
 [dependencies]
-# The selector-parameter dialect, the outbound key-expression gate and the vocabulary of a reply
-# (`ReplyOut`, `SourceInfo`, `QosLevel`). `alloc` is the heap profile, which is the only profile
-# the advanced plane runs on.
-wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
+# The selector-parameter dialect, the outbound key-expression gate, the vocabulary of a reply
+# (`ReplyOut`, `SourceInfo`, `QosLevel`) and the publish options the composite folds its knobs
+# into. `alloc` is the heap profile, which is the only profile the advanced plane runs on. The
+# publisher stamps a source identity and a timestamp on every put, so those two setters are
+# not optional here.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "alloc",
+    "pubsub-put",
+    "pubsub-source-info",
+    "pubsub-timestamp",
+] }
+# The node's time: the HLC an advanced publisher stamps from and the stamper it borrows it through.
+wz-node-time = { path = "../wz-node-time", features = ["pubsub-timestamp"] }
 # A reply the cache could not stage is warned about and the answer goes on, as upstream's does.
 log = "0.4"
 

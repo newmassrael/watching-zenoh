@@ -306,7 +306,7 @@ adminspace-router-linkstate = [
 # ext-pubsub-serde-codec (§5.25) — pure forward of the Zenoh
 # Serialization Format codec from wz-session-core (no runtime wiring;
 # the codec is standalone). Re-exported at `crate::serde_codec`.
-ext-pubsub-serde-codec = ["wz-session-core/ext-pubsub-serde-codec"]
+ext-pubsub-serde-codec = ["wz-session-core/ext-pubsub-serde-codec", "wz-ext-pubsub/ext-pubsub-serde-codec"]
 
 # ext-pubsub-advanced-cache (§5.25) — the publisher-side sample ring +
 # the @adv queryable answering _sn / _max recovery selectors. Needs the
@@ -453,6 +453,7 @@ ext-pubsub-advanced-history = ["ext-pubsub-advanced-recovery", "liveliness-histo
 ext-pubsub-sample-miss-detection = [
     "ext-pubsub-advanced-publisher",
     "ext-pubsub-serde-codec",
+    "wz-ext-pubsub/ext-pubsub-sample-miss-detection",
 ]
 # ext-pubsub-group-membership (§5.25) — the live Group + its membership tasks.
 # The AP-only tokio half over the no_std data + bincode wire codec in
@@ -1595,11 +1596,11 @@ attachment-bytes = ["wz-session-core/attachment-bytes"]
 pubsub-put = ["wz-session-core/pubsub-put"]
 pubsub-delete = ["wz-session-core/pubsub-delete"]
 pubsub-allow-loop = []
-pubsub-attachment = ["attachment-bytes", "wz-session-core/pubsub-attachment"]
+pubsub-attachment = ["attachment-bytes", "wz-session-core/pubsub-attachment", "wz-ext-pubsub/pubsub-attachment"]
 pubsub-timestamp = ["wz-session-core/pubsub-timestamp", "wz-node-time/pubsub-timestamp"]
-pubsub-encoding = ["wz-session-core/pubsub-encoding"]
+pubsub-encoding = ["wz-session-core/pubsub-encoding", "wz-ext-pubsub/pubsub-encoding"]
 pubsub-source-info = ["wz-session-core/pubsub-source-info"]
-pubsub-qos = ["wz-session-core/pubsub-qos"]
+pubsub-qos = ["wz-session-core/pubsub-qos", "wz-ext-pubsub/pubsub-qos"]
 pubsub-priority = ["pubsub-qos", "wz-session-core/pubsub-priority"]
 pubsub-congestion-control = ["pubsub-qos", "wz-session-core/pubsub-congestion-control"]
 pubsub-express = ["pubsub-qos", "wz-session-core/pubsub-express"]
