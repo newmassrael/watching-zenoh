@@ -288236,6 +288236,52 @@
         "Read the first completed hosted run holding rounds 3646 to this one: Qza and Qa (does the lane still read the images the same with session/verbs answered), the Qzb stack rows and flash of zephyr-fixed (the opener is a static of its own; Statics must still be .bss), the C1bz budget. Step 6.2b-5: the sources of hints (a build's declared ones, a Hello), wz-session-lwip forwarding the feature, and the witness on the image (a lane step; the grammar is shared with the board, so the lane owner agrees it). The heap UDP dialer does not yet verify nodes. Then D7."
       ]
     },
+    "Round 3656": {
+      "decision_summary": "Step 1a of the advanced plane (docs/advanced-pubsub-on-a-neutral-core.md): the first neutral parts leave wz-runtime-tokio. A new crate, wz-ext-pubsub (std; one dependency, wz-session-core with alloc; no features), holds the @adv key grammar (advanced_ke) and the _time selector (time_range, nine tests), which no runtime owns. The tokio crate re-exports both at the paths it has always had, so no caller changes. The key functions lose the ext-pubsub-advanced-* gates they carried: a host links the ones it calls. The crate reads no clock and spawns nothing; the cache ring (next step) takes its NTP64 now as an argument. time_range stays a second reading beside the zenoh-util family's, agreed with its session: no dependency edge. The round also mends two reds: the survey note's dependency sentence named a directory and not a package (prose_dep_graph_gate), and the C1bz budget of wz-capi-pico is 40, one scouting doc link having gone with the cooperative scouting step.",
+      "changes_bullets": [
+        "wz-ext-pubsub (new): Cargo.toml, src/lib.rs, src/advanced_ke.rs (the @adv constants and key builders, ungated and public, with its three tests) and src/time_range.rs (moved whole with its nine tests); the wz-runtime-tokio files of both names are removed and lib.rs re-exports.",
+        "crates/Cargo.toml and Cargo.lock name the crate; wz-runtime-tokio depends on it; the seven deploy lockfiles that resolve the tokio runtime by path carry it; .github/workflows/platform.yml triggers on crates/wz-ext-pubsub.",
+        "scripts/run-ci.sh: the C1bz budget of wz-capi-pico 41 -> 40 with its reason; the new crate has no doc-link finding (a link to a test module is plain code).",
+        "docs/advanced-pubsub-on-a-neutral-core.md: the crate's name, the time_range agreement worded with package names, and what step 1 has moved so far."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings: wz-ext-pubsub with all targets; wz-runtime-tokio with all targets (default features) and with --all-features on the library. Its lib tests with --all-features did not build: router_forward.rs:10191, a call of the router session's, reported to it, which fixed it in its own commit; not part of this change.",
+        "Tests: wz-ext-pubsub 12 passed; wz-runtime-tokio with the advanced features (history and sample-miss-detection) and the filter advanced: 90 passed.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed (two reds first, the platform trigger paths and the prose dependency graph, both mended). The two citation gates of hook gate 2f pass.",
+        "Layer C1bz, run on the build host: wz-ext-pubsub 1 finding (mended), wz-capi-pico 40 against a budget of 41 (lowered). Not mine and not touched: wz-tls-mbedtls reports 1 finding against a budget of 0. The layer was not run again after the two edits."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Step 1b: the cache ring (CachedSample, Retained, RepliesConfig, CacheConfig, CacheStore and its answer) into wz-ext-pubsub, with the NTP64 now as an argument and the shared-memory field behind the crate's one feature (transport-shm); the session-bound AdvancedCache stays in the tokio crate. Then the HLC and timestamp rules.",
+        "A test in wz-ext-pubsub that feeds the time_range of this crate and the zenoh-util family's the same strings (welcome to the family's session, written when the crate can take it as a dev-dependency under the dependency rule).",
+        "C1bz of wz-tls-mbedtls (1 finding against 0) is not mine; its owner reads it.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the hosted runs of earlier pushes."
+      ],
+      "publishable_decision_summary": "Step 1a of the advanced plane (docs/advanced-pubsub-on-a-neutral-core.md): the first neutral parts leave wz-runtime-tokio. A new crate, wz-ext-pubsub (std; one dependency, wz-session-core with alloc; no features), holds the @adv key grammar (advanced_ke) and the _time selector (time_range, nine tests), which no runtime owns. The tokio crate re-exports both at the paths it has always had, so no caller changes. The key functions lose the ext-pubsub-advanced-* gates they carried: a host links the ones it calls. The crate reads no clock and spawns nothing; the cache ring (next step) takes its NTP64 now as an argument. time_range stays a second reading beside the zenoh-util family's, agreed with its session: no dependency edge. The round also mends two reds: the survey note's dependency sentence named a directory and not a package (prose_dep_graph_gate), and the C1bz budget of wz-capi-pico is 40, one scouting doc link having gone with the cooperative scouting step.",
+      "publishable_changes_bullets": [
+        "wz-ext-pubsub (new): Cargo.toml, src/lib.rs, src/advanced_ke.rs (the @adv constants and key builders, ungated and public, with its three tests) and src/time_range.rs (moved whole with its nine tests); the wz-runtime-tokio files of both names are removed and lib.rs re-exports.",
+        "crates/Cargo.toml and Cargo.lock name the crate; wz-runtime-tokio depends on it; the seven deploy lockfiles that resolve the tokio runtime by path carry it; .github/workflows/platform.yml triggers on crates/wz-ext-pubsub.",
+        "scripts/run-ci.sh: the C1bz budget of wz-capi-pico 41 -> 40 with its reason; the new crate has no doc-link finding (a link to a test module is plain code).",
+        "docs/advanced-pubsub-on-a-neutral-core.md: the crate's name, the time_range agreement worded with package names, and what step 1 has moved so far."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings: wz-ext-pubsub with all targets; wz-runtime-tokio with all targets (default features) and with --all-features on the library. Its lib tests with --all-features did not build: router_forward.rs:10191, a call of the router session's, reported to it, which fixed it in its own commit; not part of this change.",
+        "Tests: wz-ext-pubsub 12 passed; wz-runtime-tokio with the advanced features (history and sample-miss-detection) and the filter advanced: 90 passed.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed (two reds first, the platform trigger paths and the prose dependency graph, both mended). The two citation gates of hook gate 2f pass.",
+        "Layer C1bz, run on the build host: wz-ext-pubsub 1 finding (mended), wz-capi-pico 40 against a budget of 41 (lowered). Not mine and not touched: wz-tls-mbedtls reports 1 finding against a budget of 0. The layer was not run again after the two edits."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 1b: the cache ring (CachedSample, Retained, RepliesConfig, CacheConfig, CacheStore and its answer) into wz-ext-pubsub, with the NTP64 now as an argument and the shared-memory field behind the crate's one feature (transport-shm); the session-bound AdvancedCache stays in the tokio crate. Then the HLC and timestamp rules.",
+        "A test in wz-ext-pubsub that feeds the time_range of this crate and the zenoh-util family's the same strings (welcome to the family's session, written when the crate can take it as a dev-dependency under the dependency rule).",
+        "C1bz of wz-tls-mbedtls (1 finding against 0) is not mine; its owner reads it.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the hosted runs of earlier pushes."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
