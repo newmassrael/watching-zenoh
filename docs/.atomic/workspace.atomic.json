@@ -286304,6 +286304,40 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3609": {
+      "decision_summary": "The scouting-socket axis census now grades the multicast-loopback axis. Round 3587 added that policy and its witness, a real delivery A/B on one host, but gave the census no verdict for the axis, so Layer C0 read it as an axis nothing judged and went red. The verdict is ONE-ENDED, as the interface axis is: the witness drives two drivers on one host, not two wz nodes, so it cannot show the two-ended reach a both verdict claims. It is witnessed on Linux only, since sender-side IP_MULTICAST_LOOP is not measured on macOS or Windows, and every scouting construction takes the build value, so the same-host scouting tests name on themselves.",
+      "changes_bullets": [
+        "scripts/lib/scouting_socket_axis_census.py: one entry in VERDICTS for the loopback axis, with the one-ended judgement, the name of the test that witnesses it and the reason it is one-ended and Linux only."
+      ],
+      "verification_bullets": [
+        "The census exits 1 on origin main before the change and 0 after it, on the same tree.",
+        "The pre-push round-fed array, 113 gates, passed with 0 failed on the tree that carried this change; the reason pin gate and the upstream citation form gate pass on the rebased tree.",
+        "Not run: the hosted run and Layer C0 as a lane, which is what this change repairs and which reads the verdict at the next push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Whether the loopback axis could be witnessed with two wz nodes is open: it would need a second host or a network namespace, and the one-ended verdict stands until then.",
+        "Read the hosted Layer C0 of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "The scouting-socket axis census now grades the multicast-loopback axis. Round 3587 added that policy and its witness, a real delivery A/B on one host, but gave the census no verdict for the axis, so Layer C0 read it as an axis nothing judged and went red. The verdict is ONE-ENDED, as the interface axis is: the witness drives two drivers on one host, not two wz nodes, so it cannot show the two-ended reach a both verdict claims. It is witnessed on Linux only, since sender-side IP_MULTICAST_LOOP is not measured on macOS or Windows, and every scouting construction takes the build value, so the same-host scouting tests name on themselves.",
+      "publishable_changes_bullets": [
+        "scripts/lib/scouting_socket_axis_census.py: one entry in VERDICTS for the loopback axis, with the one-ended judgement, the name of the test that witnesses it and the reason it is one-ended and Linux only."
+      ],
+      "publishable_verification_bullets": [
+        "The census exits 1 on origin main before the change and 0 after it, on the same tree.",
+        "The pre-push round-fed array, 113 gates, passed with 0 failed on the tree that carried this change; the reason pin gate and the upstream citation form gate pass on the rebased tree.",
+        "Not run: the hosted run and Layer C0 as a lane, which is what this change repairs and which reads the verdict at the next push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Whether the loopback axis could be witnessed with two wz nodes is open: it would need a second host or a network namespace, and the one-ended verdict stands until then.",
+        "Read the hosted Layer C0 of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
