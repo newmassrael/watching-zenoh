@@ -288094,6 +288094,38 @@
         "wz-capi-pico's doc-link budget in run-ci.sh (41) is one above what C1bz reads (40); lower it in the session that owns that crate."
       ]
     },
+    "Round 3652": {
+      "decision_summary": "Step 6, fifth part (6.2b-3, first half): the open query on the fixed-memory profile. The lifecycle query is compiled only with an allocator; the choice was to port it or to split what it says from what needs the heap, and it is the split. lifecycle_wire (no allocator, always compiled) holds the open verdict, the refused reasons, the open key and the capability document; lifecycle_query re-exports it, so the heap profile's paths and words do not change, and one function reads a key's zid. The node's admin queryable answers GET session/open/<peer> for a literal key that names the node, its role and one peer, in those words, from the arena at zero allocations, under the node's write permit; a pattern is never a target. session/verbs lists open, the only verb bound here. A refusal of a node maps onto the open outcome, each to its own word. Close, reset and status stay on the heap profile: they walk a session table, keep a record per peer, or list machines. No image binds it yet.",
+      "changes_bullets": [
+        "wz-session-core lifecycle_wire (new, no allocator): OpenOutcome, RefusedReason, OpenVerdict (moved from lifecycle_query, which re-exports them), OpenKey, write_verb_list, OPEN_VERB, three tests. credential_identity: zid_from_key_text, the one parser, which zid_hex::zenoh_hex_to_zid calls.",
+        "wz-session-mcu admin_fixed: NodeOpening, host_admin_queryable_fixed_with_open (the old registration is it with None), serve_open (session/open exact key under the permit, session/verbs). connect_manager: From<NodeRefusal> for OpenOutcome, ControlledOpener (the opener under the write permit, slot profile with adminspace-fixed), NodeOpener::controlled. tests/admin_open_query.rs (5 tests). run-ci.sh: leg C1m admin open query 5, and C1m mcu counts 28 to 29, 19 to 20 and 38 to 39. docs/session-lifecycle-intent.md: 6.2b-3 and what is next."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): the new slot-profile test (5) passes at zero heap allocations for the GET, with every refusal by its word, a pattern opening nothing and a node with no opener answering none; the lifecycle_wire tests pass with all features and with none; the core lifecycle and identity tests pass; the guarded mcu legs printed 5 (open query), 29, 20 (two node rows) and 39, equal to the constants; clippy of wz-session-mcu (slot with adminspace, adminspace-write at both limits, all features) and wz-session-core (all features, default, none) is clean; the documentation of the two crates builds, with the core's existing broken links none of which is in these files.",
+        "Not built: an image that binds the verb (none does yet), and the Zephyr and lwIP frames of a registration that holds one more reference."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Step 6.2b-4: an image that binds the verb (MAX_PEER_NODES above zero, ControlledOpener handed to the registration, which the Zephyr and lwIP images build and the kit lane reads), the sources of hints (a build's declared ones, a Hello), wz-session-lwip forwarding the feature, and the witness on the image. The in-band switchboard (the Push form) and close, reset and status are not on this profile. The heap UDP dialer does not yet verify nodes. Read the first completed hosted run holding rounds 3646 to this one (the Qzb chain, the C1bz budget). Then D7."
+      ],
+      "publishable_decision_summary": "Step 6, fifth part (6.2b-3, first half): the open query on the fixed-memory profile. The lifecycle query is compiled only with an allocator; the choice was to port it or to split what it says from what needs the heap, and it is the split. lifecycle_wire (no allocator, always compiled) holds the open verdict, the refused reasons, the open key and the capability document; lifecycle_query re-exports it, so the heap profile's paths and words do not change, and one function reads a key's zid. The node's admin queryable answers GET session/open/<peer> for a literal key that names the node, its role and one peer, in those words, from the arena at zero allocations, under the node's write permit; a pattern is never a target. session/verbs lists open, the only verb bound here. A refusal of a node maps onto the open outcome, each to its own word. Close, reset and status stay on the heap profile: they walk a session table, keep a record per peer, or list machines. No image binds it yet.",
+      "publishable_changes_bullets": [
+        "wz-session-core lifecycle_wire (new, no allocator): OpenOutcome, RefusedReason, OpenVerdict (moved from lifecycle_query, which re-exports them), OpenKey, write_verb_list, OPEN_VERB, three tests. credential_identity: zid_from_key_text, the one parser, which zid_hex::zenoh_hex_to_zid calls.",
+        "wz-session-mcu admin_fixed: NodeOpening, host_admin_queryable_fixed_with_open (the old registration is it with None), serve_open (session/open exact key under the permit, session/verbs). connect_manager: From<NodeRefusal> for OpenOutcome, ControlledOpener (the opener under the write permit, slot profile with adminspace-fixed), NodeOpener::controlled. tests/admin_open_query.rs (5 tests). run-ci.sh: leg C1m admin open query 5, and C1m mcu counts 28 to 29, 19 to 20 and 38 to 39. docs/session-lifecycle-intent.md: 6.2b-3 and what is next."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): the new slot-profile test (5) passes at zero heap allocations for the GET, with every refusal by its word, a pattern opening nothing and a node with no opener answering none; the lifecycle_wire tests pass with all features and with none; the core lifecycle and identity tests pass; the guarded mcu legs printed 5 (open query), 29, 20 (two node rows) and 39, equal to the constants; clippy of wz-session-mcu (slot with adminspace, adminspace-write at both limits, all features) and wz-session-core (all features, default, none) is clean; the documentation of the two crates builds, with the core's existing broken links none of which is in these files.",
+        "Not built: an image that binds the verb (none does yet), and the Zephyr and lwIP frames of a registration that holds one more reference."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 6.2b-4: an image that binds the verb (MAX_PEER_NODES above zero, ControlledOpener handed to the registration, which the Zephyr and lwIP images build and the kit lane reads), the sources of hints (a build's declared ones, a Hello), wz-session-lwip forwarding the feature, and the witness on the image. The in-band switchboard (the Push form) and close, reset and status are not on this profile. The heap UDP dialer does not yet verify nodes. Read the first completed hosted run holding rounds 3646 to this one (the Qzb chain, the C1bz budget). Then D7."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
