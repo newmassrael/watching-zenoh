@@ -171,6 +171,11 @@ fixed-memory = [
     "wz-session-mcu/adminspace-fixed",
     "wz-session-core/session-slot",
 ]
+# The fixed admin node binds no lifecycle verb (`CONFIG_WZ_LIFECYCLE_DECLARED`, decision D7 of
+# docs/session-lifecycle-intent.md): its opener is `NoOpening`, so the code that serves
+# `session/open` is not in the image, and the peers it holds are the ones the build declares. A
+# selector of the image and no code of its own, which is why it names nothing.
+lifecycle-declared = []
 # The FIXED-MEMORY CLIENT: the client node (`CONFIG_WZ_ROLE_CLIENT`) over Zephyr's sockets on the slot
 # profile (`fixed_client.rs`), the memory profile `CONFIG_WZ_FIXED_MEMORY` selects for it. The same
 # client as `client-node` with its sessions, tables and texts in statics the image declares: the

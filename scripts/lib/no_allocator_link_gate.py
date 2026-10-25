@@ -460,6 +460,17 @@ IMAGES: dict[str, Image] = {
                 label="cyt4bf-lwip-fixed",
                 no_default_features=True,
             ),
+            # The node that binds no lifecycle verb (`CONFIG_WZ_LIFECYCLE_DECLARED`, decision D7 of
+            # docs/session-lifecycle-intent.md): its opener is `NoOpening`, so the code that
+            # serves `session/open` is not linked. The same proof, on the other value of the axis.
+            Build(
+                V7EMHF,
+                "@deploy/zephyr-admin-node/lwip-port",
+                ("net-lwip-mac", "mac-cyt4bf", "fixed-memory", "lifecycle-declared"),
+                env=ZEPHYR_BUILD_VALUES,
+                label="cyt4bf-lwip-fixed-declared",
+                no_default_features=True,
+            ),
         ),
         ci=False,
     ),

@@ -2012,6 +2012,50 @@ Zephyr's network stack and POSIX layer still may, and CONFIG_HEAP_MEM_POOL_SIZE 
 the kernel is given for it.
 '''
 
+# Decision D7 of docs/session-lifecycle-intent.md: how a session lifecycle verb reaches the node.
+# The contract (open a peer by its zid, answered with an outcome) is one, and what differs is what
+# feeds it. A third value, `out-of-band` (an agent's control channel), is added with its control
+# port (step 7d), and not before: an option that cannot be built is not declared.
+[[axis]]
+id = "lifecycle-transport"
+image = "zephyr-admin-node"
+kconfig = "WZ_LIFECYCLE_TRANSPORT"
+prompt = "How a session lifecycle verb reaches the node"
+default = "in-band"
+help = '''
+The node holds the peers it was told to hold by their zid beside the locators it is told to
+connect to, and which peers it is asked to hold at run time is a transport of its own: a Push or
+a query on the admin space, an agent that drives the node over a channel of its own, or none.
+'''
+
+[[axis_option]]
+id = "in-band"
+axis = "lifecycle-transport"
+kconfig = "WZ_LIFECYCLE_IN_BAND"
+prompt = "A query on the admin space opens a peer (session/open/<zid>)"
+help = '''
+The node answers `GET @/<zid>/<whatami>/session/open/<peer-zid>` by holding the peer and lists
+the verb in `session/verbs`. Only the fixed-memory admin node binds the verb this way; the other
+nodes of the image have their own lifecycle or none, and this value changes nothing of them.
+'''
+
+[[axis_option]]
+id = "declared"
+axis = "lifecycle-transport"
+kconfig = "WZ_LIFECYCLE_DECLARED"
+prompt = "No verb: the peers are the ones the build declares"
+requires = "WZ_FIXED_MEMORY && WZ_NET_BACKEND_LWIP_MAC"
+help = '''
+The node binds no lifecycle verb: its admin answer lists none and serves no `session/open` key, and
+the code that serves it is not in the image. The peers it holds are the ones declared when it was
+built, and its connection machines only reconnect them.
+'''
+
+[[cargo_rule]]
+image = "zephyr-admin-node"
+when = ["WZ_LIFECYCLE_DECLARED"]
+features = ["lifecycle-declared"]
+
 [[cargo_rule]]
 image = "zephyr-admin-node"
 when = ["WZ_NET_BACKEND_ZEPHYR_SOCKETS"]

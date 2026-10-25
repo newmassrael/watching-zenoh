@@ -6,6 +6,9 @@
 
 set(wz_axes_features "")
 set(wz_axes_no_default_features "")
+if(CONFIG_WZ_LIFECYCLE_DECLARED)
+  list(APPEND wz_axes_features lifecycle-declared)
+endif()
 if(CONFIG_WZ_NET_BACKEND_ZEPHYR_SOCKETS)
   list(APPEND wz_axes_features net-zephyr-sockets)
 endif()

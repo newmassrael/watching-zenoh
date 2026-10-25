@@ -42,12 +42,16 @@ use wz::runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, Runtime
 use wz::runtime_zephyr::glue::{log, log_args, stack_usage, yield_us};
 use wz::runtime_zephyr::stack::StackWatch;
 use wz::runtime_zephyr::{ZephyrClock, ZephyrEntropy};
+#[cfg(feature = "lifecycle-declared")]
+use wz::session_lwip::admin_fixed::NoOpening;
 use wz::session_lwip::admin_fixed::{
     host_admin_queryable_fixed_with_open, AdminHost, AdminSinks, FixedNodeIdentity, FixedNodeStatus,
 };
 use wz::session_lwip::admin_host::{host_connect_writes_fixed, ConnectControl};
 use wz::session_lwip::app_layer::{NoReplies, SlotApp, SlotDispatch};
-use wz::session_lwip::connect_manager::{ControlledOpener, PeerStore};
+#[cfg(not(feature = "lifecycle-declared"))]
+use wz::session_lwip::connect_manager::ControlledOpener;
+use wz::session_lwip::connect_manager::PeerStore;
 use wz::session_lwip::driver::LwipUdpDriver;
 use wz::session_lwip::listener::SessionListener;
 use wz::session_lwip::session_host::SessionHost;
@@ -169,7 +173,14 @@ struct Control {
 
 /// The registrations the node's observer holds, all closed types: the config-write
 /// subscriber and the admin queryable.
-type Sinks = AdminSinks<1024, SESSIONS, ControlledOpener>;
+type Sinks = AdminSinks<1024, SESSIONS, Opener>;
+
+/// How a lifecycle verb reaches the node (decision D7): the in-band query's opener, or none when the
+/// image is built with the peers it holds declared (`CONFIG_WZ_LIFECYCLE_DECLARED`).
+#[cfg(not(feature = "lifecycle-declared"))]
+type Opener = ControlledOpener;
+#[cfg(feature = "lifecycle-declared")]
+type Opener = NoOpening;
 
 // SAFETY: the profile's rule, stated on the type: the node is driven by one cooperative
 // loop on one thread, which is the only thing that reaches these tables; each member is
@@ -208,7 +219,11 @@ static CONTROL: Control = Control::new();
 /// references and so does not start as zero bytes, which is what keeps [`Statics`] in `.bss`.
 /// With `CONFIG_WZ_LIMIT_MAX_PEER_NODES` at its default of zero the node has no room for one, and
 /// the query answers `refused` for that, by name.
-static OPEN: ControlledOpener = ControlledOpener::new(&NODE.peers, &CONTROL.control);
+#[cfg(not(feature = "lifecycle-declared"))]
+static OPEN: Opener = ControlledOpener::new(&NODE.peers, &CONTROL.control);
+/// The node of a build that declares its peers binds no verb, so its opener holds nothing.
+#[cfg(feature = "lifecycle-declared")]
+static OPEN: Opener = NoOpening;
 
 /// What the node makes its sessions from: the entropy, the parameters and the
 /// application layer (the process-wide observer, with the node's own admin surface
