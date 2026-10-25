@@ -287380,6 +287380,46 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3635": {
+      "decision_summary": "Step Sc3 of scouting on the cooperative engine: a blocking scouting window for the cooperative host. A new feature scout of wz-capi-coop adds the module scout: it joins the group as an extra receive socket, pins one ask socket to each interface that can carry multicast (R2611), sends one Scout, then reads every socket, pumps session-core's ScoutWindow and reads the host clock until the window resolves. It is generic over the engine's ClockSource, opens no session (z_scout needs none, so scouting is a plane beside the engine and not a port method), and drops a member whose read fails. The rules both windows share stop being copies: the locator grammar, the defaults, the tick and the delivery order (after the window, last responder first) moved into wz_session_core::scouting_host with their tests, and wz-capi-core re-exports them.",
+      "changes_bullets": [
+        "wz-capi-coop: feature scout (wz-host-net, log, scouting-active, codec-scout, codec-hello); src/scout.rs (Members, run_window, run_scout, scout_first); src/scout/tests.rs (7 tests over loopback sockets with a responder thread: survey runs its whole budget and collects every answer, lookup ends at the first, a window nobody answers ends empty at its deadline, our own Scout and an undecodable or addressless Hello are named and passed over, a dead ask socket does not end the window, the group socket asks when no other can, the public entry points find nothing on an unanswered group).",
+        "wz-session-core scouting_host: MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS, SCOUTING_WHAT_DEFAULT, SCOUT_TICK_MS, parse_multicast_locator and deliver_in_upstream_order (with the anchored citations to zenoh-pico's list and scout primitives), and their tests; wz-capi-core scouting re-exports them and keeps its tokio drive.",
+        "crates/Cargo.lock; scripts/lib/feature_public_surface_census.py (a wz-capi-coop row and PROSE_ONLY) and scripts/lib/nondefault-tests-gate.sh (scout on the coop leg); docs/capi-pico-on-coop-engine.md."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-capi-coop with scout and with default features; with the move done earlier, wz-session-core, wz-capi-core, wz-capi-c, wz-capi-pico and wz-ap-demo.",
+        "Tests: wz-capi-coop scout 7 passed; wz-session-core scouting_host 3 passed; wz-capi-core scouting 10 passed.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 1 failed (the feature-surface census, which wanted the new public feature named); after the wz-capi-coop row the census passes when run by itself, and the two citation gates of hook gate 2f pass. The whole array was not run a second time after that row."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next, scouting step Sc4: the pico scout feature and z_open's open-time lookup without the tokio engine, over wz-capi-coop's scout window with a coop clock and a zid from the posix entropy source; pico's own Ipv4-only locator parser and ScoutConfig give way to the session's.",
+        "Then the advanced publisher and subscriber, the listening role, and the engine flip. Routing the coop engine's redeclare through the replay cursor and its declaration-sync pacing policy (ledger 3634) is still to do.",
+        "Read the hosted runs of the earlier pushes at the start of the next round."
+      ],
+      "publishable_decision_summary": "Step Sc3 of scouting on the cooperative engine: a blocking scouting window for the cooperative host. A new feature scout of wz-capi-coop adds the module scout: it joins the group as an extra receive socket, pins one ask socket to each interface that can carry multicast (R2611), sends one Scout, then reads every socket, pumps session-core's ScoutWindow and reads the host clock until the window resolves. It is generic over the engine's ClockSource, opens no session (z_scout needs none, so scouting is a plane beside the engine and not a port method), and drops a member whose read fails. The rules both windows share stop being copies: the locator grammar, the defaults, the tick and the delivery order (after the window, last responder first) moved into wz_session_core::scouting_host with their tests, and wz-capi-core re-exports them.",
+      "publishable_changes_bullets": [
+        "wz-capi-coop: feature scout (wz-host-net, log, scouting-active, codec-scout, codec-hello); src/scout.rs (Members, run_window, run_scout, scout_first); src/scout/tests.rs (7 tests over loopback sockets with a responder thread: survey runs its whole budget and collects every answer, lookup ends at the first, a window nobody answers ends empty at its deadline, our own Scout and an undecodable or addressless Hello are named and passed over, a dead ask socket does not end the window, the group socket asks when no other can, the public entry points find nothing on an unanswered group).",
+        "wz-session-core scouting_host: MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS, SCOUTING_WHAT_DEFAULT, SCOUT_TICK_MS, parse_multicast_locator and deliver_in_upstream_order (with the anchored citations to zenoh-pico's list and scout primitives), and their tests; wz-capi-core scouting re-exports them and keeps its tokio drive.",
+        "crates/Cargo.lock; scripts/lib/feature_public_surface_census.py (a wz-capi-coop row and PROSE_ONLY) and scripts/lib/nondefault-tests-gate.sh (scout on the coop leg); docs/capi-pico-on-coop-engine.md."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-capi-coop with scout and with default features; with the move done earlier, wz-session-core, wz-capi-core, wz-capi-c, wz-capi-pico and wz-ap-demo.",
+        "Tests: wz-capi-coop scout 7 passed; wz-session-core scouting_host 3 passed; wz-capi-core scouting 10 passed.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 1 failed (the feature-surface census, which wanted the new public feature named); after the wz-capi-coop row the census passes when run by itself, and the two citation gates of hook gate 2f pass. The whole array was not run a second time after that row."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next, scouting step Sc4: the pico scout feature and z_open's open-time lookup without the tokio engine, over wz-capi-coop's scout window with a coop clock and a zid from the posix entropy source; pico's own Ipv4-only locator parser and ScoutConfig give way to the session's.",
+        "Then the advanced publisher and subscriber, the listening role, and the engine flip. Routing the coop engine's redeclare through the replay cursor and its declaration-sync pacing policy (ledger 3634) is still to do.",
+        "Read the hosted runs of the earlier pushes at the start of the next round."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
