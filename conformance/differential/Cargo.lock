@@ -1460,6 +1460,7 @@ dependencies = [
  "probe-up",
  "probe-wz",
  "rand",
+ "schemars",
  "serde_json",
  "token-cell",
  "tokio",
@@ -1758,8 +1759,15 @@ dependencies = [
  "home",
  "humantime",
  "lazy_static",
+ "libloading",
+ "schemars",
+ "serde",
+ "serde_json",
+ "shellexpand",
  "tracing",
  "tracing-subscriber",
+ "winapi",
+ "zenoh-core 1.10.1",
  "zenoh-result 1.10.1",
 ]
 

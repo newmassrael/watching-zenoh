@@ -69,6 +69,9 @@ num-traits = { version = "0.2", default-features = false }
 up_util = { package = "zenoh-util", version = "=1.10.1", features = ["test"] }
 wz_util = { package = "zenoh-util", path = "../../crates/wz-zenoh-util", features = ["test"] }
 humantime = "2"
+# The loader tests build the JSON schema of the ffi wrapper with `schemars`, one package for both
+# crates.
+schemars = { version = "1", features = ["either1"] }
 # `zenoh-collections`: the pair again. Both are built with the default `std`, which carries every
 # container but `SingleOrVec`.
 up_collections = { package = "zenoh-collections", version = "=1.10.1" }
