@@ -58,9 +58,15 @@ const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
 const PORT: u16 = 17490;
 const PAYLOAD: &[u8] = b"wz-multicast-host-roundtrip";
 // The `multicast-loopback` policy's `off` witness has its own (group, port) for the same
-// reason: it must not read the datagrams of the test above, nor they its own.
+// reason: it must not read the datagrams of the test above, nor they its own. It is
+// witnessed on Linux only: there `IP_MULTICAST_LOOP` is a property of the sending
+// socket, which is what the witness measures. macOS (over `lo0`) and Windows are not
+// measured, and a witness this leg cannot have run there must not gate them.
+#[cfg(target_os = "linux")]
 const PORT_LOOPBACK_OFF: u16 = 17491;
+#[cfg(target_os = "linux")]
 const QUIET_PAYLOAD: &[u8] = b"wz-multicast-host-loopback-off";
+#[cfg(target_os = "linux")]
 const CONTROL_PAYLOAD: &[u8] = b"wz-multicast-host-loopback-control";
 
 /// The interface this host's witness uses; see the module doc for the measurement
@@ -132,6 +138,7 @@ async fn a_datagram_sent_to_the_group_reaches_a_member_on_the_same_host() {
 /// absence mean something. Two senders on this host send to one group, a member of it
 /// listens: the sender whose loopback is `off` is not heard, and the one whose loopback is
 /// `on` is. The member hearing the control is what shows it was able to hear the first.
+#[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "multicast loopback e2e; opt-in like Layer M, run by the Platform lane"]
 async fn a_sender_whose_loopback_is_off_is_not_heard_by_a_member_on_its_host() {
