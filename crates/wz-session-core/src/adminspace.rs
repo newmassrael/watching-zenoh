@@ -6967,6 +6967,7 @@ mod tests {
             parked_senders: 0,
             park_budget: 32,
             park_refused: 0,
+            shed_over_capacity: 0,
         }
     }
 

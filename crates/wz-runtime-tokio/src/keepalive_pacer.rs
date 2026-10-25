@@ -116,11 +116,24 @@ fn step(weak: &Weak<SessionLinkActions>, clock: &TokioTime, generation: u64) -> 
     }
 }
 
+/// Whether the session this pacer belongs to still has its keepalive worker running. One whose
+/// worker was stopped from outside (a session the node is closing for capacity) has its pacer wake
+/// once more at the time it had set, and end; that wake is not a keepalive timer being served, and
+/// how late it is says how late the thread was before the session was cut, which the control that
+/// reads the lateness would take, an interval after its cut, for the cut not having worked.
+fn worker_runs(weak: &Weak<SessionLinkActions>) -> bool {
+    weak.upgrade().is_some_and(|actions| {
+        TokioRuntime::with_mutex_mut(&actions.link.keepalive_armed, |armed| *armed)
+    })
+}
+
 async fn pace(weak: Weak<SessionLinkActions>, clock: TokioTime, generation: u64) {
     while let Some(wait_ms) = step(&weak, &clock, generation) {
         let planned = clock.now_monotonic_ms().saturating_add(wait_ms);
         tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-        note_wake_lateness(clock.now_monotonic_ms().saturating_sub(planned));
+        if worker_runs(&weak) {
+            note_wake_lateness(clock.now_monotonic_ms().saturating_sub(planned));
+        }
     }
 }
 
@@ -144,7 +157,22 @@ fn lateness_clock_ms() -> u64 {
     .unwrap_or(u64::MAX)
 }
 
+/// The longest wake lateness since [`keepalive_timer_lateness_since_last_read`] was last called.
+static WAKE_LATENESS_RECENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The longest a keepalive timer of this process was served late since the last call of this
+/// function, in milliseconds, and the reading starts again from nothing.
+///
+/// For the one reader that closes a loop on it (`crate::capacity_control`): the windows of
+/// [`keepalive_timer_lateness`] answer how late the timers were in the last ten seconds or the
+/// last minute, and a loop that read them would still see a spike seconds after the cut that
+/// ended it. A second reader would take from the first what it had not read.
+pub fn keepalive_timer_lateness_since_last_read() -> u64 {
+    WAKE_LATENESS_RECENT.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 fn note_wake_lateness(late_ms: u64) {
+    WAKE_LATENESS_RECENT.fetch_max(late_ms, std::sync::atomic::Ordering::Relaxed);
     let now_ms = lateness_clock_ms();
     // A poisoned lock means a panic while holding two integers; the figures are still integers.
     let mut windows = WAKE_LATENESS

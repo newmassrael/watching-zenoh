@@ -444,7 +444,11 @@ use wz_session_core::wire::{PushOwned, PushOwnedVariant, RequestOwned, ResponseO
 mod egress;
 #[cfg(test)]
 mod egress_tests;
+mod shed;
+#[cfg(test)]
+mod shed_tests;
 pub use egress::EgressBudget;
+pub use shed::{ShedBatch, ShedRegistry};
 
 /// R2866 (open-debt item 751, step 2) — the router's faces, planes and tables
 /// are keyed by the pin's [`Region`] now. The 1.5.0 `FaceTier` classifier
@@ -1878,6 +1882,10 @@ pub struct RouterForwarder {
     /// What the destinations hold back, and which faces are not read for it: the router's
     /// credit-based flow control (see [`egress`]).
     credit: egress::Credit,
+    /// The sessions this router holds, as far as closing the newest of them for capacity needs
+    /// them (see [`shed`]). Behind a lock and not in [`faces`](Self#structfield.faces), so that
+    /// the capacity control, a task of the control runtime, can shed while the loop is starved.
+    shed_registry: Arc<shed::ShedRegistry>,
     /// How this router's south is partitioned into subregions, and so which
     /// regions [`hats`](Self::hats) holds and which one each face lands in
     /// ([`RouterForwarder::with_south_partition`]). `Auto` is the pin's preset
@@ -2435,6 +2443,7 @@ impl RouterForwarder {
             ),
             faces: Rc::new(RefCell::new(HashMap::new())),
             credit: egress::Credit::default(),
+            shed_registry: Arc::default(),
             #[cfg(feature = "session-close-ingress")]
             joined_links: Rc::new(RefCell::new(HashMap::new())),
             // R2639 — `disabled` seeds the empty matcher, so a router that never
@@ -2785,6 +2794,12 @@ impl RouterForwarder {
     /// asserts on.
     pub fn data_seen(&self) -> usize {
         self.data_seen.get()
+    }
+
+    /// The handle the capacity control sheds through: the sessions this router holds, as far as
+    /// closing the newest of them goes ([`ShedRegistry`]). Send and Sync, unlike the router.
+    pub fn shed_registry(&self) -> Arc<ShedRegistry> {
+        Arc::clone(&self.shed_registry)
     }
 
     /// R2904 — the data `Push` messages this router SENT on (see
@@ -8176,6 +8191,7 @@ impl FaceForwarder for RouterForwarder {
                 held: RefCell::new(egress::EgressQueue::default()),
             },
         );
+        self.shed_registry.add(id, actions.clone());
         // Self gained a routing link in this tier's net (its link-state changed):
         // bootstrap the new face + delta the existing same-tier faces NOW
         // (event-driven), and SCHEDULE that net's recompute (coalesced onto the
@@ -8191,6 +8207,7 @@ impl FaceForwarder for RouterForwarder {
     }
 
     fn deregister(&self, id: FaceId) {
+        self.shed_registry.remove(id);
         // OBLIGATION-1: purge ALL FaceId-keyed leaf state BEFORE the linkless
         // early-return below (a Client face is `link == None`, so it never reaches
         // the graph teardown). (a) the pending-query return table entries keyed by

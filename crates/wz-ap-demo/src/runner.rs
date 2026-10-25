@@ -6860,6 +6860,24 @@ async fn run_router_hat_until(
             cfg.effective_max_sessions().limit
         })
     };
+    // The ceiling bounds who is admitted, not who stays. Sessions admitted while the host was
+    // quiet, at a cost the load that comes later multiplies, can be more than the loaded host
+    // serves, and their leases run out one after another; a router that declared its CPU share
+    // therefore reads the lateness of its keepalive timers, and cuts when they are late
+    // (`wz_runtime_tokio::capacity_control`). On a thread of its own and not in this loop, which a
+    // router in that state runs every few seconds.
+    if opts.capacity.is_some() {
+        if let Err(e) = wz::runtime_tokio::capacity_control::spawn_capacity_control(
+            host_cfg.borrow().clone(),
+            forwarder.shed_registry(),
+            session_ceiling.clone(),
+        ) {
+            log::error!(
+                "wz-ap-demo router-hat: the capacity control did not start ({e}): the sessions \
+                 admitted past what the host serves will not be shed"
+            );
+        }
+    }
     #[cfg(feature = "adminspace-router-linkstate")]
     {
         use wz::runtime_tokio::adminspace::{
@@ -7088,6 +7106,7 @@ async fn run_router_hat_until(
                     capacity_sessions.admin_sessions().len(),
                     capacity_counters.refused_over_max_sessions(),
                     capacity_counters.refused_over_capacity(),
+                    capacity_counters.shed_over_capacity(),
                 );
                 if answer_capacity_query(view, out, &capacity_zid, read, &report)
                     == AdminAnswerOutcome::DeniedRead

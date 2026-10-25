@@ -107,6 +107,9 @@ struct Router {
     /// costs on this host, as it measured it: what a failed run needs to say whether the model was
     /// calibrated to the host it ran on.
     capacity_line: Arc<Mutex<String>>,
+    /// The sessions the router said it ordered closed because it held more than it measured it can
+    /// keep the leases of, summed over its statements of it.
+    shed: Arc<AtomicUsize>,
 }
 
 /// Run `demo` with `args` under a shell that raises the soft open-files limit to the hard one first
@@ -178,6 +181,13 @@ fn keepalive_lateness_ms(line: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
+/// The sessions a router ordered closed in one statement, `closing the newest N to keep K`.
+fn sessions_shed(line: &str) -> Option<usize> {
+    let rest = line.split("closing the newest ").nth(1)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
 fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Router {
     let max_sessions = ROUTER_MAX_SESSIONS.to_string();
     let mut args = vec![
@@ -205,9 +215,10 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
     let pushes = Arc::new(AtomicU64::new(0));
     let lateness_ms = Arc::new(AtomicU64::new(0));
     let capacity_line = Arc::new(Mutex::new(String::new()));
+    let shed = Arc::new(AtomicUsize::new(0));
     let (port_tx, port_rx) = mpsc::channel();
     {
-        let (up, down, down_lines, refused, pushes, lateness_ms, capacity_line) = (
+        let (up, down, down_lines, refused, pushes, lateness_ms, capacity_line, shed) = (
             Arc::clone(&up),
             Arc::clone(&down),
             Arc::clone(&down_lines),
@@ -215,6 +226,7 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
             Arc::clone(&pushes),
             Arc::clone(&lateness_ms),
             Arc::clone(&capacity_line),
+            Arc::clone(&shed),
         );
         thread::spawn(move || {
             let mut port_tx = Some(port_tx);
@@ -243,6 +255,8 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
                     pushes.store(total, Ordering::Relaxed);
                 } else if let Some(late) = keepalive_lateness_ms(&line) {
                     lateness_ms.store(late, Ordering::Relaxed);
+                } else if let Some(closed) = sessions_shed(&line) {
+                    shed.fetch_add(closed, Ordering::Relaxed);
                 } else if line.contains("admitting at most") {
                     // Each statement, in order: the series is what says whether the limit
                     // followed the host or the burst.
@@ -270,6 +284,7 @@ fn spawn_router(demo: &Path, pin: Option<usize>, cpu_share: Option<&str>) -> Rou
         pushes,
         lateness_ms,
         capacity_line,
+        shed,
     }
 }
 
@@ -435,6 +450,9 @@ struct Window {
     /// (empty when it said none): printed with a failure so that a run on a host the recorded
     /// costs do not fit says so.
     capacity_note: String,
+    /// The sessions the router ordered closed in the window because it held more than it measured
+    /// it can keep the leases of: the endings and DOWNs that are its own doing and not a lost lease.
+    shed: usize,
 }
 
 impl Window {
@@ -541,12 +559,13 @@ fn measure(scenario: Scenario) -> Window {
         .flat_map(|core| (0..starved_by.unwrap_or(0)).map(move |_| spawn_cpu_hog(core)))
         .collect();
 
-    let (cpu_before, pushes_before, down_before, up_before, ended_before) = (
+    let (cpu_before, pushes_before, down_before, up_before, ended_before, shed_before) = (
         cpu_seconds(router_pid),
         router.pushes.load(Ordering::Relaxed),
         router.down.load(Ordering::Relaxed),
         router.up.load(Ordering::Relaxed),
         ended.load(Ordering::Relaxed),
+        router.shed.load(Ordering::Relaxed),
     );
     let started = Instant::now();
     let mut waves: VecDeque<(Instant, ChildGuard)> = VecDeque::new();
@@ -585,6 +604,7 @@ fn measure(scenario: Scenario) -> Window {
             .lock()
             .map(|line| line.clone())
             .unwrap_or_default(),
+        shed: router.shed.load(Ordering::Relaxed) - shed_before,
     };
     drop(waves);
     drop(clients);
@@ -627,12 +647,15 @@ fn measure(scenario: Scenario) -> Window {
                 .unwrap_or_default()
         );
     }
+    // A face the router itself ordered closed for capacity goes DOWN, and is its own doing: only a
+    // face past the ones it ordered closed is a collapse.
     if !churn && !lease_loss_is_a_result {
-        assert_eq!(
+        assert!(
+            window.down <= window.shed,
+            "{} faces went DOWN in a steady window, {} of them ordered closed by the router; the run \
+             measured a collapse\n{}",
             window.down,
-            0,
-            "{} faces went DOWN in a steady window; the run measured a collapse\n{}",
-            window.down,
+            window.shed,
             router
                 .down_lines
                 .lock()
@@ -643,13 +666,19 @@ fn measure(scenario: Scenario) -> Window {
     // The router's own DOWN count is a race on a starved router, which sees a face fall only when its
     // loops come back to it. What the property is, from the other end: no client session lost its
     // router, and a client ends its session on its own only when its lease for the router ran out.
+    // The router closed `shed` sessions itself, and each of those a client sees end; an ending
+    // past that count is a session whose lease the router did not keep.
     if !churn && !lease_loss_is_a_result {
-        assert_eq!(
-            window.ended, 0,
-            "{} client sessions ended on their own in a steady window: their lease for the router \
-             ran out\n{} came up in the window, the longest keepalive timer lateness {} ms; the \
-             router said: {}",
-            window.ended, window.admitted, window.keepalive_late_ms, window.capacity_note
+        assert!(
+            window.ended <= window.shed,
+            "{} client sessions ended in a steady window, {} of them ordered closed by the router: \
+             the others' lease for the router ran out\n{} came up in the window, the longest \
+             keepalive timer lateness {} ms; the router said: {}",
+            window.ended,
+            window.shed,
+            window.admitted,
+            window.keepalive_late_ms,
+            window.capacity_note
         );
     }
     // The promise from the router's own side: a router that was told its CPU share serves every
@@ -661,8 +690,11 @@ fn measure(scenario: Scenario) -> Window {
         assert!(
             window.keepalive_late_ms <= limit,
             "a keepalive timer was served {} ms late, over the {limit} ms a {SESSION_LEASE_MS} ms \
-             lease allows, in a router that was told its CPU share",
-            window.keepalive_late_ms
+             lease allows, in a router that was told its CPU share; it closed {} sessions for \
+             capacity in the window; the router said: {}",
+            window.keepalive_late_ms,
+            window.shed,
+            window.capacity_note
         );
     }
     // A starved router is overloaded on purpose, so how much it forwards is the answer there and
@@ -788,14 +820,47 @@ fn wz_router_hat_keeps_every_lease_it_admits_at_its_declared_share() {
     eprintln!(
         "\nrouter told 1.32% of a core, 32 hogs, 2048 sessions knocking, offered {offered} messages/s: \
          forwarded {:.0} messages/s, {} faces went DOWN, {} admitted client sessions ended on their own, \
-         the longest a keepalive timer was served late {} ms; {} came up in the window; the router \
-         said: {}",
+         {} of them ordered closed by the router, the longest a keepalive timer was served late {} ms; \
+         {} came up in the window; the router said: {}",
         w.messages_per_second(),
         w.down,
         w.ended,
+        w.shed,
         w.keepalive_late_ms,
         w.admitted,
         w.capacity_note,
+    );
+}
+
+/// The promise kept when the host gives less than was declared (`docs/router-data-plane-scaling.md`
+/// section 7.5): the router is told 1.32% of a core and gets about half of that, 64 hogs against
+/// the 32 the promise test uses, as a burstable host does under steal. It admitted the sessions its
+/// model allowed while the host was quiet, and holds more than it can serve once the hogs start;
+/// the capacity control reads its keepalive timers, finds them late, and closes the newest
+/// sessions. Asserted: nobody went DOWN that the router did not itself close, no client ended that
+/// the router did not itself close, and no keepalive timer was served later than a lease allows.
+/// How many it closed is printed, not asserted: a host that is not short of CPU closes none.
+#[test]
+#[ignore = "opt-in measurement: spawns wz-ap-demo built with router-hat-router and 64 CPU hogs, holds 1100 local sessions; run with --ignored --nocapture"]
+fn wz_router_hat_keeps_its_promise_by_closing_sessions_when_the_host_gives_less_than_declared() {
+    let offered = 40_000;
+    let w = measure(Scenario {
+        subscribers: 2048,
+        churn: false,
+        offered,
+        starved_by: Some(64),
+        cpu_share: Some("1.32"),
+        lease_loss_is_a_result: false,
+    });
+    eprintln!(
+        "\nrouter told 1.32% of a core, 64 hogs, 2048 sessions knocking, offered {offered} messages/s: \
+         forwarded {:.0} messages/s, {} faces went DOWN, {} client sessions ended, {} of them \
+         ordered closed by the router, the longest a keepalive timer was served late {} ms",
+        w.messages_per_second(),
+        w.down,
+        w.ended,
+        w.shed,
+        w.keepalive_late_ms,
     );
 }
 

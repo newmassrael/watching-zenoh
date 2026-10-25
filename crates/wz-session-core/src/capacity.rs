@@ -386,6 +386,161 @@ pub fn effective_max_sessions(
     bound
 }
 
+/// How long an estimate of the bound stays in the [`AdmissionControl`]'s memory, in milliseconds.
+///
+/// Long enough that an estimate that flaps (the emission cost it comes from is read over a window
+/// of the latest emissions, and on a loaded host it moves by a third from one second to the next)
+/// does not make the control cut to the lowest figure of the moment, and short enough that the
+/// estimate read before the load arrived, on a quiet host where an emission costs a fifteenth of
+/// what it costs under load, is forgotten within the time a lease allows to find out.
+pub const CONTROL_MEMORY_MS: u64 = 3_000;
+
+/// How many estimates the control remembers: one a second for the memory, with room for a host
+/// that asks more often.
+const CONTROL_SLOTS: usize = 16;
+
+/// The lateness of a keepalive timer at which the node is in distress: an eighth of what a lease
+/// allows ([`keepalive_lateness_limit_ms`]), 833 ms of a 10 s lease. Below it the keepalives are
+/// being served in time; above it the sessions held are more than the node serves, and the lease
+/// is a few intervals away: the lateness of an overloaded node is not steady but grows, by the
+/// better part of a second each second, and a node that waits for a quarter of the limit has
+/// spent half of what it has by the time its first cut takes effect.
+pub const fn distress_lateness_ms(lease_ms: u64) -> u64 {
+    keepalive_lateness_limit_ms(lease_ms) / 8
+}
+
+/// What the [`AdmissionControl`] decided at one reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdmissionStep {
+    /// Close the newest sessions until this many are held, or `None` to close none.
+    pub keep: Option<usize>,
+    /// The ceiling the control puts on admission, or `None` when it puts none (the bound of the
+    /// model is then the only one).
+    pub cap: Option<usize>,
+}
+
+/// The closed loop around the admission bound: what to do when the node holds more sessions than
+/// it serves.
+///
+/// The bound ([`effective_max_sessions`]) is a function of the cost of a keepalive emission, and
+/// that cost is only known as it is paid. A node that is admitting while its host is quiet reads a
+/// cost that load multiplies by 15 or more (a thread that sleeps between emissions is, at each
+/// one, on a cache and a TLB another process has used), so the sessions admitted at the quiet cost
+/// can be more than the loaded host can serve, and their leases run out one after another. A
+/// bound applied at admission cannot undo that, and a bound derived from a share the host does not
+/// give is wrong in a way no cost corrects. The one reading that is always true is the lateness
+/// of the keepalive timers, which is what the lease depends on, and this closes the loop on it in
+/// the shape of a transport's reaction to a timeout (TCP's: `ssthresh = cwnd / 2`, `cwnd` to its
+/// initial window, slow start up to `ssthresh`, additive increase after it):
+///
+/// - **Cut, deep.** A node in distress ([`distress_lateness_ms`]) closes the newest sessions down
+///   to an eighth of what it holds, or to the model's bound when that is lower, and remembers half
+///   of what it held as the threshold. The lateness of an overloaded node grows by most of a
+///   second each second whatever the overload (it saturates, and says nothing of how deep the
+///   overload is), and a lease is a few seconds from the first late reading, so a cut sized in
+///   proportion to what is read is too small by the time it takes effect. (Tried, and measured: a
+///   cut to half, repeated every interval, lost 660 sessions where this lost none; cuts sized by
+///   the keepalives or the timers the node served read zero, or a thousand, from a node whose
+///   sessions were busy and whose timers fired in bursts.) The bound is the highest estimate of the
+///   last [`CONTROL_MEMORY_MS`], so that one bad second's estimate does not decide it. The ceiling
+///   on admission is put at what is kept, so that the sessions closed do not at once come back.
+/// - **Settle.** After a cut nothing is judged for one keepalive interval (`T / 3`): the timers
+///   that were already late are served in it, and their lateness is the cut's past and not its
+///   result. A node still in distress when the interval is over cuts again.
+/// - **Recover.** A node out of distress, with a ceiling of its own, doubles it each interval up
+///   to the threshold and raises it by an eighth each interval after, until the model's bound is
+///   the lower and the ceiling is lifted.
+/// - The sessions closed are the newest: those held longest have kept their leases longest.
+///
+/// Pure: the caller names the time of each reading, in milliseconds on one clock that never goes
+/// back, and the type reads no clock and holds no lock. `recent_lateness_ms` is the longest timer
+/// lateness since the previous reading and not a windowed maximum, which would still show a
+/// spike seconds after the cut that ended it and cut again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdmissionControl {
+    /// For each slot, the time of the estimate plus one (zero is an empty slot) and the estimate.
+    seen: [(u64, usize); CONTROL_SLOTS],
+    next: usize,
+    /// The ceiling this control puts on admission, once it has cut.
+    cap: Option<usize>,
+    /// Where recovery stops doubling and starts to add: half of what was held at the last cut.
+    threshold: usize,
+    /// When the ceiling last moved, plus one.
+    changed_at: u64,
+}
+
+impl AdmissionControl {
+    /// A control that has seen nothing and puts no ceiling.
+    pub const fn new() -> Self {
+        Self {
+            seen: [(0, 0); CONTROL_SLOTS],
+            next: 0,
+            cap: None,
+            threshold: usize::MAX,
+            changed_at: 0,
+        }
+    }
+
+    /// The ceiling the control puts on admission now.
+    pub const fn cap(&self) -> Option<usize> {
+        self.cap
+    }
+
+    /// One reading: `held` sessions, the `bound` the model gives now and the longest keepalive
+    /// timer lateness since the previous reading, for a node whose lease is `lease_ms`.
+    pub fn step(
+        &mut self,
+        now_ms: u64,
+        held: usize,
+        bound: usize,
+        recent_lateness_ms: u64,
+        lease_ms: u64,
+    ) -> AdmissionStep {
+        let stamp = now_ms.saturating_add(1);
+        self.seen[self.next] = (stamp, bound);
+        self.next = (self.next + 1) % CONTROL_SLOTS;
+        let target = self
+            .seen
+            .iter()
+            .filter(|(at, _)| *at != 0 && stamp.saturating_sub(*at) < CONTROL_MEMORY_MS)
+            .map(|(_, estimate)| *estimate)
+            .max()
+            .unwrap_or(bound);
+        let interval = lease_ms / LEASE_EXPIRE_FACTOR;
+        let settled = self.changed_at == 0 || stamp.saturating_sub(self.changed_at) >= interval;
+        let mut keep = None;
+        if settled {
+            if recent_lateness_ms >= distress_lateness_ms(lease_ms) {
+                if held > 1 {
+                    let to = (held / 8).min(target).max(1);
+                    keep = Some(to);
+                    self.cap = Some(to);
+                    self.threshold = (held / 2).max(1);
+                    self.changed_at = stamp;
+                }
+            } else if let Some(cap) = self.cap {
+                let grown = if cap < self.threshold {
+                    cap.saturating_mul(2).min(self.threshold)
+                } else {
+                    cap.saturating_add((cap / 8).max(1))
+                };
+                self.cap = if grown >= target { None } else { Some(grown) };
+                self.changed_at = stamp;
+            }
+        }
+        AdmissionStep {
+            keep,
+            cap: self.cap,
+        }
+    }
+}
+
+impl Default for AdmissionControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// The version of the capacity report's shape. Moves when a field is removed or changes meaning;
 /// a field added at the end does not move it.
 pub const CAPACITY_REPORT_SCHEMA_VERSION: u32 = 1;
@@ -437,6 +592,9 @@ pub struct CapacityReport {
     pub park_budget: usize,
     /// Senders turned away because the budget was spent, answered congested at once (counter).
     pub park_refused: u64,
+    /// Sessions the node ordered closed because it held more than it measured it can keep the
+    /// leases of ([`AdmissionControl`]) (counter).
+    pub shed_over_capacity: u64,
 }
 
 impl CapacityReport {
@@ -483,7 +641,8 @@ impl CapacityReport {
             "\"lateness_current_ms\":{},\"lateness_last_minute_ms\":{},\
              \"lateness_since_start_ms\":{},\"lateness_limit_ms\":{},\"lease_at_risk\":{},\
              \"refused_over_max_sessions\":{},\"refused_over_capacity\":{},\
-             \"parked_senders\":{},\"park_budget\":{},\"park_refused\":{}}}",
+             \"parked_senders\":{},\"park_budget\":{},\"park_refused\":{},\
+             \"shed_over_capacity\":{}}}",
             self.lateness_current_ms,
             self.lateness_last_minute_ms,
             self.lateness_since_start_ms,
@@ -493,7 +652,8 @@ impl CapacityReport {
             self.refused_over_capacity,
             self.parked_senders,
             self.park_budget,
-            self.park_refused
+            self.park_refused,
+            self.shed_over_capacity
         )
     }
 }
@@ -744,6 +904,7 @@ mod tests {
             parked_senders: 0,
             park_budget: 32,
             park_refused: 0,
+            shed_over_capacity: 0,
         }
     }
 
@@ -759,7 +920,7 @@ mod tests {
              \"lateness_current_ms\":880,\"lateness_last_minute_ms\":1263,\
              \"lateness_since_start_ms\":1263,\"lateness_limit_ms\":6667,\"lease_at_risk\":false,\
              \"refused_over_max_sessions\":0,\"refused_over_capacity\":948,\
-             \"parked_senders\":0,\"park_budget\":32,\"park_refused\":0}"
+             \"parked_senders\":0,\"park_budget\":32,\"park_refused\":0,\"shed_over_capacity\":0}"
         );
     }
 
@@ -802,7 +963,11 @@ mod tests {
             .filter(|&i| tokens.get(i + 1).is_some_and(|t| t.starts_with(':')))
             .map(|i| tokens[i])
             .collect();
-        assert_eq!(fields.len(), 20, "the schema has twenty fields: {fields:?}");
+        assert_eq!(
+            fields.len(),
+            21,
+            "the schema has twenty-one fields: {fields:?}"
+        );
         for f in &fields {
             assert!(
                 doc.contains(&std::format!("| `{f}` |")),
@@ -958,5 +1123,173 @@ mod tests {
         assert!(at_32 < SMALLEST_WITH_LOSS);
         // At 24 hogs 2048 sessions lost clients in one run of two; the bound refuses that population.
         assert!(liveness_bound(SHARE_24_HOGS, LEASE_MS, RECORDED_HOST_MODEL) < SMALLEST_WITH_LOSS);
+    }
+
+    /// An eighth of 2T/3 = 6667 ms for a 10 s lease.
+    const DISTRESS_MS: u64 = 833;
+
+    /// One reading, as `(sessions to keep, ceiling)`.
+    fn step(
+        control: &mut AdmissionControl,
+        now_ms: u64,
+        held: usize,
+        bound: usize,
+        late: u64,
+    ) -> (Option<usize>, Option<usize>) {
+        let s = control.step(now_ms, held, bound, late, LEASE_MS);
+        (s.keep, s.cap)
+    }
+
+    /// A node whose keepalives are served in time cuts nothing, whatever the bound says and however
+    /// many sessions it holds past it: a session being served in time costs nobody a lease, and the
+    /// model is conservative by its headroom.
+    #[test]
+    fn a_surplus_is_kept_while_the_keepalives_are_in_time() {
+        let mut control = AdmissionControl::new();
+        assert_eq!(distress_lateness_ms(LEASE_MS), DISTRESS_MS);
+        assert_eq!(
+            step(&mut control, 0, 1_100, 300, DISTRESS_MS - 1),
+            (None, None)
+        );
+        assert_eq!(control.cap(), None);
+    }
+
+    /// In distress the node closes down to an eighth of what it holds, deep and at once, and puts
+    /// the ceiling there so that what it closed does not at once come back.
+    #[test]
+    fn distress_cuts_to_an_eighth_and_caps_admission_there() {
+        let mut control = AdmissionControl::new();
+        assert_eq!(
+            step(&mut control, 0, 1_100, 1_100, DISTRESS_MS),
+            (Some(137), Some(137))
+        );
+        // The model's bound is the lower of the two when it is: it caps what is kept.
+        let mut control = AdmissionControl::new();
+        assert_eq!(
+            step(&mut control, 0, 1_100, 100, DISTRESS_MS),
+            (Some(100), Some(100))
+        );
+        // A few sessions are cut to one and not to none, and one is not cut.
+        let mut control = AdmissionControl::new();
+        assert_eq!(step(&mut control, 0, 5, 5, DISTRESS_MS), (Some(1), Some(1)));
+        let mut control = AdmissionControl::new();
+        assert_eq!(step(&mut control, 0, 1, 1, u64::MAX), (None, None));
+    }
+
+    /// After a cut nothing is judged for one keepalive interval, 3333 ms of a 10 s lease: the timers
+    /// that were already late are served in it and their lateness is the cut's past. A node still
+    /// in distress when it is over cuts again.
+    #[test]
+    fn a_cut_settles_for_one_keepalive_interval_and_then_cuts_again_if_still_in_distress() {
+        let mut control = AdmissionControl::new();
+        assert_eq!(
+            step(&mut control, 0, 1_100, 1_100, DISTRESS_MS),
+            (Some(137), Some(137))
+        );
+        assert_eq!(
+            step(&mut control, 1_000, 137, 1_100, 5_000),
+            (None, Some(137)),
+            "the lateness of the cut's own backlog is not read"
+        );
+        assert_eq!(
+            step(&mut control, 3_000, 137, 1_100, 5_000),
+            (None, Some(137)),
+            "still inside the interval"
+        );
+        assert_eq!(
+            step(&mut control, 3_400, 137, 1_100, DISTRESS_MS),
+            (Some(17), Some(17)),
+            "and when it is over the lateness is the result of the cut, and it was not enough"
+        );
+    }
+
+    /// Out of distress, with a ceiling of its own, the node doubles it each interval up to the
+    /// threshold, which is half of what it held when it cut, then raises it by an eighth each
+    /// interval, until the model's bound is the lower and the ceiling is lifted.
+    #[test]
+    fn a_calm_node_doubles_its_ceiling_to_the_threshold_then_adds_an_eighth_until_the_bound() {
+        let mut control = AdmissionControl::new();
+        assert_eq!(
+            step(&mut control, 0, 800, 600, DISTRESS_MS),
+            (Some(100), Some(100)),
+            "an eighth of 800, with 400 as the threshold"
+        );
+        assert_eq!(
+            step(&mut control, 1_000, 100, 600, 0),
+            (None, Some(100)),
+            "inside the interval it does not raise"
+        );
+        assert_eq!(
+            step(&mut control, 3_400, 100, 600, 0),
+            (None, Some(200)),
+            "doubled"
+        );
+        assert_eq!(step(&mut control, 6_800, 200, 600, 0), (None, Some(400)));
+        assert_eq!(
+            step(&mut control, 10_200, 400, 600, 0),
+            (None, Some(450)),
+            "at the threshold it adds an eighth and no more"
+        );
+        assert_eq!(step(&mut control, 13_600, 450, 600, 0), (None, Some(506)));
+        assert_eq!(step(&mut control, 17_000, 506, 600, 0), (None, Some(569)));
+        assert_eq!(
+            step(&mut control, 20_400, 569, 600, 0),
+            (None, None),
+            "640 is past the bound of 600: the model's bound is the lower and the ceiling is lifted"
+        );
+        assert_eq!(control.cap(), None);
+    }
+
+    /// A node cut again before it had recovered halves the threshold of the cut before: the
+    /// threshold is where the last congestion was, not the first.
+    #[test]
+    fn a_second_cut_moves_the_threshold_to_half_of_what_was_held_then() {
+        let mut control = AdmissionControl::new();
+        assert_eq!(
+            step(&mut control, 0, 800, 800, DISTRESS_MS),
+            (Some(100), Some(100))
+        );
+        assert_eq!(step(&mut control, 3_400, 100, 800, 0), (None, Some(200)));
+        assert_eq!(
+            step(&mut control, 6_800, 200, 800, DISTRESS_MS),
+            (Some(25), Some(25)),
+            "an eighth of the 200 held, and 100 as the threshold now"
+        );
+        assert_eq!(step(&mut control, 10_200, 25, 800, 0), (None, Some(50)));
+        assert_eq!(step(&mut control, 13_600, 50, 800, 0), (None, Some(100)));
+        assert_eq!(
+            step(&mut control, 17_000, 100, 800, 0),
+            (None, Some(112)),
+            "the threshold the second cut set, and then an eighth"
+        );
+    }
+
+    /// The bound is the highest estimate of the last three seconds, so one bad second's estimate
+    /// does not decide it, and an estimate older than that is forgotten, so that the figure read
+    /// before the load came does not hold the node up for ever.
+    #[test]
+    fn the_bound_is_the_highest_recent_estimate_and_forgets_the_old_ones() {
+        let mut control = AdmissionControl::new();
+        // The estimate of a quiet host, then the loaded host's, which are lower and flap.
+        let mut at = 0;
+        for bound in [1_100, 263, 361] {
+            // No distress: only the memory is fed.
+            assert_eq!(step(&mut control, at, 600, bound, 0), (None, None));
+            at += 1_000;
+        }
+        assert_eq!(
+            step(&mut control, 3_000, 4_000, 289, DISTRESS_MS),
+            (Some(361), Some(361)),
+            "three seconds after it the 1100 is gone, and the highest left is 361"
+        );
+    }
+
+    /// A node that has no sessions has nothing to cut, and a node whose lateness is nothing keeps
+    /// what it holds whatever its bound.
+    #[test]
+    fn a_node_with_nothing_to_cut_or_no_distress_holds() {
+        let mut control = AdmissionControl::new();
+        assert_eq!(step(&mut control, 0, 0, 0, u64::MAX), (None, None));
+        assert_eq!(step(&mut control, 1, 1_000, 0, 0), (None, None));
     }
 }

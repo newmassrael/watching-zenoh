@@ -8813,6 +8813,51 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.core.out_of_band.raise(|s| s.tx_congested = true);
     }
 
+    /// Stop asking for keepalives for this session: the worker the machine starts on `Established`
+    /// and stops when it leaves it, stopped from outside, at the cost of one lock. The first step
+    /// of [`Self::close_for_capacity`], on its own so that a node closing many sessions can take
+    /// them all off its keepalive service before it spends the time the closes take.
+    pub fn stop_keepalives(&self) {
+        #[cfg(feature = "transport-keepalive")]
+        R::with_mutex_mut(&self.link.keepalive_armed, |armed| *armed = false);
+    }
+
+    /// Close this session because the node that holds it can no longer serve it: it is one of
+    /// the newest of more sessions than the node's keepalive service sustains, and the node closes
+    /// them so that the rest keep their leases. Three things, in this order, each for what the
+    /// next would take too long to do:
+    ///
+    /// 1. The keepalive worker stops, so that this session stops asking for keepalives NOW. The
+    ///    machine stops it when it leaves `Established`, which its drive loop does when it gets to
+    ///    the close request; on a node short of CPU that is seconds, and for those seconds the
+    ///    sessions being closed are the load the cut was meant to take off (measured: a router
+    ///    that cut 1100 sessions to 137 saw its keepalives go on getting later, 2 s, 4 s, 7 s,
+    ///    10 s, 12 s, because the 963 it had closed were still being served).
+    /// 2. The peer is told, on the urgent write the keepalive takes, with the reason the node
+    ///    gives a session it cannot serve (`UNRESPONSIVE`), so that it does not wait out its
+    ///    lease for a node that has stopped speaking to it.
+    /// 3. The close is requested of the machine ([`Self::request_congestion_close`]), which takes
+    ///    the session down when its drive loop runs.
+    pub fn close_for_capacity(&self) {
+        self.stop_keepalives();
+        #[cfg(all(
+            feature = "codec-close",
+            feature = "transport-keepalive",
+            not(feature = "tx-lend-only")
+        ))]
+        {
+            #[cfg(feature = "transport-batching")]
+            self.flush_open_batch();
+            R::with_mutex_mut(&self.trace, |t| t.send_close_frame_with_reason += 1);
+            let bytes = encode_close(
+                CloseReason::Unresponsive as u8,
+                self.close_scope_is_session(),
+            );
+            self.send_wire_urgent_this_link(&bytes, Reliability::Reliable);
+        }
+        self.request_congestion_close();
+    }
+
     /// How long a message that may not be dropped waits for room on this session's link before
     /// the session is closed as unresponsive (`transport/link/tx/queue/congestion_control/
     /// wait_before_close`, R2924). A sender that holds such messages itself, in place of

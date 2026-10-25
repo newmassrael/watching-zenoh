@@ -121,7 +121,8 @@ pub use emission_cost::{
 /// lease depends on, read where it is made (see the function's own doc).
 #[cfg(all(feature = "transport-unicast", feature = "transport-keepalive"))]
 pub use keepalive_pacer::{
-    keepalive_timer_lateness, keepalive_timer_lateness_max_ms, KeepaliveLateness,
+    keepalive_timer_lateness, keepalive_timer_lateness_max_ms,
+    keepalive_timer_lateness_since_last_read, KeepaliveLateness,
 };
 
 /// SCE-generated AP reassembly buffer-pool config. The emit comes from
@@ -2320,6 +2321,15 @@ pub(crate) mod peer_identity;
 /// slices. Gated on `routing-router-hat` (which pulls `routing-peer`).
 #[cfg(feature = "routing-router-hat")]
 pub mod router_forward;
+
+/// The loop a router that declared its CPU share closes on the lateness of its keepalive timers:
+/// it closes the newest sessions when they are late and puts a ceiling on admission where it cut.
+#[cfg(all(
+    feature = "routing-router-hat",
+    feature = "transport-unicast",
+    feature = "transport-keepalive"
+))]
+pub mod capacity_control;
 
 /// R311tt — the §5.16 access-control interceptor SEAM: the composable
 /// message-admission chain ([`interceptor::InterceptorChain`]) the ACL,

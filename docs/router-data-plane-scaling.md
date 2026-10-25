@@ -574,6 +574,7 @@ read permit denied answers nothing; the second was run with the permit ignored i
 | `parked_senders` | report | senders | senders parked now, waiting for room on a lane |
 | `park_budget` | report | senders | how many the node lets park at once (the bulkhead) |
 | `park_refused` | report | senders | counter: turned away because the budget was spent, answered congested at once |
+| `shed_over_capacity` | report | sessions | counter: ordered closed because the node held more than it measured it can keep the leases of |
 
 **What the router does at the number.** One value, the effective `max_sessions`, is the smaller of the
 configured `transport/unicast/max_sessions` (upstream's key, enforced in the accept loop already, default
@@ -808,3 +809,68 @@ that would hang on a lost wake-up and leave the lane full on a leaked promise.
   of one notice and are to become one.
 - `wait_for_slot` (the pool's slot) and the block-first slot are other waits on the same signal and are moved with
   the room wait.
+
+### 7.7 A router that admitted while the host was quiet: the control that closes on the lateness (2026-10-25)
+
+The hosted run of E7s's promise test (`wz_router_hat_keeps_every_lease_it_admits_at_its_declared_share`) failed
+in four of the five hosted runs that finished from 16:18 UTC on 2026-10-24, with 148, 254, 365 and 501 client
+sessions ended in the four read (`0 came up in the window`, the longest timer 10.7 s late in the last). The same
+test passed on the build host and on two other hosts of the fleet. The router said, in the last, that it admitted
+1100 sessions at an emission cost of 1.2 us, and, a few seconds later, 263 at 19 us.
+
+**What it is.** Not the cost model. The cost is read from the router's own emissions, the lower decile of the
+last 256, and the first reading of a run is taken while the host is quiet, before the hogs start: 0.3 to
+1.2 us on the hosts measured, then 6 to 19 us under load. 1100 sessions are admitted at the first and held at
+the second, and a router whose keepalive service serves 263 of them in time serves 1100 late: later and later,
+until a lease runs out, and then the sessions are lost together, the oldest too. A bound applied at admission cannot undo that, and a bound derived from a share the host does not give
+(a burstable host, steal) is wrong in a way no cost corrects. The hosted runner is both.
+
+**What was tried and measured, on the host that reproduced it (an 8-core fleet host, 64 hogs, 1.32% declared;
+without the control: 660 and 814 clients lost in two runs, the longest timer 13.4 and 14.3 s late).**
+
+- Aligning the pacers' wakes to a tick, so that timers that fall due together are served together: no change
+  (1024 sessions 1.3 s late before, 1.4 s after). Rejected and removed.
+- Making the first reading cold (touching 8 MiB between probe writes): the cost under contention is a property of
+  contention, and a cold probe over-reads a quiet host by 50 times. Rejected and removed.
+- A closed loop in the router's monitor, once per tick: the monitor of a router in that state runs every two to
+  four seconds, and the lateness grows by most of a second each second. It cut too late and not deep enough.
+- The same on the control runtime: one thread serves every keepalive timer, and a task of it waits behind the
+  timers that are late. It measured the same two to three seconds.
+- A cut sized in proportion to what was read: to half, repeated every interval (the longest timer still 11.8 s
+  late, with 963 closed), or to what the service was seen to sustain, by the keepalives it emitted or the timers
+  it served: a router whose sessions are busy emits no keepalives, and its timers are served in bursts (0, 4108,
+  2676, 0 in a second). Rejected.
+
+**What was built.** `wz_session_core::capacity::AdmissionControl`, pure (the caller names the time), in the shape of
+a transport's reaction to a timeout (TCP's: `ssthresh = cwnd / 2`, `cwnd` back to a small window, doubling up to
+`ssthresh`, adding after it). A router that declared a share reads, once a second, on a thread of its own
+(`wz_runtime_tokio::capacity_control`), the longest keepalive timer lateness since the last reading.
+
+- At an eighth of `2T/3` (833 ms of a 10 s lease) it closes the newest sessions down to an eighth of what it
+  holds, or to the model's bound when that is lower, remembers half of what it held as the threshold, and puts a
+  ceiling on admission there (`SessionCeiling::set_cap`) so that the sessions it closed do not come back at once.
+- For one keepalive interval after a cut it judges nothing: the timers that were already late are served in it.
+- Calm, it doubles the ceiling each interval up to the threshold and adds an eighth after, until the model's bound
+  is the lower and the ceiling is lifted.
+- The order of a cut matters by a factor of ten. The sessions are chosen and marked, and their keepalives stop
+  (`stop_keepalives`, a lock each), before anything is written; the closes, a write each, run on a thread of
+  their own (963 of them took 14 s on this host, and a loop that waited them out read nothing for that long). The
+  peer is told on the urgent write with `UNRESPONSIVE` (`close_for_capacity`), so it does not wait out its lease.
+- A pacer whose session's worker was stopped wakes once more and ends; that wake is not a timer being served and
+  its lateness is not counted, or the control reads, an interval after its cut, the cut it just made.
+- Counted in the capacity report (`shed_over_capacity`) and in the accept loop's handle.
+
+**What it measured.** Same host, 64 hogs, 1.32% declared: without the control, 660 and 814 clients lost with the
+router's own count of closes at zero, the longest timer 13.4 and 14.3 s late. With it, 1083 sessions closed by the
+router in the window (963 on the other host), no client ended that the router had not closed, no face DOWN, the
+longest timer 1.6 s (1.5 s). The cost is the 1083: the router keeps about an eighth of what it admitted and refuses
+the rest until the keepalives are in time, which is the capacity of the host at that share, found by closing the
+loop and not by predicting it.
+
+**What it does not do.** It keeps what the host can serve and not more, and it reacts within a reading period (one
+second) of the lateness passing an eighth of `2T/3`, which a router that is cut off from its CPU
+passes some seconds after the hogs start. The threshold's recovery has been measured to double and add in the
+unit tests and not through a whole recovery on a host (the runs end before it). It has been run against the
+hosted failure's shape on two fleet hosts and not on the hosted runner itself. The 32-hog promise test is unchanged and closes none on the hosts
+that pass it; the sixth test of the lane (64 hogs) is the one that exercises the control, and asserts that nothing
+was lost that the router did not close and that no timer was later than a lease allows.

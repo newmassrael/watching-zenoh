@@ -2340,6 +2340,10 @@ pub struct SessionCeiling {
     limit: Arc<dyn Fn() -> usize + Send + Sync>,
     refused_over_max_sessions: Arc<std::sync::atomic::AtomicU64>,
     refused_over_capacity: Arc<std::sync::atomic::AtomicU64>,
+    shed_over_capacity: Arc<std::sync::atomic::AtomicU64>,
+    /// A ceiling put on the limit from outside by a loop that read what the node can serve
+    /// ([`Self::set_cap`]); `usize::MAX` is none.
+    cap: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl SessionCeiling {
@@ -2349,12 +2353,25 @@ impl SessionCeiling {
             limit: Arc::new(limit),
             refused_over_max_sessions: Arc::default(),
             refused_over_capacity: Arc::default(),
+            shed_over_capacity: Arc::default(),
+            cap: Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX)),
         }
     }
 
-    /// The faces the loop may hold now.
+    /// The faces the loop may hold now: the limit, or the ceiling put on it from outside when
+    /// that is lower.
     pub fn get(&self) -> usize {
-        (self.limit)()
+        (self.limit)().min(self.cap.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Put a ceiling on the limit, or lift it with `None`. For the loop that closes on what the
+    /// node serves (`capacity_control`, behind `routing-router-hat`): the limit is a model's, and a node that cut its
+    /// sessions because the model was wrong must not admit them again at the model's number.
+    pub fn set_cap(&self, cap: Option<usize>) {
+        self.cap.store(
+            cap.unwrap_or(usize::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     /// Faces the loop refused because `max_sessions` was reached, since it started.
@@ -2366,6 +2383,22 @@ impl SessionCeiling {
     /// Faces the loop refused because this ceiling was reached, since it started.
     pub fn refused_over_capacity(&self) -> u64 {
         self.refused_over_capacity
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Count `closed` faces the host ordered closed because the node held more than it measured
+    /// it can keep the leases of. The loop does not close them; the host that does reports them
+    /// here, beside the refusals, so that one handle says everything the ceiling cost.
+    pub fn note_shed(&self, closed: usize) {
+        self.shed_over_capacity.fetch_add(
+            u64::try_from(closed).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Faces the host ordered closed for capacity, since it started.
+    pub fn shed_over_capacity(&self) -> u64 {
+        self.shed_over_capacity
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 }

@@ -6361,11 +6361,14 @@ layer_c1ay_cargo_test_router_hat() {
     # queue behind the router), and +4 for the byte budget (five new tests of what a held message
     # costs and where a face is gated, one of the old ones renamed), and +2 for a message
     # longer than its lane delivered whole through a real queue and a chain the lane can hold
-    # held and not waited for. Each arm PRINTED by its own command: 220 222 243 225 228 267 220
-    # 222.
-    _runci_guarded_test "C1AY router_forward 220" 220 \
+    # held and not waited for, and +5 for the router's capacity shedding (`router_forward::shed_tests`:
+    # four ungated witnesses of which sessions are chosen and that a deregistered one leaves the
+    # registry, and one, behind `codec-close` and `transport-keepalive`, that a closed session stops
+    # its keepalives and tells its peer at once). Each arm PRINTED by its own command: 225 227 248
+    # 230 233 272 225 227.
+    _runci_guarded_test "C1AY router_forward 225" 225 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
-    _runci_guarded_test "C1AY router_forward 222" 222 \
+    _runci_guarded_test "C1AY router_forward 227" 227 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # R2734 — THE EIGHTH ARM, and it exists because the seven above cannot see
     # this round's third test. `a_group_query_reaches_a_client_hosted_queryable`
@@ -6374,7 +6377,7 @@ layer_c1ay_cargo_test_router_hat() {
     # resolves to `FaceForwarder`'s no-op default. No arm here pulled the atom's
     # own feature, so the witness would have existed while no lane ran it --
     # "a test exists" and "a lane runs it" being different facts.
-    _runci_guarded_test "C1AY router_forward mcast-faces 243" 243 \
+    _runci_guarded_test "C1AY router_forward mcast-faces 248" 248 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -6395,7 +6398,7 @@ layer_c1ay_cargo_test_router_hat() {
     # unattributable message, which would strand a face that has merely not
     # finished its handshake. Still `#[cfg(feature = "access-acl")]`, so the
     # five sibling resolutions are unchanged for R2346's reason.
-    _runci_guarded_test "C1AY router_forward 225" 225 \
+    _runci_guarded_test "C1AY router_forward 230" 230 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -6413,7 +6416,7 @@ layer_c1ay_cargo_test_router_hat() {
     # before the cache is consulted (the same vacuity that made R311y508's first
     # cross-impl leg prove nothing), so a cache test with no policy installed
     # tests nothing.
-    _runci_guarded_test "C1AY router_forward hotreload 228" 228 \
+    _runci_guarded_test "C1AY router_forward hotreload 233" 233 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -6425,13 +6428,13 @@ layer_c1ay_cargo_test_router_hat() {
     # this arm red and the other twenty-seven it reached OK.
     # R3334 — 246 -> 247, and ONLY this arm: the token-arm witness of a token
     # older than a FUTURE-only interest is cfg(routing-token-tables).
-    _runci_guarded_test "C1AY router_forward 267" 267 \
+    _runci_guarded_test "C1AY router_forward 272" 272 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
     # tests that ran in this broad-feature lane now need the atom and no longer
     # appear here. The number moves because the plane correctly is not there.
-    _runci_guarded_test "C1AY router_forward 220" 220 \
+    _runci_guarded_test "C1AY router_forward 225" 225 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -6444,7 +6447,7 @@ layer_c1ay_cargo_test_router_hat() {
     # command itself, after that round's full sweep STALLED with an empty log on a
     # machine at load 37 — so the one guard predicted to move and the one predicted
     # NOT to (`C1AM adminspace`, still 33) were each run directly instead.
-    _runci_guarded_test "C1AY router_forward 222" 222 \
+    _runci_guarded_test "C1AY router_forward 227" 227 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # R311y786 (§5.21 router-connect-reconcile) — the re-dial BACKOFF. Until y786
     # the loop slept a `const RECONNECT_BACKOFF_MS = 1000`, so an unreachable
@@ -21756,7 +21759,9 @@ layer_e6u_peer_unixpipe_forward() {
 # hogs, 1.32%) admits no more than the capacity model allows, refuses the rest, and
 # loses no admitted client. A fifth (R3514) prints, with no assertion, the keepalive lateness
 # and the clients lost at 1024, 1536 and 2048 sessions under 32 hogs, so every hosted run
-# leaves that table for the runner it ran on. The count guard is 5 so that a dropped
+# leaves that table for the runner it ran on. A sixth holds the promise when the host gives
+# half of the declared share (64 hogs): the router closes the newest sessions rather than
+# lose the leases of all. The count guard is 6 so that a dropped
 # `#[ignore]` (selecting none) or a renamed test reddens.
 #
 # The test fns carry the `wz_router_hat_` prefix, so the default Layer E sweep's
@@ -21764,7 +21769,7 @@ layer_e6u_peer_unixpipe_forward() {
 # and run about three minutes, which is why they are `#[ignore]`d and their own lane.
 layer_e7s_router_hat_data_plane_scaling() {
     (cd crates && cargo build --release -p wz-ap-demo --no-default-features --features preset-ap-client,router-hat-router --quiet) || return 1
-    _runci_guarded_test "E7s router data-plane scaling" 5 \
+    _runci_guarded_test "E7s router data-plane scaling" 6 \
         cargo test -p wz-integration-tests \
         --test wz_router_hat_data_plane_scaling -- --ignored --nocapture --test-threads=1 --quiet || return 1
 }

@@ -25,7 +25,7 @@ use wz_session_core::qos::CongestionControl;
 use wz_session_core::sample::QosLevel;
 
 /// A link whose queue is full or not as the test says, and that keeps the frames it was given.
-struct RoomLink {
+pub(super) struct RoomLink {
     full: AtomicBool,
     frames: Mutex<Vec<Vec<u8>>>,
     sent: AtomicUsize,
@@ -35,7 +35,7 @@ struct RoomLink {
 }
 
 impl RoomLink {
-    fn new(full: bool) -> Arc<Self> {
+    pub(super) fn new(full: bool) -> Arc<Self> {
         Arc::new(Self {
             full: AtomicBool::new(full),
             frames: Mutex::new(Vec::new()),
@@ -63,12 +63,12 @@ impl RoomLink {
         self.full.store(full, Ordering::SeqCst);
     }
 
-    fn sent(&self) -> usize {
+    pub(super) fn sent(&self) -> usize {
         self.sent.load(Ordering::SeqCst)
     }
 
     /// Every byte the link was given, in the order it was given.
-    fn bytes(&self) -> Vec<u8> {
+    pub(super) fn bytes(&self) -> Vec<u8> {
         self.frames
             .lock()
             .expect("frames")
@@ -99,12 +99,12 @@ impl BoxedLinkDriver for RoomLink {
     }
 }
 
-fn zid(b: u8) -> Zid {
+pub(super) fn zid(b: u8) -> Zid {
     Zid::from_slice(&[b, b, b, b])
 }
 
 /// A client face over `link`, whose remote peer is `peer`.
-fn client_over(link: &Arc<RoomLink>, peer: Zid) -> Arc<SessionLinkActions> {
+pub(super) fn client_over(link: &Arc<RoomLink>, peer: Zid) -> Arc<SessionLinkActions> {
     let actions = new_session_actions(
         link.clone(),
         fixture_session_init_params(),
