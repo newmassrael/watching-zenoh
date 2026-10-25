@@ -408,18 +408,27 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessToken<R, T> {
                 // is what keeps the emit and the prune on the SAME session:
                 // upgrading twice could, in principle, answer `Some` and then
                 // `None` and leave the pair straddling a drop.
-                let sent = session.send_network_message(
-                    wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
-                    /*reliable=*/ true,
-                    /*express=*/ false,
-                );
                 // R311nf — the handle owns a `Session<R, T, Unicast>`, so
                 // `actions()` is the infallible unicast bundle borrow (the
                 // R311nc `if let Ok` guard for a possible multicast session is
                 // gone — a LivelinessToken cannot exist on a multicast
                 // session).
-                session.actions().prune_token_declaration(self.id);
-                sent
+                //
+                // The replay-cache entry is removed and the retraction sent as one step: a
+                // token a paced replay had not yet reached was never told to the peer, so
+                // nothing is sent and `Ok(())` is what happened.
+                session
+                    .actions()
+                    .retract_token_recorded(self.id, || {
+                        session.send_network_message(
+                            wz_session_core::network_message::NetworkMessage::Declare(Box::new(
+                                declare,
+                            )),
+                            /*reliable=*/ true,
+                            /*express=*/ false,
+                        )
+                    })
+                    .unwrap_or(Ok(()))
             };
             // A build without the declare pair emits nothing, so there is no
             // wire verdict to report and `Ok(())` is what happened.
@@ -981,15 +990,22 @@ impl<R: SessionRuntime, T: TimeSource> LivelinessSubscriber<R, T> {
         #[cfg(feature = "declare-interest")]
         {
             let interest = wz_session_core::interest_build::build_interest_final(self.interest_id);
-            let _ = self.session.send_network_message(
-                wz_session_core::network_message::NetworkMessage::Interest(interest),
-                /*reliable=*/ true,
-                /*express=*/ false,
-            );
             // R311nf — the handle owns a `Session<R, T, Unicast>`, so
             // `actions()` is the infallible unicast bundle borrow (a
             // LivelinessSubscriber cannot exist on a multicast session).
-            self.session.actions().prune_interest(self.interest_id);
+            //
+            // The replay-cache entry is removed and the final sent as one step: an interest a
+            // paced replay had not yet reached was never told to the peer, so no final is sent.
+            let _ = self
+                .session
+                .actions()
+                .retract_interest_recorded(self.interest_id, || {
+                    self.session.send_network_message(
+                        wz_session_core::network_message::NetworkMessage::Interest(interest),
+                        /*reliable=*/ true,
+                        /*express=*/ false,
+                    )
+                });
         }
         // R311mx — when `declare-interest` is off (⟹ `liveliness-subscriber`
         // off, so the block above is also cfg'd out) nothing else reads

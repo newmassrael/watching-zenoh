@@ -6672,16 +6672,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let declare = actions
                 .prepare_declare_queryable(wire_id, mapping_id, suffix, options.complete)
                 .map_err(map_queryable_err)?;
-            self.send_network_message(
-                wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
-                /*reliable=*/ true,
-                /*express=*/ false,
-            )
-            .map_err(|e| map_queryable_err(SendDeclareError::from(e)))?;
-            // A4 — reconnect-replay cache (pico `_z_cache_declaration`);
-            // session-state bookkeeping AROUND the seam emit, like
-            // declare_subscriber.
-            actions.cache_queryable_declaration(wire_id, mapping_id, suffix, options.complete);
+            // A4 — reconnect-replay cache (pico `_z_cache_declaration`) and the seam emit, as one
+            // step, like declare_subscriber.
+            actions
+                .declare_queryable_recorded(wire_id, mapping_id, suffix, options.complete, || {
+                    self.send_network_message(
+                        wz_session_core::network_message::NetworkMessage::Declare(Box::new(
+                            declare,
+                        )),
+                        /*reliable=*/ true,
+                        /*express=*/ false,
+                    )
+                })
+                .map_err(|e| map_queryable_err(SendDeclareError::from(e)))?;
             // The retraction captures the unicast actions Arc + the wire id;
             // type-erased so `Queryable` stays free of the wire-codec types.
             let actions_for_drop = actions.clone();
@@ -7059,15 +7062,20 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let declare = actions
                 .prepare_declare_subscriber(wire_id, mapping_id, suffix)
                 .map_err(map_subscribe_err)?;
-            self.send_network_message(
-                wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
-                /*reliable=*/ true,
-                /*express=*/ false,
-            )
-            .map_err(|e| map_subscribe_err(SendDeclareError::from(e)))?;
-            // A4 — reconnect-replay cache (pico `_z_cache_declaration`);
-            // session-state bookkeeping AROUND the seam emit, like declare_token.
-            actions.cache_subscriber_declaration(wire_id, mapping_id, suffix);
+            // A4 — reconnect-replay cache (pico `_z_cache_declaration`) and the seam emit, as one
+            // step: a declaration made while a paced replay is walking the cache is replayed in its
+            // turn and not sent ahead of what it depends on.
+            actions
+                .declare_subscriber_recorded(wire_id, mapping_id, suffix, || {
+                    self.send_network_message(
+                        wz_session_core::network_message::NetworkMessage::Declare(Box::new(
+                            declare,
+                        )),
+                        /*reliable=*/ true,
+                        /*express=*/ false,
+                    )
+                })
+                .map_err(|e| map_subscribe_err(SendDeclareError::from(e)))?;
             // The retraction captures the unicast actions Arc + the wire id;
             // type-erased so `Subscriber<R>` stays free of the `T` clock param.
             let actions_for_drop = actions.clone();
@@ -7208,19 +7216,24 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let declare = actions
                 .prepare_declare_token(token_id, /*mapping_id=*/ 0, Some(&keyexpr_string))
                 .map_err(map_decl_err)?;
-            self.send_network_message(
-                wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
-                /*reliable=*/ true,
-                /*express=*/ false,
-            )
-            .map_err(|e| map_decl_err(SendDeclareError::from(e)))?;
-            // A4 — record for post-reconnect replay (pico `_z_cache_declaration`
-            // on `_Z_RES_OK`); session-state bookkeeping AROUND the seam emit.
-            actions.cache_token_declaration(
-                token_id,
-                /*mapping_id=*/ 0,
-                Some(&keyexpr_string),
-            );
+            // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on `_Z_RES_OK`)
+            // and send through the seam, as one step.
+            actions
+                .declare_token_recorded(
+                    token_id,
+                    /*mapping_id=*/ 0,
+                    Some(&keyexpr_string),
+                    || {
+                        self.send_network_message(
+                            wz_session_core::network_message::NetworkMessage::Declare(Box::new(
+                                declare,
+                            )),
+                            /*reliable=*/ true,
+                            /*express=*/ false,
+                        )
+                    },
+                )
+                .map_err(|e| map_decl_err(SendDeclareError::from(e)))?;
             // R311mz — the held-token registration (R283) now lives inside
             // LivelinessToken::new_held, the sole constructor, so the literal
             // and aliased declare paths register identically by construction.
@@ -7365,15 +7378,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             let declare = actions
                 .prepare_declare_token(token_id, mapping_id, inline_suffix)
                 .map_err(map_decl_err)?;
-            self.send_network_message(
-                wz_session_core::network_message::NetworkMessage::Declare(Box::new(declare)),
-                /*reliable=*/ true,
-                /*express=*/ false,
-            )
-            .map_err(|e| map_decl_err(SendDeclareError::from(e)))?;
-            // A4 — record for post-reconnect replay (pico `_z_cache_declaration`
-            // on `_Z_RES_OK`); session-state bookkeeping AROUND the seam emit.
-            actions.cache_token_declaration(token_id, mapping_id, inline_suffix);
+            // A4 — record for post-reconnect replay (pico `_z_cache_declaration` on `_Z_RES_OK`)
+            // and send through the seam, as one step.
+            actions
+                .declare_token_recorded(token_id, mapping_id, inline_suffix, || {
+                    self.send_network_message(
+                        wz_session_core::network_message::NetworkMessage::Declare(Box::new(
+                            declare,
+                        )),
+                        /*reliable=*/ true,
+                        /*express=*/ false,
+                    )
+                })
+                .map_err(|e| map_decl_err(SendDeclareError::from(e)))?;
             // R311mz — new_held registers the RESOLVED literal in the
             // declarer-side LocalTokenRegistry. The prior code constructed the
             // handle WITHOUT registering, so an aliased-declared token was
@@ -7587,20 +7604,31 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // SendWireError::Codec, and both fold into the same
             // `SendWireError -> LivelinessSubscriberAliasError` projection the
             // prior `.into()` used.
-            let emit = wz_session_core::interest_build::build_interest_liveliness_subscriber(
+            // A4 — record for post-reconnect replay and send through the seam, as one step: the
+            // interest is cached only when it was sent (or is owed to a paced replay), and a
+            // rejected one is taken out of the cache again.
+            let emit = self.actions().declare_subscriber_interest_recorded(
                 interest_id,
                 history,
                 /*keyexpr_mapping_id=*/ 0,
                 Some(&keyexpr_string),
-            )
-            .map_err(SendWireError::Codec)
-            .and_then(|interest| {
-                self.send_network_message(
-                    wz_session_core::network_message::NetworkMessage::Interest(interest),
-                    /*reliable=*/ true,
-                    /*express=*/ false,
-                )
-            });
+                || {
+                    wz_session_core::interest_build::build_interest_liveliness_subscriber(
+                        interest_id,
+                        history,
+                        /*keyexpr_mapping_id=*/ 0,
+                        Some(&keyexpr_string),
+                    )
+                    .map_err(SendWireError::Codec)
+                    .and_then(|interest| {
+                        self.send_network_message(
+                            wz_session_core::network_message::NetworkMessage::Interest(interest),
+                            /*reliable=*/ true,
+                            /*express=*/ false,
+                        )
+                    })
+                },
+            );
             if let Err(e) = emit {
                 cell.kill();
                 R::with_mutex_mut(&self.observer, |observer| {
@@ -7608,14 +7636,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 });
                 return Err(e.into());
             }
-            // A4 — record for post-reconnect replay; session-state bookkeeping
-            // AROUND the seam emit.
-            self.actions().cache_subscriber_interest(
-                interest_id,
-                history,
-                /*keyexpr_mapping_id=*/ 0,
-                Some(&keyexpr_string),
-            );
             Ok(LivelinessSubscriber {
                 session: self.clone(),
                 interest_id,
@@ -7767,20 +7787,29 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // routed by (mapping_id, inline_suffix) instead of (0, literal). The
             // wire frame carries the alias form; the slot register + rollback +
             // reconnect-replay cache stay session-level.
-            let emit = wz_session_core::interest_build::build_interest_liveliness_subscriber(
+            // A4 — record for post-reconnect replay and send through the seam, as one step.
+            let emit = self.actions().declare_subscriber_interest_recorded(
                 interest_id,
                 history,
                 mapping_id,
                 inline_suffix,
-            )
-            .map_err(SendWireError::Codec)
-            .and_then(|interest| {
-                self.send_network_message(
-                    wz_session_core::network_message::NetworkMessage::Interest(interest),
-                    /*reliable=*/ true,
-                    /*express=*/ false,
-                )
-            });
+                || {
+                    wz_session_core::interest_build::build_interest_liveliness_subscriber(
+                        interest_id,
+                        history,
+                        mapping_id,
+                        inline_suffix,
+                    )
+                    .map_err(SendWireError::Codec)
+                    .and_then(|interest| {
+                        self.send_network_message(
+                            wz_session_core::network_message::NetworkMessage::Interest(interest),
+                            /*reliable=*/ true,
+                            /*express=*/ false,
+                        )
+                    })
+                },
+            );
             if let Err(e) = emit {
                 cell.kill();
                 R::with_mutex_mut(&self.observer, |observer| {
@@ -7788,14 +7817,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
                 });
                 return Err(e.into());
             }
-            // A4 — record for post-reconnect replay; session-state bookkeeping
-            // AROUND the seam emit.
-            self.actions().cache_subscriber_interest(
-                interest_id,
-                history,
-                mapping_id,
-                inline_suffix,
-            );
             Ok(LivelinessSubscriber {
                 session: self.clone(),
                 interest_id,
@@ -8142,32 +8163,34 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             // alloc + pending-get register (above) + the unregister-only
             // rollback (below) + the reconnect-replay cache stay session-level;
             // the seam emits the wire Interest only.
-            let emit = wz_session_core::interest_build::build_interest_liveliness_get(
+            // A4 — record for post-reconnect replay and send through the seam, as one step (reuses
+            // the `actions` bound above).
+            let emit = actions.declare_get_interest_recorded(
                 interest_id,
                 /*keyexpr_mapping_id=*/ 0,
                 Some(&keyexpr_string),
-            )
-            .map_err(SendWireError::Codec)
-            .and_then(|interest| {
-                self.send_network_message(
-                    wz_session_core::network_message::NetworkMessage::Interest(interest),
-                    /*reliable=*/ true,
-                    /*express=*/ false,
-                )
-            });
+                || {
+                    wz_session_core::interest_build::build_interest_liveliness_get(
+                        interest_id,
+                        /*keyexpr_mapping_id=*/ 0,
+                        Some(&keyexpr_string),
+                    )
+                    .map_err(SendWireError::Codec)
+                    .and_then(|interest| {
+                        self.send_network_message(
+                            wz_session_core::network_message::NetworkMessage::Interest(interest),
+                            /*reliable=*/ true,
+                            /*express=*/ false,
+                        )
+                    })
+                },
+            );
             if let Err(e) = emit {
                 R::with_mutex_mut(&self.observer, |observer| {
                     observer.liveliness_gets.unregister(interest_id);
                 });
                 return Err(e.into());
             }
-            // A4 — record for post-reconnect replay; session-state bookkeeping
-            // AROUND the seam emit (reuses the `actions` bound above).
-            actions.cache_get_interest(
-                interest_id,
-                /*keyexpr_mapping_id=*/ 0,
-                Some(&keyexpr_string),
-            );
             // R311y575 — the interest id is RETURNED rather than kept internal,
             // so a caller can later [`Self::cancel_pending_liveliness_get`] it.
             // The sibling [`Self::query`] already returns its `ReplyHandle` for

@@ -51,8 +51,11 @@ fn reconnect_replay_re_decorates_the_cached_declare() {
 
     // Cache a subscriber declaration with the BARE keyexpr — exactly what the
     // live `Session::declare_subscriber` caches AFTER its egress-namespaced wire
-    // emit (`session/mod.rs` `cache_subscriber_declaration`).
-    actions.cache_subscriber_declaration(10, 0, Some("zenoh/sub"));
+    // emit (`session/mod.rs` `declare_subscriber_recorded`). The emit is a no-op here: the test
+    // wants the entry in the cache and no frame on the wire before the replay.
+    actions
+        .declare_subscriber_recorded(10, 0, Some("zenoh/sub"), || Ok::<(), ()>(()))
+        .expect("recording the declaration succeeds");
 
     // Replay the cache as the reconnect supervisor does after a re-handshake.
     let replayed = actions.replay_declarations().expect("replay succeeds");

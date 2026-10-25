@@ -787,29 +787,8 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
             #[cfg(feature = "declare-interest")]
             let interest_id = {
                 let interest_id = self.session.actions().alloc_next_interest_id();
-                let emit = wz_session_core::interest_build::build_interest_queryables(
-                    interest_id,
-                    /*current=*/ true,
-                    /*future=*/ true,
-                    /*keyexpr_mapping_id=*/ 0,
-                    Some(&self.keyexpr),
-                )
-                .map_err(wz_session_core::send_wire_error::SendWireError::Codec)
-                .and_then(|interest| {
-                    self.session.send_network_message(
-                        wz_session_core::network_message::NetworkMessage::Interest(interest),
-                        /*reliable=*/ true,
-                        /*express=*/ false,
-                    )
-                });
-                if let Err(e) = emit {
-                    cell.kill();
-                    R::with_mutex_mut(&self.session.observer, |obs| {
-                        obs.remote_queryables.undeclare_matching_listener(id)
-                    });
-                    return Err(MatchingListenerError::Wire(e));
-                }
-                self.session.actions().cache_matching_interest(
+                // Recorded for reconnect replay and sent through the seam, as one step.
+                let emit = self.session.actions().declare_matching_interest_recorded(
                     interest_id,
                     wz_session_core::interest_build::InterestKinds::QUERYABLES,
                     /*current=*/ true,
@@ -817,7 +796,33 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                     /*aggregate=*/ false,
                     /*keyexpr_mapping_id=*/ 0,
                     Some(&self.keyexpr),
+                    || {
+                        wz_session_core::interest_build::build_interest_queryables(
+                            interest_id,
+                            /*current=*/ true,
+                            /*future=*/ true,
+                            /*keyexpr_mapping_id=*/ 0,
+                            Some(&self.keyexpr),
+                        )
+                        .map_err(wz_session_core::send_wire_error::SendWireError::Codec)
+                        .and_then(|interest| {
+                            self.session.send_network_message(
+                                wz_session_core::network_message::NetworkMessage::Interest(
+                                    interest,
+                                ),
+                                /*reliable=*/ true,
+                                /*express=*/ false,
+                            )
+                        })
+                    },
                 );
+                if let Err(e) = emit {
+                    cell.kill();
+                    R::with_mutex_mut(&self.session.observer, |obs| {
+                        obs.remote_queryables.undeclare_matching_listener(id)
+                    });
+                    return Err(MatchingListenerError::Wire(e));
+                }
                 interest_id
             };
             let listener = MatchingListener {

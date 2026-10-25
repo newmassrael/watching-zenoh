@@ -382,21 +382,35 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
             #[cfg(feature = "declare-interest")]
             let interest_id = {
                 let interest_id = self.session.actions().alloc_next_interest_id();
-                let emit = wz_session_core::interest_build::build_interest_subscribers(
+                // Recorded for reconnect replay and sent through the seam, as one step.
+                let emit = self.session.actions().declare_matching_interest_recorded(
                     interest_id,
+                    wz_session_core::interest_build::InterestKinds::SUBSCRIBERS,
                     /*current=*/ true,
                     /*future=*/ true,
+                    /*aggregate=*/ false,
                     /*keyexpr_mapping_id=*/ 0,
                     Some(&self.keyexpr),
-                )
-                .map_err(wz_session_core::send_wire_error::SendWireError::Codec)
-                .and_then(|interest| {
-                    self.session.send_network_message(
-                        wz_session_core::network_message::NetworkMessage::Interest(interest),
-                        /*reliable=*/ true,
-                        /*express=*/ false,
-                    )
-                });
+                    || {
+                        wz_session_core::interest_build::build_interest_subscribers(
+                            interest_id,
+                            /*current=*/ true,
+                            /*future=*/ true,
+                            /*keyexpr_mapping_id=*/ 0,
+                            Some(&self.keyexpr),
+                        )
+                        .map_err(wz_session_core::send_wire_error::SendWireError::Codec)
+                        .and_then(|interest| {
+                            self.session.send_network_message(
+                                wz_session_core::network_message::NetworkMessage::Interest(
+                                    interest,
+                                ),
+                                /*reliable=*/ true,
+                                /*express=*/ false,
+                            )
+                        })
+                    },
+                );
                 if let Err(e) = emit {
                     // Roll the registration back exactly as the liveliness
                     // declare's Finding-B rollback does: kill the cell first
@@ -410,15 +424,6 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                     });
                     return Err(MatchingListenerError::Wire(e));
                 }
-                self.session.actions().cache_matching_interest(
-                    interest_id,
-                    wz_session_core::interest_build::InterestKinds::SUBSCRIBERS,
-                    /*current=*/ true,
-                    /*future=*/ true,
-                    /*aggregate=*/ false,
-                    /*keyexpr_mapping_id=*/ 0,
-                    Some(&self.keyexpr),
-                );
                 interest_id
             };
             let listener = MatchingListener {

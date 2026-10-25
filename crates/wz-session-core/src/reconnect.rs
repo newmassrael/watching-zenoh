@@ -352,6 +352,17 @@ impl core::fmt::Display for ReplayDeclarationsError {
 
 impl core::error::Error for ReplayDeclarationsError {}
 
+/// What one turn of a paced replay did ([`SessionLinkActions::replay_turn`]).
+///
+/// [`SessionLinkActions::replay_turn`]: crate::session_actions::SessionLinkActions::replay_turn
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayTurn {
+    /// How many declarations this turn told the peer.
+    pub emitted: usize,
+    /// Whether the peer now holds everything the cache held: no more turns are owed.
+    pub finished: bool,
+}
+
 /// The declaration cache of a session and the replay that is walking it, if one is.
 ///
 /// This is the heap runtime's host of [`ReplayCursor`] (`docs/declaration-sync-pacing.md`): the
