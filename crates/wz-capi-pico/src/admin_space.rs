@@ -63,10 +63,10 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
-use wz_capi_core::faces::{FaceSnapshot, SharedSession};
-use wz_capi_core::runtime::session_glue::LinkKind;
-use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink};
+use wz_capi_port::{QueryCallback, QueryHolder, QueryableSink, SessionEngine};
+use wz_session_core::face::FaceSnapshot;
 use wz_session_core::keyexpr_match::keyexpr_intersects_text;
+use wz_session_core::link::LinkKind;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::sample::EncodingHint;
 use wz_session_core::WhatAmI;
@@ -75,7 +75,7 @@ use crate::ffi::guarded;
 use crate::link_properties::pico_link_properties;
 use crate::query::PlainQueryable;
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
-use crate::session::{session_handle, tokio_session, z_loaned_session_t, PicoSessionHandle};
+use crate::session::{session_handle, z_loaned_session_t, PicoSessionHandle};
 use crate::write_filter::PicoSession;
 use crate::zid::zid_hex;
 
@@ -105,13 +105,10 @@ impl AdminSpaceSlot {
     }
 }
 
-/// The session behind `zs` and its tokio engine, whose session the admin
-/// space's queryable is declared on: `Err(Z_ERR_NULL)` for a null or spent
-/// handle.
-unsafe fn slot_of<'a>(
-    zs: *const z_loaned_session_t,
-) -> Result<(&'a PicoSessionHandle, &'a wz_capi_core::drive::SessionState), ZResult> {
-    tokio_session(zs).ok_or(Z_ERR_NULL)
+/// The session behind `zs`, whose engine the admin space's queryable is declared on:
+/// `Err(Z_ERR_NULL)` for a null or spent handle.
+unsafe fn slot_of<'a>(zs: *const z_loaned_session_t) -> Result<&'a PicoSessionHandle, ZResult> {
+    session_handle(zs).ok_or(Z_ERR_NULL)
 }
 
 /// Start the session's admin space (pico `zp_start_admin_space`).
@@ -122,7 +119,7 @@ unsafe fn slot_of<'a>(
 #[no_mangle]
 pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZResult {
     guarded(|| {
-        let (handle, state) = match slot_of(zs) {
+        let handle = match slot_of(zs) {
             Ok(found) => found,
             Err(code) => return code,
         };
@@ -134,7 +131,7 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
             return Z_OK;
         }
         let identity = Identity {
-            zid: zid_string(&state.zid()),
+            zid: zid_string(&handle.drive.zid()),
             mode: ext.mode,
             link: ext
                 .admin_space
@@ -147,7 +144,7 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
             // Weak, as pico's query context is: the queryable lives in the
             // session, and a strong reference would keep the session alive
             // through its own declaration.
-            session: Arc::downgrade(&state.shared),
+            session: Arc::downgrade(&handle.drive.engine()),
             identity,
         });
         let sink: QueryableSink = Arc::new(move |_face: Arc<dyn QueryHolder>| {
@@ -221,7 +218,7 @@ impl TransportLink {
 
 /// The queryable's handler, shared by every face it is declared on.
 struct Answerer {
-    session: Weak<SharedSession>,
+    session: Weak<dyn SessionEngine>,
     identity: Identity,
 }
 
@@ -229,10 +226,16 @@ impl Answerer {
     fn answer(&self, query: &dyn QueryView, out: &mut dyn ReplyOut) {
         // A session that is gone answers nothing, as pico drops the query of a
         // closed session.
-        let Some(shared) = self.session.upgrade() else {
+        let Some(engine) = self.session.upgrade() else {
             return;
         };
-        let faces = shared.face_snapshots();
+        // The documents describe the unicast transport: a member of a joined group is a
+        // transport of its own, which the C surface lists and these documents do not.
+        let faces: Vec<FaceSnapshot> = engine
+            .face_snapshots()
+            .into_iter()
+            .filter(|face| !face.is_multicast)
+            .collect();
         for (key, body) in replies(&self.identity, &faces, query.keyexpr()) {
             // Every key intersects the query, so a refusal is a full reply
             // stage, which pico logs and moves past to the next reply.

@@ -116,6 +116,11 @@ local-subscriber = []
 # and a querier's write filter or matching listener that counts the session's own entities counts
 # them. A queryable is the answering end and a get the requesting end, so it needs both planes.
 local-queryable = ["query", "queryable"]
+# The faces the session stands on, as a connectivity plane reads them: a snapshot of each
+# transport and its links, and the events a watcher is told when one comes up or goes down. What
+# `wz-capi-core`'s `connectivity` names on its runtime. It needs nothing of session-core that the
+# engine does not already have.
+connectivity = []
 # The liveliness token and subscriber: the token's declaration and its retraction, the tokens the
 # session holds to answer a peer that asks for them, and the subscriber that hears the peer's.
 # What `wz-capi-core`'s `liveliness` names on its runtime, named on session-core.

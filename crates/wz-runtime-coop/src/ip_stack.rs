@@ -23,11 +23,11 @@ use alloc::vec::Vec;
 use wz_session_core::byte_cells::ByteBuf;
 #[cfg(feature = "session-slot")]
 use wz_session_core::byte_cells::ByteSource;
-#[cfg(feature = "alloc")]
-use wz_session_core::link::RxFrame;
 use wz_session_core::link::{
     BoxedLinkDriver, LinkEndpoints, LinkSendOutcome, LostCause, TxSlot, TxSlotGrant,
 };
+#[cfg(feature = "alloc")]
+use wz_session_core::link::{LinkKind, LinkSubject, RxFrame};
 use wz_session_core::qos::Priority;
 use wz_session_core::reliability::Reliability;
 #[cfg(feature = "session-slot")]
@@ -141,6 +141,30 @@ where
 
     fn link_endpoints(&self) -> Option<&LinkEndpoints> {
         either!(self, link => link.link_endpoints())
+    }
+
+    /// The kind of link it is, which a connectivity plane reports (whether the link is streamed,
+    /// and how reliable). The NICs its address sits on are not resolved here, so they read as
+    /// undetermined and not as none: an answer a link that does not ask the platform cannot give.
+    #[cfg(feature = "alloc")]
+    fn link_subject(&self) -> Option<&LinkSubject> {
+        static UDP: LinkSubject = LinkSubject {
+            kind: Some(LinkKind::Udp),
+            ..LinkSubject::UNKNOWN
+        };
+        static TCP: LinkSubject = LinkSubject {
+            kind: Some(LinkKind::Tcp),
+            ..LinkSubject::UNKNOWN
+        };
+        static TLS: LinkSubject = LinkSubject {
+            kind: Some(LinkKind::Tls),
+            ..LinkSubject::UNKNOWN
+        };
+        Some(match self {
+            IpDriver::Udp(_) => &UDP,
+            IpDriver::Tcp(_) => &TCP,
+            IpDriver::Tls(_) => &TLS,
+        })
     }
 
     fn peer_credential_zid(

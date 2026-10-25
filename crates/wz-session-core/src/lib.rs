@@ -510,6 +510,12 @@ pub mod session_init_params;
 #[cfg(feature = "storage-profile")]
 pub mod link;
 
+/// What a session reports of the peers it holds: a snapshot of each established face and its
+/// links, and the event a watcher is told when one comes up or goes down. Read off the
+/// session's own actions, so no engine owns the model.
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+pub mod face;
+
 /// R3011 (open-debt item 850) — the receive-side storage profile: a decoded
 /// message whose byte fields are ranges of the frame it was decoded from, built
 /// on SCE's origin seam (`try_into_owned_in_origin`). AP-only for the reason

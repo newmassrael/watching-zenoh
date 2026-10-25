@@ -10691,8 +10691,8 @@ layer_c1cs_capability_cost() {
 # it and hears from it, answers its queries, asks it queries through `z_get` and through a
 # querier whose write filter and matching listener count the listener's queryable, holds a
 # liveliness token the node sees while it hears the node's, asks it which tokens are alive, and
-# delivers its own puts and gets to its own subscribers and queryables
-# (`crates/wz-capi-pico/tests/client_only_dials_a_listener.rs`). Such a build cannot listen, so
+# delivers its own puts and gets to its own subscribers and queryables, and lists the node as its
+# one transport and hears it leave (`crates/wz-capi-pico/tests/client_only_dials_a_listener.rs`). Such a build cannot listen, so
 # the node is the FULL build's `hold_a_listener` example, run as a process. A feature set is one
 # per build, so this takes two invocations, which no row of the non-default test table (built
 # on the default features) can spell.
@@ -10704,14 +10704,21 @@ layer_c1cs_capability_cost() {
 layer_c1co_pico_client_dials_a_listener() {
     (cd crates && cargo build -p wz-capi-pico --example hold_a_listener) || return 1
     local listener="$PWD/crates/target/debug/examples/hold_a_listener"
-    local engine answering expect
+    local engine answering expect admin
     for engine in engine-coop engine-tokio; do
         for answering in ",queryable" ""; do
-            if [[ -n "$answering" ]]; then expect=9; else expect=7; fi
+            # The admin space is a queryable, so it joins the legs that have the answering end.
+            if [[ -n "$answering" ]]; then
+                expect=11
+                admin=",admin-space"
+            else
+                expect=8
+                admin=""
+            fi
             _runci_guarded_test "C1co ${engine}${answering}" "$expect" \
                 env WZ_PICO_LISTENER_BIN="$listener" \
                 cargo test -p wz-capi-pico --no-default-features \
-                --features "${engine},link-udp,query${answering},liveliness-get,unstable-api,local-subscriber,local-queryable" \
+                --features "${engine},link-udp,query${answering}${admin},liveliness-get,unstable-api,connectivity,local-subscriber,local-queryable" \
                 --test client_only_dials_a_listener || return 1
         done
     done

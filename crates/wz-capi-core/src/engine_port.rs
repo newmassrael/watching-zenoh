@@ -145,6 +145,24 @@ impl SessionEngine for SharedSession {
         SharedSession::has_router_peer(self)
     }
 
+    fn face_snapshots(&self) -> Vec<wz_session_core::face::FaceSnapshot> {
+        // Each unicast face, then each member of each group the session joined, which pico lists
+        // as a multicast transport of its own.
+        #[cfg_attr(not(feature = "multicast-transport"), allow(unused_mut))]
+        let mut all = SharedSession::face_snapshots(self);
+        #[cfg(feature = "multicast-transport")]
+        all.extend(self.group_member_snapshots());
+        all
+    }
+
+    fn watch_faces(&self, sink: wz_session_core::face::FaceEventSink) -> u64 {
+        SharedSession::watch_faces(self, sink)
+    }
+
+    fn unwatch_faces(&self, id: u64) -> bool {
+        SharedSession::unwatch_faces(self, id)
+    }
+
     fn publish_on_wire_all(
         &self,
         keyexpr: &str,

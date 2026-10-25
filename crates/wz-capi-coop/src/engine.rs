@@ -80,6 +80,14 @@ use {
 
 #[cfg(feature = "queryable")]
 mod query;
+
+#[cfg(feature = "connectivity")]
+mod faces;
+#[cfg(feature = "connectivity")]
+use faces::FacePlane;
+#[cfg(feature = "connectivity")]
+use wz_session_core::face::FaceEventSink;
+use wz_session_core::face::{FaceEventKind, FaceSnapshot};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::{query::QueryEnvelope, sample::QosLevel};
 
@@ -187,6 +195,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// What the session's gets queued for their callbacks (`get`).
     #[cfg(feature = "query")]
     gets: Arc<GetPlane>,
+    /// What the session's watchers of its faces are owed, and who they are (`connectivity`).
+    #[cfg(feature = "connectivity")]
+    faces: Arc<FacePlane>,
     /// What the liveliness subscribers' sinks queued for their callbacks (`liveliness`).
     #[cfg(feature = "liveliness")]
     live_samples: LivelinessQueue,
@@ -271,6 +282,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// outlives each link: a new link is dispatched to the same observer.
     observer: Rc<RefCell<ApplicationLayerObserver>>,
     link: Link<C>,
+    /// Where a face coming up or going down is reported (`connectivity`).
+    #[cfg(feature = "connectivity")]
+    faces: Arc<FacePlane>,
     /// The network the session's links are opened on; it outlives them.
     links: L,
     /// Each handshake's cookie key comes from here.
@@ -659,8 +673,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // that failed, a Close from the router (`vendor/zenoh-pico/src/transport/unicast/read.c` @
             // `return _zp_unicast_failed_result(ztu, executor);`).
             Link::Up(wire) if wire.task.is_finished() => {
+                // The face is read before the wire goes: what it was is what a watcher is told.
+                let face = self.face_of(&wire.actions);
                 drop(wire);
                 self.lose_link();
+                self.report_face(FaceEventKind::Down, face);
                 if redial_ms.is_none() {
                     return Err(OpenError::Unreachable(String::from("the link was lost")));
                 }
@@ -673,6 +690,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             } => {
                 if wire.actions.is_established() {
                     self.redeclare(&wire.actions);
+                    let face = self.face_of(&wire.actions);
+                    self.report_face(FaceEventKind::Up, face);
                     Link::Up(wire)
                 } else if wire.task.is_finished() || now_us >= deadline_us {
                     let why = match (wire.actions.close_reason(), wire.task.is_finished()) {
@@ -702,6 +721,48 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             link => link,
         };
         Ok(())
+    }
+
+    /// The face a link's `actions` are the end of, when something watches the faces (an event is
+    /// the snapshot it carries) and the handshake has told who the peer is. A build without the
+    /// connectivity plane watches nothing, and its snapshot is not linked.
+    fn face_of(&self, actions: &McuActions<C>) -> Option<FaceSnapshot> {
+        #[cfg(feature = "connectivity")]
+        {
+            if !self.faces.watched() {
+                return None;
+            }
+            FaceSnapshot::of_actions(actions)
+        }
+        #[cfg(not(feature = "connectivity"))]
+        {
+            let _ = actions;
+            None
+        }
+    }
+
+    /// Tell the watchers of the faces that `face` came up or went, with the session's other
+    /// deliveries (`face_of` says whether there is anything to tell).
+    fn report_face(&self, kind: FaceEventKind, face: Option<FaceSnapshot>) {
+        #[cfg(feature = "connectivity")]
+        if let Some(face) = face {
+            self.faces.happened(kind, face);
+        }
+        #[cfg(not(feature = "connectivity"))]
+        let _ = (kind, face);
+    }
+
+    /// The faces that stand: the link's, once its handshake has completed.
+    #[cfg(feature = "connectivity")]
+    fn standing_faces(&self) -> Vec<FaceSnapshot> {
+        match &self.link {
+            Link::Up(wire) if wire.actions.is_established() => {
+                FaceSnapshot::of_actions(&*wire.actions)
+                    .into_iter()
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// What a lost link takes with it: every subscriber and queryable its peer declared, so a
@@ -841,6 +902,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             clock,
             observer: Rc::new(RefCell::new(ApplicationLayerObserver::new())),
             link: Link::Waiting { at_us: u64::MAX },
+            #[cfg(feature = "connectivity")]
+            faces: Arc::new(FacePlane::default()),
             links,
             entropy,
             config,
@@ -870,6 +933,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let plane = core.plane.clone();
         #[cfg(feature = "query")]
         let gets = core.gets.clone();
+        #[cfg(feature = "connectivity")]
+        let faces = core.faces.clone();
         core.link = core.dial_from(0, OpenError::NoEndpoint)?;
         while !matches!(core.link, Link::Up(_)) {
             core.idle_wait().wait();
@@ -885,6 +950,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             plane,
             #[cfg(feature = "query")]
             gets,
+            #[cfg(feature = "connectivity")]
+            faces,
             #[cfg(feature = "liveliness")]
             live_samples: Arc::new(Mutex::new(VecDeque::new())),
             zid,
@@ -949,6 +1016,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 });
             if let Some(callback) = callback {
                 (lock(&callback))(sample.as_sample());
+            }
+        }
+        // A face that came up or went down, told to each watcher as it stands now: the list is
+        // cloned out of its lock, so a sink that undeclares a watcher does not wait on it.
+        #[cfg(feature = "connectivity")]
+        while let Some((kind, face)) = self.faces.next_event() {
+            for sink in self.faces.sinks() {
+                sink(kind, &face);
             }
         }
         loop {
@@ -1421,6 +1496,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             (Some(zid), Some(role)) => vec![(zid, role)],
             _ => Vec::new(),
         }
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn face_snapshots(&self) -> Vec<FaceSnapshot> {
+        self.live()
+            .map_or_else(Vec::new, |core| core.0.standing_faces())
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn watch_faces(&self, sink: FaceEventSink) -> u64 {
+        self.faces.watch(sink)
+    }
+
+    #[cfg(feature = "connectivity")]
+    fn unwatch_faces(&self, id: u64) -> bool {
+        self.faces.unwatch(id)
     }
 
     fn has_router_peer(&self) -> bool {

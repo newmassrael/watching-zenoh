@@ -364,6 +364,34 @@ it behaves as pico behaves in both of pico's threading arms.
   the filter and the listener counting and not counting) and `client_only_dials_a_listener`
   (a get for the session alone answered by the session's own queryable, a querier matching while
   it stands; Layer C1co, now 9 a leg with the answering end and 7 without).
+- 2026-10-25: the connectivity plane and the admin space on the cooperative engine (step C1).
+  Both read what a session reports of its peers, so the model moved out of the tokio engine:
+  `wz_session_core::face` holds `FaceSnapshot`, `LinkSnapshot`, `GroupLink`, `FaceEventKind` and
+  the sink type, and builds a snapshot from a session's own `SessionLinkActions`, which both
+  engines hold; `wz-capi-core` re-exports them, so the zenoh-c ABI keeps its paths. The port
+  gains `face_snapshots`, `watch_faces` and `unwatch_faces` (provided answers: no faces, nobody
+  told), and `ListenerSet`, a std-only fan-in the pico plane needed from `wz-capi-core`, now lives
+  in the port. The tokio engine implements them over its face registry (a joined group's members
+  after its unicast faces, as the plane listed them); the cooperative engine, behind its own
+  `connectivity` feature, reports the one face it stands on and queues an event when the link
+  comes up or is lost, handed out where its other deliveries are, with no lock held, so a sink
+  that lists the transports from inside the event finds the session free. Events are queued only
+  while something watches, and a watcher that came after the open reads the standing faces for
+  its history, as pico's listener does. The cooperative links name their kind (`IpDriver`
+  answers `link_subject`), so a link reads streamed or not; the NICs read undetermined. The pico
+  modules no longer reach the tokio engine: the connectivity plane reads and watches the faces
+  through the port, and the admin space declares its queryable through the port and lists the
+  unicast faces (a group member is a transport the plane lists and these documents do not). The
+  pico `connectivity` and `admin-space` features select neither engine; the admin space implies
+  the cooperative engine's face reporting. Two new size-gate cases measure them:
+  pico-client-coop-connectivity is 950,729 bytes of text and pico-client-coop-admin-space
+  1,091,379; a build with neither pays 1.3 KB (878,615 against 877,351), which is the port's
+  provided methods and the link kind. Tests: the engine against a router stand-in (the face it
+  stands on, a watcher told of its loss and of the link dialled again, no event for the face the
+  open brought up, a sink that reaches back into the session, a watcher that stopped) and
+  `client_only_dials_a_listener` (a transport listed with its streamed link, a listener with
+  history told of it and of its departure, the admin space answering the listener's get and
+  silent once stopped; Layer C1co, now 11 a leg with the answering end and 8 without).
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
@@ -377,9 +405,13 @@ it behaves as pico behaves in both of pico's threading arms.
 ## 6. Open
 
 - The listening role. pico's `z_open(listen)` holds several peers in one
-  session; the cooperative session host holds sessions in slots, and whether
-  one C session maps to several slots or to one multi-face session is a design
-  question of its own.
-- Scouting, the advanced publisher and subscriber, and the connectivity plane
-  on the cooperative engine.
+  session. The slot profile's accept (`Accept`, `IpAcceptor`) is not the heap engine's: the heap
+  stack has the UDP `open_acceptor` only, and the stream accept would reuse the ungated
+  `StreamListen`. The engine's `Core` holds one observer and one link, and an observer follows
+  ONE peer (the remote registries are the peer's), so several peers are several observers: a face
+  registry in which each face has its observer and the session's declarations are replayed onto
+  each as a redial replays them, with the port's factories (`SubscriberSink` and the like)
+  minting one callback per face, as that vocabulary already says. A get then has one leg per
+  face, which the port's `get_on_wire` already returns.
+- Scouting and the advanced publisher and subscriber on the cooperative engine.
 - How the selection is spelled on the build-configuration axis (D5).

@@ -109,8 +109,8 @@ use wz_runtime_tokio::session::{
 #[cfg(feature = "peer")]
 use wz_runtime_tokio::session_glue::WhatAmI;
 use wz_runtime_tokio::session_glue::{
-    new_session_actions, BoxedLinkDriver, DriverLoopOutcome, IterationEvent, LinkKind,
-    LinkSendOutcome, SessionLinkActions,
+    new_session_actions, BoxedLinkDriver, DriverLoopOutcome, IterationEvent, LinkSendOutcome,
+    SessionLinkActions,
 };
 use wz_runtime_tokio::sink::SampleView;
 use wz_runtime_tokio::sync::PlainMutex as WzMutex;
@@ -1214,161 +1214,18 @@ impl BoxedLinkDriver for InertLinkDriver {
     fn close_blocking(&self) {}
 }
 
-/// R2259 (open-debt item 593) — one PHYSICAL link of an established face, as
-/// zenoh-c's `z_owned_link_t` reports it.
-///
-/// Every field is READ off the face, never defaulted into a plausible-looking
-/// value: `interfaces` keeps `LinkSubject`'s three-state answer (resolved,
-/// resolved-empty, undetermined) rather than flattening a failed lookup to an
-/// empty set the way upstream does, and `protocol` is `None` for a driver that
-/// cannot name itself. The C accessors are what decide how to spell "unknown"
-/// at the ABI, and they can only do that honestly if the unknown survives here.
-#[derive(Debug, Clone)]
-pub struct LinkSnapshot {
-    /// This end's locator (`z_link_src`).
-    pub src: String,
-    /// The peer end's locator (`z_link_dst`).
-    pub dst: String,
-    /// The KIND of link, or `None` when the driver cannot say (`z_link_is_streamed`,
-    /// `z_link_reliability`).
-    ///
-    /// R2794 (open-debt item 814) — the kind, not the protocol a rule sees. This
-    /// was `protocol: Option<InterceptorLink>` copied off the ACL subject, and the
-    /// two accessors above were answered from it. That was right only while one
-    /// enum held both answers: the datagram link is `quic` to a rule and still
-    /// unstreamed and best-effort to zenoh-c, and only its kind can say so.
-    pub kind: Option<LinkKind>,
-    /// The NICs this link's local address sits on (`z_link_interfaces`), with
-    /// `None` meaning "could not be determined" — see `LinkSubject`.
-    pub interfaces: Option<Vec<String>>,
-    /// The negotiated outbound frame budget (`z_link_mtu`), clamped into the
-    /// `uint16_t` upstream returns.
-    pub mtu: u16,
-    /// The group a member of a joined group is reached through, `None` on a unicast link
-    /// (open-debt item 913).
-    pub group: Option<GroupLink>,
-}
+/// The snapshot of a face and of its links, and the event a watcher is told, are the session's
+/// own model (`wz_session_core::face`): what a transport and a link of the C plane report is read
+/// off a session's actions the same way whichever engine holds the session.
+pub use wz_session_core::face::{
+    FaceEventKind, FaceEventSink, FaceSnapshot, GroupLink, LinkSnapshot,
+};
 
-/// The group under a group member's link, in the two spellings the two upstreams report it
-/// by: each ABI picks its own.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GroupLink {
-    /// The group's locator, which zenoh reports as the link's `group`
-    /// (`io/zenoh-link-commons/src/lib.rs` @ `group: Some(link.get_dst().to_owned()),`).
-    pub locator: String,
-    /// The endpoint the session joined it by, its socket keys included, which zenoh-pico
-    /// reports as the link's `src` (`vendor/zenoh-pico/src/transport/multicast/rx.c` @
-    /// `entry->common._link_src = _z_endpoint_to_string(&ztm->_common._link->_endpoint);`).
-    pub endpoint: String,
+/// Snapshot one face's session, or `None` when its INIT has not populated the identity slots
+/// yet: the half-open case [`SharedSession::peer_identities`] skips.
+fn snapshot_of(session: &TokioSession) -> Option<FaceSnapshot> {
+    FaceSnapshot::of_actions(session.actions())
 }
-
-/// R2259 (open-debt item 593) — one ESTABLISHED face as zenoh-c's
-/// `z_owned_transport_t` reports it, plus the links under it.
-///
-/// The transport half is exactly the 19 bytes `zenoh_opaque.h` gives
-/// `z_owned_transport_t` — zid, whatami, and the two negotiated booleans — which
-/// is why `zc_internal_create_transport` can construct one from four scalars and
-/// why the C type is a VALUE rather than a handle. The links are carried
-/// alongside rather than inside for the same reason upstream separates them: a
-/// transport outlives any one of its links.
-#[derive(Debug, Clone)]
-pub struct FaceSnapshot {
-    /// The peer's zid (`z_transport_zid`, `z_link_zid`).
-    pub zid: [u8; 16],
-    /// The peer's role as the raw 2-bit INIT wire form (`z_transport_whatami`).
-    pub whatami: u8,
-    /// Whether QoS was negotiated on this transport (`z_transport_is_qos`).
-    pub is_qos: bool,
-    /// Whether this is a multicast transport (`z_transport_is_multicast`).
-    ///
-    /// `false` for a unicast face, `true` for a member of a group the session joined
-    /// ([`SharedSession::group_member_snapshots`]), which both upstreams report as a
-    /// multicast transport of its own. `zc_internal_create_transport` can also build a
-    /// multicast transport value, upstream's own test door, and that value round-trips
-    /// through the same accessor.
-    pub is_multicast: bool,
-    /// Whether SHM was negotiated on this transport (`z_transport_is_shm`).
-    ///
-    /// Reported on every build, unlike the C accessor that consumes it: upstream
-    /// only widens `z_owned_transport_t` to twenty bytes under
-    /// `Z_FEATURE_SHARED_MEMORY`, but the FACT is one wz can state either way,
-    /// and gating the field would make the ABI's shape decide what the session
-    /// is allowed to know.
-    pub is_shm: bool,
-    /// This face's physical links, one entry each — see
-    /// [`SessionLinkActions::link_endpoints_all`].
-    pub links: Vec<LinkSnapshot>,
-}
-
-impl FaceSnapshot {
-    /// Snapshot one face's session, or `None` when its INIT has not populated
-    /// the identity slots yet.
-    ///
-    /// The `None` is the half-open case [`SharedSession::peer_identities`]
-    /// skips, and it is a REFUSAL rather than a default: a transport reported
-    /// with a zero zid is a peer the C application can neither match nor dial.
-    fn of(session: &TokioSession) -> Option<Self> {
-        let actions = session.actions();
-        let peer = actions.peer_zid()?;
-        let whatami = actions.peer_whatami_wire()?;
-        let mut zid = [0u8; 16];
-        let n = peer.len().min(16);
-        zid[..n].copy_from_slice(&peer[..n]);
-        let subject = actions.link_subject().cloned();
-        let mtu = u16::try_from(actions.negotiated_batch_mtu()).unwrap_or(u16::MAX);
-        let links = actions
-            .link_endpoints_all()
-            .into_iter()
-            .map(|e| LinkSnapshot {
-                src: e.src,
-                dst: e.dst,
-                kind: subject.as_ref().and_then(|s| s.kind),
-                interfaces: subject.as_ref().and_then(|s| s.interfaces.clone()),
-                mtu,
-                group: None,
-            })
-            .collect();
-        // A build without `transport-qos` never negotiates the ext, so `false`
-        // is the MEASURED answer here rather than a stand-in: there is no
-        // conduit split to report. `is_qos` itself is gated, so this is also the
-        // only spelling that compiles in both configurations.
-        #[cfg(feature = "transport-qos")]
-        let is_qos = actions.is_qos();
-        #[cfg(not(feature = "transport-qos"))]
-        let is_qos = false;
-        // Same shape, same reason, for the SHM ext.
-        #[cfg(feature = "transport-shm")]
-        let is_shm = actions.is_shm();
-        #[cfg(not(feature = "transport-shm"))]
-        let is_shm = false;
-        Some(Self {
-            zid,
-            whatami,
-            is_qos,
-            is_multicast: false,
-            is_shm,
-            links,
-        })
-    }
-}
-
-/// R2259 (open-debt item 593) — which way a face moved, the input to the `kind`
-/// a `z_link_event_t` / `z_transport_event_t` carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FaceEventKind {
-    /// The face reached Established (`Z_SAMPLE_KIND_PUT`).
-    Up,
-    /// The face left the live set (`Z_SAMPLE_KIND_DELETE`).
-    Down,
-}
-
-/// R2259 (open-debt item 593) — a face-lifecycle observer, as
-/// [`SharedSession::watch_faces`] holds it.
-///
-/// `Arc` rather than `Box` because `SharedSession::fire_face_event` clones the
-/// sink list OUT of the registry lock before invoking any of them; see that
-/// method for why that is load-bearing rather than tidy.
-pub type FaceEventSink = Arc<dyn Fn(FaceEventKind, &FaceSnapshot) + Send + Sync>;
 
 #[derive(Default)]
 struct Inner {
@@ -2457,7 +2314,7 @@ impl SharedSession {
         // fired after the lock drops. The face is Established by the time
         // `face_up` runs (both callers reach it past a completed handshake), so
         // the identity slots this reads are already populated.
-        let snapshot = FaceSnapshot::of(&session);
+        let snapshot = snapshot_of(&session);
         let replaced = guard.faces.insert(
             id,
             FaceEntry {
@@ -2591,7 +2448,7 @@ impl SharedSession {
         // R2259 (item 593) — the DEPARTED face's identity, taken while the
         // entry is still alive. There is no other moment: `face_down` is handed
         // an id, and once the entry drops nothing can say which peer it was.
-        if let Some(snapshot) = removed.as_ref().and_then(|e| FaceSnapshot::of(&e.session)) {
+        if let Some(snapshot) = removed.as_ref().and_then(|e| snapshot_of(&e.session)) {
             self.fire_face_event(FaceEventKind::Down, &snapshot);
         }
         if let Some(entry) = &removed {
@@ -3593,7 +3450,7 @@ impl SharedSession {
     pub fn face_snapshots(&self) -> Vec<FaceSnapshot> {
         self.face_sessions()
             .iter()
-            .filter_map(FaceSnapshot::of)
+            .filter_map(snapshot_of)
             .collect()
     }
 

@@ -12,12 +12,14 @@
 //!
 //! The queryable joined when the cooperative engine answered queries, the get (over
 //! session-core's `QueryOptions`) when it asked them, and the liveliness token and subscriber
-//! when it held and heard them, and the liveliness get when it asked for the ones alive; a
-//! capability no second engine has yet (scouting, the connectivity and admin planes, the
+//! when it held and heard them, the liveliness get when it asked for the ones alive, and the
+//! faces (the snapshot of each and the watch of their coming and going) when a connectivity
+//! plane and an admin space read them; a capability no second engine has yet (scouting, the
 //! advanced publisher) is not here: an ABI module that needs one still names its engine, and
 //! joins this trait when a second engine implements it.
 
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
+use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::query_options::QueryOptions;
@@ -50,6 +52,31 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// `z_info_peers_zid` is made at the ABI, where pico makes it. A link whose handshake has not
     /// completed is not listed.
     fn peer_identities(&self) -> Vec<(Vec<u8>, u8)>;
+
+    /// A snapshot of every established face: the peer's identity and the negotiated booleans of
+    /// its transport, and the links under it. One entry for each transport a connectivity plane
+    /// lists, a joined group's members included where the engine joins groups. A face whose
+    /// handshake has not completed is not listed, as with [`Self::peer_identities`]. An engine
+    /// built without the connectivity plane lists none, which is the provided answer.
+    fn face_snapshots(&self) -> Vec<FaceSnapshot> {
+        Vec::new()
+    }
+
+    /// Tell `sink` each time a face comes up or goes down, from now on, and answer the id that
+    /// stops it ([`Self::unwatch_faces`]). The sink runs where the session hands out its
+    /// callbacks and never under the session's lock, so it may reach back into the session. An
+    /// engine built without the connectivity plane tells nobody of anything, which is the
+    /// provided answer.
+    fn watch_faces(&self, sink: FaceEventSink) -> u64 {
+        let _ = sink;
+        0
+    }
+
+    /// Stop the face watch `id`: `true` when one was registered under it.
+    fn unwatch_faces(&self, id: u64) -> bool {
+        let _ = id;
+        false
+    }
 
     /// Whether any connected peer is a ROUTER — zenoh-pico's `_z_session_has_router_peer`, the
     /// condition under which a peer-mode session sends Interests at all.

@@ -289,9 +289,8 @@ pub(crate) unsafe fn session_handle<'a>(
 /// Read the tokio engine's [`SessionState`] behind a loaned session, or `None` if the pointer or
 /// its handle slot is null, or another engine runs the session.
 ///
-/// For the modules of the capabilities the port does not carry yet (the liveliness get,
-/// scouting, the connectivity and admin planes, the advanced plane); the client surface goes
-/// through the session's handle and the port.
+/// For the modules of the capabilities the port does not carry yet (scouting, the advanced
+/// plane); the client surface goes through the session's handle and the port.
 ///
 /// Lives here, beside BOTH types it touches ([`SessionState`] and
 /// [`z_loaned_session_t`]), because every module that reaches a session needs
@@ -311,11 +310,7 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
 ///
 /// # Safety
 /// As [`session_handle`].
-#[cfg(any(
-    feature = "admin-space",
-    feature = "advanced",
-    feature = "connectivity"
-))]
+#[cfg(feature = "advanced")]
 pub(crate) unsafe fn tokio_session<'a>(
     zs: *const z_loaned_session_t,
 ) -> Option<(&'a PicoSessionHandle, &'a SessionState)> {
@@ -646,19 +641,17 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // `listen` config is a peer whatever `Z_CONFIG_MODE_KEY` says.
             // Kept beside the engine's session in the handle (decision D7). It
             // carries the session's connectivity listeners too
-            // (`crate::connectivity`), and watches the face registry for them
+            // (`crate::connectivity`), and watches the engine's faces for them
             // from here on.
+            let zid = state.zid();
+            let drive = state.into_drive();
             #[cfg(feature = "connectivity")]
-            let ext =
-                crate::session_ext::PicoSessionExt::new(session_mode, &state.zid(), &state.shared);
+            let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid, &drive.engine());
             #[cfg(not(feature = "connectivity"))]
-            let ext = crate::session_ext::PicoSessionExt::new(session_mode, &state.zid());
+            let ext = crate::session_ext::PicoSessionExt::new(session_mode, &zid);
             #[cfg(feature = "admin-space")]
             let ext = ext.with_transport_endpoint(transport_endpoint);
-            let handle = PicoSessionHandle {
-                drive: state.into_drive(),
-                ext,
-            };
+            let handle = PicoSessionHandle { drive, ext };
             *zs = z_owned_session_t {
                 _val: Box::into_raw(Box::new(handle)) as *mut c_void,
                 _cnt: std::ptr::null_mut(),
@@ -704,6 +697,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     debug_assert!(request.listen.is_none());
     let dial_whatami = request.dial_whatami;
     let connect = request.connect;
+    // The locator pico's one transport is opened on, which its admin space reports as the
+    // transport's link: the first connect locator (`vendor/zenoh-pico/src/net/session.c` @
+    // `// First, try to open the optional listen locator.`, which this build has none of).
+    #[cfg(feature = "admin-space")]
+    let transport_endpoint = connect.first().cloned();
     let opened = wz_capi_coop::CoopEngine::open(
         wz_runtime_posix::links::PosixLinks::new([0; 4], wz_runtime_posix::stream::PosixTcpDial)
             .waited_by_owner(),
@@ -733,10 +731,14 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         Err(_) => return crate::result::Z_ERR_TRANSPORT_OPEN_FAILED,
     };
     let zid = wz_capi_port::SessionDrive::zid(&*engine);
-    let handle = PicoSessionHandle {
-        drive: wz_capi_coop::CoopEngine::into_drive(engine),
-        ext: crate::session_ext::PicoSessionExt::new(dial_whatami, &zid),
-    };
+    let drive = wz_capi_coop::CoopEngine::into_drive(engine);
+    #[cfg(feature = "connectivity")]
+    let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid, &drive.engine());
+    #[cfg(not(feature = "connectivity"))]
+    let ext = crate::session_ext::PicoSessionExt::new(dial_whatami, &zid);
+    #[cfg(feature = "admin-space")]
+    let ext = ext.with_transport_endpoint(transport_endpoint);
+    let handle = PicoSessionHandle { drive, ext };
     // The multi-threaded arm's read task starts with the open unless the options say not to.
     #[cfg(feature = "multi-thread")]
     if request.start_read_task {
@@ -746,6 +748,14 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         _val: Box::into_raw(Box::new(handle)) as *mut c_void,
         _cnt: std::ptr::null_mut(),
     };
+    #[cfg(feature = "admin-space")]
+    if request.start_admin_space {
+        let code = crate::admin_space::zp_start_admin_space(z_session_loan_mut(zs));
+        if code != Z_OK {
+            z_session_drop(z_session_move(zs));
+            return code;
+        }
+    }
     Z_OK
 }
 

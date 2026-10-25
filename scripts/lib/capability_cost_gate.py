@@ -176,6 +176,28 @@ CASES: tuple[Case, ...] = (
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          note="the pico-client-coop build that delivers a put to its own subscribers: 898,019 "
               "measured against its 891,519, 2.22 times the same pico (405,414)"),
+    # The cooperative client with the connectivity plane (`Z_FEATURE_CONNECTIVITY`): the listing
+    # of its transports and links and the listeners that hear them come and go. The engine reports
+    # its faces whatever the build, so the plane's own cost is the ABI's.
+    Case("pico-client-coop-connectivity", "wz-capi-pico", "libwz_capi_pico.so",
+         "engine-coop,link-udp,unstable-api,connectivity", 980_000,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, MULTICAST,
+                 TOKIO_ENGINE),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE, CONNECTIVITY),
+         note="the pico-client-coop build with the unstable API and the connectivity plane: "
+              "950,729 measured against the unstable build's 882,019, 2.16 times the same pico "
+              "(439,791), and 563 exports against its 448"),
+    # The cooperative client with pico's admin space (`Z_FEATURE_ADMIN_SPACE`): the queryable that
+    # answers `@/<zid>/pico/**`, which needs the answering end and, for the peers it lists, the
+    # engine's faces. It lists no connectivity listener, so that plane's exports stay out.
+    Case("pico-client-coop-admin-space", "wz-capi-pico", "libwz_capi_pico.so",
+         "engine-coop,link-udp,admin-space", 1_115_000,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
+                 MULTICAST, TOKIO_ENGINE),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         note="the pico-client-coop build with the answering end, the unstable API and the "
+              "admin space: 1,091,379 measured, 2.46 times the same pico (444,284), and 493 "
+              "exports"),
     # The cooperative client that asks and answers queries: the requesting end and the answering
     # end, which is what the next case adds its loopback leg to.
     Case("pico-client-coop-query", "wz-capi-pico", "libwz_capi_pico.so",

@@ -855,6 +855,8 @@ fn a_session_that_redials_none_ends_with_its_link() {
     assert!(SessionDrive::read(&*engine, false).is_err());
 }
 
+#[cfg(feature = "connectivity")]
+mod faces;
 #[cfg(feature = "query")]
 mod get;
 #[cfg(feature = "liveliness")]

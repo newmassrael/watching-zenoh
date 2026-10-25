@@ -46,6 +46,7 @@ use wz_session_core::sink::SampleView;
 pub mod cancellation;
 mod drive;
 mod engine;
+pub mod listeners;
 mod query;
 pub use drive::{CalledFromReadTask, SessionClosed, SessionDrive};
 pub use engine::SessionEngine;

@@ -248,7 +248,12 @@ unsafe fn open_to(port: u16) -> z_owned_session_t {
 }
 
 /// Step the session for `span`, in the single-threaded arm; the read task steps it otherwise.
-#[cfg(any(feature = "query", feature = "queryable", feature = "liveliness"))]
+#[cfg(any(
+    feature = "query",
+    feature = "queryable",
+    feature = "liveliness",
+    feature = "connectivity"
+))]
 unsafe fn step_for(session: &z_owned_session_t, span: Duration) {
     #[cfg(feature = "multi-thread")]
     let _ = session;
@@ -275,7 +280,7 @@ mod answering {
 
     impl Listener {
         /// Have the listener ask a query on `key`; it prints `reply <payload>` and `done <key>`.
-        fn ask(&mut self, key: &str) {
+        pub(super) fn ask(&mut self, key: &str) {
             use std::io::Write;
             let stdin = self.child.stdin.as_mut().expect("a piped stdin");
             writeln!(stdin, "get {key}").expect("the listener reads its input");
@@ -742,6 +747,250 @@ mod local_query {
             );
 
             assert_eq!(z_undeclare_querier(z_querier_move(&mut asker)), Z_OK);
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+}
+
+/// The admin space in the build that cannot listen: the session serves pico's documents to the
+/// listener that asks, the session document naming the session's role and the locator it was
+/// opened on and the peers document the listener itself. The CONTROL is the same query after the
+/// admin space is stopped: the listener's get ends with no reply.
+#[cfg(feature = "admin-space")]
+mod admin {
+    use super::*;
+    use wz_capi_pico::admin_space::{zp_start_admin_space, zp_stop_admin_space};
+
+    /// Every reply the listener printed for the query it asked, once it printed `done`, with the
+    /// session stepped meanwhile.
+    unsafe fn replies(session: &z_owned_session_t, listener: &Listener, key: &str) -> Vec<String> {
+        let mut replies = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < deadline, "the query on {key} never ended");
+            step_for(session, Duration::from_millis(20));
+            while let Ok(line) = listener.lines.try_recv() {
+                if let Some(payload) = line.strip_prefix("reply ") {
+                    replies.push(payload.to_owned());
+                } else if line == format!("done {key}") {
+                    return replies;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_client_only_build_serves_its_admin_space_to_a_listener() {
+        let port = free_port();
+        let mut listener = Listener::start(port);
+        // SAFETY: a fresh config and session, released before the function returns.
+        unsafe {
+            let mut session = open_to(port);
+            assert_eq!(zp_start_admin_space(z_session_loan_mut(&mut session)), Z_OK);
+            assert_eq!(
+                zp_start_admin_space(z_session_loan_mut(&mut session)),
+                Z_OK,
+                "a second start declares nothing more"
+            );
+            // The declaration reaches the listener before it asks.
+            step_for(&session, Duration::from_millis(300));
+
+            listener.ask("@/*/pico/session");
+            let docs = replies(&session, &listener, "@/*/pico/session");
+            assert_eq!(docs.len(), 1, "{docs:?}");
+            assert!(docs[0].contains("\"whatami\":\"client\""), "{}", docs[0]);
+            assert!(docs[0].contains("\"type\":\"unicast\""), "{}", docs[0]);
+            assert!(
+                docs[0].contains(&format!("\"address\":\"127.0.0.1:{port}\"")),
+                "the locator the session was opened on: {}",
+                docs[0]
+            );
+
+            let peers = "@/*/pico/session/transports/0/peers";
+            listener.ask(peers);
+            let docs = replies(&session, &listener, peers);
+            assert_eq!(docs.len(), 1, "{docs:?}");
+            assert!(
+                docs[0].starts_with("[{\"zid\":\""),
+                "the one peer is the listener: {}",
+                docs[0]
+            );
+
+            assert_eq!(zp_stop_admin_space(z_session_loan_mut(&mut session)), Z_OK);
+            step_for(&session, Duration::from_millis(300));
+            listener.ask("@/*/pico/session");
+            assert_eq!(
+                replies(&session, &listener, "@/*/pico/session"),
+                Vec::<String>::new(),
+                "CONTROL: a stopped admin space answers nothing"
+            );
+
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+}
+
+/// The connectivity plane in the build that cannot listen: the session lists the listener as its
+/// one transport, with one streamed link under it, and a listener declared with history is told
+/// of it as an arrival and then of its departure when the listener goes away. The CONTROL is the
+/// listing after the departure: no transport stands.
+#[cfg(feature = "connectivity")]
+mod connected {
+    use super::*;
+    use wz_capi_pico::connectivity::{
+        z_closure_link, z_closure_link_move, z_closure_transport, z_closure_transport_event,
+        z_closure_transport_event_move, z_closure_transport_move,
+        z_declare_background_transport_events_listener, z_info_links, z_info_transports,
+        z_loaned_link_t, z_loaned_transport_event_t, z_loaned_transport_t, z_owned_closure_link_t,
+        z_owned_closure_transport_event_t, z_owned_closure_transport_t,
+        z_transport_events_listener_options_default, z_transport_events_listener_options_t,
+    };
+    use wz_capi_pico::{Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT};
+
+    /// What the closures saw: each transport listed as `(zid, is_multicast)`, each link as
+    /// `(mtu, is_streamed)`, each event's kind.
+    #[derive(Default)]
+    struct Seen {
+        transports: Vec<([u8; 16], bool)>,
+        links: Vec<(u16, bool)>,
+        events: Vec<u8>,
+    }
+
+    unsafe extern "C" fn on_transport(transport: *mut z_loaned_transport_t, ctx: *mut c_void) {
+        let seen = &*(ctx as *const Mutex<Seen>);
+        seen.lock()
+            .unwrap()
+            .transports
+            .push(((*transport).zid.id, (*transport).is_multicast));
+    }
+
+    unsafe extern "C" fn on_link(link: *mut z_loaned_link_t, ctx: *mut c_void) {
+        let seen = &*(ctx as *const Mutex<Seen>);
+        seen.lock()
+            .unwrap()
+            .links
+            .push(((*link).mtu, (*link).is_streamed));
+    }
+
+    unsafe extern "C" fn on_event(event: *mut z_loaned_transport_event_t, ctx: *mut c_void) {
+        let seen = &*(ctx as *const Mutex<Seen>);
+        seen.lock().unwrap().events.push((*event).kind as u8);
+    }
+
+    /// The transports the session lists now.
+    unsafe fn listed(
+        session: &z_owned_session_t,
+        seen: &'static Mutex<Seen>,
+    ) -> Vec<([u8; 16], bool)> {
+        seen.lock().unwrap().transports.clear();
+        let mut closure: z_owned_closure_transport_t = std::mem::zeroed();
+        assert_eq!(
+            z_closure_transport(
+                &mut closure,
+                Some(on_transport),
+                None,
+                seen as *const Mutex<Seen> as *mut c_void
+            ),
+            Z_OK
+        );
+        assert_eq!(
+            z_info_transports(
+                z_session_loan(session),
+                z_closure_transport_move(&mut closure)
+            ),
+            Z_OK
+        );
+        let listed = std::mem::take(&mut seen.lock().unwrap().transports);
+        listed
+    }
+
+    #[test]
+    fn a_client_only_build_lists_its_listener_as_a_transport_and_hears_it_leave() {
+        let port = free_port();
+        let mut listener = Listener::start(port);
+        let seen: &'static Mutex<Seen> = Box::leak(Box::default());
+        // SAFETY: a fresh config and session, released before the function returns; the record
+        // is leaked, so it outlives every callback.
+        unsafe {
+            let mut session = open_to(port);
+
+            let transports = listed(&session, seen);
+            assert_eq!(transports.len(), 1, "one link, one transport");
+            assert_ne!(transports[0].0, [0; 16], "it names its peer");
+            assert!(!transports[0].1, "a unicast transport");
+
+            let mut closure: z_owned_closure_link_t = std::mem::zeroed();
+            assert_eq!(
+                z_closure_link(
+                    &mut closure,
+                    Some(on_link),
+                    None,
+                    seen as *const Mutex<Seen> as *mut c_void
+                ),
+                Z_OK
+            );
+            assert_eq!(
+                z_info_links(
+                    z_session_loan(&session),
+                    z_closure_link_move(&mut closure),
+                    std::ptr::null_mut()
+                ),
+                Z_OK
+            );
+            {
+                let seen = seen.lock().unwrap();
+                assert_eq!(seen.links.len(), 1, "one link under the transport");
+                assert!(seen.links[0].0 > 0, "a negotiated outbound budget");
+                assert!(seen.links[0].1, "a TCP link is streamed");
+            }
+
+            let mut closure: z_owned_closure_transport_event_t = std::mem::zeroed();
+            assert_eq!(
+                z_closure_transport_event(
+                    &mut closure,
+                    Some(on_event),
+                    None,
+                    seen as *const Mutex<Seen> as *mut c_void
+                ),
+                Z_OK
+            );
+            let mut options: z_transport_events_listener_options_t = std::mem::zeroed();
+            z_transport_events_listener_options_default(&mut options);
+            options.history = true;
+            assert_eq!(
+                z_declare_background_transport_events_listener(
+                    z_session_loan(&session),
+                    z_closure_transport_event_move(&mut closure),
+                    &options
+                ),
+                Z_OK
+            );
+            assert_eq!(
+                seen.lock().unwrap().events,
+                [Z_SAMPLE_KIND_PUT as u8],
+                "the listener with history is told of the transport that stands"
+            );
+
+            let _ = listener.child.kill();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while seen.lock().unwrap().events.len() < 2 {
+                assert!(
+                    Instant::now() < deadline,
+                    "the transport's departure was never told"
+                );
+                step_for(&session, Duration::from_millis(20));
+            }
+            assert_eq!(
+                seen.lock().unwrap().events,
+                [Z_SAMPLE_KIND_PUT as u8, Z_SAMPLE_KIND_DELETE as u8]
+            );
+            assert!(
+                listed(&session, seen).is_empty(),
+                "CONTROL: no transport stands once its peer is gone"
+            );
+
             z_close(z_session_loan_mut(&mut session), std::ptr::null());
             z_session_drop(z_session_move(&mut session));
         }

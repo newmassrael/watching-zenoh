@@ -22,10 +22,10 @@
 #[cfg(feature = "connectivity")]
 use std::sync::Arc;
 
-#[cfg(feature = "connectivity")]
-use wz_capi_core::faces::SharedSession;
 #[cfg(feature = "advanced")]
 use wz_capi_core::runtime::node_clock::{NodeHlc, TimestampingEnabled};
+#[cfg(feature = "connectivity")]
+use wz_capi_port::SessionEngine;
 use wz_session_core::WhatAmI;
 
 #[cfg(feature = "connectivity")]
@@ -41,18 +41,18 @@ pub(crate) struct PicoSessionExt {
     /// The transport and link listeners a C program declared on this session.
     #[cfg(feature = "connectivity")]
     pub(crate) connectivity: Arc<Connectivity>,
-    /// The face registry this session's connectivity hub watches, and the id it
+    /// The engine whose faces this session's connectivity hub watches, and the id it
     /// watches under, so the watch can be dropped with the session.
     #[cfg(feature = "connectivity")]
-    watch: (Arc<SharedSession>, u64),
+    watch: (Arc<dyn SessionEngine>, u64),
     /// Whether the admin space runs, and what it reports as the transport's link.
     #[cfg(feature = "admin-space")]
     pub(crate) admin_space: crate::admin_space::AdminSpaceSlot,
 }
 
 impl PicoSessionExt {
-    /// A session of role `mode` and identity `zid`; with the connectivity plane, over the tokio
-    /// engine's face registry `shared`, which only that engine has.
+    /// A session of role `mode` and identity `zid`; with the connectivity plane, over the faces
+    /// of `engine`, the engine that runs it.
     ///
     /// The clock STAMPS whatever the role, which is pico's: its timestamps come
     /// from the session's own clock and zid unconditionally
@@ -62,21 +62,21 @@ impl PicoSessionExt {
     /// without miss detection — is refused on a clock that does not exist, so
     /// the clock a pico session has is the one it must be given.
     ///
-    /// The connectivity hub is registered with the face registry HERE, once, and
+    /// The connectivity hub is registered with the engine's faces HERE, once, and
     /// not per listener: pico dispatches a peer's arrival or departure to every
     /// listener itself, in an order of its own (see `Connectivity`), and a
-    /// registration per listener would leave that order to the registry.
+    /// registration per listener would leave that order to the engine.
     pub(crate) fn new(
         mode: WhatAmI,
         zid: &[u8],
-        #[cfg(feature = "connectivity")] shared: &Arc<SharedSession>,
+        #[cfg(feature = "connectivity")] engine: &Arc<dyn SessionEngine>,
     ) -> Self {
         #[cfg(feature = "connectivity")]
         let connectivity = Connectivity::new();
         #[cfg(feature = "connectivity")]
         let watch_id = {
             let sink = Arc::clone(&connectivity);
-            shared.watch_faces(Arc::new(move |kind, snapshot| {
+            engine.watch_faces(Arc::new(move |kind, snapshot| {
                 sink.on_face_event(kind, snapshot);
             }))
         };
@@ -90,7 +90,7 @@ impl PicoSessionExt {
             #[cfg(feature = "connectivity")]
             connectivity,
             #[cfg(feature = "connectivity")]
-            watch: (Arc::clone(shared), watch_id),
+            watch: (Arc::clone(engine), watch_id),
             #[cfg(feature = "admin-space")]
             admin_space: crate::admin_space::AdminSpaceSlot::new(None),
         }
@@ -111,8 +111,8 @@ impl Drop for PicoSessionExt {
     /// released no later than the session is, which is when pico clears the
     /// session's listener maps.
     fn drop(&mut self) {
-        let (shared, id) = &self.watch;
-        shared.unwatch_faces(*id);
+        let (engine, id) = &self.watch;
+        engine.unwatch_faces(*id);
         self.connectivity.shutdown();
     }
 }

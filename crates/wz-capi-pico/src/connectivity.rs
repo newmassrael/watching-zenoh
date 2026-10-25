@@ -73,8 +73,8 @@ use std::collections::VecDeque;
 use std::ffi::{c_int, c_void};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use wz_capi_core::faces::{FaceEventKind, FaceSnapshot, LinkSnapshot, SharedSession};
-use wz_capi_core::listeners::ListenerSet;
+use wz_capi_port::listeners::ListenerSet;
+use wz_session_core::face::{FaceEventKind, FaceSnapshot, LinkSnapshot};
 
 use crate::abi::z_owned_string_t;
 use crate::bytes::store_owned_string;
@@ -84,7 +84,7 @@ use crate::pubsub::{
     z_closure_drop_callback_t, z_sample_kind_t, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
 use crate::result::{ZResult, Z_EINVAL, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
-use crate::session::{session_state, tokio_session, z_loaned_session_t};
+use crate::session::{engine_ref, session_handle, z_loaned_session_t, Engine, PicoSessionHandle};
 use crate::string_array::z_owned_string_array_t;
 use crate::whatami::z_whatami_t;
 use crate::zid::z_id_t;
@@ -412,12 +412,9 @@ fn transport_of(snapshot: &FaceSnapshot) -> z_loaned_transport_t {
 /// session joined, which pico lists as a multicast transport of its own
 /// (`vendor/zenoh-pico/src/api/api.c` @
 /// `z_result_t z_info_transports(const z_loaned_session_t *zs, z_moved_closure_transport_t *callback) {`).
-fn connected(shared: &SharedSession) -> Vec<FaceSnapshot> {
-    #[cfg_attr(not(feature = "multicast-transport"), allow(unused_mut))]
-    let mut all = shared.face_snapshots();
-    #[cfg(feature = "multicast-transport")]
-    all.extend(shared.group_member_snapshots());
-    all
+/// The engine holds the faces and the groups, and lists them in that order.
+fn connected(engine: &Engine) -> Vec<FaceSnapshot> {
+    engine.face_snapshots()
 }
 
 /// The config keys pico's link for a group endpoint's scheme knows, in the order its mapping
@@ -708,7 +705,7 @@ impl Connectivity {
     /// when `history` is set.
     fn declare_transport(
         &self,
-        shared: &SharedSession,
+        engine: &Engine,
         history: bool,
         closure: CClosure<Callback<z_loaned_transport_event_t>>,
     ) -> u64 {
@@ -717,7 +714,7 @@ impl Connectivity {
         // between is queued rather than missed.
         let id = self.transports.insert(Arc::clone(&delivery));
         if history {
-            for snapshot in connected(shared) {
+            for snapshot in connected(engine) {
                 delivery.call(z_loaned_transport_event_t {
                     kind: Z_SAMPLE_KIND_PUT,
                     transport: transport_of(&snapshot),
@@ -732,7 +729,7 @@ impl Connectivity {
     /// `history` is set. `filter` narrows it to one transport.
     fn declare_link(
         &self,
-        shared: &SharedSession,
+        engine: &Engine,
         history: bool,
         filter: Option<([u8; 16], bool)>,
         closure: CClosure<Callback<z_loaned_link_event_t>>,
@@ -743,7 +740,7 @@ impl Connectivity {
         });
         let id = self.links.insert(Arc::clone(&listener));
         if history {
-            for snapshot in connected(shared) {
+            for snapshot in connected(engine) {
                 if !listener.wants(&transport_of(&snapshot)) {
                     continue;
                 }
@@ -1342,9 +1339,9 @@ pub unsafe extern "C" fn z_link_event_link_mut(
 /// The hub of the session behind `zs`, if it is a live session this ABI opened.
 unsafe fn hub_of<'a>(
     zs: *const z_loaned_session_t,
-) -> Option<(&'a wz_capi_core::drive::SessionState, &'a Arc<Connectivity>)> {
-    let (handle, state) = tokio_session(zs)?;
-    Some((state, &handle.ext.connectivity))
+) -> Option<(&'a PicoSessionHandle, &'a Arc<Connectivity>)> {
+    let handle = session_handle(zs)?;
+    Some((handle, &handle.ext.connectivity))
 }
 
 /// Call `closure` once per connected transport (pico `z_info_transports`).
@@ -1364,10 +1361,10 @@ pub unsafe extern "C" fn z_info_transports(
             |c| (c._this.context, c._this.call, c._this.drop),
             |c| c._this = z_owned_closure_transport_t::null_value(),
         );
-        let Some(state) = session_state(zs) else {
+        let Some(handle) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
-        for snapshot in connected(&state.shared) {
+        for snapshot in connected(engine_ref(handle)) {
             let mut transport = transport_of(&snapshot);
             if let Some(call) = closure.call {
                 call(&mut transport, closure.context.0);
@@ -1436,10 +1433,10 @@ pub unsafe extern "C" fn z_info_links(
             Ok(filter) => filter,
             Err(()) => return Z_EINVAL,
         };
-        let Some(state) = session_state(zs) else {
+        let Some(handle) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
-        for snapshot in connected(&state.shared) {
+        for snapshot in connected(engine_ref(handle)) {
             let peer = transport_of(&snapshot);
             if let Some((zid, multicast)) = filter {
                 if zid != peer.zid.id || multicast != peer.is_multicast {
@@ -1658,7 +1655,7 @@ pub unsafe extern "C" fn z_declare_transport_events_listener(
             return Z_ERR_NULL;
         }
         *listener = z_owned_transport_events_listener_t::null_value();
-        let Some((state, hub)) = hub_of(zs) else {
+        let Some((handle, hub)) = hub_of(zs) else {
             return Z_ERR_SESSION_CLOSED;
         };
         let closure = adopt(
@@ -1666,11 +1663,11 @@ pub unsafe extern "C" fn z_declare_transport_events_listener(
             |c| (c._this.context, c._this.call, c._this.drop),
             |c| c._this = z_owned_closure_transport_event_t::null_value(),
         );
-        if state.is_closed() {
+        if handle.drive.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
         let history = !options.is_null() && (*options).history;
-        let id = hub.declare_transport(&state.shared, history, closure);
+        let id = hub.declare_transport(engine_ref(handle), history, closure);
         *listener = z_owned_transport_events_listener_t::of(Box::new(ListenerHandle {
             hub: Arc::clone(hub),
             kind: ListenerKind::Transport,
@@ -1739,7 +1736,7 @@ pub unsafe extern "C" fn z_declare_link_events_listener(
             return Z_ERR_NULL;
         }
         *listener = z_owned_link_events_listener_t::null_value();
-        let Some((state, hub)) = hub_of(zs) else {
+        let Some((handle, hub)) = hub_of(zs) else {
             return Z_ERR_SESSION_CLOSED;
         };
         let closure = adopt(
@@ -1756,10 +1753,10 @@ pub unsafe extern "C" fn z_declare_link_events_listener(
             Ok(filter) => filter,
             Err(()) => return Z_EINVAL,
         };
-        if state.is_closed() {
+        if handle.drive.is_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
-        let id = hub.declare_link(&state.shared, history, filter, closure);
+        let id = hub.declare_link(engine_ref(handle), history, filter, closure);
         *listener = z_owned_link_events_listener_t::of(Box::new(ListenerHandle {
             hub: Arc::clone(hub),
             kind: ListenerKind::Link,
@@ -1810,14 +1807,18 @@ pub unsafe extern "C" fn z_link_events_listener_drop(
     let _ = z_undeclare_link_events_listener(listener);
 }
 
-#[cfg(test)]
+/// The hub's own behaviour, over the tokio engine's registry as the engine a listener is declared
+/// on: the hub reads the faces through the port, and a registry with no face is an engine with
+/// none to replay.
+#[cfg(all(test, feature = "engine-tokio"))]
 mod tests {
     use super::*;
 
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use std::sync::OnceLock;
-    use wz_capi_core::runtime::session_glue::LinkKind;
+    use wz_capi_core::faces::SharedSession;
+    use wz_session_core::link::LinkKind;
 
     use wz_capi_core::runtime::runtime_impl::TokioTime;
 
