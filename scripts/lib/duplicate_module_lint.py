@@ -49,7 +49,11 @@ DECL = re.compile(
 # layout (`third-party` holds crates.io packages copied whole, `THIRD_PARTY.md`: tokio declares
 # a module twice under disjoint `cfg`s on purpose, which is its code and not this tree's), and
 # build output is regenerated rather than reviewed.
-SKIP_PARTS = ("target", "vendor", "third-party", ".git")
+#
+# `.claude` holds the git worktrees other sessions work in (`.claude/worktrees/<name>`): each is a
+# separate checkout of a branch of its own, linted from its own root when that branch is pushed,
+# and reading it from here made one session's unpushed code fail every other session's push.
+SKIP_PARTS = ("target", "vendor", "third-party", ".git", ".claude")
 
 
 def declarations(text: str) -> list[tuple[str, int]]:
