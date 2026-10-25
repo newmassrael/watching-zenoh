@@ -176,8 +176,11 @@ original reproduced by naming it. Three things follow from it:
   not UTF-8 is refused where upstream panics, a priority that is a positive integer is taken by
   JSON and YAML where upstream's visitor refuses it, and a range of payload sizes with a bound
   left out comes back as written where upstream writes the bound as 0)
-  and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
-  default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
+  and `zenoh` (`crates/wz-zenoh`, now the package `zenoh` under the directory of the family; its
+  first slice is the `bytes` module, `ZBytes` with its reader, writer and slice iterator and
+  `Encoding`, and the `shm` module without its provider state: 59 of 709 default lines present, 59
+  of 965 with `unstable` and 115 of 1,025 with `unstable` and `shared-memory`; the seam over the
+  engine is `docs/zenoh-api-on-the-engine.md`).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each
   crate against upstream's, a graph in which an upstream crate and the wz crate meet one type once
   patched, and the same graph unpatched as its control. The packages are not published (the

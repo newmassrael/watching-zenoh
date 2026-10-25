@@ -287,7 +287,7 @@ pinned revision for the generation-time policy.
 ## crates/wz-zenoh-* — the zenoh family's public API, reproduced
 
 - **Origin**: https://github.com/eclipse-zenoh/zenoh, tag `1.10.1` (the crates `zenoh-result`,
-  `zenoh-runtime`, `zenoh-core`, `zenoh-keyexpr`, `zenoh-macros`, `zenoh-collections`, `zenoh-buffers`, `zenoh-protocol`, `zenoh-codec`, `zenoh-shm`, `zenoh-util`, `zenoh-config` and those that follow them).
+  `zenoh-runtime`, `zenoh-core`, `zenoh-keyexpr`, `zenoh-macros`, `zenoh-collections`, `zenoh-buffers`, `zenoh-protocol`, `zenoh-codec`, `zenoh-shm`, `zenoh-util`, `zenoh-config`, `zenoh` and those that follow them).
 - **License of the origin**: EPL-2.0 OR Apache-2.0.
 - **License of these crates**: the same, `EPL-2.0 OR Apache-2.0`, and not this repository's
   non-commercial expression. A family file is a derivative of the upstream file it names (its

@@ -3,23 +3,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 """R3553 (no register item) -- a file of the zenoh family carries upstream's notice.
 
-The family crates (`crates/wz-zenoh-*`, inventory atom `api-compat-rust`) reproduce the public API
-and the documentation of the crates of the same name of eclipse-zenoh/zenoh, which are
-`EPL-2.0 OR Apache-2.0`. Both licenses ask the same of a derived file: keep the copyright and
-license notices of the original, state that the file was changed, and ship a copy of the license
-(Apache-2.0 section 4(a), (b) and (c); EPL-2.0 section 3.3). The first slices of the family dropped
-the notice and put this repository's own header on the files, which is the one thing neither license
-allows; the owner delegated the structure (2026-10-24) and this gate is the part of it that stops it
-coming back.
+The family crates (`crates/wz-zenoh-*` and `crates/wz-zenoh`, inventory atom `api-compat-rust`)
+reproduce the public API and the documentation of the crates of the same name of
+eclipse-zenoh/zenoh, which are `EPL-2.0 OR Apache-2.0`. Both licenses ask the same of a derived
+file: keep the copyright and license notices of the original, state that the file was changed,
+and ship a copy of the license (Apache-2.0 section 4(a), (b) and (c); EPL-2.0 section 3.3). The
+first slices of the family dropped the notice and put this repository's own header on the files,
+which is the one thing neither license allows; the owner delegated the structure (2026-10-24) and
+this gate is the part of it that stops it coming back.
 
 ## The structure, and what is judged
 
-  * every source file of a family crate (a member of `rust_api_surface.MEMBERS`, but for the
-    exempt facade below) opens with upstream's own notice block, kept verbatim, then
-    `SPDX-License-Identifier: EPL-2.0 OR Apache-2.0`, then this repository's
-    `SPDX-FileCopyrightText` line and a `Modified by ... Derived from <crate> <version>, file <path>`
-    statement. A file whose upstream original has no notice says so instead and carries the
-    declared license of its crate;
+  * every source file of a family crate (a member of `rust_api_surface.MEMBERS`) opens with
+    upstream's own notice block, kept verbatim, then `SPDX-License-Identifier: EPL-2.0 OR
+    Apache-2.0`, then this repository's `SPDX-FileCopyrightText` line and a `Modified by ... Derived
+    from <crate> <version>, file <path>` statement. A file whose upstream original has no notice
+    says so instead and carries the declared license of its crate;
   * the manifest of a family crate declares `license = "EPL-2.0 OR Apache-2.0"`, not the
     workspace's expression;
   * `LICENSES/Apache-2.0.txt` and `LICENSES/EPL-2.0.txt` are in the tree (the license texts a
@@ -29,11 +28,13 @@ coming back.
 The population is DERIVED from the member table, never counted by hand, and an empty population is
 a failure (a scan that found nothing to judge reports nothing wrong).
 
-## The exempt facade
+## The top crate
 
-`zenoh` itself (`crates/wz-zenoh`) has no item yet: nothing is derived, so its files keep this
-repository's header. It stays exempt only while its sources declare no public item; the slice that
-gives it one moves it into the population, and this gate reds the day that is forgotten.
+`zenoh` itself (`crates/wz-zenoh`) was exempt while it declared no public item, because nothing was
+derived and its files kept this repository's header. It declared its first (the `bytes` module,
+docs/zenoh-api-on-the-engine.md, slice Z0a), so it is in the population like every other member and
+the exemption is gone: a derived file of the top crate names `zenoh` as its crate and sits in
+`zenoh/src/` of upstream, where the lower crates sit in `commons/<crate>/src/`.
 
 ## The resolution arm
 
@@ -79,35 +80,27 @@ LICENSE_TEXTS = {
     "LICENSES/EPL-2.0.txt": ("Eclipse Public License - v 2.0", 250),
 }
 
-#: Members that are not family crates yet. A row stays only while the crate's sources declare no
-#: public item (`exempt_has_items` is the test), and is deleted by the slice that gives it one.
-FACADE_EXEMPT = {"zenoh"}
-
 #: Below this the scan read the wrong tree: the family is eight crates and about ninety files.
 MIN_FILES = 60
 
 HEAD_LINES = 40
 DERIVED = re.compile(
-    r"Derived from (zenoh-[a-z]+) (\d+\.\d+\.\d+), file\s*(?://\s*)?([\w./-]+)"
+    r"Derived from (zenoh(?:-[a-z]+)?) (\d+\.\d+\.\d+), file\s*(?://\s*)?([\w./-]+)"
 )
 UPSTREAM_COPYRIGHT = re.compile(r"Copyright \(c\) \d{4} ZettaScale Technology")
 
 
 def family_dirs() -> list[str]:
-    """`crates/wz-<package>` of every member that is a family crate, from the member table."""
+    """`crates/wz-<package>` of every member of the family, from the member table."""
     import rust_api_surface as ras
 
-    return [
-        f"crates/wz-{m.package}"
-        for m in ras.MEMBERS
-        if m.package not in FACADE_EXEMPT
-    ]
+    return [f"crates/wz-{m.package}" for m in ras.MEMBERS]
 
 
-def exempt_dirs() -> list[str]:
-    import rust_api_surface as ras
-
-    return [f"crates/wz-{m.package}" for m in ras.MEMBERS if m.package in FACADE_EXEMPT]
+def upstream_file(pin: pathlib.Path, crate: str, path: str) -> pathlib.Path:
+    """Where upstream keeps `path` of `crate`: the top crate is `zenoh/`, the others are under
+    `commons/`."""
+    return pin / (crate if crate == "zenoh" else f"commons/{crate}") / path
 
 
 def tracked(root: pathlib.Path, dirs: list[str]) -> dict[str, str]:
@@ -170,19 +163,8 @@ def judge_file(rel: str, text: str) -> list[str]:
     return errors
 
 
-def exempt_has_items(files: dict[str, str]) -> list[str]:
-    """Public items in an exempt crate's non-comment lines: it has derived content."""
-    return [
-        rel
-        for rel, text in files.items()
-        if rel.endswith(".rs")
-        and any(re.match(r"\s*pub\s", ln) for ln in text.splitlines() if not ln.lstrip().startswith("//"))
-    ]
-
-
 def judge(
     files: dict[str, str],
-    exempt_files: dict[str, str],
     licenses: dict[str, str],
 ) -> list[str]:
     errors: list[str] = []
@@ -193,11 +175,6 @@ def judge(
         )
     for rel in sorted(files):
         errors.extend(judge_file(rel, files[rel]))
-    for rel in exempt_has_items(exempt_files):
-        errors.append(
-            f"{rel}: the exempt facade now declares a public item, so it derives from upstream: "
-            "move it into the population (delete it from FACADE_EXEMPT) and give its files the notice"
-        )
     for rel, (mark, min_lines) in LICENSE_TEXTS.items():
         text = licenses.get(rel)
         if text is None:
@@ -224,7 +201,7 @@ def resolve(files: dict[str, str], pin: pathlib.Path) -> list[str]:
             errors.append(f"{rel}: no `Derived from <crate> <version>, file <path>` statement to resolve")
             continue
         crate, _version, path = d
-        up = pin / "commons" / crate / path
+        up = upstream_file(pin, crate, path)
         if not up.is_file():
             errors.append(f"{rel}: derives from `{crate}` file `{path}`, which is not at the pin")
             continue
@@ -243,13 +220,12 @@ def resolve(files: dict[str, str], pin: pathlib.Path) -> list[str]:
 
 def check(do_resolve: bool) -> int:
     files = tracked(REPO_ROOT, family_dirs())
-    exempt = tracked(REPO_ROOT, exempt_dirs())
     licenses = {
         rel: (REPO_ROOT / rel).read_text(encoding="utf-8", errors="replace")
         for rel in LICENSE_TEXTS
         if (REPO_ROOT / rel).is_file()
     }
-    errors = judge(files, exempt, licenses)
+    errors = judge(files, licenses)
     deferred = ""
     if do_resolve:
         import upstream_citation_anchor_gate as ucag
@@ -271,7 +247,7 @@ def check(do_resolve: bool) -> int:
         return 1
     print(
         f"family-notice gate: OK ({len(files)} file(s) of {len(family_dirs())} family crate(s) carry "
-        f"upstream's notice and `{UPSTREAM_EXPR}`; {len(exempt)} exempt facade file(s); "
+        f"upstream's notice and `{UPSTREAM_EXPR}`; "
         f"{len(licenses)} license text(s) present{deferred})"
     )
     return 0
@@ -308,7 +284,6 @@ def selftest() -> int:
         files.update(overrides or {})
         return files
 
-    exempt = {"crates/wz-zenoh/src/lib.rs": "//! docs only\n"}
     first = "crates/wz-zenoh-x/src/f0.rs"
     headerless = (
         "//\n// Copyright (c) the contributors of Eclipse zenoh (see the NOTICE)\n//\n"
@@ -316,51 +291,56 @@ def selftest() -> int:
         f"// {CHANGE_MARK} zenoh-x {PIN}, file\n// src/a.rs (https://github.com/eclipse-zenoh/zenoh, "
         f"tag {PIN}), which carries no notice of its own; the declared license applies.\n"
     )
+    top_block = NOTICE_BLOCK.replace("zenoh-x", "zenoh")
     red = {
         "own expression kept": (
             population({first: NOTICE_BLOCK.replace(UPSTREAM_EXPR, OUR_EXPR_MARK + "-NonCommercial-1.0")}),
-            exempt,
             lic,
         ),
         "no upstream expression": (
             population({first: NOTICE_BLOCK.replace(f"SPDX-License-Identifier: {UPSTREAM_EXPR}\n", "")}),
-            exempt,
             lic,
         ),
-        "no own copyright line": (population({first: NOTICE_BLOCK.replace(OUR_COPYRIGHT, "x")}), exempt, lic),
-        "no change statement": (population({first: NOTICE_BLOCK.replace(CHANGE_MARK, "Edited")}), exempt, lic),
+        "no own copyright line": (population({first: NOTICE_BLOCK.replace(OUR_COPYRIGHT, "x")}), lic),
+        "no change statement": (population({first: NOTICE_BLOCK.replace(CHANGE_MARK, "Edited")}), lic),
         "notice block dropped": (
             population({first: NOTICE_BLOCK.replace("ZettaScale Zenoh Team", "the team")}),
-            exempt,
             lic,
         ),
         "manifest workspace license": (
             population({"crates/wz-zenoh-x/Cargo.toml": MANIFEST.replace(f'license = "{UPSTREAM_EXPR}"', "license.workspace = true")}),
-            exempt,
             lic,
         ),
         "manifest own header": (
             population({"crates/wz-zenoh-x/Cargo.toml": MANIFEST + f"# {OUR_EXPR_MARK}-Commercial\n"}),
-            exempt,
             lic,
         ),
-        "license text missing": (population(), exempt, {k: v for k, v in lic.items() if "EPL" not in k}),
-        "license text truncated": (population(), exempt, dict(lic, **{"LICENSES/EPL-2.0.txt": "Eclipse Public License - v 2.0\n"})),
-        "facade gained an item": (population(), {"crates/wz-zenoh/src/lib.rs": "pub fn f() {}\n"}, lic),
-        "empty population": ({}, exempt, lic),
+        "license text missing": (population(), {k: v for k, v in lic.items() if "EPL" not in k}),
+        "license text truncated": (population(), dict(lic, **{"LICENSES/EPL-2.0.txt": "Eclipse Public License - v 2.0\n"})),
+        "empty population": ({}, lic),
         "a version that is not the pin": (
             population({first: NOTICE_BLOCK.replace(f"zenoh-x {PIN}", "zenoh-x 0.0.1")}),
-            exempt,
+            lic,
+        ),
+        "the top crate with this repository's header": (
+            population({"crates/wz-zenoh/src/lib.rs": "// SPDX-License-Identifier: LicenseRef-watching-zenoh-X\n"}),
+            lic,
+        ),
+        "the top crate with a version that is not the pin": (
+            population({"crates/wz-zenoh/src/lib.rs": top_block.replace(f"zenoh {PIN}", "zenoh 0.0.1")}),
             lic,
         ),
     }
     failures = []
-    for name, (files, ex, lc) in red.items():
-        if not judge(files, ex, lc):
+    for name, (files, lc) in red.items():
+        if not judge(files, lc):
             failures.append(f"RED case {name!r} passed")
-    green = judge(population({"crates/wz-zenoh-x/src/f1.rs": headerless}), exempt, lic)
+    green = judge(population({"crates/wz-zenoh-x/src/f1.rs": headerless}), lic)
     if green:
         failures.append(f"GREEN case reddened: {green}")
+    green_top = judge(population({"crates/wz-zenoh/src/lib.rs": top_block}), lic)
+    if green_top:
+        failures.append(f"GREEN case (the top crate) reddened: {green_top}")
 
     # The resolution arm, against a fake pin.
     import tempfile
@@ -370,9 +350,17 @@ def selftest() -> int:
         (pin / "commons" / "zenoh-x" / "src").mkdir(parents=True)
         (pin / "commons" / "zenoh-x" / "src" / "lib.rs").write_text(NOTICE_BLOCK)
         (pin / "commons" / "zenoh-x" / "src" / "a.rs").write_text("fn a() {}\n")
+        (pin / "zenoh" / "src").mkdir(parents=True)
+        (pin / "zenoh" / "src" / "lib.rs").write_text(top_block)
         ok = {"crates/wz-zenoh-x/src/lib.rs": NOTICE_BLOCK}
         if resolve(ok, pin):
             failures.append(f"GREEN resolve case reddened: {resolve(ok, pin)}")
+        ok_top = {"crates/wz-zenoh/src/lib.rs": top_block}
+        if resolve(ok_top, pin):
+            failures.append(f"GREEN resolve case (the top crate) reddened: {resolve(ok_top, pin)}")
+        top_in_commons = {"crates/wz-zenoh/src/gone.rs": top_block.replace("src/lib.rs", "src/gone.rs")}
+        if not resolve(top_in_commons, pin):
+            failures.append("RED resolve case 'a top crate file that is not at the pin' passed")
         wrong_year = {"crates/wz-zenoh-x/src/lib.rs": NOTICE_BLOCK.replace("2023", "2024")}
         if not resolve(wrong_year, pin):
             failures.append("RED resolve case 'a year that is not upstream's' passed")
@@ -393,8 +381,8 @@ def selftest() -> int:
             print(f"  {f}", file=sys.stderr)
         return 1
     print(
-        f"family-notice gate selftest: OK ({len(red)} red case(s) red, 1 green case green, "
-        "5 red and 2 green resolve cases)"
+        f"family-notice gate selftest: OK ({len(red)} red case(s) red, 2 green cases green, "
+        "6 red and 3 green resolve cases)"
     )
     return 0
 

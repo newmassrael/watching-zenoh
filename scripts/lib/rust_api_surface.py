@@ -151,8 +151,8 @@ class Member:
 
 
 MEMBERS: tuple[Member, ...] = (
-    Member("zenoh", "zenoh", "wz-zenoh", ARMS,
-           {"default": 709, "unstable": 965, "unstable-shared-memory": 1025}),
+    Member("zenoh", "zenoh", "zenoh", ARMS,
+           {"default": 650, "unstable": 906, "unstable-shared-memory": 910}, split_wz=True),
     Member("zenoh-result", "zenoh_result", "zenoh-result", DEFAULT_ARM, {"default": 0}),
     Member("zenoh-runtime", "zenoh_runtime", "zenoh-runtime", DEFAULT_ARM, {"default": 0}),
     Member("zenoh-core", "zenoh_core", "zenoh-core", DEFAULT_ARM, {"default": 0}),

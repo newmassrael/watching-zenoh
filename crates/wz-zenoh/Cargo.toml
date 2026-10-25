@@ -1,38 +1,64 @@
-# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# wz-zenoh — the public Rust API of the pinned `zenoh` crate, over wz (inventory atom
-# `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13 and step 12).
+# This package reproduces the public API and the documentation of the crate of the same name of
+# eclipse-zenoh/zenoh, which is EPL-2.0 OR Apache-2.0, so the whole package is under that expression.
+# The notices of the upstream files it derives from are kept in its sources (see LICENSES/ and
+# THIRD_PARTY.md at the root of this repository).
 #
-# A Rust user replaces zenoh by changing one dependency line and nothing else:
+# zenoh -- the public Rust API of the pinned `zenoh` crate, over watching-zenoh (inventory atom
+# `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13 and C13a, and
+# docs/zenoh-api-on-the-engine.md for the seam).
 #
-#     zenoh = { package = "wz-zenoh", version = "1.10.1" }
+# Named `zenoh` and versioned as the pinned zenoh, like every crate of the family (see
+# `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism): a Rust user replaces zenoh by
+# one `[patch.crates-io]` entry and every crate of the graph, an ecosystem crate included, meets
+# the same types. The directory keeps the `wz-` prefix of the family's directories.
 #
-# so the library is named `zenoh` and the version is the pinned zenoh's, and every public path,
-# kind and trait relation is upstream's. The surface it must equal is the one rustdoc JSON gives
-# for upstream at the pin (`deploy/upstream-api/zenoh-1.10.1-*.surface`), and
-# `scripts/lib/rust_api_surface.py` holds this crate to it: no line upstream does not have (C10:
-# a wz-only door is in `wz::ext`, never here), and the count of lines still missing may only
-# fall. The crate is built slice by slice in the order a user meets the API; until a slice lands
-# it is not here at all, rather than here and unimplemented.
-#
-# Features carry zenoh's names and join with the slice that gives them meaning, so a feature
-# this manifest declares is one that does something.
+# It is built in slices, each landing whole with the ratchet of `scripts/lib/rust_api_surface.py`
+# lowered in its own round. The first slice is the `bytes` module (`ZBytes`, its reader, writer
+# and slice iterator, and `Encoding`), which holds no session and names no engine. Until a slice
+# lands its items are missing lines of the surface gate, not stubs here.
 
 [package]
-name = "wz-zenoh"
+name = "zenoh"
 version = "1.10.1"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "EPL-2.0 OR Apache-2.0"
 authors.workspace = true
 repository.workspace = true
 readme.workspace = true
-description = "The public Rust API of the zenoh crate (1.10.1) as a drop-in over watching-zenoh."
+description = "The public Rust API of the zenoh crate (1.10.1), as a drop-in over watching-zenoh."
 
 [lib]
 name = "zenoh"
 path = "src/lib.rs"
+# The examples of upstream's documentation open a session, and that function is not here yet. The
+# lines that do not need one (the `bytes` module's) are held by the differential tests; the
+# documentation tests join with the slice that gives `open` a body (docs/zenoh-api-on-the-engine.md,
+# slice Z1).
+doctest = false
+
+# Upstream's features by their names, each forwarding to the family crates that carry the same
+# feature; they join the manifest with the slice that gives them meaning, and the three that the
+# surface gate's arms and the `zenoh_macros` attributes read are here from the first.
+[features]
+internal = ["zenoh-protocol/internal"]
+shared-memory = [
+    "dep:zenoh-shm",
+    "zenoh-buffers/shared-memory",
+    "zenoh-protocol/shared-memory",
+]
+unstable = ["zenoh-protocol/unstable"]
+
+[dependencies]
+bytes = "1.11.0"
+phf = { version = "0.13.1", features = ["macros"] }
+zenoh-buffers = { path = "../wz-zenoh-buffers", features = ["std"] }
+zenoh-macros = { path = "../wz-zenoh-macros" }
+zenoh-protocol = { path = "../wz-zenoh-protocol", features = ["std"] }
+zenoh-shm = { path = "../wz-zenoh-shm", optional = true }
 
 [lints]
 workspace = true

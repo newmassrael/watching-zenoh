@@ -35,6 +35,13 @@ wz_codec = { package = "zenoh-codec", path = "../../crates/wz-zenoh-codec", feat
 # `test` makes the metadata and watchdog modules public, which is how a test plays the provider.
 up_shm = { package = "zenoh-shm", version = "=1.10.1", features = ["test"] }
 wz_shm = { package = "zenoh-shm", path = "../../crates/wz-zenoh-shm", features = ["test"] }
+# `zenoh`'s `bytes` module in the shared-memory arm (a payload and its buffer in shared memory), each
+# built over its own family crates; `zenoh-core` is what the blocking resolution of a builder comes
+# from.
+up_zenoh = { package = "zenoh", version = "=1.10.1", default-features = false, features = ["unstable", "shared-memory", "internal"] }
+wz_zenoh = { package = "zenoh", path = "../../crates/wz-zenoh", features = ["unstable", "shared-memory", "internal"] }
+up_core = { package = "zenoh-core", version = "=1.10.1" }
+wz_core = { package = "zenoh-core", path = "../../crates/wz-zenoh-core" }
 # The timestamp of a put is `uhlc`'s, one package for both crates.
 uhlc = { version = "0.8.0", default-features = false, features = ["std"] }
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }

@@ -202,7 +202,24 @@ and D1 is dropped if that list has grown to the size of `Primitives` and the ses
 
 Each lands whole with its surface lines, tests and faults in one round.
 
-- **Z0. The data modules and the rename.** Classified per module first (D2).
+- **Z0. The data modules and the rename**, in parts, because the modules are not as separate as
+  D2 hoped. Measured on the pinned source by what each file names of the crate: `bytes` names
+  nothing (only links in its documentation); `encoding` names `bytes`, `query` and `sample` only in
+  its documentation; `key_expr` names the session in ten functions that are all `pub(crate)`;
+  `selector` names `Query`; `sample` names `builders::sample`, `handlers`, `key_expr` and the
+  publisher's `Priority`; `handlers` names `pubsub`, `query` and `session`; `cancellation` and
+  `config` name only themselves. So the first part is exactly the closure that names nothing:
+  - **Z0a (landed).** The rename of `wz-zenoh` to the package `zenoh`, the `bytes` module (`ZBytes`,
+    its reader, writer and slice iterator, `OptionZBytes`, `Encoding`) and the `shm` module without
+    its provider state: 59 of 709 default lines, 115 of 1,025 in the shared-memory arm, 13 injected
+    faults, the family notice gate taking the top crate (its resolution arm now reads the top crate
+    from `zenoh/` of upstream and not from `commons/`). The shared-memory arm is tested in
+    `conformance/differential-shm`, because with `shared-memory` the protocol's types change and
+    one package takes one setting of a feature. The doctests are off in the manifest until `open`
+    has a body, with the reason beside the switch.
+  - **Z0b onward.** `cancellation`, `config`, `handlers` (with the channels), then `key_expr` and
+    `selector` (the wire declaration of a key becomes an erased anchor, D2), then `sample` and the
+    quality-of-service types. Each is a part of Z0 that lands when its closure exists.
 - **Z1. Open, close, identity, config table, the choice of D5 and the rule of D4.** `zenoh::open`,
   `Session::zid`, `close`, `is_closed`, `id`, `config`, `info` (routers and peers only). The
   first slice that names an engine. Router mode is decided HERE and not later: 15 of upstream's 31
