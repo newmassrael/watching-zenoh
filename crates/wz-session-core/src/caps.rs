@@ -107,6 +107,13 @@ pub const MAX_KEYEXPR_BYTES: usize = generated::MAX_KEYEXPR_BYTES;
 /// rejected (`RegisterError::TableFull`) rather than growing the table.
 pub const MAX_SUBSCRIPTIONS: usize = generated::MAX_SUBSCRIPTIONS;
 
+/// How many distinct keys the receive match cache ([`crate::pubsub::SubscriberRegistry`]'s memory
+/// of which subscriptions a key matched) holds at once. A direct-mapped table: a key that maps to
+/// a used slot replaces what was there. `0` leaves the cache out: every message is matched against
+/// the subscriptions, which reaches the same subscribers in the same order. A count of keys and
+/// not a table of sessions: it sizes the cache only.
+pub const MATCH_MEMO_SLOTS: usize = generated::MATCH_MEMO_SLOTS;
+
 /// Maximum number of concurrently-registered local queryables in a
 /// [`crate::query::QueryableRegistry`]. Bounds the registry's queryable
 /// table on the no-alloc backing; a `register` past this is rejected

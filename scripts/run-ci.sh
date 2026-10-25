@@ -9695,7 +9695,16 @@ layer_c1d_cargo_test_pubsub() {
         && cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp,pubsub-encoding,pubsub-source-info,pubsub-priority,pubsub-congestion-control,pubsub-express --quiet \
         && cargo test -p wz-session-core --features codec-push,pubsub-put --quiet \
         && cargo test -p wz-session-core --features codec-push,pubsub-delete --quiet \
-        && cargo test -p wz-session-core --features codec-response,query-reply --quiet)
+        && cargo test -p wz-session-core --features codec-response,query-reply --quiet) || return 1
+    # The receive match cache left out (`MATCH_MEMO_SLOTS` of 0): every message is matched, and
+    # what is delivered is what the cached build delivers. The three tests are the memory's own
+    # (it follows the subscriptions and the locality; a repeated key is matched once with slots
+    # and every time without; a frame of repeated keys is delivered as the owned path delivers
+    # it), and the second states both builds' scan count, so only this arm sees the other half.
+    _runci_guarded_test "C1d match cache out" 3 \
+        env WZ_LIMIT_MATCH_MEMO_SLOTS=0 \
+        cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp \
+        --lib --quiet -- match_mem repeated_key || return 1
 }
 
 # ─── Layer C1bi — pubsub-qos: the merged QoS-byte gate (R311y307) ───────

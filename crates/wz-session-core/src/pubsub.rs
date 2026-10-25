@@ -2036,9 +2036,10 @@ impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
     }
 }
 
-/// How many distinct keys `MatchMemo` remembers at once.
+/// How many distinct keys `MatchMemo` remembers at once: the limit `MATCH_MEMO_SLOTS`. Zero
+/// leaves the memory out, and every message is matched afresh.
 #[cfg(feature = "alloc")]
-const MEMO_SLOTS: usize = 8;
+const MEMO_SLOTS: usize = caps::MATCH_MEMO_SLOTS;
 
 /// One remembered key: which subscribers it matched, under which table state.
 #[cfg(feature = "alloc")]
@@ -2092,7 +2093,9 @@ impl MatchMemo {
             hash ^= u32::from(*byte);
             hash = hash.wrapping_mul(0x0100_0193);
         }
-        (hash ^ (hash >> 15)) as usize % MEMO_SLOTS
+        // `max(1)` only keeps the remainder defined where there are no slots: nothing reaches
+        // this function then (see `fire_into_memoized`).
+        (hash ^ (hash >> 15)) as usize % MEMO_SLOTS.max(1)
     }
 }
 
@@ -2118,6 +2121,10 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
     repeats_previous: bool,
     mut deliver: impl FnMut(&mut C),
 ) -> usize {
+    // No slots: the memory is out, and the message is matched as `fire_into` matches it.
+    if MEMO_SLOTS == 0 {
+        return scan_subscribers(subscribers, key, is_remote, deliver, |_| {}).unwrap_or(0);
+    }
     if repeats_previous {
         if let Some((at, writes)) = memo.last {
             if writes == memo.writes {
@@ -2150,28 +2157,12 @@ fn fire_into_memoized<C: SampleSink, P: Storage>(
     // Not remembered at this epoch: match it as `fire_into` does, noting each hit. A key
     // that cannot be matched at all (deeper than the bound) delivers to nobody and is not
     // remembered.
-    let mut target: BoundedVec<&str, MAX_KEYEXPR_CHUNKS> = BoundedVec::new();
-    for chunk in key.split('/') {
-        if target.push(chunk).is_err() {
-            return 0;
-        }
-    }
     let mut hits: alloc::vec::Vec<u16> = alloc::vec::Vec::new();
-    for (position, subscriber) in subscribers.iter_mut().enumerate() {
-        let pass = if is_remote {
-            subscriber.allowed_origin.allows_remote()
-        } else {
-            subscriber.allowed_origin.allows_local()
-        };
-        if !pass {
-            continue;
-        }
-        if keyexpr_intersects_target(&subscriber.pattern, &target) {
-            deliver(&mut subscriber.sink);
-            hits.push(position as u16);
-        }
-    }
-    let fired = hits.len();
+    let Some(fired) = scan_subscribers(subscribers, key, is_remote, deliver, |position| {
+        hits.push(position as u16)
+    }) else {
+        return 0;
+    };
     memo.slots[at] = Some(MemoSlot {
         epoch,
         remote: is_remote,
@@ -2197,8 +2188,33 @@ fn fire_into<C: SampleSink, P: Storage>(
     view: &dyn SampleView,
     is_remote: bool,
 ) -> usize {
+    scan_subscribers(
+        subscribers,
+        view.keyexpr(),
+        is_remote,
+        |sink| sink.deliver(view),
+        |_| {},
+    )
+    .unwrap_or(0)
+}
+
+/// The one matcher: every subscriber whose locality admits the origin and whose pattern
+/// intersects `keyexpr` is handed to `deliver`, in the table's order, and its position in the
+/// table to `hit`. Returns how many matched, or `None` for a key deeper than the matcher's bound,
+/// which is delivered to nobody (a caller that remembers answers does not remember this one).
+///
+/// Every route to a subscriber reaches it: the borrowed delivery, the plain one and the
+/// receive match cache's refill, so what a message reaches does not depend on which.
+fn scan_subscribers<C: SampleSink, P: Storage>(
+    subscribers: &mut BoundedVec<Subscriber<C, P>, { caps::MAX_SUBSCRIPTIONS }, P>,
+    keyexpr: &str,
+    is_remote: bool,
+    mut deliver: impl FnMut(&mut C),
+    mut hit: impl FnMut(usize),
+) -> Option<usize> {
+    #[cfg(test)]
+    MATCH_SCANS.with(|scans| scans.set(scans.get() + 1));
     let mut fired: usize = 0;
-    let keyexpr = view.keyexpr();
     // R2662 (open-debt item 763) — THE ARRIVING KEYEXPR MAY ITSELF BE A
     // PATTERN, so it is split ONCE here and each subscriber is INTERSECTED
     // against it. The prior `keyexpr_pattern_matches(&chunks, keyexpr)`
@@ -2225,10 +2241,10 @@ fn fire_into<C: SampleSink, P: Storage>(
         // same direction `keyexpr_intersects_target` takes for an
         // over-depth candidate on the no-alloc backing.
         if target.push(c).is_err() {
-            return 0;
+            return None;
         }
     }
-    for subscriber in subscribers.iter_mut() {
+    for (position, subscriber) in subscribers.iter_mut().enumerate() {
         let pass = if is_remote {
             subscriber.allowed_origin.allows_remote()
         } else {
@@ -2245,11 +2261,19 @@ fn fire_into<C: SampleSink, P: Storage>(
             // R311gb-2b — deliver via the DIP seam (borrowed view,
             // no projection step). On MCU `C` is a closed `enum`
             // whose `deliver` injects; on AP a `BoxedSink` closure.
-            subscriber.sink.deliver(view);
+            deliver(&mut subscriber.sink);
+            hit(position);
             fired = fired.saturating_add(1);
         }
     }
-    fired
+    Some(fired)
+}
+
+// How many times `scan_subscribers` ran on this thread: a message answered from the receive
+// match cache is not scanned, one that is not answered from it is. A test reads the difference.
+#[cfg(test)]
+std::thread_local! {
+    static MATCH_SCANS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
 }
 
 impl<C: SampleSink, P: Storage> SubscriberTable<C, P> {
@@ -6900,6 +6924,46 @@ mod tests {
         assert_eq!(reg.dispatch_borrowed(&key("loc/k"), false), 0);
         assert_eq!(reg.dispatch_borrowed(&key("loc/k"), true), 1);
         assert_eq!(*order.lock().unwrap(), ["remote-only", "remote-only"]);
+    }
+
+    /// With slots the memory answers a key that comes again without matching it, and with none
+    /// (`MATCH_MEMO_SLOTS` of 0) every message is matched: the one difference between the two
+    /// builds, which the test above shows is not a difference in what is delivered. A key a
+    /// subscription's registration made stale is matched again either way.
+    #[test]
+    fn a_repeated_key_is_matched_once_with_slots_and_every_time_without() {
+        use crate::sink::BorrowedSample;
+        let scans = || MATCH_SCANS.with(|count| count.get());
+        let key = |keyexpr: &'static str| BorrowedSample {
+            keyexpr,
+            payload: b"x",
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+        let mut reg = SubscriberRegistry::new();
+        reg.register("a/*", |_: &dyn SampleView| {});
+
+        let start = scans();
+        for _ in 0..5 {
+            assert_eq!(reg.dispatch_borrowed(&key("a/x"), true), 1);
+        }
+        let first_key = scans() - start;
+        assert_eq!(
+            first_key,
+            if caps::MATCH_MEMO_SLOTS == 0 { 5 } else { 1 },
+            "five messages on one key"
+        );
+
+        reg.register("a/x", |_: &dyn SampleView| {});
+        let start = scans();
+        for _ in 0..5 {
+            assert_eq!(reg.dispatch_borrowed(&key("a/x"), true), 2);
+        }
+        assert_eq!(
+            scans() - start,
+            if caps::MATCH_MEMO_SLOTS == 0 { 5 } else { 1 },
+            "a registration is seen by the next message, then the key is remembered again"
+        );
     }
 }
 

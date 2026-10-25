@@ -23,6 +23,18 @@ config WZ_LIMIT_MAX_SUBSCRIPTIONS
 	  The subscribers a session holds at once. Declaring one more is refused
 	  while the table is full.
 
+config WZ_LIMIT_MATCH_MEMO_SLOTS
+	int "MATCH_MEMO_SLOTS"
+	default 8
+	help
+	  How many distinct keys the receive match cache remembers at once: the keys
+	  whose matching subscriptions it can answer without matching again. It is a
+	  direct-mapped table, so a key that maps to a used slot replaces what was
+	  there. More slots keep more keys at the cost of memory. 0 leaves the cache
+	  out: every message is matched against the subscriptions, which reaches the
+	  same subscribers in the same order, as zenoh-pico does where its
+	  Z_FEATURE_RX_CACHE is off (its default).
+
 config WZ_LIMIT_MAX_QUERYABLES
 	int "MAX_QUERYABLES"
 	default 16
