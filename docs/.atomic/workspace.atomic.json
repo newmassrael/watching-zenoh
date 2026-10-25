@@ -289314,6 +289314,50 @@
         "The keys of the configuration that upstream's tests exercise (acl, authentication, low pass, downsampling, qos overwrite, namespace, admin space, connection retry, tcp buffers) are each a slice or a recorded refusal, not yet owned."
       ]
     },
+    "Round 3682": {
+      "decision_summary": "The delivery lane for callbacks off the receive path is measured, on one machine in one condition, against the two deliveries it sits between (docs/rx-delivery-lane.md, phase 6). A burst the lane can hold costs the dispatching loop 35 to 50 us whatever the callback does, where inline it costs n times the callback (12.85 ms for 64 callbacks of 200 us); the lane adds no allocation to the dispatch call, about 0.1 to 0.3 us a sample, and 0 to 1 per cent to the time until the last callback has run. It does not finish the callbacks sooner: there is one consumer. Under block with a burst four times the lane the loop is held for what the lane cannot absorb, as the buffered subscriber's is, and nothing is lost; under reject the loop is never held and 64 of 256 are delivered. Not measured: several subscribers, a real link, contention, zenoh-c, zenoh-pico. Phase 4, a lane gauge in the metrics registry, is not built: that registry mirrors upstream's names and upstream has no lane.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio tests/rx_delivery_lane_cost.rs (new): dispatches n Put samples to one subscriber of each delivery (plain, buffered, offloaded under reject, offloaded under block) whose callback busy-waits W microseconds, and prints the time the dispatching loop spent, the time until every callback ran, and the allocations of the dispatch call per sample (counted per thread, around the synchronous call alone). Asserts only that each case delivered the samples it should, in order, and that block and the others lost none; time is never a gate. Scaled by WZ_LANE_N, WZ_LANE_WORK_US and WZ_LANE_PAYLOAD.",
+        "docs/rx-delivery-lane.md records the table, what it shows and what it does not measure, and why phase 4 is not built as written."
+      ],
+      "verification_bullets": [
+        "The measurement ran on the shared build machine, release build, whole table three times; the runs agreed within a few per cent, and one more run at a payload of 1000 bytes moved no figure past the noise. The same test passes in a debug build.",
+        "The first table was wrong and was not used: a wait that polled every 5 ms quantised the completion time to 5 ms and a wait for quiet added 100 ms to reject, and the allocation count over the whole process charged the dispatch for the consumer's work. Completion is now a counter with a wake, and allocations are counted on the dispatching thread around the synchronous call alone.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-runtime-tokio; the pre-push round-fed array, 113 gates, exits 0 on the tree with the test added.",
+        "Not run: the hosted run; several offloaded subscribers at once; a real link under the drive loop; payloads past a kilobyte; any comparison with zenoh-c or zenoh-pico, which are not in the process."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "What the lane buys is that the callback leaves the loop; what it cannot buy is shorter total callback time, because one consumer runs them in order. A deployment whose callbacks are slow AND independent wants more than one consumer, which the ordering rule (one consumer, in order) forbids for one subscription: decide with the owner whether a lane per key partition is wanted before building it.",
+        "The measurement is of the tokio host's dispatch call. A drive loop over a real link, several offloaded subscribers at once and the cooperative engine and slot node (sessions 11 and ef) are not measured.",
+        "Phase 4 (a lane gauge in the admin metrics) needs a decision about wz-only vocabulary beside upstream's; nothing asks for it yet.",
+        "The capability rx-callback-offload waits for the first C ABI door that exports the API.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "The delivery lane for callbacks off the receive path is measured, on one machine in one condition, against the two deliveries it sits between (docs/rx-delivery-lane.md, phase 6). A burst the lane can hold costs the dispatching loop 35 to 50 us whatever the callback does, where inline it costs n times the callback (12.85 ms for 64 callbacks of 200 us); the lane adds no allocation to the dispatch call, about 0.1 to 0.3 us a sample, and 0 to 1 per cent to the time until the last callback has run. It does not finish the callbacks sooner: there is one consumer. Under block with a burst four times the lane the loop is held for what the lane cannot absorb, as the buffered subscriber's is, and nothing is lost; under reject the loop is never held and 64 of 256 are delivered. Not measured: several subscribers, a real link, contention, zenoh-c, zenoh-pico. Phase 4, a lane gauge in the metrics registry, is not built: that registry mirrors upstream's names and upstream has no lane.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio tests/rx_delivery_lane_cost.rs (new): dispatches n Put samples to one subscriber of each delivery (plain, buffered, offloaded under reject, offloaded under block) whose callback busy-waits W microseconds, and prints the time the dispatching loop spent, the time until every callback ran, and the allocations of the dispatch call per sample (counted per thread, around the synchronous call alone). Asserts only that each case delivered the samples it should, in order, and that block and the others lost none; time is never a gate. Scaled by WZ_LANE_N, WZ_LANE_WORK_US and WZ_LANE_PAYLOAD.",
+        "docs/rx-delivery-lane.md records the table, what it shows and what it does not measure, and why phase 4 is not built as written."
+      ],
+      "publishable_verification_bullets": [
+        "The measurement ran on the shared build machine, release build, whole table three times; the runs agreed within a few per cent, and one more run at a payload of 1000 bytes moved no figure past the noise. The same test passes in a debug build.",
+        "The first table was wrong and was not used: a wait that polled every 5 ms quantised the completion time to 5 ms and a wait for quiet added 100 ms to reject, and the allocation count over the whole process charged the dispatch for the consumer's work. Completion is now a counter with a wake, and allocations are counted on the dispatching thread around the synchronous call alone.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-runtime-tokio; the pre-push round-fed array, 113 gates, exits 0 on the tree with the test added.",
+        "Not run: the hosted run; several offloaded subscribers at once; a real link under the drive loop; payloads past a kilobyte; any comparison with zenoh-c or zenoh-pico, which are not in the process."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "What the lane buys is that the callback leaves the loop; what it cannot buy is shorter total callback time, because one consumer runs them in order. A deployment whose callbacks are slow AND independent wants more than one consumer, which the ordering rule (one consumer, in order) forbids for one subscription: decide with the owner whether a lane per key partition is wanted before building it.",
+        "The measurement is of the tokio host's dispatch call. A drive loop over a real link, several offloaded subscribers at once and the cooperative engine and slot node (sessions 11 and ef) are not measured.",
+        "Phase 4 (a lane gauge in the admin metrics) needs a decision about wz-only vocabulary beside upstream's; nothing asks for it yet.",
+        "The capability rx-callback-offload waits for the first C ABI door that exports the API.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
