@@ -289180,6 +289180,38 @@
         "Read the first finished hosted run holding rounds 3674 and this one: Qzb (the admin node's chain and size rows, which a type change may move) and the no-allocator row of the declared build. Next is 7c: the declared peers of a node declaration, [[endpoint]] with role peer, a zid and its locators, checked against MAX_PEER_NODES, and confirmed into the node's directory as Declared; then 7d, the control port that makes out-of-band an option. Not measured: what the declared value saves in text. Still open: the Hello hint source, the image witness (the lane owner agrees), the heap UDP dialer verifying nodes, the Qzb chain fall and the C1cn shard 1 time budget."
       ]
     },
+    "Round 3679": {
+      "decision_summary": "Step 7c of decision D7 (one contract, three transports): the peers a build declares are held by their zid from the first tick, with no verb asking for them. ConnectManager::hold_declared hints each DeclaredPeer (Declared, permanent) and opens it by its zid; ClientNode takes the list and stops at start, naming the peer, when one cannot be held, because a node that silently lost a peer it was built to hold would run and be wrong. A node declaration states one as [[endpoint]] role = \"peer\" with a zid, read as zid_from_key_text reads it, and a tls locator: a plain stream cannot prove the node that answered is the one the zid names (D4). Each peer is a session of the node and raises MAX_PEER_NODES when none is stated. The design note records that 7a is a type parameter and not a feature, as build-configuration C3 says.",
+      "changes_bullets": [
+        "crates/wz-session-mcu: DeclaredPeer, DeclaredRefusal and ConnectManager::hold_declared in connect_manager.rs, SlotClientNode::hold_declared, and the peers field of slot_node::ClientNode with the exit code 4; one test of the declared list, so the counts of C1m mcu adminspace-write, peer nodes and read+write are 31, 22 and 41.",
+        "scripts/lib/wz_node.py: the role peer, its zid, the tls rule, the budget it implies and PEERS and PEER_NODES in the generated module (SESSIONS counts the peers), with selftest cases; the seven generated modules are regenerated; declared_node.rs passes the table, the other two front ends pass none; docs/target-build-contract.md and docs/session-lifecycle-intent.md state it."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): the connect manager tests with room for two nodes pass (22), the adminspace-write leg runs 31 and the read+write suite 41; the host slot node's binaries compile with the generated table (tls, listen, multicast, get); wz_node.py --selftest and --check pass (7 declarations valid and current); rustfmt is clean; the whole round-fed gate array passes. A first run of the declared-list test failed on a build with no room for a node, which refuses the first peer at the directory and not at the machine: the test now accepts either, by place.",
+        "Not run here: a declared node holding a declared peer over a real secure channel, a registered declaration with a peer, and the Zephyr and MCU images that pass no peers."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Next is 7d: the control port that makes out-of-band an option of the axis, and its agent in the host that hosts the node, answering a repeated open of an open session with success. Then read the first finished hosted run holding rounds 3674, 3678 and this one: Qzb and the no-allocator rows of both admin builds. Not measured: the text the declared value saves. Open: the witness of a declared peer over a real channel (needs two nodes with a key each and a lane step the lane owner agrees), the Hello hint source, the image witness, the heap UDP dialer verifying nodes, the Qzb chain fall and the C1cn shard 1 time budget."
+      ],
+      "publishable_decision_summary": "Step 7c of decision D7 (one contract, three transports): the peers a build declares are held by their zid from the first tick, with no verb asking for them. ConnectManager::hold_declared hints each DeclaredPeer (Declared, permanent) and opens it by its zid; ClientNode takes the list and stops at start, naming the peer, when one cannot be held, because a node that silently lost a peer it was built to hold would run and be wrong. A node declaration states one as [[endpoint]] role = \"peer\" with a zid, read as zid_from_key_text reads it, and a tls locator: a plain stream cannot prove the node that answered is the one the zid names (D4). Each peer is a session of the node and raises MAX_PEER_NODES when none is stated. The design note records that 7a is a type parameter and not a feature, as build-configuration C3 says.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu: DeclaredPeer, DeclaredRefusal and ConnectManager::hold_declared in connect_manager.rs, SlotClientNode::hold_declared, and the peers field of slot_node::ClientNode with the exit code 4; one test of the declared list, so the counts of C1m mcu adminspace-write, peer nodes and read+write are 31, 22 and 41.",
+        "scripts/lib/wz_node.py: the role peer, its zid, the tls rule, the budget it implies and PEERS and PEER_NODES in the generated module (SESSIONS counts the peers), with selftest cases; the seven generated modules are regenerated; declared_node.rs passes the table, the other two front ends pass none; docs/target-build-contract.md and docs/session-lifecycle-intent.md state it."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): the connect manager tests with room for two nodes pass (22), the adminspace-write leg runs 31 and the read+write suite 41; the host slot node's binaries compile with the generated table (tls, listen, multicast, get); wz_node.py --selftest and --check pass (7 declarations valid and current); rustfmt is clean; the whole round-fed gate array passes. A first run of the declared-list test failed on a build with no room for a node, which refuses the first peer at the directory and not at the machine: the test now accepts either, by place.",
+        "Not run here: a declared node holding a declared peer over a real secure channel, a registered declaration with a peer, and the Zephyr and MCU images that pass no peers."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next is 7d: the control port that makes out-of-band an option of the axis, and its agent in the host that hosts the node, answering a repeated open of an open session with success. Then read the first finished hosted run holding rounds 3674, 3678 and this one: Qzb and the no-allocator rows of both admin builds. Not measured: the text the declared value saves. Open: the witness of a declared peer over a real channel (needs two nodes with a key each and a lane step the lane owner agrees), the Hello hint source, the image witness, the heap UDP dialer verifying nodes, the Qzb chain fall and the C1cn shard 1 time budget."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
