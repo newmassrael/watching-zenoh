@@ -790,6 +790,10 @@ pub struct MulticastDispatcher<const MAX_PEERS: usize> {
     /// `release_multicast_link`: whether peers, frames and fragments are
     /// admitted and leases swept.
     running: bool,
+    /// How many JOINs found no free row in the peer table ([`JoinRefuse::PeerTableFull`]) since this
+    /// dispatcher was built. A peer that is turned away announces itself again each join interval,
+    /// so this counts beacons and not peers: it says the table is full, which nothing else does.
+    join_refusals: u32,
     /// §5.21 routing-namespace — the per-session EGRESS prefix (the master
     /// namespace value). `None` until [`Self::set_namespace`] installs it at
     /// bring-up (mirrors the unicast `SessionLinkActions::set_namespace`
@@ -839,6 +843,7 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             peers: core::array::from_fn(|_| PeerSlot::new()),
             config,
             running: false,
+            join_refusals: 0,
             #[cfg(feature = "routing-namespace")]
             namespace: None,
             #[cfg(feature = "multicast-ingress-gate")]
@@ -1494,7 +1499,10 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
         }
         let idx = match self.peers.iter().position(PeerSlot::is_free) {
             Some(i) => i,
-            None => return JoinOutcome::Refused(JoinRefuse::PeerTableFull),
+            None => {
+                self.join_refusals = self.join_refusals.saturating_add(1);
+                return JoinOutcome::Refused(JoinRefuse::PeerTableFull);
+            }
         };
         self.peers[idx].admit(src, zid, baseline, qos_next_sns, now_ms);
         #[cfg(all(feature = "alloc", feature = "codec-declare"))]
@@ -1502,6 +1510,13 @@ impl<const MAX_PEERS: usize> MulticastDispatcher<MAX_PEERS> {
             self.peers[idx].member = Some(tags.admit());
         }
         JoinOutcome::Admitted
+    }
+
+    /// How many JOINs this dispatcher turned away because every row of its peer table held a live
+    /// peer. A refresh of a member already in the table is not counted, nor is a JOIN refused for
+    /// what it advertises.
+    pub const fn join_refusals(&self) -> u32 {
+        self.join_refusals
     }
 
     /// The DEFAULT-band `ingest_join` (no per-priority QoS advertisement) — the
@@ -3000,11 +3015,23 @@ mod tests {
         let mut d = running_dispatcher::<2>(5_000);
         assert_eq!(d.ingest_join(ZID_A, SRC_A, sn0(), 0), JoinOutcome::Admitted);
         assert_eq!(d.ingest_join(ZID_B, SRC_B, sn0(), 0), JoinOutcome::Admitted);
+        assert_eq!(d.join_refusals(), 0, "two admissions turn nobody away");
         assert_eq!(
             d.ingest_join(ZID_C, SRC_C, sn0(), 0),
             JoinOutcome::Refused(JoinRefuse::PeerTableFull)
         );
         assert_eq!(d.active_peers(), 2);
+        // The turned-away peer beacons again, and a member's own beacon is a refresh: only the
+        // first kind is a refusal.
+        assert_eq!(
+            d.ingest_join(ZID_C, SRC_C, sn0(), 1),
+            JoinOutcome::Refused(JoinRefuse::PeerTableFull)
+        );
+        assert_eq!(
+            d.ingest_join(ZID_A, SRC_A, sn0(), 1),
+            JoinOutcome::Refreshed
+        );
+        assert_eq!(d.join_refusals(), 2);
     }
 
     /// An explicit Close from a peer's address evicts it and frees the slot

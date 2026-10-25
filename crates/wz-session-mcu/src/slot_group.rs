@@ -80,6 +80,7 @@ pub struct GroupState {
     members: Cell<u32>,
     joins: Cell<u32>,
     refused: Cell<u32>,
+    turned_away: Cell<u32>,
 }
 
 // SAFETY: the profile's rule: one thread drives the node, and the pump task (which writes) and the
@@ -94,6 +95,7 @@ impl GroupState {
             members: Cell::new(0),
             joins: Cell::new(0),
             refused: Cell::new(0),
+            turned_away: Cell::new(0),
         }
     }
 
@@ -111,6 +113,14 @@ impl GroupState {
     /// How many times a join was refused (no socket, no route, no cell, no task).
     pub fn join_refused(&self) -> u32 {
         self.refused.get()
+    }
+
+    /// How many JOINs the group's member table turned away because every row held a member, in the
+    /// group's current join (it starts again at none with each join, as the members do). A peer
+    /// that is turned away announces itself again each join interval, so this counts beacons: a
+    /// number above none is the table being full, which nothing else says.
+    pub fn members_turned_away(&self) -> u32 {
+        self.turned_away.get()
     }
 
     fn member_arrived(&self) {
@@ -329,8 +339,9 @@ where
         let local = CoopLocalSet::new(&self.runtime);
         match spawn_multicast_pump(&local, pump, on_event, next_tx, || false) {
             Ok(task) => {
-                // The table of a fresh session holds nobody.
+                // The table of a fresh session holds nobody and has turned nobody away.
                 state.members.set(0);
+                state.turned_away.set(0);
                 state.joins.set(state.joins.get().saturating_add(1));
                 self.task = Some(task);
                 true
@@ -351,6 +362,10 @@ where
     fn tick(&mut self, now_ms: u64) {
         if let Some(task) = &self.task {
             if !task.is_finished() {
+                self.plane
+                    .state
+                    .turned_away
+                    .set(self.plane.slots.join_refusals());
                 return;
             }
             // The group ended (its receiver failed): its members went with it.
@@ -445,5 +460,6 @@ mod tests {
         state.member_lost();
         assert_eq!(state.members(), 1);
         assert_eq!((state.joins(), state.join_refused()), (0, 0));
+        assert_eq!(state.members_turned_away(), 0);
     }
 }

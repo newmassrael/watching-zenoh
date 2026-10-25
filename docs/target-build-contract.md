@@ -695,7 +695,10 @@ literal Put: the replies of a queryable, the Request of a querier and the answer
 an interest are heap-only forms in the shared emit, so a node that is a member of a group may
 declare publishers and subscriptions and the validator refuses the other kinds for it, by name,
 rather than serve them on its sessions and drop them on the group. The node says `HOST-WZ-GROUP
-<locator> joins=<n> refused=<n> members=<n>` each time any of the three moves. One set of peer
+<locator> joins=<n> refused=<n> turned_away=<n> members=<n>` each time any of the four moves;
+`turned_away` counts the JOINs its member table had no free row for in the current join (a peer
+turned away announces itself again each join interval, so it counts beacons and not peers), which is
+how a lab tells a full table from a node that stopped taking members. One set of peer
 tables serves the whole group, so an alias a member declares is an id of the group: a put that names
 its key in full, which is what zenoh-pico's multicast peer sends, is unaffected, and two members that
 alias different keys under one id are not told apart. A put longer than one frame arrives as a

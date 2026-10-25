@@ -51,7 +51,7 @@ use wz_integration_tests::common::{
 };
 
 // The node says every change of its group; the leg waits for the join.
-// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-GROUP {} joins={} refused={} members={}" for "joins=1"
+// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-GROUP {} joins={} refused={} turned_away={} members={}" for "joins=1"
 
 /// The port of the group, as the node's declaration states it.
 const PORT: u16 = 7490;
@@ -160,6 +160,18 @@ fn members(node: &File) -> Option<u32> {
         .lines()
         .filter(|line| line.starts_with("HOST-WZ-GROUP "))
         .filter_map(|line| line.rsplit_once("members=")?.1.trim().parse().ok())
+        .next_back()
+}
+
+/// The `turned_away=` the node last said, or none.
+fn turned_away(node: &File) -> Option<u32> {
+    read(node)
+        .lines()
+        .filter(|line| line.starts_with("HOST-WZ-GROUP "))
+        .filter_map(|line| {
+            let tail = line.split_once("turned_away=")?.1;
+            tail.split_whitespace().next()?.parse().ok()
+        })
         .next_back()
 }
 
@@ -272,6 +284,62 @@ fn the_multicast_node_counts_its_members_as_pico_joins_and_its_lease_runs_out() 
             .is_some_and(|(_, tail)| tail.trim_start().starts_with('0'))
     });
     assert_eq!(members(&node_out), Some(0), "{}", read(&node_out));
+    graceful_terminate(node.child_mut(), Duration::from_secs(5));
+}
+
+/// How many members the node's table has rows for, as its declaration states.
+const MEMBER_ROWS: usize = 8;
+
+// wz-proves: none -- the same node, for the same reason: its view of the group's members has no catalog atom
+#[test]
+#[ignore = "environment-dependent multicast e2e (the packaged slot-group, which Layer M makes, + the pico CLI); runs via --ignored"]
+fn the_multicast_node_says_its_member_table_is_full_when_it_turns_a_peer_away() {
+    let (mut node, node_out) = start_node();
+    // As many pico peers as the table has rows: every one is admitted and nobody is turned away.
+    let mut peers = Vec::new();
+    for at in 0..MEMBER_ROWS {
+        let key = format!("lab/group/full/{at}");
+        peers.push(start_pico("z_pub", &key, Some("x"), "Declaring publisher"));
+    }
+    let rows = MEMBER_ROWS.to_string();
+    wait_until(
+        "the node admitting every peer its table has a row for",
+        &node_out,
+        |seen| seen.contains(&format!("members={rows}")),
+    );
+    assert_eq!(
+        members(&node_out),
+        Some(MEMBER_ROWS as u32),
+        "{}",
+        read(&node_out)
+    );
+    assert_eq!(
+        turned_away(&node_out),
+        Some(0),
+        "a peer for each row is nobody turned away\n{}",
+        read(&node_out)
+    );
+
+    // One more than the table holds: its JOIN finds no row, the node says so, and the table does not
+    // grow.
+    peers.push(start_pico(
+        "z_pub",
+        "lab/group/full/over",
+        Some("x"),
+        "Declaring publisher",
+    ));
+    wait_until(
+        "the node counting the peer it had no row for",
+        &node_out,
+        |_| turned_away(&node_out).is_some_and(|turned| turned >= 1),
+    );
+    assert_eq!(
+        members(&node_out),
+        Some(MEMBER_ROWS as u32),
+        "a peer past the table is not a member\n{}",
+        read(&node_out)
+    );
+    drop(peers);
     graceful_terminate(node.child_mut(), Duration::from_secs(5));
 }
 

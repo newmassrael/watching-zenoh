@@ -1304,6 +1304,10 @@ pub enum MulticastSpawnRefused {
 struct MulticastCell<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usize>
 {
     taken: core::cell::Cell<bool>,
+    /// The JOINs the peer table of the pump in this cell has turned away, as of the last step: the
+    /// pump owns the table, and this is the one number of it that is read from outside the cell, so
+    /// it is kept where a reader needs no reference into the pump.
+    join_refusals: core::cell::Cell<u32>,
     session: core::cell::UnsafeCell<core::mem::MaybeUninit<MulticastSession<T, MAX_PEERS>>>,
     runtime: core::cell::UnsafeCell<core::mem::MaybeUninit<CoopRuntime<C>>>,
     pump: core::cell::UnsafeCell<core::mem::MaybeUninit<MulticastPump<'static, C, T, MAX_PEERS>>>,
@@ -1316,6 +1320,7 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
     const fn new() -> Self {
         Self {
             taken: core::cell::Cell::new(false),
+            join_refusals: core::cell::Cell::new(0),
             session: core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()),
             runtime: core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()),
             pump: core::cell::UnsafeCell::new(core::mem::MaybeUninit::uninit()),
@@ -1397,6 +1402,20 @@ impl<
         critical_section::with(|_| self.refused.get())
     }
 
+    /// How many JOINs the peer tables of the sessions the cells hold now have turned away for want
+    /// of a free row ([`MulticastDispatcher::join_refusals`]), as of each pump's last step. A
+    /// session that ended takes its count with it, as it takes its members.
+    pub fn join_refusals(&self) -> u32 {
+        critical_section::with(|_| {
+            self.cells
+                .iter()
+                .filter(|cell| cell.taken.get())
+                .fold(0u32, |sum, cell| {
+                    sum.saturating_add(cell.join_refusals.get())
+                })
+        })
+    }
+
     /// The bytes this table takes in the image's `.bss`, with each cell's session and
     /// pump (and, with `reassembly`, the router's staging).
     pub const fn size_bytes() -> usize {
@@ -1419,6 +1438,8 @@ impl<
             critical_section::with(|_| self.refused.set(self.refused.get().saturating_add(1)));
             return Err(MulticastSpawnRefused::NoCell);
         };
+        // A new session's table has turned nobody away, whatever the cell's last one did.
+        critical_section::with(|_| cell.join_refusals.set(0));
         // SAFETY: the cell is `taken` by this call alone, so nothing else reaches its
         // three places, and each is uninitialised: it was never written, or the
         // `MulticastRef` that freed the cell dropped what it held. The session and
@@ -1495,6 +1516,16 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
         unsafe { (*self.cell.pump.get()).assume_init_mut() }
     }
 
+    /// Copy the peer table's count of turned-away JOINs to where the table's owner reads it
+    /// ([`MulticastSlots::join_refusals`]); a step changes it by at most one datagram's worth, so
+    /// the copy is made after each step and takes the critical section only when the count moved.
+    fn publish_join_refusals(&mut self) {
+        let count = self.dispatcher().join_refusals();
+        if count != self.cell.join_refusals.get() {
+            critical_section::with(|_| self.cell.join_refusals.set(count));
+        }
+    }
+
     /// Advance the pump by one iteration, for a firmware (or a test) that drives it
     /// by hand instead of as a task; [`MulticastPump::step`] with the pump this
     /// handle holds.
@@ -1508,7 +1539,9 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
         F: FnMut(IterationEvent<'_>),
         G: FnMut() -> Option<MulticastTxOffer<'g>>,
     {
-        self.pump().step(on_event, next_tx, should_stop)
+        let outcome = self.pump().step(on_event, next_tx, should_stop);
+        self.publish_join_refusals();
+        outcome
     }
 }
 
@@ -1549,10 +1582,11 @@ where
     H: FnMut() -> bool,
 {
     loop {
-        if let Some(outcome) = pump
+        let outcome = pump
             .pump()
-            .step(&mut on_event, &mut next_tx, Some(&mut should_stop))
-        {
+            .step(&mut on_event, &mut next_tx, Some(&mut should_stop));
+        pump.publish_join_refusals();
+        if let Some(outcome) = outcome {
             return outcome;
         }
         yield_now().await;

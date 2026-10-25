@@ -338,28 +338,32 @@ struct Report {
     published: PublishWatch<PUBLISHERS>,
     #[cfg(feature = "get")]
     queried: QueryWatch<QUERIERS>,
-    /// The group's joins, join refusals and members when they were last said.
+    /// The group's joins, join refusals, JOINs its member table turned away and members when they
+    /// were last said.
     #[cfg(feature = "multicast")]
-    group: (u32, u32, u32),
+    group: (u32, u32, u32, u32),
 }
 
 impl NodeApp for Report {
     fn after_tick(&mut self, _now_ms: u64, _node: &dyn NodeHandle) -> ControlFlow<i32> {
         // The group, said once for each round that found it changed: `HOST-WZ-GROUP <locator>
-        // joins=<n> refused=<n> members=<n>`. A lab waits for `members=1` to know the node has
-        // admitted a peer's JOIN, and for `joins=1` to know the group is joined at all.
+        // joins=<n> refused=<n> turned_away=<n> members=<n>`. A lab waits for `members=1` to know
+        // the node has admitted a peer's JOIN, for `joins=1` to know the group is joined at all, and
+        // reads `turned_away` above none as the member table being full: the peers it turned away
+        // are not members, and nothing else on the line says they tried.
         #[cfg(feature = "multicast")]
         {
             let now = (
                 GROUP_STATE.joins(),
                 GROUP_STATE.join_refused(),
+                GROUP_STATE.members_turned_away(),
                 GROUP_STATE.members(),
             );
             if now != self.group {
                 self.group = now;
                 log_args(format_args!(
-                    "HOST-WZ-GROUP {} joins={} refused={} members={}",
-                    GROUP, now.0, now.1, now.2
+                    "HOST-WZ-GROUP {} joins={} refused={} turned_away={} members={}",
+                    GROUP, now.0, now.1, now.2, now.3
                 ));
             }
         }
@@ -539,7 +543,7 @@ fn run() -> i32 {
         #[cfg(feature = "get")]
         queried: QueryWatch::new(),
         #[cfg(feature = "multicast")]
-        group: (0, 0, 0),
+        group: (0, 0, 0, 0),
     };
     node.run(
         &mut HostPort::<Console>::new(),

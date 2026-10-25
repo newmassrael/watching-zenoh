@@ -18190,14 +18190,15 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # `udp/224.0.0.224:7490`, puts a document on one key for a pico `z_sub` (and for no `z_sub` of
     # another key), keeps the latest sample a pico `z_pub` puts on another, and counts its members as
     # pico joins and as its lease runs out, and puts back together a put pico cuts into a Fragment
-    # chain (and drops one past the reassembly slot). Count-guarded at 4: the legs are `#[ignore]`.
+    # chain (and drops one past the reassembly slot), and says its member table is full when a peer
+    # past its rows is turned away. Count-guarded at 5: the legs are `#[ignore]`.
     local group_pkg group_rc=0
     group_pkg="$(mktemp -d)" || return 1
     python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc --artifact declared-node \
         --node slot-group --out "$group_pkg/slot-group" || group_rc=1
     [ "$group_rc" -eq 0 ] && { [ -x "$group_pkg/slot-group/bin/declared-node" ] \
         || { echo "  Mgrp FAIL: the packaged slot-group is not executable"; group_rc=1; }; }
-    [ "$group_rc" -eq 0 ] && { _runci_guarded_test Mgrp 4 env \
+    [ "$group_rc" -eq 0 ] && { _runci_guarded_test Mgrp 5 env \
         WZ_DECLARED_NODE_GROUP="$group_pkg/slot-group/bin/declared-node" \
         cargo test -p wz-integration-tests --test wz_declared_group_pico_interop \
         -- --ignored --quiet --test-threads=1 || group_rc=1; }
