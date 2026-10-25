@@ -286254,6 +286254,56 @@
         "Hosted results of rounds 3541 to 3607 are still unread: every hosted run was cancelled by a later push. `wz-session-mcu`'s Layer C1bz findings (4) and C1bf have no owning session found."
       ]
     },
+    "Round 3608": {
+      "decision_summary": "Two policies bound what a blocking push costs when its link has no room. tx-no-progress-deadline adds a second bound beside the total wait: a window with no fragment of the message going out, in microseconds (TX_NO_PROGRESS_WINDOW_US), that a fragment out starts again without making the total longer, so the message is given up on at whichever bound comes first; off is upstream, the total wait alone. tx-expiry-keeps-session decides what the expiry costs: off is upstream, the session closes as unresponsive and the sender is told nothing; on drops the message, answers the sender TransportUnavailable and keeps the session. Both unicast push and the router egress sweep ask one decision point, SessionLinkActions::settle_blocking_expiry, so they cannot disagree. A droppable message and a probe are untouched.",
+      "changes_bullets": [
+        "deploy/wz-config.toml declares the limit TX_NO_PROGRESS_WINDOW_US (default 1000000) and the policies tx-no-progress-deadline and tx-expiry-keeps-session, both bool and off; the generated caps_generated.rs, policy_generated.rs, deploy/Kconfig.limits and deploy/Kconfig.policies carry them.",
+        "crates/wz-session-core: TxQueueConf gains no_progress_us and expiry_keeps_session, both taken from the build policy by Default and pico(); validate() now returns TxQueueConfError and refuses a window of 0 or past wait_before_close. tx_deadline.rs: PushDeadline holds the window and what is left of it (ask waits no longer than either bound, a fragment out restarts only the window), and TxExpiry names the decision. session_actions.rs: settle_blocking_expiry, called by the unicast congestion arm, which answers TransportUnavailable when the session is kept.",
+        "crates/wz-runtime-tokio router_forward/egress.rs: the sweep asks settle_blocking_expiry instead of raising the close itself. The test literals of TxQueueConf in multicast_glue.rs and wz-ap-demo args.rs take ..default().",
+        "docs/reason-review-pins.md: the session-close-ingress rows for session_glue.rs and session_actions.rs move to this round. The reason was re-read against both files: OutOfBand, request_close, take_requested_close and the drive loop's check_out_of_band are where it says, and this change touches the congestion close beside them, not the close request."
+      ],
+      "verification_bullets": [
+        "On the build host: 8 new PushDeadline and TxExpiry tests and 4 TxQueueConf validation tests of wz-session-core pass; in wz-runtime-tokio the link_congestion_tests pass, among them the pair (policy on: the push is refused TransportUnavailable, nothing reaches the link, no close is staged; policy off: Ok and the close is staged) and the droppable control.",
+        "Red first, twice: with the window not restarted by a fragment only the restart test fails (8 passed, 1 failed); with the close requested whatever the policy says only the keep test fails (10 passed, 1 failed). Both were reverted and no trace remains.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-session-core, wz-runtime-tokio and wz-ap-demo; rustfmt clean; wz_config --check and --selftest pass; feature_gate_diagnostic --check passes.",
+        "The pre-push round-fed array, 113 gates, passes on the rebased tree after the two pin rows moved (reason_review_pin_gate was the one failure before); the count-guard lint passes.",
+        "Not run: the hosted run, Layer C1bz and the other lanes as lanes, a build of the C ABIs and the cooperative engine (their send path is not this one), the fragment-chain test of the session glue (its feature is off in that build)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "The cooperative engine and the C ABIs have their own send path and do not read these two policies yet; the session doing the cooperative engine owns that area, so it is asked first, and the same TxExpiry decision is then taken where each makes its blocking push.",
+        "The multicast transmission pipeline shares PushDeadline, so the window applies to it, but multicast never closes a session; whether its expiry should be reported to the sender under the keep policy is not decided here.",
+        "Round 3594 bounds the number of declared queriers, which is not the per-querier quota of in-flight queries the plan asks for; the quota is rebuilt next, and the declared-querier limit is withdrawn with it.",
+        "scripts/lib/wz_package.py still does not carry a policy through a profile; the packaging work owns that file and is asked first.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "Two policies bound what a blocking push costs when its link has no room. tx-no-progress-deadline adds a second bound beside the total wait: a window with no fragment of the message going out, in microseconds (TX_NO_PROGRESS_WINDOW_US), that a fragment out starts again without making the total longer, so the message is given up on at whichever bound comes first; off is upstream, the total wait alone. tx-expiry-keeps-session decides what the expiry costs: off is upstream, the session closes as unresponsive and the sender is told nothing; on drops the message, answers the sender TransportUnavailable and keeps the session. Both unicast push and the router egress sweep ask one decision point, SessionLinkActions::settle_blocking_expiry, so they cannot disagree. A droppable message and a probe are untouched.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml declares the limit TX_NO_PROGRESS_WINDOW_US (default 1000000) and the policies tx-no-progress-deadline and tx-expiry-keeps-session, both bool and off; the generated caps_generated.rs, policy_generated.rs, deploy/Kconfig.limits and deploy/Kconfig.policies carry them.",
+        "crates/wz-session-core: TxQueueConf gains no_progress_us and expiry_keeps_session, both taken from the build policy by Default and pico(); validate() now returns TxQueueConfError and refuses a window of 0 or past wait_before_close. tx_deadline.rs: PushDeadline holds the window and what is left of it (ask waits no longer than either bound, a fragment out restarts only the window), and TxExpiry names the decision. session_actions.rs: settle_blocking_expiry, called by the unicast congestion arm, which answers TransportUnavailable when the session is kept.",
+        "crates/wz-runtime-tokio router_forward/egress.rs: the sweep asks settle_blocking_expiry instead of raising the close itself. The test literals of TxQueueConf in multicast_glue.rs and wz-ap-demo args.rs take ..default().",
+        "docs/reason-review-pins.md: the session-close-ingress rows for session_glue.rs and session_actions.rs move to this round. The reason was re-read against both files: OutOfBand, request_close, take_requested_close and the drive loop's check_out_of_band are where it says, and this change touches the congestion close beside them, not the close request."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: 8 new PushDeadline and TxExpiry tests and 4 TxQueueConf validation tests of wz-session-core pass; in wz-runtime-tokio the link_congestion_tests pass, among them the pair (policy on: the push is refused TransportUnavailable, nothing reaches the link, no close is staged; policy off: Ok and the close is staged) and the droppable control.",
+        "Red first, twice: with the window not restarted by a fragment only the restart test fails (8 passed, 1 failed); with the close requested whatever the policy says only the keep test fails (10 passed, 1 failed). Both were reverted and no trace remains.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-session-core, wz-runtime-tokio and wz-ap-demo; rustfmt clean; wz_config --check and --selftest pass; feature_gate_diagnostic --check passes.",
+        "The pre-push round-fed array, 113 gates, passes on the rebased tree after the two pin rows moved (reason_review_pin_gate was the one failure before); the count-guard lint passes.",
+        "Not run: the hosted run, Layer C1bz and the other lanes as lanes, a build of the C ABIs and the cooperative engine (their send path is not this one), the fragment-chain test of the session glue (its feature is off in that build)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The cooperative engine and the C ABIs have their own send path and do not read these two policies yet; the session doing the cooperative engine owns that area, so it is asked first, and the same TxExpiry decision is then taken where each makes its blocking push.",
+        "The multicast transmission pipeline shares PushDeadline, so the window applies to it, but multicast never closes a session; whether its expiry should be reported to the sender under the keep policy is not decided here.",
+        "Round 3594 bounds the number of declared queriers, which is not the per-querier quota of in-flight queries the plan asks for; the quota is rebuilt next, and the declared-querier limit is withdrawn with it.",
+        "scripts/lib/wz_package.py still does not carry a policy through a profile; the packaging work owns that file and is asked first.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
