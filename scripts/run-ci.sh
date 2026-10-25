@@ -7308,12 +7308,16 @@ layer_c1ag_cargo_test_transport_compose() {
 #       interoperates, not that `time-hlc` WITH routing composes as a clippy-clean
 #       seam, which is what the combo below is for.
 layer_c1ah_cargo_test_time_hlc() {
+    # The two modules live in `wz-node-time` (the tokio crate re-exports them), so
+    # their unit tests run THERE: the same filters under `wz-runtime-tokio` select
+    # zero tests, which still exits 0. The features are the ones the tests' own
+    # `cfg`s name: the forward stamp needs the Push codec and the send-side gate,
+    # which `ext-pubsub-advanced-cache` brought into the tokio leg that stood here.
     _runci_guarded_test "C1ah timestamp_source" 5 \
-        cargo test -p wz-runtime-tokio --features time-hlc --lib timestamp_source:: --quiet || return 1
+        cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
+        --lib timestamp_source:: --quiet || return 1
     _runci_guarded_test "C1ah node_clock" 15 \
-        cargo test -p wz-runtime-tokio --features time-hlc --lib node_clock:: --quiet || return 1
-    _runci_guarded_test "C1ah node_clock (advanced-cache leg)" 15 \
-        cargo test -p wz-runtime-tokio --features time-hlc,ext-pubsub-advanced-cache \
+        cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
         --lib node_clock:: --quiet || return 1
     # R311y818 — the PUBLISH-side auto-stamp (zenoh `resolve_put`'s head,
     # api/session.rs:2129). Its OWN leg, because a mechanical sweep of all 222
@@ -7331,6 +7335,9 @@ layer_c1ah_cargo_test_time_hlc() {
         --features time-hlc,transport-unicast,codec-push,codec-declare,declare-keyexpr,pubsub-put,pubsub-delete,pubsub-allow-loop,pubsub-timestamp \
         --lib session::tests::auto_stamp_ --quiet || return 1
     (cd crates \
+        && cargo clippy -p wz-node-time --all-targets --features time-hlc --quiet -- -D warnings \
+        && cargo clippy -p wz-node-time --all-targets \
+            --features time-hlc,codec-push,pubsub-timestamp --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets --features time-hlc --quiet -- -D warnings \
         && cargo clippy -p wz-runtime-tokio --all-targets \
             --features time-hlc,ext-pubsub-advanced-cache --quiet -- -D warnings \

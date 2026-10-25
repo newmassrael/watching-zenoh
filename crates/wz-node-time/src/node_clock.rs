@@ -441,7 +441,7 @@ impl core::fmt::Debug for NodeHlc {
 /// `uhlc::ID` through the same `hlc_id_from_zid` clamp the node's own id uses,
 /// so a malformed inbound zid degrades to the guard value instead of failing the
 /// absorb for a reason unrelated to the time word.
-#[cfg(feature = "time-hlc")]
+#[cfg(all(feature = "time-hlc", feature = "codec-push"))]
 fn to_uhlc_timestamp(hint: &wz_session_core::sample::TimestampHint) -> uhlc::Timestamp {
     uhlc::Timestamp::new(uhlc::NTP64(hint.time), hlc_id_from_zid(&hint.zid))
 }
