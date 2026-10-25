@@ -287934,6 +287934,48 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3648": {
+      "decision_summary": "A node declaration can now state a policy. Its [policy] table names policies the catalogue declares and a value each takes (on or off for a bool, a choice otherwise); the generator refuses an unknown policy and a value it does not take, and the entry builds the node with the environment variable the policy's Kconfig symbol names, so the SHA-256 the manifest verifies covers the choice. A policy left out is upstream's. The beacon uses it: declared with declaration-sync-pacing, a burst of two and an interval of 500 ms, its Layer Z leg now has to see a router holding some of the four tokens and not all, and the last at least 800 ms after the first. The slot node's paced replay therefore has a witness that shares no code with this repository, which it did not before. The same leg against an unpaced beacon fails on exactly those two assertions.",
+      "changes_bullets": [
+        "scripts/lib/wz_node.py: [policy] is a table a declaration may have; policy_problems refuses an unknown policy and a value the policy does not take; policy_lines and the resolved view's policies give the build environment; --env prints both limits and policies; the selftest has the refusals and the order of the environment.",
+        "scripts/lib/wz_package.py: the node build's environment carries the node's policies beside its limits.",
+        "deploy/nodes/slot-beacon.toml and its generated file: the beacon states the pacing policy and its two limits; scripts/lib/no_allocator_link_gate.py builds that image the same way, and it links no allocator.",
+        "crates/wz-integration-tests/tests/wz_declared_token_zenohd_interop.rs, docs/target-build-contract.md and docs/declaration-sync-pacing.md: the witness and what the documents say of the table and of the witness."
+      ],
+      "verification_bullets": [
+        "The node tool's selftest and its check over all seven declarations, the packager's selftest and the link gate's selftest pass; the link gate grades all seven declared-node images, the paced beacon among them, clean of any allocator; the round-fed array (113) passes.",
+        "The beacon packaged through the entry (manifest verified) passes both token legs against the reference router and the stock watcher, including the two new assertions. The control, a beacon built the same way without the policy, fails the first leg at \"a router that held some of the tokens and not all was never seen\" and passes the restart leg, as it should.",
+        "Not run: the hosted run of this push; a paced witness of the other entities (a queryable, a subscriber) whose declarations also wait their turn; the lwIP and Zephyr images, which state no policy."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha, and pin the head that holds the Zephyr stack rows when reading the next hosted Qzb and Qza for their author.",
+        "A node declaration can state any policy of the catalogue now, so a witness for another policy has a place to start: state it in a node, and make the leg observe what upstream would not do.",
+        "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener. A count for the group's other refusals (a JOIN that advertises another resolution or batch) has no counter yet."
+      ],
+      "publishable_decision_summary": "A node declaration can now state a policy. Its [policy] table names policies the catalogue declares and a value each takes (on or off for a bool, a choice otherwise); the generator refuses an unknown policy and a value it does not take, and the entry builds the node with the environment variable the policy's Kconfig symbol names, so the SHA-256 the manifest verifies covers the choice. A policy left out is upstream's. The beacon uses it: declared with declaration-sync-pacing, a burst of two and an interval of 500 ms, its Layer Z leg now has to see a router holding some of the four tokens and not all, and the last at least 800 ms after the first. The slot node's paced replay therefore has a witness that shares no code with this repository, which it did not before. The same leg against an unpaced beacon fails on exactly those two assertions.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_node.py: [policy] is a table a declaration may have; policy_problems refuses an unknown policy and a value the policy does not take; policy_lines and the resolved view's policies give the build environment; --env prints both limits and policies; the selftest has the refusals and the order of the environment.",
+        "scripts/lib/wz_package.py: the node build's environment carries the node's policies beside its limits.",
+        "deploy/nodes/slot-beacon.toml and its generated file: the beacon states the pacing policy and its two limits; scripts/lib/no_allocator_link_gate.py builds that image the same way, and it links no allocator.",
+        "crates/wz-integration-tests/tests/wz_declared_token_zenohd_interop.rs, docs/target-build-contract.md and docs/declaration-sync-pacing.md: the witness and what the documents say of the table and of the witness."
+      ],
+      "publishable_verification_bullets": [
+        "The node tool's selftest and its check over all seven declarations, the packager's selftest and the link gate's selftest pass; the link gate grades all seven declared-node images, the paced beacon among them, clean of any allocator; the round-fed array (113) passes.",
+        "The beacon packaged through the entry (manifest verified) passes both token legs against the reference router and the stock watcher, including the two new assertions. The control, a beacon built the same way without the policy, fails the first leg at \"a router that held some of the tokens and not all was never seen\" and passes the restart leg, as it should.",
+        "Not run: the hosted run of this push; a paced witness of the other entities (a queryable, a subscriber) whose declarations also wait their turn; the lwIP and Zephyr images, which state no policy."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha, and pin the head that holds the Zephyr stack rows when reading the next hosted Qzb and Qza for their author.",
+        "A node declaration can state any policy of the catalogue now, so a witness for another policy has a place to start: state it in a node, and make the leg observe what upstream would not do.",
+        "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener. A count for the group's other refusals (a JOIN that advertises another resolution or batch) has no counter yet."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
