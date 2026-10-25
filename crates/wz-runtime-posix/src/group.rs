@@ -5,7 +5,8 @@
 //!
 //! [`PosixGroupTransport`] is the [`GroupTransport`] the shared group drive loop
 //! (`wz-session-mcu`'s `group_drive`) runs on, beside lwIP's and Zephyr's. It has the shape
-//! zenoh gives a multicast link (`io/zenoh-links/zenoh-link-udp/src/multicast.rs`): TWO sockets,
+//! zenoh gives a multicast link (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @
+//! `let ucast_sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))`): TWO sockets,
 //! a RECEIVER bound to the wildcard address on the group's port with `SO_REUSEADDR` and
 //! `SO_REUSEPORT` (so it can share the port with every other member on this host) and joined to the
 //! group, and a SENDER of its own on a port the kernel picks, so the source a peer sees names this
