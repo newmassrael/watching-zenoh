@@ -30,8 +30,11 @@
 //! `dispatcher/queries.rs:221/236`) and an `Arc::into_inner` gate in
 //! `finalize_pending_query` (`queries.rs:667-681`): only the branch whose removal
 //! drops the LAST strong reference propagates the upstream final. wz mirrors that
-//! exactly with an [`Rc<QueryFan>`] shared by every branch of the fan (the
-//! single-task `Rc` analog of the `Arc`): [`take`](PendingQueries::take) /
+//! exactly with an [`Arc<QueryFan>`] shared by every branch of the fan (an `Rc`
+//! while one task drove every face; an `Arc` now that the faces are driven from
+//! several, where `Arc::into_inner` also keeps its guarantee that of two branches
+//! dropping the last two references at once exactly one is told it was the last):
+//! [`take`](PendingQueries::take) /
 //! [`expired`](PendingQueries::expired) report `last == true` only when the
 //! removed entry held the fan's final reference, and
 //! [`remove_face`](PendingQueries::remove_face) returns the fans a face-down
@@ -59,7 +62,7 @@
 //! on a STILL-UP face cannot leak the entry forever.
 
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::accept_loop::FaceId;
@@ -67,9 +70,9 @@ use crate::accept_loop::FaceId;
 /// One logical query's shared RETURN TARGET — the querier's inbound face + the
 /// upstream rid every branch of the fan rewrites its replies back to. The wz
 /// analogue of zenoh's `Query { src_face, src_qid }` (`dispatcher/queries.rs:50`),
-/// shared across the fan's pending entries via `Rc` exactly as zenoh clones one
+/// shared across the fan's pending entries via `Arc` exactly as zenoh clones one
 /// `Arc<Query>` per branch: ONCE THE CALLER RELEASES ITS CONSTRUCTION HANDLE the
-/// `Rc` strong count is the live-branch count, and the entry whose removal drops
+/// `Arc` strong count is the live-branch count, and the entry whose removal drops
 /// the final reference is the fan's LAST branch (the `Arc::into_inner` last-out
 /// gate, `queries.rs:670`). Construct one per routed Query ([`QueryFan::new`]),
 /// pass it to every [`allocate`](PendingQueries::allocate) of that Query's fan,
@@ -92,7 +95,7 @@ pub struct QueryFan {
 }
 
 impl QueryFan {
-    /// A new fan target for one routed Query — `Rc`-wrapped so each branch's
+    /// A new fan target for one routed Query — `Arc`-wrapped so each branch's
     /// [`allocate`](PendingQueries::allocate) shares it. The caller must DROP
     /// this handle when its routing call returns (see the type docs — a cached
     /// handle suppresses the last-out gate).
@@ -100,8 +103,8 @@ impl QueryFan {
         inbound: FaceId,
         inbound_rid: u64,
         src_qos: wz_session_core::sample::QosLevel,
-    ) -> Rc<Self> {
-        Rc::new(Self {
+    ) -> Arc<Self> {
+        Arc::new(Self {
             inbound,
             inbound_rid,
             src_qos,
@@ -174,14 +177,14 @@ struct FacePending {
     returns: HashMap<u64, PendingReturn>,
 }
 
-/// One live return mapping: the fan's shared return target (the `Rc` clone whose
+/// One live return mapping: the fan's shared return target (the `Arc` clone whose
 /// drop-count gates the last-out final), plus the deadline past which this branch
 /// is abandoned ([`expired`](PendingQueries::expired)).
 #[derive(Debug)]
 struct PendingReturn {
     /// The fan this branch belongs to — shared across the logical query's
     /// branches (zenoh's per-branch `Arc<Query>` clone).
-    fan: Rc<QueryFan>,
+    fan: Arc<QueryFan>,
     /// When this pending branch is abandoned if no `ResponseFinal` has arrived —
     /// `allocate`-time + the forwarder's query timeout (zenoh `QueryCleanup`'s
     /// `tokio::time::sleep(timeout)`).
@@ -202,7 +205,7 @@ pub struct ExpiredQuery {
     /// Where the timeout messages go and as what: the querier's face, rid and
     /// QoS (R2595 carried the QoS; R2906 made it the shared [`QueryReturn`]).
     pub to: QueryReturn,
-    /// Whether this branch was the LAST of its fan (the `Rc::into_inner` gate) —
+    /// Whether this branch was the LAST of its fan (the `Arc::into_inner` gate) —
     /// only then does the caller send the closing `ResponseFinal`; the `Err`
     /// reply goes per branch (zenoh runs one `QueryCleanup` per branch, each
     /// sending an Err, while `finalize_pending_query` gates the final last-out).
@@ -221,9 +224,9 @@ impl PendingQueries {
     /// Returns the new qid to stamp on the outbound Request. Mirrors zenoh
     /// `insert_pending_query`'s `next_qid.wrapping_add(1)` +
     /// `pending_queries.insert(qid, (query.clone(), ..))` followed by
-    /// `QueryCleanup::spawn_query_clean_up_task` arming the timeout — the `Rc`
+    /// `QueryCleanup::spawn_query_clean_up_task` arming the timeout — the `Arc`
     /// clone here IS zenoh's per-branch `Arc<Query>` clone.
-    pub fn allocate(&mut self, out_face: FaceId, fan: &Rc<QueryFan>, deadline: Instant) -> u64 {
+    pub fn allocate(&mut self, out_face: FaceId, fan: &Arc<QueryFan>, deadline: Instant) -> u64 {
         let fp = self.by_face.entry(out_face).or_default();
         fp.next_qid = fp.next_qid.wrapping_add(1);
         let qid = fp.next_qid;
@@ -253,7 +256,7 @@ impl PendingQueries {
     /// `out_face` — the final closes this BRANCH and frees the entry (zenoh
     /// `route_send_response_final` removes the pending entry). Returns the
     /// fan's [`QueryReturn`] and `last`: `last` is `true` IFF this was the fan's FINAL
-    /// live branch (the removed entry held the last `Rc` reference — zenoh's
+    /// live branch (the removed entry held the last `Arc` reference — zenoh's
     /// `Arc::into_inner` gate in `finalize_pending_query`), and only then must
     /// the caller forward the closing `ResponseFinal` upstream; a non-last final
     /// is ABSORBED (the querier still awaits the other branches). The face's
@@ -266,7 +269,7 @@ impl PendingQueries {
         let entry = fp.returns.remove(&qid);
         entry.map(|r| {
             let to = r.fan.query_return();
-            let last = Rc::into_inner(r.fan).is_some();
+            let last = Arc::into_inner(r.fan).is_some();
             (to, last)
         })
     }
@@ -291,7 +294,7 @@ impl PendingQueries {
             // R2595 — the QoS is carried out with the rid: the drained fan's
             // terminator must read as its query did.
             let to = ret.fan.query_return();
-            if Rc::into_inner(ret.fan).is_some() {
+            if Arc::into_inner(ret.fan).is_some() {
                 drained.push(to);
             }
         }
@@ -312,7 +315,7 @@ impl PendingQueries {
     /// same sweep, exactly ONE of them reports `last` (whichever removal drops
     /// the fan's final reference).
     pub fn expired(&mut self, now: Instant) -> Vec<ExpiredQuery> {
-        // Phase 1: collect the victims under a shared borrow (the `Rc::into_inner`
+        // Phase 1: collect the victims under a shared borrow (the `Arc::into_inner`
         // last-out accounting needs owned removal, which `retain` cannot express).
         let mut victims: Vec<(FaceId, u64)> = Vec::new();
         for (&out_face, fp) in &self.by_face {
@@ -373,7 +376,7 @@ mod tests {
     /// last-out accounting, not about what the query asked for, so they name
     /// the QoS once here; `the_fan_carries_its_querys_qos_out_through_every_exit`
     /// is the case that varies it.
-    fn fan(inbound: FaceId, rid: u64) -> Rc<QueryFan> {
+    fn fan(inbound: FaceId, rid: u64) -> Arc<QueryFan> {
         QueryFan::new(inbound, rid, wz_session_core::sample::QosLevel::DEFAULT)
     }
 
@@ -481,7 +484,7 @@ mod tests {
 
     #[test]
     fn a_dropped_construction_handle_leaves_the_last_out_gate_intact() {
-        // The gate counts live Rc REFERENCES (pending entries + any caller
+        // The gate counts live Arc REFERENCES (pending entries + any caller
         // handle), so the allocation-scope contract is load-bearing: the caller
         // must drop its construction handle when the routing call returns — a
         // handle still live at take time WOULD suppress `last` (a phantom

@@ -448,7 +448,7 @@ mod shed;
 #[cfg(test)]
 mod shed_tests;
 use crate::counter::Counter;
-use crate::sync::PlainMutex;
+use crate::sync::{PlainCell, PlainMutex, PlainRwLock};
 pub use egress::{EgressBudget, EgressView};
 pub use shed::{ShedBatch, ShedRegistry};
 
@@ -2033,11 +2033,11 @@ pub struct RouterForwarder {
     /// Default `disabled` is the prior behaviour EXACTLY — an empty matcher
     /// admits nobody, so a host that never calls
     /// [`enable_autoconnect`](Self::enable_autoconnect) emits no intent at all.
-    autoconnect: Cell<AutoConnect>,
+    autoconnect: PlainCell<AutoConnect>,
     /// The dial-intent sink, `None` until a host installs one. Shared with the
     /// scouting plane when a deploy runs both — see
     /// [`enable_autoconnect_into`](Self::enable_autoconnect_into).
-    dial_tx: RefCell<Option<DialIntentSender>>,
+    dial_tx: PlainMutex<Option<DialIntentSender>>,
     /// EGRESS-only multicast group faces (zenoh `Tables.mcast_groups`,
     /// `dispatcher/tables.rs:79`) — a SEPARATE collection from `faces`, mirroring
     /// zenoh's separate `mcast_groups` Vec (the egress polymorphism is WHICH
@@ -2049,19 +2049,19 @@ pub struct RouterForwarder {
     /// the group. Empty until a run-mode [`attach_mcast_group`](Self::attach_mcast_group)s
     /// a drive loop's sender (the reserved→active wiring, a later slice).
     #[cfg(feature = "router-multicast-faces")]
-    mcast_groups: RefCell<Vec<McastGroup>>,
+    mcast_groups: PlainRwLock<Vec<McastGroup>>,
     /// Whether the installed §5.16 pipeline also governs the multicast group, in both
     /// directions (`InterceptorConfig::govern_multicast`). `false` is upstream's shape: its
     /// interceptors are not installed on a multicast transport, so a policy written for the
     /// router's unicast faces leaves the group alone. See
     /// [`mcast_admits`](Self::mcast_admits).
     #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
-    mcast_governed: Cell<bool>,
+    mcast_governed: PlainCell<bool>,
     /// The link the attached group runs over, as the pipeline's `link_protocols` and
     /// `interfaces` axes read it. Unset reads as `LinkSubject::UNKNOWN`, which every scoped rule
     /// matches, so a group whose link was never described is governed more strictly, not less.
     #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
-    mcast_link: RefCell<wz_session_core::link::LinkSubject>,
+    mcast_link: PlainRwLock<wz_session_core::link::LinkSubject>,
     /// The OTHER on-group ROUTER member zids for the attached multicast group —
     /// the Designated-Router (DR) election candidate set (I3b loop-safe
     /// federation). Learned from the group's JOIN beacons (whatami=Router) and
@@ -2075,7 +2075,7 @@ pub struct RouterForwarder {
     /// never runs the ingress drive loop that populates it, so the field + gate
     /// are elided there and egress stays unconditional (the shipped behavior).
     #[cfg(feature = "router-multicast-faces")]
-    mcast_group_members: RefCell<Vec<Zid>>,
+    mcast_group_members: PlainRwLock<Vec<Zid>>,
     /// The DEDUPED keyexpr set the attached multicast group's SUBSCRIBERS declared
     /// (§5.21 sub plane, S2), relayed live from the ingress drive loop via
     /// [`set_mcast_group_subs`](Self::set_mcast_group_subs). A THIRD self-advertise
@@ -2091,7 +2091,7 @@ pub struct RouterForwarder {
     /// as a wholesale REPLACE from the dispatch SSOT, not on a synchronous unicast
     /// UndeclareSubscriber. Empty (and elided) without `router-multicast-faces`.
     #[cfg(feature = "router-multicast-faces")]
-    group_subs: RefCell<HashSet<String>>,
+    group_subs: PlainRwLock<HashSet<String>>,
     /// The pending-query return table (C5b) — one entry per outbound Request,
     /// keyed by the out face + a per-face local qid, recording where the matching
     /// `Response` / `ResponseFinal` routes back (the querier's inbound face + rid).
@@ -2099,7 +2099,7 @@ pub struct RouterForwarder {
     /// Request; the reverse Response route (peek/take) + the timeout sweep are C5c.
     /// The standalone [`PendingQueries`] struct is reused verbatim (the same one the
     /// single-net [`LinkstateForwarder`](crate::linkstate_forward) holds).
-    pending: RefCell<PendingQueries>,
+    pending: PlainMutex<PendingQueries>,
     /// Running total of `Request` (Query) messages received — the query-plane
     /// reception witness, the query twin of
     /// [`data_seen`](Self#structfield.data_seen).
@@ -2109,7 +2109,7 @@ pub struct RouterForwarder {
     /// abandons it. [`route_request`](Self::route_request) stamps each allocated
     /// entry with [`now`](Self::now)` + this`. `Cell` (it is `Copy`, set through a
     /// `&self` config seam), the same knob the single-net forwarder carries.
-    query_timeout: Cell<Duration>,
+    query_timeout: PlainCell<Duration>,
     /// Count of pending queries reaped by the timeout sweep (C5c) — the GC
     /// witness, the router twin of the single-net forwarder's `timed_out`. Rises
     /// once per abandoned BRANCH (a queryable that never sent its `ResponseFinal`
@@ -2229,14 +2229,14 @@ pub struct RouterForwarder {
     /// [`forward`](FaceForwarder::forward) before the kind-dispatch, the router twin
     /// of [`LinkstateForwarder`](crate::linkstate_forward)'s `ingress_interceptors`.
     /// Empty (admits everything) until [`set_interceptors`](Self::set_interceptors).
-    ingress_interceptors: RefCell<InterceptorChain>,
+    ingress_interceptors: PlainRwLock<InterceptorChain>,
     /// §5.16 access-control EGRESS interceptor chain — consulted per outbound
     /// message in [`fan_out_tier`](Self::fan_out_tier) + [`send_to_face`](Self::send_to_face),
     /// the router twin of the single-net `egress_interceptors`. This closes the
     /// y113 obligation: the router's egress helpers now carry the same
     /// `admit_outbound` gate the single-net `fan_out` has (the one router↔single-net
     /// data-path parity gap).
-    egress_interceptors: RefCell<InterceptorChain>,
+    egress_interceptors: PlainRwLock<InterceptorChain>,
     /// R2348 (`routing-interceptor-hotreload`) — the monotonic version every
     /// [`set_interceptors`](Self::set_interceptors) stamps, so a table computed
     /// against a previous chain compares unequal and is recomputed. The router
@@ -2247,7 +2247,7 @@ pub struct RouterForwarder {
     /// Ungated for the same reason the single-net one is: a counter nothing
     /// reads costs one `Cell` bump per reconfigure, whereas cfg-ing it would
     /// fork `set_interceptors` into two bodies for no behavioural difference.
-    interceptor_version: Cell<u64>,
+    interceptor_version: PlainCell<u64>,
     /// R2348 — the per-(face, keyexpr) INGRESS verdict cache. zenoh's
     /// `SessionContext::in_interceptor_cache`
     /// (`zenoh/src/net/routing/dispatcher/resource.rs`
@@ -2257,7 +2257,8 @@ pub struct RouterForwarder {
     /// `FaceId` is reusable, so an entry outliving its face could serve a NEW
     /// peer a verdict computed for the subject of the old one.
     #[cfg(feature = "routing-interceptor-hotreload")]
-    ingress_keyexpr_cache: RefCell<hashbrown::HashMap<(FaceId, String), InterceptorKeyexprCache>>,
+    ingress_keyexpr_cache:
+        PlainMutex<hashbrown::HashMap<(FaceId, String), InterceptorKeyexprCache>>,
     /// R2348 — the per-(face, keyexpr) EGRESS verdict cache, zenoh's
     /// `e_interceptor_cache` twin. Separate from the ingress map because the two
     /// flows carry different chains, so the same pair has two independent
@@ -2267,7 +2268,7 @@ pub struct RouterForwarder {
     /// message PER DESTINATION FACE across `fan_out_tier`, so an uncached chain
     /// here is re-evaluated fan-out-width times for a single publish.
     #[cfg(feature = "routing-interceptor-hotreload")]
-    egress_keyexpr_cache: RefCell<hashbrown::HashMap<(FaceId, String), InterceptorKeyexprCache>>,
+    egress_keyexpr_cache: PlainMutex<hashbrown::HashMap<(FaceId, String), InterceptorKeyexprCache>>,
     /// R2348 — how many INGRESS verdict tables have been computed: one per pair
     /// first seen, plus one per pair re-seen after a chain swap. The witness that
     /// separates "the cache is consulted and invalidated" from "every message
@@ -2297,7 +2298,7 @@ pub struct RouterForwarder {
     /// controllable `base + offset` closure via [`with_clock`](Self::with_clock),
     /// exactly as the single-net [`LinkstateForwarder`](crate::linkstate_forward)
     /// does. Production is `Instant::now`.
-    clock: Box<dyn Fn() -> Instant>,
+    clock: Box<dyn Fn() -> Instant + Send + Sync>,
     /// R311y450 — THIS router's §5.18 wall-clock HLC, the source of the
     /// forward-path timestamp [`route_push`](Self::route_push) applies. A distinct
     /// axis from `clock` above (that one is the opaque MONOTONIC clock for query
@@ -2444,7 +2445,7 @@ impl RouterForwarder {
     /// injection a deterministic pending-query-timeout test uses to advance "now"
     /// across a deadline (the router twin of
     /// [`LinkstateForwarder::with_clock`](crate::linkstate_forward::LinkstateForwarder::with_clock)).
-    pub fn with_clock(self_zid: Zid, clock: Box<dyn Fn() -> Instant>) -> Self {
+    pub fn with_clock(self_zid: Zid, clock: Box<dyn Fn() -> Instant + Send + Sync>) -> Self {
         Self::build(
             self_zid,
             clock,
@@ -2457,7 +2458,7 @@ impl RouterForwarder {
     /// `timestamping.enabled` map vary).
     fn build(
         self_zid: Zid,
-        clock: Box<dyn Fn() -> Instant>,
+        clock: Box<dyn Fn() -> Instant + Send + Sync>,
         timestamping: crate::node_clock::TimestampingEnabled,
     ) -> Self {
         Self {
@@ -2494,21 +2495,21 @@ impl RouterForwarder {
             shed_registry: Arc::default(),
             // R2639 — `disabled` seeds the empty matcher, so a router that never
             // enables autoconnect behaves byte-for-byte as before.
-            autoconnect: Cell::new(AutoConnect::disabled(self_zid)),
-            dial_tx: RefCell::new(None),
+            autoconnect: PlainCell::new(AutoConnect::disabled(self_zid)),
+            dial_tx: PlainMutex::new(None),
             #[cfg(feature = "router-multicast-faces")]
-            mcast_groups: RefCell::new(Vec::new()),
+            mcast_groups: PlainRwLock::new(Vec::new()),
             #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
-            mcast_governed: Cell::new(false),
+            mcast_governed: PlainCell::new(false),
             #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
-            mcast_link: RefCell::new(wz_session_core::link::LinkSubject::UNKNOWN),
+            mcast_link: PlainRwLock::new(wz_session_core::link::LinkSubject::UNKNOWN),
             #[cfg(feature = "router-multicast-faces")]
-            mcast_group_members: RefCell::new(Vec::new()),
+            mcast_group_members: PlainRwLock::new(Vec::new()),
             #[cfg(feature = "router-multicast-faces")]
-            group_subs: RefCell::new(HashSet::new()),
-            pending: RefCell::new(PendingQueries::new()),
+            group_subs: PlainRwLock::new(HashSet::new()),
+            pending: PlainMutex::new(PendingQueries::new()),
             queries_seen: Counter::new(),
-            query_timeout: Cell::new(Self::DEFAULT_QUERY_TIMEOUT),
+            query_timeout: PlainCell::new(Self::DEFAULT_QUERY_TIMEOUT),
             timed_out: Counter::new(),
             ingested: Counter::new(),
             data_seen: Counter::new(),
@@ -2534,13 +2535,13 @@ impl RouterForwarder {
             future_qabl_pushes: Counter::new(),
             #[cfg(feature = "routing-token-tables")]
             future_token_pushes: Counter::new(),
-            ingress_interceptors: RefCell::new(InterceptorChain::new()),
-            egress_interceptors: RefCell::new(InterceptorChain::new()),
-            interceptor_version: Cell::new(0),
+            ingress_interceptors: PlainRwLock::new(InterceptorChain::new()),
+            egress_interceptors: PlainRwLock::new(InterceptorChain::new()),
+            interceptor_version: PlainCell::new(0),
             #[cfg(feature = "routing-interceptor-hotreload")]
-            ingress_keyexpr_cache: RefCell::new(hashbrown::HashMap::new()),
+            ingress_keyexpr_cache: PlainMutex::new(hashbrown::HashMap::new()),
             #[cfg(feature = "routing-interceptor-hotreload")]
-            egress_keyexpr_cache: RefCell::new(hashbrown::HashMap::new()),
+            egress_keyexpr_cache: PlainMutex::new(hashbrown::HashMap::new()),
             #[cfg(feature = "routing-interceptor-hotreload")]
             interceptor_cache_recomputes: Counter::new(),
             #[cfg(feature = "routing-interceptor-hotreload")]
@@ -2580,7 +2581,7 @@ impl RouterForwarder {
     /// same reason.
     pub fn enable_autoconnect_into(&self, policy: AutoConnect, tx: DialIntentSender) {
         self.autoconnect.set(policy);
-        *self.dial_tx.borrow_mut() = Some(tx);
+        *self.dial_tx.guard() = Some(tx);
     }
 
     /// R2641 — set `scouting/gossip/multihop` on BOTH of this router's graphs
@@ -2658,7 +2659,7 @@ impl RouterForwarder {
             if !autoconnect.should_autoconnect(*zid, whatami) {
                 continue;
             }
-            if let Some(tx) = self.dial_tx.borrow().as_ref() {
+            if let Some(tx) = self.dial_tx.guard().as_ref() {
                 // Unbounded, so this never blocks the sync ingest; an Err means
                 // the drive loop is gone (shutdown) and the intent is dropped.
                 let _ = tx.send(DialIntent {
@@ -3106,15 +3107,14 @@ impl RouterForwarder {
         // against the OLD chain still compares equal to the new one, so the
         // forwarder keeps answering out of the retired policy. zenoh bumps the
         // same counter in `regen_interceptors` and hands it to every face.
-        let version = self.interceptor_version.get().wrapping_add(1);
-        self.interceptor_version.set(version);
+        let version = self.interceptor_version.update(|last| last.wrapping_add(1));
         // Whether the group is part of the policy is the host's choice, taken from the same
         // config as the chains so the two cannot be changed apart.
         #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
         self.mcast_governed.set(config.govern_multicast);
-        *self.ingress_interceptors.borrow_mut() =
+        *self.ingress_interceptors.write() =
             config.build_chain_versioned(InterceptorFlow::Ingress, version);
-        *self.egress_interceptors.borrow_mut() =
+        *self.egress_interceptors.write() =
             config.build_chain_versioned(InterceptorFlow::Egress, version);
         #[cfg(feature = "router-multicast-faces")]
         self.note_ungoverned_group();
@@ -3131,10 +3131,10 @@ impl RouterForwarder {
         let governed = self.mcast_governed.get();
         #[cfg(not(feature = "access-acl-multicast"))]
         let governed = false;
-        let policy_installed = !self.ingress_interceptors.borrow().is_empty()
-            || !self.egress_interceptors.borrow().is_empty();
+        let policy_installed = !self.ingress_interceptors.read().is_empty()
+            || !self.egress_interceptors.read().is_empty();
         if let Some(notice) = crate::interceptor::group_policy_notice(
-            !self.mcast_groups.borrow().is_empty(),
+            !self.mcast_groups.read().is_empty(),
             policy_installed,
             governed,
         ) {
@@ -3147,7 +3147,7 @@ impl RouterForwarder {
     /// ([`multicast_link_subject`](crate::link_interfaces::multicast_link_subject)).
     #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
     pub fn set_mcast_group_link(&self, subject: wz_session_core::link::LinkSubject) {
-        *self.mcast_link.borrow_mut() = subject;
+        *self.mcast_link.write() = subject;
     }
 
     /// Whether the §5.16 chain for `flow` admits `msg` on the multicast GROUP. A group that the
@@ -3168,13 +3168,13 @@ impl RouterForwarder {
             return true;
         }
         let chain = match flow {
-            InterceptorFlow::Ingress => self.ingress_interceptors.borrow(),
-            InterceptorFlow::Egress => self.egress_interceptors.borrow(),
+            InterceptorFlow::Ingress => self.ingress_interceptors.read(),
+            InterceptorFlow::Egress => self.egress_interceptors.read(),
         };
         if chain.is_empty() {
             return true;
         }
-        let link = self.mcast_link.borrow();
+        let link = self.mcast_link.read();
         let ctx = match keyexpr {
             Some(keyexpr) => crate::interceptor::GroupContext::resolved(&link, keyexpr),
             None => crate::interceptor::GroupContext::of_message(&link, msg),
@@ -3198,7 +3198,7 @@ impl RouterForwarder {
     /// Consulted at the top of [`forward`](FaceForwarder::forward) ahead of the
     /// kind-dispatch. Empty chain (no ACL) admits without touching the face table.
     fn admit_inbound(&self, id: FaceId, msg: &NetworkMessage) -> InterceptorVerdict {
-        let chain = self.ingress_interceptors.borrow();
+        let chain = self.ingress_interceptors.read();
         if chain.is_empty() {
             return InterceptorVerdict::Admit;
         }
@@ -3218,7 +3218,7 @@ impl RouterForwarder {
         // off.
         #[cfg(feature = "routing-interceptor-hotreload")]
         if let Some(keyexpr) = resolve_governed_keyexpr(msg, &face.keyexpr_table) {
-            let mut cache = self.ingress_keyexpr_cache.borrow_mut();
+            let mut cache = self.ingress_keyexpr_cache.guard();
             let recomputes = &self.interceptor_cache_recomputes;
             let mut compute = || {
                 recomputes.bump();
@@ -3252,7 +3252,7 @@ impl RouterForwarder {
         // underscore in the signature would suggest it is decorative.
         #[cfg(not(feature = "routing-interceptor-hotreload"))]
         let _ = id;
-        let chain = self.egress_interceptors.borrow();
+        let chain = self.egress_interceptors.read();
         if chain.is_empty() {
             return InterceptorVerdict::Admit;
         }
@@ -3264,7 +3264,7 @@ impl RouterForwarder {
         // already hold it (`*id` in the fan-out loop, `target` in `send_to_face`).
         #[cfg(feature = "routing-interceptor-hotreload")]
         if let Some(keyexpr) = resolve_governed_keyexpr(msg, &state.keyexpr_table) {
-            let mut cache = self.egress_keyexpr_cache.borrow_mut();
+            let mut cache = self.egress_keyexpr_cache.guard();
             let recomputes = &self.egress_interceptor_cache_recomputes;
             let mut compute = || {
                 recomputes.bump();
@@ -3365,7 +3365,7 @@ impl RouterForwarder {
     /// R2348 — how many (face, keyexpr) entries the router's INGRESS cache holds.
     #[cfg(feature = "routing-interceptor-hotreload")]
     pub fn interceptor_cache_len(&self) -> usize {
-        self.ingress_keyexpr_cache.borrow().len()
+        self.ingress_keyexpr_cache.guard().len()
     }
 
     /// R2348 — how many (face, keyexpr) entries the router's EGRESS cache holds.
@@ -3373,7 +3373,7 @@ impl RouterForwarder {
     /// total could not tell one egress table from two ingress ones.
     #[cfg(feature = "routing-interceptor-hotreload")]
     pub fn egress_interceptor_cache_len(&self) -> usize {
-        self.egress_keyexpr_cache.borrow().len()
+        self.egress_keyexpr_cache.guard().len()
     }
 
     /// R2348 — `(ingress, egress)` cache entries held for ONE face.
@@ -3392,8 +3392,8 @@ impl RouterForwarder {
             m.keys().filter(|(face_id, _)| *face_id == id).count()
         };
         (
-            count(&self.ingress_keyexpr_cache.borrow()),
-            count(&self.egress_keyexpr_cache.borrow()),
+            count(&self.ingress_keyexpr_cache.guard()),
+            count(&self.egress_keyexpr_cache.guard()),
         )
     }
 
@@ -5312,7 +5312,7 @@ impl RouterForwarder {
     /// EGRESS half needs no single-task fold (that is the INGRESS milestone).
     #[cfg(feature = "router-multicast-faces")]
     pub fn attach_mcast_group(&self, tx: crate::multicast_pipeline::MulticastTxProducer) {
-        self.mcast_groups.borrow_mut().push(McastGroup { tx });
+        self.mcast_groups.write().push(McastGroup { tx });
         self.note_ungoverned_group();
     }
 
@@ -5389,7 +5389,7 @@ impl RouterForwarder {
         if source_is_mesh && !self.is_group_dr(keyexpr) {
             return;
         }
-        let groups = self.mcast_groups.borrow();
+        let groups = self.mcast_groups.read();
         if groups.is_empty() {
             return;
         }
@@ -5465,7 +5465,7 @@ impl RouterForwarder {
     #[cfg(feature = "router-multicast-faces")]
     fn is_group_dr(&self, keyexpr: &str) -> bool {
         let self_zid = *self.routers_net().borrow().self_zid();
-        let members = self.mcast_group_members.borrow();
+        let members = self.mcast_group_members.read();
         elect_router(
             &self_zid,
             keyexpr,
@@ -6443,7 +6443,7 @@ impl RouterForwarder {
     /// client-|-native derive (byte-identical for non-router / egress-only builds).
     #[cfg(feature = "router-multicast-faces")]
     fn group_subscribes(&self, keyexpr: &str) -> bool {
-        self.group_subs.borrow().contains(keyexpr)
+        self.group_subs.read().contains(keyexpr)
     }
     #[cfg(not(feature = "router-multicast-faces"))]
     fn group_subscribes(&self, _keyexpr: &str) -> bool {
@@ -6497,7 +6497,7 @@ impl RouterForwarder {
                 None => Vec::new(),
             },
             #[cfg(feature = "router-multicast-faces")]
-            Holder::Group => self.group_subs.borrow().iter().cloned().collect(),
+            Holder::Group => self.group_subs.read().iter().cloned().collect(),
             #[cfg(not(feature = "router-multicast-faces"))]
             Holder::Group => Vec::new(),
             Holder::Host => self
@@ -7713,7 +7713,7 @@ impl RouterForwarder {
         inbound: FaceId,
         request: &RequestOwned,
         keyexpr: &str,
-        fan: &Rc<QueryFan>,
+        fan: &Arc<QueryFan>,
         deadline: Instant,
     ) -> usize {
         let mut forwarded = 0;
@@ -7759,7 +7759,7 @@ impl RouterForwarder {
         hops: &[Zid],
         request: &RequestOwned,
         keyexpr: &str,
-        fan: &Rc<QueryFan>,
+        fan: &Arc<QueryFan>,
         deadline: Instant,
     ) -> usize {
         if hops.is_empty() {
@@ -7779,7 +7779,7 @@ impl RouterForwarder {
             if !zid.map_or(true, |z| self.query_block_admits(block, &z)) {
                 return Ok(None);
             }
-            let qid = self.pending.borrow_mut().allocate(id, fan, deadline);
+            let qid = self.pending.guard().allocate(id, fan, deadline);
             let mut carrier = template.clone();
             carrier.rid = qid;
             forwarded += 1;
@@ -7806,7 +7806,7 @@ impl RouterForwarder {
         inbound: FaceId,
         request: &RequestOwned,
         keyexpr: &str,
-        fan: &Rc<QueryFan>,
+        fan: &Arc<QueryFan>,
         deadline: Instant,
     ) -> usize {
         let mut template = request.clone();
@@ -7831,7 +7831,7 @@ impl RouterForwarder {
                 if !qualifies {
                     return Ok(None);
                 }
-                let qid = self.pending.borrow_mut().allocate(id, fan, deadline);
+                let qid = self.pending.guard().allocate(id, fan, deadline);
                 let mut carrier = template.clone();
                 carrier.rid = qid;
                 forwarded += 1;
@@ -7856,7 +7856,7 @@ impl RouterForwarder {
         reliable: bool,
         request: &RequestOwned,
         keyexpr: &str,
-        fan: &Rc<QueryFan>,
+        fan: &Arc<QueryFan>,
         deadline: Instant,
     ) -> usize {
         if !self.tables.faces.borrow().contains_key(&out_face) {
@@ -7867,7 +7867,7 @@ impl RouterForwarder {
         if set_request_keyexpr_literal(&mut carrier, keyexpr).is_err() {
             return 0;
         }
-        let qid = self.pending.borrow_mut().allocate(out_face, fan, deadline);
+        let qid = self.pending.guard().allocate(out_face, fan, deadline);
         carrier.rid = qid;
         self.send_to_face(out_face, reliable, || {
             NetworkMessage::Request(Box::new(carrier.clone()))
@@ -7926,7 +7926,7 @@ impl RouterForwarder {
                 None => return,
             }
         };
-        let Some(to) = self.pending.borrow().peek(inbound, response.request_id) else {
+        let Some(to) = self.pending.guard().peek(inbound, response.request_id) else {
             return;
         };
         // R2906 — the shared relay step: rid, QoS and a literal keyexpr, all the
@@ -7969,7 +7969,7 @@ impl RouterForwarder {
         // TAKE the branch — frees the entry; `last` is the fan's last-out gate.
         let Some((to, last)) = self
             .pending
-            .borrow_mut()
+            .guard()
             .take(inbound, response_final.request_id)
         else {
             return;
@@ -8004,7 +8004,7 @@ impl RouterForwarder {
     /// multi-hop querier. The `expired` borrow is released before the per-entry
     /// send re-borrows the faces table.
     fn reap_timed_out_queries(&self) {
-        let reaped = self.pending.borrow_mut().expired(self.now());
+        let reaped = self.pending.guard().expired(self.now());
         if reaped.is_empty() {
             return;
         }
@@ -8023,7 +8023,7 @@ impl RouterForwarder {
     /// summary (and a test) reads; the router twin of
     /// [`LinkstateForwarder::pending_len`].
     pub fn pending_len(&self) -> usize {
-        self.pending.borrow().len()
+        self.pending.guard().len()
     }
 
     /// Total pending query BRANCHES reaped by the timeout sweep (a 2-branch fan
@@ -8297,7 +8297,7 @@ impl FaceForwarder for RouterForwarder {
         // `finalize_pending_queries` on face teardown, final only — no Err), else
         // its get() waits out its own timeout. A drained fan whose querier IS the
         // departed face has nobody left to notify (skipped).
-        let drained = self.pending.borrow_mut().remove_face(&id);
+        let drained = self.pending.guard().remove_face(&id);
         synthesize_drained_fan_finals(&drained, id, |face, msg| self.send_one_to_face(face, msg));
         // R2348 — drop this face's precomputed interceptor verdicts, on BOTH
         // flows, with the face. A `FaceId` is reusable, so an entry that outlived
@@ -8307,10 +8307,10 @@ impl FaceForwarder for RouterForwarder {
         #[cfg(feature = "routing-interceptor-hotreload")]
         {
             self.ingress_keyexpr_cache
-                .borrow_mut()
+                .guard()
                 .retain(|(face_id, _), _| *face_id != id);
             self.egress_keyexpr_cache
-                .borrow_mut()
+                .guard()
                 .retain(|(face_id, _), _| *face_id != id);
         }
         // R2873 (step 3d) — the face's declarations live in the hat that owns
@@ -8675,7 +8675,7 @@ impl FaceForwarder for RouterForwarder {
         // The relay carries RAW zid bytes (keeping `wz-routing-graph` off the
         // accept-loop channel + trait); convert to `Zid` here — the router build
         // links the routing graph. A malformed zid (never from a wz JOIN) drops.
-        let mut slot = self.mcast_group_members.borrow_mut();
+        let mut slot = self.mcast_group_members.write();
         slot.clear();
         slot.extend(
             members
@@ -8704,16 +8704,16 @@ impl FaceForwarder for RouterForwarder {
         // Diff against the current set, snapshot every keyexpr it changes,
         // then COMMIT the new set (move — no clone).
         let changed: Vec<Snapshot<SubPlane>> = {
-            let old = self.group_subs.borrow();
+            let old = self.group_subs.read();
             new.symmetric_difference(&old)
                 .map(|keyexpr| self.snapshot(keyexpr))
                 .collect()
         };
-        *self.group_subs.borrow_mut() = new;
+        *self.group_subs.write() = new;
         // S3 reachability witness: high-water of DISTINCT group subs advertised, so a
         // cross-impl test can gate a mesh-side publisher on this router provably
         // holding + advertising the on-group subscriber's interest.
-        let live = self.group_subs.borrow().len();
+        let live = self.group_subs.read().len();
         self.group_subs_advertised_peak.raise_to(live);
         for snapshot in changed {
             self.repropagate(snapshot);
@@ -9007,6 +9007,24 @@ mod tests {
     use wz_codecs::wireexpr_local::WireexprLocalOwned;
     use wz_runtime_core::runtime::Runtime;
     use wz_session_core::push_routing_context::read_push_hoplimit;
+
+    /// The state the data path reads or writes that is not the tables (`docs/router-task-per-face.md`,
+    /// phase 3b) can be shared between the threads that drive the faces: the pending-query table
+    /// and the fan target its entries share, the interceptor chains, the autoconnect policy, the
+    /// dial channel and the clock. The proof is the compile; the forwarder as a whole is not `Sync`
+    /// until the tables are (3c).
+    #[test]
+    fn the_state_outside_the_tables_can_be_shared_between_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<PlainMutex<PendingQueries>>();
+        shared::<Arc<QueryFan>>();
+        shared::<PlainRwLock<InterceptorChain>>();
+        shared::<PlainCell<AutoConnect>>();
+        shared::<PlainCell<Duration>>();
+        shared::<PlainMutex<Option<DialIntentSender>>>();
+        shared::<Box<dyn Fn() -> Instant + Send + Sync>>();
+        shared::<PlainRwLock<wz_session_core::link::LinkSubject>>();
+    }
 
     /// R2864 (open-debt item 751) — the tier is now read off the face's REGION,
     /// and for every remote that announces no bound (every stock node, every wz
@@ -10010,7 +10028,7 @@ mod tests {
         quiet.register(FaceId(0), &a_q);
         discover_via(&quiet, FaceId(0), 0x01, 0xAA, 0xDD, 12, 5);
         assert!(
-            quiet.dial_tx.borrow().is_none(),
+            quiet.dial_tx.guard().is_none(),
             "a router that never enabled autoconnect installs no sink"
         );
 
@@ -18196,7 +18214,7 @@ mod tests {
             "the peer queryable of the same region is not routed to"
         );
         assert_eq!(
-            fwd.pending.borrow().len(),
+            fwd.pending.guard().len(),
             0,
             "nothing was forwarded, so nothing waits for a reply"
         );
@@ -18255,7 +18273,7 @@ mod tests {
             "the peer Query reached the client-hosted queryable"
         );
         assert_eq!(
-            fwd.pending.borrow().len(),
+            fwd.pending.guard().len(),
             1,
             "a pending entry keyed by the client face"
         );
@@ -18696,7 +18714,7 @@ mod tests {
             "BestMatching routes to ONE, not the mesh queryable too"
         );
         assert_eq!(
-            fwd.pending.borrow().len(),
+            fwd.pending.guard().len(),
             1,
             "one pending entry for the single winner"
         );
@@ -18818,7 +18836,7 @@ mod tests {
             "the prompt ResponseFinal carries the querier's rid"
         );
         assert!(
-            fwd.pending.borrow().is_empty(),
+            fwd.pending.guard().is_empty(),
             "no pending entry for an empty route (nothing is awaited)"
         );
     }
@@ -18840,7 +18858,7 @@ mod tests {
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // client hosts it
         forward_one(&fwd, FaceId(1), request_best(31, "demo/q")); // peer queries -> routed to client
         assert_eq!(
-            fwd.pending.borrow().len(),
+            fwd.pending.guard().len(),
             1,
             "a pending entry keyed by the client face"
         );
@@ -18861,7 +18879,7 @@ mod tests {
             "client_qabls purged on face-down (OBLIGATION 1)"
         );
         assert!(
-            fwd.pending.borrow().is_empty(),
+            fwd.pending.guard().is_empty(),
             "the pending entry keyed by the departed client face is purged (OBLIGATION 1)"
         );
         // The face-down produces TWO frames to the peer querier/mesh-child:
@@ -19116,7 +19134,7 @@ mod tests {
             "the prompt ResponseFinal carries the querier's rid"
         );
         assert!(
-            fwd.pending.borrow().is_empty(),
+            fwd.pending.guard().is_empty(),
             "no pending entry (nothing routed)"
         );
     }
@@ -19197,7 +19215,7 @@ mod tests {
 
         forward_one(&fwd, FaceId(0), request_best(99, "demo/q"));
         let qid = forwarded_request(&sink_c.frame_bytes(0)).rid;
-        assert_eq!(fwd.pending.borrow().len(), 1, "one pending entry recorded");
+        assert_eq!(fwd.pending.guard().len(), 1, "one pending entry recorded");
 
         // C replies: the Response routes back to A, rid rewritten, entry kept.
         let response =
@@ -19215,7 +19233,7 @@ mod tests {
             "request_id rewritten back to the querier's rid"
         );
         assert_eq!(
-            fwd.pending.borrow().len(),
+            fwd.pending.guard().len(),
             1,
             "a Response (not final) keeps the entry"
         );
@@ -19232,7 +19250,7 @@ mod tests {
             99,
             "the final's request_id rewritten back to the querier's rid"
         );
-        assert!(fwd.pending.borrow().is_empty(), "the final freed the entry");
+        assert!(fwd.pending.guard().is_empty(), "the final freed the entry");
 
         // A straggler Response after the final: the entry is gone, drops silently.
         let straggler =
@@ -19373,7 +19391,7 @@ mod tests {
             33,
             "so does the closing final"
         );
-        assert!(fwd.pending.borrow().is_empty(), "the final freed the entry");
+        assert!(fwd.pending.guard().is_empty(), "the final freed the entry");
     }
 
     #[test]
@@ -19403,7 +19421,7 @@ mod tests {
         );
         forward_one(&fwd, FaceId(1), NetworkMessage::ResponseFinal(rf));
         assert_eq!(sink_a.frame_count(), 0, "an unknown qid routes nowhere");
-        assert!(fwd.pending.borrow().is_empty(), "and records nothing");
+        assert!(fwd.pending.guard().is_empty(), "and records nothing");
     }
 
     #[test]
@@ -19414,7 +19432,7 @@ mod tests {
         // ResponseFinal back to the querier (rid rewritten), freeing the entry.
         // Deterministic via the injected clock (base + controllable offset).
         let base = Instant::now();
-        let offset = Rc::new(Cell::new(Duration::ZERO));
+        let offset = Arc::new(PlainCell::new(Duration::ZERO));
         let offset_clock = offset.clone();
         let fwd =
             RouterForwarder::with_clock(zid(0x01), Box::new(move || base + offset_clock.get()));
@@ -19431,20 +19449,20 @@ mod tests {
         sink_c.reset();
 
         forward_one(&fwd, FaceId(0), request_best(77, "demo/q"));
-        assert_eq!(fwd.pending.borrow().len(), 1, "the query is pending");
+        assert_eq!(fwd.pending.guard().len(), 1, "the query is pending");
 
         // BEFORE the deadline: the sweep reaps nothing.
         offset.set(RouterForwarder::DEFAULT_QUERY_TIMEOUT - Duration::from_millis(1));
         fwd.tick();
         assert_eq!(fwd.timed_out.get(), 0, "not reaped before the deadline");
-        assert_eq!(fwd.pending.borrow().len(), 1, "still pending");
+        assert_eq!(fwd.pending.guard().len(), 1, "still pending");
         assert_eq!(sink_a.frame_count(), 0, "nothing synthesized yet");
 
         // AT/PAST the deadline: reaped — the querier gets the Err + the final.
         offset.set(RouterForwarder::DEFAULT_QUERY_TIMEOUT);
         fwd.tick();
         assert_eq!(fwd.timed_out.get(), 1, "one query reaped at its deadline");
-        assert!(fwd.pending.borrow().is_empty(), "the entry is freed");
+        assert!(fwd.pending.guard().is_empty(), "the entry is freed");
         assert_eq!(
             sink_a.frame_count(),
             2,
@@ -19534,7 +19552,7 @@ mod tests {
             91,
             "carrying the querier's rid"
         );
-        assert!(fwd.pending.borrow().is_empty(), "the fan is fully freed");
+        assert!(fwd.pending.guard().is_empty(), "the fan is fully freed");
     }
 
     #[test]
@@ -19580,7 +19598,7 @@ mod tests {
             41,
             "carrying the querier's original rid"
         );
-        assert!(fwd.pending.borrow().is_empty());
+        assert!(fwd.pending.guard().is_empty());
     }
 
     #[test]
@@ -19642,7 +19660,7 @@ mod tests {
         // dispatcher/queries.rs:514) — the router must honor it, not its 10s
         // knob: a 5ms ext on an un-answered query is reaped at 5ms.
         let base = Instant::now();
-        let offset = Rc::new(Cell::new(Duration::ZERO));
+        let offset = Arc::new(PlainCell::new(Duration::ZERO));
         let offset_clock = offset.clone();
         let fwd =
             RouterForwarder::with_clock(zid(0x01), Box::new(move || base + offset_clock.get()));

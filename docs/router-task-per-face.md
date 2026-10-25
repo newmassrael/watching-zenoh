@@ -139,10 +139,11 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
    it lands in steps each of which compiles, passes and is measured, and none of which makes the forwarder
    `Sync` before the last:
    - **3a. The credit stage (done, round 3633).** `Credit` and its view are `Send + Sync`; see below.
-   - **3b. The rest of the state the data path writes** that is not tables: the pending-query table, the
-     interceptor chains and their per-keyexpr caches, the `Cell`s that are state (`autoconnect`,
-     `query_timeout`, `interceptor_version`, `mcast_governed`, the dirty flags of the hats), `clock`
-     (`Box<dyn Fn() -> Instant>`, not `Send`), `dial_tx` and the multicast state.
+   - **3b. The rest of the state the data path writes** that is not tables (done, round 3641): the
+     pending-query table, the interceptor chains and their per-keyexpr caches, the `Cell`s that are state
+     (`autoconnect`, `query_timeout`, `interceptor_version`, `mcast_governed`), `clock`
+     (`Box<dyn Fn() -> Instant>`, not `Send`), `dial_tx` and the multicast state. The dirty flags of the hats
+     (`trees_dirty`) are inside the hats and go with the tables in 3c.
    - **3c. The tables** under one `RwLock<Tables>`: the nine fields of phase 0 lose their cells, a method that
      reads takes `&Tables`, one that writes `&mut Tables`, and the three views that share `faces` hold the
      shared handle instead of an `Rc`. Locks taken in one order (tables, then the leaf locks), as the credit
@@ -185,6 +186,40 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
    run-to-run spread of the table (the same router read 18.3 and 23.2 at 256); the starved-router tests pass
    with no face down, 963 admitted sessions ended by the router at 32 hogs both times, the longest keepalive
    timer 1863 ms before and 1940 ms after.
+
+   **3b, what it did.** Each of the forwarder's other fields is the lock its use asks for, and none is a
+   table. The pending-query table (`pending`) is written by every query a face routes and by the tick, so it is
+   a `PlainMutex`; its fan target (`QueryFan`) is an `Arc` where it was an `Rc`, which also keeps what its
+   last-out gate (`into_inner`, upstream's) promises under threads: of two branches that drop the last two
+   references at once, exactly one is told it was the last. The interceptor chains and the multicast group
+   state (`mcast_groups`, `mcast_group_members`, `group_subs`, `mcast_link`) are read on every message and
+   written by configuration, so they are `PlainRwLock`s; their per-keyexpr caches are filled on a miss on the
+   data path, so they are `PlainMutex`es taken after the chain they were computed from (the order is
+   interceptor chain, then cache, and `set_interceptors` takes the chains for writing without a cache in
+   hand). The settings that are replaced whole (`autoconnect`, `query_timeout`, `mcast_governed`,
+   `interceptor_version`) are a new `PlainCell`, and the version is taken with `update`, a read and a write
+   under one lock, so that two installs cannot take the same version. The dial channel is a `PlainMutex`, and
+   the clock is `Box<dyn Fn() -> Instant + Send + Sync>`, which changed the signature of
+   `RouterForwarder::with_clock` (its three callers are tests, which now share an `Arc<PlainCell<Duration>>`).
+   `PlainRwLock::read` is the recursive read: the router's methods read a table from inside a method that
+   reads it, which a `RefCell` allowed, and a plain read would queue behind a waiting writer and deadlock the
+   pair; the writers of these tables are configuration, so the starvation the recursive form allows is not a
+   cost. A test holds the types to `Send + Sync`. Measured, as for 3a (a control at the 3a head and the 3b head
+   in turn on the one host, twice each, least of 25 repetitions of 20000, ns; control then new, per run): one
+   subscriber drop 673, 517 then 525, 567; block 729, 627 then 618, 648; sixteen drop 4172, 4175 then 4069,
+   4179; block 4576, 4783 then 4938, 4810; bytes and allocations did not move. The host was busier than for
+   the earlier figures (15 to 17 free cores against 20), which is why the control was run beside the change and
+   the earlier figures are not compared with these. Layer E7s on pc2: the cost table (microseconds per message
+   at 256, 1024, 2048 subscribers without churn, 256 and 1024 with) read 20.4, 23.9, 23.4, 12.8, 16.6 and 14.6,
+   17.8, 19.1, 18.1, 16.9 in two runs of the 3b head, against 15.5, 19.6, 21.0, 22.6, 27.0 for a control at the
+   3a head run right after: no direction. The starved-router tests pass, no face went down, 963 sessions were
+   ended by the router at 32 hogs (the longest keepalive timer 1938 ms; before 3a 1863 ms) and 1083 at 64 hogs
+   in every run. The knee table (milliseconds of keepalive lateness at 1024, 1536 and 2048 sessions under 32
+   hogs, with the sessions ended at 2048) is the table that drifts with the host and read, in the order the
+   runs were made, 985, 3603, 8164 (488) at the phase 2 head; 1356, 4572, 7195 (129) at 3a; 1867, 4576, 11775
+   (1241) and 2739, 5681, 8162 (422) at 3b; and 2335, 4733, 8380 (405) for the control at the 3a head made after
+   the 3b runs. The control read more than twice its own earlier value at 1024 sessions, so the rise across the
+   runs is the host's, not a step of this work, and the 3b head is inside what the control reads beside it.
 4. **A task per face.** The accept loop already spawns a face's drive onto the runtime when its forwarder is
    `Send + Sync` (`SpawnedFaces`, `drive_face_shared`); the router takes that path. The closure watcher
    (`watch_room`) becomes the wake list of a destination, and a gated face awaits its destination's room.

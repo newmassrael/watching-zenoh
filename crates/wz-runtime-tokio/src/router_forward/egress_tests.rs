@@ -14,6 +14,7 @@ use super::egress::{message_cost, EgressBudget};
 use super::*;
 use crate::runtime_impl::{TokioRuntime, TokioTime};
 use crate::session_glue::{new_session_actions, BoxedLinkDriver, LinkSendOutcome};
+use crate::sync::PlainCell;
 use crate::Reliability;
 use wz_runtime_core::runtime::Runtime;
 use wz_runtime_tokio_test_support::fixture_session_init_params;
@@ -179,7 +180,7 @@ struct Rig {
     fwd: RouterForwarder,
     link: Arc<RoomLink>,
     dest: Arc<SessionLinkActions>,
-    now: Rc<Cell<Duration>>,
+    now: Arc<PlainCell<Duration>>,
     /// Frames the destination's link had been given once the subscription was in place.
     baseline: usize,
 }
@@ -196,9 +197,9 @@ impl Rig {
 
     fn with_budget(full: bool, budget: EgressBudget) -> Self {
         let base = Instant::now();
-        let now = Rc::new(Cell::new(Duration::ZERO));
+        let now = Arc::new(PlainCell::new(Duration::ZERO));
         let clock = {
-            let now = Rc::clone(&now);
+            let now = Arc::clone(&now);
             Box::new(move || base + now.get())
         };
         let fwd = RouterForwarder::with_clock(zid(0x01), clock).with_egress_budget(budget);

@@ -970,7 +970,7 @@ struct DeferredQuery {
     /// also forwarded. Holding it keeps the last-out gate open until the
     /// redelivery has answered; `None` is a query answered here alone, which
     /// closes with its own final as before.
-    fan: Option<Rc<QueryFan>>,
+    fan: Option<Arc<QueryFan>>,
 }
 
 /// R311y46 (§5.23 Phase 3a) — the heap handler backing a [`LocalSubscriber`]:
@@ -2783,7 +2783,7 @@ impl LinkstateForwarder {
     /// master gate — the single-net peer). Returns the count forwarded.
     fn forward_request_to_client_queryables(
         &self,
-        fan: &Rc<QueryFan>,
+        fan: &Arc<QueryFan>,
         deadline: Instant,
         template: &RequestOwned,
         reliable: bool,
@@ -3966,7 +3966,7 @@ impl LinkstateForwarder {
         request: &RequestOwned,
         keyexpr: &str,
         target: Option<QueryTarget>,
-        fan: Option<&Rc<QueryFan>>,
+        fan: Option<&Arc<QueryFan>>,
     ) -> bool {
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let view = LocalQueryView {
@@ -4052,7 +4052,7 @@ impl LinkstateForwarder {
                 inbound,
                 reliable,
                 qos: view.qos,
-                fan: fan.map(Rc::clone),
+                fan: fan.map(Arc::clone),
             });
         }
         true
@@ -4180,7 +4180,7 @@ impl LinkstateForwarder {
             // pending-query table applies to a remote branch.
             let closes = match dq.fan {
                 None => true,
-                Some(fan) => Rc::into_inner(fan).is_some(),
+                Some(fan) => Arc::into_inner(fan).is_some(),
             };
             if closes {
                 self.emit_query_final(dq.inbound, dq.reliable, dq.rid, dq.qos);

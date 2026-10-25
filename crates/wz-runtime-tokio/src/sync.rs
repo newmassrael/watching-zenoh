@@ -150,6 +150,53 @@ impl<T> core::fmt::Debug for PlainMutex<T> {
 /// progressively replaced in R311z+ rounds.
 pub type RwLock<T> = std::sync::RwLock<T>;
 
+/// A small `Copy` value that is read and replaced as a whole from any thread: what a `Cell<T>` was
+/// for single-threaded state, behind a [`PlainMutex`]'s lock.
+///
+/// For a setting a builder or an operator sets and the data path reads (the policy of autoconnect,
+/// the query timeout, whether multicast is governed), not for a count: a count is a `Counter` or
+/// a `Gauge` (`counter.rs`), whose updates are one atomic instruction and do not lose a
+/// concurrent addition.
+pub struct PlainCell<T: Copy>(parking_lot::Mutex<T>);
+
+impl<T: Copy> PlainCell<T> {
+    /// A cell holding `value`.
+    pub const fn new(value: T) -> Self {
+        Self(parking_lot::const_mutex(value))
+    }
+
+    /// The value now.
+    pub fn get(&self) -> T {
+        *self.0.lock()
+    }
+
+    /// Replace the value.
+    pub fn set(&self, value: T) {
+        *self.0.lock() = value;
+    }
+
+    /// Replace the value with what `f` makes of it, under the one lock, and answer the new value:
+    /// a read and a write that no other thread's write can come between, for a value that is a
+    /// successor of the last (a version, a generation).
+    pub fn update(&self, f: impl FnOnce(T) -> T) -> T {
+        let mut value = self.0.lock();
+        *value = f(*value);
+        *value
+    }
+}
+
+impl<T: Copy + Default> Default for PlainCell<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T: Copy> core::fmt::Debug for PlainCell<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PlainCell")
+    }
+}
+
 /// The reader-writer lock a table that many threads read and few write sits behind: [`PlainMutex`]'s
 /// counterpart, `parking_lot`'s, not poisoned by a panic in a holder.
 ///
@@ -166,8 +213,14 @@ impl<T> PlainRwLock<T> {
     }
 
     /// The value for reading, waiting for a writer to finish. Any number of readers hold it at once.
+    ///
+    /// A thread that already holds a read guard may take another, which is what the `RefCell`s
+    /// this replaces allowed and what the router's code relies on (a method that reads calls one
+    /// that reads the same table): the recursive form, which does not queue behind a writer that is
+    /// waiting for the first guard, so the pair cannot deadlock. The price is that a steady stream
+    /// of readers can keep a writer waiting; the writers here are declarations and configuration.
     pub fn read(&self) -> PlainReadGuard<'_, T> {
-        self.0.read()
+        self.0.read_recursive()
     }
 
     /// The value for writing, waiting for every reader and writer to finish.
