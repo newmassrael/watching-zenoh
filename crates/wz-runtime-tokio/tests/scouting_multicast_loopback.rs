@@ -28,6 +28,7 @@ use tokio::net::UdpSocket;
 use wz_codecs::hello::HelloOwned;
 use wz_codecs::locator::LocatorOwned;
 use wz_codecs::wire_const;
+use wz_runtime_tokio::policy::MulticastLoopback;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::scouting_glue::{
     drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutRxIgnored,
@@ -35,6 +36,16 @@ use wz_runtime_tokio::scouting_glue::{
 };
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
 use wz_session_core::scout_params::ScoutParams;
+
+/// The `multicast-loopback` policy named `on`. Every test here has a scouter hear its own
+/// host's group traffic, which the operating system's setting does not promise on every
+/// host; upstream leaves it alone and wz's default is upstream's.
+fn loopback_on() -> McastSocketConfig<'static> {
+    McastSocketConfig {
+        loopback: MulticastLoopback::On,
+        ..McastSocketConfig::default()
+    }
+}
 
 const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
 const PORT: u16 = 7446;
@@ -177,7 +188,7 @@ async fn scout_discovers_peer_locator_over_multicast() {
     const PORT: u16 = 17452;
 
     // Scout side: bind the group port, join the group, loopback on.
-    let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
+    let mut driver = UdpDriver::bind_multicast(GROUP, PORT, loopback_on())
         .await
         .expect("bind multicast scouting link");
     let actions = ScoutingActions::new(ScoutParams {
@@ -260,10 +271,9 @@ async fn a_scouter_told_to_use_another_group_joins_that_group_and_only_that_grou
     // One scouting run against a responder that answers on `answer_on`. The
     // scouter ALWAYS joins the moved socket — that is the fact under test.
     async fn scout_with_responder_on(answer_on: (Ipv4Addr, u16)) -> ScoutOutcome {
-        let mut driver =
-            UdpDriver::bind_multicast(MOVED_GROUP, MOVED_PORT, McastSocketConfig::default())
-                .await
-                .expect("bind the MOVED multicast scouting link");
+        let mut driver = UdpDriver::bind_multicast(MOVED_GROUP, MOVED_PORT, loopback_on())
+            .await
+            .expect("bind the MOVED multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {
             what: 0x03,
             zid: vec![0xAA, 0xBB, 0xCC, 0xDD],
@@ -349,7 +359,7 @@ async fn every_datagram_from_a_real_group_lands_in_exactly_one_accumulator() {
     const PORT: u16 = 17453;
     const OUR_ZID: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD];
 
-    let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
+    let mut driver = UdpDriver::bind_multicast(GROUP, PORT, loopback_on())
         .await
         .expect("bind multicast scouting link");
     let actions = ScoutingActions::new(ScoutParams {
@@ -441,7 +451,7 @@ async fn an_empty_answer_from_the_group_does_not_end_an_exit_on_first_window() {
     // R2672 — 7451 collided with TWO tests in `multicast_pubsub_loopback.rs`.
     const PORT: u16 = 17454;
 
-    let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
+    let mut driver = UdpDriver::bind_multicast(GROUP, PORT, loopback_on())
         .await
         .expect("bind multicast scouting link");
     let actions = ScoutingActions::new(ScoutParams {
@@ -525,7 +535,7 @@ mod round2 {
     };
     use wz_runtime_tokio::session_open::{open_session_at, DialConfig, DEFAULT_OPEN_TICK_MS};
     use wz_runtime_tokio::writer_queue::WriterHandle;
-    use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
+    use wz_runtime_tokio::UdpDriver;
     use wz_runtime_tokio_test_support::fixture_session_init_params;
     use wz_session_core::scout_params::ScoutParams;
 
@@ -590,7 +600,7 @@ mod round2 {
         let session_locator = format!("tcp/{session_addr}");
 
         // Scout side: bind the multicast group port, join, loopback on.
-        let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
+        let mut driver = UdpDriver::bind_multicast(GROUP, PORT, super::loopback_on())
             .await
             .expect("bind multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {
@@ -698,7 +708,7 @@ mod round3_tls {
         DEFAULT_OPEN_TICK_MS,
     };
     use wz_runtime_tokio::tls_pipeline::accept_tls;
-    use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
+    use wz_runtime_tokio::UdpDriver;
     use wz_runtime_tokio_test_support::{fixture_session_init_params, loopback_tls_configs};
     use wz_session_core::scout_params::ScoutParams;
 
@@ -728,7 +738,7 @@ mod round3_tls {
         let session_locator = format!("tls/{session_addr}");
 
         // Scout side: bind the multicast group port, join, loopback on.
-        let mut driver = UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default())
+        let mut driver = UdpDriver::bind_multicast(GROUP, PORT, super::loopback_on())
             .await
             .expect("bind multicast scouting link");
         let actions = ScoutingActions::new(ScoutParams {

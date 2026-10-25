@@ -76,12 +76,22 @@ use tokio::time::timeout;
 use wz_codecs::scout::Scout;
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
+use wz_runtime_tokio::policy::MulticastLoopback;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::scouting_glue::{
     drive_scouting_until_resolved, new_scouting_engine, ScoutOutcome, ScoutingActions,
 };
 use wz_runtime_tokio::scouting_responder::{serve, ResponderStep, ScoutingResponder};
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
+
+/// The `multicast-loopback` policy named `on`: the joiner and the scouter here share a host,
+/// which the operating system's setting does not promise on every host.
+fn loopback_on() -> McastSocketConfig<'static> {
+    McastSocketConfig {
+        loopback: MulticastLoopback::On,
+        ..McastSocketConfig::default()
+    }
+}
 use wz_session_core::scout_params::ScoutParams;
 use wz_session_core::scout_responder::ResponderIdentity;
 
@@ -169,7 +179,7 @@ async fn foreign_scouter() -> UdpSocket {
 /// precondition `IP_MULTICAST_ALL` needs. The returned driver must stay ALIVE —
 /// dropping it drops the membership and the leak disappears with it.
 async fn co_joiner(group: Ipv4Addr, port: u16) -> UdpDriver {
-    UdpDriver::bind_multicast(group, port, McastSocketConfig::default())
+    UdpDriver::bind_multicast(group, port, loopback_on())
         .await
         .expect("bind + join as the co-joiner")
 }
@@ -195,10 +205,9 @@ async fn discover(scout: (Ipv4Addr, u16), resp: (Ipv4Addr, u16)) -> ScoutOutcome
         std::future::pending::<()>().await
     };
 
-    let mut scout_driver =
-        UdpDriver::bind_multicast_tx(scout.0, scout.1, McastSocketConfig::default())
-            .await
-            .expect("bind the scouting sender");
+    let mut scout_driver = UdpDriver::bind_multicast_tx(scout.0, scout.1, loopback_on())
+        .await
+        .expect("bind the scouting sender");
     let actions = ScoutingActions::new(ScoutParams {
         what: WHAT_ROUTER | WHAT_PEER,
         zid: SCOUT_ZID.to_vec(),
@@ -354,7 +363,7 @@ async fn a_responder_answers_on_an_extra_joined_group_and_only_because_it_joined
             port,
             McastSocketConfig {
                 extra_joins: joins,
-                ..Default::default()
+                ..loopback_on()
             },
         )
         .await

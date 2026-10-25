@@ -41,9 +41,27 @@ use wz_runtime_tokio::multicast_glue::{
     drive_multicast_session, multicast_put_literal, spawn_router_mcast_egress,
     MulticastDriveConfig, MulticastLink, MulticastOutcome, MulticastTxProducer,
 };
+use wz_runtime_tokio::policy::MulticastLoopback;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::{McastGroupOptions, McastSocketConfig, UdpDriver};
 use wz_session_core::multicast_dispatch::{MulticastConfig, MulticastDispatcher};
+
+/// The `multicast-loopback` policy named `on`: every member here hears the sender on its
+/// own host, which the operating system's setting does not promise on every host.
+fn loopback_on() -> McastSocketConfig<'static> {
+    McastSocketConfig {
+        loopback: MulticastLoopback::On,
+        ..McastSocketConfig::default()
+    }
+}
+
+/// [`loopback_on`] for the group seams that take the owned form.
+fn group_options_on() -> McastGroupOptions {
+    McastGroupOptions {
+        loopback: MulticastLoopback::On,
+        ..McastGroupOptions::default()
+    }
+}
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::WhatAmI;
@@ -102,8 +120,7 @@ async fn publisher_push_reaches_group_subscriber() {
     // Subscriber node B: group-joined socket + observer-backed drive loop. The
     // socket is bound when B's session opens its link; a bind that fails ends
     // B's drive, which the select below reports.
-    let mut link_b =
-        MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, PORT, McastSocketConfig::default()));
+    let mut link_b = MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, PORT, loopback_on()));
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = mc_params(0xBB);
 
@@ -219,9 +236,8 @@ async fn qos_group_publish_qos_reaches_subscriber() {
     };
 
     // Subscriber node B: qos group-joined socket + observer-backed drive loop.
-    let mut link_b = MulticastLink::new(|| {
-        UdpDriver::bind_multicast(GROUP, QOS_PORT, McastSocketConfig::default())
-    });
+    let mut link_b =
+        MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, QOS_PORT, loopback_on()));
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = qos_params(0xBB);
 
@@ -344,9 +360,8 @@ async fn qos_publisher_refused_by_non_qos_subscriber() {
     const REFUSE_PORT: u16 = 7454;
 
     // Subscriber node B is NON-qos (the mc_params default is_qos=false).
-    let mut link_b = MulticastLink::new(|| {
-        UdpDriver::bind_multicast(GROUP, REFUSE_PORT, McastSocketConfig::default())
-    });
+    let mut link_b =
+        MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, REFUSE_PORT, loopback_on()));
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = mc_params(0xBB);
     assert!(
@@ -464,9 +479,8 @@ async fn oversize_put_fragments_and_reassembles_across_nodes() {
         ..mc_params(zid_byte)
     };
 
-    let mut link_b = MulticastLink::new(|| {
-        UdpDriver::bind_multicast(GROUP, FRAG_PORT, McastSocketConfig::default())
-    });
+    let mut link_b =
+        MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, FRAG_PORT, loopback_on()));
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = frag_params(0xBB);
 
@@ -587,9 +601,8 @@ async fn concurrent_peers_fragment_reassemble_in_isolation() {
     };
 
     // ── Subscriber B: joins the group, collects every delivered payload.
-    let mut link_b = MulticastLink::new(|| {
-        UdpDriver::bind_multicast(GROUP, CONC_PORT, McastSocketConfig::default())
-    });
+    let mut link_b =
+        MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, CONC_PORT, loopback_on()));
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = conc_params(0xBB);
 
@@ -738,9 +751,8 @@ async fn router_egress_helper_reaches_group_subscriber() {
     const HELPER_PORT: u16 = 7452;
 
     // Subscriber node: group-joined socket + observer-backed drive loop.
-    let mut link_b = MulticastLink::new(|| {
-        UdpDriver::bind_multicast(GROUP, HELPER_PORT, McastSocketConfig::default())
-    });
+    let mut link_b =
+        MulticastLink::new(|| UdpDriver::bind_multicast(GROUP, HELPER_PORT, loopback_on()));
     let mut dispatcher_b = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params_b = mc_params(0xBB);
 
@@ -782,7 +794,7 @@ async fn router_egress_helper_reaches_group_subscriber() {
         GROUP,
         HELPER_PORT,
         router_profile(vec![0xAA; 4]),
-        McastGroupOptions::default(),
+        group_options_on(),
         None,
     );
 
@@ -921,7 +933,7 @@ async fn a_multicast_iface_pin_decides_whether_the_group_datagram_arrives() {
             port,
             McastSocketConfig {
                 iface: Some(rx_iface),
-                ..Default::default()
+                ..loopback_on()
             },
         )
         .await
@@ -931,7 +943,7 @@ async fn a_multicast_iface_pin_decides_whether_the_group_datagram_arrives() {
             port,
             McastSocketConfig {
                 iface: Some(tx_iface),
-                ..Default::default()
+                ..loopback_on()
             },
         )
         .await
@@ -1064,7 +1076,7 @@ async fn an_ipv6_group_datagram_arrives_through_its_membership_and_only_through_
             McastSocketConfig {
                 iface: Some(nic),
                 extra_joins: joins,
-                ..Default::default()
+                ..loopback_on()
             },
         )
         .await
@@ -1074,7 +1086,7 @@ async fn an_ipv6_group_datagram_arrives_through_its_membership_and_only_through_
             port,
             McastSocketConfig {
                 iface: Some(nic),
-                ..Default::default()
+                ..loopback_on()
             },
         )
         .await
@@ -1137,14 +1149,14 @@ async fn a_router_group_face_is_one_member_from_one_source_address() {
     const FACE_PORT: u16 = 7455;
     let router_zid = vec![0xAC; 4];
 
-    let mut listener = UdpDriver::bind_multicast(GROUP, FACE_PORT, McastSocketConfig::default())
+    let mut listener = UdpDriver::bind_multicast(GROUP, FACE_PORT, loopback_on())
         .await
         .expect("bind the listening member");
     let face = spawn_router_mcast_group(
         GROUP,
         FACE_PORT,
         router_profile(router_zid.clone()),
-        McastGroupOptions::default(),
+        group_options_on(),
         None,
     );
 
@@ -1215,15 +1227,14 @@ async fn a_router_group_face_receives_what_a_member_publishes() {
         GROUP,
         FACE_PORT,
         router_profile(vec![0xAD; 4]),
-        McastGroupOptions::default(),
+        group_options_on(),
         None,
     );
 
     // The member: a peer loop on its own send socket, publishing one Put once
     // its beacons have had time to admit it into the face's peer table.
-    let mut member = MulticastLink::new(|| {
-        UdpDriver::bind_multicast_tx(GROUP, FACE_PORT, McastSocketConfig::default())
-    });
+    let mut member =
+        MulticastLink::new(|| UdpDriver::bind_multicast_tx(GROUP, FACE_PORT, loopback_on()));
     let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params = mc_params(0xAE);
     let tx = MulticastTxProducer::new();
@@ -1305,13 +1316,12 @@ async fn a_router_group_face_counts_its_traffic_in_the_node_registry() {
         GROUP,
         FACE_PORT,
         router_profile(router_zid),
-        McastGroupOptions::default(),
+        group_options_on(),
         Some(node.clone()),
     );
 
-    let mut member = MulticastLink::new(|| {
-        UdpDriver::bind_multicast_tx(GROUP, FACE_PORT, McastSocketConfig::default())
-    });
+    let mut member =
+        MulticastLink::new(|| UdpDriver::bind_multicast_tx(GROUP, FACE_PORT, loopback_on()));
     let mut dispatcher = MulticastDispatcher::<8>::new(MulticastConfig::new(5_000));
     let params = mc_params(0xB0);
     let tx = MulticastTxProducer::new();

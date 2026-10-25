@@ -40,10 +40,20 @@ use tokio::time::timeout;
 use wz_codecs::scout::Scout;
 use wz_codecs::whatami::WhatAmI;
 use wz_codecs::wire_const;
+use wz_runtime_tokio::policy::MulticastLoopback;
 use wz_runtime_tokio::scouting_responder::{
     bind_reply_sockets, ReplySource, ResponderStep, ScoutingResponder,
 };
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
+
+/// The `multicast-loopback` policy named `on`: the responder hears a scouter on its own
+/// host, which the operating system's setting does not promise on every host.
+fn loopback_on() -> McastSocketConfig<'static> {
+    McastSocketConfig {
+        loopback: MulticastLoopback::On,
+        ..McastSocketConfig::default()
+    }
+}
 use wz_session_core::scout_responder::{ResponderIdentity, ScoutIgnored};
 use wz_session_core::scouting_message::{parse_scouting, ScoutingFrame};
 
@@ -77,7 +87,7 @@ fn wz_identity() -> ResponderIdentity {
 }
 
 async fn responder_on(group: Ipv4Addr, port: u16) -> ScoutingResponder {
-    let driver = UdpDriver::bind_multicast(group, port, McastSocketConfig::default())
+    let driver = UdpDriver::bind_multicast(group, port, loopback_on())
         .await
         .expect("bind + join the scouting group");
     ScoutingResponder::new(driver, wz_identity())

@@ -79,6 +79,7 @@ use wz_runtime_tokio::accept_loop::{
 };
 use wz_runtime_tokio::link_pipeline::bind_tcp;
 use wz_runtime_tokio::link_socket::LinkSocket;
+use wz_runtime_tokio::policy::MulticastLoopback;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::scouting_autoconnect::{serve_autoconnect, AutoconnectPlan, AutoconnectStep};
@@ -86,6 +87,15 @@ use wz_runtime_tokio::scouting_glue::{new_scouting_engine, ScoutingActions};
 use wz_runtime_tokio::scouting_responder::{serve, ResponderIdentity, ScoutingResponder};
 use wz_runtime_tokio::session_open::{BoundListener, SessionOffer, DEFAULT_OPEN_TICK_MS};
 use wz_runtime_tokio::{McastSocketConfig, UdpDriver};
+
+/// The `multicast-loopback` policy named `on`: the scouter and the responder here share a
+/// host, which the operating system's setting does not promise on every host.
+fn loopback_on() -> McastSocketConfig<'static> {
+    McastSocketConfig {
+        loopback: MulticastLoopback::On,
+        ..McastSocketConfig::default()
+    }
+}
 use wz_runtime_tokio_test_support::fixture_session_init_params;
 use wz_session_core::scout_params::ScoutParams;
 
@@ -163,7 +173,7 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
     };
 
     // The GROUP-PORT socket (upstream's `mcast_sock`): joins, and answers Scouts.
-    let responder_driver = UdpDriver::bind_multicast(GROUP, port, McastSocketConfig::default())
+    let responder_driver = UdpDriver::bind_multicast(GROUP, port, loopback_on())
         .await
         .expect("bind + join the scouting group as the responder");
     let identity = ResponderIdentity::try_new(
@@ -187,7 +197,7 @@ async fn leg(port: u16, matcher: WhatAmIMatcher) -> AcceptLoopSummary {
 
     // ── The SCOUTING node: an ephemeral-port sender (upstream's `ucast_sock`)
     //    plus the peer mesh loop that turns intents into dials. ──
-    let mut scout_driver = UdpDriver::bind_multicast_tx(GROUP, port, McastSocketConfig::default())
+    let mut scout_driver = UdpDriver::bind_multicast_tx(GROUP, port, loopback_on())
         .await
         .expect("bind the scouting sender");
     let actions = ScoutingActions::new(ScoutParams {
