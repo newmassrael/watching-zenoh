@@ -263,7 +263,7 @@ where
 {
     type Session = SlotSession<C>;
 
-    fn classify(&self, endpoint: &str) -> Result<(), crate::connect_manager::DialRefused> {
+    fn classify(endpoint: &str) -> Result<(), crate::connect_manager::DialRefused> {
         parse_locator(endpoint).map(|_| ())
     }
 

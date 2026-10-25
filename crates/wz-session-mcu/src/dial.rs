@@ -264,7 +264,7 @@ mod heap {
     {
         type Session = UdpSession<C>;
 
-        fn classify(&self, endpoint: &str) -> Result<(), DialRefused> {
+        fn classify(endpoint: &str) -> Result<(), DialRefused> {
             parse_locator(endpoint).map(|_| ())
         }
 

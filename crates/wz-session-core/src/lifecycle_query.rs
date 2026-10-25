@@ -234,6 +234,13 @@ pub enum OpenOutcome {
     NoDialableLocator,
     /// The loop that holds the node's machines is gone.
     OpenerGone,
+    /// The node holds as many peers by their zid as it was built for (a build states
+    /// how many, and none by default), so it takes no further one.
+    NoRoom,
+    /// The node's links do not hold a session to the node a dial was made for, so a
+    /// peer cannot be held by its zid: a session to whichever node answered a stale
+    /// locator would not be one to the zid (decision D4).
+    Unverifiable,
 }
 
 /// The node's opener, as the open query asks it (decision D6): told a peer's
@@ -299,11 +306,16 @@ pub enum RefusedReason {
     NoDialableLocator,
     /// The loop that would hold the peer is gone, so the open reached nobody.
     OpenerGone,
+    /// The node holds as many peers by their zid as it was built for.
+    NoRoom,
+    /// The node's links do not hold a session to the node a dial was made for, so no
+    /// dial by a zid could be told from one to another node.
+    Unverifiable,
 }
 
 impl RefusedReason {
     /// Every reason this module can give, for the declared set to be held to.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::NotPermitted,
         Self::PeerNotAZid,
         Self::ResetNotPermitted,
@@ -313,6 +325,8 @@ impl RefusedReason {
         Self::PeerUnknown,
         Self::NoDialableLocator,
         Self::OpenerGone,
+        Self::NoRoom,
+        Self::Unverifiable,
     ];
 
     /// The sentence a querier is shown. Plain ASCII with no quote or backslash, so
@@ -332,6 +346,10 @@ impl RefusedReason {
             Self::PeerUnknown => "this node knows no locator for that peer",
             Self::NoDialableLocator => "this node cannot dial any locator it knows for that peer",
             Self::OpenerGone => "the loop that would hold that peer is gone",
+            Self::NoRoom => "this node holds as many peers by their zid as it was built for",
+            Self::Unverifiable => {
+                "this node cannot tell which node answers a dial, so it holds no peer by its zid"
+            }
         }
     }
 }
@@ -356,6 +374,8 @@ impl OpenVerdict {
             OpenOutcome::PeerUnknown => Self::Refused(RefusedReason::PeerUnknown),
             OpenOutcome::NoDialableLocator => Self::Refused(RefusedReason::NoDialableLocator),
             OpenOutcome::OpenerGone => Self::Refused(RefusedReason::OpenerGone),
+            OpenOutcome::NoRoom => Self::Refused(RefusedReason::NoRoom),
+            OpenOutcome::Unverifiable => Self::Refused(RefusedReason::Unverifiable),
         }
     }
 
@@ -1423,6 +1443,8 @@ mod tests {
                 RefusedReason::NoDialableLocator,
             ),
             (OpenOutcome::OpenerGone, RefusedReason::OpenerGone),
+            (OpenOutcome::NoRoom, RefusedReason::NoRoom),
+            (OpenOutcome::Unverifiable, RefusedReason::Unverifiable),
         ] {
             let refusing = node(true, Vec::new()).with_opener(Opener::answering(outcome));
             let (answered, replies) = ask(&refusing, &key);

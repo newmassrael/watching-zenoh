@@ -884,11 +884,32 @@ Each step lands with its own done-when; sizes are not estimated here.
      each by its own name (`NodeRefusal`). Tests that hold nodes run in a leg
      that states two (`C1m mcu peer nodes`); under the default they assert the
      refusal for want of room.
-   - Next in step 6 (6.2b-2): the opener port over this manager, with the
-     decision of how `NodeRefusal::NoRoom` is said to the caller (the open
-     outcome has no word for it), the sources of hints (a build's declared
-     ones, a Hello), then the verbs on the fixed-memory profile,
-     `wz-session-lwip` forwarding the feature, and the witness on the image.
+   - 6.2b-2 (landed): the request to hold a node by its zid, made where the
+     manager is not (`NodeOpener`, from `ConnectManager::node_opener`, which a
+     static store has). A query a node answers is served beside its loop, so
+     the opener answers at once with what the node knows without the loop (can
+     this dialer verify a node, is there room, is there a live hint, can this
+     build dial one), keeps a request that passes in the store, and the next
+     tick holds the node. The store also mirrors the nodes the manager holds,
+     so an open of a held node is the same open and does not ask for room. What
+     a build can dial is now asked of the dialer TYPE (`Dialer::classify` takes
+     no `self`): the opener holds no dialer, which the manager owns, and the
+     fact was always the build's. How a refusal is said (decision): the open
+     outcome and the refused reasons gain two words, `NoRoom` (the node holds
+     as many peers by their zid as it was built for) and `Unverifiable` (its
+     links do not hold a session to the node a dial was made for), because
+     each is a different thing an operator can do something about and neither
+     is a missing locator. `NodeRefusal::NoLocator` is `PeerUnknown` and
+     `NoDialableLocator` is itself. The mapping onto `OpenOutcome` is not in
+     this crate: `lifecycle_query` is compiled only with an allocator, and the
+     fixed-memory profile has neither it nor the in-band switchboard
+     (`drive`, same gate), so the verbs there need the query's wire written
+     without `alloc`, which is the next piece, not a mapping.
+   - Next in step 6 (6.2b-3): the verbs on the fixed-memory profile (the
+     lifecycle query and the in-band switchboard without an allocator, or a
+     slot form of them), the sources of hints (a build's declared ones, a
+     Hello), `wz-session-lwip` forwarding the feature, and the witness on the
+     image.
 7. **D7** transports 2 and 3 as values of the build configuration axis.
 
 ## 5. Open
