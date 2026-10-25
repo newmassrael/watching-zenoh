@@ -287086,6 +287086,50 @@
         "The wider hot path reading stays open: where the remaining 460 bytes of a delivered copy go."
       ]
     },
+    "Round 3628": {
+      "decision_summary": "A node that is a member of a multicast group now puts back together a put that zenoh-pico cuts into a Fragment chain, where the first cut dropped it without a word. The group feature carries the reassembly router (a chain per member, 4,096 bytes a slot) and the fragment codec; the subscription's cell keeps what it holds of the whole and the line says the whole length, and a chain past the slot is dropped whole. The first sizing of the witness was wrong in two ways that the runs showed: pico cuts at the link's MTU (about 1,470 bytes) before it cuts at the batch, so a put of 1,500 is already a chain, and every z_put is a peer of its own, so the group's four rows filled and read as a wedge; slot-group now tracks eight. The queryable, querier and token over a group stay refused, with a stronger reason than the allocator: no stock peer, zenoh-pico (with or without its multicast declarations) or zenoh itself, answers a query over a group, so there is nothing to prove one against.",
+      "changes_bullets": [
+        "crates/wz-session-mcu/Cargo.toml: the group feature adds reassembly and wz-session-core's transport-fragmentation (the router that stages a chain per member and the fragment codec it reads them with).",
+        "deploy/nodes/slot-group.toml and its generated constants: members 8, since every pico z_put is a peer of its own.",
+        "crates/wz-integration-tests/tests/wz_declared_group_pico_interop.rs: a fourth leg with pico's z_put (z_pub cuts its value to 255 bytes): 1,000 bytes kept whole, 3,000 reassembled and said at its whole length, 5,000 dropped, and the next put still taken.",
+        "scripts/run-ci.sh (the Layer M count of the group legs is 4) and docs/target-build-contract.md (the group paragraph says what reassembles, its bound and its cost, why a put of 1,500 is already a chain, and why a queryable over a group has no witness)."
+      ],
+      "verification_bullets": [
+        "The four witness legs pass against zenoh-pico's z_sub, z_pub and z_put on this machine's default-route interface, with the node built directly. Building without reassembly fails the new leg at the chain (a put pico fragmented was not reassembled), after the whole-frame put passed and with the other three legs green; the feature is restored. The first run of the leg failed at its last step because the group's four rows were full of the earlier z_put peers (the log shows members=4 and no admission after), which is the measurement that moved slot-group to eight rows.",
+        "The no-allocator link gate is clean for all seven declared nodes with the router in the group image; the image grows by about 52 KB of file and carries the 22 KiB router in .bss; wz-session-mcu tests with the group feature and clippy with every feature and warnings denied pass; the pre-push round-fed array (113) and the guarded-count gate over the range pass.",
+        "Not run: the file the entry packages with this feature set (the node built directly stands in for it), Layer M as a lane, the hosted run of this push, a chain from a peer other than pico (zenoh's own peers fragment at their own batch and were not made to join a group at a batch of this node's), and the group's fragmentation on the sending side (the node's publishers put at most 1,024 bytes)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha, including Layer M (Mgrp, now 4). Still open and mine from earlier pushes: the Zephyr kit's worst chain, which the last hosted run read at 8,900 bytes through the connect manager's dial (against a 9,216-byte stack; a design question for the owner of that path, not a figure to re-commit), and phase 4 of docs/declaration-sync-pacing.md: replace the per-session declared flag of SlotSession with a wz_session_core::replay_cursor::ReplayCursor over the static declaration slice, which also ends the repeat of the whole list from index 0 after one refused send.",
+        "A group's table of members fills silently: a JOIN past the row count is refused with no count and no line, which a lab reads as a node that stopped taking members. A refusal count in the group's report is the small change.",
+        "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener."
+      ],
+      "publishable_decision_summary": "A node that is a member of a multicast group now puts back together a put that zenoh-pico cuts into a Fragment chain, where the first cut dropped it without a word. The group feature carries the reassembly router (a chain per member, 4,096 bytes a slot) and the fragment codec; the subscription's cell keeps what it holds of the whole and the line says the whole length, and a chain past the slot is dropped whole. The first sizing of the witness was wrong in two ways that the runs showed: pico cuts at the link's MTU (about 1,470 bytes) before it cuts at the batch, so a put of 1,500 is already a chain, and every z_put is a peer of its own, so the group's four rows filled and read as a wedge; slot-group now tracks eight. The queryable, querier and token over a group stay refused, with a stronger reason than the allocator: no stock peer, zenoh-pico (with or without its multicast declarations) or zenoh itself, answers a query over a group, so there is nothing to prove one against.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu/Cargo.toml: the group feature adds reassembly and wz-session-core's transport-fragmentation (the router that stages a chain per member and the fragment codec it reads them with).",
+        "deploy/nodes/slot-group.toml and its generated constants: members 8, since every pico z_put is a peer of its own.",
+        "crates/wz-integration-tests/tests/wz_declared_group_pico_interop.rs: a fourth leg with pico's z_put (z_pub cuts its value to 255 bytes): 1,000 bytes kept whole, 3,000 reassembled and said at its whole length, 5,000 dropped, and the next put still taken.",
+        "scripts/run-ci.sh (the Layer M count of the group legs is 4) and docs/target-build-contract.md (the group paragraph says what reassembles, its bound and its cost, why a put of 1,500 is already a chain, and why a queryable over a group has no witness)."
+      ],
+      "publishable_verification_bullets": [
+        "The four witness legs pass against zenoh-pico's z_sub, z_pub and z_put on this machine's default-route interface, with the node built directly. Building without reassembly fails the new leg at the chain (a put pico fragmented was not reassembled), after the whole-frame put passed and with the other three legs green; the feature is restored. The first run of the leg failed at its last step because the group's four rows were full of the earlier z_put peers (the log shows members=4 and no admission after), which is the measurement that moved slot-group to eight rows.",
+        "The no-allocator link gate is clean for all seven declared nodes with the router in the group image; the image grows by about 52 KB of file and carries the 22 KiB router in .bss; wz-session-mcu tests with the group feature and clippy with every feature and warnings denied pass; the pre-push round-fed array (113) and the guarded-count gate over the range pass.",
+        "Not run: the file the entry packages with this feature set (the node built directly stands in for it), Layer M as a lane, the hosted run of this push, a chain from a peer other than pico (zenoh's own peers fragment at their own batch and were not made to join a group at a batch of this node's), and the group's fragmentation on the sending side (the node's publishers put at most 1,024 bytes)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha, including Layer M (Mgrp, now 4). Still open and mine from earlier pushes: the Zephyr kit's worst chain, which the last hosted run read at 8,900 bytes through the connect manager's dial (against a 9,216-byte stack; a design question for the owner of that path, not a figure to re-commit), and phase 4 of docs/declaration-sync-pacing.md: replace the per-session declared flag of SlotSession with a wz_session_core::replay_cursor::ReplayCursor over the static declaration slice, which also ends the repeat of the whole list from index 0 after one refused send.",
+        "A group's table of members fills silently: a JOIN past the row count is refused with no count and no line, which a lab reads as a node that stopped taking members. A refusal count in the group's report is the small change.",
+        "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
