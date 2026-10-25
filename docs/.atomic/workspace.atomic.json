@@ -289434,6 +289434,50 @@
         "The remaining reds of the hosted run of f4f260375 belong to the sessions that claimed them: the zenoh-config citation gate, the pubsub extension's feature leak with the multicast item match it causes, the ticker's size growth, the shm lock limit."
       ]
     },
+    "Round 3685": {
+      "decision_summary": "Phase 1 of the closed key set (docs/closed-key-set.md) is built: the read-only table, its generator and the model test that holds both to the glob matcher. No host reads the table yet. KeyCatalogue numbers every key of an image by its sorted bytes and gives, for each key and each entity kind, the entities whose pattern intersects it; a const check makes a wrongly generated table a build error. The generator takes a node's entity declaration, refuses a malformed key, a wildcard publisher or token, a duplicate and a wildcard no concrete key meets, and writes the table. Because it holds a port of the matcher, the port is compared with the real matcher on every pair of 399 keys in both orders, and every selection is compared with the matcher and with the real subscriber table. Not built: the key-set policy, refusal at declare time, receive through the id, per-peer allowance; nothing is measured. D4 and D6 of the note are still the owner's.",
+      "changes_bullets": [
+        "crates/wz-session-core src/key_catalogue.rs (new): KeyCatalogue over five static arrays (key text, ends, selection offsets, members, entity rows); find_exact, text, selection, entity; new is a const fn that checks sorted unique keys, offsets covering members, one kind per selection; six unit tests, one per refusal.",
+        "scripts/lib/wz_key_set.py (new): the declaration check, the table, the Rust emitter, the corpus emitter and a selftest; --check, --write, --emit.",
+        "crates/wz-session-core tests/key_catalogue_model.rs and tests/key_set_data (new): the fixture declaration, its generated table and matcher corpus, and five model tests.",
+        ".githooks/pre-push runs wz_key_set.py --selftest; docs/closed-key-set.md records phase 1 as built."
+      ],
+      "verification_bullets": [
+        "The five model tests and the six unit tests pass on the shared build machine; clippy -D warnings over all targets of wz-session-core passes with default features and with default features off; cargo fmt --check passes; wz_key_set.py --selftest and round_fed_gate_reach.py exit 0.",
+        "The oracle was shown able to fail: with the rule that ** does not cross a verbatim chunk removed from the port and the files regenerated, three of the five model tests failed; with the rule back all pass.",
+        "Not run: the hosted run; the table under the fixed-memory profile on a target; any measurement of the table's size or of the receive path."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "Owner decisions open: whether a closed image admits an undeclared key under a declared wildcard (the note refuses it), whether access control and the closed allowance share one declaration, whether a publisher on a wildcard is needed, and whether sender-fixed resource ids are wanted.",
+        "Phase 2: the key-set policy (open is the default) and the typed refusal at declare time in the tokio host; phase 3 receives through the id and is the first measurement.",
+        "The table is built over the matcher with every wildcard feature on; a profile that turns a wildcard toggle off degrades the matcher to literal chunks, and its selections would differ: phase 2 decides whether closed requires them on.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "Phase 1 of the closed key set (docs/closed-key-set.md) is built: the read-only table, its generator and the model test that holds both to the glob matcher. No host reads the table yet. KeyCatalogue numbers every key of an image by its sorted bytes and gives, for each key and each entity kind, the entities whose pattern intersects it; a const check makes a wrongly generated table a build error. The generator takes a node's entity declaration, refuses a malformed key, a wildcard publisher or token, a duplicate and a wildcard no concrete key meets, and writes the table. Because it holds a port of the matcher, the port is compared with the real matcher on every pair of 399 keys in both orders, and every selection is compared with the matcher and with the real subscriber table. Not built: the key-set policy, refusal at declare time, receive through the id, per-peer allowance; nothing is measured. D4 and D6 of the note are still the owner's.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core src/key_catalogue.rs (new): KeyCatalogue over five static arrays (key text, ends, selection offsets, members, entity rows); find_exact, text, selection, entity; new is a const fn that checks sorted unique keys, offsets covering members, one kind per selection; six unit tests, one per refusal.",
+        "scripts/lib/wz_key_set.py (new): the declaration check, the table, the Rust emitter, the corpus emitter and a selftest; --check, --write, --emit.",
+        "crates/wz-session-core tests/key_catalogue_model.rs and tests/key_set_data (new): the fixture declaration, its generated table and matcher corpus, and five model tests.",
+        ".githooks/pre-push runs wz_key_set.py --selftest; docs/closed-key-set.md records phase 1 as built."
+      ],
+      "publishable_verification_bullets": [
+        "The five model tests and the six unit tests pass on the shared build machine; clippy -D warnings over all targets of wz-session-core passes with default features and with default features off; cargo fmt --check passes; wz_key_set.py --selftest and round_fed_gate_reach.py exit 0.",
+        "The oracle was shown able to fail: with the rule that ** does not cross a verbatim chunk removed from the port and the files regenerated, three of the five model tests failed; with the rule back all pass.",
+        "Not run: the hosted run; the table under the fixed-memory profile on a target; any measurement of the table's size or of the receive path."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Owner decisions open: whether a closed image admits an undeclared key under a declared wildcard (the note refuses it), whether access control and the closed allowance share one declaration, whether a publisher on a wildcard is needed, and whether sender-fixed resource ids are wanted.",
+        "Phase 2: the key-set policy (open is the default) and the typed refusal at declare time in the tokio host; phase 3 receives through the id and is the first measurement.",
+        "The table is built over the matcher with every wildcard feature on; a profile that turns a wildcard toggle off degrades the matcher to literal chunks, and its selections would differ: phase 2 decides whether closed requires them on.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
