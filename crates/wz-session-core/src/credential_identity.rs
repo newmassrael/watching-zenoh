@@ -77,6 +77,26 @@ pub fn zid_from_wire(wire_zid: &[u8]) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
     Some(padded)
 }
 
+/// The zid a key expression spells, in the sixteen-byte form, or `None` for text a conforming
+/// implementation would not accept as one: the lowercase hex zenoh prints (a `u128`, big-endian,
+/// no leading zero).
+///
+/// The ONE place the refusals are written (they were measured against the pinned zenohd, see
+/// `zid_hex::zenoh_hex_to_zid`, which is this with the trailing zeros trimmed), and in this module
+/// because every profile builds it: a node with no allocator reads the peer a lifecycle key
+/// names with it.
+///
+/// * UPPERCASE hex, a LEADING `0` (which is also how the id `0` is refused), an EMPTY string, and
+///   anything `u128::from_str_radix` rejects (non-hex, more than 32 digits) are refused.
+/// * A leading `+` IS accepted, as upstream accepts it: `from_str_radix` takes it.
+pub fn zid_from_key_text(hex: &str) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
+    if hex.is_empty() || hex.starts_with('0') || hex.contains(|c: char| c.is_ascii_uppercase()) {
+        return None;
+    }
+    let id = u128::from_str_radix(hex, 16).ok()?;
+    Some(id.to_le_bytes())
+}
+
 /// Whether the zid a peer claimed on the wire is the zid `credential_zid` names,
 /// compared as [`zid_from_wire`] reads it. A claim that spells no zid is never
 /// bound.

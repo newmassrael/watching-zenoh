@@ -121,11 +121,8 @@ pub fn write_zenoh_hex(zid: &[u8], out: &mut dyn core::fmt::Write) -> core::fmt:
 /// The heap profile's form: it returns the trimmed bytes as a `Vec`.
 #[cfg(feature = "alloc")]
 pub fn zenoh_hex_to_zid(hex: &str) -> Option<Vec<u8>> {
-    if hex.is_empty() || hex.starts_with('0') || hex.contains(|c: char| c.is_ascii_uppercase()) {
-        return None;
-    }
-    let id = u128::from_str_radix(hex, 16).ok()?;
-    Some(canonical_zid(&id.to_le_bytes()).to_vec())
+    let id = crate::credential_identity::zid_from_key_text(hex)?;
+    Some(canonical_zid(&id).to_vec())
 }
 
 #[cfg(test)]

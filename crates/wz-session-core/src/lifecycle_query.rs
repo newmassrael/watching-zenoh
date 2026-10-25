@@ -85,6 +85,9 @@ use core::cell::RefCell;
 use crate::drive::RESET_VERB;
 // Re-exported: the two types a host binds the queries with, so it names one module.
 pub use crate::drive::{LifecycleKey, SessionLifecycleAuthority};
+// The vocabulary a node with no allocator answers in too: the words are the same list.
+use crate::lifecycle_wire::{write_verb_list, OPEN_VERB};
+pub use crate::lifecycle_wire::{OpenOutcome, OpenVerdict, RefusedReason};
 use crate::query_sink::{QueryView, ReplyError, ReplyOut};
 use crate::text_out::{FixedText, TextOut};
 use crate::zid_hex::{canonical_zid, same_zid, zenoh_hex_to_zid};
@@ -221,28 +224,6 @@ impl PeerIntent for NoIntent {
     fn withdraw(&self, _peer_zid: &[u8]) {}
 }
 
-/// What a node's opener made of a request to hold a peer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenOutcome {
-    /// The request reached the node's machines. Accepted, not completed: the dial
-    /// is asynchronous, and the status query is how its end is read.
-    Accepted,
-    /// The node knows no locator for the peer, so there is nothing to dial.
-    PeerUnknown,
-    /// The node knows the peer but none of the locators it has for it can be
-    /// dialled from here.
-    NoDialableLocator,
-    /// The loop that holds the node's machines is gone.
-    OpenerGone,
-    /// The node holds as many peers by their zid as it was built for (a build states
-    /// how many, and none by default), so it takes no further one.
-    NoRoom,
-    /// The node's links do not hold a session to the node a dial was made for, so a
-    /// peer cannot be held by its zid: a session to whichever node answered a stale
-    /// locator would not be one to the zid (decision D4).
-    Unverifiable,
-}
-
 /// The node's opener, as the open query asks it (decision D6): told a peer's
 /// zid, it asks the node's machines to hold that peer.
 ///
@@ -280,128 +261,6 @@ impl PeerOpener for NoOpener {
     fn open(&self, _peer_zid: &[u8]) -> OpenOutcome {
         OpenOutcome::OpenerGone
     }
-}
-
-/// Why a close was refused, as one of a closed set of reasons.
-///
-/// The words are the implementation's own and a querier shows them as written, so
-/// each is a sentence that stands alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefusedReason {
-    /// The node's authority does not admit closing the session this key names.
-    NotPermitted,
-    /// The key's last chunk is not a zid in the spelling a key carries.
-    PeerNotAZid,
-    /// The node's authority does not admit resetting the session this key names.
-    ResetNotPermitted,
-    /// A reset key's generation chunk is not a decimal number.
-    GenerationNotANumber,
-    /// The node's authority does not admit reading the status this key names.
-    StatusNotPermitted,
-    /// The node's authority does not admit opening the session this key names.
-    OpenNotPermitted,
-    /// The node knows no locator for the peer an open names.
-    PeerUnknown,
-    /// None of the locators the node knows for the peer can be dialled from it.
-    NoDialableLocator,
-    /// The loop that would hold the peer is gone, so the open reached nobody.
-    OpenerGone,
-    /// The node holds as many peers by their zid as it was built for.
-    NoRoom,
-    /// The node's links do not hold a session to the node a dial was made for, so no
-    /// dial by a zid could be told from one to another node.
-    Unverifiable,
-}
-
-impl RefusedReason {
-    /// Every reason this module can give, for the declared set to be held to.
-    pub const ALL: [Self; 11] = [
-        Self::NotPermitted,
-        Self::PeerNotAZid,
-        Self::ResetNotPermitted,
-        Self::GenerationNotANumber,
-        Self::StatusNotPermitted,
-        Self::OpenNotPermitted,
-        Self::PeerUnknown,
-        Self::NoDialableLocator,
-        Self::OpenerGone,
-        Self::NoRoom,
-        Self::Unverifiable,
-    ];
-
-    /// The sentence a querier is shown. Plain ASCII with no quote or backslash, so
-    /// it is written into the JSON as it stands.
-    pub const fn words(self) -> &'static str {
-        match self {
-            Self::NotPermitted => "this node does not permit closing the session with that peer",
-            Self::PeerNotAZid => "the last chunk of the key is not a zid",
-            Self::ResetNotPermitted => {
-                "this node does not permit resetting the session with that peer"
-            }
-            Self::GenerationNotANumber => "the generation chunk of the key is not a number",
-            Self::StatusNotPermitted => {
-                "this node does not permit reading the status of the session with that peer"
-            }
-            Self::OpenNotPermitted => "this node does not permit opening a session with that peer",
-            Self::PeerUnknown => "this node knows no locator for that peer",
-            Self::NoDialableLocator => "this node cannot dial any locator it knows for that peer",
-            Self::OpenerGone => "the loop that would hold that peer is gone",
-            Self::NoRoom => "this node holds as many peers by their zid as it was built for",
-            Self::Unverifiable => {
-                "this node cannot tell which node answers a dial, so it holds no peer by its zid"
-            }
-        }
-    }
-}
-
-/// The answer to an open query (decision D6): the peer joins the node's intent and
-/// its machine connects. A second open of a held peer changes nothing, and says
-/// the same.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpenVerdict {
-    /// The node's machines were asked to hold the peer. Accepted, not completed:
-    /// the status query reads how the dial ended.
-    Opening,
-    /// The open was not attempted, or reached nothing to dial.
-    Refused(RefusedReason),
-}
-
-impl OpenVerdict {
-    /// The verdict an opener's outcome amounts to.
-    pub fn of(outcome: OpenOutcome) -> Self {
-        match outcome {
-            OpenOutcome::Accepted => Self::Opening,
-            OpenOutcome::PeerUnknown => Self::Refused(RefusedReason::PeerUnknown),
-            OpenOutcome::NoDialableLocator => Self::Refused(RefusedReason::NoDialableLocator),
-            OpenOutcome::OpenerGone => Self::Refused(RefusedReason::OpenerGone),
-            OpenOutcome::NoRoom => Self::Refused(RefusedReason::NoRoom),
-            OpenOutcome::Unverifiable => Self::Refused(RefusedReason::Unverifiable),
-        }
-    }
-
-    /// Write the reply document: one JSON object. The words of `verdict` are the
-    /// closed set `opening` and `refused`; `reason` appears only on `refused`.
-    pub fn write_json<W: TextOut + ?Sized>(&self, out: &mut W) {
-        match self {
-            Self::Opening => out.push_str("{\"verdict\":\"opening\"}"),
-            Self::Refused(reason) => {
-                out.push_str("{\"verdict\":\"refused\",\"reason\":\"");
-                out.push_str(reason.words());
-                out.push_str("\"}");
-            }
-        }
-    }
-
-    /// The `verdict` word, for a declared set to be held to.
-    pub const fn word(&self) -> &'static str {
-        match self {
-            Self::Opening => "opening",
-            Self::Refused(_) => "refused",
-        }
-    }
-
-    /// Every `verdict` word, for a declared set to be held to.
-    pub const WORDS: [&'static str; 2] = ["opening", "refused"];
 }
 
 /// The answer to a close query.
@@ -576,9 +435,6 @@ impl StatusVerdict {
 /// The verb the status query carries in its key.
 const STATUS_VERB: &str = "status";
 
-/// The verb the open query carries in its key.
-const OPEN_VERB: &str = "open";
-
 /// Every lifecycle verb a node can have bound, in the order the capability query
 /// lists them. `open` is last, and listed only by a node whose host has an opener
 /// ([`PeerOpener::BOUND`]).
@@ -587,21 +443,16 @@ pub const VERBS: [&str; 4] = [CLOSE_VERB, RESET_VERB, STATUS_VERB, OPEN_VERB];
 /// Write the capability document `{"verbs":["close","reset","status"]}`, with
 /// `"open"` after them when `open_bound`.
 pub fn write_verbs_json<W: TextOut + ?Sized>(out: &mut W, open_bound: bool) {
-    out.push_str("{\"verbs\":[");
-    let mut first = true;
+    let mut bound: [&str; VERBS.len()] = [""; VERBS.len()];
+    let mut count = 0;
     for verb in VERBS {
         if verb == OPEN_VERB && !open_bound {
             continue;
         }
-        if !first {
-            out.push_str(",");
-        }
-        first = false;
-        out.push_str("\"");
-        out.push_str(verb);
-        out.push_str("\"");
+        bound[count] = verb;
+        count += 1;
     }
-    out.push_str("]}");
+    write_verb_list(out, &bound[..count]);
 }
 
 /// The queryables a node hosts to serve the lifecycle queries, as the key

@@ -47,6 +47,9 @@ use wz_session_core::adminspace::{
 };
 use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps;
+use wz_session_core::lifecycle_wire::{
+    write_verb_list, OpenKey, OpenOutcome, OpenVerdict, RefusedReason, OPEN_VERB,
+};
 use wz_session_core::locality::Locality;
 use wz_session_core::query::QueryableRegistry;
 use wz_session_core::query_sink::{FnQuerySink, QueryView, ReplyOut};
@@ -69,6 +72,26 @@ const VERSION_TEXT_BYTES: usize = 32;
 
 /// A locator or endpoint text, as wide as every other locator in the stack.
 type LocatorText = FixedText<{ caps::MAX_LOCATOR_LEN }>;
+
+/// What the open query asks of the node: whether it may be asked, and to hold a peer by its zid
+/// (decision D6, `docs/session-lifecycle-intent.md`).
+///
+/// A port, for the reason the heap profile's `PeerOpener` is one: the machines that hold a peer
+/// live with the loop that ticks them, and the query is served beside it. The node's own
+/// implementation is `crate::connect_manager::ControlledOpener`.
+pub trait NodeOpening {
+    /// Whether this node lets a query open a session: the node's write permit, which is what
+    /// the config write is gated by too. A node that does not permit it answers a refusal that
+    /// says so, and opens nothing.
+    fn permitted(&self) -> bool;
+
+    /// Ask the node to hold the peer `zid`. Accepted, not completed: how the dial ends is read
+    /// in the node's connection status.
+    fn open(
+        &self,
+        zid: &[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES],
+    ) -> OpenOutcome;
+}
 
 /// `s` in a fixed text of `N` bytes, or `None` if it does not fit.
 fn fixed<const N: usize>(s: &str) -> Option<FixedText<N>> {
@@ -402,6 +425,27 @@ pub fn host_admin_queryable_fixed<const BODY: usize, const SESSIONS: usize>(
     config: Option<&'static (dyn ConfigView + Sync)>,
     connect: Option<&'static (dyn ConnectStatusSource + Sync)>,
 ) -> Result<(), RegisterError> {
+    host_admin_queryable_fixed_with_open(queryables, identity, status, host, config, connect, None)
+}
+
+/// [`host_admin_queryable_fixed`], and with an `open` the node's lifecycle open query too:
+/// `GET @/<zid>/<whatami>/session/open/<peer-zid>` asks the node to hold the peer, and
+/// `GET @/<zid>/<whatami>/session/verbs` says the node has bound it, in the words and the
+/// documents the heap profile's lifecycle queries use (`wz_session_core::lifecycle_wire`).
+///
+/// The open query is answered only for a literal key that names this node, its role and one
+/// peer: a pattern is never a target. Nothing else of the lifecycle is bound on this profile,
+/// so the capability document lists `open` and no other verb.
+#[allow(clippy::too_many_arguments)]
+pub fn host_admin_queryable_fixed_with_open<const BODY: usize, const SESSIONS: usize>(
+    queryables: &mut QueryableRegistry<AdminQuerySink<BODY, SESSIONS>>,
+    identity: FixedNodeIdentity,
+    status: &'static FixedNodeStatus<SESSIONS>,
+    host: &'static AdminHost<BODY>,
+    config: Option<&'static (dyn ConfigView + Sync)>,
+    connect: Option<&'static (dyn ConnectStatusSource + Sync)>,
+    open: Option<&'static (dyn NodeOpening + Sync)>,
+) -> Result<(), RegisterError> {
     let mut pattern: FixedText<{ caps::MAX_KEYEXPR_BYTES }> = FixedText::new();
     write_admin_queryable_key(&mut pattern, identity.zid_hex.prefix(), identity.whatami);
     let pattern = pattern
@@ -414,6 +458,7 @@ pub fn host_admin_queryable_fixed<const BODY: usize, const SESSIONS: usize>(
             host,
             config,
             connect,
+            open,
         },
         answer_admin_query::<BODY, SESSIONS>,
     );
@@ -429,6 +474,7 @@ pub struct AdminQueryState<const BODY: usize, const SESSIONS: usize> {
     host: &'static AdminHost<BODY>,
     config: Option<&'static (dyn ConfigView + Sync)>,
     connect: Option<&'static (dyn ConnectStatusSource + Sync)>,
+    open: Option<&'static (dyn NodeOpening + Sync)>,
 }
 
 /// The sink of the node's admin queryable ([`host_admin_queryable_fixed`]): a closed
@@ -455,6 +501,60 @@ impl<const BODY: usize, const SESSIONS: usize> ObserverSinks for AdminSinks<BODY
     type Undeclared = NoSink;
 }
 
+/// The lifecycle legs of a node that binds the open verb: the capability document, which any
+/// key that reaches it is answered, and the open query, which only a literal key that names
+/// this node, its role and one peer is.
+fn serve_open<const BODY: usize>(
+    arena: &mut AdminReplyArena<BODY>,
+    query: &dyn QueryView,
+    out: &mut dyn ReplyOut,
+    zid_hex: &str,
+    whatami: &str,
+    opener: &(dyn NodeOpening + Sync),
+) {
+    // The capability document says what the node KNOWS, not whether this caller may use it.
+    let _ = arena.serve_leg(
+        query,
+        out,
+        zid_hex,
+        whatami,
+        VERBS_TAIL,
+        AdminLegEncoding::Json,
+        |body| write_verb_list(body, &[OPEN_VERB]),
+    );
+    let key = query.keyexpr();
+    let Some(parsed) = OpenKey::parse(key) else {
+        return;
+    };
+    if parsed.node_zid != zid_hex || parsed.whatami != whatami {
+        return;
+    }
+    let verdict = if !opener.permitted() {
+        OpenVerdict::Refused(RefusedReason::OpenNotPermitted)
+    } else {
+        match parsed.peer() {
+            Some(peer) => OpenVerdict::of(opener.open(&peer)),
+            None => OpenVerdict::Refused(RefusedReason::PeerNotAZid),
+        }
+    };
+    // The key's own tail, `session/open/<peer>`: it follows `@/<zid>/<whatami>/`, which the
+    // parse has just held to name this node. A reply the arena refuses is counted there; the
+    // open has happened either way, as the heap profile's reply says.
+    let tail = &key[2 + zid_hex.len() + 1 + whatami.len() + 1..];
+    let _ = arena.serve_leg(
+        query,
+        out,
+        zid_hex,
+        whatami,
+        tail,
+        AdminLegEncoding::Json,
+        |body| verdict.write_json(body),
+    );
+}
+
+/// The tail of the capability query, `@/<zid>/<whatami>/session/verbs`.
+const VERBS_TAIL: &str = "session/verbs";
+
 /// One admin GET, answered from the node's status in the host's arena.
 fn answer_admin_query<const BODY: usize, const SESSIONS: usize>(
     held: &mut AdminQueryState<BODY, SESSIONS>,
@@ -462,7 +562,8 @@ fn answer_admin_query<const BODY: usize, const SESSIONS: usize>(
     out: &mut dyn ReplyOut,
 ) {
     let identity = &held.identity;
-    let (status, host, config, connect) = (held.status, held.host, held.config, held.connect);
+    let (status, host, config, connect, open) =
+        (held.status, held.host, held.config, held.connect, held.open);
     critical_section::with(|cs| {
         let state = status.state.borrow(cs).borrow();
         let Ok(mut arena) = host.arena.borrow(cs).try_borrow_mut() else {
@@ -494,6 +595,9 @@ fn answer_admin_query<const BODY: usize, const SESSIONS: usize>(
                     },
                 );
             }
+        }
+        if let Some(opener) = open {
+            serve_open(&mut arena, query, out, zid_hex, identity.whatami, opener);
         }
         let facts = AdminNodeFacts {
             zid_hex,

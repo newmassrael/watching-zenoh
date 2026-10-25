@@ -11428,15 +11428,15 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 28 \
+    _runci_guarded_test "C1m mcu adminspace-write" 29 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
-    _runci_guarded_test "C1m mcu peer nodes" 19 \
+    _runci_guarded_test "C1m mcu peer nodes" 20 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
     _runci_guarded_test "C1m mcu adminspace-core" 8 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 38 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 39 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
@@ -11803,6 +11803,15 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu \
         --features adminspace-core,adminspace-write,session-slot \
         --test admin_reply_fits --quiet || return 1
+    # Step 6.2b-3 of docs/session-lifecycle-intent.md -- the lifecycle open query of a node with no
+    # allocator, through the same queryable and a session's own tables: an open answered in the
+    # heap profile's words at zero allocations (each refusal by its name), a pattern never a target,
+    # a node that does not permit it refusing, the capability document listing the one verb this
+    # profile binds, and a node with no opener answering none of it. 5 = what that command PRINTED.
+    _runci_guarded_test "C1m admin open query" 5 \
+        cargo test -p wz-session-mcu \
+        --features adminspace-core,adminspace-write,session-slot \
+        --test admin_open_query --quiet || return 1
     # S9d -- the control records of a frame (a keyexpr alias, a subscriber
     # declaration and its withdrawal, a DeclFinal, a subscriber Interest and its
     # cancelling Interest, a ResponseFinal, an Oam, a MID with no decoder, and four of

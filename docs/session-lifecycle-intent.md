@@ -905,11 +905,29 @@ Each step lands with its own done-when; sizes are not estimated here.
      fixed-memory profile has neither it nor the in-band switchboard
      (`drive`, same gate), so the verbs there need the query's wire written
      without `alloc`, which is the next piece, not a mapping.
-   - Next in step 6 (6.2b-3): the verbs on the fixed-memory profile (the
-     lifecycle query and the in-band switchboard without an allocator, or a
-     slot form of them), the sources of hints (a build's declared ones, a
-     Hello), `wz-session-lwip` forwarding the feature, and the witness on the
-     image.
+   - 6.2b-3 (landed, first half): the open query on the fixed-memory profile.
+     Decision: the vocabulary is split from the heap, not the query ported.
+     `lifecycle_wire` (always compiled, no allocator) holds what a verb says:
+     the open verdict, the refused reasons, the open key and the capability
+     document; `lifecycle_query` re-exports it, so the heap profile's paths and
+     words are unchanged, and the zid a key spells is read by one function in
+     `credential_identity` that `zenoh_hex_to_zid` now calls. The node's admin
+     queryable (`host_admin_queryable_fixed_with_open`) answers
+     `GET @/<zid>/<whatami>/session/open/<peer-zid>` for a literal key that
+     names this node, its role and one peer, in the heap profile's words, from
+     the arena at zero allocations (`NodeOpening`; the node's own is
+     `ControlledOpener`, the manager's `NodeOpener` under the node's write
+     permit, with `NodeRefusal` mapped onto the open outcome), and the
+     capability document `session/verbs` lists `open`, which is all this
+     profile binds. Close, reset and status stay on the heap profile: a close
+     walks a table of sessions a host lists, reset keeps a record per peer, and
+     the status document is a list of machines, and none of them is what the
+     question was. The Push form of a verb (the in-band switchboard) is not
+     bound here either.
+   - Next in step 6 (6.2b-4): a node image that binds it (an image with
+     `MAX_PEER_NODES` above zero, handing `ControlledOpener` to the
+     registration), the sources of hints (a build's declared ones, a Hello),
+     `wz-session-lwip` forwarding the feature, and the witness on the image.
 7. **D7** transports 2 and 3 as values of the build configuration axis.
 
 ## 5. Open

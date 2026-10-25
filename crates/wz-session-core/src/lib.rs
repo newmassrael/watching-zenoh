@@ -1953,6 +1953,12 @@ pub mod declaration_sync;
 #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
 pub mod drive;
 
+/// The words of the session lifecycle that need no allocator: the open verdict, the
+/// refusals, the open key and the capability document. Unconditional, so a node of the
+/// fixed-memory profile answers an open in the words the heap profile does;
+/// `lifecycle_query` re-exports it.
+pub mod lifecycle_wire;
+
 /// The session lifecycle as a QUERY: close a session and be answered with a
 /// verdict, and ask a node which lifecycle verbs it has. The verb is the one
 /// [`drive::SessionLifecycleInjector`] takes as a Push, with a reply path.

@@ -45,6 +45,7 @@ use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_PEER_NODES, MAX_STATIC_CONNECT};
 use wz_session_core::connect_endpoints::{group_len, ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
+use wz_session_core::lifecycle_wire::OpenOutcome;
 use wz_session_core::locator_directory::{
     DirectoryRefusal, DirectoryZid, Lifetime, LocatorDirectory, LocatorSource,
 };
@@ -322,6 +323,56 @@ impl<D: Dialer> NodeOpener<D> {
             }
             t.requests.push(*zid).map_err(|_| NodeRefusal::NoRoom)
         })
+    }
+}
+
+/// The word a lifecycle open is answered with for a refusal: the same list the heap profile's
+/// opener answers in (`wz_session_core::lifecycle_wire`). A node that knows no hint for the peer
+/// is one that knows no locator for it.
+impl From<NodeRefusal> for OpenOutcome {
+    fn from(refusal: NodeRefusal) -> Self {
+        match refusal {
+            NodeRefusal::Unverifiable => Self::Unverifiable,
+            NodeRefusal::NoRoom => Self::NoRoom,
+            NodeRefusal::NoLocator => Self::PeerUnknown,
+            NodeRefusal::NoDialableLocator => Self::NoDialableLocator,
+        }
+    }
+}
+
+impl<D: Dialer> NodeOpener<D> {
+    /// This opener as the node's lifecycle open query asks it, permitted as `permit` says (the
+    /// node's write permit, which gates the config write too).
+    #[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
+    pub fn controlled(
+        self,
+        permit: &'static (dyn crate::admin_status::ConnectStatusSource + Sync),
+    ) -> ControlledOpener<D> {
+        ControlledOpener {
+            opener: self,
+            permit,
+        }
+    }
+}
+
+/// A [`NodeOpener`] under a permit: what a node binds to answer `session/open/<peer>`.
+#[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
+pub struct ControlledOpener<D: Dialer> {
+    opener: NodeOpener<D>,
+    permit: &'static (dyn crate::admin_status::ConnectStatusSource + Sync),
+}
+
+#[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
+impl<D: Dialer> crate::admin_fixed::NodeOpening for ControlledOpener<D> {
+    fn permitted(&self) -> bool {
+        self.permit.write_permit()
+    }
+
+    fn open(&self, zid: &DirectoryZid) -> OpenOutcome {
+        match self.opener.open(zid) {
+            Ok(()) => OpenOutcome::Accepted,
+            Err(refusal) => refusal.into(),
+        }
     }
 }
 
@@ -1805,6 +1856,24 @@ mod tests {
         m.tick(1);
         std::assert_eq!(m.node_states().count(), MAX_PEER_NODES);
         std::assert_eq!(opener.open(&over), Err(NodeRefusal::NoRoom));
+    }
+
+    /// Each refusal of a node is one word of the lifecycle's open vocabulary, and no two share
+    /// one: a node with no hint is a node the opener knows no locator for.
+    #[test]
+    fn a_refusal_of_a_node_is_one_word_of_the_open_vocabulary() {
+        let words = [
+            (NodeRefusal::Unverifiable, OpenOutcome::Unverifiable),
+            (NodeRefusal::NoRoom, OpenOutcome::NoRoom),
+            (NodeRefusal::NoLocator, OpenOutcome::PeerUnknown),
+            (
+                NodeRefusal::NoDialableLocator,
+                OpenOutcome::NoDialableLocator,
+            ),
+        ];
+        for (refusal, outcome) in words {
+            std::assert_eq!(OpenOutcome::from(refusal), outcome);
+        }
     }
 
     /// A dialer that cannot hold a session to the node it dials for has an opener that says so,
