@@ -288750,6 +288750,42 @@
         "Layer E7m was not rerun for this round; a transactional multi-route send stays unbuilt in the router (after phase 5), and the router's declaration-replay pacing is decided after phase 4."
       ]
     },
+    "Round 3669": {
+      "decision_summary": "The Orin board's group join was run, in a second and separate run, after the owner said in plain words that it is a test board and not a vehicle. The first run had left that leg out so that nothing multicast would be sent on its network. The group node for the QNX io-pkt stack was packaged by the entry, put on the board in one file of its own, and run for five seconds with the stack socket the board's processes need: it joined its group (joins=1) and published its beats. The file, its output and the staging copy on the lab server were removed in the same session and checked: no file and no process of the run was left. The platform rows and the contract now say that every leg ran on every board; the legs still not run are a stock peer on QNX or Android, the group against a stock multicast peer, and the paced replay's timing on a board.",
+      "changes_bullets": [
+        "deploy/wz-config.toml: the io-sock and io-pkt rows no longer say the Orin board ran on loopback only.",
+        "docs/target-build-contract.md: the paragraph on the board runs says the Orin's group join ran in a second run."
+      ],
+      "verification_bullets": [
+        "On the Orin board, the group node packaged for io-pkt ran for five seconds: joins=1, refused=0, and four beats published. Removed and checked afterwards: no file and no process of the run, and the staging copy on the lab server and the package on the SDK machine are gone. The wz_config check, the prose dependency gate (after its author fixed a sentence of another document) and the round-fed array pass on the rebased tree.",
+        "Not run: a stock peer on QNX or Android, the group against a stock multicast peer, the paced replay's timing on a board, and the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha.",
+        "The QNX build workspace on the SDK machine (toolchain, synced source, release cache, about 5 GB) is still there; removing it is the owner's decision.",
+        "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener."
+      ],
+      "publishable_decision_summary": "The Orin board's group join was run, in a second and separate run, after the owner said in plain words that it is a test board and not a vehicle. The first run had left that leg out so that nothing multicast would be sent on its network. The group node for the QNX io-pkt stack was packaged by the entry, put on the board in one file of its own, and run for five seconds with the stack socket the board's processes need: it joined its group (joins=1) and published its beats. The file, its output and the staging copy on the lab server were removed in the same session and checked: no file and no process of the run was left. The platform rows and the contract now say that every leg ran on every board; the legs still not run are a stock peer on QNX or Android, the group against a stock multicast peer, and the paced replay's timing on a board.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml: the io-sock and io-pkt rows no longer say the Orin board ran on loopback only.",
+        "docs/target-build-contract.md: the paragraph on the board runs says the Orin's group join ran in a second run."
+      ],
+      "publishable_verification_bullets": [
+        "On the Orin board, the group node packaged for io-pkt ran for five seconds: joins=1, refused=0, and four beats published. Removed and checked afterwards: no file and no process of the run, and the staging copy on the lab server and the package on the SDK machine are gone. The wz_config check, the prose dependency gate (after its author fixed a sentence of another document) and the round-fed array pass on the rebased tree.",
+        "Not run: a stock peer on QNX or Android, the group against a stock multicast peer, the paced replay's timing on a board, and the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha.",
+        "The QNX build workspace on the SDK machine (toolchain, synced source, release cache, about 5 GB) is still there; removing it is the owner's decision.",
+        "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
