@@ -180,6 +180,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 # `xBufferLength` size_t) on `xPortIsAuthorizedToAccessBuffer`, which is declared
 # only under `portUSING_MPU_WRAPPERS == 1` and which neither wz binds nor the
 # ARM_CM3 port defines. No wz source reads the version string.
+#
+# R3658 — `zephyrproject-rtos/mbedtls` and `zephyrproject-rtos/tf-psa-crypto`, NO_RELEASES,
+# the two submodules the TLS channel is built from (`vendor/mbedtls`, `vendor/tf-psa-crypto`,
+# added by `0e2eb9d70`). They are Zephyr's forks, pinned at the revisions Zephyr's `west.yml`
+# pins and not at a release of their own: the releases API answers an empty list for both,
+# which is the same observation `lwip-tcpip/lwip` has, so there is no release line to be
+# behind. The gate named both from the run after they were added (Layer U, which runs at the
+# end of the validate job and so was behind a red it did not cause); the rows say what it
+# observes, and a release either fork publishes later moves them like any other row.
 PINNED: dict[str, tuple[str, int]] = {
     "FreeRTOS/FreeRTOS-Kernel": ("MEASURED", 0),
     "eclipse-zenoh/zenoh": ("MEASURED", 0),
@@ -187,6 +196,8 @@ PINNED: dict[str, tuple[str, int]] = {
     "eclipse-zenoh/zenoh-pico": ("MEASURED", 0),
     "lwip-tcpip/lwip": ("NO_RELEASES", 0),
     "newmassrael/scxml-core-engine": ("NO_RELEASES", 0),
+    "zephyrproject-rtos/mbedtls": ("NO_RELEASES", 0),
+    "zephyrproject-rtos/tf-psa-crypto": ("NO_RELEASES", 0),
     "zephyrproject-rtos/zephyr": ("PIN_NOT_A_RELEASE", 0),
 }
 
