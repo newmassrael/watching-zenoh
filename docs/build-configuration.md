@@ -153,16 +153,17 @@ original reproduced by naming it. Three things follow from it:
   each crate's descriptors, read each crate's buffers and read what each crate's provider
   allocated with the other; the codec of a pointer into shared memory is `zenoh-codec`'s
   `shared-memory` arm),
-  `zenoh-util` (third slice of four: the time range language of a selector, the logging setup and
-  its callback layer, the zenoh home, the macro that lists the enabled features, the library loader
-  with its search directories, the ffi helpers and the network interface functions, 163 of 195
-  default lines and 165 of 197 with `test`, the timer to come; held to upstream's by generated and
-  drawn strings, by scenarios that each run in a process of their own, since the home and the
-  logging subscriber are process-global, by a loader that loads real shared libraries from a tree
-  of fixtures, and by the interface functions asked of the interfaces of the machine; the time
-  range parser refuses a duration that is a lone unit or that an instant cannot hold, the loader
-  skips a file name that is its prefix and its suffix at once, where upstream panics, and the
-  Windows adapter filter moves on to the next adapter, where upstream asks the first for ever)
+  `zenoh-util` (surface complete: the time range language of a selector, the logging setup and its
+  callback layer, the zenoh home, the macro that lists the enabled features, the library loader
+  with its search directories, the ffi helpers, the network interface functions and the timer, 195
+  of 195 default lines and 197 of 197 with `test`; held to upstream's by generated and drawn
+  strings, by scenarios that each run in a process of their own, since the home and the logging
+  subscriber are process-global, by a loader that loads real shared libraries from a tree of
+  fixtures, by the interface functions asked of the interfaces of the machine and by a timer run on
+  the clock; the time range parser refuses a duration that is a lone unit or that an instant cannot
+  hold, the loader skips a file name that is its prefix and its suffix at once, the Windows adapter
+  filter moves on to the next adapter, and the timer drops an event whose future a clone shares,
+  where upstream panics or asks the first adapter for ever or ends the timer)
   and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each

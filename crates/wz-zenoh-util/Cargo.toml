@@ -42,7 +42,9 @@ test = []
 # `const_format` is re-exported (`__concatcp`) for `concat_enabled_features!`, and `lazy_static` is
 # what `zenoh_home` keeps its path in, so the requirements are upstream's.
 [dependencies]
+async-trait = "0.1.89"
 const_format = "0.2.34"
+flume = "0.11.1"
 home = "0.5.9"
 humantime = "2.3.0"
 lazy_static = "1.5.0"

@@ -29,6 +29,8 @@ pub mod net;
 pub mod time_range;
 
 pub use lib_loader::*;
+pub mod timer;
+pub use timer::*;
 pub mod log;
 pub use lib_search_dirs::*;
 pub use log::*;

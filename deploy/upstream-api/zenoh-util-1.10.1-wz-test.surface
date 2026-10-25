@@ -50,6 +50,18 @@ fn zenoh_util::time_range::TimeRange::contains(&Self, std::time::SystemTime) -> 
 fn zenoh_util::time_range::TimeRange::contains(&Self, std::time::SystemTime) -> bool ; in impl zenoh_util::time_range::TimeRange<zenoh_util::time_range::TimeExpr>
 fn zenoh_util::time_range::TimeRange::resolve(Self) -> zenoh_util::time_range::TimeRange<std::time::SystemTime> ; in impl zenoh_util::time_range::TimeRange<zenoh_util::time_range::TimeExpr>
 fn zenoh_util::time_range::TimeRange::resolve_at(Self, std::time::SystemTime) -> zenoh_util::time_range::TimeRange<std::time::SystemTime> ; in impl zenoh_util::time_range::TimeRange<zenoh_util::time_range::TimeExpr>
+fn zenoh_util::timer::TimedEvent::get_handle(&Self) -> zenoh_util::timer::TimedHandle ; in impl zenoh_util::timer::TimedEvent
+fn zenoh_util::timer::TimedEvent::is_fused(&Self) -> bool ; in impl zenoh_util::timer::TimedEvent
+fn zenoh_util::timer::TimedEvent::once(std::time::Instant, impl 'static + core::marker::Send + core::marker::Sync + zenoh_util::timer::Timed) -> zenoh_util::timer::TimedEvent ; in impl zenoh_util::timer::TimedEvent
+fn zenoh_util::timer::TimedEvent::periodic(core::time::Duration, impl 'static + core::marker::Send + core::marker::Sync + zenoh_util::timer::Timed) -> zenoh_util::timer::TimedEvent ; in impl zenoh_util::timer::TimedEvent
+fn zenoh_util::timer::TimedHandle::defuse(Self) ; in impl zenoh_util::timer::TimedHandle
+fn zenoh_util::timer::Timer::add(&Self, zenoh_util::timer::TimedEvent) ; in impl zenoh_util::timer::Timer
+fn zenoh_util::timer::Timer::add_async(&Self, zenoh_util::timer::TimedEvent) ; async ; in impl zenoh_util::timer::Timer
+fn zenoh_util::timer::Timer::new(bool) -> zenoh_util::timer::Timer ; in impl zenoh_util::timer::Timer
+fn zenoh_util::timer::Timer::start(&mut Self, bool) ; in impl zenoh_util::timer::Timer
+fn zenoh_util::timer::Timer::start_async(&mut Self, bool) ; async ; in impl zenoh_util::timer::Timer
+fn zenoh_util::timer::Timer::stop(&mut Self) ; in impl zenoh_util::timer::Timer
+fn zenoh_util::timer::Timer::stop_async(&mut Self) ; async ; in impl zenoh_util::timer::Timer
 fn zenoh_util::try_init_log_from_env()
 fn zenoh_util::zenoh_home() -> &'static std::path::Path
 impl core::clone::Clone for zenoh_util::LibLoader
@@ -62,6 +74,9 @@ impl core::clone::Clone for zenoh_util::lib_search_dirs::LibSearchSpecKind
 impl core::clone::Clone for zenoh_util::time_range::TimeBound
 impl core::clone::Clone for zenoh_util::time_range::TimeExpr
 impl core::clone::Clone for zenoh_util::time_range::TimeRange
+impl core::clone::Clone for zenoh_util::timer::TimedEvent
+impl core::clone::Clone for zenoh_util::timer::TimedHandle
+impl core::clone::Clone for zenoh_util::timer::Timer
 impl core::cmp::Eq for zenoh_util::ffi::JsonKeyValueMap
 impl core::cmp::Eq for zenoh_util::ffi::JsonValue
 impl core::cmp::Eq for zenoh_util::lib_search_dirs::LibSearchDir
@@ -70,6 +85,8 @@ impl core::cmp::Eq for zenoh_util::lib_search_dirs::LibSearchSpec
 impl core::cmp::Eq for zenoh_util::lib_search_dirs::LibSearchSpecKind
 impl core::cmp::Eq for zenoh_util::time_range::TimeBound
 impl core::cmp::Eq for zenoh_util::time_range::TimeRange
+impl core::cmp::Eq for zenoh_util::timer::TimedEvent
+impl core::cmp::Ord for zenoh_util::timer::TimedEvent
 impl core::cmp::PartialEq for zenoh_util::ffi::JsonKeyValueMap
 impl core::cmp::PartialEq for zenoh_util::ffi::JsonValue
 impl core::cmp::PartialEq for zenoh_util::lib_search_dirs::LibSearchDir
@@ -79,6 +96,8 @@ impl core::cmp::PartialEq for zenoh_util::lib_search_dirs::LibSearchSpecKind
 impl core::cmp::PartialEq for zenoh_util::time_range::TimeBound
 impl core::cmp::PartialEq for zenoh_util::time_range::TimeExpr
 impl core::cmp::PartialEq for zenoh_util::time_range::TimeRange
+impl core::cmp::PartialEq for zenoh_util::timer::TimedEvent
+impl core::cmp::PartialOrd for zenoh_util::timer::TimedEvent
 impl core::convert::From for serde_json::map::Map
 impl core::convert::From for serde_json::value::Value
 impl core::convert::From for zenoh_util::ffi::JsonKeyValueMap
@@ -93,6 +112,7 @@ impl core::default::Default for zenoh_util::LibLoader
 impl core::default::Default for zenoh_util::ffi::JsonKeyValueMap
 impl core::default::Default for zenoh_util::ffi::JsonValue
 impl core::default::Default for zenoh_util::lib_search_dirs::LibSearchDirs
+impl core::default::Default for zenoh_util::timer::Timer
 impl core::error::Error for zenoh_util::lib_search_dirs::InvalidLibSearchDir
 impl core::fmt::Debug for zenoh_util::LibLoader
 impl core::fmt::Debug for zenoh_util::ffi::JsonKeyValueMap
@@ -107,6 +127,9 @@ impl core::fmt::Debug for zenoh_util::log::LogRecord
 impl core::fmt::Debug for zenoh_util::time_range::TimeBound
 impl core::fmt::Debug for zenoh_util::time_range::TimeExpr
 impl core::fmt::Debug for zenoh_util::time_range::TimeRange
+impl core::fmt::Debug for zenoh_util::timer::TimedEvent
+impl core::fmt::Debug for zenoh_util::timer::TimedHandle
+impl core::fmt::Debug for zenoh_util::timer::Timer
 impl core::fmt::Display for zenoh_util::lib_search_dirs::InvalidLibSearchDir
 impl core::fmt::Display for zenoh_util::time_range::TimeExpr
 impl core::fmt::Display for zenoh_util::time_range::TimeRange
@@ -151,6 +174,7 @@ mod zenoh_util::lib_search_dirs
 mod zenoh_util::log
 mod zenoh_util::net
 mod zenoh_util::time_range
+mod zenoh_util::timer
 struct zenoh_util::IntoIter
 struct zenoh_util::InvalidLibSearchDir
 struct zenoh_util::LIB_PREFIX
@@ -159,6 +183,9 @@ struct zenoh_util::LibLoader
 struct zenoh_util::LibSearchDirs
 struct zenoh_util::LibSearchSpec
 struct zenoh_util::LogRecord
+struct zenoh_util::TimedEvent
+struct zenoh_util::TimedHandle
+struct zenoh_util::Timer
 struct zenoh_util::ffi::JsonKeyValueMap
 struct zenoh_util::ffi::JsonValue
 struct zenoh_util::lib_search_dirs::IntoIter
@@ -167,3 +194,8 @@ struct zenoh_util::lib_search_dirs::LibSearchDirs
 struct zenoh_util::lib_search_dirs::LibSearchSpec
 struct zenoh_util::log::LogRecord
 struct zenoh_util::time_range::TimeRange
+struct zenoh_util::timer::TimedEvent
+struct zenoh_util::timer::TimedHandle
+struct zenoh_util::timer::Timer
+trait zenoh_util::Timed
+trait zenoh_util::timer::Timed
