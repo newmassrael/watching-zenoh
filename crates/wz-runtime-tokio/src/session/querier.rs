@@ -359,8 +359,10 @@ impl QuerierSlots {
         Ok(QueryPlace(Arc::new(QuerySlot::acquire(&self.quota)?)))
     }
 
-    /// Replace the bound; test-only, and takes effect for the queries asked after it.
-    #[cfg(test)]
+    /// Replace the bound; test-only, and takes effect for the queries asked after it. Gated on
+    /// `query-get` as well as `test`: its callers are the query tests, so a test build without
+    /// that feature would carry it unused.
+    #[cfg(all(test, feature = "query-get"))]
     pub(crate) fn set_limit(&self, limit: usize) {
         let mut held = match self.quota.lock() {
             Ok(held) => held,
@@ -369,8 +371,8 @@ impl QuerierSlots {
         held.set_limit(limit);
     }
 
-    /// The queries in flight now.
-    #[cfg(test)]
+    /// The queries in flight now. Gated as [`Self::set_limit`] is.
+    #[cfg(all(test, feature = "query-get"))]
     pub(crate) fn pending(&self) -> usize {
         match self.quota.lock() {
             Ok(held) => held.live(),
