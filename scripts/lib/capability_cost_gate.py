@@ -145,7 +145,7 @@ CASES: tuple[Case, ...] = (
     # thread or tokio is linked. Its links dial UDP in every build, so it is compared with the
     # pico that pico-client-udp is (`link-udp` names that here; it adds nothing to this build).
     Case("pico-client-coop", "wz-capi-pico", "libwz_capi_pico.so", "engine-coop,link-udp",
-         895_000,
+         905_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
@@ -155,7 +155,13 @@ CASES: tuple[Case, ...] = (
               "grew from 867,811 by what pico's client has by default and it lacked: the "
               "KeepAlive and Close codecs, a lost link dialled again with the session's "
               "declarations sent again over it (881,043), and a read that waits on its link "
-              "outside the session's lock. Its exports are pico-client's 441: the runtime's critical "
+              "outside the session's lock. 897,831 on 2026-10-25 (budget 895,000 before), "
+              "read bisected on the commits of that day: 893,251 with the timestamp policy "
+              "(`d6d659a10`), 894,515 with the faces the port reports on both engines "
+              "(`944fad43c`), 895,491 with a Push's frame sized from its message "
+              "(`77df225a7`, the commit that crossed the old budget); the 2,340 bytes between "
+              "that and the head are not separated further than that. Its "
+              "exports are pico-client's 441: the runtime's critical "
               "sections are a lock of the process (`host-lock`), so no `critical-section` "
               "implementation is linked, whose two symbols a cdylib exported beside the C ABI "
               "(443 before)"),
@@ -204,23 +210,24 @@ CASES: tuple[Case, ...] = (
     # The cooperative client that asks and answers queries: the requesting end and the answering
     # end, which is what the next case adds its loopback leg to.
     Case("pico-client-coop-query", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,query,queryable", 1_160_000,
+         "engine-coop,link-udp,query,queryable", 1_171_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          note="the pico-client-coop build with the requesting and answering ends of a query: "
               "1,137,368 measured against pico-client-coop's 875,843, 2.60 times the same pico "
-              "(437,624), and 541 exports against its 441"),
+              "(437,624), and 541 exports against its 441. 1,161,344 on 2026-10-25, with the "
+              "growth of pico-client-coop above"),
     # The same, with a get delivered to the session's own queryables
     # (`Z_FEATURE_LOCAL_QUERYABLE`), which a program that asks its own queryable needs.
     Case("pico-client-coop-local-queryable", "wz-capi-pico", "libwz_capi_pico.so",
-         "engine-coop,link-udp,query,queryable,local-queryable", 1_174_000,
+         "engine-coop,link-udp,query,queryable,local-queryable", 1_184_000,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          note="the pico-client-coop-query build with the get delivered to the session's own "
               "queryables: 1,151,161 measured against its 1,137,368 (+13,793), 2.62 times the "
-              "same pico (440,160)"),
+              "same pico (440,160). 1,175,052 on 2026-10-25, the same growth"),
     # The cooperative client that scouts (`Z_FEATURE_SCOUTING`): `z_scout`, and the lookup `z_open`
     # runs when its config names no locator, over the engine's own window and no tokio engine.
     Case("pico-client-coop-scout", "wz-capi-pico", "libwz_capi_pico.so",

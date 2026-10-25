@@ -3,7 +3,7 @@
   "images": {
     "zephyr-client-fixed": {
       "built_as": "the fixed-memory client of overlays/t2g_client_fixed.conf with the idle wait and batching off (main stack 9216 bytes), its node wz_session_mcu::slot_node",
-      "static_chain_bytes": 7540,
+      "static_chain_bytes": 7280,
       "peak_stack_bytes": 6000,
       "peak_stack_tolerance_bytes": 16,
       "get_median_us": 402,

@@ -179,6 +179,15 @@ IMAGES = (
     # round 3629 (it was a 64-byte endpoint text in every table, action and sort, and the chain
     # read 8,900 then, in the hosted image of 2026-10-25 07:21 UTC). It is 1,676 bytes under the
     # stack. Read off the failing run's own report, not derived.
+    #
+    # 7,280 bytes in the hosted image of run 40197999107 (head 4d9543fcb, 10 frames, 9 calls
+    # through a register not followed), 260 BELOW the figure above. The same job read 7,644 over 15
+    # frames at the head of run 40187337746 (5fe6b421c), so the chain moves by a few hundred bytes
+    # between trees that change nothing this node's loop calls: it is the frames of the manager's
+    # tick, `SlotDialer::dial` and the pump (1,200 to 1,900 bytes each) as the compiler inlines
+    # them. The tolerance of 128 is smaller than that spread, so the row follows what the hosted
+    # run reads and not what a change should have caused; the cause of the fall from 15 frames to
+    # 10 was not separated.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -186,7 +195,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=7540,
+        peak=7280,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
