@@ -2569,6 +2569,540 @@ fn the_explained_share_of_arbitrary_datagrams_narrows_with_the_unit_count() {
     }
 }
 
+// ── structured datagrams that are not zenoh ───────────────────────────────
+
+/// A DNS name in wire form: length-prefixed labels and the root.
+fn dns_name(name: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for label in name.split('.') {
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    out
+}
+
+fn pick<'a, T>(rng: &mut Lcg, pool: &'a [T]) -> &'a T {
+    &pool[rng.below(pool.len())]
+}
+
+fn hex_text(rng: &mut Lcg, digits: usize) -> String {
+    (0..digits)
+        .map(|_| char::from(b"0123456789abcdef"[rng.below(16)]))
+        .collect()
+}
+
+fn rand_bytes(rng: &mut Lcg, len: usize) -> Vec<u8> {
+    (0..len).map(|_| rng.next() as u8).collect()
+}
+
+/// DNS over UDP (53): alternating query and response, a fresh id per pair. A
+/// query is one question, with an EDNS0 OPT record half the time; a response
+/// echoes the question and answers it with one to four A, AAAA or TXT records
+/// whose name is a compression pointer to the question.
+fn dns_datagrams(rng: &mut Lcg, n: usize) -> Vec<(bool, Vec<u8>)> {
+    const HOSTS: [&str; 8] = [
+        "www", "mail", "api", "cdn", "ntp", "time", "update", "login",
+    ];
+    const ZONES: [&str; 6] = [
+        "example.com",
+        "ubuntu.com",
+        "github.com",
+        "pool.ntp.org",
+        "googleapis.com",
+        "ivis.ai",
+    ];
+    let mut out = Vec::new();
+    let (mut id, mut name, mut qtype) = (0u16, Vec::new(), 1u16);
+    for i in 0..n {
+        let query = i % 2 == 0;
+        if query {
+            id = rng.next() as u16;
+            let host = *pick(rng, &HOSTS);
+            let zone = *pick(rng, &ZONES);
+            name = dns_name(&alloc::format!("{host}.{zone}"));
+            qtype = *pick(rng, &[1u16, 1, 28, 28, 15, 16, 12]);
+        }
+        let mut m = id.to_be_bytes().to_vec();
+        if query {
+            let additional = u16::from(rng.below(2) == 0);
+            m.extend_from_slice(&[0x01, 0x00, 0, 1, 0, 0, 0, 0]);
+            m.extend_from_slice(&additional.to_be_bytes());
+            m.extend_from_slice(&name);
+            m.extend_from_slice(&qtype.to_be_bytes());
+            m.extend_from_slice(&[0, 1]);
+            if additional == 1 {
+                m.extend_from_slice(&[0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0]);
+            }
+        } else {
+            let answers = 1 + rng.below(4) as u16;
+            m.extend_from_slice(&[0x81, 0x80, 0, 1]);
+            m.extend_from_slice(&answers.to_be_bytes());
+            m.extend_from_slice(&[0, 0, 0, 0]);
+            m.extend_from_slice(&name);
+            m.extend_from_slice(&qtype.to_be_bytes());
+            m.extend_from_slice(&[0, 1]);
+            for _ in 0..answers {
+                let rdata = match qtype {
+                    1 => rand_bytes(rng, 4),
+                    28 => rand_bytes(rng, 16),
+                    _ => {
+                        let digits = 4 + rng.below(40);
+                        let text = hex_text(rng, digits);
+                        let mut r = vec![text.len() as u8];
+                        r.extend_from_slice(text.as_bytes());
+                        r
+                    }
+                };
+                m.extend_from_slice(&[0xC0, 0x0C]);
+                m.extend_from_slice(&qtype.to_be_bytes());
+                m.extend_from_slice(&[0, 1]);
+                m.extend_from_slice(&(rng.next() as u32 % 86_400).to_be_bytes());
+                m.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+                m.extend_from_slice(&rdata);
+            }
+        }
+        out.push((query, m));
+    }
+    out
+}
+
+/// mDNS (5353) as the host's avahi writes it: id 0 always. A query holds one to
+/// three questions (PTR or ANY, the unicast-response bit now and then) and
+/// sometimes known answers; a response holds one to four answer records and up
+/// to three additional ones (SRV, TXT, A, AAAA) with the cache-flush bit.
+fn mdns_datagrams(rng: &mut Lcg, n: usize) -> Vec<(bool, Vec<u8>)> {
+    const SERVICES: [&str; 8] = [
+        "_services._dns-sd._udp.local",
+        "_http._tcp.local",
+        "_googlecast._tcp.local",
+        "_workstation._tcp.local",
+        "_ssh._tcp.local",
+        "_ipp._tcp.local",
+        "_airplay._tcp.local",
+        "_someip._udp.local",
+    ];
+    let record = |rng: &mut Lcg, kind: u16| -> Vec<u8> {
+        let owner = if kind == 12 {
+            dns_name(pick(rng, &SERVICES))
+        } else {
+            dns_name(&alloc::format!("host-{}.local", rng.below(40)))
+        };
+        let rdata = match kind {
+            1 => rand_bytes(rng, 4),
+            28 => rand_bytes(rng, 16),
+            12 => dns_name(&alloc::format!(
+                "inst-{}.{}",
+                rng.below(40),
+                pick(rng, &SERVICES)
+            )),
+            33 => {
+                let mut r = vec![0, 0, 0, 0, 0x1F, 0x90];
+                r.extend_from_slice(&dns_name(&alloc::format!("host-{}.local", rng.below(40))));
+                r
+            }
+            _ => {
+                let text = alloc::format!("txtvers=1 id={}", hex_text(rng, 12));
+                let mut r = vec![text.len() as u8];
+                r.extend_from_slice(text.as_bytes());
+                r
+            }
+        };
+        let mut m = owner;
+        m.extend_from_slice(&kind.to_be_bytes());
+        m.extend_from_slice(&[0x80, 0x01]);
+        m.extend_from_slice(&(*pick(rng, &[120u32, 4500])).to_be_bytes());
+        m.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        m.extend_from_slice(&rdata);
+        m
+    };
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let from_dialer = rng.below(2) == 0;
+        let mut m = vec![0, 0];
+        if rng.below(2) == 0 {
+            let questions = 1 + rng.below(3) as u16;
+            let known = if rng.below(4) == 0 {
+                rng.below(3) as u16
+            } else {
+                0
+            };
+            m.extend_from_slice(&[0, 0]);
+            m.extend_from_slice(&questions.to_be_bytes());
+            m.extend_from_slice(&[0, 0]);
+            m.extend_from_slice(&known.to_be_bytes());
+            m.extend_from_slice(&[0, 0, 0, 0]);
+            for _ in 0..questions {
+                m.extend_from_slice(&dns_name(pick(rng, &SERVICES)));
+                m.extend_from_slice(&(*pick(rng, &[12u16, 12, 255])).to_be_bytes());
+                m.extend_from_slice(&(*pick(rng, &[1u16, 0x8001])).to_be_bytes());
+            }
+            for _ in 0..known {
+                m.extend_from_slice(&record(rng, 12));
+            }
+        } else {
+            let answers = 1 + rng.below(4) as u16;
+            let extra = rng.below(4) as u16;
+            m.extend_from_slice(&[0x84, 0, 0, 0]);
+            m.extend_from_slice(&answers.to_be_bytes());
+            m.extend_from_slice(&[0, 0]);
+            m.extend_from_slice(&extra.to_be_bytes());
+            for _ in 0..answers {
+                let kind = *pick(rng, &[12u16, 12, 33, 16, 1]);
+                m.extend_from_slice(&record(rng, kind));
+            }
+            for _ in 0..extra {
+                let kind = *pick(rng, &[33u16, 16, 1, 28]);
+                m.extend_from_slice(&record(rng, kind));
+            }
+        }
+        out.push((from_dialer, m));
+    }
+    out
+}
+
+/// SSDP (1900), text over UDP: an M-SEARCH from the dialer, answered by a 200
+/// OK or announced by a NOTIFY, with a fresh USN, LOCATION and max-age each time.
+fn ssdp_datagrams(rng: &mut Lcg, n: usize) -> Vec<(bool, Vec<u8>)> {
+    let mut out = Vec::new();
+    for i in 0..n {
+        let uuid = alloc::format!(
+            "uuid:{}-{}-{}-{}-{}",
+            hex_text(rng, 8),
+            hex_text(rng, 4),
+            hex_text(rng, 4),
+            hex_text(rng, 4),
+            hex_text(rng, 12)
+        );
+        let target = *pick(
+            rng,
+            &[
+                "ssdp:all",
+                "upnp:rootdevice",
+                "urn:schemas-upnp-org:device:MediaServer:1",
+                "urn:dial-multiscreen-org:service:dial:1",
+            ],
+        );
+        let location = alloc::format!(
+            "http://192.168.{}.{}:{}/desc.xml",
+            rng.below(256),
+            rng.below(256),
+            1024 + rng.below(60_000)
+        );
+        let age = *pick(rng, &[120u32, 1800, 3600]);
+        let (from_dialer, text) = match (i % 3, rng.below(2)) {
+            (0, _) => (
+                true,
+                alloc::format!(
+                    "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: {}\r\nST: {target}\r\n\r\n",
+                    1 + rng.below(5)
+                ),
+            ),
+            (_, 0) => (
+                false,
+                alloc::format!(
+                    "HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age={age}\r\nEXT:\r\nLOCATION: {location}\r\nSERVER: Linux/5.15 UPnP/1.0 Dev/1.0\r\nST: {target}\r\nUSN: {uuid}::{target}\r\n\r\n"
+                ),
+            ),
+            (_, _) => (
+                false,
+                alloc::format!(
+                    "NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nCACHE-CONTROL: max-age={age}\r\nLOCATION: {location}\r\nNT: {target}\r\nNTS: ssdp:alive\r\nSERVER: Linux/5.15 UPnP/1.0 Dev/1.0\r\nUSN: {uuid}::{target}\r\n\r\n"
+                ),
+            ),
+        };
+        out.push((from_dialer, text.into_bytes()));
+    }
+    out
+}
+
+/// NTP (123): 48 bytes, a client request (version 3 or 4, mode 3, only the
+/// transmit time set) answered by a server reply (stratum 2 or 3, fresh
+/// timestamps near the 2026 era).
+fn ntp_datagrams(rng: &mut Lcg, n: usize) -> Vec<(bool, Vec<u8>)> {
+    let era = |rng: &mut Lcg| -> Vec<u8> {
+        let mut t = (0xEC00_0000u32 + rng.next() as u32 % 0x0100_0000)
+            .to_be_bytes()
+            .to_vec();
+        t.extend_from_slice(&rand_bytes(rng, 4));
+        t
+    };
+    let mut out = Vec::new();
+    for i in 0..n {
+        let client = i % 2 == 0;
+        let mut m = vec![0u8; 48];
+        if client {
+            m[0] = *pick(rng, &[0x23u8, 0x23, 0x23, 0x1B]);
+            m[40..48].copy_from_slice(&era(rng));
+        } else {
+            m[0] = *pick(rng, &[0x24u8, 0x24, 0x1C]);
+            m[1] = *pick(rng, &[2u8, 3]);
+            m[2] = 6;
+            m[3] = 0xEC;
+            m[4..8].copy_from_slice(&(rng.next() as u32 % 0x0001_0000).to_be_bytes());
+            m[8..12].copy_from_slice(&(rng.next() as u32 % 0x0001_0000).to_be_bytes());
+            m[12..16].copy_from_slice(&rand_bytes(rng, 4));
+            for at in [16, 24, 32, 40] {
+                m[at..at + 8].copy_from_slice(&era(rng));
+            }
+        }
+        out.push((client, m));
+    }
+    out
+}
+
+/// CoAP (5683): a confirmable GET with a token of 0, 2, 4 or 8 bytes and a
+/// Uri-Path, answered by an ACK 2.05 that echoes message id and token and
+/// carries a JSON payload; one in four requests is a non-confirmable one.
+fn coap_datagrams(rng: &mut Lcg, n: usize) -> Vec<(bool, Vec<u8>)> {
+    let mut out = Vec::new();
+    let (mut mid, mut token) = (0u16, Vec::new());
+    for i in 0..n {
+        let request = i % 2 == 0;
+        let non = request && rng.below(4) == 0;
+        if request {
+            mid = rng.next() as u16;
+            let len = *pick(rng, &[0usize, 2, 4, 8]);
+            token = rand_bytes(rng, len);
+        }
+        let kind: u8 = if non {
+            1
+        } else if request {
+            0
+        } else {
+            2
+        };
+        let mut m = vec![0x40 | kind << 4 | token.len() as u8];
+        m.push(if request { 0x01 } else { 0x45 });
+        m.extend_from_slice(&mid.to_be_bytes());
+        m.extend_from_slice(&token);
+        if request {
+            let path = *pick(rng, &["sensors", "temp", "status", "light"]);
+            m.push(0xB0 | path.len() as u8);
+            m.extend_from_slice(path.as_bytes());
+        } else {
+            m.extend_from_slice(&[0xC1, 0x32, 0xFF]);
+            let body = alloc::format!("{{\"t\":{}.{}}}", 10 + rng.below(30), rng.below(10));
+            m.extend_from_slice(body.as_bytes());
+        }
+        out.push((request, m));
+    }
+    out
+}
+
+/// syslog (514) from the dialer only: RFC 3164 (`<PRI>Mon dd hh:mm:ss host
+/// app[pid]: text`) or RFC 5424 (`<PRI>1 timestamp host app pid msgid - text`).
+fn syslog_datagrams(rng: &mut Lcg, n: usize) -> Vec<(bool, Vec<u8>)> {
+    const WORDS: [&str; 8] = [
+        "started",
+        "stopped",
+        "connection",
+        "accepted",
+        "failed",
+        "timeout",
+        "session",
+        "link",
+    ];
+    let mut out = Vec::new();
+    for _ in 0..n {
+        let pri = *pick(rng, &[13u32, 14, 30, 34, 38, 86, 134, 165]);
+        let host = alloc::format!("ecu{}", rng.below(8));
+        let app = *pick(
+            rng,
+            &["sshd", "systemd", "avahi-daemon", "kernel", "dhclient"],
+        );
+        let pid = 100 + rng.below(30_000);
+        let text = alloc::format!(
+            "{} {} {} {}",
+            pick(rng, &WORDS),
+            pick(rng, &WORDS),
+            pick(rng, &WORDS),
+            rng.below(1000)
+        );
+        let (h, m, s) = (rng.below(24), rng.below(60), rng.below(60));
+        let line = if rng.below(2) == 0 {
+            alloc::format!(
+                "<{pri}>Oct {:>2} {h:02}:{m:02}:{s:02} {host} {app}[{pid}]: {text}",
+                1 + rng.below(28)
+            )
+        } else {
+            alloc::format!(
+                "<{pri}>1 2026-10-{:02}T{h:02}:{m:02}:{s:02}Z {host} {app} {pid} ID{} - {text}",
+                1 + rng.below(28),
+                rng.below(100)
+            )
+        };
+        out.push((true, line.into_bytes()));
+    }
+    out
+}
+
+/// A flow of structured datagrams on the protocol's own ports, dissected as a
+/// capture file is: its `zenoh` word, `(explained, residual, undecoded)` units,
+/// and the units.
+fn read_structured_flow(
+    datagrams: &[(bool, Vec<u8>)],
+    sport: u16,
+    dport: u16,
+) -> (ZenohVerdict, u64, u64, u64, u64) {
+    let mut packets = Packets::default();
+    for (i, (from_dialer, wire)) in datagrams.iter().enumerate() {
+        let packet = if *from_dialer {
+            udp_packet(LOW, sport, HIGH, dport, wire)
+        } else {
+            udp_packet(HIGH, dport, LOW, sport, wire)
+        };
+        packets.push(T0 + i as u64 * 1_000, packet);
+    }
+    let d = packets.dissect();
+    let table = session_table(&d);
+    let row = only(&table);
+    let readings = row.readings;
+    (
+        word(row.zenoh),
+        readings.explained.units,
+        readings.residual.units,
+        readings.undecoded.units,
+        readings.units(),
+    )
+}
+
+/// WHAT STRUCTURED, NON-ZENOH DATAGRAMS READ AS (measured 2026-10-26, answering
+/// the question the random table above leaves open: structured bytes do not
+/// read like random ones, since a protocol whose first byte is fixed reads the
+/// same way every time).
+///
+/// The datagrams are GENERATED, not captured: each builder above writes the
+/// protocol's real layout (field order, flags, lengths, name compression, text
+/// headers) and draws the free fields (ids, tokens, hosts, addresses,
+/// timestamps, record counts and kinds) from the seeded generator. Where the
+/// protocol has two directions the flow alternates them as the protocol does
+/// (query and reply, request and ACK), and mDNS picks the direction by chance
+/// as a multicast group does. The ports are the protocol's own. A generator
+/// holds a population's shape and not its real spread: a device whose first byte
+/// differs from the one written here, or a vendor extension, reads differently,
+/// so each row is what that layout reads as, not a measurement of every device
+/// that speaks the protocol.
+///
+/// Per protocol, 600 seeded flows of `n` datagrams each, the share being
+/// `explained` units over all units. Columns: mean, p95, p99, max, and the number
+/// of the 600 flows at or above 0.5.
+///
+/// | n | mDNS | DNS | CoAP | NTP | SSDP, syslog |
+/// |---|---|---|---|---|---|
+/// | 1 | 0.185 / 1.00 / 1.00 / 1.00 / 111 | 0.060 / 1.00 / 1.00 / 1.00 / 36 | 0.002 / 0 / 0 / 1.00 / 1 | 0 / 0 / 0 / 0 / 0 | 0 |
+/// | 2 | 0.158 / 0.50 / 1.00 / 1.00 / 171 | 0.066 / 1.00 / 1.00 / 1.00 / 42 | 0.120 / 0.50 / 0.50 / 0.50 / 144 | 0.012 / 0 / 0.50 / 0.50 / 14 | 0 |
+/// | 3 | 0.166 / 0.67 / 0.67 / 1.00 / 43 | 0.067 / 0.67 / 0.67 / 1.00 / 39 | 0.082 / 0.33 / 0.33 / 0.33 / 0 | 0.010 / 0 / 0.33 / 0.33 / 0 | 0 |
+/// | 5 | 0.168 / 0.40 / 0.60 / 0.80 / 22 | 0.081 / 0.40 / 0.40 / 0.80 / 6 | 0.103 / 0.40 / 0.40 / 0.40 / 0 | 0.008 / 0 / 0.20 / 0.20 / 0 | 0 |
+/// | 10 | 0.164 / 0.40 / 0.40 / 0.50 / 5 | 0.078 / 0.40 / 0.40 / 0.60 / 2 | 0.135 / 0.30 / 0.40 / 0.50 / 1 | 0.012 / 0.10 / 0.10 / 0.20 / 0 | 0 |
+/// | 20 | 0.164 / 0.30 / 0.35 / 0.45 / 0 | 0.070 / 0.20 / 0.30 / 0.30 / 0 | 0.129 / 0.25 / 0.30 / 0.40 / 0 | 0.011 / 0.05 / 0.10 / 0.15 / 0 | 0 |
+/// | 50 | 0.160 / 0.24 / 0.30 / 0.32 / 0 | 0.071 / 0.16 / 0.20 / 0.28 / 0 | 0.132 / 0.20 / 0.24 / 0.26 / 0 | 0.010 / 0.04 / 0.06 / 0.06 / 0 | 0 |
+///
+/// Each cell reads mean / p95 / p99 / max / flows at or above 0.5 (SSDP and
+/// syslog read every unit `undecoded`, 54600 of 54600 each, so their cell is
+/// zero throughout). Over all 54600 datagrams of a protocol the three classes
+/// split `explained` / `residual` / `undecoded` as: mDNS 8847 / 45753 / 0, DNS
+/// 3926 / 5927 / 44747, CoAP 6929 / 11796 / 35875, NTP 575 / 38160 / 15865.
+///
+/// What it says against the random table (n = 10: mean 0.061, max 0.40):
+///
+/// * A flow of ten or more datagrams CAN reach a share of 0.5 on structured
+///   bytes that are not zenoh: mDNS in 5 of 600 flows of ten, DNS in 2 (up to
+///   0.60) and CoAP in 1. None does at twenty or more, where the widest is mDNS
+///   at 0.45 (n = 20) and 0.32 (n = 50). So a sentence bounded by "ten units,
+///   half read whole" is crossed by real protocols, and one bounded by twenty is
+///   not, with a margin of 0.05 at its narrowest.
+/// * The mean share is no better than random: mDNS and CoAP sit at 0.16 and
+///   0.13 against random's 0.06. The mDNS id is always 0, so every datagram
+///   starts with the same byte pair and reads the same way: 84% `residual`, 16%
+///   `explained`, never `undecoded`. The unit count does not separate it from
+///   zenoh as well as it separates random bytes.
+/// * `proven` is not exclusive to zenoh: see
+///   `a_dns_datagram_whose_id_reads_as_a_join_header_is_proven`.
+#[test]
+fn structured_datagrams_of_other_protocols_read_by_their_first_byte() {
+    type Builder = fn(&mut Lcg, usize) -> Vec<(bool, Vec<u8>)>;
+    let protocols: [(&str, Builder, u16, u16); 6] = [
+        ("mdns", mdns_datagrams, 5353, 5353),
+        ("ssdp", ssdp_datagrams, 43_210, 1900),
+        ("dns", dns_datagrams, 43_210, 53),
+        ("ntp", ntp_datagrams, 43_210, 123),
+        ("coap", coap_datagrams, 43_210, 5683),
+        ("syslog", syslog_datagrams, 43_210, 514),
+    ];
+    for (name, build, sport, dport) in protocols {
+        let mut all = (0u64, 0u64, 0u64);
+        let mut proven = 0u64;
+        let mut rows = Vec::new();
+        for n in [1usize, 2, 3, 5, 10, 20, 50] {
+            let mut rng = Lcg(0x57A7 + n as u64);
+            let mut shares = Vec::new();
+            for _ in 0..600 {
+                let datagrams = build(&mut rng, n);
+                let (verdict, e, r, u, units) = read_structured_flow(&datagrams, sport, dport);
+                assert_eq!(units, n as u64, "{name}: one unit per datagram");
+                proven += u64::from(verdict == ZenohVerdict::Proven);
+                all = (all.0 + e, all.1 + r, all.2 + u);
+                shares.push(e as f64 / n as f64);
+            }
+            shares.sort_by(f64::total_cmp);
+            let at = |q: f64| shares[((shares.len() as f64 * q).ceil() as usize).max(1) - 1];
+            let mean = shares.iter().sum::<f64>() / shares.len() as f64;
+            let over = shares.iter().filter(|s| **s >= 0.5).count();
+            rows.push((n, mean, at(0.95), at(0.99), at(1.0), over));
+        }
+        // A failing bound prints the protocol's whole row set, so the table
+        // above is regenerated from the message and not from a debugger.
+        let rows_text = alloc::format!("{name}: {all:?} proven {proven}: {rows:?}");
+        for (n, mean, _, _, max, over) in &rows {
+            if *n >= 20 {
+                assert!(
+                    *max < 0.5,
+                    "{name} reached a share of {max} at {n} datagrams: {rows_text}"
+                );
+            }
+            assert!(*max <= 1.0 && *mean < 0.25, "{rows_text}");
+            if *n == 10 {
+                assert!(*max <= 0.7 && *over <= 30, "{rows_text}");
+            }
+        }
+        match name {
+            "ssdp" | "syslog" => assert_eq!(all.0 + all.1, 0, "text reads undecoded: {rows_text}"),
+            "mdns" => {
+                let ten = rows.iter().find(|r| r.0 == 10).unwrap();
+                assert!(ten.5 >= 1, "mdns no longer reaches 0.5 at ten: {rows_text}");
+                assert_eq!(all.2, 0, "{rows_text}");
+            }
+            _ => {}
+        }
+        assert!(
+            proven <= if name == "dns" { 4 } else { 0 },
+            "proven flows: {rows_text}"
+        );
+    }
+}
+
+/// THE ONE WAY STRUCTURED BYTES OF ANOTHER PROTOCOL WERE `proven` (measured
+/// 2026-10-26, 2 of 4200 generated DNS flows, none of the 4200 of any other
+/// protocol): a DNS id is two random bytes, and an id of `0x6109` or `0x4709`
+/// writes a Scout or a Join header followed by the protocol version, which the
+/// reader accepts. The datagram holds one such header and nothing else of zenoh.
+///
+/// This is not the chance of random bytes read twice: it is one datagram in
+/// roughly 27000 here, against none in the 3000 random datagrams of
+/// `arbitrary_datagrams_mostly_do_not_read_as_explained`.
+#[test]
+fn a_dns_datagram_whose_id_reads_as_a_join_header_is_proven() {
+    for id in [0x6109u16, 0x4709] {
+        let mut wire = id.to_be_bytes().to_vec();
+        wire.extend_from_slice(&[0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]);
+        wire.extend_from_slice(&dns_name("update.example.com"));
+        wire.extend_from_slice(&[0, 1, 0, 1]);
+        let (verdict, ..) = read_structured_flow(&[(true, wire)], 43_210, 53);
+        assert_eq!(verdict, ZenohVerdict::Proven, "id {id:#06x}");
+    }
+}
+
 /// ARBITRARY BYTES ON A STREAM FORM NO UNIT AT ALL: the framing this reader
 /// applies to a zenoh stream refuses a header no sender could have written, so
 /// the bytes are skipped while it resynchronises and are not units. Five seeded
