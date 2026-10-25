@@ -1013,8 +1013,22 @@ declare -A BASELINE_MC_TEXT=(
     # this image: it reads 69688 at that commit and carries no auth extension. data is 4 and bss
     # 270120 on both here (hosted 270112, the toolchain term). The hosted toolchain reads
     # thumbv7em-hf +40 B over this host's figure, inside the band. Old: 68156/68120.
-    ["thumbv7m-none-eabi"]=69776
-    ["thumbv7em-none-eabihf"]=69864
+    #
+    # 2026-10-25 -- thumbv7m 69776 -> 70172, thumbv7em-hf 69864 -> 70304, from one commit,
+    # `77df225a7` (round 3617), which sizes a Push's frame buffer from the message
+    # (`frame_encode::push_capacity_hint`) in place of the generated codec's reserve constant
+    # (2456 bytes for an eighteen-byte Put). Bisected on the build host by two sessions:
+    # thumbv7m reads 69792 at its predecessor `944fad43c` and 70172 at the commit (+380,
+    # `frame_encode.rs` +178 and the call sites in `multicast_tx.rs`); Layer Q on the tree after
+    # it reads 70172 / 70304 (+396 / +440 over the old figures, one toolchain, rustc 1.97.0 /
+    # gcc 13.2.1). It is code that this image reaches (the group send frames every Push through
+    # it) and not a leak: the function walks the message's own fields once and is the whole of
+    # what lowers a delivered copy's frame buffer from 2.4 KiB to the message's size (router hot
+    # path bytes per forward 2939 -> 569 for one subscriber). The alternative, trimming it, would
+    # trade the exact upper bound (a slot too small is a refused send on the lend path) for
+    # bytes of ROM, and was not taken. data is 4 and bss 270120 on both. Old: 69776/69864.
+    ["thumbv7m-none-eabi"]=70172
+    ["thumbv7em-none-eabihf"]=70304
 )
 # shellcheck disable=SC2034  # resolved through the `declare -n _bt/_bd/_bb`
                             # namerefs in the `case "$artifact"` dispatch below; shellcheck
