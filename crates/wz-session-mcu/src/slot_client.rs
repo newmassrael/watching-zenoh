@@ -29,13 +29,16 @@ use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
 use wz_session_core::encoding::PACKED_APPLICATION_JSON;
 use wz_session_core::locality::Locality;
+use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::query::QueryableRegistry;
 use wz_session_core::query_sink::{FnQuerySink, QueryView, ReplyOut};
 use wz_session_core::registry_error::RegisterError;
+use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::slot_observer::{NoSink, ObserverSinks};
 
 use crate::connect_manager::{ConnectManager, EndpointSource};
+use crate::latest::{LatestRef, LatestSink};
 use crate::slot_dial::{Bind, SessionFactory, SlotDialer, SlotSession};
 use crate::slot_host::SessionHost;
 
@@ -177,30 +180,52 @@ fn declare<C: ClockSource + 'static>(
     }
 }
 
-/// A queryable that answers every query with one JSON document, under the key the query asked
-/// (`z_query_keyexpr`, as zenoh-pico's comparison image replies): a function and the document it
-/// answers with, stored inline, so the registry that holds it is typed by it and the registration
-/// allocates nothing.
-pub type DocumentSink = FnQuerySink<&'static str>;
+/// What a queryable answers with: one fixed JSON document, or the latest sample a subscription of
+/// the node kept.
+#[derive(Clone, Copy)]
+pub enum Answer {
+    /// A fixed document, answered under the key the query asked.
+    Document(&'static str),
+    /// The payload of a cell of the node's subscriptions, as it arrived. Nothing is answered while
+    /// no sample has reached the cell, so a querier gets the final of an empty reply and not an
+    /// invented value.
+    Latest(LatestRef),
+}
 
-/// The observer's registrations of a client that answers documents: queryables of [`DocumentSink`]
-/// and none of the other kinds.
+/// A queryable that answers every query with one JSON document, or from a subscription's latest
+/// sample, under the key the query asked (`z_query_keyexpr`, as zenoh-pico's comparison image
+/// replies): a function and what it answers with, stored inline, so the registry that holds it is
+/// typed by it and the registration allocates nothing.
+pub type DocumentSink = FnQuerySink<Answer>;
+
+/// The observer's registrations of a client that answers documents and keeps what it subscribes to:
+/// queryables of [`DocumentSink`], subscriptions of [`LatestSink`], and none of the other kinds.
 pub struct DocumentSinks;
 
 impl ObserverSinks for DocumentSinks {
-    type Subscriber = NoSink;
+    type Subscriber = LatestSink;
     type Queryable = DocumentSink;
     type Declared = NoSink;
     type Undeclared = NoSink;
 }
 
-fn answer_document(body: &mut &'static str, query: &dyn QueryView, out: &mut dyn ReplyOut) {
-    let _ = out.reply_keyed_encoded_parts(
-        query.keyexpr(),
-        body.as_bytes(),
-        PACKED_APPLICATION_JSON,
-        None,
-    );
+fn answer(source: &mut Answer, query: &dyn QueryView, out: &mut dyn ReplyOut) {
+    match *source {
+        Answer::Document(body) => {
+            let _ = out.reply_keyed_encoded_parts(
+                query.keyexpr(),
+                body.as_bytes(),
+                PACKED_APPLICATION_JSON,
+                None,
+            );
+        }
+        Answer::Latest(cell) => cell.slots.with(cell.index, &mut |latest| {
+            // A delete is not a value to answer with.
+            if let Some(latest) = latest.filter(|l| l.kind == SampleKind::Put) {
+                let _ = out.reply_keyed(query.keyexpr(), latest.payload);
+            }
+        }),
+    }
 }
 
 /// Register on `queryables` a queryable under `key` that answers every query with `body`. `Err`
@@ -211,12 +236,30 @@ pub fn register_document(
     key: &str,
     body: &'static str,
 ) -> Result<(), RegisterError> {
+    register_answer(queryables, key, Answer::Document(body))
+}
+
+/// Register on `queryables` a queryable under `key` that answers with `source`. The refusals are
+/// [`register_document`]'s.
+pub fn register_answer(
+    queryables: &mut QueryableRegistry<DocumentSink>,
+    key: &str,
+    source: Answer,
+) -> Result<(), RegisterError> {
     queryables
-        .register_sink(
-            key,
-            Locality::Any,
-            false,
-            FnQuerySink::new(body, answer_document),
-        )
+        .register_sink(key, Locality::Any, false, FnQuerySink::new(source, answer))
+        .map(|_id| ())
+}
+
+/// Register on `subscribers` a subscription under `key` that keeps the latest sample in `sink`'s
+/// cell. `Err` when the table is full or `key` does not fit, which stops an image rather than
+/// starting it declaring what nothing takes.
+pub fn register_latest(
+    subscribers: &mut SubscriberTable<LatestSink>,
+    key: &str,
+    sink: LatestSink,
+) -> Result<(), RegisterError> {
+    subscribers
+        .register_sink(key, Locality::Any, sink)
         .map(|_id| ())
 }

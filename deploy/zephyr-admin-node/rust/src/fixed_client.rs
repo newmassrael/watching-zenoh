@@ -45,7 +45,8 @@ use wz_session_core::session_slot::SessionSlots;
 #[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_node::Answering;
 use wz_session_mcu::slot_node::{
-    ClientNode, Declared, Document, NodeIdentity, NodePort, NodeStorage, SIGNING_KEY_BYTES,
+    ClientNode, Declared, Document, Entities, NodeIdentity, NodePort, NodeStorage,
+    SIGNING_KEY_BYTES,
 };
 
 use crate::{
@@ -309,6 +310,7 @@ pub fn run() -> i32 {
         entropy: || ZephyrEntropy,
         endpoints: &ENDPOINTS,
         documents: &DOCUMENTS,
+        entities: Entities::NONE,
         layer,
         idle_sleep_us: IDLE_SLEEP,
         report_every_ms: LOOP_REPORT_MS,

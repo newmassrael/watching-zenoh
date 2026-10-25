@@ -65,8 +65,10 @@ use wz_session_core::WhatAmI;
 
 use crate::app_layer::{NoReplies, SessionEvents, SlotApp, SlotDispatch};
 use crate::connect_manager::EndpointSource;
+use crate::latest::{LatestRef, LatestSink};
 use crate::slot_client::{
-    register_document, Declaration, DeclarationKind, DocumentSinks, SlotClientNode,
+    register_answer, register_document, register_latest, Answer, Declaration, DeclarationKind,
+    DocumentSinks, SlotClientNode,
 };
 use crate::slot_dial::SessionFactory;
 use crate::slot_host::SessionHost;
@@ -372,12 +374,54 @@ impl<const N: usize> Default for Declared<N> {
     }
 }
 
+/// A subscription the node declares: every sample the router forwards on `key` is kept in a cell,
+/// cut to `capacity` bytes.
+#[derive(Clone, Copy)]
+pub struct Subscription {
+    /// The key it is declared under.
+    pub key: &'static str,
+    /// The cell that keeps the latest sample, and which one it is.
+    pub cell: LatestRef,
+    /// The bytes of a payload it keeps.
+    pub capacity: usize,
+}
+
+/// A queryable the node answers from a subscription: every query under `key` is answered with the
+/// payload the subscription's cell holds (nothing while the cell is empty).
+#[derive(Clone, Copy)]
+pub struct Mirror {
+    /// The key the queryable is declared under.
+    pub key: &'static str,
+    /// The cell it answers from.
+    pub cell: LatestRef,
+}
+
+/// The entities a node declares beside its documents: what it subscribes to, and what it answers
+/// from those subscriptions.
+#[derive(Clone, Copy)]
+pub struct Entities<'a> {
+    /// The subscriptions.
+    pub subscriptions: &'a [Subscription],
+    /// The queryables that answer from them.
+    pub mirrors: &'a [Mirror],
+}
+
+impl Entities<'static> {
+    /// A node that declares only its documents.
+    pub const NONE: Self = Self {
+        subscriptions: &[],
+        mirrors: &[],
+    };
+}
+
 /// Why the node's observer could not be built. The node does not start: it would declare what
 /// nothing answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallRefused {
     /// The registry refused a queryable (it is full, or the key does not fit).
     Registry,
+    /// The subscriber table refused a subscription (it is full, or the key does not fit).
+    Subscriptions,
     /// More documents than the node can declare.
     TooManyDeclarations,
     /// The observer was built before.
@@ -389,6 +433,7 @@ impl InstallRefused {
     pub const fn message(self) -> &'static str {
         match self {
             Self::Registry => "wz: FAIL - the node's observer refused a queryable",
+            Self::Subscriptions => "wz: FAIL - the node's observer refused a subscription",
             Self::TooManyDeclarations => "wz: FAIL - more documents than declarations",
             Self::Twice => "wz: FAIL - the observer was installed twice",
         }
@@ -406,6 +451,18 @@ pub fn install_documents<const N: usize>(
     documents: &[Document],
     declared: &Declared<N>,
 ) -> Result<&'static ObserverCell<DocumentSinks>, InstallRefused> {
+    install_entities(app, documents, &Entities::NONE, declared)
+}
+
+/// [`install_documents`], and the subscriptions and the queryables that answer from them. The
+/// declarations are recorded in this order: the documents, the mirrors, the subscriptions.
+#[inline(never)]
+pub fn install_entities<const N: usize>(
+    app: &'static SlotApp<DocumentSinks>,
+    documents: &[Document],
+    entities: &Entities<'_>,
+    declared: &Declared<N>,
+) -> Result<&'static ObserverCell<DocumentSinks>, InstallRefused> {
     let installed = app.install_with(|observer| {
         for document in documents {
             register_document(&mut observer.queryables, document.key, document.body)
@@ -413,6 +470,35 @@ pub fn install_documents<const N: usize>(
             if !declared.push(Declaration {
                 kind: DeclarationKind::Queryable,
                 key: document.key,
+            }) {
+                return Err(InstallRefused::TooManyDeclarations);
+            }
+        }
+        for mirror in entities.mirrors {
+            register_answer(
+                &mut observer.queryables,
+                mirror.key,
+                Answer::Latest(mirror.cell),
+            )
+            .map_err(|_| InstallRefused::Registry)?;
+            if !declared.push(Declaration {
+                kind: DeclarationKind::Queryable,
+                key: mirror.key,
+            }) {
+                return Err(InstallRefused::TooManyDeclarations);
+            }
+        }
+        for subscription in entities.subscriptions {
+            let sink = LatestSink::new(
+                subscription.cell.slots,
+                subscription.cell.index,
+                subscription.capacity,
+            );
+            register_latest(&mut observer.subscribers, subscription.key, sink)
+                .map_err(|_| InstallRefused::Subscriptions)?;
+            if !declared.push(Declaration {
+                kind: DeclarationKind::Subscriber,
+                key: subscription.key,
             }) {
                 return Err(InstallRefused::TooManyDeclarations);
             }
@@ -765,6 +851,9 @@ pub struct ClientNode<
     pub endpoints: &'static dyn EndpointSource,
     /// What it answers.
     pub documents: &'a [Document],
+    /// What it subscribes to, and what it answers from that ([`Entities::NONE`] for a node that
+    /// only answers documents). `DOCS` counts the declarations of all of them.
+    pub entities: Entities<'a>,
     /// What a session reports to.
     pub layer: L,
     /// How long the loop sleeps between two dials of a router that is not up.
@@ -813,6 +902,7 @@ where
             entropy,
             endpoints,
             documents,
+            entities,
             layer,
             idle_sleep_us,
             report_every_ms,
@@ -828,7 +918,7 @@ where
         // The application's registrations, on the observer the session dispatches to. A node
         // whose registrations were refused would declare what nothing answers: stop instead,
         // with the reason.
-        let observer = match install_documents(&storage.app, documents, declared) {
+        let observer = match install_entities(&storage.app, documents, &entities, declared) {
             Ok(observer) => observer,
             Err(why) => {
                 port.log(format_args!("{}", why.message()));
@@ -912,9 +1002,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::latest::{LatestCells, LatestSlots};
     use alloc::boxed::Box;
-    use wz_session_core::caps::MAX_QUERYABLES;
+    use wz_session_core::caps::{MAX_QUERYABLES, MAX_SUBSCRIPTIONS};
+    use wz_session_core::reliability::Reliability;
+    use wz_session_core::sample_kind::SampleKind;
     use wz_session_core::session_init_params::zid_bytes;
+    use wz_session_core::sink::BorrowedSample;
 
     /// A watch over counters that are one number, with a report every 5 s.
     fn watch() -> RoundWatch<u32> {
@@ -1062,6 +1156,140 @@ mod tests {
         assert!(all.iter().all(|d| d.kind == DeclarationKind::Queryable));
     }
 
+    fn cells<const K: usize, const N: usize>() -> &'static LatestCells<K, N> {
+        Box::leak(Box::new(LatestCells::new()))
+    }
+
+    fn subscription(
+        key: &'static str,
+        slots: &'static dyn LatestSlots,
+        index: usize,
+    ) -> Subscription {
+        Subscription {
+            key,
+            cell: LatestRef { slots, index },
+            capacity: 4,
+        }
+    }
+
+    #[test]
+    fn documents_then_mirrors_then_subscriptions_are_declared_in_that_order() {
+        // A build whose limits are below what this test declares cannot compile it.
+        const { assert!(MAX_QUERYABLES >= 2 && MAX_SUBSCRIPTIONS >= 1) };
+        let slots = cells::<1, 8>();
+        let subscriptions = [subscription("demo/in", slots, 0)];
+        let mirrors = [Mirror {
+            key: "demo/in",
+            cell: LatestRef { slots, index: 0 },
+        }];
+        let documents = [Document {
+            key: "demo/doc",
+            body: "{}",
+        }];
+        let declared = declared::<3>();
+        install_entities(
+            app(),
+            &documents,
+            &Entities {
+                subscriptions: &subscriptions,
+                mirrors: &mirrors,
+            },
+            declared,
+        )
+        .unwrap();
+        let all = declared.all();
+        let seen: alloc::vec::Vec<_> = all.iter().map(|d| (d.kind, d.key)).collect();
+        assert_eq!(
+            seen,
+            [
+                (DeclarationKind::Queryable, "demo/doc"),
+                (DeclarationKind::Queryable, "demo/in"),
+                (DeclarationKind::Subscriber, "demo/in"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sample_on_a_subscribed_key_reaches_its_cell_and_one_off_it_does_not() {
+        const { assert!(MAX_SUBSCRIPTIONS >= 1) };
+        let slots = cells::<1, 8>();
+        let subscriptions = [subscription("demo/in", slots, 0)];
+        let shared = app();
+        let observer = install_entities(
+            shared,
+            &[],
+            &Entities {
+                subscriptions: &subscriptions,
+                mirrors: &[],
+            },
+            declared::<1>(),
+        )
+        .unwrap();
+        let view = |key: &'static str, payload: &'static [u8]| BorrowedSample {
+            keyexpr: key,
+            payload,
+            kind: SampleKind::Put,
+            reliability: Reliability::Reliable,
+        };
+        let reached = observer
+            .borrow_mut()
+            .subscribers
+            .dispatch_borrowed(&view("demo/in", b"21.5!"), true);
+        assert_eq!(reached, 1);
+        let reached = observer
+            .borrow_mut()
+            .subscribers
+            .dispatch_borrowed(&view("demo/elsewhere", b"x"), true);
+        assert_eq!(reached, 0);
+        let mut kept = None;
+        slots.with(0, &mut |latest| {
+            kept = latest.map(|l| (l.payload.len(), l.received_len, l.sequence));
+        });
+        // Cut at the subscription's capacity (4), the length it arrived with kept, taken once.
+        assert_eq!(kept, Some((4, 5, 1)));
+    }
+
+    #[test]
+    fn more_subscriptions_than_the_table_holds_stops_the_node() {
+        let slots = cells::<1, 8>();
+        let subscriptions: alloc::vec::Vec<Subscription> = (0..=MAX_SUBSCRIPTIONS)
+            .map(|_| subscription("demo/in", slots, 0))
+            .collect();
+        assert_eq!(
+            install_entities(
+                app(),
+                &[],
+                &Entities {
+                    subscriptions: &subscriptions,
+                    mirrors: &[],
+                },
+                declared::<{ MAX_SUBSCRIPTIONS + 1 }>(),
+            )
+            .err(),
+            Some(InstallRefused::Subscriptions)
+        );
+    }
+
+    #[test]
+    fn more_entities_than_declarations_stops_the_node() {
+        const { assert!(MAX_SUBSCRIPTIONS >= 1) };
+        let slots = cells::<1, 8>();
+        let subscriptions = [subscription("demo/in", slots, 0)];
+        assert_eq!(
+            install_entities(
+                app(),
+                &[],
+                &Entities {
+                    subscriptions: &subscriptions,
+                    mirrors: &[],
+                },
+                declared::<0>(),
+            )
+            .err(),
+            Some(InstallRefused::TooManyDeclarations)
+        );
+    }
+
     #[test]
     fn a_node_with_no_documents_declares_nothing() {
         let declared = declared::<2>();
@@ -1118,6 +1346,7 @@ mod tests {
     fn every_refusal_has_its_own_console_line() {
         let all = [
             InstallRefused::Registry,
+            InstallRefused::Subscriptions,
             InstallRefused::TooManyDeclarations,
             InstallRefused::Twice,
         ];

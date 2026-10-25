@@ -84,6 +84,10 @@ pub mod slot_dial;
 // endpoints, and the declarations sent on every session as it establishes.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_client;
+// The latest sample of a subscription, in storage the image declared: what a node that
+// subscribes keeps, and what a queryable that answers from it reads.
+#[cfg(all(feature = "session-slot", feature = "client-core"))]
+pub mod latest;
 // The application of that client, written once for every platform: its storage, its factory and
 // the loop that drives it. A platform is a `NodePort` and nothing of the loop.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]

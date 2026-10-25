@@ -68,7 +68,7 @@ use wz_session_mcu::dial::parse_locator;
 #[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_node::Answering;
 use wz_session_mcu::slot_node::{
-    documents_of, BodyPool, ClientNode, Declared, NodeIdentity, NodePort, NodeStorage,
+    documents_of, BodyPool, ClientNode, Declared, Entities, NodeIdentity, NodePort, NodeStorage,
     SingleEndpoint,
 };
 
@@ -339,6 +339,7 @@ fn run(args: Args) -> i32 {
         entropy: || PosixEntropy,
         endpoints: &ROUTER,
         documents: &documents[..taken],
+        entities: Entities::NONE,
         #[cfg(not(feature = "get"))]
         layer: Answering,
         #[cfg(feature = "get")]
