@@ -798,6 +798,9 @@ def package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib.
             sub = "lib" if row["kind"] == "shared-library" else "bin"
             (out / sub).mkdir(exist_ok=True)
             shutil.copyfile(built, out / sub / want)
+            # The file a tool runs or loads is the one cargo made, mode and all: an executable
+            # copied without its execute bit is a package that cannot be started.
+            shutil.copymode(built, out / sub / want)
             blob = (out / sub / want).read_bytes()
             entries.append(artifact_entry(decl, platform, row, f"{sub}/{want}", blob, features, resolved))
         manifest = assemble(decl, platform, git_state(), toolchain, entries, view)
