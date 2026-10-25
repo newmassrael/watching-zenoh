@@ -287004,6 +287004,50 @@
         "The hosted runs of this family's pushes are still to be read per job."
       ]
     },
+    "Round 3626": {
+      "decision_summary": "The shared part of paced declaration sync is built, and the design it follows is filed. docs/declaration-sync-pacing.md describes an optional paced replay of the declarations a node owes a new peer: bounded turns, a refused send resuming where it failed, and a stability wait. The owners showed the shared part cannot be a cache: the heap runtime holds one ordered cache, the cooperative engine holds lists by kind and the fixed-memory slot node holds a static slice it never changes at run time. So wz-session-core gets ReplayCursor, a pure place in a sequence with no list, clock, heap or I/O. turn(burst) says what to emit now, refused(at) resumes there, and inserted(place) and removed(place) return Owed or EmitNow and Silent or Retract, so a host cannot get the rules for a live declare or retract made during the replay wrong without ignoring a returned value. Nothing reads it yet and no switch is declared: the policy and its three limits arrive in the change that first reads them.",
+      "changes_bullets": [
+        "docs/declaration-sync-pacing.md: the design (rules 1 to 9, the three host shapes, the phases, the open questions), agreed in part with the sessions that answered: the router's replay is out of scope and its turns go with the task-per-face work; the cooperative engine and the slot node call the cursor from their own files, written by their owners.",
+        "crates/wz-session-core: replay_cursor.rs (ReplayCursor, Insertion, Removal; fifteen tests, among them one per return value, the refusal resume, the finished and idle behaviour, and a model of a host and a peer driven over two hundred pseudo-random interleavings that checks the peer ends holding exactly what the host holds), registered in lib.rs."
+      ],
+      "verification_bullets": [
+        "On the build host the fifteen cursor tests pass with all features and with no default features, the no_std build with no allocator that the slot node uses.",
+        "Red first, twice, each reverted with no trace left: an insertion before the cursor that does not move the cursor fails four tests, among them the model; a retraction at the cursor counted as already told fails exactly the at-the-cursor test and the model.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-session-core; feature_gate_diagnostic passes; cargo doc of wz-session-core counts 495, its budget (the first run counted 506: eleven links in the module header did not resolve, found by comparing with origin/main and fixed with full paths).",
+        "The pre-push round-fed array, 113 gates, exits 0 on the rebased tree with 0 failed; the count-guard lint, the citation form gate and the reason pin gate pass.",
+        "Not run: the hosted run, and any host: no host calls the cursor yet."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "The policy declaration-sync-pacing and its limits (burst, interval, final timeout) are declared in the change that first reads them, the heap runtime's replay_declarations, which is the first host; the reconnect driver there has no session working in it and phase 2 edits its one call.",
+        "The cooperative engine's redeclare and the slot node's declare_all take the cursor in changes by the sessions that own those files; the slot node's repeat-from-index-0 after a refused send is a defect with pacing off too.",
+        "The stability wait and the per-peer completion of the queryable and token planes need the interest final of those planes measured against upstream first.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "The shared part of paced declaration sync is built, and the design it follows is filed. docs/declaration-sync-pacing.md describes an optional paced replay of the declarations a node owes a new peer: bounded turns, a refused send resuming where it failed, and a stability wait. The owners showed the shared part cannot be a cache: the heap runtime holds one ordered cache, the cooperative engine holds lists by kind and the fixed-memory slot node holds a static slice it never changes at run time. So wz-session-core gets ReplayCursor, a pure place in a sequence with no list, clock, heap or I/O. turn(burst) says what to emit now, refused(at) resumes there, and inserted(place) and removed(place) return Owed or EmitNow and Silent or Retract, so a host cannot get the rules for a live declare or retract made during the replay wrong without ignoring a returned value. Nothing reads it yet and no switch is declared: the policy and its three limits arrive in the change that first reads them.",
+      "publishable_changes_bullets": [
+        "docs/declaration-sync-pacing.md: the design (rules 1 to 9, the three host shapes, the phases, the open questions), agreed in part with the sessions that answered: the router's replay is out of scope and its turns go with the task-per-face work; the cooperative engine and the slot node call the cursor from their own files, written by their owners.",
+        "crates/wz-session-core: replay_cursor.rs (ReplayCursor, Insertion, Removal; fifteen tests, among them one per return value, the refusal resume, the finished and idle behaviour, and a model of a host and a peer driven over two hundred pseudo-random interleavings that checks the peer ends holding exactly what the host holds), registered in lib.rs."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host the fifteen cursor tests pass with all features and with no default features, the no_std build with no allocator that the slot node uses.",
+        "Red first, twice, each reverted with no trace left: an insertion before the cursor that does not move the cursor fails four tests, among them the model; a retraction at the cursor counted as already told fails exactly the at-the-cursor test and the model.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-session-core; feature_gate_diagnostic passes; cargo doc of wz-session-core counts 495, its budget (the first run counted 506: eleven links in the module header did not resolve, found by comparing with origin/main and fixed with full paths).",
+        "The pre-push round-fed array, 113 gates, exits 0 on the rebased tree with 0 failed; the count-guard lint, the citation form gate and the reason pin gate pass.",
+        "Not run: the hosted run, and any host: no host calls the cursor yet."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The policy declaration-sync-pacing and its limits (burst, interval, final timeout) are declared in the change that first reads them, the heap runtime's replay_declarations, which is the first host; the reconnect driver there has no session working in it and phase 2 edits its one call.",
+        "The cooperative engine's redeclare and the slot node's declare_all take the cursor in changes by the sessions that own those files; the slot node's repeat-from-index-0 after a refused send is a defect with pacing off too.",
+        "The stability wait and the per-peer completion of the queryable and token planes need the interest final of those planes measured against upstream first.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
