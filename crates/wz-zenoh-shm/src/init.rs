@@ -15,6 +15,20 @@
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-shm 1.10.1, file
 // src/init.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
 
+use crate::{
+    cleanup::CLEANUP,
+    metadata::{storage::GLOBAL_METADATA_STORAGE, subscription::GLOBAL_METADATA_SUBSCRIPTION},
+    watchdog::{confirmator::GLOBAL_CONFIRMATOR, validator::GLOBAL_VALIDATOR},
+};
+
+pub fn init() {
+    CLEANUP.init();
+    GLOBAL_METADATA_STORAGE.init();
+    GLOBAL_METADATA_SUBSCRIPTION.init();
+    GLOBAL_CONFIRMATOR.init();
+    GLOBAL_VALIDATOR.init();
+}
+
 /// Raise `RLIMIT_NOFILE` soft limit to hard limit.
 ///
 /// Call from SHM segment fan-in: [create], [open], [ensure_not_persistent]; not [init].

@@ -23530,6 +23530,9 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh-shm core)" 9 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_shm_core || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh-shm metadata)" 13 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_shm_metadata || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-buffers)" 5 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_buffers || return 1

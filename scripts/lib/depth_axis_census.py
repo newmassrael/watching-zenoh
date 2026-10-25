@@ -2814,7 +2814,10 @@ PIN_NO_SYMBOL = 0
 # R3586 -- 36 -> 37, one atom. `api-compat-rust`'s reason gains the first slice of `zenoh-shm` and
 # cites the test that holds its segments to upstream's. READ off the census's own FAIL line,
 # `wz citations: 37 against a pin of 36`.
-PIN_WZ_CITATIONS = 37
+# R3590 -- 37 -> 38, one atom. `api-compat-rust`'s reason gains the second slice of `zenoh-shm` and
+# cites the test that holds its metadata and watchdog to upstream's. READ off the census's own
+# FAIL line, `wz citations: 38 against a pin of 37`.
+PIN_WZ_CITATIONS = 38
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

@@ -16,3 +16,4 @@
 // src/api/provider/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
 
 pub mod chunk;
+pub mod types;

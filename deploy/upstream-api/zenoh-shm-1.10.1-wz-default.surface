@@ -3,14 +3,27 @@
 # toolchain: nightly-2026-06-07
 # format_version: 57
 const zenoh_shm::version::SHM_VERSION
+enum zenoh_shm::api::provider::types::ZAllocError
+enum zenoh_shm::api::provider::types::ZLayoutAllocError
+enum zenoh_shm::api::provider::types::ZLayoutError
 enum zenoh_shm::shm::SegmentCreateError
 enum zenoh_shm::shm::SegmentOpenError
+fn zenoh_shm::api::cleanup::cleanup_orphaned_shm_segments()
 fn zenoh_shm::api::common::types::PtrInSegment::new(*mut u8, alloc::sync::Arc<dyn core::any::Any + core::marker::Send + core::marker::Sync>) -> Self ; in impl zenoh_shm::api::common::types::PtrInSegment
 fn zenoh_shm::api::common::types::PtrInSegment::ptr(&Self) -> *const u8 ; in impl zenoh_shm::api::common::types::PtrInSegment
 fn zenoh_shm::api::common::types::PtrInSegment::ptr_mut(&mut Self) -> *mut u8 ; unsafe ; in impl zenoh_shm::api::common::types::PtrInSegment
 fn zenoh_shm::api::provider::chunk::AllocatedChunk::new(zenoh_shm::api::provider::chunk::ChunkDescriptor, zenoh_shm::api::common::types::PtrInSegment) -> Self ; in impl zenoh_shm::api::provider::chunk::AllocatedChunk
 fn zenoh_shm::api::provider::chunk::ChunkDescriptor::has_optimal_layout() -> bool ; const ; in impl zenoh_shm::api::provider::chunk::ChunkDescriptor where core::num::nonzero::NonZeroUsize: stabby_abi::istable::IStable, stabby_abi::Struct<stabby_abi::FieldPair<stabby_abi::FieldPair<zenoh_shm::api::common::types::SegmentID, zenoh_shm::api::common::types::ChunkID>, core::num::nonzero::NonZeroUsize>>: stabby_abi::istable::IStable, zenoh_shm::api::common::types::ChunkID: stabby_abi::istable::IStable, zenoh_shm::api::common::types::SegmentID: stabby_abi::istable::IStable
 fn zenoh_shm::api::provider::chunk::ChunkDescriptor::new(zenoh_shm::api::common::types::SegmentID, zenoh_shm::api::common::types::ChunkID, core::num::nonzero::NonZeroUsize) -> Self ; in impl zenoh_shm::api::provider::chunk::ChunkDescriptor
+fn zenoh_shm::api::provider::types::AllocAlignment::align_size(&Self, core::num::nonzero::NonZeroUsize) -> core::num::nonzero::NonZeroUsize ; in impl zenoh_shm::api::provider::types::AllocAlignment
+fn zenoh_shm::api::provider::types::AllocAlignment::for_type<T: core::marker::Sized>() -> Self ; const ; in impl zenoh_shm::api::provider::types::AllocAlignment
+fn zenoh_shm::api::provider::types::AllocAlignment::for_value<T: core::marker::Sized>(&T) -> Self ; const ; in impl zenoh_shm::api::provider::types::AllocAlignment
+fn zenoh_shm::api::provider::types::AllocAlignment::get_alignment_value(&Self) -> core::num::nonzero::NonZeroUsize ; in impl zenoh_shm::api::provider::types::AllocAlignment
+fn zenoh_shm::api::provider::types::AllocAlignment::new(u8) -> core::result::Result<Self, zenoh_shm::api::provider::types::ZLayoutError> ; const ; in impl zenoh_shm::api::provider::types::AllocAlignment
+fn zenoh_shm::init::init()
+fn zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor::header(&Self) -> &zenoh_shm::header::chunk_header::ChunkHeaderType ; in impl zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
+fn zenoh_shm::metadata::descriptor::OwnedWatchdog::confirm(&Self) ; in impl zenoh_shm::metadata::descriptor::OwnedWatchdog
+fn zenoh_shm::metadata::descriptor::OwnedWatchdog::new(&'static core::sync::atomic::AtomicU64, u64) -> Self ; in impl zenoh_shm::metadata::descriptor::OwnedWatchdog
 fn zenoh_shm::posix_shm::array::ArrayInSHM::create(core::num::nonzero::NonZeroUsize) -> zenoh_result::ZResult<Self> ; in impl<ID, Elem, ElemIndex> zenoh_shm::posix_shm::array::ArrayInSHM<ID, Elem, ElemIndex> where Elem: stabby_abi::istable::IStable<ContainsIndirections = stabby_abi::typenum2::unsigned::B0>, ElemIndex: 'static + num_traits::cast::AsPrimitive<usize> + num_traits::int::PrimInt + num_traits::sign::Unsigned, ID: zenoh_shm::shm::SegmentID, isize: num_traits::cast::AsPrimitive<ElemIndex>, rand::distributions::Standard: rand::distributions::distribution::Distribution<ID>
 fn zenoh_shm::posix_shm::array::ArrayInSHM::elem(&Self, ElemIndex) -> *const Elem ; unsafe ; in impl<ID, Elem, ElemIndex> zenoh_shm::posix_shm::array::ArrayInSHM<ID, Elem, ElemIndex> where Elem: stabby_abi::istable::IStable<ContainsIndirections = stabby_abi::typenum2::unsigned::B0>, ElemIndex: 'static + num_traits::cast::AsPrimitive<usize> + num_traits::int::PrimInt + num_traits::sign::Unsigned, ID: zenoh_shm::shm::SegmentID, isize: num_traits::cast::AsPrimitive<ElemIndex>, rand::distributions::Standard: rand::distributions::distribution::Distribution<ID>
 fn zenoh_shm::posix_shm::array::ArrayInSHM::elem_count(&Self) -> core::num::nonzero::NonZeroUsize ; in impl<ID, Elem, ElemIndex> zenoh_shm::posix_shm::array::ArrayInSHM<ID, Elem, ElemIndex> where Elem: stabby_abi::istable::IStable<ContainsIndirections = stabby_abi::typenum2::unsigned::B0>, ElemIndex: 'static + num_traits::cast::AsPrimitive<usize> + num_traits::int::PrimInt + num_traits::sign::Unsigned, ID: zenoh_shm::shm::SegmentID, isize: num_traits::cast::AsPrimitive<ElemIndex>, rand::distributions::Standard: rand::distributions::distribution::Distribution<ID>
@@ -38,19 +51,54 @@ fn zenoh_shm::shm::unix::SegmentImpl::len(&Self) -> core::num::nonzero::NonZeroU
 fn zenoh_shm::shm::unix::SegmentImpl::open(ID) -> zenoh_shm::shm::ShmOpenResult<Self> ; in impl<ID: zenoh_shm::shm::SegmentID> zenoh_shm::shm::unix::SegmentImpl<ID>
 impl core::clone::Clone for zenoh_shm::api::common::types::PtrInSegment
 impl core::clone::Clone for zenoh_shm::api::provider::chunk::ChunkDescriptor
+impl core::clone::Clone for zenoh_shm::api::provider::types::AllocAlignment
+impl core::clone::Clone for zenoh_shm::metadata::descriptor::MetadataDescriptor
+impl core::clone::Clone for zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
+impl core::clone::Clone for zenoh_shm::metadata::descriptor::OwnedWatchdog
 impl core::cmp::Eq for zenoh_shm::api::common::types::PtrInSegment
 impl core::cmp::Eq for zenoh_shm::api::provider::chunk::ChunkDescriptor
+impl core::cmp::Eq for zenoh_shm::api::provider::types::AllocAlignment
+impl core::cmp::Eq for zenoh_shm::metadata::descriptor::MetadataDescriptor
+impl core::cmp::Eq for zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
+impl core::cmp::Eq for zenoh_shm::metadata::descriptor::OwnedWatchdog
 impl core::cmp::Eq for zenoh_shm::posix_shm::segment::Segment
 impl core::cmp::Eq for zenoh_shm::posix_shm::struct_in_shm::StructInSHM
 impl core::cmp::Eq for zenoh_shm::shm::Segment
+impl core::cmp::Ord for zenoh_shm::api::provider::types::AllocAlignment
+impl core::cmp::Ord for zenoh_shm::metadata::descriptor::MetadataDescriptor
+impl core::cmp::Ord for zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
+impl core::cmp::Ord for zenoh_shm::metadata::descriptor::OwnedWatchdog
 impl core::cmp::PartialEq for zenoh_shm::api::common::types::PtrInSegment
 impl core::cmp::PartialEq for zenoh_shm::api::provider::chunk::ChunkDescriptor
+impl core::cmp::PartialEq for zenoh_shm::api::provider::types::AllocAlignment
+impl core::cmp::PartialEq for zenoh_shm::metadata::descriptor::MetadataDescriptor
+impl core::cmp::PartialEq for zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
+impl core::cmp::PartialEq for zenoh_shm::metadata::descriptor::OwnedWatchdog
 impl core::cmp::PartialEq for zenoh_shm::posix_shm::segment::Segment
 impl core::cmp::PartialEq for zenoh_shm::posix_shm::struct_in_shm::StructInSHM
 impl core::cmp::PartialEq for zenoh_shm::shm::Segment
+impl core::cmp::PartialOrd for zenoh_shm::api::provider::types::AllocAlignment
+impl core::cmp::PartialOrd for zenoh_shm::metadata::descriptor::MetadataDescriptor
+impl core::cmp::PartialOrd for zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
+impl core::cmp::PartialOrd for zenoh_shm::metadata::descriptor::OwnedWatchdog
+impl core::convert::From for zenoh_shm::api::provider::types::ZAllocError
+impl core::convert::From for zenoh_shm::api::provider::types::ZLayoutAllocError
+impl core::convert::From for zenoh_shm::api::provider::types::ZLayoutError
+impl core::convert::From for zenoh_shm::metadata::descriptor::MetadataDescriptor
+impl core::default::Default for zenoh_shm::api::provider::types::AllocAlignment
+impl core::error::Error for zenoh_shm::api::provider::types::ZAllocError
+impl core::error::Error for zenoh_shm::api::provider::types::ZLayoutAllocError
+impl core::error::Error for zenoh_shm::api::provider::types::ZLayoutError
 impl core::fmt::Debug for zenoh_shm::api::common::types::PtrInSegment
 impl core::fmt::Debug for zenoh_shm::api::provider::chunk::AllocatedChunk
 impl core::fmt::Debug for zenoh_shm::api::provider::chunk::ChunkDescriptor
+impl core::fmt::Debug for zenoh_shm::api::provider::types::AllocAlignment
+impl core::fmt::Debug for zenoh_shm::api::provider::types::ZAllocError
+impl core::fmt::Debug for zenoh_shm::api::provider::types::ZLayoutAllocError
+impl core::fmt::Debug for zenoh_shm::api::provider::types::ZLayoutError
+impl core::fmt::Debug for zenoh_shm::metadata::descriptor::MetadataDescriptor
+impl core::fmt::Debug for zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
+impl core::fmt::Debug for zenoh_shm::metadata::descriptor::OwnedWatchdog
 impl core::fmt::Debug for zenoh_shm::posix_shm::array::ArrayInSHM
 impl core::fmt::Debug for zenoh_shm::posix_shm::segment::Segment
 impl core::fmt::Debug for zenoh_shm::posix_shm::struct_in_shm::StructInSHM
@@ -58,14 +106,24 @@ impl core::fmt::Debug for zenoh_shm::shm::Segment
 impl core::fmt::Debug for zenoh_shm::shm::SegmentCreateError
 impl core::fmt::Debug for zenoh_shm::shm::SegmentOpenError
 impl core::fmt::Debug for zenoh_shm::shm::unix::SegmentImpl
+impl core::fmt::Display for zenoh_shm::api::provider::types::AllocAlignment
+impl core::fmt::Display for zenoh_shm::api::provider::types::ZAllocError
+impl core::fmt::Display for zenoh_shm::api::provider::types::ZLayoutAllocError
+impl core::fmt::Display for zenoh_shm::api::provider::types::ZLayoutError
+impl core::hash::Hash for zenoh_shm::metadata::descriptor::MetadataDescriptor
+impl core::hash::Hash for zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
+impl core::marker::Copy for zenoh_shm::api::provider::types::AllocAlignment
 impl core::marker::Send for zenoh_shm::api::common::types::PtrInSegment
 impl core::marker::Send for zenoh_shm::posix_shm::array::ArrayInSHM
 impl core::marker::Send for zenoh_shm::posix_shm::struct_in_shm::StructInSHM
 impl core::marker::StructuralPartialEq for zenoh_shm::api::provider::chunk::ChunkDescriptor
+impl core::marker::StructuralPartialEq for zenoh_shm::api::provider::types::AllocAlignment
+impl core::marker::StructuralPartialEq for zenoh_shm::metadata::descriptor::MetadataDescriptor
 impl core::marker::StructuralPartialEq for zenoh_shm::posix_shm::segment::Segment
 impl core::marker::Sync for zenoh_shm::api::common::types::PtrInSegment
 impl core::marker::Sync for zenoh_shm::posix_shm::array::ArrayInSHM
 impl core::marker::Sync for zenoh_shm::posix_shm::struct_in_shm::StructInSHM
+impl core::ops::deref::Deref for zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
 impl core::ops::deref::Deref for zenoh_shm::posix_shm::struct_in_shm::StructInSHM
 impl core::ops::deref::Deref for zenoh_shm::shm::Segment
 impl core::ops::deref::DerefMut for zenoh_shm::posix_shm::struct_in_shm::StructInSHM
@@ -75,12 +133,17 @@ impl stabby_abi::istable::IStable for zenoh_shm::api::provider::chunk::ChunkDesc
 macro zenoh_shm::tested_crate_module
 macro zenoh_shm::tested_module
 mod zenoh_shm::api
+mod zenoh_shm::api::cleanup
 mod zenoh_shm::api::common
 mod zenoh_shm::api::common::types
 mod zenoh_shm::api::common::with_id
 mod zenoh_shm::api::provider
 mod zenoh_shm::api::provider::chunk
+mod zenoh_shm::api::provider::types
+mod zenoh_shm::header
 mod zenoh_shm::init
+mod zenoh_shm::metadata
+mod zenoh_shm::metadata::descriptor
 mod zenoh_shm::posix_shm
 mod zenoh_shm::posix_shm::array
 mod zenoh_shm::posix_shm::segment
@@ -89,9 +152,14 @@ mod zenoh_shm::shm
 mod zenoh_shm::shm::platform
 mod zenoh_shm::shm::unix
 mod zenoh_shm::version
+mod zenoh_shm::watchdog
 struct zenoh_shm::api::common::types::PtrInSegment
 struct zenoh_shm::api::provider::chunk::AllocatedChunk
 struct zenoh_shm::api::provider::chunk::ChunkDescriptor
+struct zenoh_shm::api::provider::types::AllocAlignment
+struct zenoh_shm::metadata::descriptor::MetadataDescriptor
+struct zenoh_shm::metadata::descriptor::OwnedMetadataDescriptor
+struct zenoh_shm::metadata::descriptor::OwnedWatchdog
 struct zenoh_shm::posix_shm::array::ArrayInSHM
 struct zenoh_shm::posix_shm::segment::Segment
 struct zenoh_shm::posix_shm::struct_in_shm::StructInSHM
@@ -103,5 +171,8 @@ trait zenoh_shm::shm::SegmentID
 type zenoh_shm::api::common::types::ChunkID
 type zenoh_shm::api::common::types::ProtocolID
 type zenoh_shm::api::common::types::SegmentID
+type zenoh_shm::api::provider::types::ChunkAllocResult
+type zenoh_shm::metadata::descriptor::MetadataIndex
+type zenoh_shm::metadata::descriptor::MetadataSegmentID
 type zenoh_shm::shm::ShmCreateResult
 type zenoh_shm::shm::ShmOpenResult

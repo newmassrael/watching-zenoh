@@ -57,10 +57,11 @@ wz_buffers = { package = "zenoh-buffers", path = "../../crates/wz-zenoh-buffers"
 # above), built with `std`.
 up_codec = { package = "zenoh-codec", version = "=1.10.1" }
 wz_codec = { package = "zenoh-codec", path = "../../crates/wz-zenoh-codec" }
-# `zenoh-shm`: the pair again, each over its own `zenoh-core`, `zenoh-macros` and `zenoh-result`. They
-# share the machine's segments, so the tests also open the one crate's segments with the other.
-up_shm = { package = "zenoh-shm", version = "=1.10.1" }
-wz_shm = { package = "zenoh-shm", path = "../../crates/wz-zenoh-shm" }
+# `zenoh-shm`: the pair again, each over its own `zenoh-core`, `zenoh-macros` and `zenoh-result`, each
+# built with `test`, which makes the metadata and watchdog modules public. They share the machine's
+# segments, so the tests also open the one crate's segments with the other.
+up_shm = { package = "zenoh-shm", version = "=1.10.1", features = ["test"] }
+wz_shm = { package = "zenoh-shm", path = "../../crates/wz-zenoh-shm", features = ["test"] }
 num-traits = { version = "0.2", default-features = false }
 # `zenoh-collections`: the pair again. Both are built with the default `std`, which carries every
 # container but `SingleOrVec`.

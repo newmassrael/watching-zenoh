@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2024 ZettaScale Technology
+// Copyright (c) 2025 ZettaScale Technology
 //
 // This program and the accompanying materials are made available under the
 // terms of the Eclipse Public License 2.0 which is available at
@@ -23,7 +23,7 @@ use std::{
 };
 
 // use stabby::IStable;
-use zenoh_result::ZResult;
+use zenoh_result::{bail, ZResult};
 
 use super::segment::Segment;
 use crate::shm;
@@ -91,6 +91,16 @@ where
 
     pub fn open(id: ID) -> ZResult<Self> {
         let inner = Segment::open(id)?;
+        // A segment is named by an id that another process hands over, so one that is smaller than
+        // the structure is refused here: the original opens it, and the first read of the
+        // structure is then past the end of the mapping.
+        if inner.len().get() < size_of::<Elem>() {
+            bail!(
+                "Unable to open SHM structure segment: the segment holds {} bytes and the structure takes {}",
+                inner.len(),
+                size_of::<Elem>()
+            );
+        }
         Ok(Self {
             inner,
             _phantom: PhantomData,

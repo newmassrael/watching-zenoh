@@ -15,5 +15,6 @@
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-shm 1.10.1, file
 // src/api/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
 
+pub mod cleanup;
 pub mod common;
 pub mod provider;
