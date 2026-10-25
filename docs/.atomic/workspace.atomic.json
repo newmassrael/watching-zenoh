@@ -287976,6 +287976,36 @@
         "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener. A count for the group's other refusals (a JOIN that advertises another resolution or batch) has no counter yet."
       ]
     },
+    "Round 3649": {
+      "decision_summary": "Step 6, fourth part (6.2b-2): a request to hold a node by its zid can be made where the manager is not. A query is served beside the node's loop, so the opener (NodeOpener, from the manager over a static store) answers at once with what the node knows without the loop: can its dialer hold a session to the node it dials for, is there room, is there a live hint, can this build dial one. A request that passes waits in the store and the next tick holds the node; the store mirrors the nodes held, so an open of a held node is the same open. What a build can dial is asked of the dialer type (Dialer::classify has no self), since the opener holds no dialer. How a refusal is said: the open outcome and the refused reasons gain NoRoom and Unverifiable, each a different thing an operator can act on and neither a missing locator. The mapping is not in the mcu crate: the lifecycle query and the in-band switchboard are compiled only with an allocator, so the fixed-memory verbs are next.",
+      "changes_bullets": [
+        "wz-session-mcu connect_manager: NodeOpener (open, Copy, from ConnectManager::node_opener); the store holds now_ms, the nodes held and the requests taken at the next tick (serve_requests); Dialer::classify is an associated function and first_dialable takes the type; Ports holds no dialer reference. slot_dial and dial: classify without self. Three tests (accepts and the next tick holds it, refuses what the node cannot hold, a dialer that cannot verify). run-ci.sh: C1m mcu counts 25 to 28, 16 to 19 and 35 to 38.",
+        "wz-session-core lifecycle_query: OpenOutcome and RefusedReason gain NoRoom and Unverifiable, with their words and the verdict mapping. docs/session-lifecycle-intent.md: 6.2b-2 and what is next."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): the manager tests pass at the default limit (the node tests assert the refusal for want of room) and at two node rows; the whole wz-session-mcu suite passes with all features; wz-session-core lifecycle_query passes; the four count-guarded mcu legs printed 28, 19 (two rows), 38 and 4, equal to the constants; clippy of wz-session-mcu (adminspace-write at both limits, all features, the slot client shape), wz-session-core and wz-runtime-tokio is clean. Not measured here: the Zephyr and lwIP image frames of the manager's tick, which gained one out-of-line call."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the Zephyr Qzb chain of the first hosted run holding this round (7644 over 15 frames was read for the one before, against a committed 7540 and a tolerance of 128). Step 6.2b-3: the verbs on the fixed-memory profile (the lifecycle query and the in-band switchboard written without an allocator, or a slot form of them), the sources of hints (a build's declared ones, a Hello), wz-session-lwip forwarding the feature, and the witness on the image. The heap UDP dialer does not yet verify nodes. Then D7."
+      ],
+      "publishable_decision_summary": "Step 6, fourth part (6.2b-2): a request to hold a node by its zid can be made where the manager is not. A query is served beside the node's loop, so the opener (NodeOpener, from the manager over a static store) answers at once with what the node knows without the loop: can its dialer hold a session to the node it dials for, is there room, is there a live hint, can this build dial one. A request that passes waits in the store and the next tick holds the node; the store mirrors the nodes held, so an open of a held node is the same open. What a build can dial is asked of the dialer type (Dialer::classify has no self), since the opener holds no dialer. How a refusal is said: the open outcome and the refused reasons gain NoRoom and Unverifiable, each a different thing an operator can act on and neither a missing locator. The mapping is not in the mcu crate: the lifecycle query and the in-band switchboard are compiled only with an allocator, so the fixed-memory verbs are next.",
+      "publishable_changes_bullets": [
+        "wz-session-mcu connect_manager: NodeOpener (open, Copy, from ConnectManager::node_opener); the store holds now_ms, the nodes held and the requests taken at the next tick (serve_requests); Dialer::classify is an associated function and first_dialable takes the type; Ports holds no dialer reference. slot_dial and dial: classify without self. Three tests (accepts and the next tick holds it, refuses what the node cannot hold, a dialer that cannot verify). run-ci.sh: C1m mcu counts 25 to 28, 16 to 19 and 35 to 38.",
+        "wz-session-core lifecycle_query: OpenOutcome and RefusedReason gain NoRoom and Unverifiable, with their words and the verdict mapping. docs/session-lifecycle-intent.md: 6.2b-2 and what is next."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): the manager tests pass at the default limit (the node tests assert the refusal for want of room) and at two node rows; the whole wz-session-mcu suite passes with all features; wz-session-core lifecycle_query passes; the four count-guarded mcu legs printed 28, 19 (two rows), 38 and 4, equal to the constants; clippy of wz-session-mcu (adminspace-write at both limits, all features, the slot client shape), wz-session-core and wz-runtime-tokio is clean. Not measured here: the Zephyr and lwIP image frames of the manager's tick, which gained one out-of-line call."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the Zephyr Qzb chain of the first hosted run holding this round (7644 over 15 frames was read for the one before, against a committed 7540 and a tolerance of 128). Step 6.2b-3: the verbs on the fixed-memory profile (the lifecycle query and the in-band switchboard written without an allocator, or a slot form of them), the sources of hints (a build's declared ones, a Hello), wz-session-lwip forwarding the feature, and the witness on the image. The heap UDP dialer does not yet verify nodes. Then D7."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
