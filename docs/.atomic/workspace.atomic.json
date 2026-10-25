@@ -286926,6 +286926,36 @@
         "The wider hot path reading stays open: where the remaining 460 bytes of a delivered copy go."
       ]
     },
+    "Round 3624": {
+      "decision_summary": "The multicast footprint baseline follows the Push frame hint (scripts/check-footprint.sh). Layer Q read the multicast-e2e image over its band on origin/main: thumbv7m text 70172 (+396 over 69776), thumbv7em-hf 70304 (+440 over 69864), tolerance 256. Two sessions bisected it to one commit, 77df225a7 (round 3617), which sizes a Push's frame buffer from the message (frame_encode::push_capacity_hint) instead of the codec's 2456-byte reserve constant: thumbv7m 69792 at its predecessor, 70172 at the commit. It is code the image reaches, the group send frames every Push through it, and it is what takes a delivered copy's frame buffer from 2.4 KiB to the message's size. Trimming it would trade an exact upper bound (a slot too small is a refused send on the lend path) for ROM, and was not taken. The baseline moves to 70172 and 70304 with that attribution; data 4 and bss 270120 do not move.",
+      "changes_bullets": [
+        "scripts/check-footprint.sh: BASELINE_MC_TEXT thumbv7m 69776 to 70172, thumbv7em-hf 69864 to 70304, with the attribution written beside them (commit, bisect readings, why it is kept, old figures)."
+      ],
+      "verification_bullets": [
+        "Layer Q on the tree after round 3617 reads footprint[multicast-e2e] thumbv7m text=70172 and thumbv7em-hf text=70304 (one toolchain, rustc 1.97.0 and gcc 13.2.1); two other sessions' bisect on a second host reads thumbv7m 69792 at the predecessor and 70172 at the commit. The new baselines equal those readings. The qemu-demo footprints in the same run stay inside their bands. The one other Layer Q failure in that run, the host slot node with TLS, is the empty mbedtls submodule of a worktree and not this image.",
+        "Not verified: a Layer Q rerun on the moved baseline, and the hosted runner."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub"
+      ],
+      "carry_forward_bullets": [
+        "The baseline is now the reading, so the next change to touch this image pays only its own growth. The 256-byte band hides drift up to its width; read the readings, not only the verdict."
+      ],
+      "publishable_decision_summary": "The multicast footprint baseline follows the Push frame hint (scripts/check-footprint.sh). Layer Q read the multicast-e2e image over its band on origin/main: thumbv7m text 70172 (+396 over 69776), thumbv7em-hf 70304 (+440 over 69864), tolerance 256. Two sessions bisected it to one commit, 77df225a7 (round 3617), which sizes a Push's frame buffer from the message (frame_encode::push_capacity_hint) instead of the codec's 2456-byte reserve constant: thumbv7m 69792 at its predecessor, 70172 at the commit. It is code the image reaches, the group send frames every Push through it, and it is what takes a delivered copy's frame buffer from 2.4 KiB to the message's size. Trimming it would trade an exact upper bound (a slot too small is a refused send on the lend path) for ROM, and was not taken. The baseline moves to 70172 and 70304 with that attribution; data 4 and bss 270120 do not move.",
+      "publishable_changes_bullets": [
+        "scripts/check-footprint.sh: BASELINE_MC_TEXT thumbv7m 69776 to 70172, thumbv7em-hf 69864 to 70304, with the attribution written beside them (commit, bisect readings, why it is kept, old figures)."
+      ],
+      "publishable_verification_bullets": [
+        "Layer Q on the tree after round 3617 reads footprint[multicast-e2e] thumbv7m text=70172 and thumbv7em-hf text=70304 (one toolchain, rustc 1.97.0 and gcc 13.2.1); two other sessions' bisect on a second host reads thumbv7m 69792 at the predecessor and 70172 at the commit. The new baselines equal those readings. The qemu-demo footprints in the same run stay inside their bands. The one other Layer Q failure in that run, the host slot node with TLS, is the empty mbedtls submodule of a worktree and not this image.",
+        "Not verified: a Layer Q rerun on the moved baseline, and the hosted runner."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/6-presets/6-9-preset-mcu-multicast-pub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The baseline is now the reading, so the next change to touch this image pays only its own growth. The 256-byte band hides drift up to its width; read the readings, not only the verdict."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
