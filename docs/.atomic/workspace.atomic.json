@@ -287692,6 +287692,38 @@
         "Layer E7m was not rerun after phases 0 to 3b."
       ]
     },
+    "Round 3642": {
+      "decision_summary": "Repair of rounds 3613 to 3629, from the first hosted run that held them (run 40180823025, read per job): three reds, all in the connect manager's area. (1) Layers Qza and Qa step 6: a group of two written over a live endpoint left that endpoint live, where the lane, and the manager before it was keyed by peer, hang it up and refuse the whole group. The rows used to be compared as whole entries, group included; keyed by peer they were compared by endpoint only, so a rewrite that made a held endpoint a member of a group kept its session. An endpoint now stays only if the list names it as it was held, group or not. (2) Layer Qzb, the client's worst chain: 7540 bytes, committed 7128, read through the manager; the row moves to what the image reads (it was 8900 before round 3629 made the key 17 bytes). (3) Layer Qzb, the fixed admin node: since round 3618 the image names no frame for start, so the row's entry is wz_app_main, which holds the loop's locals as the client's does.",
+      "changes_bullets": [
+        "wz-session-mcu connect_manager: reconcile names a held endpoint by its endpoint and by whether the list writes it as a member of a group of several; one that changed is hung up and its row made again (refused as a group member, dialled again once the group is split). A test for both directions. run-ci.sh: C1m mcu counts 24 to 25, 15 to 16 and 34 to 35.",
+        "scripts/lib/stack_frame_gate.py: zephyr-client-fixed peak 7128 to 7540 with the chain and its reason; zephyr-fixed entry wz_zephyr_admin_node::start to wz_app_main, with the three images before and after round 3618 that show it."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): the new test passes and the three count-guarded mcu legs printed 25, 16 (a leg stating two node rows) and 35, equal to the constants; clippy of wz-session-mcu with adminspace-write and all targets is clean at the default limit and at two node rows; the stack gate's self-test and population read pass. Not verified here: the Qzb rows and the Qza and Qa lanes, which run on the hosted image only.",
+        "Attribution, by run: zephyr-fixed read 4664 bytes for start in runs 40128010267, 40143828508 and 40163531279 and no frame in 40172445241, 40176604740 and 40180823025; the group red is the one a unit test of the manager now holds."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the first completed hosted run holding this round: Qza and Qa step 6 green, and the Qzb rows for zephyr-fixed (wz_app_main as entry, a frame and a chain) and zephyr-client-fixed (7540 within the tolerance). The connect manager's tick frame is 1824 bytes on a 9216-byte stack; the chain is 1676 bytes under it, and moving the rows the reconcile copies off the stack is the next lever if a later change needs the room. Step 6.2b-2 (the opener port over the manager, the hint sources, the verbs on the fixed-memory profile, the image witness) is not started."
+      ],
+      "publishable_decision_summary": "Repair of rounds 3613 to 3629, from the first hosted run that held them (run 40180823025, read per job): three reds, all in the connect manager's area. (1) Layers Qza and Qa step 6: a group of two written over a live endpoint left that endpoint live, where the lane, and the manager before it was keyed by peer, hang it up and refuse the whole group. The rows used to be compared as whole entries, group included; keyed by peer they were compared by endpoint only, so a rewrite that made a held endpoint a member of a group kept its session. An endpoint now stays only if the list names it as it was held, group or not. (2) Layer Qzb, the client's worst chain: 7540 bytes, committed 7128, read through the manager; the row moves to what the image reads (it was 8900 before round 3629 made the key 17 bytes). (3) Layer Qzb, the fixed admin node: since round 3618 the image names no frame for start, so the row's entry is wz_app_main, which holds the loop's locals as the client's does.",
+      "publishable_changes_bullets": [
+        "wz-session-mcu connect_manager: reconcile names a held endpoint by its endpoint and by whether the list writes it as a member of a group of several; one that changed is hung up and its row made again (refused as a group member, dialled again once the group is split). A test for both directions. run-ci.sh: C1m mcu counts 24 to 25, 15 to 16 and 34 to 35.",
+        "scripts/lib/stack_frame_gate.py: zephyr-client-fixed peak 7128 to 7540 with the chain and its reason; zephyr-fixed entry wz_zephyr_admin_node::start to wz_app_main, with the three images before and after round 3618 that show it."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): the new test passes and the three count-guarded mcu legs printed 25, 16 (a leg stating two node rows) and 35, equal to the constants; clippy of wz-session-mcu with adminspace-write and all targets is clean at the default limit and at two node rows; the stack gate's self-test and population read pass. Not verified here: the Qzb rows and the Qza and Qa lanes, which run on the hosted image only.",
+        "Attribution, by run: zephyr-fixed read 4664 bytes for start in runs 40128010267, 40143828508 and 40163531279 and no frame in 40172445241, 40176604740 and 40180823025; the group red is the one a unit test of the manager now holds."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first completed hosted run holding this round: Qza and Qa step 6 green, and the Qzb rows for zephyr-fixed (wz_app_main as entry, a frame and a chain) and zephyr-client-fixed (7540 within the tolerance). The connect manager's tick frame is 1824 bytes on a 9216-byte stack; the chain is 1676 bytes under it, and moving the rows the reconcile copies off the stack is the next lever if a later change needs the room. Step 6.2b-2 (the opener port over the manager, the hint sources, the verbs on the fixed-memory profile, the image witness) is not started."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
