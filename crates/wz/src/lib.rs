@@ -103,6 +103,7 @@ pub mod zenoh_family {
     pub use zenoh_protocol;
     pub use zenoh_result;
     pub use zenoh_runtime;
+    pub use zenoh_shm;
 }
 
 // §5.27 — THE TWO C ABIs ARE MUTUALLY EXCLUSIVE, and this is where that is

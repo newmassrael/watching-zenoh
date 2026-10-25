@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# This package reproduces the public API and the documentation of the crate of the same name of
+# eclipse-zenoh/zenoh, which is EPL-2.0 OR Apache-2.0, so the whole package is under that expression.
+# The notices of the upstream files it derives from are kept in its sources (see LICENSES/ and
+# THIRD_PARTY.md at the root of this repository).
+#
+# zenoh-shm -- zenoh's shared memory: the platform segments (POSIX `shm_open`, the Windows file
+# mapping), the segments of arrays and structures built on them, the chunk header and the
+# metadata and watchdog subsystems that keep a buffer alive across processes, and the provider API
+# (`ShmProvider`, `ZShm`, `ZShmMut`) over watching-zenoh (inventory atom `api-compat-rust`,
+# open-debt item 910, docs/build-configuration.md C13).
+#
+# Named `zenoh-shm` and versioned as the pinned zenoh, like every crate of the family (see
+# `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). Two processes share a segment
+# by its id and the layout of what is in it, so this crate keeps upstream's layouts and names
+# (`<id>.zenoh`) exactly: a buffer allocated here must be readable by an upstream process and the
+# other way round, which the differential tests of `conformance/` hold by mapping one crate's
+# segments with the other. It is NOT the shared memory of watching-zenoh's own transport.
+#
+# It is built in slices, each landing whole with the ratchet of `scripts/lib/rust_api_surface.py`
+# lowered in its own round. Until a slice lands its items are missing lines of the surface gate, not
+# stubs here.
+
+[package]
+name = "zenoh-shm"
+version = "1.10.1"
+edition.workspace = true
+rust-version.workspace = true
+license = "EPL-2.0 OR Apache-2.0"
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Shared memory of zenoh (1.10.1), as a drop-in over watching-zenoh."
+build = "build.rs"
+
+[lib]
+name = "zenoh_shm"
+path = "src/lib.rs"
+
+# Upstream's `test` feature by its name: it makes the internal modules public so that the tests of
+# the crate (and the differential tests that drive both crates alike) can reach them.
+[features]
+test = []
+
+[dependencies]
+num-traits = { version = "0.2.19", default-features = false }
+rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
+stabby = "72.1.8"
+static_init = "1.0.3"
+tracing = "0.1.41"
+zenoh-core = { path = "../wz-zenoh-core" }
+zenoh-macros = { path = "../wz-zenoh-macros" }
+zenoh-result = { path = "../wz-zenoh-result", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+advisory-lock = "0.3.0"
+nix = { version = "0.29.0", features = ["fs", "mman"] }
+rlimit = "0.10.2"
+
+[target.'cfg(windows)'.dependencies]
+win-sys = "0.3"
+winapi = { version = "0.3.9", features = ["iphlpapi", "memoryapi", "winerror"] }
+
+[lints]
+workspace = true

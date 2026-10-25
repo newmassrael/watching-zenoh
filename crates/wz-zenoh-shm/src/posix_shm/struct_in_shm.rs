@@ -1,0 +1,134 @@
+//
+// Copyright (c) 2024 ZettaScale Technology
+//
+// This program and the accompanying materials are made available under the
+// terms of the Eclipse Public License 2.0 which is available at
+// http://www.eclipse.org/legal/epl-2.0, or the Apache License, Version 2.0
+// which is available at https://www.apache.org/licenses/LICENSE-2.0.
+//
+// SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
+//
+// Contributors:
+//   ZettaScale Zenoh Team, <zenoh@zettascale.tech>
+//
+// SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+// Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh-shm 1.10.1, file
+// src/posix_shm/struct_in_shm.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
+
+use std::{
+    marker::PhantomData,
+    mem::size_of,
+    num::NonZeroUsize,
+    ops::{Deref, DerefMut},
+};
+
+// use stabby::IStable;
+use zenoh_result::ZResult;
+
+use super::segment::Segment;
+use crate::shm;
+
+/// An SHM segment that contains data structure
+#[derive(Debug)]
+pub struct StructInSHM<ID, Elem>
+where
+    rand::distributions::Standard: rand::distributions::Distribution<ID>,
+    ID: shm::SegmentID,
+{
+    inner: Segment<ID>,
+    _phantom: PhantomData<Elem>,
+}
+
+impl<ID, Elem: Sync> PartialEq for StructInSHM<ID, Elem>
+where
+    rand::distributions::Standard: rand::distributions::Distribution<ID>,
+    ID: shm::SegmentID,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl<ID, Elem: Sync> Eq for StructInSHM<ID, Elem>
+where
+    rand::distributions::Standard: rand::distributions::Distribution<ID>,
+    ID: shm::SegmentID,
+{
+}
+
+unsafe impl<ID, Elem: Sync> Sync for StructInSHM<ID, Elem>
+where
+    rand::distributions::Standard: rand::distributions::Distribution<ID>,
+    ID: shm::SegmentID,
+{
+}
+unsafe impl<ID, Elem: Send> Send for StructInSHM<ID, Elem>
+where
+    rand::distributions::Standard: rand::distributions::Distribution<ID>,
+    ID: shm::SegmentID,
+{
+}
+
+impl<ID, Elem> StructInSHM<ID, Elem>
+where
+    rand::distributions::Standard: rand::distributions::Distribution<ID>,
+    // Elem: IStable<ContainsIndirections = stabby::abi::B0>, // NOTE (debt-910): stabby does not support IStable for big arrays
+    ID: shm::SegmentID,
+{
+    // Perform compile time check that Elem is not a ZST
+    const _S: () = if size_of::<Elem>() == 0 {
+        panic!("Elem is a ZST. ZSTs are not allowed");
+    };
+
+    pub fn create() -> ZResult<Self> {
+        let alloc_size = NonZeroUsize::try_from(size_of::<Elem>())?;
+        let inner = Segment::create(alloc_size)?;
+        Ok(Self {
+            inner,
+            _phantom: PhantomData,
+        })
+    }
+
+    pub fn open(id: ID) -> ZResult<Self> {
+        let inner = Segment::open(id)?;
+        Ok(Self {
+            inner,
+            _phantom: PhantomData,
+        })
+    }
+
+    pub fn id(&self) -> ID {
+        self.inner.id()
+    }
+
+    /// Retrieves mut element
+    pub fn elem_mut(&self) -> *mut Elem {
+        self.inner.as_ptr() as *mut Elem
+    }
+}
+
+impl<ID, Elem> Deref for StructInSHM<ID, Elem>
+where
+    rand::distributions::Standard: rand::distributions::Distribution<ID>,
+    // Elem: IStable<ContainsIndirections = stabby::abi::B0>, // NOTE (debt-910): stabby does not support IStable for big arrays
+    ID: shm::SegmentID,
+{
+    type Target = Elem;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: the pointer is guaranteed to be valid and uniquely accessible for the lifetime of `self`.
+        unsafe { &*(self.inner.as_ptr() as *const Elem) }
+    }
+}
+
+impl<ID, Elem> DerefMut for StructInSHM<ID, Elem>
+where
+    rand::distributions::Standard: rand::distributions::Distribution<ID>,
+    // Elem: IStable<ContainsIndirections = stabby::abi::B0>, // NOTE (debt-910): stabby does not support IStable for big arrays
+    ID: shm::SegmentID,
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: the pointer is guaranteed to be valid and uniquely accessible for the lifetime of `self`.
+        unsafe { &mut *(self.inner.as_ptr() as *mut Elem) }
+    }
+}
