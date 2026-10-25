@@ -217,7 +217,14 @@ Each lands whole with its surface lines, tests and faults in one round.
     `conformance/differential-shm`, because with `shared-memory` the protocol's types change and
     one package takes one setting of a feature. The doctests are off in the manifest until `open`
     has a body, with the reason beside the switch.
-  - **Z0b onward.** `cancellation`, `config`, `handlers` (with the channels), then `key_expr` and
+  - **Z0b (landed).** `cancellation`: the token of the `unstable` arm (`CancellationToken`) and, with
+    `internal`, the group under it (`SyncGroup`, `SyncGroupNotifier`). It was filed under Z6b in the
+    first draft; the measurement above puts it here, because it names only itself, and Z6b keeps the
+    timestamp stack. 7 of the `unstable` lines and 7 of the shared-memory arm's, 7 injected faults
+    (one test gap found and closed: a failed cancel must not wait for a notifier that is held). The
+    helpers upstream calls from the builders of `get` are unused until Z3, so the module carries
+    `allow(dead_code)` with the reason beside it.
+  - **Z0c onward.** `config`, `handlers` (with the channels), then `key_expr` and
     `selector` (the wire declaration of a key becomes an erased anchor, D2), then `sample` and the
     quality-of-service types. Each is a part of Z0 that lands when its closure exists.
 - **Z1. Open, close, identity, config table, the choice of D5 and the rule of D4.** `zenoh::open`,
@@ -232,15 +239,16 @@ Each lands whole with its surface lines, tests and faults in one round.
   zero-copy payload (`ZBytes` over the engine's received bytes, which no adapter does today),
   `declare_keyexpr` and `undeclare` (a key declared by another session is an error upstream).
 - **Z3. Queries.** `get`, `declare_queryable`, `Query`, `Reply`, `declare_querier`, consolidation,
-  targets, timeouts. (`cancellation` is an unstable-arm item and belongs to Z6.)
+  targets, timeouts. (The cancellation token is already in, Z0b; the builders of `get` that take
+  it join here.)
 - **Z4. Liveliness and matching.**
 - **Z5. Scouting.** Scouting is not in the port; it is the slice that decides whether the port
   gains it or the crate reaches it through the engine, and it contradicts "names no runtime" unless
   the port gains it.
 - **Z6a. The unstable arm: information.** `info().links()`, `transports()`, the link and transport
   event listeners, `connectivity`.
-- **Z6b. The unstable arm: timestamps and cancellation.** The timestamp stack (53 surface lines,
-  48 upstream tests, no model in wz's engine: it needs one), `cancellation`.
+- **Z6b. The unstable arm: timestamps.** The timestamp stack (53 surface lines,
+  48 upstream tests, no model in wz's engine: it needs one).
 - **Z6c. The unstable arm: the rest of the session, query, key expression, sample and config
   lines.**
 - **Z7. The shared-memory arm.** `get_shm_provider`, the provider state and the transport.

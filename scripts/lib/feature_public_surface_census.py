@@ -357,12 +357,16 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         frozenset({"test"}),
     ),
     # R3673 -- the top crate, `zenoh`, the eighth family member with a feature of its own.
+    # R3681 -- `unstable` and `internal` join with the cancellation module, the first public
+    # items of the crate that those two features gate.
     "zenoh": (
-        "the top crate of the zenoh compatibility family: `shared-memory` is, with `unstable`, "
-        "an arm of upstream's own public surface that `scripts/lib/rust_api_surface.py` emits "
-        "the wz crate with and holds it to (it adds the buffer of a payload in shared memory and "
-        "the `shm` module). Held to `FAMILY_GRADED` below rather than to this sentence",
-        frozenset({"shared-memory"}),
+        "the top crate of the zenoh compatibility family: `shared-memory` and `unstable` are "
+        "arms of upstream's own public surface that `scripts/lib/rust_api_surface.py` emits "
+        "the wz crate with and holds it to (`shared-memory` adds the buffer of a payload in "
+        "shared memory and the `shm` module, `unstable` the cancellation token), and `internal` "
+        "is enabled on the crate by `conformance/differential`, which exercises the group under "
+        "the token with it. Held to `FAMILY_GRADED` below rather than to this sentence",
+        frozenset({"internal", "shared-memory", "unstable"}),
     ),
     "wz-capi-core": (
         "the ABI-neutral session model: a workspace-internal rlib whose only "
@@ -1196,7 +1200,7 @@ FAMILY_GRADED: dict[str, frozenset[str]] = {
     "zenoh-codec": frozenset({"shared-memory"}),
     "zenoh-shm": frozenset({"test"}),
     "zenoh-util": frozenset({"test"}),
-    "zenoh": frozenset({"shared-memory"}),
+    "zenoh": frozenset({"internal", "shared-memory", "unstable"}),
 }
 
 #: The manifest of the differential workspace, whose dependency line names the features the wz

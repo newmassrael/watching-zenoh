@@ -17,9 +17,12 @@ fn zenoh::bytes::ZBytesReader::is_empty(&Self) -> bool ; in impl zenoh::bytes::Z
 fn zenoh::bytes::ZBytesReader::remaining(&Self) -> usize ; in impl zenoh::bytes::ZBytesReader<'_>
 fn zenoh::bytes::ZBytesWriter::append(&mut Self, zenoh::bytes::ZBytes) ; in impl zenoh::bytes::ZBytesWriter
 fn zenoh::bytes::ZBytesWriter::finish(Self) -> zenoh::bytes::ZBytes ; in impl zenoh::bytes::ZBytesWriter
+fn zenoh::cancellation::CancellationToken::cancel(&Self) -> zenoh::api::cancellation::CancelResult ; in impl zenoh::cancellation::CancellationToken
+fn zenoh::cancellation::CancellationToken::is_cancelled(&Self) -> bool ; in impl zenoh::cancellation::CancellationToken
 impl core::clone::Clone for zenoh::bytes::Encoding
 impl core::clone::Clone for zenoh::bytes::OptionZBytes
 impl core::clone::Clone for zenoh::bytes::ZBytes
+impl core::clone::Clone for zenoh::cancellation::CancellationToken
 impl core::cmp::Eq for zenoh::bytes::Encoding
 impl core::cmp::Eq for zenoh::bytes::OptionZBytes
 impl core::cmp::Eq for zenoh::bytes::ZBytes
@@ -38,12 +41,14 @@ impl core::convert::From for zenoh_protocol::zenoh::ext::AttachmentType
 impl core::default::Default for zenoh::bytes::Encoding
 impl core::default::Default for zenoh::bytes::OptionZBytes
 impl core::default::Default for zenoh::bytes::ZBytes
+impl core::default::Default for zenoh::cancellation::CancellationToken
 impl core::fmt::Debug for zenoh::bytes::Encoding
 impl core::fmt::Debug for zenoh::bytes::OptionZBytes
 impl core::fmt::Debug for zenoh::bytes::ZBytes
 impl core::fmt::Debug for zenoh::bytes::ZBytesReader
 impl core::fmt::Debug for zenoh::bytes::ZBytesSliceIterator
 impl core::fmt::Debug for zenoh::bytes::ZBytesWriter
+impl core::fmt::Debug for zenoh::cancellation::CancellationToken
 impl core::fmt::Display for zenoh::bytes::Encoding
 impl core::hash::Hash for zenoh::bytes::Encoding
 impl core::iter::traits::iterator::Iterator for zenoh::bytes::ZBytesSliceIterator
@@ -55,9 +60,11 @@ impl std::io::Read for zenoh::bytes::ZBytesReader
 impl std::io::Seek for zenoh::bytes::ZBytesReader
 impl std::io::Write for zenoh::bytes::ZBytesWriter
 mod zenoh::bytes
+mod zenoh::cancellation
 struct zenoh::bytes::Encoding
 struct zenoh::bytes::OptionZBytes
 struct zenoh::bytes::ZBytes
 struct zenoh::bytes::ZBytesReader
 struct zenoh::bytes::ZBytesSliceIterator
 struct zenoh::bytes::ZBytesWriter
+struct zenoh::cancellation::CancellationToken

@@ -4567,10 +4567,15 @@ name = "zenoh"
 version = "1.10.1"
 dependencies = [
  "bytes",
+ "futures",
  "phf",
+ "tokio",
  "zenoh-buffers",
+ "zenoh-core",
  "zenoh-macros",
  "zenoh-protocol",
+ "zenoh-result",
+ "zenoh-runtime",
  "zenoh-shm",
 ]
 

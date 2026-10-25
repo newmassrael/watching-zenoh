@@ -17,4 +17,8 @@
 // slices that have landed are declared here.
 
 pub(crate) mod bytes;
+// R3681: the token's users, the builders of `get` that take it, are slice Z3 of
+// docs/zenoh-api-on-the-engine.md; until they land the helpers upstream calls from there are unused.
+#[allow(dead_code)]
+pub(crate) mod cancellation;
 pub(crate) mod encoding;

@@ -54,11 +54,20 @@ unstable = ["zenoh-protocol/unstable"]
 
 [dependencies]
 bytes = "1.11.0"
+futures = "0.3.31"
 phf = { version = "0.13.1", features = ["macros"] }
+tokio = { version = "1.47.1", default-features = false, features = ["macros", "rt", "sync", "time"] }
 zenoh-buffers = { path = "../wz-zenoh-buffers", features = ["std"] }
+zenoh-core = { path = "../wz-zenoh-core" }
 zenoh-macros = { path = "../wz-zenoh-macros" }
 zenoh-protocol = { path = "../wz-zenoh-protocol", features = ["std"] }
+zenoh-result = { path = "../wz-zenoh-result", default-features = false }
+zenoh-runtime = { path = "../wz-zenoh-runtime" }
 zenoh-shm = { path = "../wz-zenoh-shm", optional = true }
+
+# The tests of the cancellation token run on a runtime of several threads.
+[dev-dependencies]
+tokio = { version = "1.47.1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true

@@ -21,6 +21,13 @@
 // resolve until then (docs/zenoh-api-on-the-engine.md, section 6).
 #![allow(rustdoc::broken_intra_doc_links)]
 
+// `bail!` of `zenoh-result`, which the cancellation token of the `unstable` arm uses; upstream
+// takes the macros of `zenoh-result` and `zenoh-core` for the whole crate, and each joins here with
+// the first slice that calls it, so that a build that calls none does not carry an unused import.
+#[cfg(feature = "unstable")]
+#[macro_use]
+extern crate zenoh_result;
+
 mod api;
 
 /// # Payload primitives and encoding
@@ -117,4 +124,12 @@ pub mod shm {
     // R3673: upstream's module ends with `pub use crate::net::runtime::ShmProviderState;`, the state
     // of a session's provider, which belongs to the session and so to slice Z7 of
     // docs/zenoh-api-on-the-engine.md; it joins this module there.
+}
+
+/// Functionality for interrupting queries.
+#[zenoh_macros::unstable]
+pub mod cancellation {
+    pub use crate::api::cancellation::CancellationToken;
+    #[cfg(feature = "internal")]
+    pub use crate::api::cancellation::{SyncGroup, SyncGroupNotifier};
 }
