@@ -803,6 +803,7 @@ dependencies = [
 name = "wz-ext-pubsub"
 version = "0.1.0"
 dependencies = [
+ "log",
  "wz-session-core",
 ]
 

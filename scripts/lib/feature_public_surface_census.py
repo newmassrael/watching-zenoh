@@ -440,6 +440,14 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "interface table",
         frozenset({"locator-iface"}),
     ),
+    "wz-ext-pubsub": (
+        "the rules of the advanced publisher and subscriber that no runtime owns, reached through "
+        "the tokio runtime's re-exports at the paths it has always had and by the cooperative "
+        "engine; it is not a surface the analyzer's diagnostic axis probes, and its one feature, "
+        "`transport-shm` (a cached sample may hold a buffer of shared memory), is the tokio "
+        "runtime's feature of that name forwarded",
+        frozenset({"transport-shm"}),
+    ),
     "wz-rest": (
         "the REST bridge: the facade re-exports the whole crate as `wz::rest` "
         "and is its ONLY workspace consumer, so the path a Rust caller names "
@@ -1213,7 +1221,12 @@ FAMILY_DIFFERENTIAL_MANIFEST = ROOT / "conformance" / "differential" / "Cargo.to
 #
 # `wz-capi-coop` lands here for the same reason: its row's reason is a claim about who consumes
 # the crate (the C ABI crate that selects the engine) and no predicate above holds a row to that.
-PROSE_ONLY: frozenset[str] = frozenset({"wz-capi-core", "wz-capi-coop", "wz-host-net"})
+#
+# `wz-ext-pubsub` lands here as well: its row's reason is a claim about who consumes the crate (the
+# tokio runtime's re-exports and the cooperative engine), which no predicate above holds a row to.
+PROSE_ONLY: frozenset[str] = frozenset(
+    {"wz-capi-core", "wz-capi-coop", "wz-host-net", "wz-ext-pubsub"}
+)
 
 
 class Dep(typing.NamedTuple):

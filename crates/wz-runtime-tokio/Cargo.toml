@@ -794,7 +794,12 @@ session-extcompression = ["wz-session-core/session-extcompression"]
 # pulls memmap2 for the AP POSIX segment (shm_provider). AP-only (no MCU forward
 # -- pico has no SHM). R3a is the inert provider + codec; R3b adds the live swap +
 # the Z_EXT_SHM challenge handshake (session-extshm).
-transport-shm = ["wz-session-core/transport-shm", "posix-shm-segment", "dep:talc"]
+transport-shm = [
+    "wz-session-core/transport-shm",
+    "wz-ext-pubsub/transport-shm",
+    "posix-shm-segment",
+    "dep:talc",
+]
 # R2954 — the POSIX shm SEGMENT protocol on its own (`posix_shm`: upstream's
 # `{id}.zenoh` naming, 0600 mode, shared advisory lock, and the orphan cleanup
 # that protocol defines), without the SHM transport. The zenoh-c ABI's SHM arm

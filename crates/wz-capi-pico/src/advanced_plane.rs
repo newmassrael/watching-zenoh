@@ -143,7 +143,8 @@ impl AdvancedPublisherPlane for PicoPlane {
         // One handler per face: each is a fresh closure over the same ring, and
         // none needs the face's session — a reply goes out on the query's own.
         let sink: QueryableSink = Arc::new(move |_face: Arc<dyn QueryHolder>| {
-            Box::new(store.query_handler()) as QueryCallback
+            Box::new(store.query_handler(wz_capi_core::runtime::timestamp_source::wall_clock_ntp64))
+                as QueryCallback
         });
         // INCOMPLETE, which is the only honest answer a bounded ring can give
         // (R2556, [`wz_capi_core::runtime::advanced_cache::AdvancedCache::declare`]).

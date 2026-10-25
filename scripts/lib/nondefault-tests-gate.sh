@@ -339,6 +339,11 @@ transport-link-unixpipe,transport-link-ws|"
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
     # `locator-iface`. MEASURED: 32 passed with default features, 41 with it, under 1 s.
     "wz-host-net|hook|locator-iface|"
+    # The rules of the advanced plane that no runtime owns (the `@adv` grammar, the `_time` selector,
+    # the cache ring and its answer). The one feature, `transport-shm`, makes a cached sample hold a
+    # buffer of shared memory and a recovery reply send its descriptor again; the tests the feature
+    # compiles in are the ring's own, so the leg is the crate's, with no filter.
+    "wz-ext-pubsub|hook|transport-shm|"
     # Open-debt item 913 -- the in-memory group every group test of the workspace runs over
     # (`multicast_bus`) holds a member's place while a send half of its link lives, as a socket
     # does, which the departure test of the group face depends on. The module exists only with

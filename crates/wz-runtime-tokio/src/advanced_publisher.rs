@@ -669,7 +669,7 @@ where
         Ok(self.session.declare_queryable(
             keyexpr.to_owned(),
             crate::session::QueryableOptions::default(),
-            store.query_handler(),
+            store.query_handler(crate::timestamp_source::wall_clock_ntp64),
         )?)
     }
 
@@ -1190,7 +1190,7 @@ impl<P: AdvancedPublisherPlane> AdvancedPublisherOn<P> {
     ///
     /// R311y561 — the Del IS cached now, closing the divergence R311y559
     /// shipped. [`CachedSample`] carries the sample KIND, so the ring retains
-    /// the retraction and [`crate::advanced_cache::answer_from_ring`] replays it
+    /// the retraction and the cache's answer (`wz_ext_pubsub::advanced_cache`) replays it
     /// on the Del arm ([`wz_session_core::query_sink::ReplyOut::reply_keyed_del_sourced`]).
     /// The old behaviour — skip the cache — was the right call only while a
     /// cached Del would have come back as a Put and resurrected the deleted key

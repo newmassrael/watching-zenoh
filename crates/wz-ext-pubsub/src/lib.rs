@@ -14,5 +14,6 @@
 //! as an argument. The design, and the steps that move the rest of the mechanism here, are in
 //! `docs/advanced-pubsub-on-a-neutral-core.md`.
 
+pub mod advanced_cache;
 pub mod advanced_ke;
 pub mod time_range;

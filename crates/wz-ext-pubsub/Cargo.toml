@@ -32,10 +32,27 @@ name = "wz_ext_pubsub"
 path = "src/lib.rs"
 crate-type = ["rlib"]
 
+[features]
+default = []
+# A cached sample may hold a buffer of shared memory and a recovery reply sends its descriptor
+# again (`CachedSample::shared`). The tokio runtime's feature of the same name forwards here.
+transport-shm = ["wz-session-core/transport-shm"]
+
 [dependencies]
-# The selector-parameter dialect and the outbound key-expression gate. `alloc` is the heap profile,
-# which is the only profile the advanced plane runs on.
+# The selector-parameter dialect, the outbound key-expression gate and the vocabulary of a reply
+# (`ReplyOut`, `SourceInfo`, `QosLevel`). `alloc` is the heap profile, which is the only profile
+# the advanced plane runs on.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
+# A reply the cache could not stage is warned about and the answer goes on, as upstream's does.
+log = "0.4"
+
+[dev-dependencies]
+# The responder a test drives the cache's answer through (`QueryResponder`, which stages replies
+# the way a queryable's does) is the request codec's.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = [
+    "alloc",
+    "codec-request",
+] }
 
 [lints]
 workspace = true
