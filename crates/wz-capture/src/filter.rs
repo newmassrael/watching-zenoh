@@ -68,6 +68,7 @@
 //! | `link` | `tcp` `udp` `raweth` `serial` `vsock` | `==` `!=` | as above |
 //! | `flow` | an integer, the number the document gives the row's flow (`list_id`) | `==` `!=` `<` `<=` `>` `>=` | as above |
 //! | `packet` | an integer, the packet the document numbers the row by | `==` `!=` `<` `<=` `>` `>=` | as above, or the reader cannot place the message |
+//! | `zenoh` | the flow's word for whether its bytes are zenoh: `proven` `unproven` `foreign_version` `mixed` | `==` `!=` | as above, or the plane holds no evidence of the row's flow (a tap handed no node census) |
 //!
 //! The table is the language's field list as it is WRITTEN. The list the
 //! parser reads and the one the field list document prints are one
@@ -535,6 +536,12 @@ pub struct RowFacts<'a> {
     pub src: crate::link::Endpoint,
     /// The end it was sent to.
     pub dst: crate::link::Endpoint,
+    /// The flow's word for whether its bytes are zenoh, from the evidence the
+    /// flow holds when the row is judged, or `None` where the plane was handed
+    /// none (a list no census named). A flow's word moves as its Inits arrive,
+    /// so a row's answer to a `zenoh` term is as true as the capture it was
+    /// judged over, and the since door reports the rows it moved as revised.
+    pub zenoh: Option<crate::session_table::ZenohVerdict>,
 }
 
 /// The names of the messages one record or row rode in, outermost first, held
@@ -593,6 +600,7 @@ impl<'a> RowFacts<'a> {
         list: usize,
         flow: &crate::link::FlowKey,
         direction: Direction,
+        zenoh: Option<crate::session_table::ZenohVerdict>,
     ) -> Self {
         let (src, dst) = match direction {
             Direction::A => (flow.low, flow.high),
@@ -605,6 +613,7 @@ impl<'a> RowFacts<'a> {
             link: flow.link(),
             src,
             dst,
+            zenoh,
         }
     }
 }
@@ -763,6 +772,7 @@ selector_fields! {
     Link => "link",
     Flow => "flow",
     Packet => "packet",
+    Zenoh => "zenoh",
 }
 
 /// The words a `msg` term takes: every message name a row or a record can
@@ -828,7 +838,8 @@ impl Field {
             | Self::Src
             | Self::Dst
             | Self::Addr
-            | Self::Link => EQUALITY,
+            | Self::Link
+            | Self::Zenoh => EQUALITY,
             // The binder replaces a `node` term whole, one name per term.
             Self::Node => &["==", "!="],
             Self::Bytes
@@ -856,6 +867,7 @@ impl Field {
             Self::Closed => Some(alloc::vec!["yes", "no"]),
             Self::Msg => Some(MESSAGE_WORDS.to_vec()),
             Self::Link => Some(crate::link::LinkKind::names()),
+            Self::Zenoh => Some(crate::session_table::ZenohVerdict::names()),
             _ => None,
         }
     }
@@ -1081,6 +1093,13 @@ enum Term {
         want: crate::link::LinkKind,
         negated: bool,
     },
+    /// The row's flow has this word for whether its bytes are zenoh
+    /// ([`crate::session_table::ZenohVerdict`]), as the flow's evidence stands
+    /// when the selector is judged.
+    Zenoh {
+        want: crate::session_table::ZenohVerdict,
+        negated: bool,
+    },
     /// The row's list number compares with the integer.
     Flow {
         op: Op,
@@ -1273,6 +1292,14 @@ impl Term {
             Self::Link { want, negated } => match record.row {
                 None => Truth::Unknown,
                 Some(row) => Truth::of((row.link == *want) != *negated),
+            },
+            // The flow's word is a fact about the FLOW, and a plane that was
+            // handed no census of it (a live tap with no grouping) has none to
+            // give: undecided, and never `no`, for the reason the `zid` arm
+            // below states. `not zenoh == x` is undecided with it.
+            Self::Zenoh { want, negated } => match record.row.map(|row| row.zenoh) {
+                None | Some(None) => Truth::Unknown,
+                Some(Some(word)) => Truth::of((word == *want) != *negated),
             },
             Self::Flow { op, value } => match record.row {
                 None => Truth::Unknown,
@@ -1681,6 +1708,16 @@ impl Filter {
         self.root.reads_tree()
     }
 
+    /// `true` when some term reads the flow's word for whether its bytes are
+    /// zenoh (`zenoh`): the one row fact that is the flow's EVIDENCE and so can
+    /// move after a row was judged, when the flow's first Init arrives. For a
+    /// fold that is kept between calls to begin again when such a word moves,
+    /// and only then.
+    pub fn reads_flow_word(&self) -> bool {
+        self.root
+            .any_term(&|term| matches!(term, Term::Zenoh { .. }))
+    }
+
     /// `true` when some term reads the row's facts ([`RowFacts`]): for a
     /// plane that judges two rows by one record (an exchange's request and its
     /// close) to judge the second apart only when the answer can differ.
@@ -1692,6 +1729,7 @@ impl Filter {
                     | Term::Address { .. }
                     | Term::Ports { .. }
                     | Term::Link { .. }
+                    | Term::Zenoh { .. }
                     | Term::Flow { .. }
                     | Term::FlowIn(_)
                     | Term::Packet { .. }
@@ -4056,6 +4094,22 @@ fn build_fixed(
                 });
             };
             Term::Link { want, negated }
+        }
+        Field::Zenoh => {
+            let negated = equality_negation(op, known.name(), op_at)?;
+            let Some(want) = crate::session_table::ZenohVerdict::all()
+                .into_iter()
+                .find(|word| word.name() == value)
+            else {
+                return Err(FilterError {
+                    at: value_at,
+                    kind: FilterErrorKind::UnknownValue {
+                        field: known.name(),
+                        value,
+                    },
+                });
+            };
+            Term::Zenoh { want, negated }
         }
         Field::Flow => Term::Flow {
             op,

@@ -171,6 +171,7 @@ fn a_plane_given_no_row_facts_decides_no_row_term() {
         "link == udp",
         "flow == 0",
         "packet == 0",
+        "zenoh == proven",
     ] {
         let filter = Filter::parse(selector).expect("compiles");
         assert_eq!(
@@ -189,7 +190,7 @@ fn a_plane_given_no_row_facts_decides_no_row_term() {
 fn a_serial_line_has_no_address_and_no_port() {
     let serial = FlowKey::serial_line();
     let names = ["Frame", "Push"];
-    let facts = RowFacts::of(&names, Some(0), 0, &serial, Direction::A);
+    let facts = RowFacts::of(&names, Some(0), 0, &serial, Direction::A, None);
     for selector in ["addr == 10.0.0.1", "port == 0", "sport < 9"] {
         let filter = Filter::parse(selector).expect("compiles");
         assert_eq!(
@@ -200,6 +201,59 @@ fn a_serial_line_has_no_address_and_no_port() {
     }
     let filter = Filter::parse("link == serial").expect("compiles");
     assert_eq!(filter.matches(&view(Some(facts), Record::None)), Truth::Yes);
+}
+
+/// A row whose flow has no word is undecided under `zenoh`, whichever way the
+/// term is written: `no` would put "no evidence was handed to this plane" and
+/// "the flow is not zenoh" in one bucket, and `not` over an unknown is unknown.
+/// A row that has one is decided, and `!=` is the complement.
+#[test]
+fn a_zenoh_term_is_undecided_where_the_flow_has_no_word_and_decided_where_it_has() {
+    use crate::session_table::ZenohVerdict;
+    let flow = FlowKey::serial_line();
+    let names = ["Frame"];
+    let judged = |selector: &str, word: Option<ZenohVerdict>| {
+        let facts = RowFacts::of(&names, Some(0), 0, &flow, Direction::A, word);
+        Filter::parse(selector)
+            .expect("compiles")
+            .matches(&view(Some(facts), Record::None))
+    };
+    for selector in [
+        "zenoh == proven",
+        "zenoh != proven",
+        "not zenoh == proven",
+        "zenoh in {proven, mixed}",
+    ] {
+        assert_eq!(judged(selector, None), Truth::Unknown, "{selector}");
+    }
+    assert_eq!(
+        judged("zenoh == proven", Some(ZenohVerdict::Proven)),
+        Truth::Yes
+    );
+    assert_eq!(
+        judged("zenoh != proven", Some(ZenohVerdict::Proven)),
+        Truth::No
+    );
+    assert_eq!(
+        judged("zenoh == proven", Some(ZenohVerdict::Mixed)),
+        Truth::No
+    );
+    assert_eq!(
+        judged("zenoh != proven", Some(ZenohVerdict::Mixed)),
+        Truth::Yes
+    );
+    assert_eq!(
+        judged("zenoh in {proven, mixed}", Some(ZenohVerdict::Mixed)),
+        Truth::Yes
+    );
+    // Every word the verdict has is a word the field takes, and the field
+    // takes no other.
+    for word in ZenohVerdict::names() {
+        assert!(
+            Filter::parse(&alloc::format!("zenoh == {word}")).is_ok(),
+            "{word}"
+        );
+    }
 }
 
 /// `msg` takes exactly the dissection's own message names and the walker's

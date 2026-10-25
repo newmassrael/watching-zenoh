@@ -2644,11 +2644,14 @@ static int check_transport_layout_door(void) {
  * parameter of the fixture. */
 static int check_session_table_doors(void) {
     static const char opening[] =
-        "{\"document\":{\"name\":\"session_table\",\"revision\":3},\"ok\":true,"
+        "{\"document\":{\"name\":\"session_table\",\"revision\":4},\"ok\":true,"
         "\"sessions\":[{\"initiator\":null,\"acceptor\":null,\"link\":\"udp\","
         "\"phase\":\"unseen\",\"encrypted\":\"clear\","
         "\"first_seen_ts_ns\":1000000,\"last_seen_ts_ns\":3000000,"
         "\"frames\":3,\"bytes\":3,\"zenoh\":\"unproven\","
+        "\"unit_readings\":{\"explained\":{\"units\":3,\"bytes\":3},"
+        "\"residual\":{\"units\":0,\"bytes\":0},"
+        "\"undecoded\":{\"units\":0,\"bytes\":0}},"
         "\"unstated\":[{\"cell\":\"initiator\",\"reason\":\"not_in_capture\"},"
         "{\"cell\":\"acceptor\",\"reason\":\"not_in_capture\"}],\"flows\":[";
     static const unsigned char junk[] = "not a capture, and not close to one";
@@ -3435,10 +3438,11 @@ int main(void) {
      * list operators and two token classes for a list's braces; again none of
      * it is on this branch. Nor is revision 6's, the row's facts as fields.
      * Revision 7 adds each token's `role`, what the parser read it as.
+     * Revision 8 is `zenoh` joining the fields, and nothing on this branch.
      * (Not quoted here: its double star followed by a slash would open a
      * nested comment, which -Werror=comment refuses.) */
     CHECK(strcmp(verdict,
-                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":7},"
+                 "{\"document\":{\"name\":\"selector_diagnose\",\"revision\":8},"
                  "\"ok\":true,\"tokens\":["
                  "{\"start\":0,\"end\":3,\"kind\":\"word\",\"role\":\"field\"},"
                  "{\"start\":4,\"end\":6,\"kind\":\"operator\",\"role\":\"operator\"},"
@@ -3963,8 +3967,11 @@ int main(void) {
      * 41: every flow object carries `zenoh` (proven, unproven, foreign_version,
      * mixed), and an Init or a Join of another protocol version is not read past
      * its version byte. A key arrives and a family is declared; nothing
-     * retires. */
-    revisioned[2].revision = 41;
+     * retires.
+     * 42: every flow object carries `unit_readings`, how its framing units read
+     * (`explained`, `residual`, `undecoded`, each `units` and `bytes`). Keys
+     * arrive; nothing retires. */
+    revisioned[2].revision = 42;
     revisioned[2].doc = NULL;
     rc = wz_dissect_pcap_fields(pcap, sizeof pcap, 0, &revisioned[2].doc);
     CHECK(rc == WZ_DISSECT_OK, "fields rc=%d", rc);
@@ -4105,9 +4112,11 @@ int main(void) {
      * 2: `dropped_by_limits.caps` gains `frames_total`, the ceiling over every
      * flow. A key arrives; nothing retires.
      * 3: every row and every flow of a row carries `zenoh`. A key arrives and a
-     * family is declared; nothing retires. */
+     * family is declared; nothing retires.
+     * 4: every row and every flow of a row carries `unit_readings`. Keys
+     * arrive; nothing retires. */
     revisioned[12].name = "session_table";
-    revisioned[12].revision = 3;
+    revisioned[12].revision = 4;
     revisioned[12].doc = NULL;
     rc = wz_dissect_pcap_session_table((const unsigned char *)"not a capture", 13,
                                        WZ_DISSECT_LIMITS_NONE,
@@ -4183,10 +4192,10 @@ int main(void) {
         CHECK(rc == WZ_DISSECT_OK, "selection_since document rc=%d", rc);
         wz_dissect_live_close(quiet);
     }
-    /* (ABI 44) -- the field list, at 2: it takes no input at all. 2: the row's
-     * facts join the fixed fields. */
+    /* (ABI 44) -- the field list, at 3: it takes no input at all. 2: the row's
+     * facts join the fixed fields. 3: `zenoh`, the flow's word, joins them. */
     revisioned[19].name = "selector_fields";
-    revisioned[19].revision = 2;
+    revisioned[19].revision = 3;
     revisioned[19].doc = NULL;
     rc = wz_dissect_selector_fields(&revisioned[19].doc);
     CHECK(rc == WZ_DISSECT_OK, "selector_fields document rc=%d", rc);

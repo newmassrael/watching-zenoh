@@ -60,7 +60,9 @@ use alloc::vec::Vec;
 
 use wz_session_core::inbound::InboundFrame;
 use wz_session_core::parse_error::InboundParseError;
-use wz_session_core::passive::{Direction, PassiveFrame, SessionPhase, VersionEvidence};
+use wz_session_core::passive::{
+    Direction, PassiveFrame, ReadingEvidence, SessionPhase, UnitReading, VersionEvidence,
+};
 use wz_session_core::scouting_message::ScoutingFrame;
 
 use crate::link::{FlowKey, LinkKind};
@@ -94,6 +96,9 @@ pub struct LinkIngest {
     /// reason the module gives: an Init is the oldest message of a flow and the
     /// first a retention ceiling discards. See [`VersionEvidence`].
     zenoh: VersionEvidence,
+    /// How the flow's framing units read, counted at ingest for the same reason
+    /// [`Self::zenoh`] is. See [`ReadingEvidence`].
+    readings: ReadingEvidence,
 }
 
 /// Whether a flow is zenoh, as [`VersionEvidence`] decides it. The closed set:
@@ -214,7 +219,7 @@ impl LinkIngest {
     /// LATEST Init of a kind wins, as it does for a link there: a flow reused by
     /// another node names the new one, and remembering the node that has gone is
     /// the failure.
-    pub(crate) fn observe_frame(&mut self, frame: &PassiveFrame) {
+    fn observe_frame(&mut self, frame: &PassiveFrame) {
         if matches!(&frame.frame, Ok(decoded) if !matches!(decoded, InboundFrame::Unknown { .. })) {
             self.understood = true;
         }
@@ -239,31 +244,44 @@ impl LinkIngest {
         self.named[seat] = Some((body.zid.to_vec(), *is_ack));
     }
 
-    /// Every message of a batch the session produced.
-    pub(crate) fn observe_frames(
-        &mut self,
-        frames: impl IntoIterator<Item = impl core::ops::Deref<Target = PassiveFrame>>,
-    ) {
+    /// One framing unit the session produced: every message of it, and the unit
+    /// itself counted by how it read.
+    ///
+    /// `frames` are the records of ONE unit, as
+    /// [`wz_session_core::passive::ReadUnit`] hands them out. The messages and
+    /// the unit are told together because the unit's class is stamped on its
+    /// messages: a caller that told only the messages would lose the count.
+    pub(crate) fn observe_unit(&mut self, frames: &[PassiveFrame]) {
         for frame in frames {
-            self.observe_frame(&frame);
+            self.observe_frame(frame);
         }
+        self.readings.observe_frames(frames);
     }
 
     /// One scouting datagram's decode, for the evidence alone: a Scout or a
     /// Hello names a node in the census, never a session. `whole` is whether the
-    /// message took the whole datagram.
+    /// message took the whole datagram, which is `datagram_len` bytes. A scouting
+    /// datagram is a framing unit of one message.
     pub(crate) fn observe_scouting(
         &mut self,
         frame: &Result<ScoutingFrame, InboundParseError>,
         whole: bool,
+        datagram_len: usize,
     ) {
         self.zenoh
             .observe(frame.as_ref().map(ScoutingFrame::announced_version), whole);
+        self.readings
+            .observe(UnitReading::of_scouting(frame, whole), datagram_len);
     }
 
     /// What the flow's version-bearing messages said.
     pub fn zenoh(&self) -> VersionEvidence {
         self.zenoh
+    }
+
+    /// How the flow's framing units read.
+    pub fn readings(&self) -> ReadingEvidence {
+        self.readings
     }
 
     /// The instant of the first packet of this flow, if any packet had a clock.
@@ -647,6 +665,8 @@ pub struct Link {
     pub pair: Option<(Vec<u8>, Vec<u8>)>,
     /// What the flow's version-bearing messages said.
     pub zenoh: VersionEvidence,
+    /// How the flow's framing units read.
+    pub readings: ReadingEvidence,
 }
 
 /// One row: a session, or a flow whose session is not known.
@@ -673,6 +693,8 @@ pub struct SessionRow {
     /// The flows' evidence together: a session is zenoh by what any of its
     /// flows proved, and a row grouped by a zid pair has an Init behind it.
     pub zenoh: VersionEvidence,
+    /// How the flows' framing units read, together.
+    pub readings: ReadingEvidence,
     /// The flows, in the order the dissection holds them.
     pub links: Vec<Link>,
 }
@@ -766,6 +788,9 @@ impl SessionRow {
         let zenoh = links
             .iter()
             .fold(VersionEvidence::default(), |sum, l| sum.and(l.zenoh));
+        let readings = links
+            .iter()
+            .fold(ReadingEvidence::default(), |sum, l| sum.and(l.readings));
         SessionRow {
             initiator,
             acceptor,
@@ -777,6 +802,7 @@ impl SessionRow {
             frames,
             bytes,
             zenoh,
+            readings,
             links,
         }
     }
@@ -940,6 +966,7 @@ fn link_of(
         acceptor,
         pair,
         zenoh: ingest.zenoh(),
+        readings: ingest.readings(),
     }
 }
 

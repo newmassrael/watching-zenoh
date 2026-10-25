@@ -343,6 +343,9 @@ struct RowPlace {
     place: Option<(crate::link::FlowKey, Option<usize>)>,
     list: usize,
     direction: Direction,
+    /// The flow's word for whether its bytes are zenoh, as the walk's census
+    /// held it, kept with the place for the same reason the place is.
+    zenoh: Option<crate::session_table::ZenohVerdict>,
 }
 
 impl RowPlace {
@@ -356,6 +359,7 @@ impl RowPlace {
             place: ctx.place(),
             list: ctx.list(),
             direction: frame.direction,
+            zenoh: ctx.zenoh(),
         }
     }
 
@@ -367,6 +371,7 @@ impl RowPlace {
             self.list,
             &flow,
             self.direction,
+            self.zenoh,
         ))
     }
 }
@@ -1278,6 +1283,10 @@ impl ExchangeFold {
 }
 
 impl crate::ordered_fold::OrderedFold for ExchangeFold {
+    fn reads_flow_word(&self) -> bool {
+        self.filter.reads_flow_word()
+    }
+
     fn feed(
         &mut self,
         flow: &crate::link::FlowKey,

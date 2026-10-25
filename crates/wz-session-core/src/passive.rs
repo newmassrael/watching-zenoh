@@ -362,6 +362,163 @@ impl VersionEvidence {
     }
 }
 
+/// How ONE framing unit read: the closed set [`ReadingEvidence`] counts in.
+///
+/// A unit is a datagram, or a stream's length-prefixed unit. The three answers
+/// PARTITION the units a flow produced, so a unit is counted in exactly one:
+///
+/// * `Explained` -- every message of the unit decoded and every byte of it is
+///   accounted for by a message ([`PassiveFrame::unit_read_whole`], the rule
+///   [`VersionEvidence`] reads a version under);
+/// * `Residual` -- the unit opens with a message this reader decoded and knows,
+///   and the walk stopped before the unit's end: a message it cannot measure
+///   followed (an unknown MID, or a decode that failed past the front), so bytes
+///   remain that no message accounts for;
+/// * `Undecoded` -- the unit's front did not decode, or is a MID this reader
+///   cannot name: nothing in it is explained.
+///
+/// Nothing here says whether the bytes are zenoh. A one-byte datagram is a
+/// KeepAlive and so `Explained`; a compressed zenoh session whose batches this
+/// reader cannot decompress is `Undecoded`. The word is what the READER made of
+/// the unit, which is a fact about the reading, and a consumer that wants a
+/// verdict has [`VersionEvidence`] for that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitReading {
+    /// Every message decoded and every byte accounted for.
+    Explained,
+    /// A known message at the front, and bytes left that no message accounts for.
+    Residual,
+    /// The front did not decode, or is a message this reader cannot name.
+    Undecoded,
+}
+
+impl UnitReading {
+    /// How the unit these `frames` came out of read.
+    ///
+    /// `frames` are the records of ONE unit, in order, as
+    /// [`ReadUnit::frames`] holds them: the walk stamps
+    /// [`PassiveFrame::unit_read_whole`] on every one of them, and the front
+    /// record says what the unit opened with. An empty slice is not a unit and
+    /// answers `None`.
+    pub fn of_frames(frames: &[PassiveFrame]) -> Option<UnitReading> {
+        let front = frames.first()?;
+        Some(if front.unit_read_whole {
+            UnitReading::Explained
+        } else {
+            match &front.frame {
+                Ok(InboundFrame::Unknown { .. }) | Err(_) => UnitReading::Undecoded,
+                Ok(_) => UnitReading::Residual,
+            }
+        })
+    }
+
+    /// How a scouting datagram read: the one message it carries decoded, and
+    /// took the whole datagram or did not (`whole`). A scouting datagram is
+    /// a unit of one message, which is why this takes no frame list.
+    pub fn of_scouting<T>(decode: &Result<T, InboundParseError>, whole: bool) -> UnitReading {
+        match (decode, whole) {
+            (Ok(_), true) => UnitReading::Explained,
+            (Ok(_), false) => UnitReading::Residual,
+            (Err(_), _) => UnitReading::Undecoded,
+        }
+    }
+}
+
+/// Units of one [`UnitReading`], and the bytes they carried.
+///
+/// Both, because a count alone is a weak witness: a flow of a hundred one-byte
+/// units and a flow of a hundred full batches explain the same number of units
+/// and very different numbers of bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UnitTally {
+    /// Framing units.
+    pub units: u64,
+    /// Their bytes, as the walk read them: [`PassiveFrame::unit_len`], which for
+    /// an lz4 batch is the length of the decompressed bytes and for a stream
+    /// unit does not include the length prefix.
+    pub bytes: u64,
+}
+
+impl UnitTally {
+    fn add(&mut self, bytes: usize) {
+        self.units = self.units.saturating_add(1);
+        self.bytes = self.bytes.saturating_add(bytes as u64);
+    }
+
+    fn and(self, other: UnitTally) -> UnitTally {
+        UnitTally {
+            units: self.units.saturating_add(other.units),
+            bytes: self.bytes.saturating_add(other.bytes),
+        }
+    }
+}
+
+/// How a flow's framing units READ: the evidence beside [`VersionEvidence`].
+///
+/// # What it is for
+///
+/// [`VersionEvidence`] decides whether a flow is zenoh from four messages that
+/// carry a version, and a capture that joined a session after its handshake has
+/// none of them: it reads `unproven`, exactly as arbitrary bytes do. The two
+/// are the same observation to the VERDICT, and they are not the same
+/// observation to the READING: a session joined mid-stream reads, unit after
+/// unit, as messages that account for every byte, while arbitrary bytes mostly
+/// do not. This type keeps the count that tells the two apart, and it is
+/// evidence and not a verdict: one `Explained` unit is a KeepAlive, which a
+/// byte of `0x04` is.
+///
+/// # What it counts, and what it does not
+///
+/// Framing units, each in exactly one of [`UnitReading`]'s three classes, at
+/// ingest, so a retention ceiling that discarded the messages does not move it.
+/// A stream whose framing this reader lost counts no unit for the bytes it
+/// skipped while resynchronising: those are not units, and the flow's resync
+/// record says them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReadingEvidence {
+    /// Units every byte of which a decoded message accounts for.
+    pub explained: UnitTally,
+    /// Units that opened with a known message and left bytes unaccounted for.
+    pub residual: UnitTally,
+    /// Units whose front did not decode or is not a message this reader names.
+    pub undecoded: UnitTally,
+}
+
+impl ReadingEvidence {
+    /// One unit's contribution: how it read and how many bytes it was.
+    pub fn observe(&mut self, reading: UnitReading, bytes: usize) {
+        match reading {
+            UnitReading::Explained => self.explained.add(bytes),
+            UnitReading::Residual => self.residual.add(bytes),
+            UnitReading::Undecoded => self.undecoded.add(bytes),
+        }
+    }
+
+    /// The unit these `frames` came out of, counted. Nothing for an empty slice.
+    pub fn observe_frames(&mut self, frames: &[PassiveFrame]) {
+        if let (Some(reading), Some(front)) = (UnitReading::of_frames(frames), frames.first()) {
+            self.observe(reading, front.unit_len);
+        }
+    }
+
+    /// Units of every class.
+    pub fn units(&self) -> u64 {
+        self.explained
+            .units
+            .saturating_add(self.residual.units)
+            .saturating_add(self.undecoded.units)
+    }
+
+    /// Two bodies of evidence together, for a row that groups several flows.
+    pub fn and(self, other: ReadingEvidence) -> ReadingEvidence {
+        ReadingEvidence {
+            explained: self.explained.and(other.explained),
+            residual: self.residual.and(other.residual),
+            undecoded: self.undecoded.and(other.undecoded),
+        }
+    }
+}
+
 /// What the observer knows of ONE direction's half of a session, as of the
 /// last byte it read.
 ///
@@ -3704,6 +3861,84 @@ mod tests {
     fn a_session_is_small_in_every_build() {
         let size = core::mem::size_of::<PassiveSession>();
         assert!(size < 64 * 1024, "PassiveSession is {size} bytes");
+    }
+
+    /// A unit is counted in exactly one class, with its own bytes, and the
+    /// total is the sum of the three.
+    #[test]
+    fn a_unit_is_counted_in_exactly_one_reading_class() {
+        let mut e = ReadingEvidence::default();
+        e.observe(UnitReading::Explained, 10);
+        e.observe(UnitReading::Explained, 5);
+        e.observe(UnitReading::Residual, 7);
+        e.observe(UnitReading::Undecoded, 3);
+        assert_eq!(
+            e.explained,
+            UnitTally {
+                units: 2,
+                bytes: 15
+            }
+        );
+        assert_eq!(e.residual, UnitTally { units: 1, bytes: 7 });
+        assert_eq!(e.undecoded, UnitTally { units: 1, bytes: 3 });
+        assert_eq!(e.units(), 4);
+    }
+
+    /// Evidence from several flows adds class by class, and neither wraps nor
+    /// panics at the top of the range.
+    #[test]
+    fn reading_evidence_adds_class_by_class_and_saturates() {
+        let mut a = ReadingEvidence::default();
+        a.observe(UnitReading::Explained, 4);
+        let mut b = ReadingEvidence::default();
+        b.observe(UnitReading::Explained, 6);
+        b.observe(UnitReading::Undecoded, 1);
+        let sum = a.and(b);
+        assert_eq!(
+            sum.explained,
+            UnitTally {
+                units: 2,
+                bytes: 10
+            }
+        );
+        assert_eq!(sum.residual, UnitTally::default());
+        assert_eq!(sum.undecoded, UnitTally { units: 1, bytes: 1 });
+
+        let full = ReadingEvidence {
+            explained: UnitTally {
+                units: u64::MAX,
+                bytes: u64::MAX,
+            },
+            ..ReadingEvidence::default()
+        };
+        assert_eq!(full.and(a).explained.units, u64::MAX);
+        assert_eq!(full.units(), u64::MAX);
+    }
+
+    /// A scouting datagram is a unit of one message: its decode and whether the
+    /// message took the whole datagram say how it read, and a datagram whose
+    /// decode failed is `Undecoded` however much of it there is.
+    #[test]
+    fn a_scouting_datagram_reads_by_its_decode_and_its_extent() {
+        let ok: Result<(), InboundParseError> = Ok(());
+        let err: Result<(), InboundParseError> =
+            Err(InboundParseError::ForeignVersion { version: 8 });
+        assert_eq!(UnitReading::of_scouting(&ok, true), UnitReading::Explained);
+        assert_eq!(UnitReading::of_scouting(&ok, false), UnitReading::Residual);
+        assert_eq!(UnitReading::of_scouting(&err, true), UnitReading::Undecoded);
+        assert_eq!(
+            UnitReading::of_scouting(&err, false),
+            UnitReading::Undecoded
+        );
+    }
+
+    /// An empty slice of records is not a unit: nothing is counted for it.
+    #[test]
+    fn no_records_is_no_unit() {
+        assert_eq!(UnitReading::of_frames(&[]), None);
+        let mut e = ReadingEvidence::default();
+        e.observe_frames(&[]);
+        assert_eq!(e, ReadingEvidence::default());
     }
 
     /// R311y631 (§1.2b) — the ONE message a unit was expected to hold.

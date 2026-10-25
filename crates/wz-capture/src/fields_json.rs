@@ -2139,6 +2139,7 @@ fn push_stream_flow(
     push_flow(&flow.flow, out);
     push_flow_number(tags.flow_id, out);
     push_zenoh(flow.ingest.zenoh(), out);
+    push_unit_readings(flow.ingest.readings(), out);
     push_context(&flow.session.context(), out);
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
@@ -2489,6 +2490,7 @@ fn push_datagram_flow(
     push_flow(&flow.flow, out);
     push_flow_number(tags.flow_id, out);
     push_zenoh(flow.ingest.zenoh(), out);
+    push_unit_readings(flow.ingest.readings(), out);
     push_context(&flow.session.context(), out);
     push_halves(&flow.half(Direction::A), &flow.half(Direction::B), out);
     out.push_str(",\"messages\":[");
@@ -4320,6 +4322,45 @@ fn push_zenoh(evidence: wz_session_core::passive::VersionEvidence, out: &mut Str
         ",\"zenoh\":\"{}\"",
         crate::session_table::ZenohVerdict::of(evidence).name()
     );
+}
+
+/// Revision 42 — how the flow's framing units READ, beside the verdict
+/// [`push_zenoh`] writes and not inside it: `unit_readings`, an object of three
+/// tallies, `explained`, `residual` and `undecoded`, each `{"units":N,"bytes":B}`.
+///
+/// The three PARTITION the flow's units (see
+/// [`wz_session_core::passive::UnitReading`]), so a consumer that wants the
+/// unit total sums them and one that wants the share of bytes a decoded message
+/// accounts for divides. It is evidence and not a verdict, and it is the count
+/// that tells a zenoh session the capture joined after its handshake from
+/// arbitrary bytes, which `zenoh` reads as the same observation (`unproven`).
+/// Counted at ingest, so a retention ceiling does not move it. It is shared with
+/// the session table, which writes the same object on a row and on each flow of
+/// it.
+pub(crate) fn push_unit_readings(
+    readings: wz_session_core::passive::ReadingEvidence,
+    out: &mut String,
+) {
+    let _ = write!(
+        out,
+        ",\"unit_readings\":{{\"explained\":{},\"residual\":{},\"undecoded\":{}}}",
+        TallyJson(readings.explained),
+        TallyJson(readings.residual),
+        TallyJson(readings.undecoded)
+    );
+}
+
+/// One tally as `{"units":N,"bytes":B}`.
+struct TallyJson(wz_session_core::passive::UnitTally);
+
+impl core::fmt::Display for TallyJson {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{{\"units\":{},\"bytes\":{}}}",
+            self.0.units, self.0.bytes
+        )
+    }
 }
 
 /// The flow's observation CONTEXT: what the handshake it watched

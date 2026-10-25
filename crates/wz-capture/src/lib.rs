@@ -4026,7 +4026,7 @@ impl FlowDissection {
             for frame in &mut unit.frames {
                 frame.wire_end = Some(end);
             }
-            self.ingest.observe_frames(&unit.frames);
+            self.ingest.observe_unit(&unit.frames);
             match self.keep {
                 // Open-debt item 924, step 4c — a payload is not copied: it
                 // stands in the stream, as its frame's bytes (or those bytes
@@ -4277,9 +4277,7 @@ fn stream_into_session(
                 // direction is drained before the other is asked.
                 match session.next_unit_with(dir, &|offset| instant_of(dir, offset)) {
                     Ok(unit) => {
-                        for frame in &unit.frames {
-                            ingest.observe_frame(frame);
-                        }
+                        ingest.observe_unit(&unit.frames);
                         match entries_from {
                             Some(source) => frames.push_unit(unit, source),
                             None => frames.append(unit.frames),
@@ -6713,6 +6711,39 @@ impl Dissection {
             )))
     }
 
+    /// The word of each list's flow for whether its bytes are zenoh
+    /// ([`session_table::ZenohVerdict`]), one per list of
+    /// [`Self::message_lists_with_origin`] and in its order, from the evidence
+    /// each flow holds now.
+    ///
+    /// DERIVED FROM THE ORIGINS and not from a second enumeration: the walk is
+    /// the one above, and each list's origin says which flow table it came out
+    /// of. A stream flow is one list and the k-th `Stream` is the k-th flow; a
+    /// datagram flow is a `Datagram` list and the QUIC lists that follow it,
+    /// which share the flow's evidence; the serial list has the line's. A list
+    /// the tables cannot account for is `None` (the same absence a selector's
+    /// row terms read as undecided), which cannot happen while the enumeration
+    /// is what it is and is stated rather than assumed.
+    pub(crate) fn list_zenoh_words(&self) -> Vec<Option<session_table::ZenohVerdict>> {
+        let mut streams = self.flows.iter();
+        let mut datagrams = self.datagram_flows.iter();
+        let mut datagram: Option<&session_table::LinkIngest> = None;
+        self.message_lists_with_origin()
+            .map(|(_, origin, _)| {
+                let ingest = match origin {
+                    MessageListOrigin::Stream => streams.next().map(|f| &f.ingest),
+                    MessageListOrigin::Datagram => {
+                        datagram = datagrams.next().map(|f| &f.ingest);
+                        datagram
+                    }
+                    MessageListOrigin::QuicStream(_) | MessageListOrigin::QuicDatagram => datagram,
+                    MessageListOrigin::Serial => Some(&self.serial_ingest),
+                };
+                ingest.map(|i| session_table::ZenohVerdict::of(i.zenoh()))
+            })
+            .collect()
+    }
+
     /// R2508 (open-debt item 713) — every message of every list, in the order
     /// the CAPTURE holds them, each beside the
     /// [`Self::message_lists_with_origin`] index of the list it came from.
@@ -7476,9 +7507,7 @@ impl Dissection {
                             // The flow's own ingest, a field beside the
                             // streams: a QUIC connection is one link and its
                             // streams are its sessions' byte streams.
-                            for frame in &unit.frames {
-                                dg.ingest.observe_frame(frame);
-                            }
+                            dg.ingest.observe_unit(&unit.frames);
                             match keep {
                                 Keep::Entries => frames.push_unit(unit, &source),
                                 #[cfg(test)]
@@ -7649,7 +7678,7 @@ impl Dissection {
                 .next_datagram_unit_on(direction, bytes, packet_index, handshake)
         {
             feed.messages += unit.frames.len();
-            dg.ingest.observe_frames(&unit.frames);
+            dg.ingest.observe_unit(&unit.frames);
             match dg.keep {
                 // Open-debt item 924, step 4c — the recovered plaintext exists
                 // only in this call, so the list logs a copy of it, the smallest
@@ -8019,8 +8048,8 @@ impl Dissection {
             // The two lists move together, here and nowhere else, which is what
             // keeps the index correspondence a local invariant rather than a
             // convention.
-            for decoded in &unit.frames {
-                self.serial_ingest.observe_frame(decoded);
+            self.serial_ingest.observe_unit(&unit.frames);
+            for _ in &unit.frames {
                 self.serial_origins.push_back(SerialEnvelope {
                     interface: frame.interface,
                     header: frame.header,
@@ -8647,7 +8676,7 @@ impl Dissection {
             let read = parse_scouting_observed(d.payload);
             let whole = matches!(&read, Ok((_, n)) if *n == d.payload.len());
             let frame = read.map(|(frame, _)| frame);
-            flow.ingest.observe_scouting(&frame, whole);
+            flow.ingest.observe_scouting(&frame, whole, d.payload.len());
             // Open-debt item 924, step 4c — the payload is logged (or named by
             // its place in the container) and the message is read again from
             // it. The clock was advanced for this datagram above, before the
@@ -8677,7 +8706,7 @@ impl Dissection {
             flow.session
                 .next_datagram_unit_on(direction, d.payload, d.packet_index, handshake)
         {
-            flow.ingest.observe_frames(&unit.frames);
+            flow.ingest.observe_unit(&unit.frames);
             match flow.keep {
                 // Open-debt item 924, step 4c — read again from the list's log,
                 // or from the container where the payload sits in one.

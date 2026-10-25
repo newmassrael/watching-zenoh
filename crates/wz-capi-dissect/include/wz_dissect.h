@@ -1203,7 +1203,7 @@
  *
  * Every family in `value_families` now carries a `carries` axis:
  *
- *     {"name":"fields","revision":41,"key":"kind","values":[...],
+ *     {"name":"fields","revision":42,"key":"kind","values":[...],
  *      "carries":[{"word":"bits","shapes":[["end","name","start","value"]]},
  *                 {"word":"opaque","shapes":[["end","name","start"]]}, ...]}
  *
@@ -1885,6 +1885,21 @@ int wz_dissect_pcap_census_bounded(const unsigned char *bytes, size_t len,
  *   link         tcp udp raweth serial vsock                 == !=
  *   flow         an integer, the flow's list_id              == != < <= > >=
  *   packet       an integer, the row's packet                == != < <= > >=
+ *   zenoh        the flow's word: proven unproven            == !=
+ *                foreign_version mixed
+ *
+ * `zenoh` reads the word WHETHER A FLOW IS ZENOH (wz_dissect_pcap_session_table
+ * describes it) gives the flow a row is in, as the flow's evidence stands when
+ * the selector is judged: `zenoh == proven` is `yes` on every row of a flow with
+ * an Init, Join, Scout or Hello of the protocol's version read from a unit read
+ * whole, and `no` on every row of any other. It is the flow's word and not the
+ * message's: a KeepAlive row of a proven flow is `yes`. A row whose flow has no
+ * word (a plane handed no node census of its lists) is UNDECIDED, `!=` and `not`
+ * with it, and never `no`. Because the word moves as Inits arrive, a row a
+ * cursor has passed can read another word later, and wz_dissect_live_selection_since
+ * names it in `revised`. The word is evidence of the flow, not a count of how
+ * its units read: that is `unit_readings`, on the field document's flow and the
+ * session table's rows, and no selector field reads it.
  *
  * (ABI 44, the document revisions named below) THE ROW'S OWN FACTS. `msg` is
  * every message the row rode in, so a Push in a Frame answers `yes` to
@@ -2113,15 +2128,20 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * answers the same question through wz_dissect_live_session_table, with the
  * same document; its limits are the handle's, chosen at open.
  *
- *     {"document":{"name":"session_table","revision":3},"ok":true,
+ *     {"document":{"name":"session_table","revision":4},"ok":true,
  *      "sessions":[{"initiator":"a1a1a1a1","acceptor":"b2b2b2b2","link":"tcp",
  *                   "phase":"established","encrypted":"clear",
  *                   "first_seen_ts_ns":"1700000000000000000",
  *                   "last_seen_ts_ns":"1700000000000015000",
- *                   "frames":10,"bytes":48,"zenoh":"proven","unstated":[],
+ *                   "frames":10,"bytes":48,"zenoh":"proven",
+ *                   "unit_readings":{"explained":{"units":10,"bytes":28},
+ *                                    "residual":{"units":0,"bytes":0},
+ *                                    "undecoded":{"units":0,"bytes":0}},
+ *                   "unstated":[],
  *                   "flows":[{"flow":{"low":{...},"high":{...},"link":"tcp"},
  *                             "encrypted":"clear","bytes":48,
- *                             "zenoh":"proven"}]}],
+ *                             "zenoh":"proven",
+ *                             "unit_readings":{...}}]}],
  *      "excluded":[{"why":"multicast_group","count":0},
  *                  {"why":"scouting_only","count":0}],
  *      "dropped_by_limits":{...}}
@@ -2181,11 +2201,15 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  *   `zenoh`      whether the bytes are zenoh (session_table revision 3); see
  *                WHETHER A FLOW IS ZENOH below. A row's word is its flows'
  *                evidence taken together.
+ *   `unit_readings`  how the framing units READ (session_table revision 4); see
+ *                HOW A FLOW'S UNITS READ below. A row's tallies are its flows'
+ *                together.
  *   `unstated`   one {"cell":...,"reason":...} for each cell that is null; see
  *                below.
  *   `flows`      the flows the row is made of, each with the flow object every
  *                other document carries (so a consumer can join), its `encrypted`
- *                finding, its own `bytes` and its own `zenoh`.
+ *                finding, its own `bytes`, its own `zenoh` and its own
+ *                `unit_readings`.
  *
  * WHETHER A FLOW IS ZENOH. Arbitrary bytes decode as zenoh transport messages:
  * a datagram on any port is read as one, and a few bytes make a KeepAlive or a
@@ -2217,6 +2241,43 @@ int wz_dissect_pcap_census_where_limited(const unsigned char *bytes, size_t len,
  * a Scout or a Hello names a node, an initiator or an acceptor only out of a
  * unit read whole, on the rule `proven` uses: that and the version byte are
  * what keep arbitrary bytes from becoming a node with a zid and a role.
+ *
+ * HOW A FLOW'S UNITS READ. `zenoh` reads a session the capture joined after its
+ * handshake as `unproven`, the word arbitrary bytes get, because to a VERDICT
+ * the two are one observation. To the READING they are not: such a session
+ * reads, unit after unit, as messages that account for every byte, and
+ * arbitrary bytes mostly do not. `unit_readings` keeps that count, on every row
+ * and flow here and on every flow object of the field document (revision 42):
+ *
+ *   {"explained":{"units":N,"bytes":B},
+ *    "residual":{"units":N,"bytes":B},
+ *    "undecoded":{"units":N,"bytes":B}}
+ *
+ * A unit is a datagram, or a stream's length-prefixed unit; a scouting datagram
+ * is a unit of one message. The three tallies PARTITION the flow's units, each
+ * unit in exactly one:
+ *
+ *   `explained`   every message of the unit decoded and every byte of it is
+ *                 accounted for by a message (the rule `proven` reads a version
+ *                 under);
+ *   `residual`    the unit opens with a message this reader decoded and knows,
+ *                 and the walk stopped before the unit's end: bytes remain that
+ *                 no message accounts for;
+ *   `undecoded`   the unit's front did not decode (a decode error, a message of
+ *                 another protocol version, an lz4 batch that does not
+ *                 decompress), or is a message this reader cannot name.
+ *
+ * `bytes` is the bytes of those units as the reader read them: for a stream
+ * unit without its length prefix, and for an lz4 batch the decompressed length.
+ * Both numbers are counted at ingest, so a retention ceiling that discards the
+ * messages does not move them. A stream whose framing this reader lost counts no
+ * unit for the bytes it skipped while it resynchronised: those are not units.
+ *
+ * THIS IS EVIDENCE AND NOT A VERDICT. A one-byte datagram is a KeepAlive and
+ * reads `explained`; a compressed zenoh session whose batches this reader
+ * cannot decompress reads `undecoded`. A consumer that draws it beside `zenoh`
+ * must not hide a row by it and must not say `proven` for it: the numbers say
+ * how the bytes read, never that they are zenoh.
  *
  * EVERY CELL IS PRESENT ON EVERY ROW. A value this reader cannot state is `null`
  * and the row's `unstated` names it with a REASON, so a cell is null exactly when
@@ -2465,7 +2526,7 @@ int wz_dissect_selector_bind(const char *selector, const char *names_json,
  * this BUILD's, not a capture's), returns WZ_DISSECT_OK and a string you free
  * with wz_dissect_string_free:
  *
- *     {"document":{"name":"selector_fields","revision":2},
+ *     {"document":{"name":"selector_fields","revision":3},
  *      "matches":true,
  *      "fields":[{"name":"key","operators":["==","!=","in","contains","matches"]},
  *                {"name":"dir","operators":["==","!=","in"],"words":["a","b"]},
@@ -2482,8 +2543,8 @@ int wz_dissect_selector_bind(const char *selector, const char *names_json,
  *                carries `matches`, so offering what the lists offer offers
  *                nothing the parser refuses.
  *   `fields`     the fixed fields of THE SELECTOR LANGUAGE's table, in its
- *                order. `words` only for the three with a closed set: `dir`,
- *                `kind`, `closed`.
+ *                order. `words` only for those with a closed set: `dir`, `kind`,
+ *                `closed`, `msg`, `link`, `zenoh`.
  *   `paths`      every path into a record's dissection, written from its
  *                message root. A selector may write any tail of one. `kind` is
  *                the dissection's own kind word and DECIDES the object: a
@@ -4652,7 +4713,7 @@ int wz_dissect_transport_layout(const unsigned char *bytes, size_t len,
  *
  * R2175 -- the document is at REVISION 3, and the fourth key is `value_families`:
  *
- *     "value_families":[{"name":"fields","revision":41,"key":"state",
+ *     "value_families":[{"name":"fields","revision":42,"key":"state",
  *                        "values":["decoded","encoding_mismatch",…]}, …]
  *
  * every key in every document whose VALUE this build draws from a closed set,

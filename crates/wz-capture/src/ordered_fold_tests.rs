@@ -583,3 +583,37 @@ fn the_walk_from_nothing_is_the_whole_walk_and_from_a_mark_is_its_tail() {
     g.raw(&tcp_packet_on(3333, 0, &framed_keepalive()));
     assert!(g.d.capture_order_since(Some(&marks)).is_none());
 }
+
+/// A FLOW'S WORD THAT MOVES BEGINS A FOLD THAT READ IT, AND NO OTHER.
+///
+/// The flow carries records and no handshake, so its word is `unproven`. An
+/// Init of another protocol version then arrives on it: the word becomes
+/// `foreign_version`, and that Init names no node, so nothing else a fold is
+/// judged by moves, which is what isolates the word. A selector that reads
+/// `zenoh` judged the flow's earlier messages by the old word and must begin
+/// again (and writes the same document a fresh fold does); one that does not
+/// continues, and folds exactly the one message that arrived.
+#[test]
+fn a_flow_word_that_moves_begins_a_fold_that_reads_it_and_no_other() {
+    for (selector, begins) in [("zenoh == unproven", true), ("kind == put", false)] {
+        let mut g = Growing::new(Dissection::new(), selector);
+        g.udp(true, 40000, 7447, &declare_kexpr(7, "demo/temp"));
+        g.udp(true, 40000, 7447, &push(sender_space(7, None), &[1u8; 12]));
+        g.ask("settled");
+        g.udp(true, 40000, 7447, &push(sender_space(7, None), &[2u8; 12]));
+        let (before, after) = g.ask("continued");
+        assert_eq!(delta(before, after).restarts, 0, "{selector}: an append");
+
+        let mut foreign = init_wire(ZID_A);
+        foreign[1] = 0x08;
+        g.udp_wire(true, 40000, 7447, &foreign);
+        let (before, after) = g.ask("the first Init, of another version");
+        let moved = delta(before, after);
+        if begins {
+            assert_eq!(moved.restarts, PLANES, "{selector}: {moved:?}");
+        } else {
+            assert_eq!(moved.restarts, 0, "{selector}: {moved:?}");
+            assert_eq!(moved.messages_folded, PLANES, "{selector}: {moved:?}");
+        }
+    }
+}

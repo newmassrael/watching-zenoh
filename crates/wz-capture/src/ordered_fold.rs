@@ -59,6 +59,17 @@ pub(crate) trait OrderedFold: Clone {
     /// when each walked the capture on its own.
     const PLANES: u64 = 1;
 
+    /// Whether what this fold folds was judged by a flow's word for whether
+    /// its bytes are zenoh ([`crate::filter::Filter::reads_flow_word`]), which
+    /// moves as Inits arrive: then the fold cannot be continued across a move of
+    /// a word it has already read, and is begun again. A fold whose selector
+    /// names no such term continues as the capture grows, whatever a flow's word
+    /// does.
+    ///
+    /// Required of every fold, with no default: "no" is a claim about the fold,
+    /// and a plane that was never asked would claim it by silence.
+    fn reads_flow_word(&self) -> bool;
+
     /// Take one message. `list` is its position in
     /// [`Dissection::message_lists_with_origin`] and `packet` the capture packet
     /// it resolves to; `grouping` is the capture's session grouping.
@@ -186,10 +197,17 @@ impl<F: OrderedFold> Resumable<F> {
     ) -> Option<&F> {
         let origin_ms = dissection.capture_origin_ms();
         let resumed = match &self.saved {
-            Some(s) if s.grouping == *grouping && s.origin_ms == origin_ms => match trims {
-                TrimPolicy::Restart => dissection.capture_order_since(Some(&s.marks)),
-                TrimPolicy::Continue => dissection.capture_order_since_across_trims(Some(&s.marks)),
-            },
+            Some(s)
+                if s.grouping.continues_as(grouping, s.fold.reads_flow_word())
+                    && s.origin_ms == origin_ms =>
+            {
+                match trims {
+                    TrimPolicy::Restart => dissection.capture_order_since(Some(&s.marks)),
+                    TrimPolicy::Continue => {
+                        dissection.capture_order_since_across_trims(Some(&s.marks))
+                    }
+                }
+            }
             _ => None,
         };
         if let Some(share) = share.as_deref_mut() {
@@ -353,6 +371,10 @@ impl OrderedFold for CensusFold {
     } else {
         1
     };
+
+    fn reads_flow_word(&self) -> bool {
+        self.keyexprs.reads_flow_word()
+    }
 
     fn feed(
         &mut self,

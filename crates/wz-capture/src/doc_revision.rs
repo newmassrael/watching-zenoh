@@ -2164,6 +2164,34 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: FIELDS_R41_CARRIES,
     },
+    // Revision 42 ADDS `unit_readings` to every flow object, and inside it
+    // `explained`, `residual` and `undecoded`, each with `units` and `bytes`, and
+    // retires nothing: how the flow's framing units READ. The three PARTITION the
+    // units, so a consumer sums them for the unit total and divides for the share
+    // of bytes a decoded message accounts for.
+    //
+    // It is evidence beside `zenoh` and not a second verdict. `zenoh` reads a flow
+    // the capture joined after its handshake as `unproven`, the word arbitrary
+    // bytes get, because the two are the same observation to a verdict; they are
+    // not the same to the reading: such a flow reads unit after unit as messages
+    // that account for every byte, and arbitrary bytes mostly do not. A one-byte
+    // datagram is a KeepAlive and reads `explained`, so the count is a witness of
+    // how the bytes read and never a statement that they are zenoh.
+    //
+    // No family and no `carries` row moves: the three tallies are numbers, and no
+    // word comes with them. The values are counted at ingest, so a retention
+    // ceiling that discards the messages does not move them. A cached document
+    // from revision 41 lacks the key and should be read again by a consumer that
+    // wants it.
+    DocumentShape {
+        document: FIELDS,
+        revision: 42,
+        keys: FIELDS_R42_KEYS,
+        retiring: &[],
+        families: FIELDS_R41_FAMILIES,
+        planes: &[],
+        carries: FIELDS_R41_CARRIES,
+    },
     DocumentShape {
         document: SUMMARY,
         revision: 1,
@@ -2906,6 +2934,20 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SESSION_TABLE_R3_CARRIES,
     },
+    // Revision 4 ADDS `unit_readings` to every row and to every flow of a row, the
+    // field document's object from its revision 42 (`explained`, `residual` and
+    // `undecoded`, each `units` and `bytes`), and retires nothing. A row's tallies
+    // are its flows' together. No family and no `carries` row moves and no word
+    // moves.
+    DocumentShape {
+        document: SESSION_TABLE,
+        revision: 4,
+        keys: SESSION_TABLE_R4_KEYS,
+        retiring: &[],
+        families: SESSION_TABLE_R3_FAMILIES,
+        planes: &[],
+        carries: SESSION_TABLE_R3_CARRIES,
+    },
     // The selector's verdict over the field document's rows, with none
     // of what the field document renders beside it.
     //
@@ -3254,6 +3296,22 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
         planes: &[],
         carries: SELECTOR_FIELDS_R1_CARRIES,
     },
+    // THE FLOW'S WORD JOINS THE LANGUAGE, and no key moves.
+    //
+    // One fixed field arrives under `fields`, `zenoh`, last in the table's
+    // order, with the equality operators and `words` for the four words of the
+    // flow's verdict (`foreign_version`, `mixed`, `proven`, `unproven`): the
+    // same closed set the field document and the session table declare for their
+    // own `zenoh`.
+    DocumentShape {
+        document: SELECTOR_FIELDS,
+        revision: 3,
+        keys: SELECTOR_FIELDS_R1_KEYS,
+        retiring: &[],
+        families: SELECTOR_FIELDS_R1_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_FIELDS_R1_CARRIES,
+    },
     // Revision 7 ADDS `role` to a token object and retires nothing: what the
     // parser read the token as, `field`, `path`, `operator`, `value`,
     // `function`, `logic` or `group` (`crate::filter::TokenRole`). It is
@@ -3265,6 +3323,18 @@ pub const DOCUMENT_HISTORY: &[DocumentShape] = &[
     DocumentShape {
         document: SELECTOR_DIAGNOSE,
         revision: 7,
+        keys: SELECTOR_DIAGNOSE_R7_KEYS,
+        retiring: &[],
+        families: SELECTOR_DIAGNOSE_R7_FAMILIES,
+        planes: &[],
+        carries: SELECTOR_DIAGNOSE_R7_CARRIES,
+    },
+    // Revision 8: `zenoh` JOINS THE FIELDS, and no key or word moves. A selector
+    // that names it reads `ok:true`, its value is a `word`, and the verdict's
+    // unknown-field refusal may now offer it among the nearest names.
+    DocumentShape {
+        document: SELECTOR_DIAGNOSE,
+        revision: 8,
         keys: SELECTOR_DIAGNOSE_R7_KEYS,
         retiring: &[],
         families: SELECTOR_DIAGNOSE_R7_FAMILIES,
@@ -14875,6 +14945,224 @@ pub const SESSION_TABLE_R3_CARRIES: &[KeyCarries] = &[
     },
 ];
 
+/// The keys the `session_table` document carries at revision 4: revision 3's PLUS
+/// `unit_readings` and the four names inside it, on every row and on every flow of
+/// a row.
+pub const SESSION_TABLE_R4_KEYS: &[&str] = &[
+    "acceptor",
+    "addr",
+    "bytes",
+    "caps",
+    "cell",
+    "count",
+    "document",
+    "dropped_by_limits",
+    "encrypted",
+    "excluded",
+    "explained",
+    "family",
+    "first_seen_ts_ns",
+    "flow",
+    "flows",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "high",
+    "initiator",
+    "last_seen_ts_ns",
+    "link",
+    "low",
+    "max_flows_per_table",
+    "max_scout_askers",
+    "message",
+    "name",
+    "ok",
+    "phase",
+    "port",
+    "reason",
+    "refusal",
+    "residual",
+    "revision",
+    "scout_askers",
+    "scouting",
+    "sessions",
+    "skipped",
+    "skipped_packets",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "undecoded",
+    "unit_readings",
+    "units",
+    "unstated",
+    "why",
+    "zenoh",
+];
+
+/// The keys the field document carries at revision 42: revision 41's PLUS
+/// `unit_readings` on every flow object and the four names inside it.
+///
+/// Written out rather than aliased, on the rule revision 7 set for a key that
+/// arrives.
+pub const FIELDS_R42_KEYS: &[&str] = &[
+    "abandoned_at_end",
+    "abandoned_on_eviction",
+    "above_transport",
+    "addr",
+    "after_seq",
+    "anchor",
+    "batch_index",
+    "batch_size",
+    "body",
+    "body_schema",
+    "bytes",
+    "caps",
+    "capture_reread",
+    "carried",
+    "carried_state",
+    "chain",
+    "chain_id",
+    "close_seen",
+    "closes",
+    "compression",
+    "conduit",
+    "context",
+    "counter",
+    "counter_error",
+    "counter_reason",
+    "counter_step",
+    "crc_computed",
+    "crc_error",
+    "datagram_flows",
+    "declaration_checked",
+    "declared",
+    "depth",
+    "descriptor_bytes",
+    "despite_encoding",
+    "direction",
+    "document",
+    "dropped_by_limits",
+    "dst",
+    "e2e",
+    "encoding",
+    "end",
+    "example",
+    "expired_chains",
+    "explained",
+    "family",
+    "fields",
+    "fin_seen",
+    "first",
+    "first_byte",
+    "flow",
+    "flows",
+    "format",
+    "frame_offset",
+    "frames",
+    "frames_per_flow",
+    "frames_total",
+    "halves",
+    "header",
+    "high",
+    "identity",
+    "index",
+    "keyexpr",
+    "keyexpr_cause",
+    "keyexpr_id",
+    "kind",
+    "l2",
+    "last_seen_ts_ns",
+    "lease_ms",
+    "length",
+    "length_expected",
+    "length_field",
+    "length_matches_frame",
+    "link",
+    "list_id",
+    "low",
+    "lowlatency",
+    "matched_rule",
+    "max_flows_per_table",
+    "max_gap",
+    "max_scout_askers",
+    "message",
+    "message_at",
+    "messages",
+    "missing",
+    "name",
+    "negotiated",
+    "note",
+    "offset",
+    "offset_space",
+    "omitted",
+    "opened",
+    "outcome",
+    "packet",
+    "parent",
+    "parts",
+    "patch",
+    "path",
+    "pattern",
+    "payload",
+    "payload_bytes",
+    "payload_decode",
+    "payload_mapping",
+    "payload_mapping_counts_exact",
+    "payload_offset",
+    "payload_refusals",
+    "phase",
+    "port",
+    "previous_counter",
+    "priority",
+    "profile",
+    "qos",
+    "raw",
+    "reason",
+    "reassembly",
+    "reliable",
+    "request_kind",
+    "request_record",
+    "request_seq",
+    "residual",
+    "revised",
+    "revision",
+    "rst_seen",
+    "samples",
+    "scout_askers",
+    "scouting",
+    "selected",
+    "seq",
+    "shm_descriptor",
+    "shown",
+    "silence_ms",
+    "skipped",
+    "skipped_packets",
+    "slot",
+    "sn",
+    "sn_mask",
+    "src",
+    "start",
+    "state",
+    "stream_bytes",
+    "stream_bytes_per_direction",
+    "stream_flows",
+    "through_seq",
+    "timeout_error",
+    "timeout_ms",
+    "undecoded",
+    "under",
+    "unit_readings",
+    "units",
+    "unopened_reason",
+    "value",
+    "verdict",
+    "version",
+    "why",
+    "window",
+    "wrong",
+    "zenoh",
+    "zid",
+];
+
 /// What each field-document family's WORD decides at revision 28 — revision 20's,
 /// with `state` changed: see [`PAYLOAD_STATE_CARRIES_R28`]. Written out in full,
 /// because a slice cannot be spliced in a `const` and an alias would make the
@@ -18160,7 +18448,9 @@ mod tests {
             // `list_id`: values only.
             // To 41 when every flow carried `zenoh`, and an Init or a Join of
             // another protocol version stopped being read past its version.
-            (FIELDS, 41),
+            // To 42 when every flow carried `unit_readings`: how its framing
+            // units read. Keys arrive; nothing retires and no word moves.
+            (FIELDS, 42),
             // R2121 (open-debt item 460) — the summary moved to 2 when it
             // gained `inert_counters`; R2122 (item 238) to 3 when its
             // `framing` group stopped disagreeing with the capture report's.
@@ -18198,12 +18488,14 @@ mod tests {
             // To 6 when the row's facts (`msg`, the endpoints, the ports, the
             // link, the flow, the packet) joined the fields.
             // To 7 when a token gained `role`, what the parser read it as.
-            (SELECTOR_DIAGNOSE, 7),
+            // To 8 when `zenoh`, the flow's word, joined the fields.
+            (SELECTOR_DIAGNOSE, 8),
             // The node names of a selector resolved to the zids a caller's
             // table gives them.
             (SELECTOR_BIND, 1),
             // Every field a selector can name. To 2 when the row's facts joined.
-            (SELECTOR_FIELDS, 2),
+            // To 3 when `zenoh`, the flow's word, joined.
+            (SELECTOR_FIELDS, 3),
             // To 2 when the success branch named the kind each line was read
             // as and a refused key named its chunk, byte and reason.
             (DECLARATIONS_DIAGNOSE, 2),
@@ -18245,7 +18537,9 @@ mod tests {
             // To 2 when `caps` gained `frames_total`, the ceiling over every
             // flow: one key, no word moves and nothing retires.
             // To 3 when every row and flow carried `zenoh`.
-            (SESSION_TABLE, 3),
+            // To 4 when every row and flow carried `unit_readings`: keys
+            // arrive; nothing retires and no word moves.
+            (SESSION_TABLE, 4),
             // The selector's verdict over the field document's rows.
             // To 2 on the same move as fields 27: the word on a `Request`, a
             // `ResponseFinal` and a del row stopped being `unjudged`.

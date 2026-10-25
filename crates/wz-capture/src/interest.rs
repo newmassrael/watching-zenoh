@@ -1395,6 +1395,11 @@ impl InterestFold {
 }
 
 impl crate::ordered_fold::OrderedFold for InterestFold {
+    /// The interest plane is folded under no selector.
+    fn reads_flow_word(&self) -> bool {
+        false
+    }
+
     fn feed(
         &mut self,
         flow: &crate::link::FlowKey,

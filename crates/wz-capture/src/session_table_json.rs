@@ -25,6 +25,10 @@
 //!   Init, Join, Scout or Hello announced: `proven`, `unproven`,
 //!   `foreign_version` or `mixed`. A row of arbitrary bytes on a zenoh port is
 //!   `unproven`, and so is a session the capture joined after its handshake;
+//! * `unit_readings` -- how the framing units READ, the evidence that tells those
+//!   two `unproven` rows apart: `explained`, `residual` and `undecoded`, each
+//!   `{"units":N,"bytes":B}`, partitioning the row's units. Evidence and not a
+//!   verdict: see `ReadingEvidence` in `wz_session_core::passive`;
 //! * `flows` -- the flows the row is made of, each with the flow object every
 //!   other document carries and its own `encrypted`, `bytes` and `zenoh`, for a
 //!   consumer that joins.
@@ -214,10 +218,12 @@ fn push_row(row: &SessionRow, out: &mut String) {
     });
     let _ = write!(
         out,
-        ",\"bytes\":{},\"zenoh\":\"{}\",\"unstated\":[",
+        ",\"bytes\":{},\"zenoh\":\"{}\"",
         row.bytes,
         ZenohVerdict::of(row.zenoh).name()
     );
+    crate::fields_json::push_unit_readings(row.readings, out);
+    out.push_str(",\"unstated\":[");
     for (i, (cell, reason)) in unstated.iter().enumerate() {
         if i > 0 {
             out.push(',');
@@ -238,11 +244,13 @@ fn push_row(row: &SessionRow, out: &mut String) {
         crate::census_json::push_flow(&link.flow, out);
         let _ = write!(
             out,
-            ",\"encrypted\":\"{}\",\"bytes\":{},\"zenoh\":\"{}\"}}",
+            ",\"encrypted\":\"{}\",\"bytes\":{},\"zenoh\":\"{}\"",
             link.encryption.name(),
             link.bytes,
             ZenohVerdict::of(link.zenoh).name()
         );
+        crate::fields_json::push_unit_readings(link.readings, out);
+        out.push('}');
     }
     out.push_str("]}");
 }

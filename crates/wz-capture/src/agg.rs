@@ -2665,6 +2665,10 @@ impl AggFold {
 }
 
 impl crate::ordered_fold::OrderedFold for AggFold {
+    fn reads_flow_word(&self) -> bool {
+        self.filter.reads_flow_word()
+    }
+
     fn feed(
         &mut self,
         flow: &crate::link::FlowKey,

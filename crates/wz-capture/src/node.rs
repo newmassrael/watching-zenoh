@@ -253,6 +253,10 @@ pub struct ListContext<'a> {
     /// began in, where the walk knows them: what a selector's row terms
     /// (`addr`, `port`, `link`, `packet`, ...) read.
     place: Option<(crate::link::FlowKey, Option<usize>)>,
+    /// The flow's word for whether its bytes are zenoh, as the census this
+    /// context came out of held it: what a selector's `zenoh` term reads. `None`
+    /// where the census named none (the same absence [`Self::zids`] has).
+    zenoh: Option<crate::session_table::ZenohVerdict>,
 }
 
 impl<'a> ListContext<'a> {
@@ -277,6 +281,12 @@ impl<'a> ListContext<'a> {
         self.place
     }
 
+    /// The flow's word for whether its bytes are zenoh, for a plane that keeps
+    /// the row's place past the frame beside it.
+    pub fn zenoh(self) -> Option<crate::session_table::ZenohVerdict> {
+        self.zenoh
+    }
+
     /// The facts a selector's row terms read about a record of this list that
     /// travelled in `direction` inside the messages `messages`, or `None` for a
     /// context that was not [`Self::placed`].
@@ -287,7 +297,7 @@ impl<'a> ListContext<'a> {
     ) -> Option<crate::filter::RowFacts<'m>> {
         let (flow, packet) = self.place?;
         Some(crate::filter::RowFacts::of(
-            messages, packet, self.list, &flow, direction,
+            messages, packet, self.list, &flow, direction, self.zenoh,
         ))
     }
 
@@ -308,6 +318,7 @@ impl<'a> ListContext<'a> {
             list,
             zids: None,
             place: None,
+            zenoh: None,
         }
     }
 }
@@ -403,12 +414,35 @@ pub struct NodeCensus {
     /// bytes alone would then be a percentage of a fraction, presented as a
     /// percentage of the whole. A reader must be able to see the denominator.
     unattributed_bytes: u64,
+    /// Per message list, the word its flow's evidence gives for whether the
+    /// bytes are zenoh, in [`crate::Dissection::message_lists_with_origin`]'s
+    /// order: what a selector's `zenoh` term reads through
+    /// [`SessionGrouping`]. Empty on a census assembled with no dissection
+    /// behind it, and then every list's word is unknown.
+    ///
+    /// Set by [`Self::word_the_lists`] when a census is handed out, and never
+    /// kept by a [`NodeMemory`] across calls: a flow's word moves as its Inits
+    /// arrive, and the lists a memory resumes from are what the earlier call
+    /// saw.
+    words: Vec<Option<crate::session_table::ZenohVerdict>>,
 }
 
 impl NodeCensus {
     /// An empty census.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The word of each message list's flow, or none for a census that was not
+    /// built over a dissection. See the field.
+    pub fn words(&self) -> &[Option<crate::session_table::ZenohVerdict>] {
+        &self.words
+    }
+
+    /// Name the word of each of `dissection`'s lists, as its flows hold the
+    /// evidence now.
+    fn word_the_lists(&mut self, dissection: &crate::Dissection) {
+        self.words = dissection.list_zenoh_words();
     }
 
     /// Every node this capture named, in first-appearance order.
@@ -920,6 +954,7 @@ pub fn nodes(dissection: &crate::Dissection) -> NodeCensus {
         // cannot be a `PassiveFrame` and `message_lists` cannot carry it.
         census.observe_scouting(&flow.flow, flow.scouting());
     }
+    census.word_the_lists(dissection);
     census
 }
 
@@ -1039,6 +1074,9 @@ impl NodeMemory {
         for flow in dissection.datagram_flows() {
             census.observe_scouting(&flow.flow, flow.scouting());
         }
+        // On the COPY, like the scouting above: the saved census holds what the
+        // lists said, and the words are what the flows say now.
+        census.word_the_lists(dissection);
         census
     }
 
@@ -1240,6 +1278,11 @@ pub struct SessionGrouping {
     /// prefix that begins it and another node is ambiguous whether or not the
     /// capture holds a record the first one sent.
     named: alloc::vec::Vec<alloc::vec::Vec<u8>>,
+    /// Per list index, the flow's word for whether its bytes are zenoh, as the
+    /// census held it ([`NodeCensus::words`]). Indexed by list and not keyed by
+    /// the attributed lists alone: a flow whose handshake nobody saw has a word
+    /// (`unproven`) and no session.
+    words: alloc::vec::Vec<Option<crate::session_table::ZenohVerdict>>,
     /// How many distinct sessions the links named.
     sessions: usize,
 }
@@ -1294,7 +1337,40 @@ impl SessionGrouping {
             by_list,
             zids_by_list,
             named: census.nodes().iter().map(|n| n.zid.clone()).collect(),
+            words: census.words().to_vec(),
         }
+    }
+
+    /// Whether a fold made under `self` may be CONTINUED under `later`: the
+    /// capture grew, and nothing a message already folded was judged by has
+    /// moved.
+    ///
+    /// Everything the grouping derives from the census (the owners, the zids,
+    /// the named nodes, the session count) must be exactly as it was. The words
+    /// are different in kind, and count only for a fold whose selector reads
+    /// them (`words_matter`): a capture that only appended a list has a longer
+    /// list of them, and the lists the fold had taken have the words they had.
+    /// So `later`'s words must begin with `self`'s, and a flow whose word MOVED
+    /// (its first Init arrived) is a change, because a selector that reads
+    /// `zenoh` judged the earlier messages of that flow by the old word.
+    /// Ordinary equality would restart every fold each time a flow appeared, and
+    /// again when its first Init did, for a selector that never asked.
+    ///
+    /// Destructured, so a field this type gains is a compile error here until
+    /// someone decides which of the two kinds it is.
+    pub(crate) fn continues_as(&self, later: &Self, words_matter: bool) -> bool {
+        let Self {
+            by_list,
+            zids_by_list,
+            named,
+            words,
+            sessions,
+        } = self;
+        by_list == &later.by_list
+            && zids_by_list == &later.zids_by_list
+            && named == &later.named
+            && sessions == &later.sessions
+            && (!words_matter || later.words.starts_with(words))
     }
 
     /// Every zid the capture names, in the order its node census first met
@@ -1354,6 +1430,7 @@ impl SessionGrouping {
             list,
             zids: self.zids(list),
             place: None,
+            zenoh: self.words.get(list).copied().flatten(),
         }
     }
 
