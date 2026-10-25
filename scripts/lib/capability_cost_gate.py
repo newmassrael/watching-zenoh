@@ -101,6 +101,9 @@ MULTICAST = r"multicast_glue|multicast_pipeline|MulticastLinkDriver"
 # docs/capi-pico-on-coop-engine.md): a build of one links none of the other.
 TOKIO_ENGINE = r"wz_capi_core::|wz_runtime_tokio::"
 COOP_ENGINE = r"wz_capi_coop::"
+# The cooperative engine's scouting window (`wz_capi_coop::scout`) and the session's window it
+# pumps: what a cooperative build that scouts has and the tokio engine's `SCOUTING` is not.
+COOP_SCOUT = r"wz_capi_coop::scout|scouting_host"
 
 
 @dataclass(frozen=True)
@@ -218,6 +221,16 @@ CASES: tuple[Case, ...] = (
          note="the pico-client-coop-query build with the get delivered to the session's own "
               "queryables: 1,151,161 measured against its 1,137,368 (+13,793), 2.62 times the "
               "same pico (440,160)"),
+    # The cooperative client that scouts (`Z_FEATURE_SCOUTING`): `z_scout`, and the lookup `z_open`
+    # runs when its config names no locator, over the engine's own window and no tokio engine.
+    Case("pico-client-coop-scout", "wz-capi-pico", "libwz_capi_pico.so",
+         "engine-coop,link-udp,scout", 981_000,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
+                 MULTICAST, TOKIO_ENGINE),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT),
+         note="the pico-client-coop build with the scouting window: 961,479 measured against "
+              "pico-client-coop's 875,843 (+85,636), 2.34 times the same pico (410,391), and 464 "
+              "exports"),
     Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_946_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),

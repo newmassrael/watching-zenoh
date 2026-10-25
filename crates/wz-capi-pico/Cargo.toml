@@ -124,8 +124,19 @@ raweth-transport = ["engine-tokio", "multicast-transport", "wz-capi-core/raweth-
 # selects no engine.
 link-udp = ["wz-capi-core?/link-udp"]
 # `scout` (`Z_FEATURE_SCOUTING`): `z_scout`, the one-shot survey of the group and the
-# `z_hello` family that reads its answers.
-scout = ["engine-tokio", "link-udp", "wz-capi-core/scout"]
+# `z_hello` family that reads its answers, and the lookup `z_open` runs when its config names no
+# locator. Both engines scout (a scout needs no session), so it selects neither: it turns the
+# window on in the one the build has, which is how a cooperative client finds a router. The
+# session's own scouting vocabulary is named because the plane reads the locator grammar and the
+# defaults from it.
+scout = [
+    "link-udp",
+    "wz-session-core/scouting-active",
+    "wz-session-core/codec-scout",
+    "wz-session-core/codec-hello",
+    "wz-capi-core?/scout",
+    "wz-capi-coop?/scout",
+]
 # `query`: `z_get` and the querier, the requesting end of a query. Both engines ask a get and
 # watch whether a queryable matches, so it selects neither.
 query = ["wz-capi-core?/query", "wz-capi-coop?/query"]

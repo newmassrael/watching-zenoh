@@ -446,6 +446,20 @@ it behaves as pico behaves in both of pico's threading arms.
   Scout and a Hello that does not decode or advertises no address are named and passed over, a
   dead ask socket does not end the window, and the group socket asks when no other can. Next: the
   pico `scout` feature and the open-time lookup without the tokio engine (Sc4).
+- 2026-10-25: scouting, step Sc4 of four: pico's `scout` runs on either engine. The feature no
+  longer selects the tokio engine: it names the session's scouting vocabulary and turns the window
+  on in the engine the build has (`wz-capi-core?/scout`, `wz-capi-coop?/scout`), so a cooperative
+  client scouts, and `z_open` with no locator finds a node, with no tokio runtime linked. The
+  plane picks its window by the rule `z_open` picks the engine by (the tokio engine whenever it is
+  in the build): a small `window` module with `run` and `first`, over `wz_capi_core::scouting` or
+  over `wz_capi_coop::scout` with the host's clock. Pico's own copies went: its Ipv4-only locator
+  parser (the session's parses an IPv6 group too) and the three defaults. The existing test of an
+  open that names no locator and finds nobody runs on the cooperative build too, as a fifth leg of
+  Layer C1co; the size gate gained `pico-client-coop-scout` (961,479 bytes of text, 2.34 times
+  the same pico, with no symbol of the tokio engine). What this step does not witness is an
+  answered window on the cooperative build: the window's own tests answer over loopback, and a
+  router that answers a real multicast group is the hosted leg's. Section 6 now stands at the
+  listening role and the advanced plane, then the engine flip.
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected

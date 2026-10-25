@@ -22,8 +22,11 @@
 //! With `queryable` it answers queries: its queryables' callbacks run outside its lock, as its
 //! subscribers' do, and a query a C program keeps holds its Final until it is let go.
 //!
-//! What it does not do yet, each a later step of the note: the listening role, scouting, the
-//! requesting end of a query, liveliness and the advanced plane.
+//! With `scout` it also scouts: a window a program runs on its own thread, which needs no
+//! session (`scout`).
+//!
+//! What it does not do yet, each a later step of the note: the listening role and the advanced
+//! plane.
 
 mod engine;
 #[cfg(feature = "scout")]

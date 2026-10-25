@@ -15,11 +15,12 @@
 //!
 //! ## What is wz's and what is upstream's
 //!
-//! Nothing here re-implements scouting. `wz::runtime_tokio::scouting_glue`
-//! already owns the Scout emit / Hello decode FSM (`§scouting-active`), and
-//! this module is the C-ABI adapter over it: bind the group, drive cycles until
-//! the caller's budget expires, and project each [`ScoutedHello`] into the
-//! borrowed pico shape.
+//! Nothing here re-implements scouting. `wz_session_core::scouting_host`
+//! owns the Scout emit / Hello decode window (`§scouting-active`), the engine
+//! the build runs pumps it over its own sockets (`window`), and this module is
+//! the C-ABI adapter over them: read the config, run the window for the
+//! caller's budget, and project each scouted hello into the borrowed pico
+//! shape.
 //!
 //! ## Sizes are measured, not guessed
 //!
@@ -51,10 +52,17 @@
 //! which `_z_scout` then drains (`src/net/primitives.c:81-90`) — after the
 //! window, and newest-first, because the list is built by prepending. So the
 //! shape that looked like a wz concession is upstream's own, and wz matches it
-//! deliberately in `wz-capi-core::scouting::deliver_in_upstream_order` rather
+//! deliberately in `wz_session_core::scouting_host::deliver_in_upstream_order` rather
 //! than firing per-Hello, which would have been a divergence in wz's favour.
+//! The order is the session's too, so both engines hand the peers over the same way.
 
 use std::ffi::c_void;
+use std::net::IpAddr;
+
+use wz_session_core::scouting_host::{
+    parse_multicast_locator, MULTICAST_LOCATOR_DEFAULT, SCOUTING_TIMEOUT_DEFAULT_MS,
+    SCOUTING_WHAT_DEFAULT,
+};
 
 use crate::config::ConfigState;
 use crate::pubsub::z_closure_drop_callback_t;
@@ -78,16 +86,85 @@ pub const Z_CONFIG_SCOUTING_WHAT_KEY: u8 = 0x48;
 /// first consumer.
 pub const Z_CONFIG_SESSION_ZID_KEY: u8 = 0x49;
 
-/// pico `Z_CONFIG_MULTICAST_LOCATOR_DEFAULT` (config.h.in:133).
-const MULTICAST_LOCATOR_DEFAULT: &str = "udp/224.0.0.224:7446";
-/// pico `Z_CONFIG_SCOUTING_TIMEOUT_DEFAULT` (config.h.in:141), in ms.
-const SCOUTING_TIMEOUT_DEFAULT_MS: u32 = 1000;
-/// pico `Z_CONFIG_SCOUTING_WHAT_DEFAULT` (config.h.in:149) = ROUTER|PEER.
-const SCOUTING_WHAT_DEFAULT: u8 = 0x03;
+// The defaults pico's config carries (`Z_CONFIG_MULTICAST_LOCATOR_DEFAULT`,
+// `Z_CONFIG_SCOUTING_TIMEOUT_DEFAULT`, `Z_CONFIG_SCOUTING_WHAT_DEFAULT`), the locator grammar and the
+// window itself are the session's (`wz_session_core::scouting_host`): both C ABIs and both engines
+// read one set of them. What differs per engine is the host that pumps the window, which is the
+// `window` module below.
 
-// The Scout version byte and the drive-loop tick moved out with the copied
-// drive loop: they are `wz_capi_core::scouting`'s now, so both C ABIs announce
-// one protocol version and poll on one cadence by construction.
+/// The scouting window of the engine this build runs its sessions on, by the same rule `z_open`
+/// picks the engine with: the tokio engine whenever it is in the build, the cooperative one
+/// otherwise. A scout needs no session, so the window is a plane beside the engine and not one of
+/// its methods; each engine's is the host that pumps the session's window rules over its sockets.
+mod window {
+    use std::net::IpAddr;
+
+    use wz_session_core::scouting_host::ScoutedHello;
+
+    /// Scout `group:port` for `budget_ms`, handing each peer that answered to `on_hello` after the
+    /// window, last responder first; the number delivered.
+    #[cfg(feature = "engine-tokio")]
+    pub(super) fn run(
+        group: IpAddr,
+        port: u16,
+        what: u8,
+        zid: Vec<u8>,
+        budget_ms: u64,
+        on_hello: impl FnMut(&ScoutedHello),
+    ) -> usize {
+        wz_capi_core::scouting::run_scout(group, port, what, zid, budget_ms, on_hello)
+    }
+
+    /// Scout and answer the first node that replies, or `None` when none does in the window.
+    #[cfg(feature = "engine-tokio")]
+    pub(super) fn first(
+        group: IpAddr,
+        port: u16,
+        what: u8,
+        zid: Vec<u8>,
+        budget_ms: u64,
+    ) -> Option<ScoutedHello> {
+        wz_capi_core::scouting::scout_first(group, port, what, zid, budget_ms)
+    }
+
+    #[cfg(not(feature = "engine-tokio"))]
+    pub(super) fn run(
+        group: IpAddr,
+        port: u16,
+        what: u8,
+        zid: Vec<u8>,
+        budget_ms: u64,
+        on_hello: impl FnMut(&ScoutedHello),
+    ) -> usize {
+        wz_capi_coop::scout::run_scout(
+            &wz_runtime_posix::PosixClock,
+            group,
+            port,
+            what,
+            zid,
+            budget_ms,
+            on_hello,
+        )
+    }
+
+    #[cfg(not(feature = "engine-tokio"))]
+    pub(super) fn first(
+        group: IpAddr,
+        port: u16,
+        what: u8,
+        zid: Vec<u8>,
+        budget_ms: u64,
+    ) -> Option<ScoutedHello> {
+        wz_capi_coop::scout::scout_first(
+            &wz_runtime_posix::PosixClock,
+            group,
+            port,
+            what,
+            zid,
+            budget_ms,
+        )
+    }
+}
 
 // ---------------------------------------------------------------------------
 // z_owned_hello_t
@@ -489,7 +566,7 @@ pub struct z_scout_options_t {
 #[no_mangle]
 pub unsafe extern "C" fn z_scout_options_default(options: *mut z_scout_options_t) {
     if let Some(options) = options.as_mut() {
-        options.timeout_ms = SCOUTING_TIMEOUT_DEFAULT_MS;
+        options.timeout_ms = u32::try_from(SCOUTING_TIMEOUT_DEFAULT_MS).unwrap_or(u32::MAX);
         options.what = SCOUTING_WHAT_DEFAULT as u32;
     }
 }
@@ -524,17 +601,6 @@ fn fresh_scout_zid() -> Vec<u8> {
     zid.to_vec()
 }
 
-/// Parse `udp/<addr>:<port>` (pico's multicast-locator config form) into the
-/// group + port a scouting socket joins. Returns `None` for anything this
-/// crate's UDP scouting cannot bind, so an unsupported locator FAILS the scout
-/// rather than silently falling back to the default group — a scout that
-/// searches somewhere the caller did not ask about is worse than an error.
-fn parse_multicast_locator(locator: &str) -> Option<(std::net::Ipv4Addr, u16)> {
-    let rest = locator.strip_prefix("udp/")?;
-    let (addr, port) = rest.rsplit_once(':')?;
-    Some((addr.parse().ok()?, port.parse().ok()?))
-}
-
 /// What a scout reads from a pico config: each key's value, or pico's default for it.
 /// `z_scout` with NULL options and `z_open`'s lookup read the same four keys
 /// (`vendor/zenoh-pico/src/net/session.c` @ `static z_result_t _z_locators_by_scout(`), so
@@ -558,7 +624,7 @@ impl ScoutConfig {
                 .unwrap_or(SCOUTING_WHAT_DEFAULT),
             budget_ms: get(Z_CONFIG_SCOUTING_TIMEOUT_KEY)
                 .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(u64::from(SCOUTING_TIMEOUT_DEFAULT_MS)),
+                .unwrap_or(SCOUTING_TIMEOUT_DEFAULT_MS),
             locator: get(Z_CONFIG_MULTICAST_LOCATOR_KEY)
                 .unwrap_or_else(|| MULTICAST_LOCATOR_DEFAULT.into()),
             zid: get(Z_CONFIG_SESSION_ZID_KEY)
@@ -580,7 +646,7 @@ pub(crate) fn locators_by_scout(cfg: &ConfigState) -> Result<Vec<String>, ZResul
     let Some((group, port)) = parse_multicast_locator(&read.locator) else {
         return Err(crate::result::Z_ERR_INVALID);
     };
-    wz_capi_core::scouting::scout_first(group.into(), port, read.what, read.zid, read.budget_ms)
+    window::first(group, port, read.what, read.zid, read.budget_ms)
         .map(|hello| hello.locators)
         .filter(|locators| !locators.is_empty())
         .ok_or(crate::result::Z_ERR_SCOUT_NO_RESULTS)
@@ -669,28 +735,28 @@ pub unsafe extern "C" fn z_scout(
 /// Drive one scouting window for `budget_ms` and hand each peer that answered
 /// to `on_hello`. Returns the number delivered.
 ///
-/// DELEGATES to [`wz_capi_core::scouting::run_scout`], the drive both C ABIs
-/// share. This function used to carry its own copy of that loop, and the copy
-/// is what let the two ABIs disagree — the pico side re-entered whole scouting
-/// CYCLES (because the statechart left `AwaitingHello` on the first Hello, so a
-/// single window could report only one peer), which re-sent a Scout per cycle
-/// and needed a zid set to suppress the duplicate answers its own re-scouting
-/// provoked. The FSM carries pico's `exit_on_first == false` survey arm now, so
-/// the shared drive is a single window, and the WHEN and the ORDER of the
-/// callbacks — after the window, last responder first — are settled once in
-/// `wz-capi-core` against upstream rather than twice here and there.
+/// DELEGATES to the window of the engine the build runs (`window::run`), whose rules are the
+/// session's. This function used to carry its own copy of that loop, and the copy is what let
+/// the two ABIs disagree — the pico side re-entered whole scouting CYCLES (because the
+/// statechart left `AwaitingHello` on the first Hello, so a single window could report only one
+/// peer), which re-sent a Scout per cycle and needed a zid set to suppress the duplicate answers
+/// its own re-scouting provoked. The FSM carries pico's `exit_on_first == false` survey arm now,
+/// so the shared drive is a single window, and the WHEN and the ORDER of the callbacks — after
+/// the window, last responder first — are settled once in
+/// `wz_session_core::scouting_host::deliver_in_upstream_order` against upstream rather than
+/// twice here and there.
 ///
-/// All this side keeps is the ABI mapping: a [`ScoutedHello`] becomes the
-/// `HelloState` behind pico's `z_loaned_hello_t`.
+/// All this side keeps is the ABI mapping: a scouted hello becomes the `HelloState` behind
+/// pico's `z_loaned_hello_t`.
 fn run_scout(
-    group: std::net::Ipv4Addr,
+    group: IpAddr,
     port: u16,
     what: u8,
     zid: Vec<u8>,
     budget_ms: u64,
     mut on_hello: impl FnMut(&mut HelloState),
 ) -> usize {
-    wz_capi_core::scouting::run_scout(group.into(), port, what, zid, budget_ms, |hello| {
+    window::run(group, port, what, zid, budget_ms, |hello| {
         let whatami = hello.whatami.map_or(0, |w| u32::from(w.to_api()));
         let mut state = HelloState::new(
             z_id_t::from_wire(&hello.zid),

@@ -10714,7 +10714,7 @@ layer_c1cs_capability_cost() {
 # per build, so this takes two invocations, which no row of the non-default test table (built
 # on the default features) can spell.
 #
-# Four legs: either engine, with the answering end and without it. The legs without it are
+# Four legs against a listener: either engine, with the answering end and without it. The legs without it are
 # not a repeat: a querier still has to hear the listener's queryable there, and the tokio
 # engine's requesting end did not until the round that added this lane. The count is exact
 # per leg, so a test the build stops compiling is a failure and not a smaller pass.
@@ -10739,6 +10739,14 @@ layer_c1co_pico_client_dials_a_listener() {
                 --test client_only_dials_a_listener || return 1
         done
     done
+    # A fifth leg: the cooperative client that scouts. A `z_open` that names no locator looks for
+    # one over the engine's own window, and finds nobody on a group nobody answers, which the
+    # tokio engine's default build already runs; this is the same test with no tokio engine in
+    # the build (`crates/wz-capi-pico/tests/open_scouts_for_a_locator.rs`).
+    _runci_guarded_test "C1co scout engine-coop" 1 \
+        cargo test -p wz-capi-pico --no-default-features \
+        --features "engine-coop,link-udp,scout" \
+        --test open_scouts_for_a_locator || return 1
 }
 
 # ─── Layer C1cn — every crate LINTS CLEAN behind its non-default ────
