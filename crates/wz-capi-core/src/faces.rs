@@ -1004,7 +1004,7 @@ fn install_matching_watch(
             .declare_matching_listener(callback)
             .ok(),
         FilterPlane::Queryables { complete_required } => session
-            .querier_for_matching(keyexpr.to_owned(), querier_watching(complete_required))
+            .declare_querier(keyexpr.to_owned(), querier_watching(complete_required))
             .declare_matching_listener(callback)
             .ok(),
     }
@@ -4281,7 +4281,7 @@ impl SharedSession {
     pub fn has_matching_queryable(&self, keyexpr: &str, complete_required: bool) -> bool {
         self.matching_planes().into_iter().any(|session| {
             session
-                .querier_for_matching(keyexpr.to_owned(), querier_watching(complete_required))
+                .declare_querier(keyexpr.to_owned(), querier_watching(complete_required))
                 .get_matching_status()
                 .matching
         })

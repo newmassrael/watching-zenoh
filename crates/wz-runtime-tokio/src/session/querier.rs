@@ -255,6 +255,14 @@ pub enum QueryAliasError {
     /// Unlike every variant above, wire bytes MAY have been emitted (followed
     /// by a `0x3 Drop` stop fragment); retry once the budget is refilled.
     FragmentChainAbandoned,
+    /// The `QUERIER_MAX_PENDING_QUERIES` quota: this declared querier already has as many
+    /// queries in flight as its bound allows. Nothing was sent and nothing was registered;
+    /// a place comes back when a pending query ends, so the same call can succeed later.
+    /// `limit` is the bound that was reached.
+    QuotaExceeded {
+        /// The bound that was reached.
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for QueryAliasError {
@@ -294,6 +302,11 @@ impl std::fmt::Display for QueryAliasError {
                  Drop stop fragment followed any fragments already sent); retry \
                  once the budget is refilled"
             ),
+            QueryAliasError::QuotaExceeded { limit } => write!(
+                f,
+                "QueryAliasError: this querier already has {limit} quer(ies) in flight, \
+                 its bound; the Request(Query) was not emitted — retry once one ends"
+            ),
         }
     }
 }
@@ -317,73 +330,128 @@ impl From<SendWireError> for QueryAliasError {
     }
 }
 
-/// A session declined a querier: it already holds as many live as its bound
-/// (`MAX_QUERIERS`) allows. Nothing was declared, no interest was asked for, and a
-/// place that comes back (the last handle of a declared querier dropping) lets the
-/// next declaration through.
-///
-/// `#[non_exhaustive]` so a later reason a declaration can fail is a new variant, not a
-/// break. Upstream's `declare_querier` is fallible too (`ZResult`), so the signature
-/// carries no more than a caller of the original already handles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DeclareQuerierError {
-    /// The session's querier quota is full; `limit` is the bound that was reached.
-    QuotaExceeded {
-        /// The bound that was reached.
-        limit: usize,
-    },
+/// The places one declared querier has for queries in flight: the `QUERIER_MAX_PENDING_QUERIES`
+/// quota of that declaration. Shared by every clone of the handle, because a clone is another
+/// handle to the same declaration and not another querier, so the bound is per declaration and
+/// one busy querier cannot take the places of another.
+#[derive(Clone)]
+pub(crate) struct QuerierSlots {
+    quota: Arc<std::sync::Mutex<wz_session_core::quota::Quota>>,
 }
 
-impl std::fmt::Display for DeclareQuerierError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DeclareQuerierError::QuotaExceeded { limit } => write!(
-                f,
-                "DeclareQuerierError: the session already holds {limit} live querier(s), its bound"
-            ),
+impl QuerierSlots {
+    /// The places of a querier declared now: the build's bound.
+    pub(crate) fn new() -> Self {
+        Self::with_limit(wz_session_core::caps::QUERIER_MAX_PENDING_QUERIES)
+    }
+
+    pub(crate) fn with_limit(limit: usize) -> Self {
+        Self {
+            quota: Arc::new(std::sync::Mutex::new(wz_session_core::quota::Quota::new(
+                limit,
+            ))),
+        }
+    }
+
+    /// Take a place for one query, or say the bound is reached. A refusal takes no place and
+    /// changes nothing. The place goes back when the query ends: see [`QueryPlace`].
+    pub(crate) fn take(&self) -> Result<QueryPlace, QueryAliasError> {
+        Ok(QueryPlace(Arc::new(QuerySlot::acquire(&self.quota)?)))
+    }
+
+    /// Replace the bound; test-only, and takes effect for the queries asked after it.
+    #[cfg(test)]
+    pub(crate) fn set_limit(&self, limit: usize) {
+        let mut held = match self.quota.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        held.set_limit(limit);
+    }
+
+    /// The queries in flight now.
+    #[cfg(test)]
+    pub(crate) fn pending(&self) -> usize {
+        match self.quota.lock() {
+            Ok(held) => held.live(),
+            Err(poisoned) => poisoned.into_inner().live(),
         }
     }
 }
 
-impl std::error::Error for DeclareQuerierError {}
+/// The place one query in flight holds, handed to its two callbacks. It goes back exactly once:
+/// after the query's final has run, or, when no final runs (the pending entry was unregistered,
+/// or the send failed before the entry was kept), when the last callback is dropped.
+pub(crate) struct QueryPlace(Arc<QuerySlot>);
 
-/// One place of the session's querier quota, held for as long as the declared querier
-/// has a handle. The place goes back when the LAST handle (a [`Querier`] or a
-/// [`QuerierAliased`] and every clone of it) drops, which is why the handles share this
-/// behind an `Arc` and do not each carry one: a clone is another handle to the same
-/// declaration, not another querier. The interest count of [`Querier`] is the other way
-/// round (a clone is a reference on the keyexpr's interest), and the two are kept apart
-/// on purpose.
-pub(crate) struct QuerierPermit {
-    quota: Arc<std::sync::Mutex<wz_session_core::quota::Quota>>,
+impl QueryPlace {
+    /// `on_reply` as the pending entry holds it: it keeps the place alive for as long as the
+    /// entry holds the callback, so dropping the entry returns the place.
+    pub(crate) fn guard_reply(
+        &self,
+        mut on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
+    ) -> impl FnMut(&dyn ReplyView) + Send + 'static {
+        let held = self.0.clone();
+        move |reply: &dyn ReplyView| {
+            let _held = &held;
+            on_reply(reply);
+        }
+    }
+
+    /// `on_final` as the pending entry holds it: the place goes back once it has run.
+    pub(crate) fn guard_final(
+        &self,
+        mut on_final: impl FnMut(u64) + Send + 'static,
+    ) -> impl FnMut(u64) + Send + 'static {
+        let held = self.0.clone();
+        move |rid: u64| {
+            on_final(rid);
+            held.release();
+        }
+    }
 }
 
-impl QuerierPermit {
-    /// Take a place, or say the bound is reached.
-    pub(crate) fn acquire(
+/// One place of a [`QuerierSlots`], held by one query in flight and given back exactly once.
+struct QuerySlot {
+    quota: Arc<std::sync::Mutex<wz_session_core::quota::Quota>>,
+    returned: std::sync::atomic::AtomicBool,
+}
+
+impl QuerySlot {
+    fn acquire(
         quota: &Arc<std::sync::Mutex<wz_session_core::quota::Quota>>,
-    ) -> Result<Arc<Self>, DeclareQuerierError> {
+    ) -> Result<Self, QueryAliasError> {
         let mut held = match quota.lock() {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
         };
         held.try_acquire()
-            .map_err(|full| DeclareQuerierError::QuotaExceeded { limit: full.limit })?;
+            .map_err(|full| QueryAliasError::QuotaExceeded { limit: full.limit })?;
         drop(held);
-        Ok(Arc::new(Self {
+        Ok(Self {
             quota: quota.clone(),
-        }))
+            returned: std::sync::atomic::AtomicBool::new(false),
+        })
     }
-}
 
-impl Drop for QuerierPermit {
-    fn drop(&mut self) {
+    fn release(&self) {
+        if self
+            .returned
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
         let mut held = match self.quota.lock() {
             Ok(held) => held,
             Err(poisoned) => poisoned.into_inner(),
         };
         held.release();
+    }
+}
+
+impl Drop for QuerySlot {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -427,11 +495,8 @@ pub struct Querier<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> 
     pub(super) session: Session<R, T, Unicast>,
     pub(super) keyexpr: String,
     pub(super) options: QueryOptions,
-    /// This declaration's place in the session's querier quota, shared by every clone.
-    /// `None` for the handle the runtime makes for its own use
-    /// ([`Session::querier_for_matching`]): that is not a declaration of the application
-    /// and takes no place, so it can neither fill the bound nor be refused by it.
-    pub(super) permit: Option<Arc<QuerierPermit>>,
+    /// This declaration's places for queries in flight, shared by every clone.
+    pub(super) slots: QuerierSlots,
 }
 
 impl<R: SessionRuntime, T: TimeSource> Clone for Querier<R, T> {
@@ -446,7 +511,7 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Querier<R, T> {
             session: self.session.clone(),
             keyexpr: self.keyexpr.clone(),
             options: self.options.clone(),
-            permit: self.permit.clone(),
+            slots: self.slots.clone(),
         }
     }
 }
@@ -505,6 +570,8 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
         // R311cw — clock fold-in: `Session::query` now reads the Session-
         // owned `Arc<T>` clock internally, so this delegate no longer
         // threads a `clock: &T` argument.
+        let place = self.slots.take()?;
+        let (on_reply, on_final) = (place.guard_reply(on_reply), place.guard_final(on_final));
         self.session
             .query(&self.keyexpr, self.options.clone(), on_reply, on_final)
     }
@@ -520,6 +587,8 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
+        let place = self.slots.take()?;
+        let (on_reply, on_final) = (place.guard_reply(on_reply), place.guard_final(on_final));
         self.session.query_shm(
             &self.keyexpr,
             self.options.clone(),
@@ -828,8 +897,8 @@ pub struct QuerierAliased<R: SessionRuntime = TokioRuntime, T: TimeSource = Toki
     pub(super) mapping_id: u64,
     pub(super) inline_suffix: Option<String>,
     pub(super) options: QueryOptions,
-    /// This declaration's place in the session's querier quota, shared by every clone.
-    pub(super) permit: Arc<QuerierPermit>,
+    /// This declaration's places for queries in flight, shared by every clone.
+    pub(super) slots: QuerierSlots,
 }
 
 impl<R: SessionRuntime, T: TimeSource> Clone for QuerierAliased<R, T> {
@@ -839,7 +908,7 @@ impl<R: SessionRuntime, T: TimeSource> Clone for QuerierAliased<R, T> {
             mapping_id: self.mapping_id,
             inline_suffix: self.inline_suffix.clone(),
             options: self.options.clone(),
-            permit: self.permit.clone(),
+            slots: self.slots.clone(),
         }
     }
 }
@@ -882,6 +951,8 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
     ) -> Result<ReplyHandle, QueryAliasError> {
         // R311cw — clock fold-in: delegate path no longer threads
         // `clock: &T`; `Session::query_aliased_auto` reads `self.clock`.
+        let place = self.slots.take()?;
+        let (on_reply, on_final) = (place.guard_reply(on_reply), place.guard_final(on_final));
         self.session.query_aliased_auto(
             self.mapping_id,
             self.inline_suffix.as_deref(),
@@ -901,6 +972,8 @@ impl<R: SessionRuntime, T: TimeSource> QuerierAliased<R, T> {
         on_reply: impl FnMut(&dyn ReplyView) + Send + 'static,
         on_final: impl FnMut(u64) + Send + 'static,
     ) -> Result<ReplyHandle, QueryAliasError> {
+        let place = self.slots.take()?;
+        let (on_reply, on_final) = (place.guard_reply(on_reply), place.guard_final(on_final));
         self.session.query_aliased_auto_shm(
             self.mapping_id,
             self.inline_suffix.as_deref(),

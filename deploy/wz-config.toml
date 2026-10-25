@@ -1650,14 +1650,17 @@ at the limit; a fixed deployment names a few peers.
 '''
 
 [[limit]]
-id = "MAX_QUERIERS"
-kconfig = "WZ_LIMIT_MAX_QUERIERS"
+id = "QUERIER_MAX_PENDING_QUERIES"
+kconfig = "WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES"
 default = 0
 help = '''
-The queriers a session holds at once; declaring one more is refused until
-one is dropped. 0 is no bound, which is upstream's behaviour. Unlike the
-other limits this one sizes no table: it only refuses the one more. The
-Rust session API holds to it; the C ABIs do not apply it yet.
+The queries one declared querier may have in flight at once; one more is
+refused until a pending one ends. A query ends when its final arrives, its
+deadline passes, or its handle is unregistered. The bound is per querier,
+not per session, so one busy querier cannot starve another. 0 is no bound,
+which is upstream's behaviour. Unlike the other limits this one sizes no
+table: it only refuses the one more. It binds the Rust session API; the C
+ABIs and the cooperative engine do not hold to it yet.
 '''
 
 [[limit]]

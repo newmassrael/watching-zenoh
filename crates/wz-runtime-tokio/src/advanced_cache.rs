@@ -1195,12 +1195,10 @@ mod tests {
         let clock = Arc::new(TokioTime::new());
         let session = TokioSession::new(actions, observer, clock);
 
-        let querier = session
-            .declare_querier(
-                "demo/data/@adv/pub/ff/7/_",
-                crate::session::QueryOptions::get().with_target(QueryTarget::AllComplete),
-            )
-            .expect("the session holds no other querier");
+        let querier = session.declare_querier(
+            "demo/data/@adv/pub/ff/7/_",
+            crate::session::QueryOptions::get().with_target(QueryTarget::AllComplete),
+        );
         assert!(
             !querier.get_matching_status().matching,
             "no queryable yet, so the AllComplete querier matches nothing"

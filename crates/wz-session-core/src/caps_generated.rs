@@ -43,6 +43,7 @@ pub(super) const MAX_TASKS: usize = limit(option_env!("WZ_LIMIT_MAX_TASKS"), 8);
 pub(super) const MAX_TIMERS: usize = limit(option_env!("WZ_LIMIT_MAX_TIMERS"), 16);
 pub(super) const MAX_LOCATOR_LEN: usize = limit(option_env!("WZ_LIMIT_MAX_LOCATOR_LEN"), 64);
 pub(super) const MAX_STATIC_CONNECT: usize = limit(option_env!("WZ_LIMIT_MAX_STATIC_CONNECT"), 8);
-pub(super) const MAX_QUERIERS: usize = limit(option_env!("WZ_LIMIT_MAX_QUERIERS"), 0);
+pub(super) const QUERIER_MAX_PENDING_QUERIES: usize =
+    limit(option_env!("WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES"), 0);
 pub(super) const TX_NO_PROGRESS_WINDOW_US: usize =
     limit(option_env!("WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US"), 1000000);

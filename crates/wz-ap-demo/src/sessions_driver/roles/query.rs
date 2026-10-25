@@ -39,16 +39,10 @@ async fn run(ctx: Ctx) {
     let count = ctx.int("count");
     let timeout =
         u32::try_from(ctx.int("timeout_ms").unwrap_or(DEFAULT_TIMEOUT_MS)).unwrap_or(u32::MAX);
-    let querier = match ctx.session.declare_querier(
+    let querier = ctx.session.declare_querier(
         key.clone(),
         QueryOptions::default().with_timeout_ms(timeout),
-    ) {
-        Ok(querier) => querier,
-        Err(e) => {
-            ctx.say.line(&format!("declare refused key={key}: {e}"));
-            return;
-        }
-    };
+    );
     ctx.say.line(&format!("declared key={key}"));
     let mut asked = 0u64;
     while count.map_or(true, |n| asked < n) {

@@ -1001,15 +1001,6 @@ where
     /// owned the count would emit a Final the other still needs.
     #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
     matching_interests: Arc<std::sync::Mutex<MatchingInterestTable>>,
-    /// How many queriers this session holds live, against `MAX_QUERIERS` (`0` is no bound,
-    /// upstream's behaviour). A declared querier ([`Querier`] or [`QuerierAliased`]) holds
-    /// one place through a [`QuerierPermit`] for as long as any handle to it lives.
-    ///
-    /// Shared on a fork, never copied, for the reason `matching_interests` is: two handles
-    /// of one session that each counted their own would let a session hold twice the bound.
-    /// The count is the session's, and not the handle's or the table's, because a querier
-    /// is a handle and not a row: it holds no memory this crate sizes.
-    querier_quota: Arc<std::sync::Mutex<wz_session_core::quota::Quota>>,
     /// R2690 (§5.23) — this host's per-entity admin introspection answer, rebuilt
     /// WHOLESALE from the observer's declaration tables whenever they move.
     ///
@@ -1388,8 +1379,6 @@ where
             // Interest(Final) while the other still has publishers standing.
             #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
             matching_interests: self.matching_interests.clone(),
-            // Shared: a fork that counted its own queriers would hold twice the bound.
-            querier_quota: self.querier_quota.clone(),
             // R2690 — shared, and here the reason is the tightest of the three:
             // the cache is written by the dispatch SSOT and read by an admin
             // handler that was declared through a DIFFERENT handle. A fork that
@@ -2872,9 +2861,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
             final_holds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
             matching_interests: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            querier_quota: Arc::new(std::sync::Mutex::new(wz_session_core::quota::Quota::new(
-                wz_session_core::caps::MAX_QUERIERS,
-            ))),
             // R311y450 — a multicast session is handshake-free, so it has
             // neither of the two inputs the node clock is gated on: no
             // `SessionInitParams` means no zid to derive a `uhlc::ID` from and no
@@ -3459,9 +3445,6 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             final_holds: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(all(feature = "session-matching", feature = "declare-interest"))]
             matching_interests: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            querier_quota: Arc::new(std::sync::Mutex::new(wz_session_core::quota::Quota::new(
-                wz_session_core::caps::MAX_QUERIERS,
-            ))),
             // R2690 — empty until the first dispatch refreshes it, which is
             // correct: a session that has dispatched nothing has been told
             // nothing, so "no declarations" is the true answer rather than an
@@ -5555,51 +5538,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// returns `Err(QueryAliasError::FeatureDisabled)` (R311t
     /// Result-form transition — no wire frame, no callback
     /// registration).
-    ///
-    /// ## Refused at the session's bound
-    ///
-    /// A session holds at most `MAX_QUERIERS` live queriers (`0`, the default, is no
-    /// bound, which is upstream's behaviour). Past it this returns
-    /// [`DeclareQuerierError::QuotaExceeded`] and declares nothing, interest included.
-    /// A declaration keeps its place until the last handle to it, a [`Querier`] and every
-    /// clone of it, is dropped.
     pub fn declare_querier(
         &self,
         keyexpr: impl Into<String>,
         options: QueryOptions,
-    ) -> Result<Querier<R, T>, DeclareQuerierError> {
-        // The place is taken BEFORE the interest is asked for, so a refusal leaves
-        // nothing standing on the wire or in the interest table.
-        let permit = QuerierPermit::acquire(&self.querier_quota)?;
-        Ok(self.build_querier(keyexpr.into(), options, Some(permit)))
-    }
-
-    /// A [`Querier`] the RUNTIME makes to read a matching verdict or to hang a matching
-    /// listener on, which the application did not declare. It takes no place of the
-    /// querier quota, so it is never refused at the bound and never uses a place an
-    /// application's declaration is owed; in every other way it is a querier, interest
-    /// included, and drops like one.
-    ///
-    /// The application declares through [`Self::declare_querier`], which is the
-    /// counted way. Calling this from application code to get past the bound is
-    /// the one misuse the bound has, and it is a visible one.
-    pub fn querier_for_matching(
-        &self,
-        keyexpr: impl Into<String>,
-        options: QueryOptions,
     ) -> Querier<R, T> {
-        self.build_querier(keyexpr.into(), options, None)
-    }
-
-    fn build_querier(
-        &self,
-        keyexpr: String,
-        options: QueryOptions,
-        permit: Option<Arc<QuerierPermit>>,
-    ) -> Querier<R, T> {
+        let keyexpr = keyexpr.into();
         // R2577 — the QUERYABLES mirror of the publisher's ask, and it lands in
         // the same round for the reason the seam is shared: `Querier` has the
-        // identical shape (`Clone`, by-value declare) and
+        // identical shape (`Clone`, no `Drop`, infallible by-value declare) and
         // `Querier::get_matching_status` reads a queryable registry the
         // neighbour fills only for a face that asked. zenoh-pico declares its
         // querier's filter the same way -- `vendor/zenoh-pico/src/api/api.c` @
@@ -5611,26 +5558,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             session: self.clone(),
             keyexpr,
             options,
-            permit,
-        }
-    }
-
-    /// The bound on live queriers this session was built with, replaced. A test names a
-    /// bound the build does not state; the bound of a built image is `MAX_QUERIERS`.
-    #[cfg(test)]
-    pub(crate) fn set_querier_limit(&self, limit: usize) {
-        match self.querier_quota.lock() {
-            Ok(mut held) => held.set_limit(limit),
-            Err(poisoned) => poisoned.into_inner().set_limit(limit),
-        }
-    }
-
-    /// How many queriers this session holds live now.
-    #[cfg(test)]
-    pub(crate) fn live_queriers(&self) -> usize {
-        match self.querier_quota.lock() {
-            Ok(held) => held.live(),
-            Err(poisoned) => poisoned.into_inner().live(),
+            slots: querier::QuerierSlots::new(),
         }
     }
 
@@ -5650,23 +5578,19 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// `Err(QueryAliasError::FeatureDisabled)` via
     /// [`Session::query_aliased_auto`] when `query-get` is OFF
     /// (R311t Result-form transition).
-    ///
-    /// An aliased querier is a querier: it takes a place of the same quota as
-    /// [`Self::declare_querier`] and is refused at the same bound.
     pub fn declare_querier_aliased(
         &self,
         mapping_id: u64,
         inline_suffix: Option<&str>,
         options: QueryOptions,
-    ) -> Result<QuerierAliased<R, T>, DeclareQuerierError> {
-        let permit = QuerierPermit::acquire(&self.querier_quota)?;
-        Ok(QuerierAliased {
+    ) -> QuerierAliased<R, T> {
+        QuerierAliased {
             session: self.clone(),
             mapping_id,
             inline_suffix: inline_suffix.map(str::to_string),
             options,
-            permit,
-        })
+            slots: querier::QuerierSlots::new(),
+        }
     }
 
     /// R244 — declare a reusable [`Publisher`] bound to `keyexpr` +

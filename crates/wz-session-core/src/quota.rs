@@ -6,10 +6,10 @@
 //! # What it is
 //!
 //! A counting semaphore whose acquire never waits: the holder either takes a place or is told
-//! the bound is reached. A resource that is acquired and later released (a querier is one: it
-//! is declared, used, and dropped) is bounded by a quota; a table of rows that never move is
-//! bounded by its capacity (`caps`). The two are different facts and are kept apart: a capacity
-//! sizes memory the image carries, a quota refuses the holder that asks for one more.
+//! the bound is reached. A resource that is acquired and later released (a query in flight is
+//! one: it is asked, pending, and ended) is bounded by a quota; a table of rows that never move
+//! is bounded by its capacity (`caps`). The two are different facts and are kept apart: a
+//! capacity sizes memory the image carries, a quota refuses the holder that asks for one more.
 //!
 //! # Why a plain state machine
 //!
@@ -63,9 +63,9 @@ impl Quota {
         self.live
     }
 
-    /// Change the bound. Places already taken stay taken: lowering the bound below `live`
-    /// refuses every acquire until enough are given back, and raising it grants at once.
-    /// This is how a test names a bound the build does not state, in one binary.
+    /// Change the bound; `0` is none. Places already taken stay taken: a bound lowered under
+    /// the live count refuses every acquire until enough places are released, and takes none
+    /// back from the holders.
     pub fn set_limit(&mut self, limit: usize) {
         self.limit = limit;
     }
@@ -117,6 +117,26 @@ mod tests {
     }
 
     #[test]
+    fn a_bound_lowered_under_the_live_count_takes_no_place_back() {
+        let mut quota = Quota::new(3);
+        for _ in 0..3 {
+            assert_eq!(quota.try_acquire(), Ok(()));
+        }
+        quota.set_limit(1);
+        assert_eq!(quota.live(), 3, "the holders keep their places");
+        assert_eq!(quota.try_acquire(), Err(QuotaExceeded { limit: 1 }));
+        quota.release();
+        quota.release();
+        assert_eq!(
+            quota.try_acquire(),
+            Err(QuotaExceeded { limit: 1 }),
+            "1 live of 1"
+        );
+        quota.release();
+        assert_eq!(quota.try_acquire(), Ok(()));
+    }
+
+    #[test]
     fn a_limit_of_zero_is_no_bound() {
         let mut quota = Quota::unlimited();
         assert_eq!(quota, Quota::new(0));
@@ -125,31 +145,6 @@ mod tests {
         }
         assert_eq!(quota.live(), 10_000);
         assert_eq!(quota.limit(), 0);
-    }
-
-    #[test]
-    fn a_bound_changed_under_live_places_leaves_them_taken() {
-        let mut quota = Quota::new(3);
-        for _ in 0..3 {
-            quota.try_acquire().unwrap();
-        }
-        quota.set_limit(1);
-        assert_eq!(quota.live(), 3, "lowering the bound takes nothing back");
-        assert_eq!(quota.try_acquire(), Err(QuotaExceeded { limit: 1 }));
-        quota.release();
-        quota.release();
-        assert!(
-            quota.try_acquire().is_err(),
-            "one place is still over a bound of one"
-        );
-        quota.release();
-        assert_eq!(quota.try_acquire(), Ok(()));
-        quota.set_limit(0);
-        assert_eq!(
-            quota.try_acquire(),
-            Ok(()),
-            "raising the bound to none grants at once"
-        );
     }
 
     #[test]
