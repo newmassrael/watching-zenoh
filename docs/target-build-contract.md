@@ -559,8 +559,17 @@ close-on-exec by it (the one path for both kernels, since Neutrino has no `SOCK_
 `accept4`), a group is joined with `ip_mreq`, and a socket address carries its length. Layer C1sp
 reads the Linux aarch64 platform (the glibc 2.35 Yocto SDK) and both QNX platforms (the 7.1 SDP)
 with every registered node; each package is verified and the first of a platform is made twice with
-the same manifest bytes. Nothing was run on a board: a node packaged for a QNX or aarch64 Linux
-platform is a built and verified file, and the run against a stock router on the device is owed.
+the same manifest bytes. The declared nodes were also RUN on four lab boards (2026-10-25, each in one
+directory of its own that was removed afterwards): on a Raspberry Pi 4 on aarch64 Linux against a
+stock `zenohd` and stock examples cross-built for it from the pinned zenoh source (listener, dialled
+tokens, subscriber, publisher, querier, group); on a Raspberry Pi 4 on QNX 7.1 (io-sock), an NVIDIA
+Orin board on QNX 7.1 (io-pkt) and an Android 16 tablet against wz's own peer (`ap-demo`), because
+the stock `zenohd` and examples do not build for QNX and this repository has no stock build for
+Android. The Orin board ran the loopback legs only, so nothing was sent on its network and its group
+join is not run. What a board run found: the Linux board has one subnet route and no default route,
+so joining the group on the interface routing picks failed, and the join now falls back to the first
+interface that is up and can multicast. What is still not run: a stock peer on QNX or Android, the
+group against a stock multicast peer, and the paced replay's timing on a board.
 
 **The structure of an entity (owner, 2026-10-25: cost ignored, the textbook one).** An entity is a
 kind, a key and a BEHAVIOUR, and the behaviours are a closed vocabulary stated as data: a
