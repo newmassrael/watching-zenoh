@@ -26,7 +26,7 @@ use host_slot_node_glue::fresh_zid;
 #[cfg(feature = "tls")]
 use host_slot_node_glue::tls;
 use host_slot_node_glue::tuning::{
-    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RX, SESSIONS, TASKS, TASK_BYTES_PUBLISHING,
+    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RX, SESSIONS, TASKS, TASK_BYTES_ACTIVE,
     TIMERS, TX,
 };
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
@@ -39,12 +39,15 @@ use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps::{MAX_QUERYABLES, MAX_REPLY_PAYLOAD_BYTES, MAX_SUBSCRIPTIONS};
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_mcu::connect_manager::StaticEndpoints;
-use wz_session_mcu::latest::{LatestCells, LatestRef, LatestWatch};
+use wz_session_mcu::latest::{Latest, LatestCells, LatestRef, LatestWatch};
+use wz_session_mcu::slot_active::Active;
 use wz_session_mcu::slot_node::{
     documents_of, BodyPool, ClientNode, Declared, Entities, Mirror, NodeApp, NodeHandle,
     NodeIdentity, NodePort, NodeStorage, Subscription,
 };
-use wz_session_mcu::slot_publisher::{Publication, PublishCounts, PublishWatch, Publishing};
+use wz_session_mcu::slot_publisher::{Publication, PublishCounts, PublishWatch};
+#[cfg(feature = "get")]
+use wz_session_mcu::slot_querier::{Query, QueryState, QueryWatch};
 
 wz_runtime_posix::posix_image_no_heap!();
 
@@ -53,9 +56,11 @@ mod declared {
     include!(env!("WZ_DECLARED_RS"));
 }
 
+#[cfg(feature = "get")]
+use declared::QUERIED;
 use declared::{
-    DECLARATION_SHA256, DOCS, DOCUMENTS, MIRRORED, MIRRORS, NODE_ID, PUBLISHED, PUBLISHERS, ROUTER,
-    SAMPLE_MAX, SUBSCRIBERS, SUBSCRIPTIONS, TLS,
+    CELLS, DECLARATION_SHA256, DOCS, DOCUMENTS, MIRRORED, MIRRORS, NODE_ID, PUBLISHED, PUBLISHERS,
+    QUERIERS, ROUTER, SAMPLE_MAX, SUBSCRIBERS, SUBSCRIPTIONS, TLS,
 };
 
 /// The declarations the node sends on a session: its documents, the queryables that answer from a
@@ -104,16 +109,55 @@ const _: () = {
     while at < MIRRORS {
         let from = MIRRORED[at].1;
         assert!(
-            from < SUBSCRIBERS,
-            "a queryable answers from a subscription that is not there"
+            from < CELLS,
+            "a queryable answers from a cell that is not there"
         );
         assert!(
-            SUBSCRIPTIONS[from].1 <= MAX_REPLY_PAYLOAD_BYTES,
-            "a queryable answers from a subscription that keeps more than a reply holds"
+            cell_bytes(from) <= MAX_REPLY_PAYLOAD_BYTES,
+            "a queryable answers from a cell that keeps more than a reply holds"
         );
         at += 1;
     }
 };
+const _: () = assert!(
+    CELLS == SUBSCRIBERS + QUERIERS,
+    "the cells are the subscriptions' and the queriers'"
+);
+const _: () = assert!(
+    QUERIERS == 0 || cfg!(feature = "get"),
+    "the declaration has a querier and the node is not built with the `get` feature that asks"
+);
+const _: () = {
+    let mut at = 0;
+    while at < QUERIERS {
+        assert!(
+            queried_bytes(at) >= 1 && queried_bytes(at) <= SAMPLE_MAX,
+            "a querier keeps no bytes, or more than the cells hold"
+        );
+        at += 1;
+    }
+};
+
+/// The bytes the cell `at` keeps: the subscriptions' first, then the queriers'.
+const fn cell_bytes(at: usize) -> usize {
+    if at < SUBSCRIBERS {
+        SUBSCRIPTIONS[at].1
+    } else {
+        queried_bytes(at - SUBSCRIBERS)
+    }
+}
+
+/// The bytes the replies of querier `at` are kept to.
+#[cfg(feature = "get")]
+const fn queried_bytes(at: usize) -> usize {
+    QUERIED[at].3
+}
+
+/// A node built without `get` has no querier (`QUERIERS` is asserted to be 0), so no cell is one.
+#[cfg(not(feature = "get"))]
+const fn queried_bytes(_at: usize) -> usize {
+    0
+}
 const _: () = {
     let mut at = 0;
     while at < PUBLISHERS {
@@ -152,7 +196,7 @@ type Stack = tls::Stack;
 /// The node's big tables, in one `static` whose initial value is ALL ZERO BYTES, so the linker
 /// places it in `.bss` and not in `.data`.
 type Storage =
-    NodeStorage<Clock, Stack, PosixEntropy, TASKS, TASK_BYTES_PUBLISHING, TIMERS, SESSIONS, RX, TX>;
+    NodeStorage<Clock, Stack, PosixEntropy, TASKS, TASK_BYTES_ACTIVE, TIMERS, SESSIONS, RX, TX>;
 
 static NODE: Storage = Storage::new();
 
@@ -165,11 +209,16 @@ static ENDPOINTS: StaticEndpoints = StaticEndpoints::new(&[ROUTER]);
 /// The declarations the node sends on each session, in the order of their registrations.
 static DECLARED: Declared<DECLS> = Declared::new();
 
-/// The latest sample of each subscription, in the cells the declaration sized.
-static CELLS: LatestCells<SUBSCRIBERS, SAMPLE_MAX> = LatestCells::new();
+/// The latest of each cell, in the cells the declaration sized: the subscriptions' samples and then
+/// the queriers' replies.
+static LATEST: LatestCells<CELLS, SAMPLE_MAX> = LatestCells::new();
 
 /// How many puts each publisher sent and had refused.
 static COUNTS: PublishCounts<PUBLISHERS> = PublishCounts::new();
+
+/// Where the replies of the queriers are kept, and how many queries each asked and had answered.
+#[cfg(feature = "get")]
+static QUERY_STATE: QueryState<QUERIERS> = QueryState::new();
 
 /// The name this front end's console lines carry.
 struct Console;
@@ -194,21 +243,34 @@ fn subscriptions() -> [Subscription; SUBSCRIBERS] {
     core::array::from_fn(|at| Subscription {
         key: SUBSCRIPTIONS[at].0,
         cell: LatestRef {
-            slots: &CELLS,
+            slots: &LATEST,
             index: at,
         },
         capacity: SUBSCRIPTIONS[at].1,
     })
 }
 
-/// The queryables that answer from a subscription, each with the cell it reads.
+/// The queryables that answer from a cell (a subscription's or a querier's), each with the cell it
+/// reads.
 fn mirrors() -> [Mirror; MIRRORS] {
     core::array::from_fn(|at| Mirror {
         key: MIRRORED[at].0,
         cell: LatestRef {
-            slots: &CELLS,
+            slots: &LATEST,
             index: MIRRORED[at].1,
         },
+    })
+}
+
+/// The queries the declaration chose: each key, its period, how long it may stay pending and how
+/// much of a reply is kept.
+#[cfg(feature = "get")]
+fn queries() -> [Query; QUERIERS] {
+    core::array::from_fn(|at| Query {
+        key: QUERIED[at].0,
+        period_ms: QUERIED[at].1,
+        timeout_ms: QUERIED[at].2,
+        reply_bytes: QUERIED[at].3,
     })
 }
 
@@ -228,8 +290,10 @@ fn publications() -> [Publication; PUBLISHERS] {
 /// two rounds shows as a jump. A publisher is said the same way, as `HOST-WZ-PUBLISHED <key>
 /// sent=<n> refused=<n>`, once for each round that found its counts moved.
 struct Report {
-    watch: LatestWatch<SUBSCRIBERS>,
+    watch: LatestWatch<CELLS>,
     published: PublishWatch<PUBLISHERS>,
+    #[cfg(feature = "get")]
+    queried: QueryWatch<QUERIERS>,
 }
 
 impl NodeApp for Report {
@@ -240,28 +304,53 @@ impl NodeApp for Report {
                 PUBLISHED[at].0, sent, refused
             ));
         });
-        self.watch.poll(&CELLS, SUBSCRIBERS, |_, sample| {
-            let mut hex = [0u8; 2 * SAMPLE_MAX];
-            for (at, byte) in sample.payload.iter().enumerate() {
-                hex[2 * at] = b"0123456789abcdef"[usize::from(byte >> 4)];
-                hex[2 * at + 1] = b"0123456789abcdef"[usize::from(byte & 15)];
-            }
-            match sample.kind {
-                SampleKind::Put => log_args(format_args!(
-                    "HOST-WZ-SAMPLE {} put len={} kept={} seq={} hex={}",
-                    sample.key,
-                    sample.received_len,
-                    sample.payload.len(),
-                    sample.sequence,
-                    core::str::from_utf8(&hex[..2 * sample.payload.len()]).unwrap_or("")
-                )),
-                SampleKind::Del => log_args(format_args!(
-                    "HOST-WZ-SAMPLE {} del seq={}",
-                    sample.key, sample.sequence
-                )),
-            }
+        #[cfg(feature = "get")]
+        self.queried.poll(&QUERY_STATE, |at, tally| {
+            log_args(format_args!(
+                "HOST-WZ-ASKED {} asked={} replies={} errors={} finals={} timeouts={} refused={}",
+                QUERIED[at].0,
+                tally.asked,
+                tally.replied,
+                tally.errors,
+                tally.finals,
+                tally.timeouts,
+                tally.refused
+            ));
         });
+        // The subscriptions' cells come first, then the queriers'.
+        self.watch.poll_range(&LATEST, 0, SUBSCRIBERS, |_, sample| {
+            say_cell("HOST-WZ-SAMPLE", &sample)
+        });
+        self.watch
+            .poll_range(&LATEST, SUBSCRIBERS, CELLS, |_, sample| {
+                say_cell("HOST-WZ-REPLY", &sample)
+            });
         ControlFlow::Continue(())
+    }
+}
+
+/// One cell, said on one line whatever its bytes are: `<tag> <key> put len= kept= seq= hex=`, or
+/// `<tag> <key> del seq=` for a delete.
+fn say_cell(tag: &str, sample: &Latest<'_>) {
+    let mut hex = [0u8; 2 * SAMPLE_MAX];
+    for (at, byte) in sample.payload.iter().enumerate() {
+        hex[2 * at] = b"0123456789abcdef"[usize::from(byte >> 4)];
+        hex[2 * at + 1] = b"0123456789abcdef"[usize::from(byte & 15)];
+    }
+    match sample.kind {
+        SampleKind::Put => log_args(format_args!(
+            "{} {} put len={} kept={} seq={} hex={}",
+            tag,
+            sample.key,
+            sample.received_len,
+            sample.payload.len(),
+            sample.sequence,
+            core::str::from_utf8(&hex[..2 * sample.payload.len()]).unwrap_or("")
+        )),
+        SampleKind::Del => log_args(format_args!(
+            "{} {} del seq={}",
+            tag, sample.key, sample.sequence
+        )),
     }
 }
 
@@ -328,18 +417,27 @@ fn run() -> i32 {
             subscriptions: &subscribed,
             mirrors: &mirrored,
         },
-        layer: Publishing {
+        layer: Active::<PUBLISHERS, QUERIERS> {
             publications: publications(),
             counts: &COUNTS,
+            #[cfg(feature = "get")]
+            queries: queries(),
+            #[cfg(feature = "get")]
+            state: &QUERY_STATE,
         },
         idle_sleep_us: IDLE_SLEEP_US,
         report_every_ms: 0,
     };
     // The line a lab (or a person at the console) waits for, once the node is built: the same one
     // `host-slot-node` says, so a lab that waits for it waits for either.
+    // The replies of the queriers are kept after the subscriptions' samples, in the same cells.
+    #[cfg(feature = "get")]
+    QUERY_STATE.attach(&LATEST, SUBSCRIBERS, &queries());
     let mut report = Report {
         watch: LatestWatch::new(),
         published: PublishWatch::new(),
+        #[cfg(feature = "get")]
+        queried: QueryWatch::new(),
     };
     node.run(
         &mut HostPort::<Console>::new(),

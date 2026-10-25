@@ -27,7 +27,10 @@ not build the node.
                                from = "<subscriber key>" (the latest sample of that subscription);
                                kind = "subscriber", key, sample_bytes (the payload bytes it keeps);
                                kind = "publisher", key, period_ms, document_bytes (the document it
-                               puts on that key every period)
+                               puts on that key every period);
+                               kind = "querier", key, period_ms, timeout_ms, reply_bytes (it asks
+                               that key every period and keeps the latest reply; a queryable's
+                               from may name its key)
     [limits]                   <LIMIT_ID> = <integer>, any limit `deploy/wz-config.toml` declares
 
 ## What it refuses, and why that is an exit and not a skip
@@ -73,7 +76,7 @@ ENDPOINT_ROLES = ("dial", "listen", "multicast")
 ENTITY_KINDS = ("publisher", "subscriber", "queryable", "querier", "liveliness-token")
 NODE_KEYS = {"id", "help", "target"}
 ENDPOINT_KEYS = {"role", "locator"}
-ENTITY_KEYS = {"kind", "key", "document_bytes", "sample_bytes", "from", "period_ms"}
+ENTITY_KEYS = {"kind", "key", "document_bytes", "sample_bytes", "from", "period_ms", "timeout_ms", "reply_bytes"}
 TOP_KEYS = {"node", "endpoint", "entity", "limits"}
 
 # What each target builds. `slot` is the per-session fixed-memory profile of the cooperative runtime:
@@ -86,7 +89,7 @@ TARGETS = {
         "max_endpoints": 1,
         "endpoint_roles": {"dial"},
         "schemes": ("tcp", "udp", "tls"),
-        "entity_kinds": {"queryable", "subscriber", "publisher"},
+        "entity_kinds": {"queryable", "subscriber", "publisher", "querier"},
         # `DOC_MAX` of the same file: the static every document is a prefix of.
         "document_max": 4096,
         # The bytes of a payload a subscription keeps (`LatestCells` of `wz_session_mcu::latest`).
@@ -95,14 +98,16 @@ TARGETS = {
         # the schedules of at most `max_publishers` in the session's task cell.
         "publish_max": 1024,
         "max_publishers": 4,
+        # A querier keeps its latest reply in a cell, so it is held to the cell's size (`sample_max`),
+        # and its schedule is in the same task cell.
+        "max_queriers": 4,
+        "timeout_max": 60_000,
         "period_max": 3_600_000,
         "refused": {
             "listen": "the slot node holds one session that it dials; it has no accept loop",
             "multicast": "the multicast group session has a slot table but no node that joins "
             "one yet",
             "liveliness-token": "the slot node declares queryables, subscriptions and publishers only",
-            "querier": "the slot node's getter is a plan its arguments drive (a lab tool), not an "
-            "entity a declaration can state",
         },
     },
 }
@@ -196,10 +201,10 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             if any(int(match[o]) > 255 for o in "abcd") or not 1 <= int(match["port"]) <= 65535:
                 out.append(f"{who}: locator {ep['locator']!r} has an octet above 255 or a port outside 1..65535")
 
-    seen: dict[str, set[str]] = {"queryable": set(), "subscriber": set(), "publisher": set()}
+    seen: dict[str, set[str]] = {"queryable": set(), "subscriber": set(), "publisher": set(), "querier": set()}
     sample_sizes: dict[str, int] = {}
     mirrors: list[tuple[str, object]] = []
-    queryables = subscribers = publishers = 0
+    queryables = subscribers = publishers = queriers = 0
     for n, ent in enumerate(data.get("entity", []), 1):
         who = f"entity {n}"
         for extra in sorted(set(ent) - ENTITY_KEYS):
@@ -214,14 +219,22 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         queryables += kind == "queryable"
         subscribers += kind == "subscriber"
         publishers += kind == "publisher"
-        if kind != "publisher" and "period_ms" in ent:
-            out.append(f"{who}: only a publisher has a `period_ms`")
+        queriers += kind == "querier"
+        if kind not in ("publisher", "querier") and "period_ms" in ent:
+            out.append(f"{who}: only a publisher or a querier has a `period_ms`")
+        for extra in ("timeout_ms", "reply_bytes"):
+            if kind != "querier" and extra in ent:
+                out.append(f"{who}: only a querier has `{extra}`")
         key = ent.get("key")
         why = key_problem(key, values["MAX_KEYEXPR_BYTES"]) if isinstance(key, str) else "is missing"
+        # A subscription and a querier each keep their latest in a cell named by the key.
+        cell_twin = {"subscriber": "querier", "querier": "subscriber"}.get(kind)
         if why:
             out.append(f"{who}: key {key!r} {why}")
         elif key in seen[kind]:
             out.append(f"{who}: key {key!r} is declared twice")
+        elif cell_twin and key in seen[cell_twin]:
+            out.append(f"{who}: key {key!r} names the cell of a {cell_twin} too, and a cell is named by one")
         else:
             seen[kind].add(key)
         if kind == "subscriber":
@@ -247,6 +260,19 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= target["publish_max"]:
                 out.append(f"{who}: document_bytes is {size!r}, not an integer from 0 to {target['publish_max']}")
             continue
+        if kind == "querier":
+            for extra in ("document_bytes", "sample_bytes", "from"):
+                if extra in ent:
+                    out.append(f"{who}: a querier asks and keeps what comes back and has no `{extra}`")
+            for name, low, high in (("period_ms", 1, target["period_max"]),
+                                    ("timeout_ms", 1, target["timeout_max"]),
+                                    ("reply_bytes", 1, target["sample_max"])):
+                value = ent.get(name)
+                if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                    out.append(f"{who}: {name} is {value!r}, not an integer from {low} to {high}")
+                elif name == "reply_bytes" and isinstance(key, str):
+                    sample_sizes[key] = value
+            continue
         if "sample_bytes" in ent:
             out.append(f"{who}: a queryable has no `sample_bytes`; the subscription it answers from has")
         if "from" in ent:
@@ -259,15 +285,25 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= target["document_max"]:
             out.append(f"{who}: document_bytes is {size!r}, not an integer from 0 to {target['document_max']}")
     for who, source in mirrors:
-        if not isinstance(source, str) or source not in seen["subscriber"]:
-            out.append(f"{who}: `from` is {source!r}, which is not the key of a subscription of this node")
+        if not isinstance(source, str) or source not in seen["subscriber"] | seen["querier"]:
+            out.append(f"{who}: `from` is {source!r}, which is not the key of a subscription or a querier "
+                       "of this node")
         elif sample_sizes.get(source, 0) > values["MAX_REPLY_PAYLOAD_BYTES"]:
-            out.append(f"{who}: the subscription {source!r} keeps {sample_sizes[source]} bytes, more than a "
+            out.append(f"{who}: what {source!r} keeps is {sample_sizes[source]} bytes, more than a "
                        f"reply holds (MAX_REPLY_PAYLOAD_BYTES is {values['MAX_REPLY_PAYLOAD_BYTES']})")
     if publishers > target["max_publishers"]:
         out.append(f"{publishers} publishers; the {node['target']} target keeps the schedule of "
                    f"{target['max_publishers']} in the session's task cell")
+    if queriers > target["max_queriers"]:
+        out.append(f"{queriers} queriers; the {node['target']} target keeps the schedule of "
+                   f"{target['max_queriers']} in the session's task cell")
     stated = data.get("limits", {})
+    pending = pending_need(data.get("entity", []))
+    if "MAX_PENDING_QUERIES" in stated and isinstance(stated["MAX_PENDING_QUERIES"], int) \
+            and stated["MAX_PENDING_QUERIES"] < pending:
+        out.append(f"its queriers can have {pending} queries pending; the declaration states "
+                   f"MAX_PENDING_QUERIES = {stated['MAX_PENDING_QUERIES']} (state at least {pending}, or "
+                   "nothing, and it follows from the entities)")
     for name, need, what in (("MAX_QUERYABLES", queryables, "queryables"),
                              ("MAX_SUBSCRIPTIONS", subscribers, "subscriptions")):
         if name in stated and isinstance(stated[name], int) and stated[name] < need:
@@ -276,16 +312,35 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
     return out
 
 
+def pending_need(entities: list) -> int:
+    """The queries a node's queriers can have pending at once: each is asked every period and stays
+    until its final or its deadline, so a querier holds the periods that fit in its timeout, and the
+    row a late final of the last still holds. Entities that do not validate count for nothing."""
+    total = 0
+    for ent in entities:
+        if ent.get("kind") != "querier":
+            continue
+        period, timeout = ent.get("period_ms"), ent.get("timeout_ms")
+        if all(isinstance(v, int) and not isinstance(v, bool) and v >= 1 for v in (period, timeout)):
+            total += -(-timeout // period) + 1
+    return total
+
+
 def budgets(data: dict, decl: dict) -> dict[str, int]:
-    """The budgets a node's build is given: what the declaration states, and the two its entities
-    decide (`MAX_QUERYABLES`, `MAX_SUBSCRIPTIONS`) when the image's own is below what they need and
-    the declaration does not state one. Valid input only: `validate` ran first."""
+    """The budgets a node's build is given: what the declaration states, and the three its entities
+    decide (`MAX_QUERYABLES`, `MAX_SUBSCRIPTIONS`, `MAX_PENDING_QUERIES`) when the image's own is
+    below what they need and the declaration does not state one. Valid input only: `validate` ran
+    first."""
     target = TARGETS[data["node"]["target"]]
     stated = dict(data.get("limits", {}))
     values, _ = limit_values(decl, stated, image_limits(target))
     entities = data.get("entity", [])
-    for name, kind in (("MAX_QUERYABLES", "queryable"), ("MAX_SUBSCRIPTIONS", "subscriber")):
-        need = sum(1 for e in entities if e["kind"] == kind)
+    needs = {
+        "MAX_QUERYABLES": sum(1 for e in entities if e["kind"] == "queryable"),
+        "MAX_SUBSCRIPTIONS": sum(1 for e in entities if e["kind"] == "subscriber"),
+        "MAX_PENDING_QUERIES": pending_need(entities),
+    }
+    for name, need in needs.items():
         if name not in stated and need > values[name]:
             stated[name] = need
     return dict(sorted(stated.items()))
@@ -309,7 +364,11 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
     docs = ", ".join(f"({rust_string(k)}, {b})" for k, b in entities)
     subscribed = [(e["key"], e["sample_bytes"]) for e in every if e["kind"] == "subscriber"]
     cells = ", ".join(f"({rust_string(k)}, {b})" for k, b in subscribed)
-    place = {k: at for at, (k, _) in enumerate(subscribed)}
+    queried = [(e["key"], e["period_ms"], e["timeout_ms"], e["reply_bytes"]) for e in every
+               if e["kind"] == "querier"]
+    asks = ", ".join(f"({rust_string(k)}, {p}, {t}, {b})" for k, p, t, b in queried)
+    # The cells are the subscriptions' and then the queriers', in the order the declaration has them.
+    place = {k: at for at, k in enumerate([k for k, _ in subscribed] + [k for k, _, _, _ in queried])}
     mirrored = [(e["key"], place[e["from"]]) for e in every if e["kind"] == "queryable" and "from" in e]
     mirrors = ", ".join(f"({rust_string(k)}, {at})" for k, at in mirrored)
     published = [(e["key"], e["period_ms"], e["document_bytes"]) for e in every if e["kind"] == "publisher"]
@@ -335,9 +394,15 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             "/// The subscriptions the node declares, and the bytes of a payload each keeps: (key, bytes).",
             f"pub const SUBSCRIBERS: usize = {len(subscribed)};",
             f"pub const SUBSCRIPTIONS: [(&str, usize); {len(subscribed)}] = [{cells}];",
-            "/// The most bytes any subscription keeps: the size of every cell the node holds.",
-            f"pub const SAMPLE_MAX: usize = {max((b for _, b in subscribed), default=1)};",
-            "/// The queryables that answer from a subscription: (key, index into `SUBSCRIPTIONS`).",
+            "/// The queriers the node runs: (key, the period and the timeout in milliseconds, the bytes of a",
+            "/// reply each keeps).",
+            f"pub const QUERIERS: usize = {len(queried)};",
+            f"pub const QUERIED: [(&str, u32, u32, usize); {len(queried)}] = [{asks}];",
+            "/// The cells that keep a latest value: the subscriptions' and then the queriers'.",
+            f"pub const CELLS: usize = {len(subscribed) + len(queried)};",
+            "/// The most bytes any cell keeps: the size of every cell the node holds.",
+            f"pub const SAMPLE_MAX: usize = {max([b for _, b in subscribed] + [b for _, _, _, b in queried], default=1)};",
+            "/// The queryables that answer from a cell: (key, index into the cells).",
             f"pub const MIRRORS: usize = {len(mirrored)};",
             f"pub const MIRRORED: [(&str, usize); {len(mirrored)}] = [{mirrors}];",
             "/// The publishers: (key, the period in milliseconds, the bytes of the document it puts).",
@@ -363,6 +428,15 @@ def env_lines(data: dict, decl: dict) -> list[str]:
 # What a dialled endpoint's scheme asks of the device, by name from the facilities of
 # `deploy/wz-config.toml`. `tls` rides a TCP stream, so it asks for the same socket.
 SCHEME_FACILITIES = {"tcp": "sockets-tcp", "tls": "sockets-tcp", "udp": "sockets-udp"}
+
+
+def features_of(data: dict) -> list[str]:
+    """The cargo features a node is built with: `declared`, `tls` exactly when its endpoint is
+    `tls/` (which the node's own `const` assertion holds again), and `get` for a node that asks (and
+    only such a node: the layer's queries and the pending table are not in any other)."""
+    tls = any(ep["locator"].startswith("tls/") for ep in data["endpoint"])
+    asks = any(e["kind"] == "querier" for e in data.get("entity", []))
+    return ["declared"] + (["tls"] if tls else []) + (["get"] if asks else [])
 
 
 def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
@@ -392,7 +466,7 @@ def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
         "target": data["node"]["target"],
         "declaration_sha256": sha,
         "generated": generated,
-        "features": ["declared"] + (["tls"] if "tls" in schemes else []),
+        "features": features_of(data),
         "limits": dict(line.split("=", 1) for line in env_lines(data, decl)),
         "facilities": facilities,
     }
@@ -535,10 +609,61 @@ def _selftest() -> int:
             SAMPLE.replace('role = "dial"', 'role = "listen"'), "no accept loop")
     refuses("a multicast endpoint", SAMPLE.replace('role = "dial"', 'role = "multicast"'), "not built on slot")
     refuses("a role outside the vocabulary", SAMPLE.replace('role = "dial"', 'role = "dail"'), "not one of dial")
-    refuses("a querier is refused, not dropped", SAMPLE.replace('kind = "queryable"', 'kind = "querier"'),
-            "not built on slot")
     refuses("a liveliness token is refused, not dropped",
             SAMPLE.replace('kind = "queryable"', 'kind = "liveliness-token"'), "not built on slot")
+
+    # A querier asks a key every period and keeps the latest reply in a cell.
+    ask = ('\n[[entity]]\nkind = "querier"\nkey = "lab/ask/val"\nperiod_ms = 500\ntimeout_ms = 1000\n'
+           "reply_bytes = 32\n")
+    expect("a querier is a valid entity", problems(SAMPLE + ask) == [])
+    asked = emit("n", wz_config.read_decl_toml(SAMPLE + ask), sha)
+    expect("the querier, its period, its timeout and its reply size are generated",
+           'pub const QUERIED: [(&str, u32, u32, usize); 1] = [("lab/ask/val", 500, 1000, 32)];' in asked
+           and "pub const QUERIERS: usize = 1;" in asked and "pub const CELLS: usize = 1;" in asked)
+    expect("the cell of a querier is as large as it asks, and no node with none has a querier",
+           "pub const SAMPLE_MAX: usize = 32;" in asked and "pub const QUERIERS: usize = 0;" in rs)
+    expect("a querier is a pattern-able key: it asks for everything under it",
+           problems(SAMPLE + ask.replace("lab/ask/val", "lab/ask/**")) == [])
+    expect("a node that asks is built with get, and no other is",
+           features_of(wz_config.read_decl_toml(SAMPLE + ask)) == ["declared", "get"]
+           and features_of(data) == ["declared"]
+           and features_of(wz_config.read_decl_toml((SAMPLE + ask).replace("tcp/", "tls/"))) == ["declared", "tls", "get"])
+    expect("the pending rows its queries can fill are counted from the periods that fit in a timeout",
+           pending_need(wz_config.read_decl_toml(SAMPLE + ask)["entity"]) == 3)
+    expect("an image whose table holds them is left as it is",
+           "MAX_PENDING_QUERIES" not in budgets(wz_config.read_decl_toml(SAMPLE + ask), decl))
+    slow = SAMPLE + ask.replace("period_ms = 500", "period_ms = 1000").replace("timeout_ms = 1000", "timeout_ms = 60000")
+    expect("one whose table is too small gets the rows the querier needs",
+           budgets(wz_config.read_decl_toml(slow), decl)["MAX_PENDING_QUERIES"] == 61)
+    both = SAMPLE + sub + ask
+    expect("the cells are the subscriptions' and then the queriers', and a mirror may answer from a querier",
+           problems(both + '\n[[entity]]\nkind = "queryable"\nkey = "lab/ask/val"\nfrom = "lab/ask/val"\n') == []
+           and 'pub const MIRRORED: [(&str, usize); 1] = [("lab/ask/val", 1)];' in emit(
+               "n", wz_config.read_decl_toml(both + '\n[[entity]]\nkind = "queryable"\nkey = "lab/ask/val"\n'
+                                             'from = "lab/ask/val"\n'), sha)
+           and "pub const CELLS: usize = 2;" in emit("n", wz_config.read_decl_toml(both), sha))
+    refuses("a querier with no period", SAMPLE + ask.replace("period_ms = 500\n", ""), "period_ms is None")
+    refuses("a querier with no timeout", SAMPLE + ask.replace("timeout_ms = 1000\n", ""), "timeout_ms is None")
+    refuses("a timeout above the target's", SAMPLE + ask.replace("1000", "60001"), "timeout_ms is 60001")
+    refuses("a querier that keeps nothing", SAMPLE + ask.replace("reply_bytes = 32", "reply_bytes = 0"),
+            "reply_bytes is 0")
+    refuses("a querier that keeps more than a cell", SAMPLE + ask.replace("= 32", "= 4097"), "reply_bytes is 4097")
+    refuses("a querier with a document", SAMPLE + ask + "document_bytes = 4\n", "has no `document_bytes`")
+    refuses("a querier with a source", SAMPLE + ask + 'from = "lab/in/a"\n', "has no `from`")
+    refuses("a timeout on a publisher", SAMPLE + "\n[[entity]]\nkind = \"publisher\"\nkey = \"lab/o\"\n"
+            "period_ms = 5\ndocument_bytes = 1\ntimeout_ms = 5\n", "only a querier has `timeout_ms`")
+    refuses("a reply size on a subscriber", SAMPLE + sub + "reply_bytes = 5\n", "only a querier has `reply_bytes`")
+    refuses("two queriers of one key", SAMPLE + ask + ask, "declared twice")
+    refuses("a subscription and a querier of one key", SAMPLE + sub + ask.replace("lab/ask/val", "lab/in/a"),
+            "names the cell of a subscriber too")
+    refuses("more queriers than the task cell keeps",
+            SAMPLE + "".join(ask.replace("lab/ask/val", f"lab/ask/{i}") for i in range(5)), "5 queriers")
+    refuses("a mirror of a querier that keeps more than a reply holds",
+            SAMPLE + ask.replace("= 32", "= 2048") + '\n[[entity]]\nkind = "queryable"\nkey = "m"\n'
+            'from = "lab/ask/val"\n', "more than a reply holds")
+    refuses("a limit stated below the pending rows the querier needs",
+            SAMPLE.replace("MAX_QUERYABLES = 2", "MAX_QUERYABLES = 2\nMAX_PENDING_QUERIES = 2") + ask,
+            "states MAX_PENDING_QUERIES = 2")
 
     # A publisher puts a document of its own on one key, every period.
     pub = '\n[[entity]]\nkind = "publisher"\nkey = "lab/out/beat"\nperiod_ms = 200\ndocument_bytes = 8\n'
@@ -560,8 +685,10 @@ def _selftest() -> int:
     refuses("a publisher of a pattern with $", SAMPLE + pub.replace("lab/out/beat", "lab/out/$*"), "is a pattern")
     refuses("a publisher with a source", SAMPLE + pub + 'from = "lab/in/a"\n', "has no `from`")
     refuses("a publisher with a sample size", SAMPLE + pub + "sample_bytes = 4\n", "has no `sample_bytes`")
-    refuses("a period on a queryable", SAMPLE.replace("512", "512\nperiod_ms = 5"), "only a publisher has a `period_ms`")
-    refuses("a period on a subscriber", SAMPLE + sub + "period_ms = 5\n", "only a publisher has a `period_ms`")
+    refuses("a period on a queryable", SAMPLE.replace("512", "512\nperiod_ms = 5"),
+            "only a publisher or a querier has a `period_ms`")
+    refuses("a period on a subscriber", SAMPLE + sub + "period_ms = 5\n",
+            "only a publisher or a querier has a `period_ms`")
     refuses("two publishers of one key", SAMPLE + pub + pub, "declared twice")
     refuses("more publishers than the task cell keeps",
             SAMPLE + "".join(pub.replace("lab/out/beat", f"lab/out/{i}") for i in range(5)), "5 publishers")

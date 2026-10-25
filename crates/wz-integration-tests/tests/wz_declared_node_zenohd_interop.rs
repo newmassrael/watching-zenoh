@@ -37,8 +37,9 @@ use wz_runtime_tokio_test_support::free_port;
 
 // The node is a deploy crate, which the barrier gate does not read as a producer: the two lines it
 // prints are declared here, each for the needle the tests wait for.
-// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-SAMPLE {} put len={} kept={} seq={} hex={}" for "hex="
-// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-SAMPLE {} del seq={}" for "lab/in/temp del seq="
+// The first `{}` of each is the tag the node gives the cell, `HOST-WZ-SAMPLE` for a subscription's.
+// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "{} {} put len={} kept={} seq={} hex={}" for "hex="
+// barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "{} {} del seq={}" for "lab/in/temp del seq="
 
 /// The router the node dials, as its declaration states it.
 const ROUTER_PORT: u16 = 17471;

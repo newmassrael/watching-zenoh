@@ -591,6 +591,21 @@ IMAGES: dict[str, Image] = {
                 ),
                 label="linux-x86_64-slot-reporter",
             ),
+            # A node that asks: built with `get` (the layer's queries and the pending table), the
+            # replies kept in zeroed cells. The budgets are what `wz_node.py --env slot-asker`
+            # prints, which is none while the image's own table holds its queries.
+            Build(
+                HOST,
+                None,
+                ("declared", "get"),
+                env=(
+                    (
+                        "WZ_DECLARED_RS",
+                        str(REPO_ROOT / "deploy" / "nodes" / "generated" / "slot-asker.rs"),
+                    ),
+                ),
+                label="linux-x86_64-slot-asker",
+            ),
         ),
     ),
     # The wz half of the zenoh-pico comparison image: the CYT4BF MAC behind Zephyr's Ethernet

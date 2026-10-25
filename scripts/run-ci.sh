@@ -11368,13 +11368,21 @@ layer_c1m_session_lwip() {
     # The latest sample of a subscription (`latest`, the same profile): the cell, its cut at the
     # subscription's capacity, a delete, a key cut at a character, the storage's bounds, and the
     # loop's watch that says each new sample once.
-    _runci_guarded_test "C1m mcu latest sample" 8 \
+    _runci_guarded_test "C1m mcu latest sample" 9 \
         cargo test -p wz-session-mcu --features client-slot --lib latest::tests --quiet || return 1
-    # The publisher (`slot_publisher`, the same profile): the schedule (the first put at once, the
-    # cadence kept on the grid, a late loop sending once, a retry soon, a lost session starting
-    # over, a period of zero not a spin) and the counts and the watch that says them.
-    _runci_guarded_test "C1m mcu publisher" 10 \
+    # The schedule a publisher's puts and a querier's gets are kept on (`slot_schedule`, the same
+    # profile): the first poll at once, the cadence kept on the grid, a late loop sending once, a
+    # retry soon, a lost session starting over, a period of zero not a spin.
+    _runci_guarded_test "C1m mcu schedule" 8 \
+        cargo test -p wz-session-mcu --features client-slot --lib slot_schedule::tests --quiet || return 1
+    # The publisher (`slot_publisher`): the counts and the watch that says them.
+    _runci_guarded_test "C1m mcu publisher" 3 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_publisher::tests --quiet || return 1
+    # The querier (`slot_querier`, which is `query-get`'s): a reply into the cell of its query after
+    # the subscriptions', cut at the size it keeps, an error counted and kept nowhere, a delete, the
+    # end of a query as one final or one timeout, and the watch that says the counts.
+    _runci_guarded_test "C1m mcu querier" 9 \
+        cargo test -p wz-session-mcu --features client-slot,query-get --lib slot_querier::tests --quiet || return 1
     # R3167 moved EVERY wz-session-lwip leg below by FIVE, and the legs that turn
     # on `codec-push` by SIX: the driver's lend tests (the datagram equals the
     # copying send's, the size written, an abandoned lend, the table of places,
@@ -19926,7 +19934,7 @@ layer_z_zenohd_interop() {
     # declared size is cut, and a delete empties the answer.
     local decl_pkg decl_rc=0 decl_node
     decl_pkg="$(mktemp -d)" || return 1
-    for decl_node in slot-recorder slot-reporter; do
+    for decl_node in slot-recorder slot-reporter slot-asker; do
         [ "$decl_rc" -eq 0 ] || break
         python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc --artifact declared-node \
             --node "$decl_node" --out "$decl_pkg/$decl_node" || decl_rc=1
@@ -19942,6 +19950,13 @@ layer_z_zenohd_interop() {
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zpub 2 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_DECLARED_NODE_REPORTER="$decl_pkg/slot-reporter/bin/declared-node" \
         cargo test -p wz-integration-tests --test wz_declared_publisher_zenohd_interop \
+        -- --ignored --quiet --test-threads=1 || decl_rc=1; }
+    # The querier, the same way, with the stock `zenoh_z_queryable` as the responder: the node keeps
+    # the reply, keeps it when nothing answers and answers from it, and asks again with the session
+    # that follows a router restart.
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zask 2 env WZ_ZENOHD_BIN="$zenohd" \
+        WZ_DECLARED_NODE_ASKER="$decl_pkg/slot-asker/bin/declared-node" \
+        cargo test -p wz-integration-tests --test wz_declared_querier_zenohd_interop \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     rm -rf "$decl_pkg"
     [ "$decl_rc" -eq 0 ] || return 1

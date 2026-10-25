@@ -17,9 +17,15 @@ pub const DOCUMENTS: [(&str, usize); 2] = [("lab/doc/small", 256), ("lab/doc/lar
 /// The subscriptions the node declares, and the bytes of a payload each keeps: (key, bytes).
 pub const SUBSCRIBERS: usize = 0;
 pub const SUBSCRIPTIONS: [(&str, usize); 0] = [];
-/// The most bytes any subscription keeps: the size of every cell the node holds.
+/// The queriers the node runs: (key, the period and the timeout in milliseconds, the bytes of a
+/// reply each keeps).
+pub const QUERIERS: usize = 0;
+pub const QUERIED: [(&str, u32, u32, usize); 0] = [];
+/// The cells that keep a latest value: the subscriptions' and then the queriers'.
+pub const CELLS: usize = 0;
+/// The most bytes any cell keeps: the size of every cell the node holds.
 pub const SAMPLE_MAX: usize = 1;
-/// The queryables that answer from a subscription: (key, index into `SUBSCRIPTIONS`).
+/// The queryables that answer from a cell: (key, index into the cells).
 pub const MIRRORS: usize = 0;
 pub const MIRRORED: [(&str, usize); 0] = [];
 /// The publishers: (key, the period in milliseconds, the bytes of the document it puts).

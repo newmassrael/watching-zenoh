@@ -1,0 +1,33 @@
+# A node declaration (docs/target-build-contract.md section 5b), checked by scripts/lib/wz_node.py.
+#
+# A fixed-memory node that asks, keeps the answer and answers from it: it dials one router and,
+# while the session is up, asks `lab/ask/val` every 500 ms (a query may stay pending for a second),
+# keeps the latest reply (up to 32 bytes of its payload) and answers a query under the same key
+# with it, on the per-session slot profile (no allocator). The first query goes out when the
+# session is established, and a query nothing answers keeps the cell as it was.
+#
+# The endpoint is this machine's loopback on a port of its own, because this is the node the
+# interop test builds and runs against the reference router
+# (crates/wz-integration-tests/tests/wz_declared_querier_zenohd_interop.rs): the locator is part of
+# what the node IS, so the router it is tested against listens there.
+
+[node]
+id = "slot-asker"
+help = "A fixed-memory client that dials a router over TCP, asks one key every period, keeps the latest reply and answers queries from it."
+target = "slot"
+
+[[endpoint]]
+role = "dial"
+locator = "tcp/127.0.0.1:17473"
+
+[[entity]]
+kind = "querier"
+key = "lab/ask/val"
+period_ms = 500
+timeout_ms = 1000
+reply_bytes = 32
+
+[[entity]]
+kind = "queryable"
+key = "lab/ask/val"
+from = "lab/ask/val"

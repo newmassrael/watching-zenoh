@@ -585,9 +585,30 @@ reference router's REST SSE stream: the declared document, eight bytes of `x`, a
 every 200 ms, and it arrives again from the next session after the router is stopped and
 started (`wz_declared_publisher_zenohd_interop.rs`).
 
+**Querier (landed).** `kind = "querier"`, `key` (a pattern is allowed: it asks for everything
+under it), `period_ms`, `timeout_ms` (how long a query may stay pending) and `reply_bytes`: while
+a session is established the node asks that key, the first query when the session is established
+and then every period, and keeps the latest reply in a cell, the subscriptions' cells' neighbour
+in the same storage, so a queryable that states `from = "<a subscriber's or a querier's key>"`
+answers from either. A reply that carries data replaces the cell (cut at `reply_bytes`, with how
+long it was and a count), a delete replaces it with a delete, an error reply is counted and keeps
+nothing, and a query nothing answers ends with its final and leaves the cell as it was. The
+layer is the same one the publisher is in (`wz_session_mcu::slot_active`, with the schedule of
+`slot_schedule` both are kept on), so a node publishes and asks from one application layer; a
+node with a querier is built with the `get` feature and a node without one is not, and the
+declaration decides which. The budgets the querier decides follow from it: the pending rows its
+queries can fill (the periods that fit in its timeout, and one more) when the image's table is
+smaller, and a declaration that states fewer is refused. The node says what it asked
+(`HOST-WZ-ASKED <key> asked= replies= errors= finals= timeouts= refused=`) and what it kept
+(`HOST-WZ-REPLY <key> put len= kept= seq= hex=`). A node holds at most four queriers. The
+witness is the stock `zenoh_z_queryable` as the responder and the reference router's REST plugin
+as the asker of the node's own queryable: the reply is kept, it is kept after the responder is
+stopped and answered from, another responder's value replaces it, and the node asks again with
+the next session after the router is stopped and started
+(`wz_declared_querier_zenohd_interop.rs`).
+
 Not written: the entities the slot profile does not build yet (a listening endpoint, multicast, a
-token, a querier), each of which is a change to the profile before it is a word the
-declaration accepts; a port of the declared node for QNX or Android; and the budgets that are
+token), each of which is a change to the profile before it is a word the declaration accepts; a port of the declared node for QNX or Android; and the budgets that are
 still tuning constants of the library (the task cells, the receive and send storage), which the
 declaration cannot state.
 
