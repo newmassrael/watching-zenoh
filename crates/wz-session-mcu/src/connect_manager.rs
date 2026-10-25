@@ -990,11 +990,19 @@ impl<D: Dialer> ConnectManager<D> {
     fn reconcile(&mut self, list: &ConnectEndpoints, now_ms: u64) {
         // An empty group names nothing to dial.
         let dialable = |e: &ConnectEntry| !e.endpoint.is_empty();
-        // A node is not the list's to name: it stays until it is closed.
+        // Whether the entry is one locator of a group of several, which this node cannot
+        // open as one transport.
+        let in_group = |e: &ConnectEntry| e.group.is_some_and(|g| group_len(list, g.index) > 1);
+        // A node is not the list's to name: it stays until it is closed. An endpoint is
+        // named as it was held: one the list now writes as a member of a group of several
+        // (or no longer does) is another entry, so its session is hung up and the row is
+        // made again, as the rows were compared whole before they were keyed by peer.
         let named = |row: &Row<D::Session>| match row.endpoint() {
-            Some(endpoint) => list
-                .iter()
-                .any(|entry| dialable(entry) && entry.endpoint.as_str() == endpoint),
+            Some(endpoint) => list.iter().any(|entry| {
+                dialable(entry)
+                    && entry.endpoint.as_str() == endpoint
+                    && in_group(entry) == row.multi_link
+            }),
             None => true,
         };
 
@@ -1032,16 +1040,14 @@ impl<D: Dialer> ConnectManager<D> {
         // runtime implements); an MCU session holds one link, so each is refused by name
         // rather than dialled as separate sessions to what is one peer.
         for entry in list.iter().filter(|e| dialable(e)) {
-            let multi_link = entry.group.is_some_and(|g| group_len(list, g.index) > 1);
+            let multi_link = in_group(entry);
             let held = self
                 .rows
                 .iter_mut()
                 .find(|row| row.endpoint() == Some(entry.endpoint.as_str()));
             let key = match held {
-                Some(row) => {
-                    row.multi_link = multi_link;
-                    row.key
-                }
+                // A row that stayed was named as it is (`named`), group or not.
+                Some(row) => row.key,
                 None => {
                     // The list holds as many entries as this table has rows for endpoints, so a
                     // slot is always free and a row always fits; one that did not could only
@@ -1356,6 +1362,45 @@ mod tests {
                 (String::from("udp/10.0.0.3:1"), SlotState::Live),
             ]
         );
+    }
+
+    /// An endpoint that is up when a rewrite makes it a member of a group of several is
+    /// hung up and refused with the others (the lane's step 6: a group of two is refused
+    /// whole, the live member included), and a group split again is dialled again.
+    #[test]
+    fn a_live_endpoint_made_a_group_member_is_hung_up_and_refused() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        write(&CONTROL, &["udp/10.0.0.1:1"]);
+        m.tick(0);
+        std::assert_eq!(dials(&mut m), ["udp/10.0.0.1:1"]);
+        std::assert_eq!(m.states().next().unwrap().1, SlotState::Live);
+
+        CONTROL.apply_for_test(
+            br#"[{ strategy: "allOf", locators: ["udp/10.0.0.1:1", "udp/10.0.0.2:9"] }]"#,
+        );
+        m.tick(1);
+        std::assert_eq!(m.dialer().hang_ups, vec![String::from("udp/10.0.0.1:1")]);
+        std::assert_eq!(m.sessions().count(), 0, "a refused member holds no session");
+        let states: Vec<SlotState> = m.states().map(|(_, s)| s).collect();
+        std::assert_eq!(
+            states,
+            [
+                SlotState::Refused(DialRefused::MultiLinkGroup),
+                SlotState::Refused(DialRefused::MultiLinkGroup),
+            ]
+        );
+        std::assert!(dials(&mut m).is_empty(), "a group is never dialled");
+
+        write(&CONTROL, &["udp/10.0.0.1:1"]);
+        m.tick(2);
+        std::assert_eq!(
+            dials(&mut m),
+            ["udp/10.0.0.1:1"],
+            "a group split is dialled again"
+        );
+        std::assert_eq!(m.states().next().unwrap().1, SlotState::Live);
     }
 
     #[test]
