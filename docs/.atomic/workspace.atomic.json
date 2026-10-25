@@ -288786,6 +288786,38 @@
         "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener."
       ]
     },
+    "Round 3670": {
+      "decision_summary": "Repair of the hosted reds nobody had claimed, read per job in the finished runs holding the dissect round and attributed one by one. C1bnl: the fragmented multicast push makes four allocations, not five, since 77df225a7 sized a Push's frame buffer from the message (green at its parent, red at it, measured on pc2); the pin moves with the commit named, and its owner agreed. C1u, C1v, C1q: the counts the legs guard are what they print (9, 9, 12). E7g: the capacity limit is the recorded model's, tightened by the emission cost the router measures on its own host, so 1100 is one host's number (902 on a hosted runner); the test holds the report to its own floor. C1cs: pico-client-coop and its two query builds grew past their budgets (897,831; 1,161,344; 1,175,052), crossing at 77df225a7; budgets move with the measurement stated. Qzb: the client chain reads 7,280, in the stack row and the budget row together.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: C1u 7 to 9, C1v 7 to 9 and C1q 14 to 12, each with the commit that moved it. wz-runtime-tokio tests/datagram_tx_pool_allocations.rs: FRAGMENTED_ALLOCATIONS 5 to 4, with 77df225a7 named. wz-integration-tests wz_router_hat_serves_its_capacity_report: the limit is held between liveness_bound at the report's own floor (calibrated) and the recorded model's, in place of the literal 1100.",
+        "scripts/lib/capability_cost_gate.py: pico-client-coop 895,000 to 905,000, pico-client-coop-query 1,160,000 to 1,171,000 and pico-client-coop-local-queryable 1,174,000 to 1,184,000, with the measurements and the commits they were read at. scripts/lib/stack_frame_gate.py and deploy/resource_budget.json: the zephyr-client-fixed chain 7,540 to 7,280."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): the allocation suite (the C1bq command with the datagram features) passes with the pin at four, and fails with five at 77df225a7 and passes at its parent; the three counts are the numbers the commands printed (9, 9, 12); the E7g capacity tests pass (2 passed, the router demo and the probe built as the lane builds them); the capability-cost gate measured pico-client-coop at 893,251 (d6d659a10), 894,515 (944fad43c), 895,491 (77df225a7) and, with the query builds, 897,831, 1,161,344 and 1,175,052 at bd4b76341; the gate's selftest, the stack gate's selftest and population, and the resource budget gate pass; clippy of the integration tests, rustfmt and shellcheck are clean; the hook's whole round-fed gate array passes.",
+        "Not run here: the hosted Zephyr image (the chain is read from run 40197999107), and Layer C1cs and Layer E7g as the lane runs them end to end."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the first finished hosted run holding this round and the ones before it (rounds 3649 to 3662: the opener on the images, the C1an repair): C1an, C1bnl, C1u, C1v, C1q, E7g, C1cs and Qzb are meant to be green. Not done: the C1cn shard 1 job runs at 91 to 97 percent of its 1800 s budget, which is one slow census from a red of its own; the 2,340 bytes pico-client-coop grew between 77df225a7 and the head are not attributed; the chain of the Zephyr client moves by a few hundred bytes between trees and its tolerance is 128."
+      ],
+      "publishable_decision_summary": "Repair of the hosted reds nobody had claimed, read per job in the finished runs holding the dissect round and attributed one by one. C1bnl: the fragmented multicast push makes four allocations, not five, since 77df225a7 sized a Push's frame buffer from the message (green at its parent, red at it, measured on pc2); the pin moves with the commit named, and its owner agreed. C1u, C1v, C1q: the counts the legs guard are what they print (9, 9, 12). E7g: the capacity limit is the recorded model's, tightened by the emission cost the router measures on its own host, so 1100 is one host's number (902 on a hosted runner); the test holds the report to its own floor. C1cs: pico-client-coop and its two query builds grew past their budgets (897,831; 1,161,344; 1,175,052), crossing at 77df225a7; budgets move with the measurement stated. Qzb: the client chain reads 7,280, in the stack row and the budget row together.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: C1u 7 to 9, C1v 7 to 9 and C1q 14 to 12, each with the commit that moved it. wz-runtime-tokio tests/datagram_tx_pool_allocations.rs: FRAGMENTED_ALLOCATIONS 5 to 4, with 77df225a7 named. wz-integration-tests wz_router_hat_serves_its_capacity_report: the limit is held between liveness_bound at the report's own floor (calibrated) and the recorded model's, in place of the literal 1100.",
+        "scripts/lib/capability_cost_gate.py: pico-client-coop 895,000 to 905,000, pico-client-coop-query 1,160,000 to 1,171,000 and pico-client-coop-local-queryable 1,174,000 to 1,184,000, with the measurements and the commits they were read at. scripts/lib/stack_frame_gate.py and deploy/resource_budget.json: the zephyr-client-fixed chain 7,540 to 7,280."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): the allocation suite (the C1bq command with the datagram features) passes with the pin at four, and fails with five at 77df225a7 and passes at its parent; the three counts are the numbers the commands printed (9, 9, 12); the E7g capacity tests pass (2 passed, the router demo and the probe built as the lane builds them); the capability-cost gate measured pico-client-coop at 893,251 (d6d659a10), 894,515 (944fad43c), 895,491 (77df225a7) and, with the query builds, 897,831, 1,161,344 and 1,175,052 at bd4b76341; the gate's selftest, the stack gate's selftest and population, and the resource budget gate pass; clippy of the integration tests, rustfmt and shellcheck are clean; the hook's whole round-fed gate array passes.",
+        "Not run here: the hosted Zephyr image (the chain is read from run 40197999107), and Layer C1cs and Layer E7g as the lane runs them end to end."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first finished hosted run holding this round and the ones before it (rounds 3649 to 3662: the opener on the images, the C1an repair): C1an, C1bnl, C1u, C1v, C1q, E7g, C1cs and Qzb are meant to be green. Not done: the C1cn shard 1 job runs at 91 to 97 percent of its 1800 s budget, which is one slow census from a red of its own; the 2,340 bytes pico-client-coop grew between 77df225a7 and the head are not attributed; the chain of the Zephyr client moves by a few hundred bytes between trees and its tolerance is 128."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
