@@ -289358,6 +289358,42 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3683": {
+      "decision_summary": "The hosted run of the last push was read per job: twelve jobs red, the same twelve on the run before it, so the cancellation round moved none of them. Two are this family's own and are paid here. Layer E18 failed in two tests of zenoh_codec_shm_core with OS error 12 in both upstream's crate and wz's: the segment's map locks every mapping, a reader opens the process's metadata segment a second time, and a hosted runner grants 8 MiB of lockable memory where every dev box grants GiB. Layer C1bf stopped at its audit because wz-zenoh-config, which carries a gated field, was not in its list. The other ten are not of this family and are named in the carry.",
+      "changes_bullets": [
+        "scripts/run-ci.sh: Layer E18 raises RLIMIT_MEMLOCK at its start with the function the io_uring lanes already use on the hosted runner, so every lane of the layer runs under it, and prints the limit it ends with; the reason is written beside the call. The covered list of Layer C1bf gains wz-zenoh-config, with its reason beside the entry; the all-features clippy of that crate passes.",
+        "Measured, not assumed: with the limit set to 8 MiB on a build host, the same test file failed three tests with OS error 12, in wz's crate and in upstream's, the failure the hosted log shows; the file passes with the limit as the host grants it."
+      ],
+      "verification_bullets": [
+        "Layer E18 through run-ci on a build host passes (106 s) and prints the limit it ran under; bash -n and shellcheck of run-ci.sh are clean; clippy with warnings denied passes for zenoh-config over all targets with all features. The static gate bundle of the push hook that the change can move runs on the tree before the append.",
+        "Not shown here: the raise itself on a runner of 8 MiB, because it needs the passwordless sudo that only a hosted runner has; the next hosted run of Layer E18 shows it, and the step prints the limit it got.",
+        "Not run: the ten red jobs that are not of this family."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Ten red jobs of the hosted run of the last push are not of this family and are not repaired here; their owners are to be told first: wz-runtime-tokio does not compile with transport multicast alone, a match on MulticastTxItem lacks Push and Interest (C4e, both shards of C1cn, C1bnl), after the commit that sized a Push's frame buffer; two tests of wz-runtime-tokio fail with the codec push off and with the timestamp off (C1j, C1bj); the repository-captures test of wz-capture counts 5 units and 289 bytes against 4 and 26 (C1, C1bnl); the lane-reach and test-discipline gates of Layer C0 fail; Layer C1cs is over the budget of pico-client-small; and wz-ext-pubsub joined the hazard class of C1bf without being listed, which keeps C1bf red until it is added.",
+        "Next, in order: Z0c onward of docs/zenoh-api-on-the-engine.md, each part landing when its closure exists: config, handlers with the channels, then key_expr and selector, then sample and the quality-of-service types; then Z1. The top crate has not been run on the Windows host."
+      ],
+      "publishable_decision_summary": "The hosted run of the last push was read per job: twelve jobs red, the same twelve on the run before it, so the cancellation round moved none of them. Two are this family's own and are paid here. Layer E18 failed in two tests of zenoh_codec_shm_core with OS error 12 in both upstream's crate and wz's: the segment's map locks every mapping, a reader opens the process's metadata segment a second time, and a hosted runner grants 8 MiB of lockable memory where every dev box grants GiB. Layer C1bf stopped at its audit because wz-zenoh-config, which carries a gated field, was not in its list. The other ten are not of this family and are named in the carry.",
+      "publishable_changes_bullets": [
+        "scripts/run-ci.sh: Layer E18 raises RLIMIT_MEMLOCK at its start with the function the io_uring lanes already use on the hosted runner, so every lane of the layer runs under it, and prints the limit it ends with; the reason is written beside the call. The covered list of Layer C1bf gains wz-zenoh-config, with its reason beside the entry; the all-features clippy of that crate passes.",
+        "Measured, not assumed: with the limit set to 8 MiB on a build host, the same test file failed three tests with OS error 12, in wz's crate and in upstream's, the failure the hosted log shows; the file passes with the limit as the host grants it."
+      ],
+      "publishable_verification_bullets": [
+        "Layer E18 through run-ci on a build host passes (106 s) and prints the limit it ran under; bash -n and shellcheck of run-ci.sh are clean; clippy with warnings denied passes for zenoh-config over all targets with all features. The static gate bundle of the push hook that the change can move runs on the tree before the append.",
+        "Not shown here: the raise itself on a runner of 8 MiB, because it needs the passwordless sudo that only a hosted runner has; the next hosted run of Layer E18 shows it, and the step prints the limit it got.",
+        "Not run: the ten red jobs that are not of this family."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Ten red jobs of the hosted run of the last push are not of this family and are not repaired here; their owners are to be told first: wz-runtime-tokio does not compile with transport multicast alone, a match on MulticastTxItem lacks Push and Interest (C4e, both shards of C1cn, C1bnl), after the commit that sized a Push's frame buffer; two tests of wz-runtime-tokio fail with the codec push off and with the timestamp off (C1j, C1bj); the repository-captures test of wz-capture counts 5 units and 289 bytes against 4 and 26 (C1, C1bnl); the lane-reach and test-discipline gates of Layer C0 fail; Layer C1cs is over the budget of pico-client-small; and wz-ext-pubsub joined the hazard class of C1bf without being listed, which keeps C1bf red until it is added.",
+        "Next, in order: Z0c onward of docs/zenoh-api-on-the-engine.md, each part landing when its closure exists: config, handlers with the channels, then key_expr and selector, then sample and the quality-of-service types; then Z1. The top crate has not been run on the Windows host."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
