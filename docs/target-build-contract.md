@@ -565,8 +565,8 @@ stock `zenohd` and stock examples cross-built for it from the pinned zenoh sourc
 tokens, subscriber, publisher, querier, group); on a Raspberry Pi 4 on QNX 7.1 (io-sock), an NVIDIA
 Orin board on QNX 7.1 (io-pkt) and an Android 16 tablet against wz's own peer (`ap-demo`), because
 the stock `zenohd` and examples do not build for QNX and this repository has no stock build for
-Android. The Orin board ran the loopback legs only, so nothing was sent on its network and its group
-join is not run. What a board run found: the Linux board has one subnet route and no default route,
+Android. The Orin board ran the loopback legs first, and its group join in a second, separate run,
+when the owner said it is a test board. What a board run found: the Linux board has one subnet route and no default route,
 so joining the group on the interface routing picks failed, and the join now falls back to the first
 interface that is up and can multicast. What is still not run: a stock peer on QNX or Android, the
 group against a stock multicast peer, and the paced replay's timing on a board.
