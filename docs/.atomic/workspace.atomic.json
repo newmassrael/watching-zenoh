@@ -288580,6 +288580,54 @@
         "The hosted runs of this family's pushes are still to be read per job, and the tests of ffi/win.rs are run by hand on the Windows host."
       ]
     },
+    "Round 3665": {
+      "decision_summary": "Step 1c of the advanced plane: the node's time leaves wz-runtime-tokio, and not into wz-ext-pubsub, because time is not the advanced plane's: the router's forwarders, the storage services and the session stamp through it too. It is a crate of its own, wz-node-time (std; session-core with alloc, wz-codecs for the role, uhlc optional), which every engine that stamps shares. It holds the wall clock as an NTP64 word and in milliseconds, the process's epoch source, the per-role switch (TimestampingEnabled), the node-scoped HLC (NodeHlc, the forward-path stamp, the drop-future-timestamp knob) and FallbackStamp, now public. The tokio runtime re-exports both modules at the old paths, drops its own uhlc dependency and forwards time-hlc, codec-push and pubsub-timestamp. Behaviour is unchanged: the 20 tests of the two modules moved with them. wz-ext-pubsub does not depend on the crate yet; the publisher's host trait will, in step 3. The C1bz budget of wz-runtime-tokio is 449.",
+      "changes_bullets": [
+        "wz-node-time (new): Cargo.toml (features time-hlc, codec-push, pubsub-timestamp), src/lib.rs, src/node_clock.rs and src/node_clock/tests.rs (moved whole), src/timestamp_source.rs and src/timestamp_source/tests.rs (moved whole; FallbackStamp is public and no longer gated on the storage and publisher features).",
+        "wz-runtime-tokio: node_clock.rs and timestamp_source.rs removed; lib.rs re-exports both from wz-node-time under the old cfg; Cargo.toml depends on the crate, loses its own uhlc dependency, and forwards time-hlc, codec-push and pubsub-timestamp; the stray storage-service doc that had been attached to the time module moved onto storage_service.",
+        "crates/Cargo.toml and Cargo.lock; the seven deploy lockfiles that resolve the tokio runtime by path; .github/workflows/platform.yml (crates/wz-node-time/**).",
+        "scripts/lib/feature_public_surface_census.py (a wz-node-time row naming codec-push, PROSE_ONLY), scripts/lib/nondefault-tests-gate.sh (a leg for codec-push, pubsub-timestamp and time-hlc), scripts/run-ci.sh (C1bz wz-runtime-tokio 459 -> 449, with its reason); docs/advanced-pubsub-on-a-neutral-core.md."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings: wz-node-time with all targets, with default features and with time-hlc, codec-push and pubsub-timestamp; wz-runtime-tokio with all targets and with --all-features; wz-capi-c, wz-ap-demo and wz-capi-pico with all targets.",
+        "Tests: wz-node-time 6 passed with default features and 20 with the three features; wz-runtime-tokio with time-hlc, the advanced publisher, codec-push and pubsub-timestamp, filter stamp: 22 passed.",
+        "Layer C1bz, subset of wz-node-time and wz-runtime-tokio, on the build host: wz-node-time 0, wz-runtime-tokio 449 (the budget lowered to it); a finding of wz-tls-mbedtls that is not mine was also reported.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed (after the census row was narrowed to the one feature that gates a public item, and a Cargo.toml comment was reworded for the build-closure gate). The reason-citation and the two citation gates pass; the lock resolves with --locked after the rebase.",
+        "Not run: the full tests of the router and storage services with every feature, and the advanced-plane interop legs; hosted CI runs them."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Step 2 of the advanced plane: the vocabulary of events and commands of the publisher's beacon and of the subscriber, surveyed against both, with the tests that state each rule. Step 3 then moves AdvancedPublisherOn and its plane trait (node_hlc now names wz-node-time's NodeHlc), and gives the cooperative engine a plane.",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings, as its session welcomed; or a table of strings its side can run.",
+        "Hosted: read the interop legs of the advanced plane after the pushes of 3661 and this one. C1bz of wz-tls-mbedtls (1 finding against 0) is not mine.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ],
+      "publishable_decision_summary": "Step 1c of the advanced plane: the node's time leaves wz-runtime-tokio, and not into wz-ext-pubsub, because time is not the advanced plane's: the router's forwarders, the storage services and the session stamp through it too. It is a crate of its own, wz-node-time (std; session-core with alloc, wz-codecs for the role, uhlc optional), which every engine that stamps shares. It holds the wall clock as an NTP64 word and in milliseconds, the process's epoch source, the per-role switch (TimestampingEnabled), the node-scoped HLC (NodeHlc, the forward-path stamp, the drop-future-timestamp knob) and FallbackStamp, now public. The tokio runtime re-exports both modules at the old paths, drops its own uhlc dependency and forwards time-hlc, codec-push and pubsub-timestamp. Behaviour is unchanged: the 20 tests of the two modules moved with them. wz-ext-pubsub does not depend on the crate yet; the publisher's host trait will, in step 3. The C1bz budget of wz-runtime-tokio is 449.",
+      "publishable_changes_bullets": [
+        "wz-node-time (new): Cargo.toml (features time-hlc, codec-push, pubsub-timestamp), src/lib.rs, src/node_clock.rs and src/node_clock/tests.rs (moved whole), src/timestamp_source.rs and src/timestamp_source/tests.rs (moved whole; FallbackStamp is public and no longer gated on the storage and publisher features).",
+        "wz-runtime-tokio: node_clock.rs and timestamp_source.rs removed; lib.rs re-exports both from wz-node-time under the old cfg; Cargo.toml depends on the crate, loses its own uhlc dependency, and forwards time-hlc, codec-push and pubsub-timestamp; the stray storage-service doc that had been attached to the time module moved onto storage_service.",
+        "crates/Cargo.toml and Cargo.lock; the seven deploy lockfiles that resolve the tokio runtime by path; .github/workflows/platform.yml (crates/wz-node-time/**).",
+        "scripts/lib/feature_public_surface_census.py (a wz-node-time row naming codec-push, PROSE_ONLY), scripts/lib/nondefault-tests-gate.sh (a leg for codec-push, pubsub-timestamp and time-hlc), scripts/run-ci.sh (C1bz wz-runtime-tokio 459 -> 449, with its reason); docs/advanced-pubsub-on-a-neutral-core.md."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings: wz-node-time with all targets, with default features and with time-hlc, codec-push and pubsub-timestamp; wz-runtime-tokio with all targets and with --all-features; wz-capi-c, wz-ap-demo and wz-capi-pico with all targets.",
+        "Tests: wz-node-time 6 passed with default features and 20 with the three features; wz-runtime-tokio with time-hlc, the advanced publisher, codec-push and pubsub-timestamp, filter stamp: 22 passed.",
+        "Layer C1bz, subset of wz-node-time and wz-runtime-tokio, on the build host: wz-node-time 0, wz-runtime-tokio 449 (the budget lowered to it); a finding of wz-tls-mbedtls that is not mine was also reported.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed (after the census row was narrowed to the one feature that gates a public item, and a Cargo.toml comment was reworded for the build-closure gate). The reason-citation and the two citation gates pass; the lock resolves with --locked after the rebase.",
+        "Not run: the full tests of the router and storage services with every feature, and the advanced-plane interop legs; hosted CI runs them."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 2 of the advanced plane: the vocabulary of events and commands of the publisher's beacon and of the subscriber, surveyed against both, with the tests that state each rule. Step 3 then moves AdvancedPublisherOn and its plane trait (node_hlc now names wz-node-time's NodeHlc), and gives the cooperative engine a plane.",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings, as its session welcomed; or a table of strings its side can run.",
+        "Hosted: read the interop legs of the advanced plane after the pushes of 3661 and this one. C1bz of wz-tls-mbedtls (1 finding against 0) is not mine.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
