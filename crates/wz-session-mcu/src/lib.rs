@@ -88,6 +88,10 @@ pub mod slot_client;
 // subscribes keeps, and what a queryable that answers from it reads.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod latest;
+// The client node as a publisher: a fixed document put on a key every period, from the session's own
+// application layer.
+#[cfg(all(feature = "session-slot", feature = "client-core"))]
+pub mod slot_publisher;
 // The application of that client, written once for every platform: its storage, its factory and
 // the loop that drives it. A platform is a `NodePort` and nothing of the loop.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
