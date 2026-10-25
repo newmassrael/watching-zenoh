@@ -103,9 +103,13 @@ runtime.
 ## Not part of this
 
 The router's replay of its own declarations to a new face
-(`replay_declarations_to_new_face`) belongs to the router work and is bounded there by its credit
-stage. Pacing a router's replay is a different question (it replays other nodes' declarations,
-many per face) and is not decided here.
+(`replay_declarations_to_new_face`) belongs to the router work. Its bytes are bounded by the credit
+stage; its turns are not, and are decided with the router's task-per-face work
+(`docs/router-task-per-face.md`). A replayed Declare there is a held or probe-sent message like any
+other, so a router replaying thousands of declarations to a new face still runs them in one loop
+turn today. That is a router item that should take the cursor idea later, after the task-per-face
+phase, because then a replay is a task and a turn bound becomes an await point instead of a
+resumable cursor. Agreed with the router session on 2026-10-25.
 
 ## Open for the owners
 
