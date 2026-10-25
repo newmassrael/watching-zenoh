@@ -1,0 +1,39 @@
+# A node declaration (docs/target-build-contract.md section 5b), checked by scripts/lib/wz_node.py.
+#
+# A fixed-memory node that is a member of a multicast group: it joins udp/224.0.0.224:7490 through the
+# interface the kernel's routing picks, announces itself with a JOIN beacon, admits the members whose
+# beacons it hears, puts a document on one key every period for all of them, and keeps the latest
+# sample any member puts on another. It dials no router, accepts no connection and needs neither; on
+# the per-session slot profile, with no allocator.
+#
+# A group carries publishers and subscriptions here and no more: the literal Put is all its outbound
+# vocabulary has without an allocator (the validator refuses the other kinds, by name).
+#
+# The group and its port are this machine's own, because this is the node the interop test builds and
+# runs against zenoh-pico's multicast peers
+# (crates/wz-integration-tests/tests/wz_declared_group_pico_interop.rs): the locator is part of what
+# the node IS, so the peers are told to join there.
+
+[node]
+id = "slot-group"
+help = "A fixed-memory node that is a member of a multicast group, publishes on it and keeps what its members put."
+target = "slot"
+
+[[endpoint]]
+role = "multicast"
+locator = "udp/224.0.0.224:7490"
+members = 4
+
+[[entity]]
+kind = "publisher"
+key = "lab/group/beat"
+period_ms = 200
+document_bytes = 8
+
+[[entity]]
+kind = "subscriber"
+key = "lab/group/in"
+sample_bytes = 64
+
+[limits]
+MAX_SUBSCRIPTIONS = 1

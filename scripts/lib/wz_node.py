@@ -25,7 +25,11 @@ not build the node.
     [[endpoint]]               role = "dial", locator = "<scheme>/<a.b.c.d>:<port>" (a router it dials);
                                role = "listen", locator = "tcp/<a.b.c.d>:<port>" and accepts = N (the
                                port it takes connections on, and how many sessions of them it holds
-                               at once; a node that listens presents itself to them as a peer)
+                               at once; a node that listens presents itself to them as a peer);
+                               role = "multicast", locator = "udp/<group>:<port>", members = N and
+                               an optional ttl (a group the node is a member of, which carries
+                               publishers and subscriptions: the literal Put is all its outbound
+                               vocabulary has without an allocator)
     [[entity]]               kind = "queryable", key, and document_bytes (a fixed document) or
                                from = "<subscriber key>" (the latest sample of that subscription);
                                kind = "subscriber", key, sample_bytes (the payload bytes it keeps);
@@ -41,8 +45,8 @@ not build the node.
 ## What it refuses, and why that is an exit and not a skip
 
 The vocabulary is wider than any one target can build: a declaration may name a listening endpoint
-over a scheme a target has no listener for, a multicast group, a publisher, a subscriber, a
-liveliness token or a querier. A target states which
+over a scheme a target has no listener for, a group over a scheme that is not UDP, a publisher, a
+subscriber, a liveliness token or a querier on a node that has a group. A target states which
 of those it builds (`TARGETS`), and a word it does not build is REFUSED with the target's reason,
 never dropped: a node that silently lost its subscriber would run and be wrong. A word outside the
 vocabulary is refused as a typo. A budget the target cannot give, a key longer than the key limit,
@@ -81,7 +85,7 @@ NODES = ROOT / "deploy" / "nodes"
 ENDPOINT_ROLES = ("dial", "listen", "multicast")
 ENTITY_KINDS = ("publisher", "subscriber", "queryable", "querier", "liveliness-token")
 NODE_KEYS = {"id", "help", "target"}
-ENDPOINT_KEYS = {"role", "locator", "accepts"}
+ENDPOINT_KEYS = {"role", "locator", "accepts", "members", "ttl"}
 ENTITY_KEYS = {"kind", "key", "document_bytes", "sample_bytes", "from", "period_ms", "timeout_ms", "reply_bytes"}
 TOP_KEYS = {"node", "endpoint", "entity", "limits"}
 
@@ -94,8 +98,25 @@ TARGETS = {
         # The endpoints of each role a node holds: the one router it dials (the connect manager's
         # row, `MAX_STATIC_CONNECT`) and the one port it listens on. The sessions of the node are
         # the dialled one and `accepts` more, which is the size of its session table.
-        "endpoint_limits": {"dial": 1, "listen": 1},
+        "endpoint_limits": {"dial": 1, "listen": 1, "multicast": 1},
         "schemes": ("tcp", "udp", "tls"),
+        # A group is UDP: a member's datagrams are the group's, with no connection to hold.
+        "multicast_schemes": ("udp",),
+        # The members of the group the node tracks at once, each a row of its peer table.
+        "max_members": 8,
+        # What a group carries with no allocator: the literal Put is the whole of its outbound
+        # vocabulary, so a node that has a group publishes and subscribes. A kind the group cannot
+        # carry is refused for the node as a whole, since every entity is carried by every plane the
+        # node has, and one the group silently dropped would be a node that lost it.
+        "group_kinds": {"publisher", "subscriber"},
+        "group_refused": {
+            "queryable": "the reply a queryable writes (Response and ResponseFinal) has no form "
+            "without an allocator in the group's emit yet",
+            "querier": "the Request a querier asks with has no form without an allocator in the "
+            "group's emit yet",
+            "liveliness-token": "the answer a token gives to an interest (DeclareReply) has no form "
+            "without an allocator in the group's emit yet",
+        },
         # A listener is a stream's: a `tcp/` connection is a link the moment it is accepted, with no
         # handshake of the transport's own to read first.
         "listen_schemes": ("tcp",),
@@ -120,10 +141,7 @@ TARGETS = {
         # can carry: a node of four tokens and a document is what the witness runs, and every one of
         # the five is seen by the router (`wz_declared_token_zenohd_interop.rs`).
         "max_tokens": 4,
-        "refused": {
-            "multicast": "the multicast group session has a slot table but no node that joins "
-            "one yet",
-        },
+        "refused": {},
         # Why a listener over this scheme is not built, by scheme.
         "listen_refused": {
             "udp": "a datagram listener answers the sender of an InitSyn and the slot node's "
@@ -223,6 +241,17 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                 out.append(f"{who}: accepts is {accepts!r}, not an integer from 1 to {target['max_accepts']}")
         elif "accepts" in ep:
             out.append(f"{who}: only a `listen` endpoint has `accepts`")
+        members = ep.get("members")
+        if role == "multicast":
+            if isinstance(members, bool) or not isinstance(members, int) or not 1 <= members <= target["max_members"]:
+                out.append(f"{who}: members is {members!r}, not an integer from 1 to {target['max_members']}")
+            ttl = ep.get("ttl", 1)
+            if isinstance(ttl, bool) or not isinstance(ttl, int) or not 1 <= ttl <= 255:
+                out.append(f"{who}: ttl is {ttl!r}, not an integer from 1 to 255")
+        else:
+            for extra in ("members", "ttl"):
+                if extra in ep:
+                    out.append(f"{who}: only a `multicast` endpoint has `{extra}`")
         match = LOCATOR_RE.fullmatch(ep.get("locator", "")) if isinstance(ep.get("locator"), str) else None
         if match is None:
             out.append(f"{who}: locator {ep.get('locator')!r} is not <scheme>/<a.b.c.d>:<port>")
@@ -232,8 +261,14 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             elif role == "listen" and match["scheme"] not in target["listen_schemes"]:
                 out.append(f"{who}: a `{match['scheme']}` listener is not built on {node['target']}: "
                            f"{target['listen_refused'][match['scheme']]}")
+            elif role == "multicast" and match["scheme"] not in target["multicast_schemes"]:
+                out.append(f"{who}: a group is `{'`, `'.join(target['multicast_schemes'])}`, not `{match['scheme']}`")
             if any(int(match[o]) > 255 for o in "abcd") or not 1 <= int(match["port"]) <= 65535:
                 out.append(f"{who}: locator {ep['locator']!r} has an octet above 255 or a port outside 1..65535")
+            elif role == "multicast" and not 224 <= int(match["a"]) <= 239:
+                out.append(f"{who}: locator {ep['locator']!r} is not a group: a multicast address is "
+                           "224.0.0.0 to 239.255.255.255")
+    has_group = "multicast" in held
 
     seen: dict[str, set[str]] = {"queryable": set(), "subscriber": set(), "publisher": set(),
                                  "querier": set(), "liveliness-token": set()}
@@ -251,6 +286,10 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         if kind not in target["entity_kinds"]:
             why_not = target["refused"].get(kind, "the target has no behaviour for it yet")
             out.append(f"{who}: a `{kind}` is not built on {node['target']}: {why_not}")
+            continue
+        if has_group and kind not in target["group_kinds"]:
+            out.append(f"{who}: a `{kind}` is not carried by the group this node is a member of: "
+                       f"{target['group_refused'][kind]}")
             continue
         tokens += kind == "liveliness-token"
         queryables += kind == "queryable"
@@ -413,6 +452,13 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
     at = LOCATOR_RE.fullmatch(listen_at) if listens else None
     listen_addr = ", ".join(at[o] for o in "abcd") if at else "0, 0, 0, 0"
     listen_port = int(at["port"]) if at else 0
+    groups = [ep for ep in data["endpoint"] if ep["role"] == "multicast"]
+    group_at = groups[0]["locator"] if groups else ""
+    members = groups[0]["members"] if groups else 0
+    group_ttl = groups[0].get("ttl", 1) if groups else 1
+    gat = LOCATOR_RE.fullmatch(group_at) if groups else None
+    group_addr = ", ".join(gat[o] for o in "abcd") if gat else "0, 0, 0, 0"
+    group_port = int(gat["port"]) if gat else 0
     every = data.get("entity", [])
     entities = [(e["key"], e["document_bytes"]) for e in every if e["kind"] == "queryable" and "from" not in e]
     docs = ", ".join(f"({rust_string(k)}, {b})" for k, b in entities)
@@ -454,6 +500,15 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             f"pub const ACCEPTS: usize = {accepts};",
             "/// The sessions the node holds at most: the ones it dials and the ones a peer opened.",
             "pub const SESSIONS: usize = DIALS + ACCEPTS;",
+            "/// Whether the node is a member of a multicast group, the locator of the group (empty when it",
+            "/// is not), the address and port that locator names, the hop limit of what it sends and how",
+            "/// many members of the group it tracks at once.",
+            f"pub const GROUPS: usize = {len(groups)};",
+            f"pub const GROUP: &str = {rust_string(group_at)};",
+            f"pub const GROUP_ADDR: [u8; 4] = [{group_addr}];",
+            f"pub const GROUP_PORT: u16 = {group_port};",
+            f"pub const GROUP_TTL: u8 = {group_ttl};",
+            f"pub const MEMBERS: usize = {members};",
             "/// The queryables the node declares, and the documents they answer with: (key, bytes).",
             f"pub const DOCS: usize = {len(entities)};",
             f"pub const DOCUMENTS: [(&str, usize); {len(entities)}] = [{docs}];",
@@ -508,8 +563,10 @@ def features_of(data: dict) -> list[str]:
     asks = any(e["kind"] == "querier" for e in data.get("entity", []))
     alive = any(e["kind"] == "liveliness-token" for e in data.get("entity", []))
     listens = any(ep["role"] == "listen" for ep in data["endpoint"])
+    grouped = any(ep["role"] == "multicast" for ep in data["endpoint"])
     return (["declared"] + (["tls"] if tls else []) + (["get"] if asks else [])
-            + (["token"] if alive else []) + (["listen"] if listens else []))
+            + (["token"] if alive else []) + (["listen"] if listens else [])
+            + (["multicast"] if grouped else []))
 
 
 def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
@@ -529,7 +586,11 @@ def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
     if not generated.is_file() or generated.read_text(encoding="utf-8") != emit(name, data, sha):
         raise ValueError(f"{name}: {generated.name} is missing or stale: regenerate it with --write")
     schemes = [LOCATOR_RE.fullmatch(ep["locator"])["scheme"] for ep in data["endpoint"]]
-    facilities = sorted({SCHEME_FACILITIES[s] for s in schemes})
+    facilities = {SCHEME_FACILITIES[s] for s in schemes}
+    if any(ep["role"] == "multicast" for ep in data["endpoint"]):
+        # A group is a UDP socket that has joined it: the socket option is a facility of its own.
+        facilities.add("multicast")
+    facilities = sorted(facilities)
     unknown = [f for f in facilities if f not in wz_config.OS_FACILITIES]
     if unknown:
         raise ValueError(f"{name}: the facilities {', '.join(unknown)} that its endpoints ask for are not "
@@ -715,7 +776,62 @@ def _selftest() -> int:
             listening.replace("tcp/0.0.0.0", "udp/0.0.0.0"), "a `udp` listener is not built on slot")
     refuses("a secure listener is refused with the target's reason",
             listening.replace("tcp/0.0.0.0", "tls/0.0.0.0"), "a `tls` listener is not built on slot")
-    refuses("a multicast endpoint", SAMPLE.replace('role = "dial"', 'role = "multicast"'), "not built on slot")
+    # A multicast group: a member of it publishes and subscribes, and the rest is refused by name.
+    group_node = """[node]
+id = "n"
+help = "A node."
+target = "slot"
+
+[[endpoint]]
+role = "multicast"
+locator = "udp/224.0.0.224:7447"
+members = 4
+
+[[entity]]
+kind = "subscriber"
+key = "lab/in"
+sample_bytes = 64
+
+[[entity]]
+kind = "publisher"
+key = "lab/out"
+period_ms = 200
+document_bytes = 8
+"""
+    expect("a node that is a member of a group, publishes and subscribes is valid", problems(group_node) == [])
+    grs = emit("n", wz_config.read_decl_toml(group_node), sha)
+    expect("the group is a set of constants of the generated file",
+           "pub const GROUPS: usize = 1;" in grs and 'pub const GROUP: &str = "udp/224.0.0.224:7447";' in grs
+           and "pub const GROUP_ADDR: [u8; 4] = [224, 0, 0, 224];" in grs and "pub const GROUP_PORT: u16 = 7447;" in grs
+           and "pub const GROUP_TTL: u8 = 1;" in grs and "pub const MEMBERS: usize = 4;" in grs
+           and "pub const DIALS: usize = 0;" in grs and "pub const SESSIONS: usize = DIALS + ACCEPTS;" in grs)
+    expect("a node with no group is a member of none",
+           "pub const GROUPS: usize = 0;" in rs and "pub const MEMBERS: usize = 0;" in rs
+           and "pub const GROUP_TTL: u8 = 1;" in rs)
+    expect("a group is a feature of the build",
+           features_of(wz_config.read_decl_toml(group_node)) == ["declared", "multicast"])
+    expect("a ttl the declaration states is the one generated",
+           "pub const GROUP_TTL: u8 = 8;" in emit(
+               "n", wz_config.read_decl_toml(group_node.replace("members = 4", "members = 4\nttl = 8")), sha))
+    both = group_node.replace("[[entity]]", '[[endpoint]]\nrole = "dial"\nlocator = "tcp/10.0.0.1:7447"\n\n[[entity]]', 1)
+    expect("a node may dial a router and be a member of a group", problems(both) == []
+           and features_of(wz_config.read_decl_toml(both)) == ["declared", "multicast"])
+    refuses("a group with no members", group_node.replace("members = 4\n", ""), "members is None")
+    refuses("a group of more members than the node tracks", group_node.replace("members = 4", "members = 9"), "from 1 to 8")
+    refuses("a hop limit of zero", group_node.replace("members = 4", "members = 4\nttl = 0"), "ttl is 0")
+    refuses("a hop limit past a byte", group_node.replace("members = 4", "members = 4\nttl = 256"), "ttl is 256")
+    refuses("a group that is not a multicast address", group_node.replace("224.0.0.224", "10.0.0.1"), "is not a group")
+    refuses("a group over TCP", group_node.replace("udp/", "tcp/"), "a group is `udp`, not `tcp`")
+    refuses("members on a dialled endpoint", SAMPLE.replace('role = "dial"', 'role = "dial"\nmembers = 2'),
+            "only a `multicast` endpoint has `members`")
+    refuses("a second group", group_node + '\n[[endpoint]]\nrole = "multicast"\nlocator = "udp/224.0.0.225:7447"\n'
+            "members = 2\n", "more than 1 `multicast`")
+    for kind, extra in (("queryable", 'document_bytes = 16'),
+                        ("querier", 'period_ms = 100\ntimeout_ms = 500\nreply_bytes = 16'),
+                        ("liveliness-token", "")):
+        refuses(f"a {kind} on a node that is a member of a group",
+                group_node + f'\n[[entity]]\nkind = "{kind}"\nkey = "lab/x"\n{extra}\n',
+                f"a `{kind}` is not carried by the group")
     refuses("a role outside the vocabulary", SAMPLE.replace('role = "dial"', 'role = "dail"'), "not one of dial")
     # A kind a target does not build is refused with the target's own words, or with a default when it
     # states none. The slot target builds every kind now, so the branch is driven on a target that

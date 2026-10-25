@@ -21,6 +21,15 @@ pub const LISTEN_PORT: u16 = 0;
 pub const ACCEPTS: usize = 0;
 /// The sessions the node holds at most: the ones it dials and the ones a peer opened.
 pub const SESSIONS: usize = DIALS + ACCEPTS;
+/// Whether the node is a member of a multicast group, the locator of the group (empty when it
+/// is not), the address and port that locator names, the hop limit of what it sends and how
+/// many members of the group it tracks at once.
+pub const GROUPS: usize = 0;
+pub const GROUP: &str = "";
+pub const GROUP_ADDR: [u8; 4] = [0, 0, 0, 0];
+pub const GROUP_PORT: u16 = 0;
+pub const GROUP_TTL: u8 = 1;
+pub const MEMBERS: usize = 0;
 /// The queryables the node declares, and the documents they answer with: (key, bytes).
 pub const DOCS: usize = 2;
 pub const DOCUMENTS: [(&str, usize); 2] = [("lab/doc/small", 256), ("lab/doc/large", 4096)];
