@@ -215,12 +215,35 @@ pub struct TxQueueConf {
     pub max_wait_before_drop_fragments_us: u64,
     /// `congestion_control/block/wait_before_close`, in microseconds.
     pub wait_before_close_us: u64,
+    /// The `tx-no-progress-deadline` policy: a second bound on a BLOCKING message, in
+    /// microseconds with no fragment of it going out ([`crate::tx_deadline::PushDeadline`]).
+    /// The total wait, `wait_before_close_us`, still ends the message, and a fragment out
+    /// starts this window again without making the total longer: the message is given up
+    /// on at whichever bound comes first. `None`, upstream's behaviour, is the total wait
+    /// alone. A window past the total wait is refused ([`Self::validate`]).
+    pub no_progress_us: Option<u64>,
+    /// The `tx-expiry-keeps-session` policy: what a blocking message that found no room in
+    /// its deadline costs. `false`, upstream's behaviour, closes the session as unresponsive
+    /// and tells the sender nothing. `true` drops the message, reports the transport as not
+    /// available, and keeps the session open.
+    pub expiry_keeps_session: bool,
 }
 
 /// R2926 — upstream's default
 /// `transport/link/tx/queue/congestion_control/drop/max_wait_before_drop_fragments`
 /// (`commons/zenoh-config/src/defaults.rs` @ `max_wait_before_drop_fragments: 50000,`).
 pub const MAX_WAIT_BEFORE_DROP_FRAGMENTS_US: u64 = 50_000;
+
+/// The `tx-no-progress-deadline` policy as this build states it, in the form
+/// [`TxQueueConf::no_progress_us`] carries it: the window of `TX_NO_PROGRESS_WINDOW_US` when the
+/// build turned the policy on, and none (upstream's behaviour) when it did not.
+const fn build_no_progress_us() -> Option<u64> {
+    if crate::policy::SessionPolicy::from_build().tx_no_progress_deadline {
+        Some(crate::caps::TX_NO_PROGRESS_WINDOW_US as u64)
+    } else {
+        None
+    }
+}
 
 impl Default for TxQueueConf {
     fn default() -> Self {
@@ -229,7 +252,31 @@ impl Default for TxQueueConf {
             wait_before_drop_us: WAIT_BEFORE_DROP_US,
             max_wait_before_drop_fragments_us: MAX_WAIT_BEFORE_DROP_FRAGMENTS_US,
             wait_before_close_us: WAIT_BEFORE_CLOSE_US,
+            no_progress_us: build_no_progress_us(),
+            expiry_keeps_session: crate::policy::SessionPolicy::from_build()
+                .tx_expiry_keeps_session,
         }
+    }
+}
+
+/// Why a [`TxQueueConf`] is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxQueueConfError {
+    /// A queue size outside upstream's accepted range.
+    SizeOutOfRange(TxQueueSizeOutOfRange),
+    /// A no-progress window that is zero, which can never be met, or longer than the total
+    /// wait, which could never be the bound that comes first.
+    NoProgressWindow {
+        /// The window asked for, in microseconds.
+        window_us: u64,
+        /// The total wait it is held against, `wait_before_close_us`.
+        total_us: u64,
+    },
+}
+
+impl From<TxQueueSizeOutOfRange> for TxQueueConfError {
+    fn from(size: TxQueueSizeOutOfRange) -> Self {
+        Self::SizeOutOfRange(size)
     }
 }
 
@@ -263,17 +310,30 @@ impl TxQueueConf {
             wait_before_drop_us: WAIT_BEFORE_CLOSE_US,
             max_wait_before_drop_fragments_us: 0,
             wait_before_close_us: WAIT_BEFORE_CLOSE_US,
+            no_progress_us: build_no_progress_us(),
+            expiry_keeps_session: crate::policy::SessionPolicy::from_build()
+                .tx_expiry_keeps_session,
         }
     }
 
-    /// Refuse a size outside `1..=16`, as upstream's config does.
-    pub fn validate(&self) -> Result<(), TxQueueSizeOutOfRange> {
+    /// Refuse a size outside `1..=16`, as upstream's config does, and a no-progress window
+    /// that is zero or longer than the total wait.
+    pub fn validate(&self) -> Result<(), TxQueueConfError> {
         use crate::link::TxQueueShape;
         for (byte, &size) in self.sizes.iter().enumerate() {
             if !(TxQueueShape::MIN_SIZE..=TxQueueShape::MAX_SIZE).contains(&size) {
                 return Err(TxQueueSizeOutOfRange {
                     priority_byte: byte as u8,
                     size,
+                }
+                .into());
+            }
+        }
+        if let Some(window_us) = self.no_progress_us {
+            if window_us == 0 || window_us > self.wait_before_close_us {
+                return Err(TxQueueConfError::NoProgressWindow {
+                    window_us,
+                    total_us: self.wait_before_close_us,
                 });
             }
         }
@@ -341,6 +401,80 @@ mod shape_tests {
         assert_eq!((udp.batch_bytes, udp.queue_unit_bytes), (1450, 65535));
         let small = conf.shape(true, 2048, 1024);
         assert_eq!((small.batch_bytes, small.queue_unit_bytes), (2048, 2048));
+    }
+}
+
+#[cfg(test)]
+mod no_progress_tests {
+    use super::{TxQueueConf, TxQueueConfError, WAIT_BEFORE_CLOSE_US};
+
+    fn conf(no_progress_us: Option<u64>) -> TxQueueConf {
+        TxQueueConf {
+            no_progress_us,
+            ..TxQueueConf::default()
+        }
+    }
+
+    /// The build with no policy states is upstream's: the total wait alone, and a blocking
+    /// message that finds no room closes the session.
+    #[test]
+    fn a_build_that_states_no_policy_is_upstreams_behaviour() {
+        assert_eq!(TxQueueConf::default().no_progress_us, None);
+        assert!(!TxQueueConf::default().expiry_keeps_session);
+        assert_eq!(TxQueueConf::pico().no_progress_us, None);
+        assert!(!TxQueueConf::pico().expiry_keeps_session);
+    }
+
+    /// The window is held against the total wait: none, zero and past-the-total are refused,
+    /// and one as long as the total, and one microsecond, are not.
+    #[test]
+    fn a_window_is_refused_when_it_is_zero_or_longer_than_the_total_wait() {
+        assert_eq!(conf(None).validate(), Ok(()));
+        assert_eq!(conf(Some(1)).validate(), Ok(()));
+        assert_eq!(conf(Some(WAIT_BEFORE_CLOSE_US)).validate(), Ok(()));
+        let refused = |window_us| {
+            Err(TxQueueConfError::NoProgressWindow {
+                window_us,
+                total_us: WAIT_BEFORE_CLOSE_US,
+            })
+        };
+        assert_eq!(conf(Some(0)).validate(), refused(0));
+        assert_eq!(
+            conf(Some(WAIT_BEFORE_CLOSE_US + 1)).validate(),
+            refused(WAIT_BEFORE_CLOSE_US + 1)
+        );
+    }
+
+    /// The total wait the window is held against is the configured one, not the default.
+    #[test]
+    fn the_window_is_held_against_the_configured_total_wait() {
+        let tight = TxQueueConf {
+            wait_before_close_us: 500,
+            no_progress_us: Some(501),
+            ..TxQueueConf::default()
+        };
+        assert_eq!(
+            tight.validate(),
+            Err(TxQueueConfError::NoProgressWindow {
+                window_us: 501,
+                total_us: 500
+            })
+        );
+    }
+
+    /// A queue size outside the range is still refused, now as a variant of the error.
+    #[test]
+    fn a_size_out_of_range_is_still_refused() {
+        let mut sizes = TxQueueConf::default().sizes;
+        sizes[0] = 0;
+        let bad = TxQueueConf {
+            sizes,
+            ..TxQueueConf::default()
+        };
+        assert!(matches!(
+            bad.validate(),
+            Err(TxQueueConfError::SizeOutOfRange(_))
+        ));
     }
 }
 

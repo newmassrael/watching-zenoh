@@ -7009,6 +7009,7 @@ mod stock_config_tests {
                 wait_before_drop_us: 2_500,
                 max_wait_before_drop_fragments_us: 40_000,
                 wait_before_close_us: 7_000_000,
+                ..wz::runtime_tokio::session_glue::TxQueueConf::default()
             },
             "the file's queue section reaches the session the node opens"
         );
@@ -7185,6 +7186,7 @@ mod stock_config_tests {
                 wait_before_drop_us: 2_500,
                 max_wait_before_drop_fragments_us: 40_000,
                 wait_before_close_us: 7_000_000,
+                ..wz::runtime_tokio::session_glue::TxQueueConf::default()
             }
         );
     }

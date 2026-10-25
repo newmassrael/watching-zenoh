@@ -196,4 +196,13 @@ config WZ_LIMIT_MAX_QUERIERS
 	  other limits this one sizes no table: it only refuses the one more. The
 	  Rust session API holds to it; the C ABIs do not apply it yet.
 
+config WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US
+	int "TX_NO_PROGRESS_WINDOW_US"
+	default 1000000
+	help
+	  How long, in microseconds, a blocking message may wait with no progress
+	  when the tx-no-progress-deadline policy is on: no fragment of it going out.
+	  It is read only when that policy is on, and must be at least 1 and no more
+	  than the total wait before the session is closed, which is set as before.
+
 endmenu

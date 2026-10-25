@@ -1660,6 +1660,17 @@ other limits this one sizes no table: it only refuses the one more. The
 Rust session API holds to it; the C ABIs do not apply it yet.
 '''
 
+[[limit]]
+id = "TX_NO_PROGRESS_WINDOW_US"
+kconfig = "WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US"
+default = 1000000
+help = '''
+How long, in microseconds, a blocking message may wait with no progress
+when the tx-no-progress-deadline policy is on: no fragment of it going out.
+It is read only when that policy is on, and must be at least 1 and no more
+than the total wait before the session is closed, which is set as before.
+'''
+
 # A policy is behaviour upstream does not have; it is declared with what upstream does and
 # defaults to that, so a build that states nothing is the original's (docs/build-configuration.md,
 # C2). `kind` is `bool` (default `off`) or `choice` (`choices`, one of them the default). Each is a
@@ -1680,6 +1691,36 @@ members of that group on the same host. `os-default` leaves the operating
 system's setting alone. `on` and `off` set it on every multicast socket the
 node opens: `on` is for nodes that share a host and must hear one another,
 `off` for a node that must not hear its own host's traffic.
+'''
+
+[[policy]]
+id = "tx-no-progress-deadline"
+kind = "bool"
+kconfig = "WZ_POLICY_TX_NO_PROGRESS_DEADLINE"
+default = "off"
+upstream = "Gives a blocking message one wait_before_close for the whole of it, however many fragments go out (io/zenoh-transport/src/common/pipeline.rs: Deadline::new with no max wait, so WaitTime::advance leaves the deadline where it is)."
+since = 2
+help = '''
+Whether a blocking message gets a second bound beside its total wait: the
+wait with no progress. Off, only the total wait bounds it. On, it is also
+given up when TX_NO_PROGRESS_WINDOW_US passes with no fragment out, and the
+total wait still ends it, whichever comes first. A fragment out is progress
+and starts the window again, and the total wait is never made longer.
+'''
+
+[[policy]]
+id = "tx-expiry-keeps-session"
+kind = "bool"
+kconfig = "WZ_POLICY_TX_EXPIRY_KEEPS_SESSION"
+default = "off"
+upstream = "Closes the session as unresponsive when a blocking message found no room in its deadline, and tells the sender nothing (io/zenoh-transport/src/unicast/universal/tx.rs, handle_push_result)."
+since = 2
+help = '''
+What happens when a blocking message finds no room within its deadline. Off,
+the session is closed as unresponsive and the send reports success. On, the
+message is dropped, the send reports that the transport was not available,
+and the session stays open: a slow link costs the message and not the
+session. A multicast group never closes either way.
 '''
 
 # The role of a node in a zenoh network: upstream's `mode`. A global axis (it names no image),

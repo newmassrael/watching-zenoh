@@ -31,4 +31,31 @@ config WZ_POLICY_MULTICAST_LOOPBACK_OFF
 
 endchoice
 
+config WZ_POLICY_TX_NO_PROGRESS_DEADLINE
+	bool "tx-no-progress-deadline"
+	default n
+	help
+	  Whether a blocking message gets a second bound beside its total wait: the
+	  wait with no progress. Off, only the total wait bounds it. On, it is also
+	  given up when TX_NO_PROGRESS_WINDOW_US passes with no fragment out, and the
+	  total wait still ends it, whichever comes first. A fragment out is progress
+	  and starts the window again, and the total wait is never made longer.
+	  Upstream: Gives a blocking message one wait_before_close for the whole of it,
+	  however many fragments go out (io/zenoh-transport/src/common/pipeline.rs:
+	  Deadline::new with no max wait, so WaitTime::advance leaves the deadline where
+	  it is).
+
+config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION
+	bool "tx-expiry-keeps-session"
+	default n
+	help
+	  What happens when a blocking message finds no room within its deadline. Off,
+	  the session is closed as unresponsive and the send reports success. On, the
+	  message is dropped, the send reports that the transport was not available,
+	  and the session stays open: a slow link costs the message and not the
+	  session. A multicast group never closes either way.
+	  Upstream: Closes the session as unresponsive when a blocking message found no
+	  room in its deadline, and tells the sender nothing (io/zenoh-
+	  transport/src/unicast/universal/tx.rs, handle_push_result).
+
 endmenu

@@ -2727,6 +2727,7 @@ struct FrameEmit {
     feature = "liveliness-token",
 ))]
 use crate::tx_deadline::PushDeadline;
+use crate::tx_deadline::TxExpiry;
 
 impl<R: SessionRuntime, T: TimeSource> Deref for SessionLinkActions<R, T> {
     type Target = SessionCore<R, T>;
@@ -8813,6 +8814,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.core.out_of_band.raise(|s| s.tx_congested = true);
     }
 
+    /// A blocking message found no room in its deadline: settle what that costs, by the
+    /// `tx-expiry-keeps-session` policy ([`TxExpiry`]). Upstream's answer closes the session
+    /// ([`Self::request_congestion_close`]); the policy's keeps it, and the caller reports the
+    /// drop to the sender. The one place both senders ask, so the two cannot disagree.
+    pub fn settle_blocking_expiry(&self) -> TxExpiry {
+        let outcome = TxExpiry::of(&self.params.tx_queue);
+        if outcome == TxExpiry::Closing {
+            self.request_congestion_close();
+        }
+        outcome
+    }
+
     /// Stop asking for keepalives for this session: the worker the machine starts on `Established`
     /// and stops when it leaves it, stopped from outside, at the cost of one lock. The first step
     /// of [`Self::close_for_capacity`], on its own so that a node closing many sessions can take
@@ -9752,8 +9765,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     message_priority,
                     &_stats_class,
                 );
-                if !droppable {
-                    self.request_congestion_close();
+                if !droppable && self.settle_blocking_expiry() == TxExpiry::Kept {
+                    return Err(SendWireError::TransportUnavailable);
                 }
                 Ok(Dispatched::Sent)
             }

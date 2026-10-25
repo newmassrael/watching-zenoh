@@ -359,3 +359,10 @@ pub const MAX_STATIC_CONNECT: usize = generated::MAX_STATIC_CONNECT;
 /// are `QuerierState` boxes on the face set, which neither a `Session` nor this count
 /// sees, so they are not bounded yet; the cooperative engine's are not either.
 pub const MAX_QUERIERS: usize = generated::MAX_QUERIERS;
+
+/// How long, in microseconds, a blocking message may wait with no fragment of it going out,
+/// when the `tx-no-progress-deadline` policy is on. It is read only then
+/// ([`crate::session_init_params::TxQueueConf`]), and must be at least `1` and at most the
+/// total wait, `wait_before_close`, which bounds the message as before. A time and not a
+/// table size: it sizes no memory.
+pub const TX_NO_PROGRESS_WINDOW_US: usize = generated::TX_NO_PROGRESS_WINDOW_US;

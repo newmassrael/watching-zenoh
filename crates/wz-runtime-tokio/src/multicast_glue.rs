@@ -2749,6 +2749,7 @@ mod tests {
             wait_before_drop_us: 7,
             max_wait_before_drop_fragments_us: 13,
             wait_before_close_us: 11,
+            ..TxQueueConf::default()
         };
         assert_ne!(operator, TxQueueConf::default());
         let group = router_group_params(RouterGroupProfile {

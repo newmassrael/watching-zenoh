@@ -548,7 +548,7 @@ impl RouterForwarder {
             self.credit.closed.set(self.credit.closed.get() + 1);
             self.credit.holding.borrow_mut().remove(&id);
             state.actions.watch_link_room(None);
-            state.actions.request_congestion_close();
+            let _ = state.actions.settle_blocking_expiry();
             closed_any = true;
         }
         drop(faces);

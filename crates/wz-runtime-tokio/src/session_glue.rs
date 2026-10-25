@@ -5275,6 +5275,83 @@ mod link_congestion_tests {
         assert!(!actions.take_congestion_close(), "and taken once");
     }
 
+    /// A blocking push, the unicast sender's other caller of the expiry decision.
+    fn blocking_push(
+        actions: &super::SessionLinkActions,
+    ) -> Result<wz_session_core::send_wire_error::SendWireError, ()> {
+        use wz_session_core::qos::CongestionControl;
+        use wz_session_core::sample::QosLevel;
+        let meta = super::PushMetadata {
+            qos: Some(QosLevel::DEFAULT.with_congestion(CongestionControl::Block)),
+            ..super::PushMetadata::default()
+        };
+        match actions.send_push_with_meta_literal("home/a", b"A", true, &meta) {
+            Ok(_) => Err(()),
+            Err(refused) => Ok(refused),
+        }
+    }
+
+    /// The `tx-expiry-keeps-session` policy: a blocking push that found no room is dropped, the
+    /// sender is told the transport is not available, and no close is staged. The control below
+    /// is the same push under upstream's behaviour.
+    #[test]
+    fn with_the_policy_on_an_expired_blocking_push_is_refused_and_the_session_stays() {
+        use wz_session_core::send_wire_error::SendWireError;
+        let link = CongestibleLink::new();
+        let actions = session_with_queue(
+            link.clone(),
+            super::TxQueueConf {
+                expiry_keeps_session: true,
+                ..super::TxQueueConf::default()
+            },
+        );
+        link.set_room(LinkRoom::Congested);
+        assert_eq!(
+            blocking_push(&actions),
+            Ok(SendWireError::TransportUnavailable),
+            "the sender is told, since the session is not going away to tell it"
+        );
+        assert!(link.frames().is_empty(), "nothing reached the link");
+        assert!(
+            !actions.take_congestion_close(),
+            "the session is kept: no close is staged"
+        );
+    }
+
+    /// The control: upstream's behaviour, the policy off. The put succeeds from the caller's
+    /// side and the close is staged for the loop.
+    #[test]
+    fn with_the_policy_off_an_expired_blocking_push_closes_the_session_and_the_sender_is_told_nothing(
+    ) {
+        let link = CongestibleLink::new();
+        let actions = session(link.clone());
+        link.set_room(LinkRoom::Congested);
+        assert_eq!(blocking_push(&actions), Err(()), "the put returned Ok");
+        assert!(
+            actions.take_congestion_close(),
+            "the congestion close is staged"
+        );
+    }
+
+    /// The policy touches only a message that may not be dropped: a droppable push that finds no
+    /// room is a congestion drop and the put succeeds, policy or none.
+    #[test]
+    fn the_policy_does_not_change_what_a_droppable_push_costs() {
+        let link = CongestibleLink::new();
+        let actions = session_with_queue(
+            link.clone(),
+            super::TxQueueConf {
+                expiry_keeps_session: true,
+                ..super::TxQueueConf::default()
+            },
+        );
+        link.set_room(LinkRoom::Congested);
+        actions
+            .send_push_literal_qos("home/a", b"A", true, Priority::DEFAULT)
+            .expect("a droppable message that found no room is a drop, not an error");
+        assert!(!actions.take_congestion_close());
+    }
+
     /// The counts are upstream's: a congestion drop is `n_dropped` and NOT
     /// `n_msgs`, which counts pushed messages only
     /// (`io/zenoh-transport/src/unicast/universal/tx.rs` @ `if pushed {`).

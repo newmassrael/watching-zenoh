@@ -8,7 +8,7 @@
 //! `Default` is the value the build's environment states as `WZ_POLICY_<NAME>`, or upstream's
 //! behaviour when it states none. A test names the other value by setting the field.
 
-use super::policy_choice;
+use super::{policy_bool, policy_choice};
 
 /// `multicast-loopback`: Whether a datagram a node sends to a multicast group is also
 /// delivered to members of that group on the same host. `os-default` leaves the operating
@@ -60,13 +60,28 @@ pub struct SessionPolicy {
     /// `multicast-loopback`. Upstream: Never sets IP_MULTICAST_LOOP on a multicast socket,
     /// so each sending socket keeps the operating system's setting.
     pub multicast_loopback: MulticastLoopback,
+    /// `tx-no-progress-deadline`. Upstream: Gives a blocking message one wait_before_close
+    /// for the whole of it, however many fragments go out (io/zenoh-
+    /// transport/src/common/pipeline.rs: Deadline::new with no max wait, so
+    /// WaitTime::advance leaves the deadline where it is).
+    pub tx_no_progress_deadline: bool,
+    /// `tx-expiry-keeps-session`. Upstream: Closes the session as unresponsive when a
+    /// blocking message found no room in its deadline, and tells the sender nothing
+    /// (io/zenoh-transport/src/unicast/universal/tx.rs, handle_push_result).
+    pub tx_expiry_keeps_session: bool,
 }
 
 impl SessionPolicy {
     /// The policy this build states: its environment's values, else upstream's.
     pub const fn from_build() -> Self {
         let multicast_loopback = MulticastLoopback::stated();
-        Self { multicast_loopback }
+        let tx_no_progress_deadline = policy_bool(option_env!("WZ_POLICY_TX_NO_PROGRESS_DEADLINE"));
+        let tx_expiry_keeps_session = policy_bool(option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION"));
+        Self {
+            multicast_loopback,
+            tx_no_progress_deadline,
+            tx_expiry_keeps_session,
+        }
     }
 }
 
