@@ -286388,6 +286388,54 @@
         "Read the hosted runs of 3599, 3602, 3605 and this round at the start of the next round; job pico-client-only has no margin gate yet."
       ]
     },
+    "Round 3611": {
+      "decision_summary": "CORRECTION to Round 3594: the bound it built counted declared queriers, and the bound the build is meant to state is the queries ONE querier has in flight. The limit MAX_QUERIERS and its refusal at declare time are withdrawn, and declare_querier and declare_querier_aliased return their handles directly again, as before that round. In their place QUERIER_MAX_PENDING_QUERIES, default 0 which is no bound and upstream's behaviour, gives each declared querier its own places for pending queries. A query past the bound is refused with QueryAliasError::QuotaExceeded, sends no frame and registers no pending entry; a place comes back when the query's final has run or, if none runs, when its pending entry is dropped (unregistered or swept). The places belong to the declaration, shared by its clones, so one busy querier cannot starve another. Quota keeps its rule and gains set_limit.",
+      "changes_bullets": [
+        "deploy/wz-config.toml declares QUERIER_MAX_PENDING_QUERIES (default 0) in place of MAX_QUERIERS, with a help that says it binds the Rust session API and that the C ABIs and the cooperative engine do not hold to it yet; caps.rs binds it, and caps_generated.rs and deploy/Kconfig.limits follow.",
+        "crates/wz-runtime-tokio session/querier.rs: QuerierSlots (the quota of one declaration, shared by its clones), QueryPlace and QuerySlot (one place per query in flight, returned once), and QueryAliasError::QuotaExceeded; the four get entry points of Querier and QuerierAliased take a place before anything is registered or sent. session/mod.rs: the two declare functions give each declaration its own slots. The declare-time refusal, DeclareQuerierError and the permit of Round 3594 are gone, with the Result handling its callers had grown (wz-ap-demo, wz-capi-core, advanced_cache, two test files).",
+        "crates/wz-session-core quota.rs: Quota gains set_limit; a bound lowered under the live count takes no place back.",
+        "crates/wz-runtime-tokio session/tests.rs: seven tests (refusal registers nothing and sends nothing, a final returns the place, an unregistered entry returns it, the bound is per querier and shared by a clone, the default never refuses, the aliased querier holds the same bound), beside the six that stood."
+      ],
+      "verification_bullets": [
+        "On the build host, all features: the seven new tests of wz-runtime-tokio pass with four neighbours that matched the filter, and the eight quota tests of wz-session-core pass, among them the new one for a lowered bound.",
+        "Red first, three times, each reverted with no trace left: a release that returns nothing fails exactly the two give-back tests; an acquire that ignores the bound, and one that sets it to 0 first, fail the refusal tests (four of six) while the unregister and default tests still pass.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-session-core, wz-runtime-tokio (also after the rebase), wz-ap-demo, wz-capi-core and wz-integration-tests; rustfmt clean; wz_config --check and --selftest pass; feature_gate_diagnostic --check passes.",
+        "The pre-push round-fed array, 113 gates, exits 0 on the rebased tree with 0 failed; the count-guard lint and the upstream citation form gate pass.",
+        "Not run: the hosted run, Layer C1bz and the other lanes as lanes, a build of the C ABIs and the cooperative engine as products: their queriers are not this type and are not bounded."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "The queriers of the C ABIs (a QuerierState on the capi-core face set) and of the cooperative engine do not hold places, so QUERIER_MAX_PENDING_QUERIES does not bound them; the session doing the cooperative engine owns that area, so it is asked first, and the same Quota is then taken where each engine makes a query.",
+        "The owner-less direct queries of the session API are not bounded by this limit; whether they get a session-wide bound of their own is not decided here.",
+        "The next policy in the plan's order is entity-timestamp, then the transactional multi-route send and the pool monitor, each in its own change with its pair of tests.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "CORRECTION to Round 3594: the bound it built counted declared queriers, and the bound the build is meant to state is the queries ONE querier has in flight. The limit MAX_QUERIERS and its refusal at declare time are withdrawn, and declare_querier and declare_querier_aliased return their handles directly again, as before that round. In their place QUERIER_MAX_PENDING_QUERIES, default 0 which is no bound and upstream's behaviour, gives each declared querier its own places for pending queries. A query past the bound is refused with QueryAliasError::QuotaExceeded, sends no frame and registers no pending entry; a place comes back when the query's final has run or, if none runs, when its pending entry is dropped (unregistered or swept). The places belong to the declaration, shared by its clones, so one busy querier cannot starve another. Quota keeps its rule and gains set_limit.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml declares QUERIER_MAX_PENDING_QUERIES (default 0) in place of MAX_QUERIERS, with a help that says it binds the Rust session API and that the C ABIs and the cooperative engine do not hold to it yet; caps.rs binds it, and caps_generated.rs and deploy/Kconfig.limits follow.",
+        "crates/wz-runtime-tokio session/querier.rs: QuerierSlots (the quota of one declaration, shared by its clones), QueryPlace and QuerySlot (one place per query in flight, returned once), and QueryAliasError::QuotaExceeded; the four get entry points of Querier and QuerierAliased take a place before anything is registered or sent. session/mod.rs: the two declare functions give each declaration its own slots. The declare-time refusal, DeclareQuerierError and the permit of Round 3594 are gone, with the Result handling its callers had grown (wz-ap-demo, wz-capi-core, advanced_cache, two test files).",
+        "crates/wz-session-core quota.rs: Quota gains set_limit; a bound lowered under the live count takes no place back.",
+        "crates/wz-runtime-tokio session/tests.rs: seven tests (refusal registers nothing and sends nothing, a final returns the place, an unregistered entry returns it, the bound is per querier and shared by a clone, the default never refuses, the aliased querier holds the same bound), beside the six that stood."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, all features: the seven new tests of wz-runtime-tokio pass with four neighbours that matched the filter, and the eight quota tests of wz-session-core pass, among them the new one for a lowered bound.",
+        "Red first, three times, each reverted with no trace left: a release that returns nothing fails exactly the two give-back tests; an acquire that ignores the bound, and one that sets it to 0 first, fail the refusal tests (four of six) while the unregister and default tests still pass.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-session-core, wz-runtime-tokio (also after the rebase), wz-ap-demo, wz-capi-core and wz-integration-tests; rustfmt clean; wz_config --check and --selftest pass; feature_gate_diagnostic --check passes.",
+        "The pre-push round-fed array, 113 gates, exits 0 on the rebased tree with 0 failed; the count-guard lint and the upstream citation form gate pass.",
+        "Not run: the hosted run, Layer C1bz and the other lanes as lanes, a build of the C ABIs and the cooperative engine as products: their queriers are not this type and are not bounded."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The queriers of the C ABIs (a QuerierState on the capi-core face set) and of the cooperative engine do not hold places, so QUERIER_MAX_PENDING_QUERIES does not bound them; the session doing the cooperative engine owns that area, so it is asked first, and the same Quota is then taken where each engine makes a query.",
+        "The owner-less direct queries of the session API are not bounded by this limit; whether they get a session-wide bound of their own is not decided here.",
+        "The next policy in the plan's order is entity-timestamp, then the transactional multi-route send and the pool monitor, each in its own change with its pair of tests.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
