@@ -78,9 +78,21 @@ per message; B is the answer only if those say the lock is what is being paid fo
 Each phase ends with the tree green and the numbers of Layer E7s (microseconds per message at 256, 1024 and
 2048 subscribers, with and without churn) no worse than before it.
 
-0. **Group.** Move the control-plane-owned fields (`hats`, `faces`, `partition`, `joined_links`, the local
-   subscribers and queryables, the future stores, `pending`, the interceptors) into a `Tables` struct inside
-   the forwarder. Mechanical, no behaviour change; the routing code reads `self.tables()`.
+0. **Group (done, round 3619).** `struct Tables` holds nine fields: `hats`, `partition`, `faces`,
+   `joined_links`, the local subscribers and queryables and the three future stores (`future_subs`,
+   `future_qabls`, `future_tokens`), each the type it was; the forwarder has one `tables: Tables` and the
+   routing code reads `self.tables.<field>`. No behaviour change, held by the router_forward tests (226 in the
+   default set, 228 and 273 in two others, the same counts as before) and by the hot path budget, which did not
+   move by a byte (a grouping that allocated would have). Left out on purpose, because the data path writes
+   them and so each needs a lock or an atomic of its own (phases 1 and 2), not a place under one: `pending`,
+   `group_subs`, the interceptor chains and their caches, the counters. What went wrong in doing it, so that
+   phase 3 does not repeat it: a textual `self.faces` to `self.tables.faces` also rewrote three other types in
+   the file that have a `faces` field of their own (`RouterSessionsView`, `RouterSessionDirectory`,
+   `RouterDeclarationsView`, which hold a shared handle to it, not the forwarder), and `cargo fmt` had wrapped
+   some accesses across lines (`self` and `.field` on separate lines), which a replace of the one-line text does
+   not reach; four of the feature sets (token tables, shared memory, the lifecycle, all together) each showed a
+   different leftover, because the code that uses a field exists only behind its feature. Check every feature
+   combination that gates a moved field, not the default set alone.
 1. **Counters and HLC.** The `Cell` counters (about thirty of the 84 `Cell`s) become atomics; `NodeHlc` takes its own lock (it already
    serialises a clock).
 2. **The memo.** `data_routes` and `client_routes` get their own `RwLock`, as upstream's `data_routes` does.

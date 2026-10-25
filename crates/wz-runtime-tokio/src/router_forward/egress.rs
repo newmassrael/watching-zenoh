@@ -430,7 +430,7 @@ impl RouterForwarder {
             return;
         }
         let holding: Vec<FaceId> = self.credit.holding.borrow().iter().copied().collect();
-        let faces = self.faces.borrow();
+        let faces = self.tables.faces.borrow();
         let mut took = false;
         for id in holding {
             let Some(state) = faces.get(&id) else {
@@ -524,7 +524,7 @@ impl RouterForwarder {
         }
         let now = (self.clock)();
         let holding: Vec<FaceId> = self.credit.holding.borrow().iter().copied().collect();
-        let faces = self.faces.borrow();
+        let faces = self.tables.faces.borrow();
         let mut closed_any = false;
         for id in holding {
             let Some(state) = faces.get(&id) else {
@@ -561,7 +561,7 @@ impl RouterForwarder {
     /// Release every gated face whose destinations are down to half their budget or gone, and,
     /// when the pool is down to half, the faces gated on it.
     fn release_gates(&self) {
-        let faces = self.faces.borrow();
+        let faces = self.tables.faces.borrow();
         let budget = self.credit.budget;
         let pool_full = self.credit.held_bytes.get() > budget.pool_bytes / 2;
         self.credit.gated.borrow_mut().retain(|_, on| {
