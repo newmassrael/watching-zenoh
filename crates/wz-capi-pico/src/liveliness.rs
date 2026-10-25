@@ -33,8 +33,8 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
-use wz_capi_core::runtime::declare::LivelinessSampleKind;
-use wz_capi_core::runtime::session::{LivelinessOptions, LivelinessSubscriberOptions};
+use wz_capi_port::{LivelinessSink, TokenId};
+use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
 
 use crate::abi::{handle_ref, z_loaned_keyexpr_t};
 use crate::ffi::{guard_val, guarded};
@@ -44,9 +44,10 @@ use crate::pubsub::{
     SubscriberState, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
-use crate::session::{session_state, z_loaned_session_t};
+#[cfg(feature = "liveliness-get")]
+use crate::session::session_state;
+use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
-use wz_capi_core::faces::{SharedSession, TokenId};
 
 /// pico `z_liveliness_token_options_t` — a single `uint8_t __dummy`
 /// (`api/liveliness.h:45-47`), 1 B measured. Carried for layout only; pico's
@@ -58,8 +59,8 @@ pub struct z_liveliness_token_options_t {
 
 /// pico `z_liveliness_subscriber_options_t` — `{ bool history }`
 /// (`api/liveliness.h:89-91`), 1 B measured. `history` requests the peer's
-/// CURRENT-state replay at declare time, which wz carries as
-/// [`LivelinessSubscriberOptions::history`].
+/// CURRENT-state replay at declare time, which wz carries as the `history` argument of the
+/// port's `declare_liveliness_subscriber_on_wire`.
 #[repr(C)]
 pub struct z_liveliness_subscriber_options_t {
     pub history: bool,
@@ -105,7 +106,7 @@ impl z_owned_liveliness_token_t {
 /// explicit `z_liveliness_undeclare_token` and the implicit `z_drop` take the
 /// identical path — the two must not be able to diverge.
 pub(crate) struct TokenState {
-    shared: Arc<SharedSession>,
+    shared: Arc<Engine>,
     id: TokenId,
     /// R2959 — the token's key with the whole-key declaration pico makes for
     /// it; dropped after the token, so its retraction follows the token's.
@@ -130,15 +131,15 @@ impl TokenState {
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
         let key = DeclaredKeyexpr::declare(&session.engine, keyexpr, existing)?;
-        let Some(id) = session.shared.declare_liveliness_token_on_wire(
+        let Some(id) = session.engine.declare_liveliness_token_on_wire(
             keyexpr.to_owned(),
             key.wire(&*session.engine),
-            LivelinessOptions::new().with_retraction_naming_the_key(true),
+            Some(key.retraction_key(&*session.engine)),
         ) else {
             return Err(Z_ERR_GENERIC);
         };
         Ok(Self {
-            shared: session.shared.clone(),
+            shared: session.engine.clone(),
             id,
             _key: key,
         })
@@ -196,7 +197,7 @@ pub unsafe extern "C" fn z_liveliness_declare_token(
         if token.is_null() {
             return Z_ERR_NULL;
         }
-        let handle = match crate::session::session_handle(zs) {
+        let handle = match session_handle(zs) {
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
@@ -329,53 +330,33 @@ pub unsafe extern "C" fn z_liveliness_declare_subscriber(
         let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
         *owned = z_owned_closure_sample_t::null_value();
 
-        let (handle, state) = match crate::session::tokio_session(zs) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
+        let Some(handle) = session_handle(zs) else {
+            return Z_ERR_NULL;
         };
         let ke = match keyexpr_str(keyexpr) {
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
         };
         // A NULL options pointer is pico's "defaults", not an error.
-        let history = if options.is_null() {
-            false
-        } else {
-            (*options).history
-        };
-        // `LivelinessSubscriberOptions` is `#[non_exhaustive]`, so it is built
-        // from its default and then narrowed — which is also the shape that
-        // survives upstream adding a field.
-        let mut opts = LivelinessSubscriberOptions::default();
-        opts.history = history;
+        let history = !options.is_null() && (*options).history;
+        let engine = engine_of(handle);
         // R2959 — pico declares the WHOLE key for a liveliness subscriber and
         // sends its interest on that declaration
         // (`vendor/zenoh-pico/src/net/liveliness.c` @
         // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &s._key, keyexpr), _z_subscription_clear(&s));`
         // and the `_z_make_interest(&wireexpr, ...)` on `sp_s->_key` below it).
-        let key = match DeclaredKeyexpr::declare(
-            &crate::session::engine_of(handle),
-            &ke,
-            declared_of(keyexpr),
-        ) {
+        let key = match DeclaredKeyexpr::declare(&engine, &ke, declared_of(keyexpr)) {
             Ok(key) => key,
             Err(rc) => return rc,
         };
-        let wire = key.wire(crate::session::engine_ref(handle));
-        let id = state
-            .shared
-            .declare_liveliness_subscriber_on_wire(ke, wire, opts, {
-                // R311y498 — the ABI shim mints the callback; the registry only
-                // calls the factory (once per face). The `Arc<CClosure>` lives
-                // in the factory, so the C `drop(context)` still fires when the
-                // last one is released.
-                let closure = Arc::new(cclosure);
-                Arc::new(move || {
-                    Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>
-                })
-            });
+        let wire = key.wire(&*engine);
+        let Some(id) =
+            engine.declare_liveliness_subscriber_on_wire(ke, wire, history, sample_sink(cclosure))
+        else {
+            return Z_ERR_GENERIC;
+        };
         let mut boxed = Box::new(SubscriberState {
-            shared: crate::session::engine_of(handle),
+            shared: engine,
             id,
             key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
@@ -637,6 +618,16 @@ pub unsafe extern "C" fn z_liveliness_get(
     })
 }
 
+/// The factory an engine mints a liveliness subscriber's callbacks with, over the C closure.
+///
+/// R311y498 — the ABI shim mints the callback; the engine only calls the factory (once per face).
+/// The `Arc<CClosure>` lives in the factory, so the C `drop(context)` still fires when the last
+/// one is released.
+fn sample_sink(cclosure: CClosure) -> LivelinessSink {
+    let closure = Arc::new(cclosure);
+    Arc::new(move || Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>)
+}
+
 /// The pico sample kind for a wz liveliness event.
 pub(crate) fn liveliness_kind_of(kind: LivelinessSampleKind) -> crate::pubsub::z_sample_kind_t {
     match kind {
@@ -665,15 +656,21 @@ pub(crate) unsafe fn token_state<'a>(
 /// "Lives for the session" is implemented as "no `SubscriberState` is ever
 /// built", not as a leaked one: the state's `Drop` is what retracts a
 /// subscription, so never constructing it is both simpler and exactly the
-/// intent. `z_close` still tears it down, because closing clears every face and
-/// the registry entry with them.
+/// intent. `z_close` still tears it down, because closing ends every entity the
+/// engine holds.
+///
+/// Its key is declared whole and its Interest names that declaration, as the
+/// handle form's does; the engine's entry is the only holder a background
+/// subscriber has, so the key it is announced on keeps the declaration alive.
 ///
 /// # Safety
-/// `keyexpr` must be a valid keyexpr string; `callback` must be a valid moved
+/// `keyexpr` must be a valid keyexpr string; `existing` must be the caller's own
+/// key when it is already a declaration; `callback` must be a valid moved
 /// closure; `options` must be null or valid.
 pub(crate) unsafe fn declare_background_liveliness_subscriber(
-    shared: &Arc<wz_capi_core::faces::SharedSession>,
+    engine: &Arc<Engine>,
     keyexpr: &str,
+    existing: Option<&DeclaredKeyexpr>,
     callback: *mut z_moved_closure_sample_t,
     options: *const z_liveliness_subscriber_options_t,
 ) -> ZResult {
@@ -686,15 +683,22 @@ pub(crate) unsafe fn declare_background_liveliness_subscriber(
         let cclosure = CClosure::new(owned.context, owned.call, owned.drop);
         *owned = z_owned_closure_sample_t::null_value();
 
-        let mut opts = LivelinessSubscriberOptions::default();
-        opts.history = !options.is_null() && (*options).history;
-        shared.declare_liveliness_subscriber(keyexpr.to_owned(), opts, {
-            let closure = Arc::new(cclosure);
-            Arc::new(move || {
-                Box::new(crate::pubsub::make_liveliness_callback(closure.clone())) as Box<_>
-            })
-        });
-        Z_OK
+        let history = !options.is_null() && (*options).history;
+        let key = match DeclaredKeyexpr::declare(engine, keyexpr, existing) {
+            Ok(key) => key,
+            Err(rc) => return rc,
+        };
+        let anchor: Arc<dyn Send + Sync> = Arc::new(key.share());
+        let wire = key.wire(&**engine).keeping(anchor);
+        match engine.declare_liveliness_subscriber_on_wire(
+            keyexpr.to_owned(),
+            wire,
+            history,
+            sample_sink(cclosure),
+        ) {
+            Some(_) => Z_OK,
+            None => Z_ERR_GENERIC,
+        }
     })
 }
 
@@ -719,12 +723,18 @@ pub unsafe extern "C" fn z_liveliness_declare_background_subscriber(
     options: *mut z_liveliness_subscriber_options_t,
 ) -> ZResult {
     guarded(|| {
-        let Some(state) = session_state(zs) else {
+        let Some(handle) = session_handle(zs) else {
             return Z_ERR_NULL;
         };
         let Some(ke) = keyexpr_str(keyexpr) else {
             return Z_ERR_INVALID;
         };
-        declare_background_liveliness_subscriber(&state.shared, ke, callback, options)
+        declare_background_liveliness_subscriber(
+            &engine_of(handle),
+            ke,
+            declared_of(keyexpr),
+            callback,
+            options,
+        )
     })
 }

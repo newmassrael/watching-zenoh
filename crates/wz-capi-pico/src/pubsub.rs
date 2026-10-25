@@ -30,7 +30,7 @@ use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
 #[cfg(feature = "liveliness")]
-use wz_capi_core::runtime::declare::LivelinessSample;
+use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::reliability::Reliability;

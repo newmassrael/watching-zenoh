@@ -126,15 +126,15 @@ link-udp = ["wz-capi-core?/link-udp"]
 # `scout` (`Z_FEATURE_SCOUTING`): `z_scout`, the one-shot survey of the group and the
 # `z_hello` family that reads its answers.
 scout = ["engine-tokio", "link-udp", "wz-capi-core/scout"]
-# `query`: `z_get` and the querier, the requesting end of a query. Both engines ask a get, so it
-# selects neither; the querier, which watches whether a queryable matches, is in a build with the
-# tokio engine only, until the cooperative engine has that plane.
+# `query`: `z_get` and the querier, the requesting end of a query. Both engines ask a get and
+# watch whether a queryable matches, so it selects neither.
 query = ["wz-capi-core?/query", "wz-capi-coop?/query"]
 # `queryable`: `z_declare_queryable` and the replies, the answering end of a query. Both engines
 # answer queries, so it selects neither: it turns the queryable on in the one the build has.
 queryable = ["wz-capi-core?/queryable", "wz-capi-coop?/queryable"]
-# `liveliness`: the token and the subscriber.
-liveliness = ["engine-tokio", "wz-capi-core/liveliness"]
+# `liveliness`: the token and the subscriber. Both engines hold tokens and hear them, so it
+# selects neither.
+liveliness = ["wz-capi-core?/liveliness", "wz-capi-coop?/liveliness"]
 # `liveliness-get`: the snapshot get of the liveliness plane. It is a query, so it needs the
 # requesting end of one; the get half is `wz-capi-core`'s `liveliness-get` (its drive loop
 # sweeps the get deadlines) and the runtime's feature behind it.
@@ -356,7 +356,7 @@ required-features = ["peer"]
 # the full build to talk to. It asks queries and answers them, so the build has both ends of one.
 [[example]]
 name = "hold_a_listener"
-required-features = ["peer", "query", "queryable"]
+required-features = ["peer", "query", "queryable", "liveliness"]
 
 [lints]
 workspace = true

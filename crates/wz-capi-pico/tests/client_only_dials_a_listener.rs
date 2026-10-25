@@ -2,7 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
 //! The build without the `peer` feature opens a client session to a node that listens, publishes
-//! to it and hears from it, answers its queries and asks it queries.
+//! to it and hears from it, answers its queries and asks it queries, and holds liveliness tokens
+//! and hears the node's.
 //!
 //! Such a build cannot listen, so the node it dials is the `hold_a_listener` example of the
 //! FULL build, run as a process. The two are built by two invocations (a feature set is one per
@@ -13,7 +14,8 @@
 //! cargo build --release -p wz-capi-pico --example hold_a_listener
 //! WZ_PICO_LISTENER_BIN=$PWD/target/release/examples/hold_a_listener \
 //!     cargo test --release -p wz-capi-pico --no-default-features \
-//!     --features engine-coop,link-udp,query,queryable --test client_only_dials_a_listener
+//!     --features engine-coop,link-udp,query,queryable,liveliness \
+//!     --test client_only_dials_a_listener
 //! ```
 //!
 //! and again with `engine-tokio` in place of `engine-coop`, and each without `queryable`. Layer
@@ -246,7 +248,7 @@ unsafe fn open_to(port: u16) -> z_owned_session_t {
 }
 
 /// Step the session for `span`, in the single-threaded arm; the read task steps it otherwise.
-#[cfg(any(feature = "query", feature = "queryable"))]
+#[cfg(any(feature = "query", feature = "queryable", feature = "liveliness"))]
 unsafe fn step_for(session: &z_owned_session_t, span: Duration) {
     #[cfg(feature = "multi-thread")]
     let _ = session;
@@ -631,6 +633,166 @@ mod asking {
                 ask(&session, c"demo/nobody/a"),
                 Vec::<String>::new(),
                 "CONTROL: a get nobody answers ends with the Final alone"
+            );
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+}
+
+/// The liveliness plane in the build that cannot listen: the client's token is seen by the
+/// listener and its drop too, and the client's liveliness subscribers hear the listener's tokens
+/// come and go; the one that asked for history is also told the token alive when it asked.
+#[cfg(feature = "liveliness")]
+mod living {
+    use super::*;
+    use wz_capi_pico::liveliness::{
+        z_liveliness_declare_subscriber, z_liveliness_declare_token,
+        z_liveliness_subscriber_options_t, z_liveliness_token_drop, z_liveliness_token_move,
+        z_owned_liveliness_token_t,
+    };
+    use wz_capi_pico::{z_sample_kind, Z_SAMPLE_KIND_PUT};
+
+    impl Listener {
+        /// Give the listener a line of input (`token <key>`, `untoken <key>`).
+        fn tell(&mut self, line: &str) {
+            use std::io::Write;
+            let stdin = self.child.stdin.as_mut().expect("a piped stdin");
+            writeln!(stdin, "{line}").expect("the listener reads its input");
+            stdin.flush().expect("the listener reads its input");
+        }
+    }
+
+    /// What a liveliness subscriber heard, as the listener prints it: `alive <key>` and
+    /// `dropped <key>`.
+    type Heard = Arc<Mutex<Vec<String>>>;
+
+    unsafe extern "C" fn on_token(sample: *const z_loaned_sample_t, ctx: *mut c_void) {
+        let heard = &*(ctx as *const Mutex<Vec<String>>);
+        let mut view: z_view_string_t = std::mem::zeroed();
+        if z_keyexpr_as_view_string(z_sample_keyexpr(sample), &mut view) != Z_OK {
+            return;
+        }
+        let string = z_view_string_loan(&view);
+        let bytes =
+            std::slice::from_raw_parts(z_string_data(string) as *const u8, z_string_len(string));
+        let key = String::from_utf8_lossy(bytes);
+        let event = if z_sample_kind(sample) == Z_SAMPLE_KIND_PUT {
+            format!("alive {key}")
+        } else {
+            format!("dropped {key}")
+        };
+        heard.lock().unwrap().push(event);
+    }
+
+    unsafe extern "C" fn on_token_drop(ctx: *mut c_void) {
+        drop(Arc::from_raw(ctx as *const Mutex<Vec<String>>));
+    }
+
+    /// Subscribe to the tokens on `key`, with `history` as given.
+    unsafe fn subscribe(
+        session: &z_owned_session_t,
+        key: &CStr,
+        history: bool,
+    ) -> (z_owned_subscriber_t, Heard) {
+        let heard: Heard = Arc::default();
+        let mut closure = std::mem::zeroed();
+        assert_eq!(
+            z_closure_sample(
+                &mut closure,
+                Some(on_token),
+                Some(on_token_drop),
+                Arc::into_raw(heard.clone()) as *mut c_void
+            ),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+        let mut options = z_liveliness_subscriber_options_t { history };
+        let mut sub: z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            z_liveliness_declare_subscriber(
+                z_session_loan(session),
+                &mut sub,
+                z_view_keyexpr_loan(&ke),
+                z_closure_sample_move(&mut closure),
+                &mut options,
+            ),
+            Z_OK
+        );
+        (sub, heard)
+    }
+
+    /// Step the session until `done` holds, for at most ten seconds.
+    unsafe fn step_until(session: &z_owned_session_t, what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            step_for(session, Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_client_only_build_holds_a_token_and_hears_the_listeners() {
+        let port = free_port();
+        let mut listener = Listener::start(port);
+        // SAFETY: a fresh config and session, released before the function returns.
+        unsafe {
+            let mut session = open_to(port);
+            let (mut history_sub, history) = subscribe(&session, c"demo/listener/**", true);
+            step_until(&session, "the history to be told", || {
+                *history.lock().unwrap() == ["alive demo/listener/alive"]
+            });
+            // Only now, so the listener's token is alive before it subscribes however the listener
+            // told the session of it (it also announces its tokens to a new peer unasked).
+            let (mut future_sub, future) = subscribe(&session, c"demo/listener/**", false);
+
+            let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut ke, c"demo/client/alive".as_ptr()),
+                Z_OK
+            );
+            let mut token: z_owned_liveliness_token_t = std::mem::zeroed();
+            assert_eq!(
+                z_liveliness_declare_token(
+                    z_session_loan(&session),
+                    &mut token,
+                    z_view_keyexpr_loan(&ke),
+                    std::ptr::null(),
+                ),
+                Z_OK
+            );
+            listener.wait_for("alive demo/client/alive");
+            z_liveliness_token_drop(z_liveliness_token_move(&mut token));
+            listener.wait_for("dropped demo/client/alive");
+
+            listener.tell("token demo/listener/more");
+            step_until(&session, "the new token to reach both", || {
+                history.lock().unwrap().last().map(String::as_str)
+                    == Some("alive demo/listener/more")
+                    && future.lock().unwrap().last().map(String::as_str)
+                        == Some("alive demo/listener/more")
+            });
+            assert_eq!(
+                *future.lock().unwrap(),
+                ["alive demo/listener/more"],
+                "CONTROL: the subscriber that asked no history was told no token alive before it"
+            );
+            listener.tell("untoken demo/listener/more");
+            step_until(&session, "its drop to reach both", || {
+                history.lock().unwrap().last().map(String::as_str)
+                    == Some("dropped demo/listener/more")
+                    && future.lock().unwrap().last().map(String::as_str)
+                        == Some("dropped demo/listener/more")
+            });
+
+            assert_eq!(
+                z_undeclare_subscriber(z_subscriber_move(&mut history_sub)),
+                Z_OK
+            );
+            assert_eq!(
+                z_undeclare_subscriber(z_subscriber_move(&mut future_sub)),
+                Z_OK
             );
             z_close(z_session_loan_mut(&mut session), std::ptr::null());
             z_session_drop(z_session_move(&mut session));

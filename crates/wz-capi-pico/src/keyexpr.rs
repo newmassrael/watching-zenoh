@@ -252,8 +252,16 @@ impl DeclaredKeyexpr {
         if mode == WhatAmI::Client {
             return None;
         }
+        Some(self.retraction_key(shared))
+    }
+
+    /// This key as a retraction names it: its declaration and the rest of the key, or the
+    /// literal when nothing covers it. A token's retraction names it in every mode
+    /// (`vendor/zenoh-pico/src/net/liveliness.c` @
+    /// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
+    pub(crate) fn retraction_key(&self, shared: &Engine) -> RetractionKey {
         let wire = self.wire(shared);
-        Some(if wire.mapping_id == 0 {
+        if wire.mapping_id == 0 {
             RetractionKey {
                 mapping_id: 0,
                 suffix: self.literal.clone(),
@@ -263,7 +271,7 @@ impl DeclaredKeyexpr {
                 mapping_id: wire.mapping_id,
                 suffix: wire.suffix.unwrap_or_default(),
             }
-        })
+        }
     }
 
     /// pico `_z_declared_keyexpr_declare`: a key whose declaration covers ALL

@@ -1716,8 +1716,9 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
         };
         let detection = format!("{}/@adv/pub/**", state.keyexpr);
         crate::liveliness::declare_background_liveliness_subscriber(
-            &state.shared,
+            &state.shared.as_engine(),
             &detection,
+            None,
             callback,
             options,
         )

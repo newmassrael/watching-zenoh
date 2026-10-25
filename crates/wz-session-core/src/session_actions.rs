@@ -12572,17 +12572,37 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// at the call site (R311o type-ungating cascade prerequisite).
     pub fn send_undeclare_token(&self, token_id: u64) {
         #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
-        {
-            let declare = build_undeclare_token(token_id);
-            // F2 — this surface has no error channel; a transport-down
-            // reject drops the emit exactly as the dead link would.
-            let _ = self.dispatch_declare(declare, /*reliable=*/ true);
-            // A4 — drop the matching replay entry (pico
-            // `_z_prune_declaration` undeclare-filter on `_id`).
-            self.prune_token_declaration(token_id);
-        }
+        self.retract_token(token_id, build_undeclare_token(token_id));
         #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
         let _ = token_id;
+    }
+
+    /// [`Self::send_undeclare_token`], with the retraction naming the key the
+    /// token is held on as well as its id — the liveliness twin of
+    /// [`Self::send_undeclare_subscriber_naming`]. zenoh-pico's token
+    /// retraction always names it (`vendor/zenoh-pico/src/net/liveliness.c` @
+    /// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
+    pub fn send_undeclare_token_naming(&self, token_id: u64, mapping_id: u64, suffix: &str) {
+        #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
+        self.retract_token(
+            token_id,
+            build_undeclare_token_on_wire(token_id, mapping_id, suffix)
+                .expect("the ext body rides the alloc carrier, which is unbounded"),
+        );
+        #[cfg(not(all(feature = "declare-token", feature = "declare-undeclare")))]
+        let _ = (token_id, mapping_id, suffix);
+    }
+
+    /// The emit and the replay-cache prune every token retraction shape shares
+    /// — see [`Self::retract_subscriber`].
+    #[cfg(all(feature = "declare-token", feature = "declare-undeclare"))]
+    fn retract_token(&self, token_id: u64, declare: wz_codecs::declare::DeclareOwned) {
+        // F2 — this surface has no error channel; a transport-down
+        // reject drops the emit exactly as the dead link would.
+        let _ = self.dispatch_declare(declare, /*reliable=*/ true);
+        // A4 — drop the matching replay entry (pico
+        // `_z_prune_declaration` undeclare-filter on `_id`).
+        self.prune_token_declaration(token_id);
     }
 
     /// R311mw — drop the post-emit reconnect-replay cache entry for an

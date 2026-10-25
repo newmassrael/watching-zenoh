@@ -276,7 +276,25 @@ it behaves as pico behaves in both of pico's threading arms.
   matches and whose get ends at once, with and without the answering end, on both engines.
   Layer C1co runs those four builds against the full build's listener, in a job of its own.
   pico-client-coop 890,395 bytes.
-- Next: the rest of section 6, one step each.
+- 2026-10-25: liveliness, step L1: the token and the subscriber on both engines. The port names
+  a token (`declare_liveliness_token_on_wire`, its retraction naming its key as zenoh-pico's
+  always does) and a liveliness subscriber (`declare_liveliness_subscriber_on_wire`, with or
+  without history, retracted as any subscriber is), with session-core's `LivelinessSample`; pico's
+  token, its subscriber and the background form go through it, the background form now declaring
+  its key and asking on it as pico's does. The cooperative engine (`wz-capi-coop`'s `liveliness`)
+  announces each token over its link and again over each new one, and keeps it with the
+  observer's local tokens, so a peer that asks later is answered; a liveliness subscriber is the
+  observer's, its Interest sent again over each new link, and its sink only queues an owned copy
+  of each sample, handed out with no lock held (D8): a token declared or retracted, the ones alive
+  when it asked for history, and each token of a lost link as it goes. A token answering a history
+  Interest reaches only the subscribers that asked for history, session-core's rule after
+  zenoh's. Tests: the engine against a router stand-in (a token seen and retracted with and
+  without its key; a subscriber hearing the router's tokens on its key alone; history told the
+  tokens the router only held; a lost link taking the router's tokens and a new router told the
+  session's), and `client_only_dials_a_listener` holding a token the listener sees and hearing
+  the listener's, on both engines (Layer C1co, now with `liveliness`). The liveliness get stays
+  with the tokio engine.
+- Next: the liveliness get on the cooperative engine (L2), then the rest of section 6.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
   engine's session, and the modules of capabilities the cooperative engine does not have yet
@@ -288,7 +306,7 @@ it behaves as pico behaves in both of pico's threading arms.
 
 ## 6. Open
 
-- Liveliness on the cooperative engine.
+- The liveliness get (`z_liveliness_get`) on the cooperative engine.
 - The listening role. pico's `z_open(listen)` holds several peers in one
   session; the cooperative session host holds sessions in slots, and whether
   one C session maps to several slots or to one multi-face session is a design

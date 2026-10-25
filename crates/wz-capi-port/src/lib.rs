@@ -12,8 +12,9 @@
 //! ## What lives here
 //!
 //! A type belongs here when an ABI and an engine both have to name it and nothing in it is a
-//! particular engine's. The ids an ABI's handles carry ([`SubId`], [`MatchId`], [`FilterId`]),
-//! the callback factories an ABI hands an engine ([`SubscriberSink`], [`MatchingSink`]), the
+//! particular engine's. The ids an ABI's handles carry ([`SubId`], [`MatchId`], [`FilterId`],
+//! [`TokenId`]), the callback factories an ABI hands an engine ([`SubscriberSink`],
+//! [`MatchingSink`], [`LivelinessSink`]), the
 //! form a key takes on the wire ([`WireKey`]), what a write filter counts ([`FilterPlane`]) and
 //! what a filtered put did ([`FilteredPut`], [`FanoutError`]). They lived in `wz-capi-core`'s
 //! face registry, which re-exports them, so the zenoh-c ABI keeps its paths.
@@ -39,6 +40,7 @@
 
 use std::sync::Arc;
 
+use wz_session_core::declare::liveliness_sample::LivelinessSample;
 use wz_session_core::sink::SampleView;
 
 pub mod cancellation;
@@ -64,6 +66,14 @@ pub type FilterId = u64;
 /// Mints one subscriber callback per face.
 pub type SubscriberSink =
     Arc<dyn Fn() -> Box<dyn FnMut(&dyn SampleView) + Send + 'static> + Send + Sync>;
+
+/// A C-level liveliness token id — what a `z_owned_liveliness_token_t` handle carries.
+pub type TokenId = u64;
+
+/// Mints one liveliness-subscriber callback per face: each token a peer declares on the key is a
+/// `Put`, each it retracts a `Delete`.
+pub type LivelinessSink =
+    Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
 
 /// Delivers ONE aggregated matching verdict to C.
 ///

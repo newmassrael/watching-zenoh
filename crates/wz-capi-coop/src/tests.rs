@@ -78,6 +78,16 @@ enum Command {
     /// Answer no query from now on, as a peer gone quiet: a frame that carries one is dropped.
     #[cfg(feature = "query")]
     Silence,
+    /// Hold token `.0` on the key and announce it.
+    #[cfg(feature = "liveliness")]
+    DeclareToken(u64, &'static str),
+    /// Retract token `.0`.
+    #[cfg(feature = "liveliness")]
+    UndeclareToken(u64),
+    /// Hold token `.0` on the key without announcing it: a peer learns it only by asking for the
+    /// tokens alive.
+    #[cfg(feature = "liveliness")]
+    HoldToken(u64, &'static str),
 }
 
 /// What reached the router.
@@ -99,6 +109,9 @@ struct Seen {
     /// was told to, or has gone quiet.
     #[cfg(feature = "query")]
     settled: bool,
+    /// The tokens the session holds, by the id it announced them under.
+    #[cfg(feature = "liveliness")]
+    tokens: Vec<(u64, String)>,
 }
 
 /// Whether the router holds a catch-all subscriber. It is a subscriber like any other: the router
@@ -204,6 +217,24 @@ fn run_router(
             )
             .expect("the router's catch-all");
     }
+    #[cfg(feature = "liveliness")]
+    let holding = observer.clone();
+    #[cfg(feature = "liveliness")]
+    {
+        let declared = seen.clone();
+        let undeclared = seen.clone();
+        let mut observer = observer.borrow_mut();
+        observer.liveliness.on_token_declared(move |token| {
+            declared
+                .lock()
+                .unwrap()
+                .tokens
+                .push((token.id(), token.keyexpr().to_owned()));
+        });
+        observer.liveliness.on_token_undeclared(move |id| {
+            undeclared.lock().unwrap().tokens.retain(|(t, _)| *t != id);
+        });
+    }
     #[cfg(feature = "query")]
     let answering = observer.clone();
     #[cfg(feature = "query")]
@@ -264,6 +295,20 @@ fn run_router(
             }
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
+            }
+            #[cfg(feature = "liveliness")]
+            Ok(Command::DeclareToken(id, key)) => {
+                let _ = holding.borrow_mut().local_tokens.register(id, key);
+                let _ = actions.send_declare_token(id, 0, Some(key));
+            }
+            #[cfg(feature = "liveliness")]
+            Ok(Command::UndeclareToken(id)) => {
+                holding.borrow_mut().local_tokens.unregister(id);
+                actions.send_undeclare_token(id);
+            }
+            #[cfg(feature = "liveliness")]
+            Ok(Command::HoldToken(id, key)) => {
+                let _ = holding.borrow_mut().local_tokens.register(id, key);
             }
             Ok(Command::Push(key, value)) => {
                 let _ = actions.send_push_literal(key, value, true);
@@ -782,5 +827,7 @@ fn a_session_that_redials_none_ends_with_its_link() {
 
 #[cfg(feature = "query")]
 mod get;
+#[cfg(feature = "liveliness")]
+mod liveliness;
 #[cfg(feature = "queryable")]
 mod queryable;

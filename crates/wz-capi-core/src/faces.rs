@@ -147,13 +147,9 @@ pub use multicast::{dispatch_mcast_event, sweep_mcast_face, McastFaceParts};
 // (docs/capi-pico-on-coop-engine.md). It is re-exported here, so every path into
 // this module keeps resolving. What stays is what names this engine's sessions.
 pub use wz_capi_port::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, SubId, SubscriberSink,
-    WireKey,
+    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, SubId,
+    SubscriberSink, TokenId, WireKey,
 };
-
-/// Mints one liveliness-subscriber callback per face.
-pub type LivelinessSink =
-    Arc<dyn Fn() -> Box<dyn for<'a> FnMut(LivelinessSample<'a>) + Send + 'static> + Send + Sync>;
 
 /// Mints one queryable callback per face.
 ///
@@ -873,10 +869,6 @@ struct GroupEntry {
     agg: Arc<GroupAggregate>,
     priority: Priority,
 }
-
-/// A C-level liveliness token id, keying the per-face wz tokens one C
-/// declaration spawned.
-pub type TokenId = u64;
 
 /// The cross-face aggregate behind ONE C matching listener.
 ///

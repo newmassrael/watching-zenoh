@@ -289,7 +289,7 @@ pub(crate) unsafe fn session_handle<'a>(
 /// Read the tokio engine's [`SessionState`] behind a loaned session, or `None` if the pointer or
 /// its handle slot is null, or another engine runs the session.
 ///
-/// For the modules of the capabilities the port does not carry yet (queries, liveliness,
+/// For the modules of the capabilities the port does not carry yet (the liveliness get,
 /// scouting, the connectivity and admin planes, the advanced plane); the client surface goes
 /// through the session's handle and the port.
 ///
@@ -307,16 +307,14 @@ pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a Ses
 }
 
 /// The handle and the tokio engine's session behind a loaned session together, for a module that
-/// declares through the port and reaches the tokio engine for the rest (a liveliness token's key
-/// goes through the port, the token itself through the face registry).
+/// declares through the port and reaches the tokio engine for the rest.
 ///
 /// # Safety
 /// As [`session_handle`].
 #[cfg(any(
     feature = "admin-space",
     feature = "advanced",
-    feature = "connectivity",
-    feature = "liveliness"
+    feature = "connectivity"
 ))]
 pub(crate) unsafe fn tokio_session<'a>(
     zs: *const z_loaned_session_t,

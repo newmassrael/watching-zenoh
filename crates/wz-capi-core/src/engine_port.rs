@@ -284,6 +284,45 @@ impl SessionEngine for SharedSession {
         SharedSession::undeclare_queryable(self, id);
     }
 
+    // The runtime's token names in its retraction the key it was declared on, which is the key
+    // `retraction` names: so whether it names one is all it needs.
+    #[cfg(feature = "liveliness")]
+    fn declare_liveliness_token_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        retraction: Option<RetractionKey>,
+    ) -> Option<wz_capi_port::TokenId> {
+        SharedSession::declare_liveliness_token_on_wire(
+            self,
+            keyexpr,
+            wire,
+            crate::runtime::session::LivelinessOptions::new()
+                .with_retraction_naming_the_key(retraction.is_some()),
+        )
+    }
+
+    #[cfg(feature = "liveliness")]
+    fn undeclare_liveliness_token(&self, id: wz_capi_port::TokenId) {
+        SharedSession::undeclare_liveliness_token(self, id);
+    }
+
+    #[cfg(feature = "liveliness")]
+    fn declare_liveliness_subscriber_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        history: bool,
+        sink: wz_capi_port::LivelinessSink,
+    ) -> Option<SubId> {
+        // `#[non_exhaustive]`: built from its default and narrowed.
+        let mut options = crate::runtime::session::LivelinessSubscriberOptions::default();
+        options.history = history;
+        Some(SharedSession::declare_liveliness_subscriber_on_wire(
+            self, keyexpr, wire, options, sink,
+        ))
+    }
+
     #[cfg(feature = "query")]
     fn get_on_wire(
         &self,

@@ -10,11 +10,12 @@
 //! implements the trait; an ABI holds `Arc<dyn SessionEngine>` and reaches the engine through
 //! nothing else (`docs/capi-pico-on-coop-engine.md`, decision D1).
 //!
-//! The queryable joined when the cooperative engine answered queries, and the get (over
-//! session-core's `QueryOptions`) when it asked them; a capability no second engine has yet
-//! (liveliness, scouting, the connectivity and admin planes, the advanced publisher) is not
-//! here: an ABI module that needs one still names its engine, and joins this trait when a second
-//! engine implements it.
+//! The queryable joined when the cooperative engine answered queries, the get (over
+//! session-core's `QueryOptions`) when it asked them, and the liveliness token and subscriber
+//! when it held and heard them; a capability no second engine has yet (the liveliness get,
+//! scouting, the connectivity and admin planes, the advanced publisher) is not here: an ABI
+//! module that needs one still names its engine, and joins this trait when a second engine
+//! implements it.
 
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::locality::Locality;
@@ -23,8 +24,8 @@ use wz_session_core::query_options::QueryOptions;
 
 use crate::cancellation::CancellableFan;
 use crate::{
-    FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, QblId, QueryableSink,
-    ReplyCallback, SubId, SubscriberSink, WireKey,
+    FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId, MatchingSink, QblId,
+    QueryableSink, ReplyCallback, SubId, SubscriberSink, TokenId, WireKey,
 };
 
 /// The operations a C ABI's client surface makes on one session, whatever engine runs it.
@@ -173,6 +174,42 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// nothing.
     fn undeclare_queryable(&self, id: QblId) {
         let _ = id;
+    }
+
+    /// Declare a liveliness token on `keyexpr`, announced as `wire`, to every peer the session
+    /// reaches now and later. `retraction` is the key its undeclaration names beside its id,
+    /// when the declaring ABI's reference library names one. `None` from an engine with no
+    /// liveliness in this build, which is the provided answer.
+    fn declare_liveliness_token_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        retraction: Option<RetractionKey>,
+    ) -> Option<TokenId> {
+        let _ = (keyexpr, wire, retraction);
+        None
+    }
+
+    /// Retract token `id`, which tells the peers' liveliness subscribers it is gone. Retracting
+    /// one already retracted, or one never declared, does nothing.
+    fn undeclare_liveliness_token(&self, id: TokenId) {
+        let _ = id;
+    }
+
+    /// Subscribe to the liveliness tokens the peers hold on `keyexpr`, asking for them as `wire`
+    /// names it, through callbacks `sink` mints; with `history`, the tokens already alive are
+    /// delivered first. It is a subscriber like any other to retract
+    /// ([`Self::undeclare_subscriber`]): the ids are one space. `None` from an engine with no
+    /// liveliness in this build, which is the provided answer.
+    fn declare_liveliness_subscriber_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        history: bool,
+        sink: LivelinessSink,
+    ) -> Option<SubId> {
+        let _ = (keyexpr, wire, history, sink);
+        None
     }
 
     /// Ask a query on `keyexpr` (named on the wire as `wire`) with `opts`: one leg per peer the

@@ -105,6 +105,14 @@ queryable = [
     "wz-session-core/codec-response",
     "wz-session-core/codec-response-final",
 ]
+# The liveliness token and subscriber: the token's declaration and its retraction, the tokens the
+# session holds to answer a peer that asks for them, and the subscriber that hears the peer's.
+# What `wz-capi-core`'s `liveliness` names on its runtime, named on session-core.
+liveliness = [
+    "wz-session-core/declare-token",
+    "wz-session-core/liveliness-token",
+    "wz-session-core/liveliness-subscriber",
+]
 # The requesting end of a query: a get, the slots of its request (target, timeout,
 # consolidation, attachment, parameters, source info, value) and everything a reply carries back
 # to it. What `wz-capi-core`'s `query` names on its runtime, named on session-core.

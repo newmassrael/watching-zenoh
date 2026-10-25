@@ -81,6 +81,14 @@ use {
 #[cfg(feature = "queryable")]
 mod query;
 
+#[cfg(feature = "liveliness")]
+mod liveliness;
+#[cfg(feature = "liveliness")]
+use {
+    liveliness::{LiveSubEntry, LivelinessCallback, LivelinessQueue, TokenEntry},
+    wz_capi_port::{LivelinessSink, TokenId},
+};
+
 #[cfg(feature = "query")]
 mod get;
 #[cfg(feature = "query")]
@@ -174,6 +182,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// What the session's gets queued for their callbacks (`get`).
     #[cfg(feature = "query")]
     gets: Arc<GetPlane>,
+    /// What the liveliness subscribers' sinks queued for their callbacks (`liveliness`).
+    #[cfg(feature = "liveliness")]
+    live_samples: LivelinessQueue,
     zid: [u8; 16],
     closed: AtomicBool,
     next_entity: AtomicU64,
@@ -236,6 +247,8 @@ enum Target {
     /// One leg of a get, locked while it runs.
     #[cfg(feature = "query")]
     Reply(Arc<Mutex<ReplyCallback>>),
+    #[cfg(feature = "liveliness")]
+    Liveliness(LivelinessCallback),
 }
 
 /// The read task: a thread that steps the session until it is told to stop.
@@ -277,6 +290,11 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     pending_gets: Vec<PendingGet>,
     #[cfg(feature = "query")]
     gets: Arc<GetPlane>,
+    /// The tokens the session holds, and its liveliness subscribers (`liveliness`).
+    #[cfg(feature = "liveliness")]
+    tokens: Vec<TokenEntry>,
+    #[cfg(feature = "liveliness")]
+    live_subs: Vec<LiveSubEntry>,
 }
 
 /// The session's link: up, being dialled, or waiting to be.
@@ -676,7 +694,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Declare again, over a link that has just come up, what the session holds, under the ids it
     /// was declared with: its key expressions first, since a subscriber or an Interest may name
-    /// one, then its subscribers and its Interests. zenoh-pico sends its declaration cache again
+    /// one, then its subscribers and its Interests, its queryables, its tokens and its liveliness
+    /// subscribers' Interests. zenoh-pico sends its declaration cache again
     /// once a reopen succeeds (`vendor/zenoh-pico/src/net/session.c` @
     /// `_z_fut_fn_result_t _z_client_reopen_task_fn(void *ztc_arg, _z_executor_t *executor) {`).
     fn redeclare(&self, actions: &McuActions<C>) {
@@ -692,6 +711,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "queryable")]
         for entry in &self.queryables {
             entry.declare(actions);
+        }
+        #[cfg(feature = "liveliness")]
+        {
+            for entry in &self.tokens {
+                entry.declare(actions);
+            }
+            for entry in &self.live_subs {
+                entry.ask(actions);
+            }
         }
     }
 
@@ -792,6 +820,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             pending_gets: Vec::new(),
             #[cfg(feature = "query")]
             gets: Arc::new(GetPlane::default()),
+            #[cfg(feature = "liveliness")]
+            tokens: Vec::new(),
+            #[cfg(feature = "liveliness")]
+            live_subs: Vec::new(),
         };
         #[cfg(feature = "queryable")]
         let plane = core.plane.clone();
@@ -812,6 +844,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             plane,
             #[cfg(feature = "query")]
             gets,
+            #[cfg(feature = "liveliness")]
+            live_samples: Arc::new(Mutex::new(VecDeque::new())),
             zid,
             closed: AtomicBool::new(false),
             next_entity: AtomicU64::new(1),
@@ -858,6 +892,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 });
             if let Some(callback) = callback {
                 (lock(&callback))(&sample);
+            }
+        }
+        #[cfg(feature = "liveliness")]
+        loop {
+            let next = lock(&self.live_samples).pop_front();
+            let Some((id, sample)) = next else {
+                break;
+            };
+            let callback = lock(&self.targets)
+                .iter()
+                .find_map(|(t, target)| match target {
+                    Target::Liveliness(cb) if *t == id => Some(cb.clone()),
+                    _ => None,
+                });
+            if let Some(callback) = callback {
+                (lock(&callback))(sample.as_sample());
             }
         }
         loop {
@@ -1210,6 +1260,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     }
 
     fn undeclare_subscriber(&self, id: SubId) {
+        // A liveliness subscriber's id is one of these too (the port's one id space): its
+        // registration goes and its Interest ends.
+        #[cfg(feature = "liveliness")]
+        let live = self.live().and_then(|mut core| {
+            let core = &mut core.0;
+            let at = core.live_subs.iter().position(|s| s.id == id)?;
+            let entry = core.live_subs.remove(at);
+            core.observer
+                .borrow_mut()
+                .liveliness_subscribers
+                .unregister(id);
+            if let Some(actions) = core.up() {
+                actions.send_interest_final(id);
+            }
+            Some(entry)
+        });
+        #[cfg(feature = "liveliness")]
+        if live.is_some() {
+            let callback = self.take_target(id);
+            drop((live, callback));
+            return;
+        }
         let entry = self.live().and_then(|mut core| {
             let core = &mut core.0;
             let at = core.subscribers.iter().position(|s| s.id == id)?;
@@ -1630,6 +1702,95 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let callback = self.take_target(id);
         drop((entry, callback));
     }
+
+    #[cfg(feature = "liveliness")]
+    fn declare_liveliness_token_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        retraction: Option<RetractionKey>,
+    ) -> Option<TokenId> {
+        // zenoh-pico's token takes the session's next entity id
+        // (`vendor/zenoh-pico/src/net/liveliness.c` @ `uint32_t id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`).
+        let id = self.next_entity_id();
+        let mut core = self.live()?;
+        let core = &mut core.0;
+        core.observer
+            .borrow_mut()
+            .local_tokens
+            .register(id, &keyexpr)
+            .ok()?;
+        let entry = TokenEntry {
+            id,
+            keyexpr,
+            wire,
+            retraction,
+        };
+        if let Some(actions) = core.up() {
+            entry.declare(actions);
+        }
+        core.tokens.push(entry);
+        Some(id)
+    }
+
+    #[cfg(feature = "liveliness")]
+    fn undeclare_liveliness_token(&self, id: TokenId) {
+        let entry = self.live().and_then(|mut core| {
+            let core = &mut core.0;
+            let at = core.tokens.iter().position(|t| t.id == id)?;
+            let entry = core.tokens.remove(at);
+            core.observer.borrow_mut().local_tokens.unregister(id);
+            if let Some(actions) = core.up() {
+                entry.retract(actions);
+            }
+            Some(entry)
+        });
+        // Its key may hold a declaration whose release reaches the session: after the lock.
+        drop(entry);
+    }
+
+    #[cfg(feature = "liveliness")]
+    fn declare_liveliness_subscriber_on_wire(
+        &self,
+        keyexpr: String,
+        wire: WireKey,
+        history: bool,
+        sink: LivelinessSink,
+    ) -> Option<SubId> {
+        let id = self.next_entity_id();
+        let Some(mut guard) = self.live() else {
+            return Some(id);
+        };
+        let core = &mut guard.0;
+        lock(&self.targets).push((id, Target::Liveliness(Arc::new(Mutex::new(sink())))));
+        // With `history`, the registration hands the sink the tokens the session already knows,
+        // before the peer answers with the rest, as zenoh-pico's does
+        // (`vendor/zenoh-pico/src/net/liveliness.c` @ `_z_liveliness_subscription_trigger_history`).
+        let registered = core.observer.borrow_mut().liveliness_subscribers.register(
+            id,
+            &keyexpr,
+            history,
+            liveliness::sample_sink(id, &self.live_samples),
+        );
+        if registered.is_err() {
+            drop(guard);
+            drop(self.take_target(id));
+            return Some(id);
+        }
+        let entry = LiveSubEntry {
+            id,
+            keyexpr,
+            wire,
+            history,
+        };
+        if let Some(actions) = core.up() {
+            entry.ask(actions);
+        }
+        core.live_subs.push(entry);
+        drop(guard);
+        self.deliver();
+        Some(id)
+    }
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
@@ -1680,7 +1841,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         };
         #[cfg(not(feature = "query"))]
         let gets: Vec<u64> = Vec::new();
+        // The session's tokens end with its link; its liveliness subscribers' callbacks go.
+        #[cfg(feature = "liveliness")]
+        let live_subs: Vec<SubId> = {
+            core.tokens.clear();
+            core.live_subs.drain(..).map(|s| s.id).collect()
+        };
+        #[cfg(not(feature = "liveliness"))]
+        let live_subs: Vec<SubId> = Vec::new();
         drop(guard);
+        #[cfg(feature = "liveliness")]
+        drop(std::mem::take(&mut *lock(&self.live_samples)));
         #[cfg(feature = "query")]
         drop(std::mem::take(&mut *lock(&self.gets.events)));
         // The queries no callback will now answer, and the callbacks' C contexts, are dropped
@@ -1692,6 +1863,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             .chain(matches)
             .chain(queryables)
             .chain(gets)
+            .chain(live_subs)
             .filter_map(|id| self.take_target(id))
             .collect();
         drop(taken);

@@ -14,10 +14,22 @@
 //! answering end of a query in the build that cannot listen reads. It holds a queryable on
 //! `demo/listener/**` that answers each query with `listened` on the query's key, which is what
 //! a test of the asking end reads.
+//!
+//! It holds a liveliness token on `demo/listener/alive`, and subscribes to the tokens on
+//! `demo/**`, printing `alive <key>` when one appears and `dropped <key>` when it goes. A line
+//! `token <key>` declares one more token, and `untoken <key>` drops it, which is what a test of a
+//! liveliness subscriber in the build that cannot listen reads.
 
+use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
 use std::io::BufRead;
 use std::time::Duration;
+
+use wz_capi_pico::liveliness::{
+    z_liveliness_declare_subscriber, z_liveliness_declare_token, z_liveliness_token_drop,
+    z_liveliness_token_move, z_owned_liveliness_token_t,
+};
+use wz_capi_pico::{z_sample_kind, Z_SAMPLE_KIND_PUT};
 
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_bytes_to_slice, z_close, z_closure_query,
@@ -101,6 +113,46 @@ unsafe extern "C" fn on_reply(reply: *mut z_loaned_reply_t, _ctx: *mut c_void) {
 unsafe extern "C" fn on_reply_done(ctx: *mut c_void) {
     let key = Box::from_raw(ctx as *mut String);
     println!("done {key}");
+}
+
+/// A token appearing or going on the liveliness subscriber.
+unsafe extern "C" fn on_token(sample: *const z_loaned_sample_t, _ctx: *mut c_void) {
+    let mut view: z_view_string_t = std::mem::zeroed();
+    if z_keyexpr_as_view_string(z_sample_keyexpr(sample), &mut view) != Z_OK {
+        return;
+    }
+    let string = z_view_string_loan(&view);
+    let (data, len) = (z_string_data(string), z_string_len(string));
+    if data.is_null() {
+        return;
+    }
+    if let Ok(key) = std::str::from_utf8(std::slice::from_raw_parts(data as *const u8, len)) {
+        if z_sample_kind(sample) == Z_SAMPLE_KIND_PUT {
+            println!("alive {key}");
+        } else {
+            println!("dropped {key}");
+        }
+    }
+}
+
+/// Declare a liveliness token on `key`.
+unsafe fn declare_token(
+    session: &z_owned_session_t,
+    key: &str,
+) -> Option<z_owned_liveliness_token_t> {
+    let text = CString::new(key).ok()?;
+    let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+    if z_view_keyexpr_from_str(&mut ke, text.as_ptr()) != Z_OK {
+        return None;
+    }
+    let mut token: z_owned_liveliness_token_t = std::mem::zeroed();
+    (z_liveliness_declare_token(
+        z_session_loan(session),
+        &mut token,
+        z_view_keyexpr_loan(&ke),
+        std::ptr::null(),
+    ) == Z_OK)
+        .then_some(token)
 }
 
 /// Ask a query on `key`, which prints its replies and its end.
@@ -198,26 +250,64 @@ fn main() {
             ),
             Z_OK
         );
+        let mut alive =
+            declare_token(&session, "demo/listener/alive").expect("the listener's token");
+        let mut on_tokens = std::mem::zeroed();
+        assert_eq!(
+            z_closure_sample(&mut on_tokens, Some(on_token), None, std::ptr::null_mut()),
+            Z_OK
+        );
+        let mut watched: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(
+            z_view_keyexpr_from_str(&mut watched, c"demo/**".as_ptr()),
+            Z_OK
+        );
+        let mut tokens_sub: z_owned_subscriber_t = std::mem::zeroed();
+        assert_eq!(
+            z_liveliness_declare_subscriber(
+                z_session_loan(&session),
+                &mut tokens_sub,
+                z_view_keyexpr_loan(&watched),
+                z_closure_sample_move(&mut on_tokens),
+                std::ptr::null_mut(),
+            ),
+            Z_OK
+        );
         println!("READY");
 
-        // The keys of the `get` lines, and `None` once the standard input has closed.
+        // The lines of the standard input, and `None` once it has closed.
         let (lines_tx, lines_rx) = std::sync::mpsc::channel::<Option<String>>();
         std::thread::spawn(move || {
             for line in std::io::stdin().lock().lines().map_while(Result::ok) {
-                if let Some(key) = line.strip_prefix("get ") {
-                    let _ = lines_tx.send(Some(key.to_owned()));
-                }
+                let _ = lines_tx.send(Some(line));
             }
             let _ = lines_tx.send(None);
         });
+        let mut held: HashMap<String, z_owned_liveliness_token_t> = HashMap::new();
         loop {
             match lines_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(Some(key)) => get(&session, &key),
+                Ok(Some(line)) => {
+                    if let Some(key) = line.strip_prefix("get ") {
+                        get(&session, key);
+                    } else if let Some(key) = line.strip_prefix("token ") {
+                        if let Some(token) = declare_token(&session, key) {
+                            held.insert(key.to_owned(), token);
+                        }
+                    } else if let Some(key) = line.strip_prefix("untoken ") {
+                        if let Some(mut token) = held.remove(key) {
+                            z_liveliness_token_drop(z_liveliness_token_move(&mut token));
+                        }
+                    }
+                }
                 Ok(None) => break,
                 Err(_) => put(&session, c"demo/from-listener", c"payload"),
             }
         }
 
+        for (_, mut token) in held.drain() {
+            z_liveliness_token_drop(z_liveliness_token_move(&mut token));
+        }
+        z_liveliness_token_drop(z_liveliness_token_move(&mut alive));
         z_close(z_session_loan_mut(&mut session), std::ptr::null());
         z_session_drop(z_session_move(&mut session));
     }
