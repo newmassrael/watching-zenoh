@@ -285660,6 +285660,56 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3595": {
+      "decision_summary": "Liveliness step L1: the token and the subscriber on both engines. SessionEngine names a liveliness token (its retraction naming the key, as pico's always does) and a liveliness subscriber (with or without history, retracted as any subscriber); pico's token, subscriber and background form go through it, the background form now declaring its key and asking on it as pico does. The cooperative engine announces each token over its link and again over each new one, keeps it among the observer's local tokens so a later asker is answered, and registers each subscriber with the observer, its Interest sent again over each new link; the sink only queues owned samples, handed out with no lock held (D8). A token answering a history Interest reaches only subscribers that asked for history, session-core's rule after zenoh's. FOUND, not repaired: at close the tokio engine retracts every live liveliness entity where real pico sends nothing; a driver line that exposed it was taken back out.",
+      "changes_bullets": [
+        "wz-capi-port: LivelinessSink and TokenId; SessionEngine declare_liveliness_token_on_wire, undeclare_liveliness_token, declare_liveliness_subscriber_on_wire.",
+        "wz-session-core: send_undeclare_token_naming, with the emit and prune of a token retraction shared.",
+        "wz-capi-core: the tokio engine implements the three over its face registry; its own LivelinessSink and TokenId are the port's.",
+        "wz-capi-coop: feature liveliness; engine/liveliness.rs; tokens and subscribers replayed over each new link, closed with the session.",
+        "wz-capi-pico: token, subscriber and background form through the port; liveliness selects neither engine; the liveliness get stays on the tokio engine.",
+        "Tests: four coop tests on the router stand-in; client_only_dials_a_listener holds a token the listener sees and hears the listener's, on both engines (Layer C1co counts 5 and 4); hold_a_listener holds and drops tokens on request.",
+        "docs/reason-review-pins.md: session-close-ingress, session_actions.rs, re-read and moved."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-session-core (default and the token-only set), wz-capi-port, wz-capi-core, wz-capi-c, wz-capi-coop (liveliness; liveliness+query+queryable), wz-capi-pico default, all features, and engine-coop and engine-tokio with link-udp+liveliness (and query+queryable).",
+        "Tests: wz-capi-coop 8 / 12 / 18 passed (none / liveliness / all three); wz-capi-port, wz-capi-core lib, wz-capi-c lib and the wz-capi-pico suite pass. Layer C1co: 5, 4, 5 and 4 passed (coop and tokio, with and without queryable).",
+        "C1bz for the six touched crates spends exactly their budgets; capability_cost_gate 11 cases within budget; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed on the rebased tree; A3 unchanged.",
+        "The twice-and-diff declaring leg against real pico matched through the background subscriber's declared key and Interest and differed only by the close-time Interest final named in the decision; the line was removed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "The tokio engine retracts a session's live liveliness subscribers and tokens at close (Interest final, UndeclToken) where real pico sends nothing; found by a background liveliness subscriber in the declaring driver of pico_keyexpr_declaration_twice_and_diff. Owed its own round with the oracle suites (the engine is zenoh-c's too).",
+        "Next on this track: the liveliness get on the cooperative engine (L2), then the rest of section 6 of docs/capi-pico-on-coop-engine.md.",
+        "Job pico-client-only still has no budget gate: its first hosted run is the measurement."
+      ],
+      "publishable_decision_summary": "Liveliness step L1: the token and the subscriber on both engines. SessionEngine names a liveliness token (its retraction naming the key, as pico's always does) and a liveliness subscriber (with or without history, retracted as any subscriber); pico's token, subscriber and background form go through it, the background form now declaring its key and asking on it as pico does. The cooperative engine announces each token over its link and again over each new one, keeps it among the observer's local tokens so a later asker is answered, and registers each subscriber with the observer, its Interest sent again over each new link; the sink only queues owned samples, handed out with no lock held (D8). A token answering a history Interest reaches only subscribers that asked for history, session-core's rule after zenoh's. FOUND, not repaired: at close the tokio engine retracts every live liveliness entity where real pico sends nothing; a driver line that exposed it was taken back out.",
+      "publishable_changes_bullets": [
+        "wz-capi-port: LivelinessSink and TokenId; SessionEngine declare_liveliness_token_on_wire, undeclare_liveliness_token, declare_liveliness_subscriber_on_wire.",
+        "wz-session-core: send_undeclare_token_naming, with the emit and prune of a token retraction shared.",
+        "wz-capi-core: the tokio engine implements the three over its face registry; its own LivelinessSink and TokenId are the port's.",
+        "wz-capi-coop: feature liveliness; engine/liveliness.rs; tokens and subscribers replayed over each new link, closed with the session.",
+        "wz-capi-pico: token, subscriber and background form through the port; liveliness selects neither engine; the liveliness get stays on the tokio engine.",
+        "Tests: four coop tests on the router stand-in; client_only_dials_a_listener holds a token the listener sees and hears the listener's, on both engines (Layer C1co counts 5 and 4); hold_a_listener holds and drops tokens on request.",
+        "docs/reason-review-pins.md: session-close-ingress, session_actions.rs, re-read and moved."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-session-core (default and the token-only set), wz-capi-port, wz-capi-core, wz-capi-c, wz-capi-coop (liveliness; liveliness+query+queryable), wz-capi-pico default, all features, and engine-coop and engine-tokio with link-udp+liveliness (and query+queryable).",
+        "Tests: wz-capi-coop 8 / 12 / 18 passed (none / liveliness / all three); wz-capi-port, wz-capi-core lib, wz-capi-c lib and the wz-capi-pico suite pass. Layer C1co: 5, 4, 5 and 4 passed (coop and tokio, with and without queryable).",
+        "C1bz for the six touched crates spends exactly their budgets; capability_cost_gate 11 cases within budget; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed on the rebased tree; A3 unchanged.",
+        "The twice-and-diff declaring leg against real pico matched through the background subscriber's declared key and Interest and differed only by the close-time Interest final named in the decision; the line was removed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The tokio engine retracts a session's live liveliness subscribers and tokens at close (Interest final, UndeclToken) where real pico sends nothing; found by a background liveliness subscriber in the declaring driver of pico_keyexpr_declaration_twice_and_diff. Owed its own round with the oracle suites (the engine is zenoh-c's too).",
+        "Next on this track: the liveliness get on the cooperative engine (L2), then the rest of section 6 of docs/capi-pico-on-coop-engine.md.",
+        "Job pico-client-only still has no budget gate: its first hosted run is the measurement."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
