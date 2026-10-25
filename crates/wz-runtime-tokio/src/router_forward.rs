@@ -8982,6 +8982,22 @@ mod tests {
     use wz_runtime_core::runtime::Runtime;
     use wz_session_core::push_routing_context::read_push_hoplimit;
 
+    /// A table is read and written the same way whichever cell the forwarder keeps it in: the route
+    /// helpers the peer forwarder and the router share take `SharedTable`, so the peer keeps its
+    /// `Rc<RefCell<_>>` and the router its `Arc<PlainRwLock<_>>` and neither pays for the other's.
+    #[test]
+    fn a_shared_table_reads_and_writes_alike_in_either_cell() {
+        use crate::sync::SharedTable;
+        fn push_and_total(table: &impl SharedTable<Vec<u32>>) -> u32 {
+            table.write_table().push(7);
+            table.read_table().iter().sum()
+        }
+        assert_eq!(push_and_total(&RefCell::new(vec![1, 2])), 10);
+        assert_eq!(push_and_total(&Rc::new(RefCell::new(vec![1, 2]))), 10);
+        assert_eq!(push_and_total(&PlainRwLock::new(vec![1, 2])), 10);
+        assert_eq!(push_and_total(&Arc::new(PlainRwLock::new(vec![1, 2]))), 10);
+    }
+
     /// The state the data path reads or writes that is not the tables (`docs/router-task-per-face.md`,
     /// phase 3b) can be shared between the threads that drive the faces: the pending-query table
     /// and the fan target its entries share, the interceptor chains, the autoconnect policy, the

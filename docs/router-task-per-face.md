@@ -144,10 +144,12 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
      (`autoconnect`, `query_timeout`, `interceptor_version`, `mcast_governed`), `clock`
      (`Box<dyn Fn() -> Instant>`, not `Send`), `dial_tx` and the multicast state. The dirty flags of the hats
      (`trees_dirty`) are inside the hats and go with the tables in 3c.
-   - **3c. The tables** under one `RwLock<Tables>`: the nine fields of phase 0 lose their cells, a method that
-     reads takes `&Tables`, one that writes `&mut Tables`, and the three views that share `faces` hold the
-     shared handle instead of an `Rc`. Locks taken in one order (tables, then the leaf locks), as the credit
-     stage's order below.
+   - **3c. The tables behind locks (done, round 3651), one lock per table.** Not the one
+     `RwLock<Tables>` this step was first written as; see "3c, what it did and what it cost" below for why, and
+     3e for the form it is still to reach. Every table is an `Arc<PlainRwLock<_>>` and the three views that
+     share `faces` hold the handle.
+   - **3e. One guard per forward (not done).** The data path takes the tables once, as upstream's `zread!`
+     does, and passes the guard down; today it takes 18 read locks per forward.
    - **3d. The handlers** of local subscribers and queryables (`Send`), and the forwarder's `Send + Sync`
      proof, with the test of many faces' threads into one router that the earlier steps could not write.
 
@@ -220,6 +222,43 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
    (1241) and 2739, 5681, 8162 (422) at 3b; and 2335, 4733, 8380 (405) for the control at the 3a head made after
    the 3b runs. The control read more than twice its own earlier value at 1024 sessions, so the rise across the
    runs is the host's, not a step of this work, and the 3b head is inside what the control reads beside it.
+   **3c, what it did and what it cost.** The hats' mesh and client tables (`net`, `subs`, `qabls`, `tokens`),
+   the faces table, the joined links, the future stores and the local subscribers and queryables are each
+   `Arc<PlainRwLock<_>>` (or a `PlainRwLock` where nothing shares the handle), and the hats' dirty flag a
+   `PlainCell`. A method reads a table with `read()` and writes with `write()`, which is what `borrow()` and
+   `borrow_mut()` were; `read` is the recursive form (see 3b), so a method that reads a table from inside
+   one that reads it does not deadlock behind a waiting writer. The route helpers both forwarders share
+   (`data_route`, `client_route`, `client_query_route`, `query_candidates`, `compute_push_forward`,
+   `compute_self_publish_forward`, `re_advertise_interest_into`) took `&RefCell<_>`; they take
+   `&impl SharedTable<_>` (`sync.rs`), implemented for `RefCell`, `PlainRwLock` and the `Rc` and `Arc` that
+   hold them, so the peer forwarder keeps its `Rc<RefCell<_>>` and its non-atomic borrow and the router its
+   locks, and neither pays for the other's. `LinkstateNetView` is generic over the same.
+   Why per table and not one lock: a single `RwLock<Tables>` needs every method to take the guard and a method
+   that holds the write guard cannot call one that takes the read guard, so the declaration code (hundreds of
+   methods, most of them re-entrant through the repropagation) would be rewritten around a guard it passes
+   down. That is 3e. What the per-table form costs is measured below, and it is the reason 3e is not optional.
+   What it found: the memo's `refresh`, called for every message, took the memo's WRITE lock whether or not
+   anything had changed, so with a task per face every message would have waited for every other's; it decides
+   under the read lock now. Measured on the one-core instrument (a control at the 3b head against the 3c
+   head, alternating, two runs each, least of 25 repetitions of 20000, ns, control then new): one subscriber
+   drop 544, 520 then 602, 598; block 639, 643 then 698, 703; sixteen drop 3929, 4044 then 4183, 4237; block
+   4708, 4745 then 4883, 4867. That is 58 to 78 ns more (11 to 15 per cent) for one subscriber and 190 to 250
+   (5 to 6 per cent) for sixteen. Counting the acquisitions with a temporary counter per call site: 17 read
+   locks and 1 write lock per forward at one subscriber (the write was the memo's refresh), 32 and 1 at
+   sixteen, so one read lock per extra subscriber and about 3.5 ns for each, which is the whole of the
+   difference; 18 reads and no write after the refresh was fixed (three memo reads and one refresh read, six
+   reads of the nets and tables inside the shared helpers, two of the interceptor chains, two of the broker
+   hats' subscriber stores, three of the faces table, one of the local subscribers). Bytes and allocations did
+   not move. This is a cost, not a spread: both pairs agree with each other and the controls agree with each
+   other. It is paid for on a single core by nothing and is justified only if the task per face that follows
+   recovers more, which is the measurement phase 4 is for; and 3e takes the 18 to about three.
+   Layer E7s on pc2 (3c head; its control, run right after it): cost table 13.3, 14.8, 19.0, 32.0, 35.0
+   against 20.2, 18.2, 23.9, 24.2, 27.1. The first run of the 3c head FAILED the fifth test (the table of
+   keepalive lateness under 32 hogs, which asserts only its population): 1413 of 2048 sessions came up, and
+   the run took 470 seconds against 336 for the control. The host was busier than in the earlier runs (a
+   keepalive emission cost 11 to 18 microseconds where it had cost 6 to 8). The second run of the same head
+   passed all six in 339 seconds, as did the control. One failure in two runs, not reproduced, on a host that
+   was visibly loaded: recorded here and not attributed.
 4. **A task per face.** The accept loop already spawns a face's drive onto the runtime when its forwarder is
    `Send + Sync` (`SpawnedFaces`, `drive_face_shared`); the router takes that path. The closure watcher
    (`watch_room`) becomes the wake list of a destination, and a gated face awaits its destination's room.
