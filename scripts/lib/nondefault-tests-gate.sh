@@ -206,8 +206,12 @@ router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast
     # endpoints joined it) are gated as the connect reconcile is, and the row lists
     # that module's `cfg(all(..))` whole, with `session-close-ingress` beside it:
     # a `close` withdrawing a peer (decision D6, Round 3579) is that seam's, and so
-    # are the planner's tests of it.
-    "wz-runtime-tokio|hook|routing-accept,router-connect-reconcile,session-close-ingress|loop_peers::"
+    # are the planner's tests of it. `transport-link-tls` rides along for the rule
+    # stated above the first row of this feature; Round 3579 left it out and the row
+    # built nothing (wz-session-core's D2 refusal), so the census found the two
+    # withdraw tests claimed by no leg.
+    "wz-runtime-tokio|hook|routing-accept,router-connect-reconcile,session-close-ingress,\
+transport-link-tls|loop_peers::"
     "wz-runtime-tokio|hook|session-close-ingress,routing-peer,routing-accept,\
 router-connect-reconcile,transport-link-tcp,transport-link-tls,transport-unicast|\
 accept_loop::tests::an_added_node_is_handed_to_the_planner_and_added_locators_name_no_node"
@@ -1179,8 +1183,17 @@ if [[ "${1:-}" == "--census" ]]; then
 
     # `cargo test -- --list` for one package at one feature spelling, reduced to
     # sorted unique test paths. Never runs a test.
+    #
+    # A listing that cargo could not produce FAILS, and says what it ran. It used
+    # to drop cargo's status and its stderr, so a build that did not compile listed
+    # nothing, and nothing reads as a crate with nothing to claim: on a build host
+    # the all-features listing of wz-runtime-tokio came back empty once and the
+    # census skipped the crate without a word (only its SKIPS rows, reported as
+    # never examined, said anything), and a leg that did not compile (Round 3579's
+    # lifecycle row without a secure channel) was reported as two unclaimed tests
+    # rather than as the refusal that emptied it.
     list_names() {
-        local pkg="$1" feats="$2" filter="$3"
+        local pkg="$1" feats="$2" filter="$3" out
         local -a argv=(test -p "$pkg")
         if [[ "$feats" == "@all" ]]; then
             argv+=(--all-features)
@@ -1188,8 +1201,14 @@ if [[ "${1:-}" == "--census" ]]; then
             argv+=(--features "$feats")
         fi
         [[ -n "$filter" ]] && argv+=("$filter")
-        (cd "$repo/crates" && cargo "${argv[@]}" -- --list 2>/dev/null) |
-            grep -E ': test$' | sed 's/: test$//' | sort -u
+        if ! out="$(cd "$repo/crates" && cargo "${argv[@]}" -- --list 2>"$tmp/list.err")"; then
+            echo "nondefault-tests: FAIL -- cargo ${argv[*]} -- --list did not list:" >&2
+            echo "  a census that cannot list a build cannot say what it holds." >&2
+            tail -n 15 "$tmp/list.err" | sed 's/^/    /' >&2
+            return 1
+        fi
+        grep -E ': test$' <<<"$out" | sed 's/: test$//' | sort -u
+        return 0
     }
 
     # SHARDING (hosted C1cn). The census builds every crate twice and is most of
@@ -1226,8 +1245,17 @@ if [[ "${1:-}" == "--census" ]]; then
             continue
         fi
 
-        list_names "$pkg" "" "" > "$tmp/d"
-        list_names "$pkg" "@all" "" > "$tmp/a"
+        if ! list_names "$pkg" "" "" > "$tmp/d" ||
+            ! list_names "$pkg" "@all" "" > "$tmp/a"; then
+            # Refused above with cargo's own words. Its SKIPS rows are not
+            # reported a second time as never examined: the listing is the cause.
+            for row in "${SKIPS[@]}"; do
+                IFS='|' read -r sp spath _ <<<"$row"
+                [[ "$sp" == "$pkg" ]] && checked_rows="$checked_rows $sp>$spath"
+            done
+            rc=1
+            continue
+        fi
         comm -13 "$tmp/d" "$tmp/a" > "$tmp/diff"
         n="$(grep -c . < "$tmp/diff" || true)"
         [[ "$n" -eq 0 ]] && continue
@@ -1260,7 +1288,7 @@ if [[ "${1:-}" == "--census" ]]; then
         for leg in "${LEGS[@]}"; do
             IFS='|' read -r lp _lscope lfeats lfilter lhand <<<"$leg"
             [[ "$lp" == "$pkg" ]] || continue
-            list_names "$lp" "$(leg_feats "$lfeats")" "$lfilter" > "$tmp/leg"
+            list_names "$lp" "$(leg_feats "$lfeats")" "$lfilter" > "$tmp/leg" || rc=1
             # LISTED is not RUN. Subtract what this leg is told to skip -- its
             # own handoffs and the package's SKIPS -- or the census would credit
             # a leg with tests it deliberately does not execute.
