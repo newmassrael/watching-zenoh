@@ -281,6 +281,28 @@ def preflight(decl: dict, platform_id: str, artifact_ids: list[str]) -> tuple[di
     return platform, sorted(rows, key=lambda r: order[r["id"]])
 
 
+def lane_plan(decl: dict, platform_id: str) -> tuple[list[str], list[str]]:
+    """What Layer C1sp packages for a platform: the artifacts its operating system supports that need
+    no declaration, and, when it supports the declared-node artifact, every registered node (a node
+    artifact is made from one declaration, so each is a package call of its own). An artifact the
+    platform's operating system is not in the `os` of is left out here and refused by `preflight`
+    when named, so the lane asks for what the platform can have and never for a refusal."""
+    platform = next((p for p in decl["platforms"] if p["id"] == platform_id), None)
+    if platform is None:
+        raise Refusal(f"no platform `{platform_id}` is declared "
+                      f"(known: {', '.join(p['id'] for p in decl['platforms'])})")
+    plain, with_nodes = [], False
+    for row in decl["artifacts"]:
+        if row.get("os") is not None and platform["os"] not in row["os"]:
+            continue
+        if row.get("input") == "node":
+            with_nodes = True
+        else:
+            plain.append(row["id"])
+    nodes = sorted(p.stem for p in wz_node.NODES.glob("*.toml")) if with_nodes else []
+    return plain, nodes
+
+
 # ---------------------------------------------------------------------------
 # A registered profile as an input (docs/target-build-contract.md T13)
 # ---------------------------------------------------------------------------
@@ -1054,11 +1076,23 @@ def _selftest() -> int:
             "which platform linux-x86_64-glibc does not provide",
             lambda: node_entry(node_file(), plat=next(p for p in no_tcp["platforms"] if p["id"] == host),
                                dec=no_tcp))
-    for other, os_name in (("android-arm64", "android"), ("qnx710-iosock-aarch64", "nto"),
-                           ("qnx710-iopkt-aarch64", "nto")):
-        refuses(f"a node for the {other} platform, whose port does not exist",
-                f"operating system {os_name}): its runtime is the posix port, which is written for Linux only",
-                lambda other=other: preflight(decl, other, ["declared-node"]))
+    refuses("a node for the android-arm64 platform, whose port does not exist",
+            "operating system android): its runtime is the posix port, which is written for Linux and "
+            "QNX Neutrino only",
+            lambda: preflight(decl, "android-arm64", ["declared-node"]))
+    for qnx in ("qnx710-iosock-aarch64", "qnx710-iopkt-aarch64"):
+        expect(f"a node is accepted for the {qnx} platform, whose port exists",
+               preflight(decl, qnx, ["declared-node"])[1] == [node_row])
+    registered = sorted(p.stem for p in wz_node.NODES.glob("*.toml"))
+    plain, nodes = lane_plan(decl, "android-arm64")
+    expect("the lane asks an Android platform for no node, whose port does not exist",
+           nodes == [] and "declared-node" not in plain and plain != [])
+    for with_port in ("qnx710-iosock-aarch64", "linux-aarch64-glibc"):
+        plain, nodes = lane_plan(decl, with_port)
+        expect(f"the lane asks {with_port} for every registered node and the artifacts that need none",
+               nodes == registered and registered != [] and "declared-node" not in plain)
+    refuses("a lane plan for a platform nobody declared", "no platform `nope`",
+            lambda: lane_plan(decl, "nope"))
     expect("a node is accepted for a Linux platform", preflight(decl, host, ["declared-node"])[1] == [node_row])
     node_rows = preflight(decl, host, ["declared-node"])[1]
     refuses("a node artifact with no declaration named", "name one with --node",
@@ -1340,6 +1374,14 @@ def main(argv: list[str]) -> int:
         else:
             print("\n".join(p["id"] for p in decl["platforms"]
                             if p["lane"] != "none" and "os_provides" in p and p["triple"] != host))
+        return 0
+    if len(argv) == 2 and argv[0] == "--lane-plan":
+        try:
+            plain, nodes = lane_plan(wz_config.load_decl(), argv[1])
+        except Refusal as err:
+            print(f"wz-package: REFUSED -- {err}", file=sys.stderr)
+            return 2
+        print("\n".join([f"artifact {a}" for a in plain] + [f"node {n}" for n in nodes]))
         return 0
     if argv == ["--selftest"]:
         try:

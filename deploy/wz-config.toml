@@ -129,7 +129,7 @@ sdk_kind = "yocto"
 # Read from the standard C library's interface, NOT run on a board.
 os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "raw-ethernet", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
 system_assumed = ["libgcc_s.so.1", "libm.so.6", "libc.so.6", "ld-linux-aarch64.so.1"]
-help = "An aarch64 Linux board on glibc 2.35 (a Yocto kirkstone image). Lane `build` is Layer C1sp read on a build machine with the glibc 2.35 SDK (Yocto 4.0.35): all three artifacts package twice with the same manifest bytes and verify, and each measures a glibc floor of GLIBC_2.34. Nothing was run on a board. The matching SDK is the glibc 2.35 one; the shared glibc 2.39 SDK builds what the board cannot run, which the measured floor would show."
+help = "An aarch64 Linux board on glibc 2.35 (a Yocto kirkstone image). Lane `build` is Layer C1sp read on a build machine with the glibc 2.35 SDK (Yocto 4.0.35): all three artifacts package twice with the same manifest bytes and verify, and each measures a glibc floor of GLIBC_2.34. The lane also packages each registered declared node (seven) and verifies it, the first twice, each at the same floor. Nothing was run on a board. The matching SDK is the glibc 2.35 one; the shared glibc 2.39 SDK builds what the board cannot run, which the measured floor would show."
 
 [[platform]]
 id = "android-arm64"
@@ -168,7 +168,7 @@ sdk_kind = "qnx-sdp"
 # Unsupported (see the help).
 os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
 system_assumed = ["libsocket.so.4", "libgcc_s.so.1", "libc.so.5", "libm.so.3"]
-help = "QNX 7.1 on aarch64le with the io-sock network stack. Lane `build` is Layer C1sp, read on a build machine with the QNX 7.1 SDP (GCC 8.3, the nightly toolchain with build-std): capi-pico, capi-c and ap-demo are packaged twice through the entry in the release profile, the manifests are the same bytes and verify, and each needs libsocket.so.4, libgcc_s.so.1, libc.so.5 and libm.so.3. Four crates.io packages are carried as copies under third-party/ to build here (socket2, tokio, ring, quinn-udp; each has a WZ-PATCH.md). The IPv6 group join, the keep-alive idle time and the peer credential answer Unsupported until libc declares them for io-sock (the headers have ipv6_mreq, TCP_KEEPIDLE and LOCAL_PEERCRED with struct xucred). ring uses the compile-time CPU features on QNX, not run-time detection. capi-pico stops the process if /dev/urandom cannot be read. Hosted CI has no SDP, so it reports the platform as not provisioned. Nothing was run on a board."
+help = "QNX 7.1 on aarch64le with the io-sock network stack. Lane `build` is Layer C1sp, read on a build machine with the QNX 7.1 SDP (GCC 8.3, the nightly toolchain with build-std): capi-pico, capi-c and ap-demo are packaged twice through the entry in the release profile, the manifests are the same bytes and verify, and each needs libsocket.so.4, libgcc_s.so.1, libc.so.5 and libm.so.3. Four crates.io packages are carried as copies under third-party/ to build here (socket2, tokio, ring, quinn-udp; each has a WZ-PATCH.md). The IPv6 group join, the keep-alive idle time and the peer credential answer Unsupported until libc declares them for io-sock (the headers have ipv6_mreq, TCP_KEEPIDLE and LOCAL_PEERCRED with struct xucred). ring uses the compile-time CPU features on QNX, not run-time detection. capi-pico stops the process if /dev/urandom cannot be read. Hosted CI has no SDP, so it reports the platform as not provisioned. The lane also packages each registered declared node (seven) and verifies it, the first twice; the node's runtime is the posix port, which reads /dev/urandom for entropy here. Nothing was run on a board."
 
 [[platform]]
 id = "qnx710-iopkt-aarch64"
@@ -185,7 +185,7 @@ sdk_kind = "qnx-sdp"
 # the same set as the io-sock row (IP_ADD_MEMBERSHIP and getifaddrs are declared in usr/include).
 os_provides = ["threads", "sockets-tcp", "sockets-udp", "multicast", "unix-sockets", "filesystem", "entropy", "wall-clock", "interface-list"]
 system_assumed = ["libsocket.so.3", "libgcc_s.so.1", "libc.so.5", "libm.so.3"]
-help = "QNX 7.1 on aarch64le with the io-pkt stack. Lane `build` is Layer C1sp, read on a build machine with the QNX 7.1 SDP exactly as for the io-sock row; the measured NEEDED set differs from that row in the network library only (libsocket.so.3). The IPv6 group join answers Unsupported. The io-pkt headers declare no IP_RECVTOS, so the QUIC transport does not request the IPv4 type of service on this stack (third-party/quinn-udp). Hosted CI has no SDP, so it reports the platform as not provisioned. Nothing was run on a board."
+help = "QNX 7.1 on aarch64le with the io-pkt stack. Lane `build` is Layer C1sp, read on a build machine with the QNX 7.1 SDP exactly as for the io-sock row; the measured NEEDED set differs from that row in the network library only (libsocket.so.3). The IPv6 group join answers Unsupported. The io-pkt headers declare no IP_RECVTOS, so the QUIC transport does not request the IPv4 type of service on this stack (third-party/quinn-udp). Hosted CI has no SDP, so it reports the platform as not provisioned. The lane also packages each registered declared node (seven) and verifies it, the first twice; the node's runtime is the posix port, which reads /dev/urandom for entropy here. Nothing was run on a board."
 
 # The one platform the entry has run on: the x86_64 Linux host the workspace is built and tested
 # on. `os_provides` is what the lanes exercise there (every facility, `raw-ethernet` with the
@@ -645,8 +645,9 @@ help = "The session node and the traffic driver, one executable driven by its ar
 
 # A node built from a declaration (deploy/nodes/<id>.toml, docs/target-build-contract.md 5b): the
 # package is not in the crates workspace, so its own manifest and binary are named, and the entry
-# takes the declaration as an input (`--node`). The posix port under it exists for Linux only, so a
-# platform of another operating system is refused by name before anything is built.
+# takes the declaration as an input (`--node`). The posix port under it exists for Linux and for QNX
+# Neutrino (both stacks, io-pkt and io-sock), so a platform of another operating system is refused by
+# name before anything is built.
 [[artifact]]
 id = "declared-node"
 package = "host-slot-node"
@@ -656,8 +657,8 @@ family = "declared-node"
 input = "node"
 manifest = "deploy/host-slot-node/Cargo.toml"
 bin = "declared-node"
-os = ["linux"]
-os_note = "its runtime is the posix port, which is written for Linux only"
+os = ["linux", "nto"]
+os_note = "its runtime is the posix port, which is written for Linux and QNX Neutrino only"
 help = "A fixed-memory node built from one node declaration: its endpoint, its documents, its budgets."
 
 [[role]]

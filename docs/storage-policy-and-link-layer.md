@@ -294,9 +294,9 @@ right place.
   the link, witnessed only on the target, and now has host tests (eight on the
   heap forms, nine on the slot forms, fifteen with the idle wait).
 - **`wz-runtime-posix`** supplies the host's seams over libc: a monotonic clock,
-  `getrandom`, the date, a UDP socket, the console and the image glue (a
-  `critical_section` that takes no lock, because one thread runs the program).
-  Linux only. It is the Zephyr profile's shape.
+  `getrandom` (a read of `/dev/urandom` on QNX Neutrino, whose 7.1 library has none), the date,
+  a UDP socket, the console and the image glue (a `critical_section` that takes no lock, because
+  one thread runs the program). Linux and QNX Neutrino. It is the Zephyr profile's shape.
 - **`deploy/host-slot-node`** is the node of `fixed_client.rs` with those seams
   under it: `#![no_std]`, `#![no_main]`, no `#[global_allocator]`. The link is the
   proof, as for the kit's image: a program that allocates anywhere does not

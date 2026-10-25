@@ -14112,8 +14112,10 @@ layer_c1st_abi_stamp() {
 # So the result a platform's `lane` states was read where the toolchain is, and the row's help says
 # where; the hosted run reports it as not provisioned.
 #
-# Each ready platform is packaged twice for every declared artifact; the two manifests must be the
-# same bytes, then the first is verified against its files.
+# Each ready platform is packaged twice for every artifact its operating system supports that needs
+# no declaration; the two manifests must be the same bytes, then the first is verified against its
+# files. Where the operating system has the declared-node artifact (Linux and QNX Neutrino), each
+# registered node is then packaged and verified too, the first twice (`wz_package.py --lane-plan`).
 layer_c1sp_cross_platforms() {
     command -v python3 >/dev/null 2>&1 || { echo "  C1sp FAIL: python3 is absent"; return 1; }
     local ready required id work rc=0
@@ -14125,25 +14127,47 @@ layer_c1sp_cross_platforms() {
         fi
     done
     [ -z "$ready" ] && { echo "  C1sp: no cross platform is provisioned on this machine"; return "$rc"; }
-    local arts=() art
-    while IFS= read -r art; do arts+=(--artifact "$art"); done < <(python3 -I - <<'PY'
-import sys
-sys.path.insert(0, "scripts/lib")
-import wz_config
-print("\n".join(a["id"] for a in wz_config.load_decl()["artifacts"]))
-PY
-)
+    # What each platform is asked for is the entry's own plan (`--lane-plan`): the artifacts its
+    # operating system supports that need no declaration, packaged twice with the same manifest bytes,
+    # and every registered node (a node artifact is made from one declaration, so each is a package of
+    # its own), each verified and the first also packaged twice. A platform is never asked for what the
+    # entry refuses it by name.
+    local arts nodes node first plan_line
     for id in $ready; do
+        arts=() nodes=()
+        while IFS= read -r plan_line; do
+            case "$plan_line" in
+                "artifact "*) arts+=(--artifact "${plan_line#artifact }") ;;
+                "node "*) nodes+=("${plan_line#node }") ;;
+            esac
+        done < <(python3 scripts/lib/wz_package.py --lane-plan "$id") || return 1
         work="$(mktemp -d)" || return 1
         if python3 scripts/lib/wz_package.py --platform "$id" "${arts[@]}" --out "$work/a" \
             && python3 scripts/lib/wz_package.py --platform "$id" "${arts[@]}" --out "$work/b" \
             && cmp "$work/a/wz-target-manifest.json" "$work/b/wz-target-manifest.json" \
             && python3 scripts/lib/wz_package.py --verify "$work/a"; then
-            echo "  C1sp OK: $id"
+            echo "  C1sp OK: $id (${#nodes[@]} node(s) to follow)"
         else
             echo "  C1sp FAIL: $id did not package, reproduce or verify"
             rc=1
         fi
+        first=1
+        for node in "${nodes[@]}"; do
+            if python3 scripts/lib/wz_package.py --platform "$id" --artifact declared-node --node "$node" \
+                --out "$work/n-$node" \
+                && python3 scripts/lib/wz_package.py --verify "$work/n-$node" \
+                && { [ "$first" -eq 0 ] || {
+                    python3 scripts/lib/wz_package.py --platform "$id" --artifact declared-node \
+                        --node "$node" --out "$work/n2-$node" \
+                        && cmp "$work/n-$node/wz-target-manifest.json" "$work/n2-$node/wz-target-manifest.json"
+                }; }; then
+                echo "  C1sp OK: $id node $node"
+            else
+                echo "  C1sp FAIL: $id node $node did not package, reproduce or verify"
+                rc=1
+            fi
+            first=0
+        done
         rm -rf "$work"
     done
     return "$rc"

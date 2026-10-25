@@ -23,7 +23,7 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::session_drive::LinkReadiness;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 
-use crate::net::{errno, set_flag, sockaddr, PosixNetError};
+use crate::net::{errno, set_close_on_exec, set_flag, set_nonblocking, sockaddr, PosixNetError};
 
 /// The most parts one write gathers: a length and its batch, with room to spare.
 const MAX_PARTS: usize = 4;
@@ -123,13 +123,7 @@ impl PosixTcpListener {
     /// [`StreamListen::local`]).
     pub fn bind(addr: [u8; 4], port: u16) -> Result<Self, PosixNetError> {
         // SAFETY: plain system call with value arguments.
-        let fd = unsafe {
-            libc::socket(
-                libc::AF_INET,
-                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
-                0,
-            )
-        };
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
         if fd < 0 {
             return Err(PosixNetError::Socket(errno()));
         }
@@ -138,6 +132,8 @@ impl PosixTcpListener {
             fd,
             local: (addr, port),
         };
+        // The listener never waits: a pass of the node's loop asks, and nothing queued is an answer.
+        set_nonblocking(fd, true).map_err(PosixNetError::NonBlocking)?;
         set_flag(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR).map_err(PosixNetError::ReuseAddr)?;
         let at = sockaddr(addr, port);
         // SAFETY: `at` is a live `sockaddr_in` of the length passed.
@@ -169,16 +165,8 @@ impl StreamListen for PosixTcpListener {
 
     fn accept(&self) -> Result<Option<PosixTcpSocket>, LinkOpenError> {
         // SAFETY: a null address and length ask for no peer name; the descriptor is this
-        // listener's own. The accepted socket is close-on-exec and blocking, as a dialled one is:
-        // its reads are `MSG_DONTWAIT` and its writes wait for the kernel.
-        let fd = unsafe {
-            libc::accept4(
-                self.fd,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-                libc::SOCK_CLOEXEC,
-            )
-        };
+        // listener's own.
+        let fd = unsafe { libc::accept(self.fd, core::ptr::null_mut(), core::ptr::null_mut()) };
         if fd < 0 {
             return match errno() {
                 // Nothing waits, or the connection gave up before it was taken; the accept(2)
@@ -211,8 +199,13 @@ impl StreamListen for PosixTcpListener {
             peer: ([0; 4], 0),
         };
         // A connection reset between the accept and these calls is one that gave up: nothing to
-        // take, and the close above is the answer its peer already has.
-        if set_flag(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY).is_err() {
+        // take, and the close above is the answer its peer already has. The accepted socket is
+        // close-on-exec and blocking, as a dialled one is: its reads are `MSG_DONTWAIT` and its
+        // writes wait for the kernel.
+        if set_close_on_exec(fd).is_err()
+            || set_nonblocking(fd, false).is_err()
+            || set_flag(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY).is_err()
+        {
             return Ok(None);
         }
         let (Ok(local), Ok(peer)) = (
@@ -267,7 +260,8 @@ impl StreamSocket for PosixTcpSocket {
             // SAFETY: an all-zero `msghdr` is a valid one with no name and no control data.
             let mut msg: libc::msghdr = unsafe { core::mem::zeroed() };
             msg.msg_iov = vecs[first..count].as_mut_ptr();
-            msg.msg_iovlen = count - first;
+            // `usize` on Linux, `i32` on Neutrino: at most the few parts of one frame.
+            msg.msg_iovlen = (count - first) as _;
             // SAFETY: every iovec names a live slice of `parts` for its length. MSG_NOSIGNAL: a
             // peer that closed the stream is an error here, not a SIGPIPE.
             let sent = unsafe { libc::sendmsg(self.fd, &msg, libc::MSG_NOSIGNAL) };

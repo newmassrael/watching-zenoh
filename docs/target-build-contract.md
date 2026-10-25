@@ -548,9 +548,19 @@ with the node's id and the SHA-256 of the declaration file. The manifest's `prov
 from the file (role `declared-node`), and what the node asks of a device is the base plus the
 sockets its endpoint's scheme uses. `--verify` resolves the declaration again, so a declaration
 edited after the build, a file built from another declaration, or a file built with other features
-is a finding. The artifact row lists the operating systems its port exists for (`os`), and the
-posix port is Linux only (`wz-runtime-posix` is empty on another OS): a QNX or Android platform
-row is refused by name, with the reason, before anything is built.
+is a finding. The artifact row lists the operating systems its port exists for (`os`): the posix
+port exists for Linux and for QNX Neutrino (both stacks, io-pkt and io-sock; `wz-runtime-posix` is
+empty on any other OS), so an Android platform row is refused by name, with the reason, before
+anything is built. The Neutrino port differs in what the C library lacks: `errno` is read through
+`__get_errno_ptr`, the entropy is a read of `/dev/urandom` (the 7.1 library has no `getrandom` and
+no `getentropy`, so a node whose random service is not running refuses to start and does not guess),
+a socket is made non-blocking by `fcntl` and an accepted connection is made blocking and
+close-on-exec by it (the one path for both kernels, since Neutrino has no `SOCK_NONBLOCK` or
+`accept4`), a group is joined with `ip_mreq`, and a socket address carries its length. Layer C1sp
+reads the Linux aarch64 platform (the glibc 2.35 Yocto SDK) and both QNX platforms (the 7.1 SDP)
+with every registered node; each package is verified and the first of a platform is made twice with
+the same manifest bytes. Nothing was run on a board: a node packaged for a QNX or aarch64 Linux
+platform is a built and verified file, and the run against a stock router on the device is owed.
 
 **The structure of an entity (owner, 2026-10-25: cost ignored, the textbook one).** An entity is a
 kind, a key and a BEHAVIOUR, and the behaviours are a closed vocabulary stated as data: a

@@ -31,6 +31,8 @@ pub enum PosixNetError {
     ReceiveTimeout(c_int),
     /// `bind` failed with this `errno`.
     Bind(c_int),
+    /// `fcntl(F_SETFL, O_NONBLOCK)` on a listening socket failed with this `errno`.
+    NonBlocking(c_int),
     /// `setsockopt(SO_REUSEADDR)` failed with this `errno`.
     ReuseAddr(c_int),
     /// `setsockopt(SO_REUSEPORT)` failed with this `errno`.
@@ -109,10 +111,19 @@ impl Drop for FdReadiness {
 }
 
 /// The calling thread's `errno`.
+#[cfg(target_os = "linux")]
 pub(crate) fn errno() -> c_int {
     // SAFETY: `__errno_location` returns the address of the calling thread's `errno`, valid for
     // the thread's life.
     unsafe { *libc::__errno_location() }
+}
+
+/// The calling thread's `errno`.
+#[cfg(target_os = "nto")]
+pub(crate) fn errno() -> c_int {
+    // SAFETY: `__get_errno_ptr` is what Neutrino's `errno` macro reads: the address of the calling
+    // thread's `errno`, valid for the thread's life.
+    unsafe { *libc::__get_errno_ptr() }
 }
 
 /// Bound every blocking read of `fd` by `ms` milliseconds (`SO_RCVTIMEO`): the `errno` when the
@@ -163,8 +174,44 @@ pub(crate) fn set_flag(fd: c_int, level: c_int, name: c_int) -> Result<(), c_int
     set_option(fd, level, name, &(1 as c_int))
 }
 
+/// Make `fd` non-blocking or blocking (`fcntl(F_SETFL, O_NONBLOCK)`): the `errno` when the kernel
+/// refuses. A socket is made this way and not by a flag of `socket` or `accept4`, which Neutrino
+/// does not have: the one call is the same on both kernels, and a connection a non-blocking
+/// listener hands over is made blocking here whether the kernel's accept passed the flag on (the
+/// BSD one does) or not (Linux's).
+pub(crate) fn set_nonblocking(fd: c_int, on: bool) -> Result<(), c_int> {
+    // SAFETY: plain system call with value arguments.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(errno());
+    }
+    let wanted = if on {
+        flags | libc::O_NONBLOCK
+    } else {
+        flags & !libc::O_NONBLOCK
+    };
+    // SAFETY: plain system call with value arguments.
+    if wanted != flags && unsafe { libc::fcntl(fd, libc::F_SETFL, wanted) } < 0 {
+        return Err(errno());
+    }
+    Ok(())
+}
+
+/// Close `fd` when the process starts another program (`FD_CLOEXEC`): the `errno` when the kernel
+/// refuses.
+pub(crate) fn set_close_on_exec(fd: c_int) -> Result<(), c_int> {
+    // SAFETY: plain system call with value arguments.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(errno());
+    }
+    Ok(())
+}
+
 pub(crate) fn sockaddr(addr: [u8; 4], port: u16) -> libc::sockaddr_in {
     libc::sockaddr_in {
+        // Neutrino's socket address, as the BSDs', carries its own length.
+        #[cfg(target_os = "nto")]
+        sin_len: size_of::<libc::sockaddr_in>() as u8,
         sin_family: libc::AF_INET as libc::sa_family_t,
         sin_port: port.to_be(),
         sin_addr: libc::in_addr {
@@ -239,14 +286,16 @@ impl PosixUdpSocket {
     /// Join `group` on the interface that holds `interface` (the unspecified address: the one the
     /// kernel's routing picks for the group).
     pub fn join_group(&self, group: [u8; 4], interface: [u8; 4]) -> Result<(), PosixNetError> {
-        let request = libc::ip_mreqn {
+        // `ip_mreq`, which every kernel here takes and Neutrino has no wider form of: the group and
+        // the address of the interface (the kernel's choice when it is the unspecified one). Linux's
+        // `ip_mreqn` is this plus an interface index this code never set.
+        let request = libc::ip_mreq {
             imr_multiaddr: libc::in_addr {
                 s_addr: u32::from_ne_bytes(group),
             },
-            imr_address: libc::in_addr {
+            imr_interface: libc::in_addr {
                 s_addr: u32::from_ne_bytes(interface),
             },
-            imr_ifindex: 0,
         };
         set_option(self.fd, libc::IPPROTO_IP, libc::IP_ADD_MEMBERSHIP, &request)
             .map_err(PosixNetError::Membership)
@@ -410,6 +459,36 @@ mod tests {
             PosixUdpSocket::bind(LOOPBACK, 0).expect("a first socket"),
             PosixUdpSocket::bind(LOOPBACK, 0).expect("a second socket"),
         )
+    }
+
+    #[test]
+    fn a_descriptor_is_made_non_blocking_and_blocking_again_and_each_is_read_back() {
+        let socket = PosixUdpSocket::bind(LOOPBACK, 0).expect("a socket");
+        let flags = |fd| unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        assert_eq!(
+            flags(socket.fd()) & libc::O_NONBLOCK,
+            0,
+            "a fresh socket blocks"
+        );
+        set_nonblocking(socket.fd(), true).expect("non-blocking");
+        assert_ne!(flags(socket.fd()) & libc::O_NONBLOCK, 0);
+        set_nonblocking(socket.fd(), true).expect("a second time is no change");
+        set_nonblocking(socket.fd(), false).expect("blocking");
+        assert_eq!(flags(socket.fd()) & libc::O_NONBLOCK, 0);
+        assert_eq!(
+            set_nonblocking(-1, true),
+            Err(libc::EBADF),
+            "a descriptor that is not one is the kernel's refusal, with its errno"
+        );
+    }
+
+    #[test]
+    fn a_descriptor_is_closed_on_exec_and_a_bad_one_is_refused() {
+        let socket = PosixUdpSocket::bind(LOOPBACK, 0).expect("a socket");
+        set_close_on_exec(socket.fd()).expect("close-on-exec");
+        let flags = unsafe { libc::fcntl(socket.fd(), libc::F_GETFD) };
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+        assert_eq!(set_close_on_exec(-1), Err(libc::EBADF));
     }
 
     #[test]

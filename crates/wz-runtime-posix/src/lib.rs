@@ -28,11 +28,14 @@
 //! The profile is single-threaded by construction, and the `critical_section` implementation says
 //! so: it takes no lock, because nothing else runs.
 //!
-//! Linux only: the socket reads `errno` through glibc's `__errno_location`, and the entropy is
-//! `getrandom(2)`. On another OS this crate is empty, so a workspace-wide build there does not
-//! stop on it; a port names its own `errno` and entropy calls here.
+//! Linux and QNX Neutrino only. Two OS calls differ between them and are named once each: `errno`
+//! (glibc's `__errno_location`, Neutrino's `__get_errno_ptr`) and the entropy (`getrandom(2)`;
+//! Neutrino 7.1's C library has none, so `/dev/urandom` is read). A socket the two make alike is
+//! made by one code path, and the one thing Linux has that Neutrino does not (`SOCK_NONBLOCK`,
+//! `accept4`) is two calls where Linux has one. On another OS this crate is empty, so a
+//! workspace-wide build there does not stop on it; a port names its own calls here.
 #![no_std]
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "nto"))]
 
 #[cfg(test)]
 extern crate std;
@@ -79,9 +82,9 @@ impl ClockSource for PosixClock {
 }
 
 /// The session core's [`EntropySource`](wz_session_core::entropy::EntropySource) over
-/// `getrandom(2)`: the kernel's CSPRNG. A call that returns fewer bytes than asked is asked again
-/// for the rest; one that fails, fails the fill -- the cookie nonce and the signing key must never
-/// be made of whatever the buffer held.
+/// `getrandom(2)` (on Neutrino, which has none, a read of `/dev/urandom`): the kernel's CSPRNG. A
+/// call that returns fewer bytes than asked is asked again for the rest; one that fails, fails the
+/// fill -- the cookie nonce and the signing key must never be made of whatever the buffer held.
 #[derive(Clone, Copy, Default)]
 pub struct PosixEntropy;
 
@@ -93,15 +96,41 @@ impl wz_session_core::entropy::EntropySource for PosixEntropy {
         let mut filled = 0;
         while filled < buf.len() {
             let rest = &mut buf[filled..];
-            // SAFETY: `rest` is live and writable for its whole length.
-            let got = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
-            if got <= 0 {
+            let got = random_bytes(rest);
+            if got == 0 {
                 return Err(wz_session_core::entropy::EntropyUnavailable);
             }
-            filled += got as usize;
+            filled += got;
         }
         Ok(())
     }
+}
+
+/// Fill the front of `rest` from the kernel's CSPRNG: how many bytes it gave, none when it could
+/// not.
+#[cfg(target_os = "linux")]
+fn random_bytes(rest: &mut [u8]) -> usize {
+    // SAFETY: `rest` is live and writable for its whole length.
+    let got = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
+    usize::try_from(got).unwrap_or(0)
+}
+
+/// Neutrino 7.1's C library has no `getrandom` and no `getentropy`; its random service answers
+/// reads of `/dev/urandom`. The descriptor is opened for the read and closed after it, so the node
+/// holds none between fills, and a service that is not running makes the fill fail, which is
+/// refused and not guessed.
+#[cfg(target_os = "nto")]
+fn random_bytes(rest: &mut [u8]) -> usize {
+    // SAFETY: the path is a NUL-terminated literal; the descriptor is this call's own.
+    let fd = unsafe { libc::open(c"/dev/urandom".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return 0;
+    }
+    // SAFETY: `rest` is live and writable for its whole length; `fd` is open.
+    let got = unsafe { libc::read(fd, rest.as_mut_ptr().cast(), rest.len()) };
+    // SAFETY: `fd` is this call's own descriptor, closed exactly once.
+    unsafe { libc::close(fd) };
+    usize::try_from(got).unwrap_or(0)
 }
 
 /// The session core's [`EpochSource`](wz_session_core::epoch::EpochSource) over
