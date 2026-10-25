@@ -7046,7 +7046,10 @@ fn awaiting_options() -> QueryOptions {
 }
 
 /// The peer's `ResponseFinal` for `rid`, delivered as the drive loop delivers it, and drained.
-#[cfg(feature = "query-get")]
+///
+/// A final is a message of its own to the build (`codec-response-final`): a build that asks and
+/// does not decode one never sees a query end by it, so what needs one is gated on both.
+#[cfg(all(feature = "query-get", feature = "codec-response-final"))]
 fn finish_query(session: &TokioSession, rid: u64) {
     use wz_codecs::response_final::ResponseFinal;
     let response_final = ResponseFinal {
@@ -7090,7 +7093,7 @@ fn a_querier_at_its_pending_bound_refuses_the_next_query_and_registers_nothing()
 }
 
 /// A place comes back when the query's final arrives, and the next query is granted.
-#[cfg(feature = "query-get")]
+#[cfg(all(feature = "query-get", feature = "codec-response-final"))]
 #[test]
 fn a_query_ending_by_its_final_gives_its_place_back() {
     let (session, _driver) = build_session();
