@@ -9575,8 +9575,76 @@ mod tests {
         fn shared<T: Send + Sync>() {}
         shared::<Tables>();
         shared::<PlainRwLock<Tables>>();
+        shared::<RouterForwarder>();
         shared::<Hosted<HostedQueryHandler>>();
         shared::<Hosted<HostedSubscriberHandler>>();
+    }
+
+    /// The test phase 3 could not write until the tables were one value under one guard: many
+    /// faces' threads into one router at once. Eight publisher faces forward 200 Puts each while a
+    /// ninth thread keeps registering, declaring on and deregistering a face of its own (a writer
+    /// among the readers); every Put reaches the subscriber, the count the data path keeps is
+    /// exact, and every thread finishes (a guard held across a write would wait for itself, so a
+    /// thread that does not report in a minute fails the test and does not hang it).
+    #[test]
+    fn many_faces_threads_route_into_one_router_at_once() {
+        const PUBLISHERS: u64 = 8;
+        const PUTS: usize = 200;
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)));
+        let (subscriber, sink) = face(zid(0xCC), WIRE_CLIENT);
+        fwd.register(FaceId(0), &subscriber);
+        forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
+        let mut publishers = Vec::new();
+        for p in 1..=PUBLISHERS {
+            let (actions, _sink) = face(zid(0xA0 + p as u8), WIRE_CLIENT);
+            fwd.register(FaceId(p), &actions);
+            publishers.push(FaceId(p));
+        }
+        sink.reset();
+        let (done, finished) = std::sync::mpsc::channel();
+        let mut threads = Vec::new();
+        for id in publishers {
+            let fwd = Arc::clone(&fwd);
+            let done = done.clone();
+            threads.push(std::thread::spawn(move || {
+                for _ in 0..PUTS {
+                    let put = wz_session_core::push_build::build_push_literal("demo/data", b"x")
+                        .expect("build push");
+                    forward_one(&fwd, id, NetworkMessage::Push(Box::new(put)));
+                }
+                done.send(()).expect("the test is waiting");
+            }));
+        }
+        {
+            let fwd = Arc::clone(&fwd);
+            let done = done.clone();
+            threads.push(std::thread::spawn(move || {
+                for round in 0..PUTS as u64 {
+                    let id = FaceId(100 + round % 4);
+                    let (actions, _sink) = face(zid(0xE0 + (round % 4) as u8), WIRE_CLIENT);
+                    fwd.register(id, &actions);
+                    forward_one(&fwd, id, declare_sub("demo/other"));
+                    fwd.deregister(id);
+                }
+                done.send(()).expect("the test is waiting");
+            }));
+        }
+        drop(done);
+        for _ in 0..threads.len() {
+            finished
+                .recv_timeout(Duration::from_secs(60))
+                .expect("every thread finishes: a thread that does not is waiting for a guard");
+        }
+        for t in threads {
+            t.join().expect("a thread of the router finishes");
+        }
+        let total = PUBLISHERS as usize * PUTS;
+        assert_eq!(fwd.data_seen(), total, "every Put was counted once");
+        assert_eq!(
+            sink.frame_count(),
+            total,
+            "every Put reached the subscriber's link"
+        );
     }
 
     /// Calls of one hosted handler from different threads are serialized, as an `FnMut` needs: a

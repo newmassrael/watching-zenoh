@@ -146,12 +146,14 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
      (`trees_dirty`) are inside the hats and go with the tables in 3c.
    - **3c. The tables behind locks (done, round 3651), one lock per table.** Not the one
      `RwLock<Tables>` this step was first written as; see "3c, what it did and what it cost" below for why, and
-     3e for the form it is still to reach. Every table is an `Arc<PlainRwLock<_>>` and the three views that
-     share `faces` hold the handle.
-   - **3e. One guard per forward (not done).** The data path takes the tables once, as upstream's `zread!`
-     does, and passes the guard down; today it takes 18 read locks per forward.
+     3e for the form it reached. Every table was an `Arc<PlainRwLock<_>>` and the three views that share
+     `faces` held the handle. 3e replaced that form.
+   - **3e. One guard per forward (done).** The tables are one value, `Tables`, behind one `PlainRwLock`; the
+     data path takes it once per message, as upstream's `zread!` does, and passes it down. See "3e, what it did".
    - **3d. The handlers** of local subscribers and queryables (`Send`), and the forwarder's `Send + Sync`
-     proof, with the test of many faces' threads into one router that the earlier steps could not write.
+     proof, with the test of many faces' threads into one router that the earlier steps could not write
+     (done, with 3e: the one value under one guard cannot be `Sync` with a handler that is not `Send` in it, so
+     the two landed together).
 
    **3a, what it did.** `Credit`'s fields are each a lock or an atomic: `gated` and `holding` are
    `PlainMutex`es, the held and held-bytes counts are a new `Gauge` (`counter.rs`: added to and subtracted from,
@@ -259,6 +261,53 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
    keepalive emission cost 11 to 18 microseconds where it had cost 6 to 8). The second run of the same head
    passed all six in 339 seconds, as did the control. One failure in two runs, not reproduced, on a host that
    was visibly loaded: recorded here and not attributed.
+   **3e, what it did.** `Tables` is one value (the hats, the partition, the faces table, the joined links, the
+   hosts' handlers, the future stores) behind one `PlainRwLock`, and its fields are plain: the interior
+   mutability 3c put in each table is gone, and with it the 18 read locks a forward took and the
+   `SharedTable` seam the shared route helpers needed (they take plain references again, and the peer forwarder
+   passes the `.borrow()` of its own cell). Every method that reads or writes a table is a method of
+   `OnTables<T>`, the forwarder with its tables as the caller holds them: `T` is anything that derefs to
+   `Tables`, so a reader is available on a read guard and on a write guard, and a writer says `T: DerefMut` and
+   takes `&mut self`. That makes the rule that a method holding the write guard must not take the read guard a
+   type error and not a deadlock: a writer calls every reader through its own `self`, and a reader can call no
+   writer. The public methods of `RouterForwarder` take the guard they need (`on_tables`, `on_tables_mut`) and
+   hand it to the method of the same name. Where a store of the tables is written while another table is read
+   (the future stores, which are written while the hats are folded), the hats are read by a function of the hats
+   alone (`merged_qabl_info_in`, `any_sub_matches_in`) and the two fields are borrowed apart. `forward` is one
+   method per frame that takes a guard per message and for the kind of work it is: a topology message, a
+   declaration and an interest take the write guard and run the ingress check under it; a Push, a Request and a
+   Response take the read guard; the head of the frame (the egress drain and the face's tier) takes one. A
+   frame of declarations does not hold the tables against the data between them, since the guard of one message
+   is dropped before the next is taken. A handler a host registered runs under the read guard of the route that
+   found it, so it may read the router (the admin views do) and must not call a method that writes the tables.
+   What it asked beside the tables: the hosts' handlers are `Send` (`HostedQueryHandler`,
+   `HostedSubscriberHandler`, held as `Hosted<H>`, a `PlainMutex` that serializes the calls of one handler
+   across threads and refuses a call from inside the handler, which would wait for itself; the peer forwarder
+   keeps its `Rc<RefCell<_>>` handlers), and so the demo's router host holds its config and its queue of config
+   writes behind `Arc<PlainMutex<_>>` where it held `Rc<RefCell<_>>`, and answers the lifecycle queries through
+   a shared answerer (`host_session_lifecycle_shared`). The views and the node locators read a graph through
+   a `NetHandle` (`TablesNet` names a region and reads it through the tables when asked). The forwarder as a
+   whole is `Send + Sync` now, which a test holds, and a test of eight faces' threads and a writer into one
+   router (a guard held across a write fails it within a minute and does not hang it) is the one 3a to 3c could
+   not write. Tests that held a guard across a write of their own deadlocked and were fixed (one did). The
+   count guards of the eight `router_forward` arms moved by +3: the shared-table witness left and four
+   ungated witnesses came. Measured on the one-core instrument as for 3c (a control at the 3c head beside the
+   new tree, alternating, three runs, least of 25 repetitions of 20000, ns, new then control): one subscriber
+   drop 618, 525, 535 against 623, 618, 642; block 718, 628, 621 against 743, 740, 760; sixteen drop 4574,
+   4114, 4083 against 4420, 4341, 4468; block 5372, 4820, 4843 against 5138, 5059, 5192. For one subscriber the
+   new tree is faster in all three runs, by 5 to 140 ns, which is where the 3c cost (58 to 78 ns) was
+   measured; for sixteen it read slower by 150 to 230 in the first run and faster by 230 to 390 in the other
+   two, and the host's spread (the control's own runs differ by 50 to 150 ns) is as large as that change, so the
+   sixteen-subscriber figure is recorded and not read as a gain. Bytes and allocations did not move (569, 708,
+   7454, 8718; 9, 11, 69, 86). The tables are taken twice for a Put (the head of the frame and the message)
+   where they were read 18 times, by construction: no counter was put on the call sites this time. The locks
+   that remain on a forward are the ones outside the tables (the route memo's, the interceptor chains'), which
+   3e does not touch and which phase 4 measures. Layer E7s on pc2, the new tree against its control run after it (cost
+   table, microseconds per message at 256, 1024, 2048 subscribers without churn and 256, 1024 with):
+   12.7, 14.8, 15.9, 17.0, 18.7 against 18.9, 19.0, 19.0, 12.9, 17.8; the knee table (lateness in
+   milliseconds at 1024, 1536 and 2048 sessions, the sessions ended at 2048) 1852, 5589, 8379 (456) against
+   2229, 3885, 7256 (378). No direction beyond the spread of the table, six of six pass in both, 963 sessions
+   were ended by the router at 32 hogs and no face went down in either.
 4. **A task per face.** The accept loop already spawns a face's drive onto the runtime when its forwarder is
    `Send + Sync` (`SpawnedFaces`, `drive_face_shared`); the router takes that path. The closure watcher
    (`watch_room`) becomes the wake list of a destination, and a gated face awaits its destination's room.
