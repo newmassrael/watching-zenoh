@@ -64,7 +64,7 @@ use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
 
 use crate::app_layer::{NoReplies, SessionEvents, SlotApp, SlotDispatch};
-use crate::connect_manager::{EndpointSource, PeerStore};
+use crate::connect_manager::{DeclaredPeer, EndpointSource, PeerStore};
 use crate::latest::{LatestRef, LatestSink};
 use crate::slot_client::{
     register_answer, register_document, register_latest, Answer, Declaration, DeclarationKind,
@@ -853,6 +853,8 @@ impl NodeApp for () {}
 pub const EXIT_RUNTIME_TWICE: i32 = 3;
 /// The exit code of a run that could not start because the observer could not be built.
 pub const EXIT_OBSERVER: i32 = 3;
+/// The exit code of a run that could not start because a peer the build declares could not be held.
+pub const EXIT_DECLARED_PEER: i32 = 4;
 
 /// A client node: everything the loop needs to run, handed over by the platform once.
 ///
@@ -908,6 +910,11 @@ pub struct ClientNode<
     pub entropy: fn() -> E,
     /// The endpoints it dials.
     pub endpoints: &'static dyn EndpointSource,
+    /// The peers it holds by their zid beside the endpoints, declared when the build was made
+    /// (decision D7 of `docs/session-lifecycle-intent.md`, the third transport): empty for a node
+    /// that holds none. Holding one needs a dialer that verifies the node it dialled for and room
+    /// for it (`MAX_PEER_NODES`); a build that has neither stops at start and says which peer.
+    pub peers: &'static [DeclaredPeer],
     /// What it answers.
     pub documents: &'a [Document],
     /// What it subscribes to, and what it answers from that ([`Entities::NONE`] for a node that
@@ -967,6 +974,7 @@ where
             batch_size,
             entropy,
             endpoints,
+            peers,
             documents,
             entities,
             layer,
@@ -1019,6 +1027,14 @@ where
             SessionTimeouts::spec_defaults(),
             declared.all(),
         );
+        // The peers the build declares are held from the first tick. A node that silently lost
+        // one it was built to hold would run and be wrong: stop, and say which.
+        if let Err(why) = node.hold_declared(peers, clock.now_us() / 1000) {
+            port.log(format_args!(
+                "wz: FAIL - a declared peer cannot be held: {why:?}"
+            ));
+            return EXIT_DECLARED_PEER;
+        }
         let mut plane = plane.start(PlaneContext {
             runtime: runtime.clone(),
             observer,

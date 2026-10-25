@@ -41,7 +41,7 @@ use wz_runtime_posix::stream::PosixTcpListener;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps::{MAX_QUERYABLES, MAX_REPLY_PAYLOAD_BYTES, MAX_SUBSCRIPTIONS};
 use wz_session_core::sample_kind::SampleKind;
-use wz_session_mcu::connect_manager::StaticEndpoints;
+use wz_session_mcu::connect_manager::{DeclaredPeer, StaticEndpoints};
 #[cfg(feature = "multicast")]
 use wz_session_mcu::group_drive::MulticastSlots;
 use wz_session_mcu::latest::{Latest, LatestCells, LatestRef, LatestWatch};
@@ -71,8 +71,8 @@ mod declared {
 use declared::QUERIED;
 use declared::{
     ACCEPTS, CELLS, DECLARATION_SHA256, DIALED, DOCS, DOCUMENTS, GROUPS, LISTEN, LISTENS, MIRRORED,
-    MIRRORS, NODE_ID, PUBLISHED, PUBLISHERS, QUERIERS, SAMPLE_MAX, SESSIONS, SUBSCRIBERS,
-    SUBSCRIPTIONS, TLS, TOKENS, TOKEN_KEYS,
+    MIRRORS, NODE_ID, PEERS, PEER_NODES, PUBLISHED, PUBLISHERS, QUERIERS, SAMPLE_MAX, SESSIONS,
+    SUBSCRIBERS, SUBSCRIPTIONS, TLS, TOKENS, TOKEN_KEYS,
 };
 #[cfg(feature = "multicast")]
 use declared::{GROUP, GROUP_ADDR, GROUP_PORT, GROUP_TTL, MEMBERS};
@@ -242,6 +242,26 @@ static BODY: BodyPool<DOC_MAX> = BodyPool::new();
 /// The endpoints the node dials: the declaration's, checked against a locator row when this is
 /// built. A node that only listens dials none.
 static ENDPOINTS: StaticEndpoints = StaticEndpoints::new(&DIALED);
+
+/// The peers the node holds by their zid beside the router it dials, from the declaration (decision
+/// D7 of `docs/session-lifecycle-intent.md`, the third transport): no verb asks for them.
+static PEER_TABLE: [DeclaredPeer; PEERS] = peer_table();
+
+const fn peer_table() -> [DeclaredPeer; PEERS] {
+    let mut table = [DeclaredPeer {
+        zid: [0; 16],
+        locator: "",
+    }; PEERS];
+    let mut at = 0;
+    while at < PEERS {
+        table[at] = DeclaredPeer {
+            zid: PEER_NODES[at].0,
+            locator: PEER_NODES[at].1,
+        };
+        at += 1;
+    }
+    table
+}
 
 /// The declarations the node sends on each session, in the order of their registrations.
 static DECLARED: Declared<DECLS> = Declared::new();
@@ -515,6 +535,7 @@ fn run() -> i32 {
         batch_size: BATCH_SIZE,
         entropy: || PosixEntropy,
         endpoints: &ENDPOINTS,
+        peers: &PEER_TABLE,
         documents: &documents[..taken],
         entities: Entities {
             subscriptions: &subscribed,

@@ -276,6 +276,29 @@ pub enum NodeRefusal {
     NoDialableLocator,
 }
 
+/// A peer a build declares: the node it holds by its zid, and the locator it may be found at.
+///
+/// The intent's baseline of decision D6, the third transport of decision D7: a node whose peers
+/// are known when it is built holds them from its first tick, with no verb to ask. The locator is
+/// a hint of where the zid may be and not a claim that it is (decision D3): every dial of it is
+/// made for the zid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeclaredPeer {
+    /// The node, by its zid.
+    pub zid: DirectoryZid,
+    /// Where it may be reached.
+    pub locator: &'static str,
+}
+
+/// Why a declared peer could not be held at start, and which one (its index in the list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclaredRefusal {
+    /// The directory refused the peer's locator (a row that does not fit).
+    Locator(usize, DirectoryRefusal),
+    /// The peer could not be held as a node ([`NodeRefusal`]).
+    Node(usize, NodeRefusal),
+}
+
 /// The request to hold a node by its zid (a lifecycle `open`, decision D6), made where the
 /// manager is not: a query a node answers is served beside its loop and not inside it.
 ///
@@ -918,6 +941,30 @@ impl<D: Dialer> ConnectManager<D> {
             // The table holds as many peers as the rows do.
             let _ = planner.open(key, ports, next_id, emit);
         });
+        Ok(())
+    }
+
+    /// Hold each peer a build declares, as if its locator had been confirmed `Declared` and the
+    /// node opened by its zid, in the order they are listed. The first that cannot be held stops
+    /// the list and is named, since a node that silently lost a peer it was built to hold would
+    /// run and be wrong; the ones before it stay held.
+    pub fn hold_declared(
+        &mut self,
+        peers: &[DeclaredPeer],
+        now_ms: u64,
+    ) -> Result<(), DeclaredRefusal> {
+        for (index, peer) in peers.iter().enumerate() {
+            self.confirm_locator(
+                peer.zid,
+                peer.locator,
+                LocatorSource::Declared,
+                now_ms,
+                Lifetime::Permanent,
+            )
+            .map_err(|why| DeclaredRefusal::Locator(index, why))?;
+            self.open_node(peer.zid, now_ms)
+                .map_err(|why| DeclaredRefusal::Node(index, why))?;
+        }
         Ok(())
     }
 
@@ -1765,6 +1812,46 @@ mod tests {
             "a rewrite of the list leaves the node"
         );
         std::assert!(m.dialer().hang_ups.iter().all(|s| !s.ends_with('@')));
+    }
+
+    /// A build that declares its peers holds each by its zid from the call, dialled at the locator
+    /// it declared and FOR the zid, with no verb asked; the first it cannot hold is named by its
+    /// place in the list.
+    #[test]
+    fn the_peers_a_build_declares_are_held_with_no_verb_and_the_first_refused_is_named() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        let peers = [
+            DeclaredPeer {
+                zid: NODE_A,
+                locator: "udp/10.0.0.9:7447",
+            },
+            DeclaredPeer {
+                zid: NODE_B,
+                locator: "serial//dev/ttyS0",
+            },
+        ];
+        if !nodes_asked_for() {
+            // A build with no room for a node has no row for its hint either: the first peer is
+            // refused, by its place, at one or the other.
+            std::assert!(matches!(
+                m.hold_declared(&peers[..1], 0),
+                Err(DeclaredRefusal::Locator(0, _) | DeclaredRefusal::Node(0, NodeRefusal::NoRoom))
+            ));
+            return;
+        }
+        std::assert_eq!(m.hold_declared(&peers[..1], 0), Ok(()));
+        let made: Vec<(String, DirectoryZid)> =
+            m.dialer().dials_for.borrow_mut().drain(..).collect();
+        std::assert_eq!(made, [(String::from("udp/10.0.0.9:7447"), NODE_A)]);
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
+        // Held again is unchanged, and a peer nothing can dial is refused by its place.
+        std::assert_eq!(
+            m.hold_declared(&peers, 1),
+            Err(DeclaredRefusal::Node(1, NodeRefusal::NoDialableLocator))
+        );
+        std::assert_eq!(m.node_states().count(), 1);
     }
 
     /// An open for a node that is not held takes no row until there is something to dial: a zid

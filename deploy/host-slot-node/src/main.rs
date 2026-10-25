@@ -342,6 +342,7 @@ fn run(args: Args) -> i32 {
         batch_size: BATCH_SIZE,
         entropy: || PosixEntropy,
         endpoints: &ROUTER,
+        peers: &[],
         documents: &documents[..taken],
         entities: Entities::NONE,
         #[cfg(not(feature = "get"))]

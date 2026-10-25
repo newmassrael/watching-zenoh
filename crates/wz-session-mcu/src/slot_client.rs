@@ -42,7 +42,9 @@ use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::slot_observer::{NoSink, ObserverSinks};
 
-use crate::connect_manager::{ConnectManager, EndpointSource, PeerStore};
+use crate::connect_manager::{
+    ConnectManager, DeclaredPeer, DeclaredRefusal, EndpointSource, PeerStore,
+};
 use crate::latest::{LatestRef, LatestSink};
 use crate::slot_dial::{events_of, Bind, SessionFactory, SlotDialer, SlotSession};
 use crate::slot_host::SessionHost;
@@ -197,6 +199,17 @@ where
     pub fn is_established(&self) -> bool {
         self.live()
             .any(|session| session.actions().is_established())
+    }
+
+    /// Hold the peers the build declares, each by its zid, from the node's first tick (decision
+    /// D7, the third transport: no verb asks for them). The first that cannot be held is named
+    /// by its place in the list.
+    pub fn hold_declared(
+        &mut self,
+        peers: &[DeclaredPeer],
+        now_ms: u64,
+    ) -> Result<(), DeclaredRefusal> {
+        self.manager.hold_declared(peers, now_ms)
     }
 
     /// Whether some established session's peer is verified: the zid it claimed is the zid the

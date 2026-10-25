@@ -313,6 +313,7 @@ pub fn run() -> i32 {
         batch_size: BATCH_SIZE,
         entropy: || ZephyrEntropy,
         endpoints: &ENDPOINTS,
+        peers: &[],
         documents: &DOCUMENTS,
         entities: Entities::NONE,
         layer,

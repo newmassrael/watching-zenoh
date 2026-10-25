@@ -30,7 +30,14 @@ not build the node.
                                role = "multicast", locator = "udp/<group>:<port>", members = N and
                                an optional ttl (a group the node is a member of, which carries
                                publishers and subscriptions: the literal Put is all its outbound
-                               vocabulary has without an allocator)
+                               vocabulary has without an allocator);
+                               role = "peer", zid = "<lowercase hex>" and locator = "tls/<a.b.c.d>:<port>"
+                               (a node it holds by its zid from its first tick, decision D7 of
+                               docs/session-lifecycle-intent.md: the third transport, where the
+                               build declares the peers and no verb asks for them; the locator is a
+                               hint, every dial is made for the zid, and only a secure channel proves
+                               the answer is the node, so it is `tls`; each peer raises MAX_PEER_NODES
+                               when the declaration states none)
     [[entity]]               kind = "queryable", key, and document_bytes (a fixed document) or
                                from = "<subscriber key>" (the latest sample of that subscription);
                                kind = "subscriber", key, sample_bytes (the payload bytes it keeps);
@@ -87,10 +94,10 @@ NODES = ROOT / "deploy" / "nodes"
 
 # The words a declaration may use. A word outside these is a typo; one inside them that a target does
 # not build is a refusal with the target's own reason.
-ENDPOINT_ROLES = ("dial", "listen", "multicast")
+ENDPOINT_ROLES = ("dial", "listen", "multicast", "peer")
 ENTITY_KINDS = ("publisher", "subscriber", "queryable", "querier", "liveliness-token")
 NODE_KEYS = {"id", "help", "target"}
-ENDPOINT_KEYS = {"role", "locator", "accepts", "members", "ttl"}
+ENDPOINT_KEYS = {"role", "locator", "accepts", "members", "ttl", "zid"}
 ENTITY_KEYS = {"kind", "key", "document_bytes", "sample_bytes", "from", "period_ms", "timeout_ms", "reply_bytes"}
 TOP_KEYS = {"node", "endpoint", "entity", "limits", "policy"}
 
@@ -101,9 +108,11 @@ TARGETS = {
         # The package the node is built in, whose cargo config states the budgets it holds.
         "image": "deploy/host-slot-node",
         # The endpoints of each role a node holds: the one router it dials (the connect manager's
-        # row, `MAX_STATIC_CONNECT`) and the one port it listens on. The sessions of the node are
+        # row, `MAX_STATIC_CONNECT`), the one port it listens on and the peers it holds by their zid
+        # (each a connection machine of some 930 bytes and two rows of the locator directory,
+        # `MAX_PEER_NODES`, which a declaration's peers set when it states none). The sessions of the node are
         # the dialled one and `accepts` more, which is the size of its session table.
-        "endpoint_limits": {"dial": 1, "listen": 1, "multicast": 1},
+        "endpoint_limits": {"dial": 1, "listen": 1, "multicast": 1, "peer": 4},
         "schemes": ("tcp", "udp", "tls"),
         # A group is UDP: a member's datagrams are the group's, with no connection to hold.
         "multicast_schemes": ("udp",),
@@ -155,6 +164,11 @@ TARGETS = {
         },
     },
 }
+
+# The text of a zid as zenoh prints it and as `credential_identity::zid_from_key_text` reads it (the
+# one place its refusals are written): lowercase hex, no leading zero, at most 32 digits, the value
+# of a `u128` whose little-endian bytes are the zid's sixteen.
+ZID_RE = re.compile(r"[1-9a-f][0-9a-f]{0,31}")
 
 LOCATOR_RE = re.compile(r"(?P<scheme>[a-z]+)/(?P<a>\d{1,3})\.(?P<b>\d{1,3})\.(?P<c>\d{1,3})\.(?P<d>\d{1,3}):(?P<port>\d{1,5})")
 
@@ -248,6 +262,7 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
     if not endpoints:
         out.append("a node with no endpoint neither reaches anything nor is reached: declare one [[endpoint]]")
     held: dict[str, int] = {}
+    peer_zids: set[str] = set()
     for n, ep in enumerate(endpoints, 1):
         who = f"endpoint {n}"
         for extra in sorted(set(ep) - ENDPOINT_KEYS):
@@ -268,6 +283,17 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                 out.append(f"{who}: accepts is {accepts!r}, not an integer from 1 to {target['max_accepts']}")
         elif "accepts" in ep:
             out.append(f"{who}: only a `listen` endpoint has `accepts`")
+        zid = ep.get("zid")
+        if role == "peer":
+            if not isinstance(zid, str) or ZID_RE.fullmatch(zid) is None:
+                out.append(f"{who}: zid is {zid!r}, not the lowercase hex of a zid (no leading 0, at most "
+                           "32 digits)")
+            elif zid in peer_zids:
+                out.append(f"{who}: zid {zid} is declared twice")
+            else:
+                peer_zids.add(zid)
+        elif "zid" in ep:
+            out.append(f"{who}: only a `peer` endpoint has `zid`")
         members = ep.get("members")
         if role == "multicast":
             if isinstance(members, bool) or not isinstance(members, int) or not 1 <= members <= target["max_members"]:
@@ -290,11 +316,18 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                            f"{target['listen_refused'][match['scheme']]}")
             elif role == "multicast" and match["scheme"] not in target["multicast_schemes"]:
                 out.append(f"{who}: a group is `{'`, `'.join(target['multicast_schemes'])}`, not `{match['scheme']}`")
+            elif role == "peer" and match["scheme"] != "tls":
+                out.append(f"{who}: a peer held by its zid is dialled over `tls`, not `{match['scheme']}`: only "
+                           "a secure channel proves the node that answered is the one the zid names "
+                           "(decision D4 of docs/session-lifecycle-intent.md)")
             if any(int(match[o]) > 255 for o in "abcd") or not 1 <= int(match["port"]) <= 65535:
                 out.append(f"{who}: locator {ep['locator']!r} has an octet above 255 or a port outside 1..65535")
             elif role == "multicast" and not 224 <= int(match["a"]) <= 239:
                 out.append(f"{who}: locator {ep['locator']!r} is not a group: a multicast address is "
                            "224.0.0.0 to 239.255.255.255")
+    if "MAX_PEER_NODES" in data.get("limits", {}) and held.get("peer", 0) > values["MAX_PEER_NODES"]:
+        out.append(f"limits: MAX_PEER_NODES is {values['MAX_PEER_NODES']}, the declaration holds "
+                   f"{held['peer']} peers by their zid")
     has_group = "multicast" in held
 
     seen: dict[str, set[str]] = {"queryable": set(), "subscriber": set(), "publisher": set(),
@@ -452,6 +485,7 @@ def budgets(data: dict, decl: dict) -> dict[str, int]:
         "MAX_QUERYABLES": sum(1 for e in entities if e["kind"] == "queryable"),
         "MAX_SUBSCRIPTIONS": sum(1 for e in entities if e["kind"] == "subscriber"),
         "MAX_PENDING_QUERIES": pending_need(entities),
+        "MAX_PEER_NODES": sum(1 for ep in data["endpoint"] if ep["role"] == "peer"),
     }
     for name, need in needs.items():
         if name not in stated and need > values[name]:
@@ -473,6 +507,12 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
     """The `declared.rs` the node's code includes. Valid input only: `validate` ran first."""
     dialed = [ep["locator"] for ep in data["endpoint"] if ep["role"] == "dial"]
     dials = ", ".join(rust_string(locator) for locator in dialed)
+    peers = [(ep["zid"], ep["locator"]) for ep in data["endpoint"] if ep["role"] == "peer"]
+    peer_nodes = ", ".join(
+        f"([{', '.join(str(b) for b in int(zid, 16).to_bytes(16, 'little'))}], {rust_string(locator)})"
+        for zid, locator in peers
+    )
+    secure = any(d.startswith("tls/") for d in dialed) or bool(peers)
     listens = [ep for ep in data["endpoint"] if ep["role"] == "listen"]
     listen_at = listens[0]["locator"] if listens else ""
     accepts = listens[0]["accepts"] if listens else 0
@@ -516,8 +556,12 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             "/// The routers the node dials, as locators.",
             f"pub const DIALS: usize = {len(dialed)};",
             f"pub const DIALED: [&str; {len(dialed)}] = [{dials}];",
-            "/// Whether a dialled endpoint is `tls/`, which the node's `tls` feature must be built for.",
-            f"pub const TLS: bool = {'true' if any(d.startswith('tls/') for d in dialed) else 'false'};",
+            "/// The peers the node holds by their zid beside the router it dials, each as the sixteen bytes",
+            "/// of the zid and the locator it may be found at (decision D7, the third transport).",
+            f"pub const PEERS: usize = {len(peers)};",
+            f"pub const PEER_NODES: [([u8; 16], &str); {len(peers)}] = [{peer_nodes}];",
+            "/// Whether a dialled endpoint or a peer is `tls/`, which the node's `tls` feature must be built for.",
+            f"pub const TLS: bool = {'true' if secure else 'false'};",
             "/// Whether the node listens, the locator it listens on (empty when it does not), the address",
             "/// and port that locator names, and how many sessions a peer opened it holds at once.",
             f"pub const LISTENS: bool = {'true' if listens else 'false'};",
@@ -525,8 +569,9 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             f"pub const LISTEN_ADDR: [u8; 4] = [{listen_addr}];",
             f"pub const LISTEN_PORT: u16 = {listen_port};",
             f"pub const ACCEPTS: usize = {accepts};",
-            "/// The sessions the node holds at most: the ones it dials and the ones a peer opened.",
-            "pub const SESSIONS: usize = DIALS + ACCEPTS;",
+            "/// The sessions the node holds at most: the ones it dials, the peers it holds by their zid and",
+            "/// the ones a peer opened.",
+            "pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;",
             "/// Whether the node is a member of a multicast group, the locator of the group (empty when it",
             "/// is not), the address and port that locator names, the hop limit of what it sends and how",
             "/// many members of the group it tracks at once.",
@@ -596,7 +641,7 @@ def features_of(data: dict) -> list[str]:
     `tls/` (which the node's own `const` assertion holds again), `get` for a node that asks (and
     only such a node: the layer's queries and the pending table are not in any other), `token` for a
     node that declares a liveliness token and `listen` for a node that has a port to listen on."""
-    tls = any(ep["locator"].startswith("tls/") for ep in data["endpoint"] if ep["role"] == "dial")
+    tls = any(ep["locator"].startswith("tls/") for ep in data["endpoint"] if ep["role"] in ("dial", "peer"))
     asks = any(e["kind"] == "querier" for e in data.get("entity", []))
     alive = any(e["kind"] == "liveliness-token" for e in data.get("entity", []))
     listens = any(ep["role"] == "listen" for ep in data["endpoint"])
@@ -788,7 +833,7 @@ def _selftest() -> int:
            and "pub const LISTEN_ADDR: [u8; 4] = [0, 0, 0, 0];" in lrs and "pub const LISTEN_PORT: u16 = 17475;" in lrs
            and "pub const ACCEPTS: usize = 2;" in lrs)
     expect("its sessions are the dialled one and the accepted ones",
-           'pub const DIALED: [&str; 1] = ["tcp/10.0.0.1:7447"];' in lrs and "pub const SESSIONS: usize = DIALS + ACCEPTS;" in lrs)
+           'pub const DIALED: [&str; 1] = ["tcp/10.0.0.1:7447"];' in lrs and "pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;" in lrs)
     expect("a node that listens on nothing accepts nothing",
            "pub const LISTENS: bool = false;" in rs and "pub const ACCEPTS: usize = 0;" in rs
            and 'pub const LISTEN: &str = "";' in rs)
@@ -842,7 +887,7 @@ document_bytes = 8
            "pub const GROUPS: usize = 1;" in grs and 'pub const GROUP: &str = "udp/224.0.0.224:7447";' in grs
            and "pub const GROUP_ADDR: [u8; 4] = [224, 0, 0, 224];" in grs and "pub const GROUP_PORT: u16 = 7447;" in grs
            and "pub const GROUP_TTL: u8 = 1;" in grs and "pub const MEMBERS: usize = 4;" in grs
-           and "pub const DIALS: usize = 0;" in grs and "pub const SESSIONS: usize = DIALS + ACCEPTS;" in grs)
+           and "pub const DIALS: usize = 0;" in grs and "pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;" in grs)
     expect("a node with no group is a member of none",
            "pub const GROUPS: usize = 0;" in rs and "pub const MEMBERS: usize = 0;" in rs
            and "pub const GROUP_TTL: u8 = 1;" in rs)
@@ -1034,6 +1079,30 @@ document_bytes = 8
             "more than 1 `dial`")
     refuses("no endpoint", SAMPLE.replace('[[endpoint]]\nrole = "dial"\nlocator = "tcp/10.0.0.1:7447"\n', ""),
             "no endpoint")
+    # Decision D7, the third transport: the peers a build declares and holds by their zid.
+    peer = '\n[[endpoint]]\nrole = "peer"\nzid = "a1b2c3"\nlocator = "tls/10.0.0.9:7447"\n'
+    expect("a declared peer is a valid declaration", problems(SAMPLE + peer) == [])
+    peered = emit("n", wz_config.read_decl_toml(SAMPLE + peer), sha)
+    expect("a peer is generated as its zid's sixteen bytes (the u128's little-endian) and its locator",
+           "pub const PEERS: usize = 1;" in peered
+           and 'pub const PEER_NODES: [([u8; 16], &str); 1] = [([195, 178, 161, 0, 0, 0, 0, 0, 0, 0, 0, 0, '
+           '0, 0, 0, 0], "tls/10.0.0.9:7447")];' in peered)
+    expect("a peer holds a session of its own", "pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;" in peered)
+    expect("a peer is secure whatever the router is", "pub const TLS: bool = true;" in peered)
+    expect("a node with no peer declares none", "pub const PEERS: usize = 0;" in rs
+           and "pub const PEER_NODES: [([u8; 16], &str); 0] = [];" in rs)
+    expect("a peer is built with the secure channel", "tls" in features_of(wz_config.read_decl_toml(SAMPLE + peer)))
+    expect("a peer raises the budget of nodes held by their zid when none is stated",
+           "WZ_LIMIT_MAX_PEER_NODES=1" in env_lines(wz_config.read_decl_toml(SAMPLE + peer), decl))
+    refuses("a peer named by a zid with a leading zero", SAMPLE + peer.replace("a1b2c3", "0a1b2c3"), "lowercase hex")
+    refuses("a peer named by an uppercase zid", SAMPLE + peer.replace("a1b2c3", "A1B2C3"), "lowercase hex")
+    refuses("a peer with no zid", SAMPLE + peer.replace('zid = "a1b2c3"\n', ""), "lowercase hex")
+    refuses("a peer over a stream with no secure channel", SAMPLE + peer.replace("tls/", "tcp/"), "dialled over `tls`")
+    refuses("a zid declared twice", SAMPLE + peer + peer, "declared twice")
+    refuses("a zid on a router", SAMPLE.replace('role = "dial"', 'role = "dial"\nzid = "a1"'), "only a `peer`")
+    refuses("more peers than the declaration's own budget",
+            SAMPLE.replace("MAX_QUERYABLES = 2", "MAX_QUERYABLES = 2\nMAX_PEER_NODES = 1")
+            + peer + peer.replace("a1b2c3", "d4e5f6"), "MAX_PEER_NODES is 1")
     refuses("a key with an empty chunk", SAMPLE.replace("lab/doc/a", "lab//a"), "empty chunk")
     refuses("a key with a space", SAMPLE.replace("lab/doc/a", "lab doc"), "character a key expression does not")
     refuses("a key longer than the limit", SAMPLE.replace("lab/doc/a", "k" * 300), "MAX_KEYEXPR_BYTES")

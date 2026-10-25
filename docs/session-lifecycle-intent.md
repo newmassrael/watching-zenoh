@@ -972,7 +972,8 @@ Each step lands with its own done-when; sizes are not estimated here.
 7. **D7** transports 2 and 3 as values of the build configuration axis.
    - **The structure (decision; the owner delegated the choice on
      2026-10-26 with "cost ignored, the most correct long-term, textbook,
-     ultimate"; steps 7a to 7d are not done).**
+     ultimate"; 7a, 7b and 7c are landed and 7d is not; where what landed differs from
+     the first draft below, the paragraph after the steps says how).**
      - The contract is the port the fixed profile already has,
        `NodeOpening` (open a peer by its zid, answered with an outcome and
        not a bool). The three transports differ only in what feeds the
@@ -1002,6 +1003,36 @@ Each step lands with its own done-when; sizes are not estimated here.
        `deploy/wz-config.toml` and its generated Kconfig. 7c: the declared
        peers in `wz_node.py`. 7d: the control port, and its agent in the
        host that hosts the node.
+     - What landed, and how it differs from that draft.
+       - **7a is a type, not a feature.** The in-band verb is not a cargo
+         feature: `docs/build-configuration.md` C3 says a choice that changes
+         the shape of the code is a type parameter, monomorphised at no
+         run-time cost, and a feature would also have been a new atom of the
+         catalog (open question below). `admin_fixed`'s queryable is generic
+         over `NodeOpening`, whose constant `BOUND` is false only for
+         `NoOpening`; the answer serves `session/open` only if `BOUND`, so the
+         third transport's image carries none of that code. The capability
+         names above stay the vocabulary, as the types the images name.
+       - **7b** is the axis `lifecycle-transport` of `zephyr-admin-node` with
+         `in-band` (the default) and `declared` (selectable on the fixed
+         admin node over lwIP), and the image selector `lifecycle-declared`.
+         `out-of-band` is declared with its control port in 7d and not
+         before: an option that cannot be built is not declared. The
+         no-allocator gate carries the declared build as a row, clean.
+       - **7c** is two halves. The node: `ConnectManager::hold_declared` hints
+         each `DeclaredPeer` (`Declared`, permanent) and opens it by its zid;
+         `ClientNode` takes the list and stops at start, naming the peer,
+         when one cannot be held (exit 4), since a node that silently lost a
+         peer it was built to hold would run and be wrong. The declaration:
+         `[[endpoint]] role = "peer"` with a `zid` (the text zenoh prints, as
+         `zid_from_key_text` reads it) and a `tls/` locator, because a plain
+         stream cannot prove the node that answered is the one the zid names
+         (D4): a dialer that does not verify refuses it `Unverifiable`.
+         Each peer is a session of the node and raises `MAX_PEER_NODES` when
+         the declaration states none. Witness: the manager's test of the
+         declared list, `wz_node.py --selftest`, and the declared node
+         compiling over the generated table. Not run: a declared node holding
+         a declared peer over a real secure channel.
 
 ## 5. Open
 

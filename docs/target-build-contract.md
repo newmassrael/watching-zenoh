@@ -509,7 +509,10 @@ the slot target builds (a listener over UDP or TLS, a group over a scheme that i
 queryable, querier or token on a node that is a member of a group): a word the target does not
 build is REFUSED with its reason, never dropped, so a declaration that asks for a subscriber cannot
 produce a node that quietly has none. What the slot target builds today is what its node does: one
-dialled endpoint (`tcp`, `udp` or `tls`), one TCP listener, one multicast group, queryables that
+dialled endpoint (`tcp`, `udp` or `tls`), one TCP listener, one multicast group, up to four peers
+held by their zid (`role = "peer"`, a `zid` and a `tls/` locator: the third transport of decision D7
+of `docs/session-lifecycle-intent.md`, the peers a build declares and no verb asks for; `tls` since
+only a secure channel proves the node that answered is the one the zid names), queryables that
 answer from documents, and the entities below. The registered node,
 `slot-answerer`, is the existing `deploy/host-slot-node` stated as data.
 

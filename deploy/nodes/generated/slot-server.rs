@@ -10,7 +10,11 @@ pub const DECLARATION_SHA256: &str = "42ef0ce8d104709bae1340a0fa0b9b096c3edbe7dd
 /// The routers the node dials, as locators.
 pub const DIALS: usize = 0;
 pub const DIALED: [&str; 0] = [];
-/// Whether a dialled endpoint is `tls/`, which the node's `tls` feature must be built for.
+/// The peers the node holds by their zid beside the router it dials, each as the sixteen bytes
+/// of the zid and the locator it may be found at (decision D7, the third transport).
+pub const PEERS: usize = 0;
+pub const PEER_NODES: [([u8; 16], &str); 0] = [];
+/// Whether a dialled endpoint or a peer is `tls/`, which the node's `tls` feature must be built for.
 pub const TLS: bool = false;
 /// Whether the node listens, the locator it listens on (empty when it does not), the address
 /// and port that locator names, and how many sessions a peer opened it holds at once.
@@ -19,8 +23,9 @@ pub const LISTEN: &str = "tcp/127.0.0.1:17475";
 pub const LISTEN_ADDR: [u8; 4] = [127, 0, 0, 1];
 pub const LISTEN_PORT: u16 = 17475;
 pub const ACCEPTS: usize = 2;
-/// The sessions the node holds at most: the ones it dials and the ones a peer opened.
-pub const SESSIONS: usize = DIALS + ACCEPTS;
+/// The sessions the node holds at most: the ones it dials, the peers it holds by their zid and
+/// the ones a peer opened.
+pub const SESSIONS: usize = DIALS + PEERS + ACCEPTS;
 /// Whether the node is a member of a multicast group, the locator of the group (empty when it
 /// is not), the address and port that locator names, the hop limit of what it sends and how
 /// many members of the group it tracks at once.
