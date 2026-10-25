@@ -156,7 +156,6 @@ fn wz_router_hat_serves_its_capacity_report_beside_upstreams_admin_space() {
         "\"schema_version\":1,",
         "\"share_ppm\":13200,",
         "\"configured_max_sessions\":5000,",
-        "\"limit\":1100,",
         "\"limiter\":\"liveness\",",
         "\"sessions_held\":1,",
         "\"lease_ms\":10000,",
@@ -174,6 +173,38 @@ fn wz_router_hat_serves_its_capacity_report_beside_upstreams_admin_space() {
         "\"egress_gated_faces\":0}",
     ] {
         assert!(body.contains(fact), "the report lacks {fact}\n{body}");
+    }
+
+    // The limit is the recorded model's (1100 sessions at 1.32% of a core and a 10 s lease), tightened
+    // by the emission cost the router measured on its own host: it can fall while the router runs and
+    // never rises above the recorded one (`ControlModel::calibrated`). So it is not one number across
+    // hosts: 1100 on a host whose floor is under the recorded cost's room, 902 on a hosted runner whose
+    // floor is 5.5 us. What the report must hold is the relation, read off its own floor: the floor
+    // only falls as the router runs, so the limit is at least what the floor the report names gives,
+    // and at most the recorded one.
+    {
+        use wz_session_core::capacity::{liveness_bound, RECORDED_HOST_MODEL};
+        let number_after = |key: &str| -> Option<u64> {
+            let at = body.find(key)? + key.len();
+            let digits: String = body[at..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse().ok()
+        };
+        let limit = number_after("\"limit\":").expect("the report states a limit");
+        let floor = number_after("\"emission_floor_ns\":");
+        let at_most = liveness_bound(13_200, 10_000, RECORDED_HOST_MODEL);
+        let at_least = liveness_bound(13_200, 10_000, RECORDED_HOST_MODEL.calibrated(floor));
+        assert_eq!(
+            at_most, 1100,
+            "the recorded model's limit for this contract"
+        );
+        assert!(
+            (at_least..=at_most).contains(&limit),
+            "the limit {limit} is not between {at_least} (the floor {floor:?} the report names) and \
+             {at_most} (the recorded model)\n{body}"
+        );
     }
 
     // 3 and 4: upstream's admin space is answered from keys under `@/` and never from the report's;
