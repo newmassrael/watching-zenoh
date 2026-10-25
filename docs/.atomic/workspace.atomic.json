@@ -287768,6 +287768,46 @@
         "Read the hosted runs of the earlier pushes at the start of the next round."
       ]
     },
+    "Round 3644": {
+      "decision_summary": "A group's member table filled without a word: a JOIN past the row count was dropped with no count and no line, which a lab reads as a node that stopped taking members. The peer table of the multicast dispatcher now counts the JOINs it had no free row for, a refresh of a member already held is not one, and the group's report line says it as turned_away beside joins, refused and members. The pump keeps its table inside a cell, so the count is copied to the cell after every step, whichever way the step is called, and the plane reads the sum of the cells it holds; it starts again at none with each join, as the members do. A peer that is turned away announces itself again each join interval, so the number counts beacons and not peers, and the doc says so. The first run of the witness leg failed because the task that drives a pump steps through the pump and not through the cell's handle, which the new leg found before it shipped.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/multicast_dispatch.rs: the dispatcher counts JOINs refused for a full peer table (join_refusals), with the existing table-full test extended to a repeat refusal and a refresh that is not counted.",
+        "crates/wz-session-mcu/src/group_drive.rs and slot_group.rs: each cell keeps the count its pump's table last had, MulticastSlots::join_refusals sums the cells in use, the pump task and the handle's step both copy it, and GroupState::members_turned_away is what the plane reads each tick.",
+        "deploy/host-slot-node/src/bin/declared_node.rs, docs/target-build-contract.md, crates/wz-integration-tests/tests/wz_declared_group_pico_interop.rs and scripts/run-ci.sh: the line is HOST-WZ-GROUP with turned_away, and a fifth leg fills the table with pico publishers, then adds one more and reads the count; the Layer M guard counts 5."
+      ],
+      "verification_bullets": [
+        "The dispatcher's table-full test and the slot group's tests pass; clippy with every feature and warnings denied is clean for wz-session-core, wz-session-mcu, wz-session-lwip and wz-integration-tests, one crate at a time; the guarded-count gate over the range passes.",
+        "The five witness legs pass against zenoh-pico's z_sub, z_pub and z_put on this machine's multicast route with the packaged node: eight pico publishers fill the eight rows with turned_away at none, the ninth leaves members at eight and turned_away above none. Before the pump task copied the count, the same leg failed at its wait for the count, which is the control. The client, get-batching, tls, answerer, server and group images build.",
+        "The round-fed array (113) passes on the rebased tip. On the tip before it the resource budget gate was red (the stack gate committed 7540 for the Zephyr kit's client and its budget row said 7128); its author moved the row, and the gate passes after the rebase.",
+        "Not run: the hosted run of this push, the Layer M lane itself (the node built directly and packaged stand in), a table past its rows under a lease expiry."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha, with Layer M's count of 5 (it is a deferred guard, measured only by the hosted lane). Pin the head that holds the Zephyr stack rows when reading the next hosted Qzb and Qza, and tell their author what it reads.",
+        "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener. A count for the group's other refusals (a JOIN that advertises another resolution or batch) has the same shape and no counter yet."
+      ],
+      "publishable_decision_summary": "A group's member table filled without a word: a JOIN past the row count was dropped with no count and no line, which a lab reads as a node that stopped taking members. The peer table of the multicast dispatcher now counts the JOINs it had no free row for, a refresh of a member already held is not one, and the group's report line says it as turned_away beside joins, refused and members. The pump keeps its table inside a cell, so the count is copied to the cell after every step, whichever way the step is called, and the plane reads the sum of the cells it holds; it starts again at none with each join, as the members do. A peer that is turned away announces itself again each join interval, so the number counts beacons and not peers, and the doc says so. The first run of the witness leg failed because the task that drives a pump steps through the pump and not through the cell's handle, which the new leg found before it shipped.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/multicast_dispatch.rs: the dispatcher counts JOINs refused for a full peer table (join_refusals), with the existing table-full test extended to a repeat refusal and a refresh that is not counted.",
+        "crates/wz-session-mcu/src/group_drive.rs and slot_group.rs: each cell keeps the count its pump's table last had, MulticastSlots::join_refusals sums the cells in use, the pump task and the handle's step both copy it, and GroupState::members_turned_away is what the plane reads each tick.",
+        "deploy/host-slot-node/src/bin/declared_node.rs, docs/target-build-contract.md, crates/wz-integration-tests/tests/wz_declared_group_pico_interop.rs and scripts/run-ci.sh: the line is HOST-WZ-GROUP with turned_away, and a fifth leg fills the table with pico publishers, then adds one more and reads the count; the Layer M guard counts 5."
+      ],
+      "publishable_verification_bullets": [
+        "The dispatcher's table-full test and the slot group's tests pass; clippy with every feature and warnings denied is clean for wz-session-core, wz-session-mcu, wz-session-lwip and wz-integration-tests, one crate at a time; the guarded-count gate over the range passes.",
+        "The five witness legs pass against zenoh-pico's z_sub, z_pub and z_put on this machine's multicast route with the packaged node: eight pico publishers fill the eight rows with turned_away at none, the ninth leaves members at eight and turned_away above none. Before the pump task copied the count, the same leg failed at its wait for the count, which is the control. The client, get-batching, tls, answerer, server and group images build.",
+        "The round-fed array (113) passes on the rebased tip. On the tip before it the resource budget gate was red (the stack gate committed 7540 for the Zephyr kit's client and its budget row said 7128); its author moved the row, and the gate passes after the rebase.",
+        "Not run: the hosted run of this push, the Layer M lane itself (the node built directly and packaged stand in), a table past its rows under a lease expiry."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha, with Layer M's count of 5 (it is a deferred guard, measured only by the hosted lane). Pin the head that holds the Zephyr stack rows when reading the next hosted Qzb and Qza, and tell their author what it reads.",
+        "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener. A count for the group's other refusals (a JOIN that advertises another resolution or batch) has the same shape and no counter yet."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
