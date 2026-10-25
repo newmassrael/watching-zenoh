@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-node-time — the node's time (§5.18): the wall clock in NTP64, the node-scoped Hybrid Logical
+# Clock and the per-role switch that says whether a node has one, and the stamper an auto-stamping
+# consumer borrows it through.
+#
+# Time sits under every consumer that stamps: the router's forwarders, the storage services, the
+# session, and the advanced publisher. It was in `wz-runtime-tokio` because that crate was the
+# first and, for a while, the only host; an engine that is not the tokio one (the cooperative
+# engine behind the pico C ABI) needs the same node clock and the same stamp rules, and linking the
+# tokio crate for them is what its size gate refuses. So it is here, with no runtime in it: `std`
+# for `SystemTime`, `uhlc` (zenoh's own crate, `no_std`) for the HLC, and the session core's types.
+#
+# `rlib` only: a Rust-internal seam, like `wz-host-net` and `wz-ext-pubsub`.
+
+[package]
+name = "wz-node-time"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "The node's time: the wall clock in NTP64, the node-scoped HLC with its per-role switch, and the stamper that borrows it; independent of any runtime."
+publish = false
+
+[lib]
+name = "wz_node_time"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = []
+# The node clock is a Hybrid Logical Clock (zenoh's `Option<Arc<HLC>>` on the Runtime). Off, a node
+# holds none: `NodeHlc` is zero-sized, nothing stamps, and every consumer falls back to the wall
+# clock, which is zenoh's own `None` arm. The tokio runtime's feature of the same name forwards here.
+time-hlc = ["dep:uhlc"]
+# The forward-path stamp (`NodeHlc::treat_timestamp`) works on a Push, so it needs the Push codec.
+codec-push = ["wz-codecs/codec-push", "wz-session-core/codec-push"]
+# The send-side gate `set_push_timestamp` routes through: with it off a forward stamp is a
+# deliberate no-op.
+pubsub-timestamp = ["wz-session-core/pubsub-timestamp"]
+
+[dependencies]
+# The timestamp type, the NTP64 word, the epoch port and (with `codec-push`) the Push the forward
+# stamp edits. `alloc` is the heap profile, which is the only one a node with a clock runs on.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
+# The node's role, which the per-role switch reads.
+wz-codecs = { path = "../wz-codecs", default-features = false }
+# zenoh's own Hybrid Logical Clock crate, at the pin zenoh uses, with its `std` feature off: the
+# physical clock is injected, so the crate needs none of what that feature brings.
+uhlc = { version = "0.8", default-features = false, optional = true }
+
+[lints]
+workspace = true

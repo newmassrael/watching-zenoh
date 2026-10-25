@@ -85,12 +85,17 @@ defect of this plane; it is documented on the plane and not worked around with a
 1. **Neutral parts** (mechanical, no behaviour change): the `@adv` grammar, the cache ring, the time
    range and the HLC and timestamp rules move to `wz-ext-pubsub`; the tokio crate re-exports them
    at the same paths. The ring takes its "now" from its caller.
-   Done so far (ledger entry for the round that created the crate): the `@adv` key grammar
-   and the `_time` selector (`time_range`, with its nine tests) are in `wz-ext-pubsub`, ungated
-   and with the `ext-pubsub-advanced-*` gates dropped from the functions (a host links the ones
-   it calls); `wz-runtime-tokio` re-exports both at their old paths. Still to move: the cache
-   ring with `CacheStore` (its answer takes the NTP64 "now" it is given, and the shared-memory
-   field becomes the crate's one feature), then the HLC and timestamp rules.
+   Done so far: the `@adv` key grammar and the `_time` selector (`time_range`, with its nine
+   tests) are in `wz-ext-pubsub`, ungated and with the `ext-pubsub-advanced-*` gates dropped from
+   the functions (a host links the ones it calls); the cache ring and its answer
+   (`advanced_cache`: samples, `CacheStore`, the `_sn`/`_max`/`_time` filters, the reply arms) are
+   there too, and the answer takes the NTP64 "now" from a function its host passes, so the ring
+   reads no clock. `wz-runtime-tokio` re-exports all of it at the old paths and keeps the
+   session-bound `AdvancedCache`. The HLC and timestamp rules did not go into `wz-ext-pubsub`,
+   because time is not the advanced plane's: the router's forwarders, the storage services and the
+   session stamp through it as well. They are a crate of their own, `wz-node-time` (the wall clock
+   in NTP64, the node HLC with its per-role switch and forward-path stamp, and the fallback
+   stamper), which sits under both the tokio runtime and, next, the advanced plane's host trait.
 2. **The vocabulary**: events and commands of the publisher's beacon and of the subscriber, written
    as types with the tests that state each rule, from the code in `advanced_publisher.rs` and
    `advanced_subscriber.rs` and against zenoh-ext at the pinned version.

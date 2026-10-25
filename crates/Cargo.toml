@@ -103,6 +103,9 @@ members = [
     # grammar, the `_time` selector and (as they move) the cache, sequencing and recovery rules,
     # which the tokio runtime and the cooperative engine both host.
     "wz-ext-pubsub",
+    # The node's time (§5.18): the wall clock in NTP64, the node HLC with its per-role switch, and
+    # the stamper that borrows it, which every engine that stamps shares.
+    "wz-node-time",
     "wz-capi-dissect",
     # Round 2441 (open-debt item 693) — the C ABI over `wz-replay`'s PLAN half.
     # Its own crate rather than a door in `wz-capi-dissect` for the reason that

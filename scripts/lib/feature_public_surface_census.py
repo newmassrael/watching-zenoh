@@ -448,6 +448,15 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "runtime's feature of that name forwarded",
         frozenset({"transport-shm"}),
     ),
+    "wz-node-time": (
+        "the node's time (the wall clock in NTP64, the node HLC with its per-role switch, the "
+        "fallback stamper), reached through the tokio runtime's re-exports at the paths it has "
+        "always had and by the cooperative engine; it is not a surface the analyzer's diagnostic "
+        "axis probes, and its one feature that gates a public item, `codec-push` (the forward-path "
+        "stamp over a Push), is the tokio runtime's feature of that name forwarded, run by this "
+        "crate's own tests",
+        frozenset({"codec-push"}),
+    ),
     "wz-rest": (
         "the REST bridge: the facade re-exports the whole crate as `wz::rest` "
         "and is its ONLY workspace consumer, so the path a Rust caller names "
@@ -1224,8 +1233,11 @@ FAMILY_DIFFERENTIAL_MANIFEST = ROOT / "conformance" / "differential" / "Cargo.to
 #
 # `wz-ext-pubsub` lands here as well: its row's reason is a claim about who consumes the crate (the
 # tokio runtime's re-exports and the cooperative engine), which no predicate above holds a row to.
+#
+# `wz-node-time` too, for the same reason: who consumes the crate (the tokio runtime's re-exports,
+# the cooperative engine) is a claim no predicate above holds a row to.
 PROSE_ONLY: frozenset[str] = frozenset(
-    {"wz-capi-core", "wz-capi-coop", "wz-host-net", "wz-ext-pubsub"}
+    {"wz-capi-core", "wz-capi-coop", "wz-host-net", "wz-ext-pubsub", "wz-node-time"}
 )
 
 

@@ -2042,17 +2042,9 @@ pub fn compiled_in_link_schemes() -> &'static [&'static str] {
     }
 }
 
-/// R311uy — the storage service DRIVER (§5.11 storage, atom 3/4): the AP
-/// tokio binding for the runtime-agnostic storage kernel. A
-/// [`storage_service::StorageService`] declares a capture [`Subscriber`]
-/// + a complete [`Queryable`] on a storage keyexpr and drives the
-/// [`wz_session_core::storage_state::StorageState`] gate (Put / Delete
-/// capture -> newer-wins; query -> per-key reply). Gated on
-/// `storage-backend` (which forwards the kernel + `query-queryable`), so a
-/// profile without storage never compiles the driver.
 /// R311xt — §5.18 time: the [`FallbackStamp`](timestamp_source::FallbackStamp)
 /// timestamp-source seam (`time-timestamp-source`, FOUNDATIONAL) plus the
-/// optional [`uhlc::HLC`] source (`time-hlc`, active). Consumed by
+/// optional Hybrid Logical Clock source (`time-hlc`, active). Consumed by
 /// [`storage_service`] to stamp un-timestamped captured samples — wz's only
 /// auto-stamp site today — so the module is gated on `storage-backend`.
 // R311y69 — `timestamp_source` (the §5.18 FallbackStamp seam) gained a
@@ -2074,16 +2066,27 @@ pub fn compiled_in_link_schemes() -> &'static [&'static str] {
     feature = "time-hlc",
     feature = "timestamp-wall-clock"
 ))]
-pub mod timestamp_source;
+// The source and the stamper live in `wz-node-time`, which no runtime owns, and are re-exported
+// at the path they have always had.
+pub use wz_node_time::timestamp_source;
 
 /// R311y450 — §5.18 time: the NODE-scoped HLC ([`node_clock::NodeHlc`]) and its
 /// per-role enablement map, wz's mirror of zenoh's `Option<Arc<HLC>>` on the
 /// Runtime (`zenoh/src/net/runtime/mod.rs:147`). UNCONDITIONAL: `NodeHlc` is
 /// zero-sized without `time-hlc`, so the storage stamper and both forwarders hold
 /// one with no cfg at the field or at any constructor — the alternative pushes the
-/// feature split into six call sites.
-pub mod node_clock;
+/// feature split into six call sites. It lives in `wz-node-time` and is re-exported here at the
+/// path it has always had.
+pub use wz_node_time::node_clock;
 
+/// R311uy — the storage service DRIVER (§5.11 storage, atom 3/4): the AP
+/// tokio binding for the runtime-agnostic storage kernel. A
+/// [`storage_service::StorageService`] declares a capture [`Subscriber`]
+/// and a complete [`Queryable`] on a storage keyexpr and drives the
+/// [`wz_session_core::storage_state::StorageState`] gate (Put / Delete
+/// capture -> newer-wins; query -> per-key reply). Gated on
+/// `storage-backend` (which forwards the kernel + `query-queryable`), so a
+/// profile without storage never compiles the driver.
 #[cfg(feature = "storage-backend")]
 pub mod storage_service;
 

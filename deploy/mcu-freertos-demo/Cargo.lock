@@ -1004,6 +1004,14 @@ name = "wz-mcu-stack"
 version = "0.1.0"
 
 [[package]]
+name = "wz-node-time"
+version = "0.1.0"
+dependencies = [
+ "wz-codecs",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-runtime-coop"
 version = "0.1.0"
 dependencies = [
@@ -1046,6 +1054,7 @@ dependencies = [
  "wz-codecs",
  "wz-ext-pubsub",
  "wz-host-net",
+ "wz-node-time",
  "wz-runtime-core",
  "wz-session-core",
  "zeroize",

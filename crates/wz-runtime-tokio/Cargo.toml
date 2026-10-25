@@ -832,7 +832,13 @@ session-extshm = ["wz-session-core/session-extshm", "transport-shm", "dep:libc"]
 # closes the first body-codec handshake-only-deploy contract slot
 # (codec-frame OFF now requires codec-push OFF; R311i/j/k will extend
 # the same imply to declare/request/response).
-codec-push = ["wz-codecs/codec-push", "codec-frame", "wz-session-core/codec-push", "wz-codecs-test-support/codec-push"]
+codec-push = [
+    "wz-codecs/codec-push",
+    "codec-frame",
+    "wz-session-core/codec-push",
+    "wz-node-time/codec-push",
+    "wz-codecs-test-support/codec-push",
+]
 # R311i — codec-declare gates wz-runtime-tokio's Declare wire surface
 # in session_glue.rs: Declare/DeclareVariant/Decl*/Undecl* imports,
 # N_MID_DECLARE const, 8 build_declare_* + 4 build_undeclare_* +
@@ -1590,7 +1596,7 @@ pubsub-put = ["wz-session-core/pubsub-put"]
 pubsub-delete = ["wz-session-core/pubsub-delete"]
 pubsub-allow-loop = []
 pubsub-attachment = ["attachment-bytes", "wz-session-core/pubsub-attachment"]
-pubsub-timestamp = ["wz-session-core/pubsub-timestamp"]
+pubsub-timestamp = ["wz-session-core/pubsub-timestamp", "wz-node-time/pubsub-timestamp"]
 pubsub-encoding = ["wz-session-core/pubsub-encoding"]
 pubsub-source-info = ["wz-session-core/pubsub-source-info"]
 pubsub-qos = ["wz-session-core/pubsub-qos"]
@@ -1608,7 +1614,7 @@ pubsub-express = ["pubsub-qos", "wz-session-core/pubsub-express"]
 # to it), with it OFF the bare `wall_clock_ntp64` SSOT is used
 # (byte-identical to the prior behavior). NOT default — an opt-in
 # alternative timestamp source, like the other advanced composition knobs.
-time-hlc = ["storage-backend", "dep:uhlc"]
+time-hlc = ["storage-backend", "wz-node-time/time-hlc"]
 # The wall-clock NTP64 source alone (`timestamp_source::wall_clock_ntp64`), with none of the
 # stamper seams or the storage module the other features of that module bring: what a C ABI's
 # `z_timestamp_new` reads, in a build that holds no node clock and answers no query.
@@ -1923,17 +1929,10 @@ webpki-roots = { version = "1", optional = true }
 # against zenoh-c observes both. `default-features = false` is upstream's choice and
 # leaves the crate with no dependencies at all. Behind `transport-shm`.
 talc = { version = "4.4.3", default-features = false, optional = true }
-# R311xt — uhlc is zenoh's own Hybrid Logical Clock crate (zenoh pins the
-# same 0.8 at its workspace root, `default-features = false` for no_std
-# usage). wz reuses it rather than re-deriving the subtle
-# logical-counter-in-low-CSIZE-bits + drift + Timestamp `Ord` algorithm (the
-# SSOT for the HLC is upstream, not a wz copy — the same reuse stance as the
-# lz4_flex / memmap2 deps). `default-features = false` drops uhlc's `std`
-# system clock + env-var delta; wz injects its OWN physical clock
-# (`NTP64(wall_clock_ntp64())`, byte-identical to uhlc's `system_time_clock`)
-# via `HLCBuilder::with_clock`, so no std feature is needed. Behind the
-# `time-hlc` feature (`dep:uhlc`).
-uhlc = { version = "0.8", default-features = false, optional = true }
+# The node's time (the wall clock in NTP64, the node HLC, the fallback stamper) is `wz-node-time`'s,
+# which owns the `uhlc` dependency (zenoh's own Hybrid Logical Clock crate, at zenoh's pin); this
+# crate re-exports it at the paths it has always had and forwards the features below.
+wz-node-time = { path = "../wz-node-time" }
 # R311xk — host QUIC link backend, behind the optional `transport-link-quic`
 # feature. quinn is the async QUIC implementation zenoh-link-vsock... no:
 # zenoh-link-quic uses quinn 0.11.5 (workspace pin). wz pins the same 0.11.

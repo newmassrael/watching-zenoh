@@ -4129,6 +4129,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-node-time"
+version = "0.1.0"
+dependencies = [
+ "uhlc",
+ "wz-codecs",
+ "wz-session-core",
+]
+
+[[package]]
 name = "wz-oa-tc6"
 version = "0.1.0"
 dependencies = [
@@ -4267,7 +4276,6 @@ dependencies = [
  "tokio-serial",
  "tokio-tungstenite",
  "tokio-vsock",
- "uhlc",
  "walkdir",
  "webpki-roots",
  "windows-sys 0.61.2",
@@ -4277,6 +4285,7 @@ dependencies = [
  "wz-codecs-test-support",
  "wz-ext-pubsub",
  "wz-host-net",
+ "wz-node-time",
  "wz-packet-socket",
  "wz-plugin-abi",
  "wz-routing-graph",

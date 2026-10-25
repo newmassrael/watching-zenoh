@@ -344,6 +344,11 @@ transport-link-unixpipe,transport-link-ws|"
     # buffer of shared memory and a recovery reply send its descriptor again; the tests the feature
     # compiles in are the ring's own, so the leg is the crate's, with no filter.
     "wz-ext-pubsub|hook|transport-shm|"
+    # The node's time (the wall clock, the node HLC with its per-role switch, the stamper). The HLC,
+    # the Push stamp and its tests are compiled only with the three features, which the tokio
+    # runtime forwards; the leg is the crate's, with no filter. MEASURED: 6 passed with default
+    # features, 20 with the three, under 1 s.
+    "wz-node-time|hook|codec-push,pubsub-timestamp,time-hlc|"
     # Open-debt item 913 -- the in-memory group every group test of the workspace runs over
     # (`multicast_bus`) holds a member's place while a send half of its link lives, as a socket
     # does, which the departure test of the group face depends on. The module exists only with
