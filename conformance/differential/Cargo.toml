@@ -63,6 +63,12 @@ wz_codec = { package = "zenoh-codec", path = "../../crates/wz-zenoh-codec" }
 up_shm = { package = "zenoh-shm", version = "=1.10.1", features = ["test"] }
 wz_shm = { package = "zenoh-shm", path = "../../crates/wz-zenoh-shm", features = ["test"] }
 num-traits = { version = "0.2", default-features = false }
+# `zenoh-util`: the pair again, each over its own `zenoh-result` and `zenoh-core`, each built with
+# `test`, which adds the logging setup the valgrind lane uses. `humantime` is what the time
+# language formats and parses instants with, one package for both crates, so the tests name it.
+up_util = { package = "zenoh-util", version = "=1.10.1", features = ["test"] }
+wz_util = { package = "zenoh-util", path = "../../crates/wz-zenoh-util", features = ["test"] }
+humantime = "2"
 # `zenoh-collections`: the pair again. Both are built with the default `std`, which carries every
 # container but `SingleOrVec`.
 up_collections = { package = "zenoh-collections", version = "=1.10.1" }

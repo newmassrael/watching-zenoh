@@ -82,6 +82,7 @@ members = [
     "wz-zenoh-protocol",
     "wz-zenoh-codec",
     "wz-zenoh-shm",
+    "wz-zenoh-util",
     # R311y578 (G1) — pcap ingest + link/IP/TCP decapsulation + TCP flow
     # reassembly, feeding `wz_session_core::passive`. Knows nothing about
     # zenoh; the seam is a byte stream plus a direction, so a live tap can

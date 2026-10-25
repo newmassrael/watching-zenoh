@@ -173,6 +173,8 @@ MEMBERS: tuple[Member, ...] = (
            {"default": 0, "shared-memory": 0}, split_wz=True),
     Member("zenoh-shm", "zenoh_shm", "zenoh-shm", (("default", ""), ("test", "test")),
            {"default": 0, "test": 0}, split_wz=True),
+    Member("zenoh-util", "zenoh_util", "zenoh-util", (("default", ""), ("test", "test")),
+           {"default": 140, "test": 140}, split_wz=True),
 )
 
 

@@ -348,6 +348,14 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "rather than to this sentence",
         frozenset({"test"}),
     ),
+    # R3623 -- the sixth family member with a feature of its own.
+    "zenoh-util": (
+        "a crate of the zenoh compatibility family: `test` is an arm of upstream's own public "
+        "surface that `scripts/lib/rust_api_surface.py` emits the wz crate with and holds it to "
+        "(it adds the logging setup the valgrind lane uses). Held to `FAMILY_GRADED` below "
+        "rather than to this sentence",
+        frozenset({"test"}),
+    ),
     "wz-capi-core": (
         "the ABI-neutral session model: a workspace-internal rlib whose only "
         "consumers are the two C ABI crates, and the one of them that turns the "
@@ -1145,6 +1153,7 @@ FAMILY_GRADED: dict[str, frozenset[str]] = {
     "zenoh-protocol": frozenset({"internal", "shared-memory", "test"}),
     "zenoh-codec": frozenset({"shared-memory"}),
     "zenoh-shm": frozenset({"test"}),
+    "zenoh-util": frozenset({"test"}),
 }
 
 #: The manifest of the differential workspace, whose dependency line names the features the wz

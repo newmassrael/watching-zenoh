@@ -152,7 +152,13 @@ original reproduced by naming it. Three things follow from it:
   names `<id>.zenoh` are upstream's and the differential tests open each crate's segments, link
   each crate's descriptors, read each crate's buffers and read what each crate's provider
   allocated with the other; the codec of a pointer into shared memory is `zenoh-codec`'s
-  `shared-memory` arm)
+  `shared-memory` arm),
+  `zenoh-util` (first slice of four: the time range language of a selector, the logging setup and
+  its callback layer, the zenoh home and the macro that lists the enabled features, 55 of 195
+  default lines and 57 of 197 with `test`; held to upstream's by generated and drawn strings and by
+  scenarios that each run in a process of their own, since the home and the logging subscriber are
+  process-global; the parser of the time range refuses a duration that is a lone unit or that an
+  instant cannot hold, where upstream panics)
   and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each
