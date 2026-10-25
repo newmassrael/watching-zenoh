@@ -81,6 +81,10 @@ use {
 #[cfg(feature = "queryable")]
 mod query;
 
+mod replay;
+use replay::{Kind, OnRefusal, Replay};
+use wz_session_core::replay_pacing::ReplayPacing;
+
 #[cfg(feature = "connectivity")]
 mod faces;
 #[cfg(feature = "connectivity")]
@@ -314,6 +318,8 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     tokens: Vec<TokenEntry>,
     #[cfg(feature = "liveliness")]
     live_subs: Vec<LiveSubEntry>,
+    /// Where the telling of the lists above to the link's peer stands (`replay`).
+    replay: Replay,
 }
 
 /// The session's link: up, being dialled, or waiting to be.
@@ -373,9 +379,9 @@ struct SubEntry {
 }
 
 impl SubEntry {
-    /// Declare this subscriber over `actions`.
-    fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
-        let _ = if self.wire.is_literal() {
+    /// Declare this subscriber over `actions`: whether the link took it.
+    fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
+        if self.wire.is_literal() {
             actions.send_declare_subscriber(self.id, 0, Some(&self.keyexpr))
         } else {
             actions.send_declare_subscriber(
@@ -383,7 +389,8 @@ impl SubEntry {
                 self.wire.mapping_id,
                 self.wire.suffix.as_deref(),
             )
-        };
+        }
+        .is_ok()
     }
 }
 
@@ -400,9 +407,9 @@ struct QblEntry {
 
 #[cfg(feature = "queryable")]
 impl QblEntry {
-    /// Declare this queryable over `actions`.
-    fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
-        let _ = if self.wire.is_literal() {
+    /// Declare this queryable over `actions`: whether the link took it.
+    fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
+        if self.wire.is_literal() {
             actions.send_declare_queryable(self.id, 0, Some(&self.keyexpr), self.complete)
         } else {
             actions.send_declare_queryable(
@@ -411,7 +418,8 @@ impl QblEntry {
                 self.wire.suffix.as_deref(),
                 self.complete,
             )
-        };
+        }
+        .is_ok()
     }
 
     /// Retract this queryable over `actions`, naming its key when its declaration asked to.
@@ -450,17 +458,20 @@ struct InterestHold {
 }
 
 impl InterestHold {
-    /// Send this Interest over `actions`, for what is declared now and what is declared later.
-    fn send<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
-        let _ = actions.send_interest_kinds(
-            self.interest_id,
-            kinds(self.plane),
-            /* current */ true,
-            /* future */ true,
-            self.form.aggregate,
-            self.form.mapping_id,
-            self.form.suffix.as_deref(),
-        );
+    /// Send this Interest over `actions`, for what is declared now and what is declared later:
+    /// whether the link took it.
+    fn send<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
+        actions
+            .send_interest_kinds(
+                self.interest_id,
+                kinds(self.plane),
+                /* current */ true,
+                /* future */ true,
+                self.form.aggregate,
+                self.form.mapping_id,
+                self.form.suffix.as_deref(),
+            )
+            .is_ok()
     }
 }
 
@@ -661,12 +672,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Move the link on, after the session was stepped. A handshake that completed brings the
-    /// link up and declares over it what the session holds; one that ended or ran out of time
+    /// link up and begins to declare over it what the session holds, and a link that is up goes on
+    /// with the telling when a turn of it is due (`replay`); one that ended or ran out of time
     /// gives way to the next endpoint; a lost link takes what its peer declared with it and is
     /// dialled again. `Err` when the session ends: its link was lost, or no endpoint answered,
     /// and `redial_ms` is `None`; or the platform gave no entropy.
     fn poll_link(&mut self, redial_ms: Option<u64>) -> Result<(), OpenError> {
         let now_us = self.clock.now_us();
+        let now_ms = now_us / 1000;
         let link = std::mem::replace(&mut self.link, Link::Waiting { at_us: now_us });
         self.link = match link {
             // zenoh-pico's client reopens whatever ended its link: a lease that ran out, a read
@@ -683,13 +696,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 }
                 self.dial_or_wait(0, OpenError::NoEndpoint, now_us, redial_ms)?
             }
+            // A link that is up goes on telling its peer what the session holds, when a turn is
+            // due.
+            Link::Up(wire) if !self.replay.finished() => {
+                self.replay_turn(&wire.actions, now_ms);
+                Link::Up(wire)
+            }
             Link::Dialing {
                 wire,
                 next,
                 deadline_us,
             } => {
                 if wire.actions.is_established() {
-                    self.redeclare(&wire.actions);
+                    self.begin_replay(&wire.actions, now_ms);
                     let face = self.face_of(&wire.actions);
                     self.report_face(FaceEventKind::Up, face);
                     Link::Up(wire)
@@ -770,6 +789,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// zenoh-pico drops a peer's targets from every write filter when its connection drops
     /// (`vendor/zenoh-pico/src/net/filtering.c` @ `case _Z_INTEREST_MSG_TYPE_CONNECTION_DROPPED: {`).
     fn lose_link(&mut self) {
+        // What the lost link's peer was told went with it: the next link's peer holds nothing.
+        self.replay.discard();
         let mut observer = self.observer.borrow_mut();
         observer.flush_declarations_on_link_loss();
         observer.flush_liveliness_on_link_loss();
@@ -778,37 +799,6 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "query")]
         for pending in self.pending_gets.drain(..) {
             pending.unregister(&mut observer);
-        }
-    }
-
-    /// Declare again, over a link that has just come up, what the session holds, under the ids it
-    /// was declared with: its key expressions first, since a subscriber or an Interest may name
-    /// one, then its subscribers and its Interests, its queryables, its tokens and its liveliness
-    /// subscribers' Interests. zenoh-pico sends its declaration cache again
-    /// once a reopen succeeds (`vendor/zenoh-pico/src/net/session.c` @
-    /// `_z_fut_fn_result_t _z_client_reopen_task_fn(void *ztc_arg, _z_executor_t *executor) {`).
-    fn redeclare(&self, actions: &McuActions<C>) {
-        for entry in &self.keyexprs {
-            let _ = actions.send_declare_keyexpr(entry.id, &entry.keyexpr);
-        }
-        for entry in &self.subscribers {
-            entry.declare(actions);
-        }
-        for hold in &self.interests {
-            hold.send(actions);
-        }
-        #[cfg(feature = "queryable")]
-        for entry in &self.queryables {
-            entry.declare(actions);
-        }
-        #[cfg(feature = "liveliness")]
-        {
-            for entry in &self.tokens {
-                entry.declare(actions);
-            }
-            for entry in &self.live_subs {
-                entry.ask(actions);
-            }
         }
     }
 
@@ -842,6 +832,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             }
             None => most,
         };
+        // And so is the next turn of a replay the link owes its peer, which is not due by input.
+        let most = match self.replay.next_turn_ms() {
+            Some(due_ms) => {
+                let left_us = due_ms
+                    .saturating_mul(1000)
+                    .saturating_sub(self.clock.now_us());
+                u32::try_from(left_us.div_ceil(1000)).map_or(most, |left| left.min(most))
+            }
+            None => most,
+        };
         if most == 0 {
             return IdleWait::None;
         }
@@ -864,6 +864,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// End the link, whatever it is doing, telling an established peer so.
     fn end_link(&mut self) {
+        self.replay.discard();
         let link = std::mem::replace(&mut self.link, Link::Waiting { at_us: u64::MAX });
         if let Link::Up(wire) | Link::Dialing { wire, .. } = link {
             if wire.actions.is_established() {
@@ -928,6 +929,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             tokens: Vec::new(),
             #[cfg(feature = "liveliness")]
             live_subs: Vec::new(),
+            replay: Replay::new(),
         };
         #[cfg(feature = "queryable")]
         let plane = core.plane.clone();
@@ -960,6 +962,23 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             reader: Mutex::new(None),
             this: this.clone(),
         }))
+    }
+
+    /// State how the declarations of a link go out, for a caller that wants a pace regardless of
+    /// the build (a test, or a program whose image is built for another policy); the build states
+    /// it by default (`ReplayPacing::from_build`). `Some` sends a burst of declarations a step and
+    /// waits at least the interval before the next burst; `None` sends them all in one.
+    pub fn set_replay_pacing(&self, pacing: Option<ReplayPacing>) {
+        if let Some(mut core) = self.live() {
+            core.0.replay.set_pacing(pacing);
+        }
+    }
+
+    /// Whether the peer of the established link has been told every declaration the session holds.
+    /// A session with no link established owes nothing yet, so it is synced, as the slot node's
+    /// is before a client has come (`docs/declaration-sync-pacing.md`, rule 9).
+    pub fn declarations_synced(&self) -> bool {
+        self.live().map_or(true, |core| core.0.replay.finished())
     }
 
     /// The session's state, for one operation. `None` once the session is closed.
@@ -1308,9 +1327,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             form: form.clone(),
             holds: 1,
         };
-        if let Some(actions) = core.up() {
-            hold.send(actions);
-        }
+        core.announce(Kind::Interest, OnRefusal::Forget, |actions| {
+            hold.send(actions)
+        });
         core.interests.push(hold);
     }
 
@@ -1325,8 +1344,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         core.interests[at].holds -= 1;
         if core.interests[at].holds == 0 {
+            let link = core.retract(Kind::Interest, at);
             let hold = core.interests.remove(at);
-            if let Some(actions) = core.up() {
+            if let Some(actions) = link {
                 actions.send_interest_final(hold.interest_id);
             }
         }
@@ -1569,9 +1589,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             keyexpr,
             wire,
         };
-        if let Some(actions) = core.up() {
-            entry.declare(actions);
-        }
+        core.announce(Kind::Subscriber, OnRefusal::Forget, |actions| {
+            entry.declare(actions)
+        });
         core.subscribers.push(entry);
         // A matching listener that counts the session's own subscribers may now match: it is
         // told, outside the lock.
@@ -1591,12 +1611,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let live = self.live().and_then(|mut core| {
             let core = &mut core.0;
             let at = core.live_subs.iter().position(|s| s.id == id)?;
+            let link = core.retract(Kind::LiveSub, at);
             let entry = core.live_subs.remove(at);
             core.observer
                 .borrow_mut()
                 .liveliness_subscribers
                 .unregister(id);
-            if let Some(actions) = core.up() {
+            if let Some(actions) = link {
                 actions.send_interest_final(id);
             }
             Some(entry)
@@ -1610,12 +1631,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let entry = self.live().and_then(|mut core| {
             let core = &mut core.0;
             let at = core.subscribers.iter().position(|s| s.id == id)?;
+            let link = core.retract(Kind::Subscriber, at);
             let entry = core.subscribers.remove(at);
             core.observer
                 .borrow_mut()
                 .subscribers
                 .unregister(entry.registration);
-            match (core.up(), &entry.retraction) {
+            match (link, &entry.retraction) {
                 (Some(actions), Some(key)) => {
                     actions.send_undeclare_subscriber_naming(id, key.mapping_id, &key.suffix)
                 }
@@ -1641,10 +1663,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Some(entry.id);
         }
         let id = core.next_mapping;
-        // A declaration the link refuses is not made; one made while the link is down is sent
-        // when it comes up.
-        if let Some(actions) = core.up() {
-            actions.send_declare_keyexpr(id, &keyexpr).ok()?;
+        // A declaration the link refuses is not made; one made while the link is down, or that
+        // the replay has not reached, is sent in its turn.
+        let taken = core.announce(Kind::Keyexpr, OnRefusal::Undo, |actions| {
+            actions.send_declare_keyexpr(id, &keyexpr).is_ok()
+        });
+        if !taken {
+            return None;
         }
         core.next_mapping += 1;
         core.keyexprs.push(KexprEntry {
@@ -1665,8 +1690,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         };
         core.keyexprs[at].holds -= 1;
         if core.keyexprs[at].holds == 0 {
+            let link = core.retract(Kind::Keyexpr, at);
             core.keyexprs.remove(at);
-            if let Some(actions) = core.up() {
+            if let Some(actions) = link {
                 actions.send_undeclare_kexpr(mapping_id);
             }
         }
@@ -1957,9 +1983,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             wire,
             complete,
         };
-        if let Some(actions) = core.up() {
-            entry.declare(actions);
-        }
+        core.announce(Kind::Queryable, OnRefusal::Forget, |actions| {
+            entry.declare(actions)
+        });
         core.queryables.push(entry);
         // A matching listener that counts the session's own queryables may now match: it is told,
         // outside the lock.
@@ -2134,13 +2160,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let entry = self.live().and_then(|mut core| {
             let core = &mut core.0;
             let at = core.queryables.iter().position(|q| q.id == id)?;
+            let link = core.retract(Kind::Queryable, at);
             let entry = core.queryables.remove(at);
             core.observer
                 .borrow_mut()
                 .queryables
                 .unregister(entry.registration);
-            if let Some(actions) = core.up() {
-                entry.retract(actions);
+            if let Some(actions) = link {
+                entry.retract(&actions);
             }
             // One that counted it may now match no more.
             #[cfg(feature = "local-queryable")]
@@ -2176,9 +2203,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             wire,
             retraction,
         };
-        if let Some(actions) = core.up() {
-            entry.declare(actions);
-        }
+        core.announce(Kind::Token, OnRefusal::Forget, |actions| {
+            entry.declare(actions)
+        });
         core.tokens.push(entry);
         Some(id)
     }
@@ -2188,10 +2215,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         let entry = self.live().and_then(|mut core| {
             let core = &mut core.0;
             let at = core.tokens.iter().position(|t| t.id == id)?;
+            let link = core.retract(Kind::Token, at);
             let entry = core.tokens.remove(at);
             core.observer.borrow_mut().local_tokens.unregister(id);
-            if let Some(actions) = core.up() {
-                entry.retract(actions);
+            if let Some(actions) = link {
+                entry.retract(&actions);
             }
             Some(entry)
         });
@@ -2233,9 +2261,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             wire,
             history,
         };
-        if let Some(actions) = core.up() {
-            entry.ask(actions);
-        }
+        core.announce(Kind::LiveSub, OnRefusal::Forget, |actions| {
+            entry.ask(actions)
+        });
         core.live_subs.push(entry);
         drop(guard);
         self.deliver();

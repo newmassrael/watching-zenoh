@@ -76,7 +76,7 @@ different shapes:
 | Host | Where its declarations live | Declares at run time | Today's replay |
 |---|---|---|---|
 | Heap runtime (tokio) | one ordered `Vec` of cached declarations, `SessionCore::declaration_cache` | yes | `replay_declarations`, one call, from the reconnect driver |
-| Cooperative engine | separate lists by kind (key expressions, subscribers, interests, queryables, tokens, liveliness) | yes | `Core::redeclare`, one call, kinds in a fixed order |
+| Cooperative engine | separate lists by kind (key expressions, subscribers, interests, queryables, tokens, liveliness) | yes | one turn per step over a per-link `ReplayCursor` in `engine/replay.rs` (`wz-capi-coop`): the kinds in a fixed order, the place of an entry its kind's offset plus its index, a burst and an interval from `ReplayPacing` when the policy is on and the whole sequence when it is off, and a refused send resuming at the entry it failed on; it was `Core::redeclare`, one call, before phase 4 landed for this host |
 | Fixed-memory slot node | one `&'static [Declaration]` built at start, wire id = index + 1 | no | `replay_declarations` (`slot_client`), one turn per established session over a per-session `ReplayCursor`, a burst and an interval from `ReplayPacing` (in `wz-session-core`, the one type the heap runtime shares) when the policy is on and the whole list when it is off, and a per-session next-turn time that holds the next turn back; a refused send resumes at the entry it failed on (it was the whole list from index 0 before phase 4 landed for this host) |
 
 What is common is not a cache. It is a position in a sequence the host can recite in a fixed order.
@@ -161,8 +161,14 @@ pacing is on, and the cursor removes it; that part is worth landing as its own c
    written by the session that owns the file (the cooperative engine: session 11; the slot node:
    session ef, who offered to do or review it). This document does not edit their files. DONE for
    the slot node: the cursor (a refused send resumes where it failed), then the policy's burst and
-   interval through the shared `ReplayPacing`, with `SlotClientNode::declarations_synced`. The
-   cooperative engine's `redeclare` is not done.
+   interval through the shared `ReplayPacing`, with `SlotClientNode::declarations_synced`. DONE
+   for the cooperative engine: a link that comes up begins a cursor over its lists, `poll_link`
+   runs a turn when one is due (the read's idle wait is shortened to it), every live declaration
+   and retraction of the six lists asks the cursor (`announce`, `retract`), a lost or ended link
+   discards it, and `CoopEngine::declarations_synced` says whether the established link's peer has
+   been told everything. Not done there: the heap host's final-bookkeeping, which reads owned
+   frames, has no reader on this engine, so `wait_declarations_stable` and a synced query are
+   not on it.
 
 ## What a user of aliased sends must know
 

@@ -460,6 +460,28 @@ it behaves as pico behaves in both of pico's threading arms.
   answered window on the cooperative build: the window's own tests answer over loopback, and a
   router that answers a real multicast group is the hosted leg's. Section 6 now stands at the
   listening role and the advanced plane, then the engine flip.
+- 2026-10-25: the cooperative engine's declarations take the replay cursor (phase 4 of
+  `docs/declaration-sync-pacing.md`). `Core::redeclare` told the six lists to a new link in one
+  call and ignored every refused send. It is now one `ReplayCursor` per link in
+  `engine/replay.rs`: the lists in a fixed order are the sequence (key expressions, subscribers,
+  Interests, queryables, tokens, liveliness subscribers), an entry's place is its kind's offset
+  plus its index, and a link that comes up begins the cursor and sends the first turn. `poll_link`
+  sends the next turn when it is due, and the read's idle wait is shortened to it, so a paced
+  session moves on its own clock as the slot node does. Every live push into or removal from a
+  list asks the cursor first: a declaration the replay has not reached is stored and sent in its
+  turn, one behind the cursor is sent at once, a retraction of an entry the peer was told of is
+  sent and one it was not told of is dropped in silence. A key expression the link refuses is not
+  made and leaves the cursor as it was; any other live send that is refused counts as told, as it
+  always has here. A lost or ended link discards the cursor. Without the `declaration-sync-pacing`
+  policy a turn is the whole sequence, so a build with the policy off sends the frames it sent
+  before, and the one change in it is that a send the link refused during the replay is retried
+  from the entry it failed on, a millisecond later, and not dropped. `CoopEngine` gains
+  `set_replay_pacing` (a caller that wants a pace regardless of the build) and
+  `declarations_synced`. Five tests over the router stand-in: a burst a turn and an interval
+  between, a declaration made during the replay told once, a retraction sent only if the peer was
+  told, a replay cut short by a lost link begun again on the next, and the unpaced single turn.
+  Not on this engine: `wait_declarations_stable` and a synced query, which need a reader of the
+  peer's finals that the heap host's bookkeeping does not give an engine with no owned frames.
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected

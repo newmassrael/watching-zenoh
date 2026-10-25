@@ -867,5 +867,6 @@ mod local;
 mod local_query;
 #[cfg(feature = "queryable")]
 mod queryable;
+mod replay;
 #[cfg(feature = "liveliness-get")]
 mod snapshot;

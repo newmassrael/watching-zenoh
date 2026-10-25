@@ -48,13 +48,14 @@ pub(super) struct TokenEntry {
 }
 
 impl TokenEntry {
-    /// Announce this token over `actions`.
-    pub(super) fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
-        let _ = if self.wire.is_literal() {
+    /// Announce this token over `actions`: whether the link took it.
+    pub(super) fn declare<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
+        if self.wire.is_literal() {
             actions.send_declare_token(self.id, 0, Some(&self.keyexpr))
         } else {
             actions.send_declare_token(self.id, self.wire.mapping_id, self.wire.suffix.as_deref())
-        };
+        }
+        .is_ok()
     }
 
     /// Retract this token over `actions`, naming its key when its declaration asked to.
@@ -78,9 +79,9 @@ pub(super) struct LiveSubEntry {
 
 impl LiveSubEntry {
     /// Send this subscriber's Interest over `actions`: the tokens to come, and with `history` the
-    /// ones alive now.
-    pub(super) fn ask<C: ClockSource + 'static>(&self, actions: &McuActions<C>) {
-        let _ = if self.wire.is_literal() {
+    /// ones alive now: whether the link took it.
+    pub(super) fn ask<C: ClockSource + 'static>(&self, actions: &McuActions<C>) -> bool {
+        if self.wire.is_literal() {
             actions.send_interest_liveliness_subscriber(
                 self.id,
                 self.history,
@@ -94,7 +95,8 @@ impl LiveSubEntry {
                 self.wire.mapping_id,
                 self.wire.suffix.as_deref(),
             )
-        };
+        }
+        .is_ok()
     }
 }
 
