@@ -415,9 +415,17 @@ if [[ -n "$ZH" ]]; then
         # priority 1 and priority 6 fragment chains on ONE link, which is the
         # precondition every per-channel reassembly witness needs and which
         # nothing else here can produce.
-        echo "build-zenohd: building zenoh core examples (z_queryable, z_get, z_pub) ..." >&2
+        #
+        # The LIVELINESS pair joins them for the same reason: `z_sub_liveliness` is the only foreign
+        # watcher of a token that says, in its own words, that a token appeared and that it was
+        # dropped, and `z_get_liveliness` the only foreign asker of the tokens alive now. zenohd
+        # routes tokens and declares none, and zenoh-pico's liveliness (which wz is also held to)
+        # is not the upstream router-side behaviour a node that declares a token has to meet: a
+        # fixed-memory node's token is judged by these two, which share no code with wz.
+        echo "build-zenohd: building zenoh core examples (z_queryable, z_get, z_pub, z_sub_liveliness, z_get_liveliness) ..." >&2
         CARGO_TARGET_DIR="$BUILD_DIR" cargo "+$TOOLCHAIN" build \
             -p zenoh-examples --example z_queryable --example z_get --example z_pub \
+            --example z_sub_liveliness --example z_get_liveliness \
             --release --manifest-path "$ZH/Cargo.toml"
         CORE_EXAMPLES_SRC="$BUILD_DIR/release/examples"
     fi
@@ -536,7 +544,7 @@ else
     echo "  and will FAIL rather than grade a table it could not read." >&2
 fi
 if [[ -n "$CORE_EXAMPLES_SRC" ]]; then
-    for ex in z_queryable z_get z_pub; do
+    for ex in z_queryable z_get z_pub z_sub_liveliness z_get_liveliness; do
         install -m 0755 "$CORE_EXAMPLES_SRC/$ex" "$INSTALL_DIR/zenoh_$ex"
         echo "build-zenohd: installed -> $INSTALL_DIR/zenoh_$ex" >&2
     done

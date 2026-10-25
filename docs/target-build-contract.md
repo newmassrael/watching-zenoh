@@ -607,8 +607,29 @@ stopped and answered from, another responder's value replaces it, and the node a
 the next session after the router is stopped and started
 (`wz_declared_querier_zenohd_interop.rs`).
 
-Not written: the entities the slot profile does not build yet (a listening endpoint, multicast, a
-token), each of which is a change to the profile before it is a word the declaration accepts; a port of the declared node for QNX or Android; and the budgets that are
+**Liveliness token (landed).** `kind = "liveliness-token"` and `key` (a literal: a token is the
+liveliness of one key, and a pattern is refused): the node declares the token on every session as
+it establishes, and the router keeps it for as long as the session lasts, tells whoever watches
+the key that it appeared, and drops it, with the same word, when the session goes. The node keeps
+nothing for it and says nothing of it: a token is only a declaration, recorded after the others
+(`DeclarationKind::Token`, sent with `send_declare_token`), so it holds no cell, decides no budget
+and is refused nowhere but by a node built without the `token` feature, which refuses to start
+with one (`InstallRefused::Tokens`) rather than run and never be heard. That feature is built
+exactly when the declaration has a token. The send had no path without an allocator (its owned
+form is a heap object): `send_declare_token` now writes the declaration from the caller's text
+through the borrowed writer, as the subscriber's and the queryable's do (the writer itself was
+already held byte for byte to the owned form), and the owned form and its reconnect cache are the
+heap profile's. A node holds at most four tokens, which is the bound the witness runs: four tokens
+and a document are the five declarations of one session establishing, and the router sees every
+one. The witness is upstream's own pair, which shares no code with wz: `z_sub_liveliness` sees the
+four appear when the session is established and dropped when the node is stopped, `z_get_liveliness`
+lists them on the pattern that covers them, one on a key that names one and none on a key nothing
+declared, and a restarted node declares them again
+(`wz_declared_token_zenohd_interop.rs`). The two examples are provisioned beside the others by
+`scripts/build-zenohd.sh`, which changes the key of the hosted zenohd cache.
+
+Not written: the entities the slot profile does not build yet (a listening endpoint, multicast),
+each of which is a change to the profile before it is a word the declaration accepts; a port of the declared node for QNX or Android; and the budgets that are
 still tuning constants of the library (the task cells, the receive and send storage), which the
 declaration cannot state.
 

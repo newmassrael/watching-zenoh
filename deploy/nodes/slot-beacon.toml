@@ -1,0 +1,42 @@
+# A node declaration (docs/target-build-contract.md section 5b), checked by scripts/lib/wz_node.py.
+#
+# A fixed-memory node that says it is alive: it dials one router and, on every session, declares four
+# liveliness tokens, which the router keeps for as long as the session lasts and tells whoever
+# watches the key about, and a document it answers queries with, on the per-session slot profile
+# (no allocator). Four tokens and a document are the declarations of one session establishing that
+# the target's bound is set by: the witness sees every one of them.
+#
+# The endpoint is this machine's loopback on a port of its own, because this is the node the
+# interop test builds and runs against the reference router
+# (crates/wz-integration-tests/tests/wz_declared_token_zenohd_interop.rs): the locator is part of
+# what the node IS, so the router it is tested against listens there.
+
+[node]
+id = "slot-beacon"
+help = "A fixed-memory client that dials a router over TCP and declares four liveliness tokens on every session."
+target = "slot"
+
+[[endpoint]]
+role = "dial"
+locator = "tcp/127.0.0.1:17474"
+
+[[entity]]
+kind = "queryable"
+key = "lab/beacon/info"
+document_bytes = 16
+
+[[entity]]
+kind = "liveliness-token"
+key = "lab/alive/a"
+
+[[entity]]
+kind = "liveliness-token"
+key = "lab/alive/b"
+
+[[entity]]
+kind = "liveliness-token"
+key = "lab/alive/c"
+
+[[entity]]
+kind = "liveliness-token"
+key = "lab/alive/d"

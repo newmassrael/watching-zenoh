@@ -11360,12 +11360,17 @@ layer_c1m_session_lwip() {
     _runci_guarded_test "C1m mcu adminspace read+write" 24 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
-    # with the client core): no leg above selects both, so its tests ran in none until this one. 25 =
+    # with the client core): no leg above selects both, so its tests ran in none until this one. 27 =
     # the loop's observations, the identity and the handshake, the documents and their declarations,
-    # the body pool, the documents a front end chose, the single endpoint, and the subscriptions and
-    # the queryables that answer from them (their order, a sample reaching its cell, the refusals).
-    _runci_guarded_test "C1m mcu slot node" 25 \
+    # the body pool, the documents a front end chose, the single endpoint, the subscriptions and
+    # the queryables that answer from them (their order, a sample reaching its cell, the refusals),
+    # and the liveliness tokens (declared last, refused by a node that cannot send one).
+    _runci_guarded_test "C1m mcu slot node" 27 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_node --quiet || return 1
+    # The same tests of a node built with `declare-token`: the number is the same, and what two of
+    # them assert is the other half (a token is declared, and is not refused).
+    _runci_guarded_test "C1m mcu slot node with tokens" 27 \
+        cargo test -p wz-session-mcu --features client-slot,declare-token --lib slot_node --quiet || return 1
     # The latest sample of a subscription (`latest`, the same profile): the cell, its cut at the
     # subscription's capacity, a delete, a key cut at a character, the storage's bounds, and the
     # loop's watch that says each new sample once.
@@ -19935,7 +19940,7 @@ layer_z_zenohd_interop() {
     # declared size is cut, and a delete empties the answer.
     local decl_pkg decl_rc=0 decl_node
     decl_pkg="$(mktemp -d)" || return 1
-    for decl_node in slot-recorder slot-reporter slot-asker; do
+    for decl_node in slot-recorder slot-reporter slot-asker slot-beacon; do
         [ "$decl_rc" -eq 0 ] || break
         python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc --artifact declared-node \
             --node "$decl_node" --out "$decl_pkg/$decl_node" || decl_rc=1
@@ -19958,6 +19963,13 @@ layer_z_zenohd_interop() {
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zask 2 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_DECLARED_NODE_ASKER="$decl_pkg/slot-asker/bin/declared-node" \
         cargo test -p wz-integration-tests --test wz_declared_querier_zenohd_interop \
+        -- --ignored --quiet --test-threads=1 || decl_rc=1; }
+    # The liveliness tokens, the same way, with upstream's `z_sub_liveliness` as the watcher and
+    # `z_get_liveliness` as the asker: the four tokens appear when the session is established and
+    # drop with it, the router's table lists them, and they come back with the next session.
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Ztok 2 env WZ_ZENOHD_BIN="$zenohd" \
+        WZ_DECLARED_NODE_BEACON="$decl_pkg/slot-beacon/bin/declared-node" \
+        cargo test -p wz-integration-tests --test wz_declared_token_zenohd_interop \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     rm -rf "$decl_pkg"
     [ "$decl_rc" -eq 0 ] || return 1

@@ -30,7 +30,9 @@ not build the node.
                                puts on that key every period);
                                kind = "querier", key, period_ms, timeout_ms, reply_bytes (it asks
                                that key every period and keeps the latest reply; a queryable's
-                               from may name its key)
+                               from may name its key);
+                               kind = "liveliness-token", key (a literal, declared on every
+                               session and kept by the router for as long as it lasts)
     [limits]                   <LIMIT_ID> = <integer>, any limit `deploy/wz-config.toml` declares
 
 ## What it refuses, and why that is an exit and not a skip
@@ -89,7 +91,7 @@ TARGETS = {
         "max_endpoints": 1,
         "endpoint_roles": {"dial"},
         "schemes": ("tcp", "udp", "tls"),
-        "entity_kinds": {"queryable", "subscriber", "publisher", "querier"},
+        "entity_kinds": {"queryable", "subscriber", "publisher", "querier", "liveliness-token"},
         # `DOC_MAX` of the same file: the static every document is a prefix of.
         "document_max": 4096,
         # The bytes of a payload a subscription keeps (`LatestCells` of `wz_session_mcu::latest`).
@@ -103,11 +105,14 @@ TARGETS = {
         "max_queriers": 4,
         "timeout_max": 60_000,
         "period_max": 3_600_000,
+        # A token is only a declaration, so the bound is what the declarations of a session establishing
+        # can carry: a node of four tokens and a document is what the witness runs, and every one of
+        # the five is seen by the router (`wz_declared_token_zenohd_interop.rs`).
+        "max_tokens": 4,
         "refused": {
             "listen": "the slot node holds one session that it dials; it has no accept loop",
             "multicast": "the multicast group session has a slot table but no node that joins "
             "one yet",
-            "liveliness-token": "the slot node declares queryables, subscriptions and publishers only",
         },
     },
 }
@@ -201,10 +206,11 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             if any(int(match[o]) > 255 for o in "abcd") or not 1 <= int(match["port"]) <= 65535:
                 out.append(f"{who}: locator {ep['locator']!r} has an octet above 255 or a port outside 1..65535")
 
-    seen: dict[str, set[str]] = {"queryable": set(), "subscriber": set(), "publisher": set(), "querier": set()}
+    seen: dict[str, set[str]] = {"queryable": set(), "subscriber": set(), "publisher": set(),
+                                 "querier": set(), "liveliness-token": set()}
     sample_sizes: dict[str, int] = {}
     mirrors: list[tuple[str, object]] = []
-    queryables = subscribers = publishers = queriers = 0
+    queryables = subscribers = publishers = queriers = tokens = 0
     for n, ent in enumerate(data.get("entity", []), 1):
         who = f"entity {n}"
         for extra in sorted(set(ent) - ENTITY_KEYS):
@@ -214,8 +220,10 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             out.append(f"{who}: kind is {kind!r}, not one of {', '.join(ENTITY_KINDS)}")
             continue
         if kind not in target["entity_kinds"]:
-            out.append(f"{who}: a `{kind}` is not built on {node['target']}: {target['refused'][kind]}")
+            why_not = target["refused"].get(kind, "the target has no behaviour for it yet")
+            out.append(f"{who}: a `{kind}` is not built on {node['target']}: {why_not}")
             continue
+        tokens += kind == "liveliness-token"
         queryables += kind == "queryable"
         subscribers += kind == "subscriber"
         publishers += kind == "publisher"
@@ -246,6 +254,13 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
                 out.append(f"{who}: sample_bytes is {size!r}, not an integer from 1 to {target['sample_max']}")
             elif isinstance(key, str):
                 sample_sizes[key] = size
+            continue
+        if kind == "liveliness-token":
+            for extra in ("document_bytes", "sample_bytes", "from"):
+                if extra in ent:
+                    out.append(f"{who}: a liveliness token is only its key and has no `{extra}`")
+            if isinstance(key, str) and ("*" in key or "$" in key):
+                out.append(f"{who}: a token is the liveliness of one key, and {key!r} is a pattern (`*` or `$`)")
             continue
         if kind == "publisher":
             for extra in ("sample_bytes", "from"):
@@ -294,6 +309,9 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
     if publishers > target["max_publishers"]:
         out.append(f"{publishers} publishers; the {node['target']} target keeps the schedule of "
                    f"{target['max_publishers']} in the session's task cell")
+    if tokens > target["max_tokens"]:
+        out.append(f"{tokens} liveliness tokens; the {node['target']} target declares at most "
+                   f"{target['max_tokens']} in the declarations of a session establishing")
     if queriers > target["max_queriers"]:
         out.append(f"{queriers} queriers; the {node['target']} target keeps the schedule of "
                    f"{target['max_queriers']} in the session's task cell")
@@ -373,6 +391,8 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
     mirrors = ", ".join(f"({rust_string(k)}, {at})" for k, at in mirrored)
     published = [(e["key"], e["period_ms"], e["document_bytes"]) for e in every if e["kind"] == "publisher"]
     pubs = ", ".join(f"({rust_string(k)}, {p}, {b})" for k, p, b in published)
+    alive = [e["key"] for e in every if e["kind"] == "liveliness-token"]
+    token_keys = ", ".join(rust_string(k) for k in alive)
     return "\n".join(
         [
             f"// {wz_config.SPDX}",
@@ -396,6 +416,9 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             f"pub const SUBSCRIPTIONS: [(&str, usize); {len(subscribed)}] = [{cells}];",
             "/// The queriers the node runs: (key, the period and the timeout in milliseconds, the bytes of a",
             "/// reply each keeps).",
+            "/// The liveliness tokens the node declares on every session, by key.",
+            f"pub const TOKENS: usize = {len(alive)};",
+            f"pub const TOKEN_KEYS: [&str; {len(alive)}] = [{token_keys}];",
             f"pub const QUERIERS: usize = {len(queried)};",
             f"pub const QUERIED: [(&str, u32, u32, usize); {len(queried)}] = [{asks}];",
             "/// The cells that keep a latest value: the subscriptions' and then the queriers'.",
@@ -436,7 +459,8 @@ def features_of(data: dict) -> list[str]:
     only such a node: the layer's queries and the pending table are not in any other)."""
     tls = any(ep["locator"].startswith("tls/") for ep in data["endpoint"])
     asks = any(e["kind"] == "querier" for e in data.get("entity", []))
-    return ["declared"] + (["tls"] if tls else []) + (["get"] if asks else [])
+    alive = any(e["kind"] == "liveliness-token" for e in data.get("entity", []))
+    return ["declared"] + (["tls"] if tls else []) + (["get"] if asks else []) + (["token"] if alive else [])
 
 
 def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
@@ -609,8 +633,57 @@ def _selftest() -> int:
             SAMPLE.replace('role = "dial"', 'role = "listen"'), "no accept loop")
     refuses("a multicast endpoint", SAMPLE.replace('role = "dial"', 'role = "multicast"'), "not built on slot")
     refuses("a role outside the vocabulary", SAMPLE.replace('role = "dial"', 'role = "dail"'), "not one of dial")
-    refuses("a liveliness token is refused, not dropped",
-            SAMPLE.replace('kind = "queryable"', 'kind = "liveliness-token"'), "not built on slot")
+    # A kind a target does not build is refused with the target's own words, or with a default when it
+    # states none. The slot target builds every kind now, so the branch is driven on a target that
+    # does not, for the length of the call.
+    built = TARGETS["slot"]["entity_kinds"]
+    TARGETS["slot"]["entity_kinds"] = built - {"publisher"}
+    try:
+        refuses("a kind the target does not build is refused, never dropped",
+                SAMPLE + '\n[[entity]]\nkind = "publisher"\nkey = "p"\nperiod_ms = 1\ndocument_bytes = 1\n',
+                "not built on slot: the target has no behaviour for it yet")
+        TARGETS["slot"]["refused"]["publisher"] = "the target has no clock"
+        refuses("and with the target's reason when it states one",
+                SAMPLE + '\n[[entity]]\nkind = "publisher"\nkey = "p"\nperiod_ms = 1\ndocument_bytes = 1\n',
+                "the target has no clock")
+    finally:
+        TARGETS["slot"]["entity_kinds"] = built
+        TARGETS["slot"]["refused"].pop("publisher", None)
+
+    # A liveliness token is a key, declared on every session, that the router drops with the session.
+    tok = '\n[[entity]]\nkind = "liveliness-token"\nkey = "lab/alive/a"\n'
+    expect("a token is a valid entity", problems(SAMPLE + tok) == [])
+    toks = emit("n", wz_config.read_decl_toml(SAMPLE + tok + tok.replace("lab/alive/a", "lab/alive/b")), sha)
+    expect("the tokens are generated by key, in the order they are declared",
+           'pub const TOKEN_KEYS: [&str; 2] = ["lab/alive/a", "lab/alive/b"];' in toks
+           and "pub const TOKENS: usize = 2;" in toks)
+    expect("a node with no token declares none",
+           "pub const TOKENS: usize = 0;" in rs and "pub const TOKEN_KEYS: [&str; 0] = [];" in rs)
+    expect("a token decides no budget and no cell",
+           budgets(wz_config.read_decl_toml(SAMPLE + tok), decl) == budgets(data, decl)
+           and "pub const CELLS: usize = 0;" in emit("n", wz_config.read_decl_toml(SAMPLE + tok), sha))
+    expect("a node with a token is built with the token feature, and no other is",
+           features_of(wz_config.read_decl_toml(SAMPLE + tok)) == ["declared", "token"]
+           and features_of(data) == ["declared"])
+    expect("the features are the ones each kind asks for, in a fixed order",
+           features_of(wz_config.read_decl_toml((
+               SAMPLE + tok + '\n[[entity]]\nkind = "querier"\nkey = "lab/ask/val"\nperiod_ms = 500\n'
+               "timeout_ms = 1000\nreply_bytes = 32\n").replace("tcp/", "tls/")))
+           == ["declared", "tls", "get", "token"])
+    refuses("a token with no key", SAMPLE + '\n[[entity]]\nkind = "liveliness-token"\n', "key")
+    refuses("a token that is a pattern", SAMPLE + tok.replace("lab/alive/a", "lab/alive/*"), "is a pattern")
+    refuses("a token that is a pattern with $", SAMPLE + tok.replace("lab/alive/a", "lab/$*"), "is a pattern")
+    refuses("a token with a document", SAMPLE + tok + "document_bytes = 4\n", "has no `document_bytes`")
+    refuses("a token with a sample size", SAMPLE + tok + "sample_bytes = 4\n", "has no `sample_bytes`")
+    refuses("a token with a source", SAMPLE + tok + 'from = "x"\n', "has no `from`")
+    refuses("a token with a period", SAMPLE + tok + "period_ms = 4\n", "only a publisher or a querier has a `period_ms`")
+    refuses("two tokens of one key", SAMPLE + tok + tok, "declared twice")
+    expect("a token and a publisher of one key are not a duplicate",
+           problems(SAMPLE + tok + '\n[[entity]]\nkind = "publisher"\nkey = "lab/alive/a"\nperiod_ms = 5\n'
+                    "document_bytes = 1\n") == [])
+    refuses("more tokens than a session establishing declares",
+            SAMPLE + "".join(tok.replace("lab/alive/a", f"lab/alive/{i}") for i in range(5)),
+            "5 liveliness tokens")
 
     # A querier asks a key every period and keeps the latest reply in a cell.
     ask = ('\n[[entity]]\nkind = "querier"\nkey = "lab/ask/val"\nperiod_ms = 500\ntimeout_ms = 1000\n'

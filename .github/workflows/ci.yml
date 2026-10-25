@@ -2725,6 +2725,13 @@ jobs:
             test -x "target/zenohd/$ex" \
               || { echo "::error::$ex missing — the wz QueryTarget proof cannot run"; exit 1; }
           done
+          # The LIVELINESS pair, for the declared-node token witness (Layer Z, Ztok): the only
+          # foreign watcher and asker of a liveliness token. Their absence is a panic in that leg
+          # and not a skip, and it is named here before the lanes run.
+          for ex in zenoh_z_sub_liveliness zenoh_z_get_liveliness; do
+            test -x "target/zenohd/$ex" \
+              || { echo "::error::$ex missing — the declared-node token proof cannot run"; exit 1; }
+          done
           # R2109 (open-debt item 514) — the reference DOCUMENT, not a binary.
           # Layer Z's LEG 12 derives upstream's default `mode` from it rather
           # than transcribing `peer` into a wz source, so its absence turns a

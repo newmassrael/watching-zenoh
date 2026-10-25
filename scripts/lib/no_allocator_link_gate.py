@@ -606,6 +606,21 @@ IMAGES: dict[str, Image] = {
                 ),
                 label="linux-x86_64-slot-asker",
             ),
+            # A node that says it is alive: built with `token` (the `Declare(DeclToken)` written into
+            # the lent slot, which is the part that had no allocator-free path), four tokens and a
+            # document, no budget of its own.
+            Build(
+                HOST,
+                None,
+                ("declared", "token"),
+                env=(
+                    (
+                        "WZ_DECLARED_RS",
+                        str(REPO_ROOT / "deploy" / "nodes" / "generated" / "slot-beacon.rs"),
+                    ),
+                ),
+                label="linux-x86_64-slot-beacon",
+            ),
         ),
     ),
     # The wz half of the zenoh-pico comparison image: the CYT4BF MAC behind Zephyr's Ethernet

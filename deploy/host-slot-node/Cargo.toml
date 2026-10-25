@@ -50,6 +50,10 @@ required-features = ["declared"]
 default = []
 # Build `declared-node`, which includes the generated constants named by `WZ_DECLARED_RS`.
 declared = []
+# The node declares liveliness tokens: the `Declare(DeclToken)` it sends on every session. Built exactly
+# when a node declaration has a token (`scripts/lib/wz_node.py` names the features of a node), and a
+# node that has one and is built without it refuses to start.
+token = ["wz-session-mcu/declare-token"]
 # The session coalesces the messages of one send window into one datagram (zenoh-pico's
 # `Z_FEATURE_BATCHING`): off, every message is a datagram of its own.
 batching = ["wz-runtime-coop/transport-batching", "wz-session-core/transport-batching"]

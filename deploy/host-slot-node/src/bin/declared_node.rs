@@ -60,12 +60,12 @@ mod declared {
 use declared::QUERIED;
 use declared::{
     CELLS, DECLARATION_SHA256, DOCS, DOCUMENTS, MIRRORED, MIRRORS, NODE_ID, PUBLISHED, PUBLISHERS,
-    QUERIERS, ROUTER, SAMPLE_MAX, SUBSCRIBERS, SUBSCRIPTIONS, TLS,
+    QUERIERS, ROUTER, SAMPLE_MAX, SUBSCRIBERS, SUBSCRIPTIONS, TLS, TOKENS, TOKEN_KEYS,
 };
 
 /// The declarations the node sends on a session: its documents, the queryables that answer from a
-/// subscription, and the subscriptions.
-const DECLS: usize = DOCS + MIRRORS + SUBSCRIBERS;
+/// cell, the subscriptions and the liveliness tokens.
+const DECLS: usize = DOCS + MIRRORS + SUBSCRIBERS + TOKENS;
 
 /// The revision of how this executable is driven. It takes no argument and reads no document, so the
 /// surface is the console lines a lab waits for; it moves when one of them is removed or changes
@@ -122,6 +122,10 @@ const _: () = {
 const _: () = assert!(
     CELLS == SUBSCRIBERS + QUERIERS,
     "the cells are the subscriptions' and the queriers'"
+);
+const _: () = assert!(
+    TOKENS == 0 || cfg!(feature = "token"),
+    "the declaration has a liveliness token and the node is not built with the `token` feature that declares it"
 );
 const _: () = assert!(
     QUERIERS == 0 || cfg!(feature = "get"),
@@ -416,6 +420,7 @@ fn run() -> i32 {
         entities: Entities {
             subscriptions: &subscribed,
             mirrors: &mirrored,
+            tokens: &TOKEN_KEYS,
         },
         layer: Active::<PUBLISHERS, QUERIERS> {
             publications: publications(),

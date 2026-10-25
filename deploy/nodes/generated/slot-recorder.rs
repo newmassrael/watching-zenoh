@@ -19,6 +19,9 @@ pub const SUBSCRIBERS: usize = 1;
 pub const SUBSCRIPTIONS: [(&str, usize); 1] = [("lab/in/temp", 64)];
 /// The queriers the node runs: (key, the period and the timeout in milliseconds, the bytes of a
 /// reply each keeps).
+/// The liveliness tokens the node declares on every session, by key.
+pub const TOKENS: usize = 0;
+pub const TOKEN_KEYS: [&str; 0] = [];
 pub const QUERIERS: usize = 0;
 pub const QUERIED: [(&str, u32, u32, usize); 0] = [];
 /// The cells that keep a latest value: the subscriptions' and then the queriers'.
