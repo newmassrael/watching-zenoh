@@ -350,7 +350,6 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 #[cfg(feature = "router-multicast-faces")]
 use std::hash::Hasher;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -416,13 +415,14 @@ use crate::linkstate_forward::{
     peer_zid_routing, query_candidates, re_advertise_interest_into, resolve_governed_keyexpr,
     resolve_source_in, resolve_source_zid_in, select_best_matching, synthesize_drained_fan_finals,
     synthesize_expired_query_returns, Cached, ClientQablStore, ClientQueryRoutes, ClientQueryable,
-    ClientRoutes, ClientSubStore, DataRoutes, LocalQueryHandler, LocalQueryView, LocalQueryable,
-    LocalSubscriber, LocalSubscriberHandler, QueryCandidate, QueryRoutes,
+    ClientRoutes, ClientSubStore, DataRoutes, LocalQueryView, QueryCandidate, QueryRoutes,
 };
 use crate::routing_region::{
     hat_kind, regions_of, GatewayView, HatKind, InterRegionFilter, RegionMap,
 };
+use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::region_partition::{region_of, RemoteFacts, SouthPartition};
+use wz_session_core::sink::SampleView;
 // R2393 — the host-subscriber dispatch's sample types, the same ones the peer
 // plane's `dispatch_local_subscribers` builds from.
 use wz_session_core::sample_kind::SampleKind;
@@ -537,8 +537,8 @@ fn is_router_hat(region: Region) -> bool {
 struct MeshHat {
     /// The region's link-state graph. `Rc<RefCell>`, single-task, like every
     /// forwarder graph, and shared with the read-only admin views.
-    net: Arc<PlainRwLock<LinkstateNetwork>>,
-    /// A spanning-tree recompute of `net` is pending (the D2c coalescing flag).
+    net: LinkstateNetwork,
+    ///A spanning-tree recompute of `net` is pending (the D2c coalescing flag).
     /// zenoh runs a SEPARATE `TreesComputationWorker` per net; wz coalesces
     /// every net onto the one [`tick`](FaceForwarder::tick) cadence the trait
     /// seam offers, with one dirty flag per net (a functional-equivalent
@@ -549,7 +549,7 @@ struct MeshHat {
     /// keyed by their zid. The cross-region self-bubble is NOT stored; it is
     /// DERIVED at route-compute from the native tables. `Rc`, shared with the
     /// admin `RouterDeclarationsView`.
-    subs: Arc<PlainRwLock<LinkstatepeerInterest<()>>>,
+    subs: LinkstatepeerInterest<()>,
     /// R2908 — the data routes computed over `net` and `subs`, per keyexpr and
     /// source, served until either changes: the pin keeps them per hat on the
     /// `Resource` (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) data_routes: RwLock<DataRoutes>,`).
@@ -557,7 +557,7 @@ struct MeshHat {
     /// The region's queryable interest, the query-plane twin of `subs`: native
     /// sources keyed by zid, VALUE = their declared `QueryableInfo`. The
     /// cross-region self-bubble (a MERGED info in zenoh) is DERIVED at compute.
-    qabls: Arc<PlainRwLock<LinkstatepeerInterest<QueryableInfo>>>,
+    qabls: LinkstatepeerInterest<QueryableInfo>,
     /// R2910 — the query routes computed over `net` and `qabls`, per keyexpr
     /// and source: the pin's per-hat `query_routes` on the `Resource`.
     query_routes: QueryRoutes,
@@ -568,7 +568,7 @@ struct MeshHat {
     /// derived. `Rc` for the reason `subs` is: the admin `token/**` leg reads
     /// it through the view rather than by recapturing the forwarder.
     #[cfg(feature = "routing-token-tables")]
-    tokens: Arc<PlainRwLock<LinkstatepeerInterest<()>>>,
+    tokens: LinkstatepeerInterest<()>,
 }
 
 impl MeshHat {
@@ -597,14 +597,14 @@ impl MeshHat {
             LinkstateNetwork::new_in_region(self_zid, WhatAmI::Router, region.bound().is_south());
         net.set_full_linkstate(!is_peer_hat(region));
         Self {
-            net: Arc::new(PlainRwLock::new(net)),
+            net,
             trees_dirty: PlainCell::new(false),
-            subs: Arc::new(PlainRwLock::new(LinkstatepeerInterest::new())),
+            subs: LinkstatepeerInterest::new(),
             data_routes: DataRoutes::new(),
-            qabls: Arc::new(PlainRwLock::new(LinkstatepeerInterest::new())),
+            qabls: LinkstatepeerInterest::new(),
             query_routes: QueryRoutes::new(),
             #[cfg(feature = "routing-token-tables")]
-            tokens: Arc::new(PlainRwLock::new(LinkstatepeerInterest::new())),
+            tokens: LinkstatepeerInterest::new(),
         }
     }
 }
@@ -648,6 +648,131 @@ fn face_qabl_info(
         .filter(|(k, _)| k == keyexpr)
         .map(|(_, info)| *info)
         .reduce(QueryableInfo::merge)
+}
+
+/// The MERGED [`QueryableInfo`] the querier on `exclude_face` interested in `ke`
+/// would see — the OR of `complete` (min of `distance`) over EVERY queryable wz
+/// holds that intersects `ke` (`router_qabls` + `linkstatepeer_qabls` excluding
+/// self, plus `client_qabls` EXCLUDING the destination face) — the value a FUTURE
+/// qabl push/re-push MUST carry: a single source's raw info would DOWNGRADE an
+/// aggregate reply (`merge` is OR-complete) and re-arm an ALL_COMPLETE filter.
+/// Excluding `exclude_face` keeps the CURRENT-dump seed
+/// (`OnTables::dump_interest_qabls`, which inlines the SAME fold
+/// excluding the requesting `inbound`), the ingest push, and the R311y153
+/// downgrade re-push all like-for-like, so the stored value never drifts.
+///
+/// DIVERGENCE from zenoh (benign, source-verified): zenoh's `local_qabl_info(res,
+/// dst_face)` excludes the dst's own contribution only CONDITIONALLY — for a CLIENT
+/// dst it FOLDS IN the dst's own queryable (hat/router/queries.rs:175-177, the
+/// `face.whatami != Peer` disjunct), keeping that client's filter OFF via the fold.
+/// wz excludes `exclude_face` UNCONDITIONALLY. The OUTCOME is nonetheless equivalent
+/// for a co-hosted COMPLETE queryable: that scenario requires pico
+/// `Z_FEATURE_LOCAL_QUERYABLE`, which registers the local queryable as a
+/// `local_target` (zenoh-pico `net/filtering.c` `_z_write_filter_ctx_update_state`:
+/// the filter is ACTIVE only when `targets == NULL && local_targets == 0`), so the
+/// co-hosted queryable keeps the write-filter OFF independent of what wz declares —
+/// no black-hole. Different mechanism (pico `local_targets` vs zenoh fold-in), same
+/// outcome (filter stays OFF, the querier's get flows to the local answerer).
+///
+/// A function of the hats and not of the whole of [`Tables`], so that the store of FUTURE
+/// queryable interests, a field of the same tables, can be written while it is computed.
+fn merged_qabl_info_in(
+    hats: &RegionMap<Hat>,
+    ke: &str,
+    self_zid: &Zid,
+    exclude_face: FaceId,
+) -> QueryableInfo {
+    let mut merged: Option<QueryableInfo> = None;
+    let mut fold = |info: QueryableInfo| {
+        merged = Some(match merged {
+            Some(m) => m.merge(info),
+            None => info,
+        });
+    };
+    for hat in hats.values().filter_map(Hat::mesh) {
+        for (_ke, _zid, info) in hat.qabls.matching_entries(ke, Some(self_zid)) {
+            fold(*info);
+        }
+    }
+    let ke_chunks: Vec<&str> = ke.split('/').collect();
+    for hat in hats.values().filter_map(Hat::broker) {
+        for (face, m) in hat.qabls.iter() {
+            if *face == exclude_face {
+                continue; // don't fold the destination querier's own queryable
+            }
+            for (k, info) in m.values() {
+                if keyexpr_intersects_target(k, &ke_chunks) {
+                    fold(*info);
+                }
+            }
+        }
+    }
+    merged.unwrap_or(QueryableInfo::DEFAULT)
+}
+
+/// Whether ANY subscription wz still holds INTERSECTS `ke` — the "still backed"
+/// existence predicate the R311y151 undeclare-push consults AFTER a withdrawal to
+/// decide whether a pushed reply ke has lost its LAST backer (`false` => undeclare
+/// and re-arm the filter). Folds GLOBALLY (no self/dest-face exclusion): the
+/// current dump's "backed" is `matching_entries` non-empty or an intersecting
+/// client sub, so a per-destination exclusion here would spuriously undeclare a
+/// reply ke still backed by a co-hosted or self sub.
+fn any_sub_matches_in(hats: &RegionMap<Hat>, ke: &str) -> bool {
+    if hats
+        .values()
+        .filter_map(Hat::mesh)
+        .any(|hat| !hat.subs.matching_entries(ke, None).is_empty())
+    {
+        return true;
+    }
+    let chunks: Vec<&str> = ke.split('/').collect();
+    hats.values().filter_map(Hat::broker).any(|hat| {
+        hat.subs.values().any(|by_id| {
+            by_id
+                .values()
+                .any(|k| keyexpr_intersects_target(k, &chunks))
+        })
+    })
+}
+
+/// The liveliness-token twin of [`any_sub_matches_in`] (see `OnTables::any_token_matches`): the
+/// post-withdrawal "still backed" existence check `undeclare_push_token` consults.
+#[cfg(feature = "routing-token-tables")]
+fn any_token_matches_in(hats: &RegionMap<Hat>, ke: &str) -> bool {
+    if hats
+        .values()
+        .filter_map(Hat::mesh)
+        .any(|hat| !hat.tokens.matching_entries(ke, None).is_empty())
+    {
+        return true;
+    }
+    let chunks: Vec<&str> = ke.split('/').collect();
+    hats.values().filter_map(Hat::broker).any(|hat| {
+        hat.tokens
+            .values()
+            .any(|ids| ids.values().any(|k| keyexpr_intersects_target(k, &chunks)))
+    })
+}
+
+/// The queryable twin of [`any_sub_matches_in`]. An EXISTENCE check, NOT
+/// [`merged_qabl_info_in`] (which folds to `QueryableInfo::DEFAULT` on zero matches — a value
+/// read would report "backed" even when no queryable exists and suppress every undeclare).
+fn any_qabl_matches_in(hats: &RegionMap<Hat>, ke: &str) -> bool {
+    if hats
+        .values()
+        .filter_map(Hat::mesh)
+        .any(|hat| !hat.qabls.matching_entries(ke, None).is_empty())
+    {
+        return true;
+    }
+    let chunks: Vec<&str> = ke.split('/').collect();
+    hats.values().filter_map(Hat::broker).any(|hat| {
+        hat.qabls.values().any(|by_id| {
+            by_id
+                .values()
+                .any(|(k, _)| keyexpr_intersects_target(k, &chunks))
+        })
+    })
 }
 
 /// R2906 — what a reader of one client face's SUBSCRIBERS sees: each keyexpr
@@ -707,7 +832,7 @@ struct BrokerHat {
     ///
     /// R2909 — [`Versioned`], so the client leg cached in `client_routes` is
     /// stale once it changes.
-    subs: Arc<PlainRwLock<ClientSubs>>,
+    subs: ClientSubs,
     /// R2909 — the client leg of the data route over `subs`, per keyexpr.
     client_routes: ClientRoutes,
     /// The per-client-face QUERYABLE store (C5b), the query-plane twin of
@@ -723,7 +848,7 @@ struct BrokerHat {
     /// and the store contributes to the merged
     /// [`derived_cross_tier_qabl_info`](RouterForwarder::derived_cross_tier_qabl_info).
     /// Same keyexpr-keyed follow-up as `subs` (`undeclare_queryable`).
-    qabls: Arc<PlainRwLock<ClientQabls>>,
+    qabls: ClientQabls,
     /// R2911 — the client leg of the query route over `qabls`, per keyexpr.
     client_query_routes: ClientQueryRoutes,
     /// The per-client-face liveliness-TOKEN store (slice-3), keyed the way
@@ -739,18 +864,18 @@ struct BrokerHat {
     /// FOLD this store (excluding the requester), the twin of
     /// `dump_interest_subs` folding `subs`.
     #[cfg(feature = "routing-token-tables")]
-    tokens: Arc<PlainRwLock<ClientTokens>>,
+    tokens: ClientTokens,
 }
 
 impl BrokerHat {
     fn new() -> Self {
         Self {
-            subs: Arc::new(PlainRwLock::new(ClientSubStore::new())),
+            subs: ClientSubStore::new(),
             client_routes: ClientRoutes::new(),
-            qabls: Arc::new(PlainRwLock::new(Versioned::new(HashMap::new()))),
+            qabls: Versioned::new(HashMap::new()),
             client_query_routes: ClientQueryRoutes::new(),
             #[cfg(feature = "routing-token-tables")]
-            tokens: Arc::new(PlainRwLock::new(HashMap::new())),
+            tokens: HashMap::new(),
         }
     }
 }
@@ -760,7 +885,7 @@ impl BrokerHat {
 /// table exists only under `routing-token-tables`.
 #[cfg(feature = "routing-token-tables")]
 fn mesh_tokens_name(hat: &MeshHat, keyexpr: &str) -> bool {
-    hat.tokens.read().source_count(keyexpr) > 0
+    hat.tokens.source_count(keyexpr) > 0
 }
 
 #[cfg(not(feature = "routing-token-tables"))]
@@ -772,7 +897,6 @@ fn mesh_tokens_name(_hat: &MeshHat, _keyexpr: &str) -> bool {
 #[cfg(feature = "routing-token-tables")]
 fn client_tokens_name(hat: &BrokerHat, keyexpr: &str) -> bool {
     hat.tokens
-        .read()
         .values()
         .any(|ids| ids.values().any(|k| k == keyexpr))
 }
@@ -787,6 +911,12 @@ fn client_tokens_name(_hat: &BrokerHat, _keyexpr: &str) -> bool {
 /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `pub hats: RegionMap<Box<dyn HatTrait + Send + Sync>>,`).
 /// The kind is read off the ported hat table ([`is_leaf`]), so which regions
 /// are meshes and which are brokers cannot drift from the pin's choice.
+///
+/// A mesh hat holds its graph, its three interest tables and its memos by value (phase 3e, one
+/// guard round them), so the variants differ in size. There are a handful of hats in a router and
+/// they are read on every message, so a box would be a pointer to follow on the hot path for the
+/// sake of a size nothing multiplies.
+#[allow(clippy::large_enum_variant)]
 enum Hat {
     Mesh(MeshHat),
     Broker(BrokerHat),
@@ -814,6 +944,20 @@ impl Hat {
             Hat::Mesh(_) => None,
         }
     }
+
+    fn mesh_mut(&mut self) -> Option<&mut MeshHat> {
+        match self {
+            Hat::Mesh(hat) => Some(hat),
+            Hat::Broker(_) => None,
+        }
+    }
+
+    fn broker_mut(&mut self) -> Option<&mut BrokerHat> {
+        match self {
+            Hat::Broker(hat) => Some(hat),
+            Hat::Mesh(_) => None,
+        }
+    }
 }
 
 /// R2879 (open-debt item 751, step 5) — the router's hats as the inter-region
@@ -822,17 +966,11 @@ impl Hat {
 /// (`zenoh/src/net/routing/hat/broker/mod.rs` @ `fn gateways_of(&self, _tables: &TablesData, _zid: &ZenohIdProto) -> Option<Vec<ZenohIdProto>> {`).
 impl<T: std::ops::Deref<Target = Tables>> GatewayView<Zid> for OnTables<'_, T> {
     fn gateways_of(&self, region: Region, zid: &Zid) -> Option<Vec<Zid>> {
-        self.tables
-            .hats
-            .get(&region)?
-            .mesh()?
-            .net
-            .read()
-            .gateways_of(zid)
+        self.tables.hats.get(&region)?.mesh()?.net.gateways_of(zid)
     }
 
     fn gateways(&self, region: Region) -> Option<Vec<Zid>> {
-        Some(self.tables.hats.get(&region)?.mesh()?.net.read().gateways())
+        Some(self.tables.hats.get(&region)?.mesh()?.net.gateways())
     }
 }
 
@@ -1095,42 +1233,18 @@ type FaceKeyexprs = HashMap<FaceId, HashSet<String>>;
 /// face-keyed map. A face is owned by exactly one hat, so no two regions
 /// contribute the same face.
 #[cfg(feature = "adminspace-introspection-handlers")]
-fn client_keyexprs<S: FaceMap>(
-    stores: &RegionMap<Arc<PlainRwLock<S>>>,
+fn client_keyexprs<'a, S: FaceMap + 'a>(
+    stores: impl Iterator<Item = &'a S>,
     keys: impl Fn(&S::Entry) -> HashSet<String>,
 ) -> FaceKeyexprs {
     stores
-        .values()
         .flat_map(|store| {
             store
-                .read()
                 .faces()
                 .iter()
                 .map(|(face, entry)| (*face, keys(entry)))
                 .collect::<Vec<_>>()
         })
-        .collect()
-}
-
-/// Every table a view holds for a region the pin's ROUTER hat serves, in region
-/// order: `North`, then on a custom partition each subregion's router region.
-/// Each fills the one `routers` bucket, as each of the pin's router hats fills
-/// its own and the dispatcher merges them per resource.
-#[cfg(feature = "adminspace-introspection-handlers")]
-fn router_region_tables<T>(map: &RegionMap<Arc<T>>) -> Vec<&Arc<T>> {
-    map.iter()
-        .filter(|(region, _)| is_router_hat(*region))
-        .map(|(_, table)| table)
-        .collect()
-}
-
-/// Every table a view holds for a region the pin's PEER hat serves, in region
-/// order: one on the `auto` preset, one per subregion on a custom partition.
-#[cfg(feature = "adminspace-introspection-handlers")]
-fn peer_region_tables<T>(map: &RegionMap<Arc<T>>) -> Vec<&Arc<T>> {
-    map.iter()
-        .filter(|(region, _)| is_peer_hat(*region))
-        .map(|(_, table)| table)
         .collect()
 }
 
@@ -1545,12 +1659,10 @@ pub use crate::linkstate_forward::LinkstateNetView;
 /// of live state the adminspace renders.
 #[cfg(feature = "adminspace-core")]
 pub struct RouterSessionsView {
-    faces: Arc<PlainRwLock<HashMap<FaceId, RouterFaceState>>>,
-    /// R2637 — the ROUTERS-tier graph, because a session's weight is a property
-    /// of the link and not of the face. Two handles rather than moving the
-    /// renderer back onto the forwarder: the enumeration stays ONE derivation
-    /// site, and both fields are already `Rc` so this costs nothing.
-    routers_net: Arc<PlainRwLock<LinkstateNetwork>>,
+    /// The router's tables: the faces, and the ROUTERS-tier graph (R2637), because a session's
+    /// weight is a property of the link and not of the face. One handle rather than moving the
+    /// renderer back onto the forwarder: the enumeration stays ONE derivation site.
+    tables: Arc<PlainRwLock<Tables>>,
 }
 
 #[cfg(feature = "adminspace-core")]
@@ -1580,9 +1692,10 @@ impl RouterSessionsView {
         // R2637 — ONE lookup of the tier's weights for the whole table, not one
         // per face: `links_info` walks the graph, so calling it per session would
         // re-walk it N times to answer N questions about one snapshot.
-        let weights = self.routers_net.read().links_info();
-        self.faces
-            .read()
+        let tables = self.tables.read();
+        let weights = tables.routers_net().links_info();
+        tables
+            .faces
             .values()
             .map(|face| {
                 let zid = peer_zid_routing(&face.actions);
@@ -1618,8 +1731,7 @@ impl RouterSessionsView {
 /// reasoning: a close ends the session with a peer, which is every link to it.
 #[cfg(feature = "session-close-ingress")]
 pub struct RouterSessionDirectory {
-    faces: Arc<PlainRwLock<HashMap<FaceId, RouterFaceState>>>,
-    joined: Arc<PlainRwLock<HashMap<FaceId, Arc<SessionLinkActions>>>>,
+    tables: Arc<PlainRwLock<Tables>>,
 }
 
 #[cfg(feature = "session-close-ingress")]
@@ -1627,12 +1739,12 @@ impl RouterSessionDirectory {
     /// Every link this router holds, primaries and joined links, handed to `f`:
     /// the one enumeration the close and the status read share.
     fn with_links<R>(&self, f: impl FnOnce(Vec<&SessionLinkActions>) -> R) -> R {
-        let faces = self.faces.read();
-        let joined = self.joined.read();
-        f(faces
+        let tables = self.tables.read();
+        f(tables
+            .faces
             .values()
             .map(|face| &*face.actions)
-            .chain(joined.values().map(|link| &**link))
+            .chain(tables.joined_links.values().map(|link| &**link))
             .collect())
     }
 }
@@ -1664,31 +1776,15 @@ impl wz_session_core::lifecycle_query::SessionDirectory for RouterSessionDirecto
 /// thing the reply body is actually about.
 #[cfg(feature = "adminspace-introspection-handlers")]
 pub struct RouterDeclarationsView {
-    /// R2869 (open-debt item 751, step 3b) — each mesh region's subscriber and
-    /// queryable tables, keyed by region as the forwarder's hats are. Each
-    /// region fills the bucket of its own hat, which is how the pin's
-    /// dispatcher merges them (see [`subscribers`](Self::subscribers)).
-    subs: RegionMap<Arc<PlainRwLock<LinkstatepeerInterest<()>>>>,
-    qabls: RegionMap<Arc<PlainRwLock<LinkstatepeerInterest<QueryableInfo>>>>,
-    /// R2873 (step 3d) — each broker hat's per-face stores, keyed by region.
-    /// Every one fills the `clients` bucket, as each of the pin's broker hats
-    /// does for the faces it owns.
-    client_subs: RegionMap<Arc<PlainRwLock<ClientSubs>>>,
-    client_qabls: RegionMap<Arc<PlainRwLock<ClientQabls>>>,
-    /// The token plane's three tiers, present only where the tables are
-    /// (`routing-token-tables`). The `token/**` leg is folded from exactly the
-    /// same trio as the other two legs — upstream's router hat enumerates tokens
-    /// like every other hat (`zenoh/src/net/routing/hat/router/token.rs` @
-    /// `fn sourced_tokens`), which is what says this host owes the leg at all.
-    /// R2870 (open-debt item 751, step 3c) — the mesh regions' token tables,
-    /// keyed by region like `subs` and `qabls`.
-    #[cfg(feature = "routing-token-tables")]
-    tokens: RegionMap<Arc<PlainRwLock<LinkstatepeerInterest<()>>>>,
-    #[cfg(feature = "routing-token-tables")]
-    client_tokens: RegionMap<Arc<PlainRwLock<ClientTokens>>>,
-    /// A client's zid comes from its FACE: a Client joins no link-state graph,
-    /// so there is nowhere else to read it from.
-    faces: Arc<PlainRwLock<HashMap<FaceId, RouterFaceState>>>,
+    /// The router's tables, read when a leg is asked for: each mesh region's subscriber,
+    /// queryable and (under `routing-token-tables`) token tables, which fill the bucket of their
+    /// own hat as the pin's dispatcher merges them (see [`subscribers`](Self::subscribers)); each
+    /// broker hat's per-face stores, which fill the `clients` bucket; and the faces, because a
+    /// client's zid comes from its FACE (a Client joins no link-state graph, so there is nowhere
+    /// else to read it from). The `token/**` leg is folded from exactly the same trio as the
+    /// other two legs, as upstream's router hat enumerates tokens like every other hat
+    /// (`zenoh/src/net/routing/hat/router/token.rs` @ `fn sourced_tokens`).
+    tables: Arc<PlainRwLock<Tables>>,
 }
 
 #[cfg(feature = "adminspace-introspection-handlers")]
@@ -1731,12 +1827,20 @@ impl RouterDeclarationsView {
     /// here, which is why an isolated router answers these legs with nothing:
     /// what it knows about declarations is what its neighbours told it.
     pub fn subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
-        let clients = client_keyexprs(&self.client_subs, |by_id| by_id.values().cloned().collect());
-        let routers = router_region_tables(&self.subs);
-        let peers = peer_region_tables(&self.subs);
-        self.bucket_by_tier(
-            &routers.iter().map(|table| table.read()).collect::<Vec<_>>(),
-            &peers.iter().map(|table| table.read()).collect::<Vec<_>>(),
+        let tables = self.tables.read();
+        let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.subs), |by_id| {
+            by_id.values().cloned().collect()
+        });
+        Self::bucket_by_tier(
+            &tables,
+            &tables
+                .router_mesh_hats()
+                .map(|hat| &hat.subs)
+                .collect::<Vec<_>>(),
+            &tables
+                .peer_mesh_hats()
+                .map(|hat| &hat.subs)
+                .collect::<Vec<_>>(),
             &clients,
         )
     }
@@ -1746,14 +1850,20 @@ impl RouterDeclarationsView {
     /// per-declaration `QueryableInfo` — so the client store's inner map is
     /// reduced to its keyexpr set here.
     pub fn queryables(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
-        let clients = client_keyexprs(&self.client_qabls, |by_id| {
+        let tables = self.tables.read();
+        let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.qabls), |by_id| {
             by_id.values().map(|(keyexpr, _)| keyexpr.clone()).collect()
         });
-        let routers = router_region_tables(&self.qabls);
-        let peers = peer_region_tables(&self.qabls);
-        self.bucket_by_tier(
-            &routers.iter().map(|table| table.read()).collect::<Vec<_>>(),
-            &peers.iter().map(|table| table.read()).collect::<Vec<_>>(),
+        Self::bucket_by_tier(
+            &tables,
+            &tables
+                .router_mesh_hats()
+                .map(|hat| &hat.qabls)
+                .collect::<Vec<_>>(),
+            &tables
+                .peer_mesh_hats()
+                .map(|hat| &hat.qabls)
+                .collect::<Vec<_>>(),
             &clients,
         )
     }
@@ -1785,14 +1895,20 @@ impl RouterDeclarationsView {
     /// `native` predicate had to distinguish and this one does not.
     #[cfg(feature = "routing-token-tables")]
     pub fn tokens(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)> {
-        let clients = client_keyexprs(&self.client_tokens, |by_id| {
+        let tables = self.tables.read();
+        let clients = client_keyexprs(tables.broker_hats().map(|hat| &hat.tokens), |by_id| {
             by_id.values().cloned().collect()
         });
-        let routers = router_region_tables(&self.tokens);
-        let peers = peer_region_tables(&self.tokens);
-        self.bucket_by_tier(
-            &routers.iter().map(|table| table.read()).collect::<Vec<_>>(),
-            &peers.iter().map(|table| table.read()).collect::<Vec<_>>(),
+        Self::bucket_by_tier(
+            &tables,
+            &tables
+                .router_mesh_hats()
+                .map(|hat| &hat.tokens)
+                .collect::<Vec<_>>(),
+            &tables
+                .peer_mesh_hats()
+                .map(|hat| &hat.tokens)
+                .collect::<Vec<_>>(),
             &clients,
         )
     }
@@ -1801,9 +1917,9 @@ impl RouterDeclarationsView {
     /// keyexpr so two GETs of one unchanged state reply identically (a
     /// `HashMap` iteration order would not).
     fn bucket_by_tier<A, B>(
-        &self,
-        routers: &[crate::sync::PlainReadGuard<'_, LinkstatepeerInterest<A>>],
-        peers: &[crate::sync::PlainReadGuard<'_, LinkstatepeerInterest<B>>],
+        tables: &Tables,
+        routers: &[&LinkstatepeerInterest<A>],
+        peers: &[&LinkstatepeerInterest<B>],
         clients: &HashMap<FaceId, HashSet<String>>,
     ) -> Vec<(String, wz_session_core::adminspace::AdminSources)>
     where
@@ -1841,9 +1957,8 @@ impl RouterDeclarationsView {
                     .push(zid_to_zenoh_hex(zid.as_slice()));
             }
         }
-        let faces = self.faces.read();
         for (face, keys) in clients.iter() {
-            let Some(zid) = faces.get(face).and_then(|f| f.peer_zid) else {
+            let Some(zid) = tables.faces.get(face).and_then(|f| f.peer_zid) else {
                 // A face whose handshake carried no routing zid contributes no
                 // SOURCE. Skipping is the honest answer: an entry naming no zid
                 // would claim a declaration nobody can be named for.
@@ -1913,14 +2028,14 @@ pub(crate) struct Tables {
     /// the live face set. A shared handle to the sub-part is the same sidestep
     /// [`LinkstateNetView`] already makes for the two graphs. Use sites are
     /// unchanged — `Rc<RefCell<T>>` derefs to `RefCell<T>`.
-    faces: Arc<PlainRwLock<HashMap<FaceId, RouterFaceState>>>,
+    faces: HashMap<FaceId, RouterFaceState>,
     /// The joined aggregated links of the sessions in [`Self::faces`]: a second or
     /// later physical link of a peer's session is not a face of its own, so the
     /// table above holds only the primary. Kept so a lifecycle close can order
     /// EVERY link to a peer closed ([`RouterForwarder::lifecycle_directory`]), the joined ones
     /// as well as the registered one.
     #[cfg(feature = "session-close-ingress")]
-    joined_links: Arc<PlainRwLock<HashMap<FaceId, Arc<SessionLinkActions>>>>,
+    joined_links: HashMap<FaceId, Arc<SessionLinkActions>>,
     /// Queryables HOSTED BY THIS ROUTER (§5.23 `adminspace-router-linkstate`) —
     /// e.g. the built-in admin queryable on `@/<self-zid>/router/**`. The
     /// router-idiom `derive-not-store` analogue of the peer
@@ -1935,7 +2050,7 @@ pub(crate) struct Tables {
     /// excluded from the routing targets). Always compiled (like `client_qabls`);
     /// the `adminspace-router-linkstate` cfg gates only the demo registration + the
     /// session-core answerer, so an unused registry is a harmless empty no-op.
-    local_queryables: PlainRwLock<Vec<LocalQueryable>>,
+    local_queryables: Vec<HostedQueryable>,
     /// R2393 (§5.21 `router-connect-reconcile`) — subscribers HOSTED BY THIS ROUTER,
     /// the Push-plane twin of [`local_queryables`](Self#structfield.local_queryables).
     ///
@@ -1956,7 +2071,7 @@ pub(crate) struct Tables {
     /// subs, group subs and opposite-mesh natives — so it advertises by the SAME
     /// derive every other contributor uses rather than through a parallel path, and
     /// self is still never stored in either mesh's table.
-    local_subscribers: PlainRwLock<Vec<LocalSubscriber>>,
+    local_subscribers: Vec<HostedSubscriber>,
     /// FUTURE-mode subscriber-interest store (R311y146) — which CLIENT faces
     /// declared a FUTURE (`f()`) subscriber `Interest`, and which
     /// `DeclareSubscriber`s wz has pushed back to them (zenoh's per-`FaceState`
@@ -1969,7 +2084,7 @@ pub(crate) struct Tables {
     /// state, so [`deregister`](FaceForwarder::deregister) MUST purge it BEFORE its
     /// linkless early-return (OBLIGATION 1), like `client_subs`. SUBS plane only
     /// (the QABL future-push is the value-aware [`future_qabls`](Self#structfield.future_qabls)).
-    future_subs: PlainRwLock<FutureSubStore>,
+    future_subs: FutureSubStore,
     /// The QUERYABLE-plane FUTURE store (R311y150) — the value-aware twin of
     /// [`future_subs`](Self#structfield.future_subs): a queryable learned LATER
     /// ([`declare_queryable`](RouterForwarder::declare_queryable)) is proactively
@@ -1977,7 +2092,7 @@ pub(crate) struct Tables {
     /// querier-BEFORE-queryable querier's write-filter deactivates, and a
     /// completeness flip re-pushes the same id. Same OBLIGATION-1 purge as
     /// `future_subs`.
-    future_qabls: PlainRwLock<FutureQablStore>,
+    future_qabls: FutureQablStore,
     /// §5.21 routing-token-tables (slice-4) — the liveliness-TOKEN FUTURE store,
     /// the token twin of [`future_subs`](Self#structfield.future_subs) (both
     /// `FutureInterestStore<()>` — tokens carry no value). A CLIENT face's FUTURE
@@ -1992,7 +2107,7 @@ pub(crate) struct Tables {
     /// ungraceful detach, id-reuse displacement, client face-down), so a future-push
     /// reader IS told a token withdrew: the liveliness stale-live residual is CLOSED.
     #[cfg(feature = "routing-token-tables")]
-    future_tokens: PlainRwLock<FutureSubStore>,
+    future_tokens: FutureSubStore,
 }
 
 /// A [`FaceForwarder`] that maintains zenoh's DUAL router meshes — `routers_net`
@@ -2003,7 +2118,7 @@ pub(crate) struct Tables {
 pub struct RouterForwarder {
     /// The routing tables: the hats, the faces and the stores a declaration writes, in one
     /// place (see [`Tables`]).
-    tables: Tables,
+    tables: Arc<PlainRwLock<Tables>>,
     /// What the destinations hold back, and which faces are not read for it: the router's
     /// credit-based flow control (see [`egress`]).
     ///
@@ -2314,6 +2429,215 @@ pub struct RouterForwarder {
     node_hlc: crate::node_clock::NodeHlc,
 }
 
+/// The handler of a queryable a host registered on the router: the shape the session's own
+/// `declare_queryable` takes (`Send`, so that a router shared between threads can run it from any
+/// of them), where the peer forwarder's is not, a single task never leaving its thread.
+pub(crate) type HostedQueryHandler = Box<dyn FnMut(&dyn QueryView, &mut dyn ReplyOut) + Send>;
+
+/// The handler of a subscriber a host registered on the router (see [`HostedQueryHandler`]).
+pub(crate) type HostedSubscriberHandler = Box<dyn FnMut(&dyn SampleView) + Send>;
+
+thread_local! {
+    /// The handlers this thread is inside of now, by address: what tells a handler that is called
+    /// again from its own body (it publishes into its own pattern) from one that another thread is
+    /// running, which is waited for.
+    static HOSTED_RUNNING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A handler a host registered on the router, callable from any thread: calls of one handler are
+/// serialized, as an `FnMut` needs, and a call that comes from inside the handler itself is refused
+/// and not waited for, which would never end.
+pub(crate) struct Hosted<H>(PlainMutex<H>);
+
+impl<H> Hosted<H> {
+    fn new(handler: H) -> Arc<Self> {
+        Arc::new(Self(PlainMutex::new(handler)))
+    }
+
+    /// Run `f` over the handler, waiting for a call on another thread to finish; `None`, without
+    /// running `f`, when this thread is already inside the handler.
+    fn call<R>(&self, f: impl FnOnce(&mut H) -> R) -> Option<R> {
+        /// Takes the handler off the list of those this thread is inside of, however `f` ends.
+        struct Leave;
+        impl Drop for Leave {
+            fn drop(&mut self) {
+                HOSTED_RUNNING.with(|running| {
+                    running.borrow_mut().pop();
+                });
+            }
+        }
+        let address = std::ptr::from_ref(self) as usize;
+        if HOSTED_RUNNING.with(|running| running.borrow().contains(&address)) {
+            return None;
+        }
+        let mut handler = self.0.guard();
+        HOSTED_RUNNING.with(|running| running.borrow_mut().push(address));
+        let _leave = Leave;
+        Some(f(&mut handler))
+    }
+}
+
+/// A queryable HOSTED BY THIS ROUTER: its keyexpr, whether it answers completely, and its handler.
+struct HostedQueryable {
+    keyexpr: String,
+    complete: bool,
+    handler: Arc<Hosted<HostedQueryHandler>>,
+}
+
+/// A subscriber HOSTED BY THIS ROUTER: its keyexpr (a pattern) and its handler.
+struct HostedSubscriber {
+    keyexpr: String,
+    handler: Arc<Hosted<HostedSubscriberHandler>>,
+}
+
+impl Tables {
+    /// The graph + coalescing flag for a region, or `None` for a region with
+    /// no mesh hat — every leaf region, the clients' included (a client is in no
+    /// mesh). The single classifier `register` / `deregister` / `forward` route
+    /// a face's work through. R2867: a lookup in [`hats`](Self::hats), so the
+    /// selection is the region map's and not a match over known regions.
+    fn plane(&self, tier: Region) -> Option<(&LinkstateNetwork, &PlainCell<bool>)> {
+        self.mesh_hat(tier).map(|hat| (&hat.net, &hat.trees_dirty))
+    }
+
+    /// The hat of a mesh region this router always builds. Panics on any other
+    /// region: the callers name [`ROUTERS_REGION`] / [`PEERS_REGION`], which
+    /// `the_mesh_regions_are_the_non_leaf_regions_the_pins_router_builds` pins
+    /// as exactly the hats the constructor creates.
+    fn mesh(&self, region: Region) -> &MeshHat {
+        self.mesh_hat(region)
+            .unwrap_or_else(|| unreachable!("{region} is not a mesh region of a router"))
+    }
+
+    /// [`mesh`](Self::mesh) for writing.
+    fn mesh_mut(&mut self, region: Region) -> &mut MeshHat {
+        self.hats
+            .get_mut(&region)
+            .and_then(Hat::mesh_mut)
+            .unwrap_or_else(|| unreachable!("{region} is not a mesh region of a router"))
+    }
+
+    /// R2873 (step 3d) — the hat of `region` when it is a MESH hat, `None` for a
+    /// leaf region (a broker hat) or a region this router builds no hat for.
+    fn mesh_hat(&self, region: Region) -> Option<&MeshHat> {
+        self.hats.get(&region).and_then(Hat::mesh)
+    }
+
+    /// Every mesh hat, in the pin's region order.
+    fn mesh_hats(&self) -> impl Iterator<Item = &MeshHat> {
+        self.hats.values().filter_map(Hat::mesh)
+    }
+
+    /// The hats of the regions the pin's ROUTER hat serves, in region order: `North`, then on a
+    /// custom partition each subregion's router region. Each fills the one `routers` bucket of
+    /// an admin leg, as each of the pin's router hats fills its own and the dispatcher merges
+    /// them per resource.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn router_mesh_hats(&self) -> impl Iterator<Item = &MeshHat> {
+        self.hats
+            .iter()
+            .filter(|(region, _)| is_router_hat(*region))
+            .filter_map(|(_, hat)| hat.mesh())
+    }
+
+    /// The hats of the regions the pin's PEER hat serves, in region order: one on the `auto`
+    /// preset, one per subregion on a custom partition.
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn peer_mesh_hats(&self) -> impl Iterator<Item = &MeshHat> {
+        self.hats
+            .iter()
+            .filter(|(region, _)| is_peer_hat(*region))
+            .filter_map(|(_, hat)| hat.mesh())
+    }
+
+    /// The hat of `region` when it is a leaf region's BROKER hat, `None`
+    /// otherwise. A face whose region is a leaf is owned by this hat, and its
+    /// declarations are held here.
+    fn broker_hat(&self, region: Region) -> Option<&BrokerHat> {
+        self.hats.get(&region).and_then(Hat::broker)
+    }
+
+    /// Every broker hat, in the pin's region order. A fold over "every client
+    /// declaration" is a fold over these.
+    fn broker_hats(&self) -> impl Iterator<Item = &BrokerHat> {
+        self.broker_regions().map(|(_, hat)| hat)
+    }
+
+    /// Every broker hat with the region it serves, for a fan-out that has to
+    /// scope its sends to the faces that hat owns.
+    fn broker_regions(&self) -> impl Iterator<Item = (Region, &BrokerHat)> {
+        self.hats
+            .iter()
+            .filter_map(|(region, hat)| hat.broker().map(|hat| (region, hat)))
+    }
+
+    /// The broker hat that OWNS a face placed in the leaf `region`: where that
+    /// face's declarations are registered, as the pin's dispatcher registers a
+    /// declaration in the hat of the face's region. The dispatch calls this only
+    /// for a leaf region, and the constructor builds a broker hat for every leaf
+    /// region the pin's router builds (pinned by
+    /// `the_mesh_regions_are_the_non_leaf_regions_the_pins_router_builds`), and
+    /// [`face_region`] places no face anywhere else, so it never panics.
+    fn owner_broker(&self, region: Region) -> &BrokerHat {
+        self.broker_hat(region)
+            .unwrap_or_else(|| unreachable!("{region} is not a leaf region of a router"))
+    }
+
+    /// [`owner_broker`](Self::owner_broker) for writing.
+    fn owner_broker_mut(&mut self, region: Region) -> &mut BrokerHat {
+        self.hats
+            .get_mut(&region)
+            .and_then(Hat::broker_mut)
+            .unwrap_or_else(|| unreachable!("{region} is not a leaf region of a router"))
+    }
+
+    /// The routers region's graph — zenoh's router-hat `routers_net`.
+    fn routers_net(&self) -> &LinkstateNetwork {
+        &self.mesh(ROUTERS_REGION).net
+    }
+
+    /// The graph of every region the pin's PEER hat serves, in region order: one
+    /// on the `auto` preset, one per subregion of a custom partition, none for a
+    /// partition with no subregion.
+    fn peers_nets(&self) -> impl Iterator<Item = &LinkstateNetwork> {
+        self.hats
+            .iter()
+            .filter(|(region, _)| is_peer_hat(*region))
+            .filter_map(|(_, hat)| hat.mesh().map(|mesh| &mesh.net))
+    }
+}
+
+/// The graph of one mesh region of a router, named by the region and read through the router's
+/// tables when it is asked for: what a view or a node-locator keeps of a graph that is a field
+/// of a hat and so cannot be held on its own ([`crate::linkstate_forward::NetHandle`]).
+#[cfg(any(
+    feature = "adminspace-router-linkstate",
+    all(
+        feature = "session-close-ingress",
+        feature = "routing-accept",
+        feature = "router-connect-reconcile"
+    )
+))]
+pub(crate) struct TablesNet {
+    tables: Arc<PlainRwLock<Tables>>,
+    region: Region,
+}
+
+#[cfg(any(
+    feature = "adminspace-router-linkstate",
+    all(
+        feature = "session-close-ingress",
+        feature = "routing-accept",
+        feature = "router-connect-reconcile"
+    )
+))]
+impl crate::linkstate_forward::NetHandle for TablesNet {
+    fn with_net(&self, f: &mut dyn FnMut(&LinkstateNetwork)) {
+        let tables = self.tables.read();
+        f(&tables.mesh(self.region).net);
+    }
+}
+
 /// The router with its [`Tables`] held for the length of one operation: the forwarder, and the
 /// tables as the caller holds them (`T` is a reference or a lock guard, anything that derefs to
 /// `Tables`).
@@ -2340,11 +2664,23 @@ impl<T> std::ops::Deref for OnTables<'_, T> {
 }
 
 impl RouterForwarder {
-    /// The forwarder with its tables as they are held now.
-    fn on_tables(&self) -> OnTables<'_, &Tables> {
+    /// The forwarder with its tables held for reading, until the result is dropped. Any number of
+    /// readers hold them at once; a thread that already holds them for reading may take them
+    /// again (see [`PlainRwLock::read`]).
+    fn on_tables(&self) -> OnTables<'_, crate::sync::PlainReadGuard<'_, Tables>> {
         OnTables {
             fwd: self,
-            tables: &self.tables,
+            tables: self.tables.read(),
+        }
+    }
+
+    /// The forwarder with its tables held for writing: alone, until the result is dropped. A
+    /// thread that holds them for writing must not take them again for any use, which is why
+    /// the methods that write take `&mut self` and call the readers through it.
+    fn on_tables_mut(&self) -> OnTables<'_, crate::sync::PlainWriteGuard<'_, Tables>> {
+        OnTables {
+            fwd: self,
+            tables: self.tables.write(),
         }
     }
 }
@@ -2352,28 +2688,34 @@ impl RouterForwarder {
 /// The router's public methods, each taking its tables once and handing them to the method of the
 /// same name on [`OnTables`]: what a host, a test or the accept loop calls, and where the lock is
 /// taken. A method that takes no table is delegated all the same, so that the public surface of the
-/// router is one list.
+/// router is one list. The first token names how the tables are taken: `on_tables` for a method that
+/// reads them, `on_tables_mut` for one that writes them.
 macro_rules! router_entry_points {
-    ($($(#[$attr:meta])* fn $name:ident(&self $(, $arg:ident: $ty:ty)* $(,)?) $(-> $ret:ty)?;)*) => {
+    ($guard:ident: $($(#[$attr:meta])* fn $name:ident(&self $(, $arg:ident: $ty:ty)* $(,)?) $(-> $ret:ty)?;)*) => {
         impl RouterForwarder {
             $(
                 $(#[$attr])*
                 #[doc = concat!("The router's `", stringify!($name), "`, with its tables taken once.")]
                 pub fn $name(&self $(, $arg: $ty)*) $(-> $ret)? {
-                    self.on_tables().$name($($arg),*)
+                    self.$guard().$name($($arg),*)
                 }
             )*
         }
     };
 }
 
-router_entry_points! {
-    fn enable_autoconnect(&self, policy: AutoConnect) -> DialIntentReceiver;
-    fn enable_autoconnect_into(&self, policy: AutoConnect, tx: DialIntentSender);
+router_entry_points! { on_tables_mut:
     fn set_gossip_multihop(&self, enabled: bool);
     fn set_peer_region_full_linkstate(&self, enabled: bool);
-    fn set_query_timeout(&self, timeout: Duration);
     fn update_router_link_weights(&self, link_weights: HashMap<Zid, LinkEdgeWeight>) -> bool;
+    fn register_local_queryable(&self, keyexpr: &str, complete: bool, handler: HostedQueryHandler);
+    fn register_local_subscriber(&self, keyexpr: &str, handler: HostedSubscriberHandler);
+}
+
+router_entry_points! { on_tables:
+    fn enable_autoconnect(&self, policy: AutoConnect) -> DialIntentReceiver;
+    fn enable_autoconnect_into(&self, policy: AutoConnect, tx: DialIntentSender);
+    fn set_query_timeout(&self, timeout: Duration);
     #[cfg(feature = "adminspace-core")]
     fn admin_sessions(&self) -> Vec<wz_session_core::adminspace::AdminSession>;
     #[cfg(feature = "session-close-ingress")]
@@ -2436,8 +2778,6 @@ router_entry_points! {
     fn interceptor_cache_entries_for(&self, id: FaceId) -> (usize, usize);
     #[cfg(feature = "router-multicast-faces")]
     fn attach_mcast_group(&self, tx: crate::multicast_pipeline::MulticastTxProducer);
-    fn register_local_queryable(&self, keyexpr: &str, complete: bool, handler: LocalQueryHandler);
-    fn register_local_subscriber(&self, keyexpr: &str, handler: LocalSubscriberHandler);
     #[cfg(feature = "adminspace-introspection-handlers")]
     fn declarations_view(&self) -> RouterDeclarationsView;
     #[cfg(feature = "adminspace-introspection-handlers")]
@@ -2527,17 +2867,20 @@ impl RouterForwarder {
     ///
     /// Call it before any face registers: the hats a registered face joined are
     /// the ones it keeps.
-    pub fn with_south_partition(mut self, partition: SouthPartition) -> Self {
-        assert!(
-            self.tables.faces.read().is_empty(),
-            "a router's south is partitioned before any face registers"
-        );
-        let self_zid = *self.on_tables().routers_net().read().self_zid();
-        self.tables.hats = regions_of(WhatAmI::Router, &partition)
-            .into_iter()
-            .map(|region| (region, Hat::for_region(region, self_zid)))
-            .collect();
-        self.tables.partition = partition;
+    pub fn with_south_partition(self, partition: SouthPartition) -> Self {
+        {
+            let mut on = self.on_tables_mut();
+            assert!(
+                on.tables.faces.is_empty(),
+                "a router's south is partitioned before any face registers"
+            );
+            let self_zid = *on.routers_net().self_zid();
+            on.tables.hats = regions_of(WhatAmI::Router, &partition)
+                .into_iter()
+                .map(|region| (region, Hat::for_region(region, self_zid)))
+                .collect();
+            on.tables.partition = partition;
+        }
         self
     }
 }
@@ -2603,22 +2946,22 @@ impl RouterForwarder {
         timestamping: crate::node_clock::TimestampingEnabled,
     ) -> Self {
         Self {
-            tables: Tables {
+            tables: Arc::new(PlainRwLock::new(Tables {
                 hats: regions_of(WhatAmI::Router, &SouthPartition::Auto)
                     .into_iter()
                     .map(|region| (region, Hat::for_region(region, self_zid)))
                     .collect(),
                 partition: SouthPartition::Auto,
-                faces: Arc::new(PlainRwLock::new(HashMap::new())),
+                faces: HashMap::new(),
                 #[cfg(feature = "session-close-ingress")]
-                joined_links: Arc::new(PlainRwLock::new(HashMap::new())),
-                local_queryables: PlainRwLock::new(Vec::new()),
-                local_subscribers: PlainRwLock::new(Vec::new()),
-                future_subs: PlainRwLock::new(FutureSubStore::new()),
-                future_qabls: PlainRwLock::new(FutureQablStore::new()),
+                joined_links: HashMap::new(),
+                local_queryables: Vec::new(),
+                local_subscribers: Vec::new(),
+                future_subs: FutureSubStore::new(),
+                future_qabls: FutureQablStore::new(),
                 #[cfg(feature = "routing-token-tables")]
-                future_tokens: PlainRwLock::new(FutureSubStore::new()),
-            },
+                future_tokens: FutureSubStore::new(),
+            })),
             // R311y450 — this router's §5.18 clock, over the SAME `WhatAmI::Router`
             // both nets above are seeded with, so the timestamping gate cannot
             // disagree with the role. Router is the one role zenoh's shipped map
@@ -2753,9 +3096,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ///   nets because the `false` call site is "the PEER hat's, a different
     ///   kind of object". Since item 751 this router's south region IS served
     ///   by the peer hat, whose net is that object.
-    pub fn set_gossip_multihop(&self, enabled: bool) {
-        for hat in self.mesh_hats() {
-            hat.net.write().set_gossip_multihop(enabled);
+    pub fn set_gossip_multihop(&mut self, enabled: bool)
+    where
+        T: std::ops::DerefMut,
+    {
+        for (_, hat) in self.tables.hats.iter_mut() {
+            if let Some(hat) = hat.mesh_mut() {
+                hat.net.set_gossip_multihop(enabled);
+            }
         }
     }
 
@@ -2770,9 +3118,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// every link-less gossip entry as detached, measured as three router-hat
     /// mesh E2Es red with a gossip router and link-state peers. The router
     /// mesh keeps full link-state either way; that is the router hat's.
-    pub fn set_peer_region_full_linkstate(&self, enabled: bool) {
-        for net in self.peers_nets() {
-            net.write().set_full_linkstate(enabled);
+    pub fn set_peer_region_full_linkstate(&mut self, enabled: bool)
+    where
+        T: std::ops::DerefMut,
+    {
+        for (region, hat) in self.tables.hats.iter_mut() {
+            if !is_peer_hat(region) {
+                continue;
+            }
+            if let Some(hat) = hat.mesh_mut() {
+                hat.net.set_full_linkstate(enabled);
+            }
         }
     }
 
@@ -2786,12 +3142,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// is stamped here because this is the only place this plane emits, which is
     /// what keeps the loop's gossip counter a gossip discriminator now that the
     /// scouting plane shares the channel.
-    fn emit_dial_intents(&self, net: &Arc<PlainRwLock<LinkstateNetwork>>, changes: &Changes) {
+    fn emit_dial_intents(&self, tier: Region, changes: &Changes) {
         if changes.new.is_empty() {
             return;
         }
+        let Some((net, _)) = self.plane(tier) else {
+            return;
+        };
         let autoconnect = self.autoconnect.get();
-        let net = net.read();
         for zid in &changes.new {
             let Some(locators) = net.node_locators(zid) else {
                 continue;
@@ -2843,17 +3201,29 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// recompute is coalesced onto the next [`tick`](Self::tick), the
     /// counterpart of upstream's `compute_trees_async`. Returns whether any
     /// region's links moved.
-    pub fn update_router_link_weights(&self, link_weights: HashMap<Zid, LinkEdgeWeight>) -> bool {
+    pub fn update_router_link_weights(&mut self, link_weights: HashMap<Zid, LinkEdgeWeight>) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
+        let regions: Vec<Region> = self
+            .tables
+            .hats
+            .iter()
+            .filter(|(region, hat)| hat.mesh().is_some() && is_router_hat(*region))
+            .map(|(region, _)| region)
+            .collect();
         let mut moved = false;
-        for (region, hat) in self.tables.hats.iter() {
-            let Some(hat) = hat.mesh().filter(|_| is_router_hat(region)) else {
-                continue;
-            };
-            if !hat.net.write().update_link_weights(link_weights.clone()) {
+        for region in regions {
+            if !self
+                .tables
+                .mesh_mut(region)
+                .net
+                .update_link_weights(link_weights.clone())
+            {
                 continue;
             }
-            let _ = self.flood_self_links_changed_tier(region, &hat.net);
-            hat.trees_dirty.set(true);
+            let _ = self.flood_self_links_changed_tier(region);
+            self.tables.mesh(region).trees_dirty.set(true);
             moved = true;
         }
         moved
@@ -2879,8 +3249,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     #[cfg(feature = "session-close-ingress")]
     pub fn lifecycle_directory(&self) -> RouterSessionDirectory {
         RouterSessionDirectory {
-            faces: Arc::clone(&self.tables.faces),
-            joined: Arc::clone(&self.tables.joined_links),
+            tables: Arc::clone(&self.fwd.tables),
         }
     }
 
@@ -2893,12 +3262,22 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         feature = "router-connect-reconcile"
     ))]
     pub fn node_locators(&self) -> crate::session_lifecycle_open::NodeLocators {
-        crate::session_lifecycle_open::NodeLocators::new(
-            std::iter::once(self.routers_net())
-                .chain(self.peers_nets())
-                .map(Arc::clone)
-                .collect(),
-        )
+        let nets = std::iter::once(ROUTERS_REGION)
+            .chain(
+                self.tables
+                    .hats
+                    .iter()
+                    .filter(|(region, hat)| is_peer_hat(*region) && hat.mesh().is_some())
+                    .map(|(region, _)| region),
+            )
+            .map(|region| {
+                Arc::new(TablesNet {
+                    tables: Arc::clone(&self.fwd.tables),
+                    region,
+                }) as Arc<dyn crate::linkstate_forward::NetHandle + Send + Sync>
+            })
+            .collect();
+        crate::session_lifecycle_open::NodeLocators::new(nets)
     }
 
     /// A read-only handle over the live face set — the admin host's `sessions[]`
@@ -2909,8 +3288,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     #[cfg(feature = "adminspace-core")]
     pub fn sessions_view(&self) -> RouterSessionsView {
         RouterSessionsView {
-            faces: Arc::clone(&self.tables.faces),
-            routers_net: Arc::clone(self.routers_net()),
+            tables: Arc::clone(&self.fwd.tables),
         }
     }
 
@@ -2931,7 +3309,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .iter()
             .filter(|(region, _)| is_router_hat(*region))
             .filter_map(|(_, hat)| hat.mesh())
-            .flat_map(|hat| hat.net.read().links_info())
+            .flat_map(|hat| hat.net.links_info())
             .collect()
     }
 
@@ -2942,7 +3320,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// count) so each mirrors the field it reads and a caller cannot transpose
     /// them. A single-router topology (no Router faces) reads 1 (self alone).
     pub fn routers_net_node_count(&self) -> usize {
-        self.routers_net().read().node_count()
+        self.routers_net().node_count()
     }
 
     /// Number of nodes in the PEER-tier graph (self + every learned Peer) — the
@@ -2951,8 +3329,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// N connected peers reads `1 + N` once converged (the E2E convergence
     /// witness the ACTIVATION harness asserts on).
     pub fn linkstatepeers_net_node_count(&self) -> usize {
-        self.first_peers_net()
-            .map_or(0, |net| net.read().node_count())
+        self.first_peers_net().map_or(0, |net| net.node_count())
     }
 
     /// Total link-state lists ingested across both nets — the control-plane
@@ -3037,7 +3414,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let actions = self
             .tables
             .faces
-            .read()
             .get(&inbound)
             .map(|state| Arc::clone(&state.actions));
         let pass = self
@@ -3200,9 +3576,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     pub fn queryables_seen(&self) -> usize {
         let client: usize = self
             .broker_hats()
-            .map(|h| h.qabls.read().values().map(|m| m.len()).sum::<usize>())
+            .map(|h| h.qabls.values().map(|m| m.len()).sum::<usize>())
             .sum();
-        let mesh: usize = self.mesh_hats().map(|h| h.qabls.read().count()).sum();
+        let mesh: usize = self.mesh_hats().map(|h| h.qabls.count()).sum();
         client + mesh
     }
 
@@ -3214,7 +3590,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// racing declare-propagation with a Put burst.
     pub fn client_subs_seen(&self) -> usize {
         self.broker_hats()
-            .map(|h| h.subs.read().values().map(|s| s.len()).sum::<usize>())
+            .map(|h| h.subs.values().map(|s| s.len()).sum::<usize>())
             .sum()
     }
 
@@ -3229,7 +3605,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// a matching sub — which needs wz to already hold that sub HERE; an empty
     /// CURRENT dump leaves the filter active and the puts never reach the wire.
     pub fn mesh_subs_seen(&self) -> usize {
-        self.mesh_hats().map(|h| h.subs.read().count()).sum()
+        self.mesh_hats().map(|h| h.subs.count()).sum()
     }
 
     /// Install the full §5.16 interceptor configuration — the router twin of
@@ -3341,7 +3717,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if chain.is_empty() {
             return InterceptorVerdict::Admit;
         }
-        let faces = self.tables.faces.read();
+        let faces = &self.tables.faces;
         let Some(face) = faces.get(&id) else {
             // an unknown face has no relay path anyway
             return InterceptorVerdict::Admit;
@@ -3465,15 +3841,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// resource tree. An exact match, as a `Resource` is one keyexpr.
     fn names_a_resource(&self, keyexpr: &str) -> bool {
         let in_mesh = self.mesh_hats().any(|hat| {
-            hat.subs.read().source_count(keyexpr) > 0
-                || hat.qabls.read().source_count(keyexpr) > 0
+            hat.subs.source_count(keyexpr) > 0
+                || hat.qabls.source_count(keyexpr) > 0
                 || mesh_tokens_name(hat, keyexpr)
         });
         let in_clients = self.broker_hats().any(|hat| {
-            hat.subs.read().names_key(keyexpr)
+            hat.subs.names_key(keyexpr)
                 || hat
                     .qabls
-                    .read()
                     .values()
                     .any(|ids| ids.values().any(|(k, _)| k == keyexpr))
                 || client_tokens_name(hat, keyexpr)
@@ -3483,13 +3858,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             || self
                 .tables
                 .local_queryables
-                .read()
                 .iter()
                 .any(|q| q.keyexpr == keyexpr)
             || self
                 .tables
                 .local_subscribers
-                .read()
                 .iter()
                 .any(|s| s.keyexpr == keyexpr)
     }
@@ -3548,117 +3921,70 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// mesh). The single classifier `register` / `deregister` / `forward` route
     /// a face's work through. R2867: a lookup in [`hats`](Self::hats), so the
     /// selection is the region map's and not a match over known regions.
-    fn plane(
-        &self,
-        tier: Region,
-    ) -> Option<(&Arc<PlainRwLock<LinkstateNetwork>>, &PlainCell<bool>)> {
-        self.mesh_hat(tier).map(|hat| (&hat.net, &hat.trees_dirty))
+    fn plane(&self, tier: Region) -> Option<(&LinkstateNetwork, &PlainCell<bool>)> {
+        self.tables.plane(tier)
     }
 
-    /// The hat of a mesh region this router always builds. Panics on any other
-    /// region: the callers name [`ROUTERS_REGION`] / [`PEERS_REGION`], which
-    /// `the_mesh_regions_are_the_non_leaf_regions_the_pins_router_builds` pins
-    /// as exactly the hats the constructor creates.
-    fn mesh(&self, region: Region) -> &MeshHat {
-        self.mesh_hat(region)
-            .unwrap_or_else(|| unreachable!("{region} is not a mesh region of a router"))
-    }
-
-    /// R2873 (step 3d) — the hat of `region` when it is a MESH hat, `None` for a
-    /// leaf region (a broker hat) or a region this router builds no hat for.
+    /// The hat of `region` when it is a MESH hat (see [`Tables::mesh_hat`]).
     fn mesh_hat(&self, region: Region) -> Option<&MeshHat> {
-        self.tables.hats.get(&region).and_then(Hat::mesh)
+        self.tables.mesh_hat(region)
+    }
+
+    /// The hat of a mesh region this router always builds (see [`Tables::mesh`]), for a test.
+    #[cfg(test)]
+    fn mesh(&self, region: Region) -> &MeshHat {
+        self.tables.mesh(region)
+    }
+
+    /// The broker hat that OWNS a face placed in the leaf `region` (see
+    /// [`Tables::owner_broker`]), for a test.
+    #[cfg(test)]
+    fn owner_broker(&self, region: Region) -> &BrokerHat {
+        self.tables.owner_broker(region)
     }
 
     /// Every mesh hat, in the pin's region order.
     fn mesh_hats(&self) -> impl Iterator<Item = &MeshHat> {
-        self.tables.hats.values().filter_map(Hat::mesh)
+        self.tables.mesh_hats()
     }
 
-    /// The hat of `region` when it is a leaf region's BROKER hat, `None`
-    /// otherwise. A face whose region is a leaf is owned by this hat, and its
-    /// declarations are held here.
+    /// The hat of `region` when it is a leaf region's BROKER hat (see [`Tables::broker_hat`]).
     fn broker_hat(&self, region: Region) -> Option<&BrokerHat> {
-        self.tables.hats.get(&region).and_then(Hat::broker)
+        self.tables.broker_hat(region)
     }
 
     /// Every broker hat, in the pin's region order. A fold over "every client
     /// declaration" is a fold over these.
     fn broker_hats(&self) -> impl Iterator<Item = &BrokerHat> {
-        self.broker_regions().map(|(_, hat)| hat)
+        self.tables.broker_hats()
     }
 
     /// Every broker hat with the region it serves, for a fan-out that has to
     /// scope its sends to the faces that hat owns.
     fn broker_regions(&self) -> impl Iterator<Item = (Region, &BrokerHat)> {
-        self.tables
-            .hats
-            .iter()
-            .filter_map(|(region, hat)| hat.broker().map(|hat| (region, hat)))
-    }
-
-    /// The broker hat that OWNS a face placed in the leaf `region`: where that
-    /// face's declarations are registered, as the pin's dispatcher registers a
-    /// declaration in the hat of the face's region. The dispatch calls this only
-    /// for a leaf region, and the constructor builds a broker hat for every leaf
-    /// region the pin's router builds (pinned by
-    /// `the_mesh_regions_are_the_non_leaf_regions_the_pins_router_builds`), and
-    /// [`face_region`] places no face anywhere else, so it never panics.
-    fn owner_broker(&self, region: Region) -> &BrokerHat {
-        self.broker_hat(region)
-            .unwrap_or_else(|| unreachable!("{region} is not a leaf region of a router"))
-    }
-
-    /// One table out of every mesh hat, keyed by its region — the shape the
-    /// admin declarations view holds.
-    #[cfg(feature = "adminspace-introspection-handlers")]
-    fn mesh_tables<V>(&self, table: impl Fn(&MeshHat) -> V) -> RegionMap<V> {
-        self.tables
-            .hats
-            .iter()
-            .filter_map(|(region, hat)| hat.mesh().map(|hat| (region, table(hat))))
-            .collect()
-    }
-
-    /// The [`mesh_tables`](Self::mesh_tables) twin over the broker hats.
-    #[cfg(feature = "adminspace-introspection-handlers")]
-    fn broker_tables<V>(&self, table: impl Fn(&BrokerHat) -> V) -> RegionMap<V> {
-        self.broker_regions()
-            .map(|(region, hat)| (region, table(hat)))
-            .collect()
+        self.tables.broker_regions()
     }
 
     /// Whether any broker hat holds a client subscription at all.
     fn any_client_sub(&self) -> bool {
-        self.broker_hats().any(|hat| !hat.subs.read().is_empty())
+        self.tables.broker_hats().any(|hat| !hat.subs.is_empty())
     }
 
     /// The routers region's graph — zenoh's router-hat `routers_net`.
-    fn routers_net(&self) -> &Arc<PlainRwLock<LinkstateNetwork>> {
-        &self.mesh(ROUTERS_REGION).net
-    }
-
-    /// The graph of every region the pin's PEER hat serves, in region order: one
-    /// on the `auto` preset, one per subregion of a custom partition, none for a
-    /// partition with no subregion.
-    fn peers_nets(&self) -> impl Iterator<Item = &Arc<PlainRwLock<LinkstateNetwork>>> {
-        self.tables
-            .hats
-            .iter()
-            .filter(|(region, _)| is_peer_hat(*region))
-            .filter_map(|(_, hat)| hat.mesh().map(|mesh| &mesh.net))
+    fn routers_net(&self) -> &LinkstateNetwork {
+        self.tables.routers_net()
     }
 
     /// The first peers region's graph, which the admin views and the stats read.
     /// `None` when the partition has no subregion.
-    fn first_peers_net(&self) -> Option<&Arc<PlainRwLock<LinkstateNetwork>>> {
-        self.peers_nets().next()
+    fn first_peers_net(&self) -> Option<&LinkstateNetwork> {
+        self.tables.peers_nets().next()
     }
 
     /// The default peers region's graph, for the tests that stand a router up on
     /// the `auto` preset.
     #[cfg(test)]
-    fn linkstatepeers_net(&self) -> &Arc<PlainRwLock<LinkstateNetwork>> {
+    fn linkstatepeers_net(&self) -> &LinkstateNetwork {
         self.first_peers_net()
             .expect("the auto preset has a peers region")
     }
@@ -3726,7 +4052,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         mut build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
     ) -> Result<usize, CodecError> {
         let mut sent = 0;
-        for (id, state) in self.tables.faces.read().iter() {
+        for (id, state) in self.tables.faces.iter() {
             self.fan_out_face_visits.bump();
             if state.tier != tier {
                 continue;
@@ -3762,7 +4088,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         mut build: impl FnMut(FaceId, Option<Zid>) -> Result<Option<NetworkMessage>, CodecError>,
     ) -> Result<usize, CodecError> {
         let mut sent = 0;
-        let faces = self.tables.faces.read();
+        let faces = &self.tables.faces;
         for id in targets {
             self.fan_out_face_visits.bump();
             let Some(state) = faces.get(id) else {
@@ -3848,22 +4174,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         &self,
         new_face: FaceId,
         tier: Region,
-        net: &Arc<PlainRwLock<LinkstateNetwork>>,
         neighbour: &Zid,
         neighbour_was_new: bool,
     ) -> Result<usize, CodecError> {
+        let Some((net, _)) = self.plane(tier) else {
+            return Ok(0);
+        };
         // R2893 (751 rule 8d) — both shapes are the graph's decision, by the
         // pin object and mode it stands for: a single-hop gossip `Network` (the
         // south peer region) bootstraps the new face with its direct
         // neighbours' zids and tells the existing faces nothing.
-        let Some(new_link) = self.tables.faces.read().get(&new_face).and_then(|s| s.link) else {
+        let Some(new_link) = self.tables.faces.get(&new_face).and_then(|s| s.link) else {
             return Ok(0);
         };
-        let full = build_linkstate_oam_owned(&net.read().build_new_link_bootstrap(new_link))?;
-        let delta = match net
-            .read()
-            .build_link_added_delta_for_existing(neighbour, neighbour_was_new)
-        {
+        let full = build_linkstate_oam_owned(&net.build_new_link_bootstrap(new_link))?;
+        let delta = match net.build_link_added_delta_for_existing(neighbour, neighbour_was_new) {
             Some(list) => Some(build_linkstate_oam_owned(&list)?),
             None => None,
         };
@@ -3884,13 +4209,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// every surviving face of the tier so they drop the dead link from their
     /// topology at once (each receiver's own detached-node prune handles the
     /// rest). Reliable.
-    fn flood_self_links_changed_tier(
-        &self,
-        tier: Region,
-        net: &Arc<PlainRwLock<LinkstateNetwork>>,
-    ) -> Result<usize, CodecError> {
+    fn flood_self_links_changed_tier(&self, tier: Region) -> Result<usize, CodecError> {
+        let Some((net, _)) = self.plane(tier) else {
+            return Ok(0);
+        };
         // R2893 — nothing to tell in a single-hop gossip `Network`.
-        let Some(list) = net.read().build_link_removed_delta() else {
+        let Some(list) = net.build_link_removed_delta() else {
             return Ok(0);
         };
         let oam = build_linkstate_oam_owned(&list)?;
@@ -3905,12 +4229,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// spanning-tree recompute is COALESCED (D2c), not run here. (Autoconnect
     /// discovery is deferred with the gossip plane.)
     fn ingest_inbound_linkstate_tier(
-        &self,
+        &mut self,
         face: FaceId,
-        net: &Arc<PlainRwLock<LinkstateNetwork>>,
+        tier: Region,
         list: LinkstateListOwned,
-    ) -> Changes {
-        let link_id = match self.tables.faces.read().get(&face).and_then(|s| s.link) {
+    ) -> Changes
+    where
+        T: std::ops::DerefMut,
+    {
+        let link_id = match self.tables.faces.get(&face).and_then(|s| s.link) {
             Some(id) => id,
             None => {
                 log::debug!(
@@ -3920,11 +4247,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 return Changes::default();
             }
         };
-        let changes = net.write().ingest_linkstate_list(link_id, list);
+        let changes = self
+            .tables
+            .mesh_mut(tier)
+            .net
+            .ingest_linkstate_list(link_id, list);
         // R2639 — the discovery emit, for EITHER tier. Placed here rather than in
         // each caller because this is the one site where an ingest's `Changes`
         // originate, so a later tier cannot be added and silently miss it.
-        self.emit_dial_intents(net, &changes);
+        self.emit_dial_intents(tier, &changes);
         self.ingested.bump();
         changes
     }
@@ -3939,19 +4270,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         &self,
         source: FaceId,
         tier: Region,
-        net: &Arc<PlainRwLock<LinkstateNetwork>>,
         changes: &Changes,
     ) -> Result<usize, CodecError> {
         if changes.new.is_empty() && changes.updated.is_empty() {
             return Ok(0);
         }
+        let Some((net, _)) = self.plane(tier) else {
+            return Ok(0);
+        };
         // R2893 — the shape and the per-face exclusions are the graph's
         // (`build_reflood_for`), shared with the peer forwarder. This used to
         // withhold the whole list from the source face, the defect R311y431
         // found and repaired on the peer side only: psid space is per sender,
         // so the source must get the `new` half back to learn self's psids.
         self.fan_out_tier(tier, true, |id, zid| {
-            match net.read().build_reflood_for(changes, zid, id == source) {
+            match net.build_reflood_for(changes, zid, id == source) {
                 Some(list) => Ok(Some(NetworkMessage::Oam(build_linkstate_oam_owned(&list)?))),
                 None => Ok(None),
             }
@@ -3976,36 +4309,37 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// likely to be missed). No-op for a leaf region (no tier tables). The
     /// self-bubble itself is never stored (derive-not-store); only the WIRE
     /// advertisement needs the explicit retraction.
-    fn purge_detached_interest_tier(&self, tier: Region, removed: &[Zid]) {
+    fn purge_detached_interest_tier(&mut self, tier: Region, removed: &[Zid])
+    where
+        T: std::ops::DerefMut,
+    {
         if removed.is_empty() {
             return;
         }
         let Some(hat) = self.mesh_hat(tier) else {
             return;
         };
-        let (subs, qabls) = (&hat.subs, &hat.qabls);
         // Every plane diffs its fold against the state BEFORE the removal
         // (R2876, see `Snapshot`), so the departed natives' keyexprs are read
         // and snapshotted first, while they still count; the borrows drop
         // before the propagate, which re-reads the tables.
-        let sub_snapshots: Vec<Snapshot<SubPlane>> = subs
-            .read()
+        let sub_snapshots: Vec<Snapshot<SubPlane>> = hat
+            .subs
             .keys_held_by(removed)
             .iter()
             .map(|keyexpr| self.snapshot(keyexpr))
             .collect();
-        let qabl_snapshots: Vec<Snapshot<QablPlane>> = qabls
-            .read()
+        let qabl_snapshots: Vec<Snapshot<QablPlane>> = hat
+            .qabls
             .keys_held_by(removed)
             .iter()
             .map(|keyexpr| self.snapshot(keyexpr))
             .collect();
         {
-            let mut subs = subs.write();
-            let mut qabls = qabls.write();
+            let hat = self.tables.mesh_mut(tier);
             for zid in removed {
-                subs.remove_peer_keys(zid);
-                qabls.remove_peer_keys(zid);
+                hat.subs.remove_peer_keys(zid);
+                hat.qabls.remove_peer_keys(zid);
             }
         }
         // §5.21 routing-token-tables — drain the departed natives' token entries,
@@ -4019,13 +4353,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         #[cfg(feature = "routing-token-tables")]
         if let Some(tokens) = self.tokens_table(tier) {
             let token_snapshots: Vec<Snapshot<TokenPlane>> = tokens
-                .read()
                 .keys_held_by(removed)
                 .iter()
                 .map(|keyexpr| self.snapshot(keyexpr))
                 .collect();
             {
-                let mut tokens = tokens.write();
+                let tokens = &mut self.tables.mesh_mut(tier).tokens;
                 for zid in removed {
                     tokens.remove_peer_keys(zid);
                 }
@@ -4089,38 +4422,25 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
-    /// The subscription interest table for `tier`, or `None` for a leaf region
-    /// (whose per-face store is its [`BrokerHat`]).
-    fn subs_table(&self, tier: Region) -> Option<&PlainRwLock<LinkstatepeerInterest<()>>> {
-        self.mesh_hat(tier).map(|hat| &*hat.subs)
-    }
-
     /// The liveliness-token interest table for `tier`, or `None` for a leaf
     /// region (a client token lands in its [`BrokerHat`], never in a
-    /// Zid-keyed mesh tier table — derive-not-store) — the token twin of
-    /// [`subs_table`](Self::subs_table). Tokens carry no value,
+    /// Zid-keyed mesh tier table — derive-not-store) — the token twin of the
+    /// subscription table of a mesh hat. Tokens carry no value,
     /// so both tiers are `LinkstatepeerInterest<()>`, identical to the sub plane.
     #[cfg(feature = "routing-token-tables")]
-    fn tokens_table(&self, tier: Region) -> Option<&PlainRwLock<LinkstatepeerInterest<()>>> {
-        self.mesh_hat(tier).map(|hat| &*hat.tokens)
-    }
-
-    /// The queryable interest table for `tier` (the query-plane twin of
-    /// [`subs_table`](Self::subs_table)), or `None` for a leaf region.
-    fn qabls_table(
-        &self,
-        tier: Region,
-    ) -> Option<&PlainRwLock<LinkstatepeerInterest<QueryableInfo>>> {
-        self.mesh_hat(tier).map(|hat| &*hat.qabls)
+    fn tokens_table(&self, tier: Region) -> Option<&LinkstatepeerInterest<()>> {
+        self.mesh_hat(tier).map(|hat| &hat.tokens)
     }
 
     /// Record (or drop) a link-local keyexpr alias from a sourced `DeclKexpr` /
     /// `UndeclKexpr` on `face` (1b) — a thin `&self.tables.faces`-borrow around the
     /// shared [`absorb_keyexpr_into`] SSOT (R311y111), which both forwarders use.
     /// Link-local: each link negotiates its own aliases (not re-flooded).
-    fn absorb_keyexpr_declaration(&self, face: FaceId, declare: &DeclareOwned) {
-        let mut faces = self.tables.faces.write();
-        let Some(state) = faces.get_mut(&face) else {
+    fn absorb_keyexpr_declaration(&mut self, face: FaceId, declare: &DeclareOwned)
+    where
+        T: std::ops::DerefMut,
+    {
+        let Some(state) = self.tables.faces.get_mut(&face) else {
             return;
         };
         absorb_keyexpr_into(&mut state.keyexpr_table, declare);
@@ -4145,7 +4465,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .resolve_sourced(inbound, region, declare, keyexpr_of)
                 .map(Declared::Sourced),
             Hat::Broker(_) => {
-                let faces = self.tables.faces.read();
+                let faces = &self.tables.faces;
                 // R2734 — SourceOnly declines on every plane, each for its
                 // own reason. A group peer's SUBSCRIPTION is carried by a
                 // different structure: the MulticastDispatcher tracks
@@ -4162,7 +4482,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 // can never reach and attracts queries no one will answer. A
                 // withdrawal declines for the same faces: nothing was ever
                 // registered for one to remove.
-                let s = match classify_inbound(&faces, inbound) {
+                let s = match classify_inbound(faces, inbound) {
                     InboundFace::Held(s) => s,
                     InboundFace::SourceOnly | InboundFace::Gone => return None,
                 };
@@ -4222,7 +4542,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                                                // Resolve the keyexpr against the inbound face's alias table + read its
                                                // zid / link, in one scoped borrow (an unresolvable alias drops it).
         let (inbound_zid, inbound_link, keyexpr) = {
-            let faces = self.tables.faces.read();
+            let faces = &self.tables.faces;
             // R2734 — SourceOnly declines here, and the reason is that an
             // Interest is answered: `respond_to_interest` sends Declares back to
             // the face that asked, and a group ingress face has no send seam. The
@@ -4232,7 +4552,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // a shorter path, and is now said rather than fallen into. A
             // withdrawal declines for the same face kinds: a source-only face
             // never registers an interest for one to remove.
-            let s = match classify_inbound(&faces, inbound) {
+            let s = match classify_inbound(faces, inbound) {
                 InboundFace::Held(s) => s,
                 InboundFace::SourceOnly | InboundFace::Gone => return None,
             };
@@ -4241,13 +4561,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         };
         // R2893 — the source is resolved without the graph, and the relay psid
         // is read only if the graph numbers the source (see `Sourced`).
-        let net = net.read();
-        let source_zid = resolve_source_zid_in(
-            &net,
-            inbound_zid,
-            inbound_link,
-            read_declare_source(declare),
-        )?;
+        let source_zid =
+            resolve_source_zid_in(net, inbound_zid, inbound_link, read_declare_source(declare))?;
         let out_node_id = net
             .local_psid_of(&source_zid)
             .and_then(|psid| u16::try_from(psid).ok());
@@ -4264,18 +4579,19 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// within `tier`. Returns whether it changed anything.
     #[allow(clippy::too_many_arguments)]
     fn commit_register<V: PartialEq>(
-        &self,
+        &mut self,
         inbound: FaceId,
         tier: Region,
         reliable: bool,
         sourced: &Sourced,
-        table: &PlainRwLock<LinkstatepeerInterest<V>>,
+        table: impl FnOnce(&mut MeshHat) -> &mut LinkstatepeerInterest<V>,
         value: V,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
-    ) -> bool {
-        if !table
-            .write()
-            .register(&sourced.keyexpr, sourced.source_zid, value)
+    ) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
+        if !table(self.tables.mesh_mut(tier)).register(&sourced.keyexpr, sourced.source_zid, value)
         {
             return false;
         }
@@ -4287,18 +4603,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// removal, re-flood the retraction within `tier`. Returns whether it
     /// removed anything.
     fn commit_withdraw<V>(
-        &self,
+        &mut self,
         inbound: FaceId,
         tier: Region,
         reliable: bool,
         sourced: &Sourced,
-        table: &PlainRwLock<LinkstatepeerInterest<V>>,
+        table: impl FnOnce(&mut MeshHat) -> &mut LinkstatepeerInterest<V>,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
-    ) -> bool {
-        if !table
-            .write()
-            .withdraw(&sourced.keyexpr, &sourced.source_zid)
-        {
+    ) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
+        if !table(self.tables.mesh_mut(tier)).withdraw(&sourced.keyexpr, &sourced.source_zid) {
             return false;
         }
         self.reflood_sourced(inbound, tier, reliable, sourced, build);
@@ -4334,16 +4650,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if is_peer_hat(tier) {
             return;
         }
-        let Some((net, _dirty)) = self.plane(tier) else {
-            return;
-        };
         let Some(out_node_id) = sourced.out_node_id else {
             return;
         };
         self.reflood_declaration(
             inbound,
             tier,
-            net,
             sourced.source_zid,
             sourced.inbound_zid,
             out_node_id,
@@ -4377,12 +4689,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// to `inbound`. The push fires even when a co-client already subscribes:
     /// it dedups per interest-holder via the pushed registry.
     fn declare_subscriber(
-        &self,
+        &mut self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declare: &DeclareOwned,
-    ) {
+    ) where
+        T: std::ops::DerefMut,
+    {
         let Some(wireexpr) = declare_subscriber_wireexpr(declare) else {
             return;
         };
@@ -4416,26 +4730,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// the face's subscription moves only when this is the first id on the
     /// face naming that keyexpr, as the pin's resource-level `subs` does.
     fn register_subscriber(
-        &self,
+        &mut self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declared: &Declared,
         decl_id: u64,
-    ) -> bool {
+    ) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
         match declared {
             Declared::Sourced(sourced) => self.commit_register(
                 inbound,
                 region,
                 reliable,
                 sourced,
-                &self.mesh(region).subs,
+                |hat| &mut hat.subs,
                 (),
                 |ke| build_declare_subscriber(0, 0, Some(ke)),
             ),
             Declared::Face(keyexpr) => {
-                let store = &self.owner_broker(region).subs;
-                let mut store = store.write();
+                let store = &mut self.tables.owner_broker_mut(region).subs;
                 let already = store
                     .get(&inbound)
                     .is_some_and(|by_id| by_id.values().any(|k| k == keyexpr));
@@ -4451,19 +4767,20 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// publisher whose pushed reply ke lost its LAST backer, with an
     /// `UndeclareSubscriber` and `pushed` cleared.
     fn undeclare_subscriber(
-        &self,
+        &mut self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declare: &DeclareOwned,
-    ) {
+    ) where
+        T: std::ops::DerefMut,
+    {
         let (decl_id, exts) = match &declare.body {
             DeclareOwnedVariant::CodecZenohUndeclSubscriber(u) => (u.id, u.extensions.as_ref()),
             _ => return,
         };
         let Some(declared) = self.resolve_withdrawn(inbound, region, declare, exts, |hat| {
             hat.subs
-                .read()
                 .get(&inbound)
                 .and_then(|by_id| by_id.get(&decl_id))
                 .cloned()
@@ -4483,26 +4800,29 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// face still names the keyexpr (the pin's "Duplicated subscriber" arm,
     /// `zenoh/src/net/routing/hat/broker/pubsub.rs` @ `"Duplicated subscriber"`).
     fn unregister_subscriber(
-        &self,
+        &mut self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declared: &Declared,
         decl_id: u64,
-    ) -> bool {
+    ) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
         match declared {
             Declared::Sourced(sourced) => self.commit_withdraw(
                 inbound,
                 region,
                 reliable,
                 sourced,
-                &self.mesh(region).subs,
+                |hat| &mut hat.subs,
                 build_undeclare_subscriber_with_keyexpr,
             ),
             Declared::Face(_) => self
-                .owner_broker(region)
+                .tables
+                .owner_broker_mut(region)
                 .subs
-                .write()
                 .remove_id_leaving_key(inbound, decl_id),
         }
     }
@@ -4518,12 +4838,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// querier-interest matches with the RE-FOLDED merged info (R311y150), so
     /// a completeness flip re-pushes the recomputed merge.
     fn declare_queryable(
-        &self,
+        &mut self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declare: &DeclareOwned,
-    ) {
+    ) where
+        T: std::ops::DerefMut,
+    {
         let Some(wireexpr) = declare_queryable_wireexpr(declare) else {
             return;
         };
@@ -4551,27 +4873,29 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// the face is the merge of every id naming the keyexpr
     /// ([`face_qabl_info`]), so the change is judged on that merge.
     fn register_queryable(
-        &self,
+        &mut self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declared: &Declared,
         decl_id: u64,
         info: QueryableInfo,
-    ) -> bool {
+    ) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
         match declared {
             Declared::Sourced(sourced) => self.commit_register(
                 inbound,
                 region,
                 reliable,
                 sourced,
-                &self.mesh(region).qabls,
+                |hat| &mut hat.qabls,
                 info,
                 move |ke| build_declare_queryable_with_info(ke, info),
             ),
             Declared::Face(keyexpr) => {
-                let store = &self.owner_broker(region).qabls;
-                let mut store = store.write();
+                let store = &mut self.tables.owner_broker_mut(region).qabls;
                 let by_id = store.entry(inbound).or_default();
                 let before = face_qabl_info(by_id, keyexpr);
                 by_id.insert(decl_id, (keyexpr.clone(), info));
@@ -4588,19 +4912,20 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// backing queryable. The face-down purge stays the safety net for a
     /// departed peer.
     fn undeclare_queryable(
-        &self,
+        &mut self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declare: &DeclareOwned,
-    ) {
+    ) where
+        T: std::ops::DerefMut,
+    {
         let (decl_id, exts) = match &declare.body {
             DeclareOwnedVariant::CodecZenohUndeclQueryable(u) => (u.id, u.extensions.as_ref()),
             _ => return,
         };
         let Some(declared) = self.resolve_withdrawn(inbound, region, declare, exts, |hat| {
             hat.qabls
-                .read()
                 .get(&inbound)
                 .and_then(|by_id| by_id.get(&decl_id))
                 .map(|(keyexpr, _)| keyexpr.clone())
@@ -4617,24 +4942,27 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Unregister a resolved queryable from the hat that owns `region`,
     /// whether it changed the face's merged queryable for the keyexpr.
     fn unregister_queryable(
-        &self,
+        &mut self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declared: &Declared,
         decl_id: u64,
-    ) -> bool {
+    ) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
         match declared {
             Declared::Sourced(sourced) => self.commit_withdraw(
                 inbound,
                 region,
                 reliable,
                 sourced,
-                &self.mesh(region).qabls,
+                |hat| &mut hat.qabls,
                 build_undeclare_queryable_with_keyexpr,
             ),
             Declared::Face(keyexpr) => remove_from_face(
-                &mut self.owner_broker(region).qabls.write(),
+                &mut self.tables.owner_broker_mut(region).qabls,
                 inbound,
                 |by_id| {
                     let before = face_qabl_info(by_id, keyexpr);
@@ -4662,12 +4990,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// slice-5 notify, and a liveliness token never leaks stale-live.
     #[cfg(feature = "routing-token-tables")]
     fn declare_token(
-        &self,
+        &mut self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declare: &DeclareOwned,
-    ) {
+    ) where
+        T: std::ops::DerefMut,
+    {
         let (decl_id, wireexpr) = match &declare.body {
             DeclareOwnedVariant::CodecZenohDeclToken(t) => (t.id, &t.keyexpr),
             _ => return,
@@ -4679,9 +5009,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         };
         let displaced = match &declared {
             Declared::Face(keyexpr) => self
+                .tables
                 .owner_broker(region)
                 .tokens
-                .read()
                 .get(&inbound)
                 .and_then(|ids| ids.get(&decl_id))
                 .filter(|old| *old != keyexpr)
@@ -4714,28 +5044,31 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// changed anything. A broker hat keys it by the client's `decl_id`.
     #[cfg(feature = "routing-token-tables")]
     fn register_token(
-        &self,
+        &mut self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declared: &Declared,
         decl_id: u64,
-    ) -> bool {
+    ) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
         match declared {
             Declared::Sourced(sourced) => self.commit_register(
                 inbound,
                 region,
                 reliable,
                 sourced,
-                &self.mesh(region).tokens,
+                |hat| &mut hat.tokens,
                 (),
                 |ke| build_declare_token(0, 0, Some(ke)),
             ),
             Declared::Face(keyexpr) => {
                 let previous = self
-                    .owner_broker(region)
+                    .tables
+                    .owner_broker_mut(region)
                     .tokens
-                    .write()
                     .entry(inbound)
                     .or_default()
                     .insert(decl_id, keyexpr.clone());
@@ -4761,12 +5094,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// an `ext_wire_expr` the client never sends.
     #[cfg(feature = "routing-token-tables")]
     fn undeclare_token(
-        &self,
+        &mut self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declare: &DeclareOwned,
-    ) {
+    ) where
+        T: std::ops::DerefMut,
+    {
         let (decl_id, exts) = match &declare.body {
             DeclareOwnedVariant::CodecZenohUndeclToken(u) => (u.id, u.extensions.as_ref()),
             _ => return,
@@ -4777,7 +5112,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .map(Declared::Sourced),
             Some(Hat::Broker(hat)) => hat
                 .tokens
-                .read()
                 .get(&inbound)
                 .and_then(|ids| ids.get(&decl_id))
                 .cloned()
@@ -4798,24 +5132,27 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// it removed anything. A broker hat removes the client's `decl_id` entry.
     #[cfg(feature = "routing-token-tables")]
     fn unregister_token(
-        &self,
+        &mut self,
         inbound: FaceId,
         region: Region,
         reliable: bool,
         declared: &Declared,
         decl_id: u64,
-    ) -> bool {
+    ) -> bool
+    where
+        T: std::ops::DerefMut,
+    {
         match declared {
             Declared::Sourced(sourced) => self.commit_withdraw(
                 inbound,
                 region,
                 reliable,
                 sourced,
-                &self.mesh(region).tokens,
+                |hat| &mut hat.tokens,
                 build_undeclare_token_with_keyexpr,
             ),
             Declared::Face(_) => remove_from_face(
-                &mut self.owner_broker(region).tokens.write(),
+                &mut self.tables.owner_broker_mut(region).tokens,
                 inbound,
                 |ids| ids.remove(&decl_id),
             )
@@ -4841,7 +5178,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// tier-agnostic once an interest is admitted, but since R2882 an interest
     /// is admitted only from below and never from a router ([`InterestFlow`]),
     /// as the pin's dispatcher admits it; until then this answered every face.
-    fn respond_to_interest(&self, inbound: FaceId, interest: &InterestOwned) {
+    fn respond_to_interest(&mut self, inbound: FaceId, interest: &InterestOwned)
+    where
+        T: std::ops::DerefMut,
+    {
         // Interest(Final) (`!c && !f`): a client CANCELLING a prior interest. pico
         // sends one on every publisher/querier drop (`net/primitives.c:
         // _z_remove_interest`, client-gated), so the stored FUTURE interest for
@@ -4853,16 +5193,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // safe (a plane that never stored this id no-ops).
             self.tables
                 .future_subs
-                .write()
                 .remove_interest(inbound, interest.interest_id);
             self.tables
                 .future_qabls
-                .write()
                 .remove_interest(inbound, interest.interest_id);
             #[cfg(feature = "routing-token-tables")]
             self.tables
                 .future_tokens
-                .write()
                 .remove_interest(inbound, interest.interest_id);
             return;
         }
@@ -4875,12 +5212,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // sets RESTRICTED). An unresolvable alias still terminates the interest so
         // the peer is not left waiting.
         let target: Option<String> = {
-            let faces = self.tables.faces.read();
+            let faces = &self.tables.faces;
             // R2734 — SourceOnly declines: this function's whole job is to SEND a
             // Declare back to the asking face, and a group ingress face has no
             // send seam. `send_to_face` would return false for it anyway, so the
             // decline is the same outcome stated one step earlier.
-            let s = match classify_inbound(&faces, inbound) {
+            let s = match classify_inbound(faces, inbound) {
                 InboundFace::Held(s) => s,
                 InboundFace::SourceOnly | InboundFace::Gone => return,
             };
@@ -4922,7 +5259,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let store_future = interest.f() && body.su() && self.is_client_face(inbound);
         if store_future {
             if let Some(t) = target.as_deref() {
-                self.tables.future_subs.write().store_interest(
+                self.tables.future_subs.store_interest(
                     inbound,
                     interest_id,
                     t.to_owned(),
@@ -4937,7 +5274,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let store_future_qabl = interest.f() && body.qu() && self.is_client_face(inbound);
         if store_future_qabl {
             if let Some(t) = target.as_deref() {
-                self.tables.future_qabls.write().store_interest(
+                self.tables.future_qabls.store_interest(
                     inbound,
                     interest_id,
                     t.to_owned(),
@@ -4954,7 +5291,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         #[cfg(feature = "routing-token-tables")]
         if store_future_token {
             if let Some(t) = target.as_deref() {
-                self.tables.future_tokens.write().store_interest(
+                self.tables.future_tokens.store_interest(
                     inbound,
                     interest_id,
                     t.to_owned(),
@@ -4968,7 +5305,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // FUTURE-only interest (no `c()`) gets neither — an ongoing subscription has
         // no current snapshot to close.
         if interest.c() {
-            let self_zid = *self.routers_net().read().self_zid();
+            let self_zid = *self.routers_net().self_zid();
             if body.su() {
                 self.dump_interest_subs(
                     inbound,
@@ -5021,7 +5358,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     fn is_client_face(&self, face: FaceId) -> bool {
         self.tables
             .faces
-            .read()
             .get(&face)
             .is_some_and(|s| is_leaf(s.tier))
     }
@@ -5036,26 +5372,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// matching sub keyexpr. Keyexprs are collected OWNED before any send, so no
     /// interest-table borrow is held across the egress.
     fn dump_interest_subs(
-        &self,
+        &mut self,
         inbound: FaceId,
         target: Option<&str>,
         aggregate: bool,
         self_zid: &Zid,
         interest_id: u64,
         future: bool,
-    ) {
+    ) where
+        T: std::ops::DerefMut,
+    {
         let Some(target) = target else {
             return; // match-all deferred; the caller's DeclareFinal still closes the interest.
         };
         let mut per_ke: HashMap<String, ()> = HashMap::new();
         for table in self.mesh_hats().map(|hat| &hat.subs) {
-            for (ke, _zid, ()) in table.read().matching_entries(target, Some(self_zid)) {
+            for (ke, _zid, ()) in table.matching_entries(target, Some(self_zid)) {
                 per_ke.insert(ke.to_string(), ());
             }
         }
         let target_chunks: Vec<&str> = target.split('/').collect();
         for hat in self.broker_hats() {
-            for (face, by_id) in hat.subs.read().iter() {
+            for (face, by_id) in hat.subs.iter() {
                 if *face == inbound {
                     continue; // never advertise a face its own subscription
                 }
@@ -5066,6 +5404,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 }
             }
         }
+        // The replies are built first, interning their ids in the store as they go, and sent after:
+        // the store is written while they are built, and nothing may read the tables from the
+        // sink at the same time.
+        let mut replies = Vec::new();
         emit_current_interest_replies(
             interest_id,
             target,
@@ -5079,18 +5421,20 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // CURRENT-only interest keeps id 0 (`make_sub_id` = 0 for non-future).
             |id, ke, ()| {
                 if future {
-                    let sub_id =
-                        self.tables
-                            .future_subs
-                            .write()
-                            .intern_current_reply(inbound, ke, ());
+                    let sub_id = self
+                        .tables
+                        .future_subs
+                        .intern_current_reply(inbound, ke, ());
                     build_declare_subscriber_reply_with_id(id, sub_id, ke)
                 } else {
                     build_declare_subscriber_reply(id, ke)
                 }
             },
-            |msg| self.send_one_to_face(inbound, msg),
+            |msg| replies.push(msg),
         );
+        for msg in replies {
+            self.send_one_to_face(inbound, msg);
+        }
     }
 
     /// The CURRENT-dump QUERYABLE leg of [`respond_to_interest`] — the query-plane
@@ -5103,20 +5447,22 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// on the interest ke; else one per distinct keyexpr (each keyexpr's sources
     /// pre-merged).
     fn dump_interest_qabls(
-        &self,
+        &mut self,
         inbound: FaceId,
         target: Option<&str>,
         aggregate: bool,
         self_zid: &Zid,
         interest_id: u64,
         future: bool,
-    ) {
+    ) where
+        T: std::ops::DerefMut,
+    {
         let Some(target) = target else {
             return;
         };
         let mut per_ke: HashMap<String, QueryableInfo> = HashMap::new();
         for table in self.mesh_hats().map(|hat| &hat.qabls) {
-            for (ke, _zid, info) in table.read().matching_entries(target, Some(self_zid)) {
+            for (ke, _zid, info) in table.matching_entries(target, Some(self_zid)) {
                 per_ke
                     .entry(ke.to_string())
                     .and_modify(|e| *e = e.merge(*info))
@@ -5125,7 +5471,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         let target_chunks: Vec<&str> = target.split('/').collect();
         for hat in self.broker_hats() {
-            for (face, by_id) in hat.qabls.read().iter() {
+            for (face, by_id) in hat.qabls.iter() {
                 if *face == inbound {
                     continue;
                 }
@@ -5139,6 +5485,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 }
             }
         }
+        let mut replies = Vec::new();
         emit_current_interest_replies(
             interest_id,
             target,
@@ -5155,15 +5502,17 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     let qabl_id = self
                         .tables
                         .future_qabls
-                        .write()
                         .intern_current_reply(inbound, ke, info);
                     build_declare_queryable_reply_with_id(id, qabl_id, ke, info)
                 } else {
                     build_declare_queryable_reply(id, ke, info)
                 }
             },
-            |msg| self.send_one_to_face(inbound, msg),
+            |msg| replies.push(msg),
         );
+        for msg in replies {
+            self.send_one_to_face(inbound, msg);
+        }
     }
 
     /// §5.21 routing-token-tables (slice-4) — the CURRENT-dump liveliness-TOKEN leg
@@ -5183,26 +5532,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// `make_token_id`'s future branch); a CURRENT-only interest keeps id 0.
     #[cfg(feature = "routing-token-tables")]
     fn dump_interest_tokens(
-        &self,
+        &mut self,
         inbound: FaceId,
         target: Option<&str>,
         aggregate: bool,
         self_zid: &Zid,
         interest_id: u64,
         future: bool,
-    ) {
+    ) where
+        T: std::ops::DerefMut,
+    {
         let Some(target) = target else {
             return; // match-all deferred; the caller's DeclareFinal still closes it.
         };
         let mut per_ke: HashMap<String, ()> = HashMap::new();
         for table in self.mesh_hats().map(|hat| &hat.tokens) {
-            for (ke, _zid, ()) in table.read().matching_entries(target, Some(self_zid)) {
+            for (ke, _zid, ()) in table.matching_entries(target, Some(self_zid)) {
                 per_ke.insert(ke.to_string(), ());
             }
         }
         let target_chunks: Vec<&str> = target.split('/').collect();
         for hat in self.broker_hats() {
-            for (face, ids) in hat.tokens.read().iter() {
+            for (face, ids) in hat.tokens.iter() {
                 if *face == inbound {
                     continue; // never replay a face its own token
                 }
@@ -5213,6 +5564,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 }
             }
         }
+        let mut replies = Vec::new();
         emit_current_interest_replies(
             interest_id,
             target,
@@ -5224,18 +5576,20 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // (mirror of the sub future branch); a CURRENT-only interest keeps id 0.
             |id, ke, ()| {
                 if future {
-                    let token_id =
-                        self.tables
-                            .future_tokens
-                            .write()
-                            .intern_current_reply(inbound, ke, ());
+                    let token_id = self
+                        .tables
+                        .future_tokens
+                        .intern_current_reply(inbound, ke, ());
                     build_declare_token_reply_with_id(id, token_id, ke)
                 } else {
                     build_declare_token_reply(id, ke)
                 }
             },
-            |msg| self.send_one_to_face(inbound, msg),
+            |msg| replies.push(msg),
         );
+        for msg in replies {
+            self.send_one_to_face(inbound, msg);
+        }
     }
 
     /// Re-flood a clean sourced declaration WITHIN `tier` to the source's
@@ -5251,7 +5605,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         &self,
         inbound: FaceId,
         tier: Region,
-        net: &Arc<PlainRwLock<LinkstateNetwork>>,
         source_zid: Zid,
         inbound_zid: Option<Zid>,
         out_node_id: u16,
@@ -5259,7 +5612,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         keyexpr: &str,
         build: impl Fn(&str) -> Result<DeclareOwned, CodecError>,
     ) {
-        let children = net.read().tree_children_of(&source_zid);
+        let Some((net, _)) = self.plane(tier) else {
+            return;
+        };
+        let children = net.tree_children_of(&source_zid);
         if children.is_empty() {
             return;
         }
@@ -5603,7 +5959,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// member set.
     #[cfg(feature = "router-multicast-faces")]
     fn is_group_dr(&self, keyexpr: &str) -> bool {
-        let self_zid = *self.routers_net().read().self_zid();
+        let self_zid = *self.routers_net().self_zid();
         let members = self.mcast_group_members.read();
         elect_router(
             &self_zid,
@@ -5652,12 +6008,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// there; `resolve_wireexpr` is pure, so the two resolutions are identical.)
     /// `None` = the face is gone or the alias id is unknown (drop the Push).
     fn resolve_inbound_keyexpr(&self, inbound: FaceId, push: &PushOwned) -> Option<String> {
-        let faces = self.tables.faces.read();
+        let faces = &self.tables.faces;
         // R2734 — this is the ONE site that recognised the sentinel before the
         // classifier existed, and it is why Push worked at all while every other
         // kind died at its lookup. It now asks the same question the other eleven
         // ask, so the special case is the enum's rather than this function's.
-        match classify_inbound(&faces, inbound) {
+        match classify_inbound(faces, inbound) {
             InboundFace::Held(s) => resolve_wireexpr(&push.keyexpr.body, &s.keyexpr_table),
             // A source-only face carries no per-peer alias table, so a literal
             // (id==0) push yields its suffix and an aliased id-only push yields
@@ -5681,7 +6037,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         fwd_zid: Option<&Zid>,
         dst_zid: Option<&Zid>,
     ) -> bool {
-        let self_zid = *self.routers_net().read().self_zid();
+        let self_zid = *self.routers_net().self_zid();
         InterRegionFilter {
             src,
             dst,
@@ -5705,8 +6061,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         push: &PushOwned,
     ) -> (Option<Zid>, Option<Zid>) {
         let (inbound_zid, inbound_link) = {
-            let faces = self.tables.faces.read();
-            match classify_inbound(&faces, inbound) {
+            let faces = &self.tables.faces;
+            match classify_inbound(faces, inbound) {
                 InboundFace::Held(s) => (s.peer_zid, s.link),
                 InboundFace::SourceOnly | InboundFace::Gone => return (None, None),
             }
@@ -5714,12 +6070,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // R2893 — the origin alone, which needs no graph node (a peer-hat
         // region's single-hop gossip `Network` has none for a new neighbour).
         let source = self.plane(tier).and_then(|(net, _dirty)| {
-            resolve_source_zid_in(
-                &net.read(),
-                inbound_zid,
-                inbound_link,
-                read_push_source(push),
-            )
+            resolve_source_zid_in(net, inbound_zid, inbound_link, read_push_source(push))
         });
         (source, inbound_zid)
     }
@@ -5820,7 +6171,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // Resolve the keyexpr against the inbound face's alias table + read its
         // zid / link in one scoped borrow (an unresolvable alias drops the Push).
         let (inbound_zid, inbound_link, keyexpr) = {
-            let faces = self.tables.faces.read();
+            let faces = &self.tables.faces;
             // R2734 — SourceOnly declines, and this one is a REAL routing
             // decision rather than a formality: the within-tier mesh transit of a
             // group-ingress Push is NOT this path. It is the DR-gated federation
@@ -5829,7 +6180,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // peers cannot echo-loop. Letting a source-only face through here
             // would re-forward the same Push a second time, ungated by that
             // election.
-            let s = match classify_inbound(&faces, inbound) {
+            let s = match classify_inbound(faces, inbound) {
                 InboundFace::Held(s) => s,
                 InboundFace::SourceOnly | InboundFace::Gone => return,
             };
@@ -6105,11 +6456,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// space) and flooded tier-scoped. NATIVES ONLY: the cross-tier self-bubble
     /// is DERIVED at compute (C2), a distinct self-sourced declaration, so it
     /// re-advertises on its own path.
-    fn recompute_and_advertise_tier(&self, tier: Region) {
-        let Some((net, _dirty)) = self.plane(tier) else {
+    fn recompute_and_advertise_tier(&mut self, tier: Region)
+    where
+        T: std::ops::DerefMut,
+    {
+        if self.plane(tier).is_none() {
             return;
-        };
-        let new_children = net.write().compute_trees();
+        }
+        let new_children = self.tables.mesh_mut(tier).net.compute_trees();
         self.recomputes.bump();
         if new_children.is_empty() {
             return;
@@ -6124,7 +6478,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // under a rule it contradicts. The self cross-tier re-advertise at the end
         // is the `other_info` case and stays.
         if !is_peer_hat(tier) {
-            self.re_advertise_natives_into(tier, net, &new_children);
+            self.re_advertise_natives_into(tier, &new_children);
         }
         // R2890 (751 rule 8c) — a peer-hat region has no tree to take a delta of;
         // a peer that joins it is told self's derived declarations when its FACE
@@ -6142,39 +6496,38 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 
     /// The native re-advertise of [`recompute_and_advertise_tier`](Self::recompute_and_advertise_tier):
     /// every source's declarations in `tier`, to the tier's new tree children.
-    fn re_advertise_natives_into(
-        &self,
-        tier: Region,
-        net: &Arc<PlainRwLock<LinkstateNetwork>>,
-        new_children: &[(Zid, Vec<Zid>)],
-    ) {
-        if let Some(subs) = self.subs_table(tier) {
-            re_advertise_interest_into(
-                net,
-                subs,
-                new_children,
-                |ke, _: &()| build_declare_subscriber(0, 0, Some(ke)),
-                |children, declare| self.flood_delta_tier(tier, children, declare),
-            );
-        }
-        if let Some(qabls) = self.qabls_table(tier) {
-            re_advertise_interest_into(
-                net,
-                qabls,
-                new_children,
-                |ke, info: &QueryableInfo| build_declare_queryable_with_info(ke, *info),
-                |children, declare| self.flood_delta_tier(tier, children, declare),
-            );
-        }
+    fn re_advertise_natives_into(&self, tier: Region, new_children: &[(Zid, Vec<Zid>)]) {
+        let Some(hat) = self.mesh_hat(tier) else {
+            return;
+        };
+        let psid_of = |zid: &Zid| {
+            hat.net
+                .local_psid_of(zid)
+                .and_then(|p| u16::try_from(p).ok())
+        };
+        re_advertise_interest_into(
+            psid_of,
+            hat.subs.entries(),
+            new_children,
+            |ke, _: &()| build_declare_subscriber(0, 0, Some(ke)),
+            |children, declare| self.flood_delta_tier(tier, children, declare),
+        );
+        re_advertise_interest_into(
+            psid_of,
+            hat.qabls.entries(),
+            new_children,
+            |ke, info: &QueryableInfo| build_declare_queryable_with_info(ke, *info),
+            |children, declare| self.flood_delta_tier(tier, children, declare),
+        );
         // §5.21 routing-token-tables (slice-2) — re-advertise the native tokens to
         // the tier's NEW tree children too, so a late-joining child converges on
         // the within-tier token bubble (closes the slice-1 register-only gap where
         // an ingested native token was never re-advertised to a late joiner).
         #[cfg(feature = "routing-token-tables")]
-        if let Some(tokens) = self.tokens_table(tier) {
+        {
             re_advertise_interest_into(
-                net,
-                tokens,
+                psid_of,
+                hat.tokens.entries(),
                 new_children,
                 |ke, _: &()| build_declare_token(0, 0, Some(ke)),
                 |children, declare| self.flood_delta_tier(tier, children, declare),
@@ -6200,12 +6553,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// (zenoh `propagate_simple_subscription_to`). The push carries the interned
     /// non-zero decl id, `interest_id: None`, no `I` flag — an unsolicited declare,
     /// NOT an interest reply. `origin` is never pushed (no self-echo).
-    fn push_future_subscription(&self, new_ke: &str, origin: FaceId) {
-        let pushes =
-            self.tables
-                .future_subs
-                .write()
-                .pushes_for_new(new_ke, Some(origin), |_, _| ());
+    fn push_future_subscription(&mut self, new_ke: &str, origin: FaceId)
+    where
+        T: std::ops::DerefMut,
+    {
+        let pushes = self
+            .tables
+            .future_subs
+            .pushes_for_new(new_ke, Some(origin), |_, _| ());
         for (face, reply_ke, id, ()) in pushes {
             match build_declare_subscriber(id, 0, Some(&reply_ke)) {
                 Ok(decl) => {
@@ -6233,12 +6588,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// guard is a faithful NO-OP here — if wz later co-locates a session on the router
     /// node, this push must NOT exclude a face whose zid == self's zid.
     #[cfg(feature = "routing-token-tables")]
-    fn push_future_token(&self, new_ke: &str, origin: FaceId) {
-        let pushes =
-            self.tables
-                .future_tokens
-                .write()
-                .pushes_for_new(new_ke, Some(origin), |_, _| ());
+    fn push_future_token(&mut self, new_ke: &str, origin: FaceId)
+    where
+        T: std::ops::DerefMut,
+    {
+        let pushes = self
+            .tables
+            .future_tokens
+            .pushes_for_new(new_ke, Some(origin), |_, _| ());
         for (face, reply_ke, id, ()) in pushes {
             match build_declare_token(id, 0, Some(&reply_ke)) {
                 Ok(decl) => {
@@ -6252,73 +6609,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
-    /// The MERGED [`QueryableInfo`] the querier on `exclude_face` interested in `ke`
-    /// would see — the OR of `complete` (min of `distance`) over EVERY queryable wz
-    /// holds that intersects `ke` (`router_qabls` + `linkstatepeer_qabls` excluding
-    /// self, plus `client_qabls` EXCLUDING the destination face) — the value a FUTURE
-    /// qabl push/re-push MUST carry: a single source's raw info would DOWNGRADE an
-    /// aggregate reply (`merge` is OR-complete) and re-arm an ALL_COMPLETE filter.
-    /// Excluding `exclude_face` keeps the CURRENT-dump seed
-    /// ([`dump_interest_qabls`](Self::dump_interest_qabls), which inlines the SAME fold
-    /// excluding the requesting `inbound`), the ingest push, and the R311y153
-    /// downgrade re-push all like-for-like, so the stored value never drifts.
-    ///
-    /// DIVERGENCE from zenoh (benign, source-verified): zenoh's `local_qabl_info(res,
-    /// dst_face)` excludes the dst's own contribution only CONDITIONALLY — for a CLIENT
-    /// dst it FOLDS IN the dst's own queryable (hat/router/queries.rs:175-177, the
-    /// `face.whatami != Peer` disjunct), keeping that client's filter OFF via the fold.
-    /// wz excludes `exclude_face` UNCONDITIONALLY. The OUTCOME is nonetheless equivalent
-    /// for a co-hosted COMPLETE queryable: that scenario requires pico
-    /// `Z_FEATURE_LOCAL_QUERYABLE`, which registers the local queryable as a
-    /// `local_target` (zenoh-pico `net/filtering.c` `_z_write_filter_ctx_update_state`:
-    /// the filter is ACTIVE only when `targets == NULL && local_targets == 0`), so the
-    /// co-hosted queryable keeps the write-filter OFF independent of what wz declares —
-    /// no black-hole. Different mechanism (pico `local_targets` vs zenoh fold-in), same
-    /// outcome (filter stays OFF, the querier's get flows to the local answerer).
-    fn merged_qabl_info(&self, ke: &str, self_zid: &Zid, exclude_face: FaceId) -> QueryableInfo {
-        let mut merged: Option<QueryableInfo> = None;
-        let mut fold = |info: QueryableInfo| {
-            merged = Some(match merged {
-                Some(m) => m.merge(info),
-                None => info,
-            });
-        };
-        for table in self.mesh_hats().map(|hat| &hat.qabls) {
-            for (_ke, _zid, info) in table.read().matching_entries(ke, Some(self_zid)) {
-                fold(*info);
-            }
-        }
-        let ke_chunks: Vec<&str> = ke.split('/').collect();
-        for hat in self.broker_hats() {
-            for (face, m) in hat.qabls.read().iter() {
-                if *face == exclude_face {
-                    continue; // don't fold the destination querier's own queryable
-                }
-                for (k, info) in m.values() {
-                    if keyexpr_intersects_target(k, &ke_chunks) {
-                        fold(*info);
-                    }
-                }
-            }
-        }
-        merged.unwrap_or(QueryableInfo::DEFAULT)
-    }
-
     /// Emit the unsolicited FUTURE `DeclareQueryable` pushes a newly-learned
     /// queryable `new_ke` (sourced at `origin`) triggers — the query-plane twin of
     /// [`push_future_subscription`](Self::push_future_subscription). Each push
     /// carries the RE-FOLDED merged [`QueryableInfo`] for its reply ke
-    /// ([`merged_qabl_info`](Self::merged_qabl_info)), so an aggregate reply folds
+    /// ([`merged_qabl_info_in`]), so an aggregate reply folds
     /// the whole target and a completeness flip `false -> true` re-declares the SAME
     /// interned id (pico updates the `(decl_id, peer)` write-filter target in place).
     /// `origin` is never pushed (no self-echo).
-    fn push_future_queryable(&self, new_ke: &str, origin: FaceId) {
-        let self_zid = *self.routers_net().read().self_zid();
-        let pushes = self.tables.future_qabls.write().pushes_for_new(
-            new_ke,
-            Some(origin),
-            |reply_ke, dest| self.merged_qabl_info(reply_ke, &self_zid, dest),
-        );
+    fn push_future_queryable(&mut self, new_ke: &str, origin: FaceId)
+    where
+        T: std::ops::DerefMut,
+    {
+        let self_zid = *self.routers_net().self_zid();
+        let tables: &mut Tables = &mut self.tables;
+        let hats = &tables.hats;
+        let pushes = tables
+            .future_qabls
+            .pushes_for_new(new_ke, Some(origin), |reply_ke, dest| {
+                merged_qabl_info_in(hats, reply_ke, &self_zid, dest)
+            });
         for (face, reply_ke, id, info) in pushes {
             match build_declare_queryable_with_id_info(id, &reply_ke, info) {
                 Ok(decl) => {
@@ -6332,62 +6642,22 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
     }
 
-    /// Whether ANY subscription wz still holds INTERSECTS `ke` — the "still backed"
-    /// existence predicate the R311y151 undeclare-push consults AFTER a withdrawal to
-    /// decide whether a pushed reply ke has lost its LAST backer (`false` => undeclare
-    /// and re-arm the filter). Folds GLOBALLY (no self/dest-face exclusion): the
-    /// current dump's "backed" is `matching_entries` non-empty or an intersecting
-    /// client sub, so a per-destination exclusion here would spuriously undeclare a
-    /// reply ke still backed by a co-hosted or self sub.
-    fn any_sub_matches(&self, ke: &str) -> bool {
-        for table in self.mesh_hats().map(|hat| &hat.subs) {
-            if !table.read().matching_entries(ke, None).is_empty() {
-                return true;
-            }
-        }
-        let chunks: Vec<&str> = ke.split('/').collect();
-        self.broker_hats().any(|hat| {
-            hat.subs.read().values().any(|by_id| {
-                by_id
-                    .values()
-                    .any(|k| keyexpr_intersects_target(k, &chunks))
-            })
-        })
-    }
-
-    /// The queryable twin of [`any_sub_matches`](Self::any_sub_matches). An EXISTENCE
-    /// check, NOT [`merged_qabl_info`](Self::merged_qabl_info) (which folds to
-    /// `QueryableInfo::DEFAULT` on zero matches — a value read would report "backed"
-    /// even when no queryable exists and suppress every undeclare).
-    fn any_qabl_matches(&self, ke: &str) -> bool {
-        for table in self.mesh_hats().map(|hat| &hat.qabls) {
-            if !table.read().matching_entries(ke, None).is_empty() {
-                return true;
-            }
-        }
-        let chunks: Vec<&str> = ke.split('/').collect();
-        self.broker_hats().any(|hat| {
-            hat.qabls.read().values().any(|by_id| {
-                by_id
-                    .values()
-                    .any(|(k, _)| keyexpr_intersects_target(k, &chunks))
-            })
-        })
-    }
-
     /// Emit the R311y151 UNDECLARE pushes a withdrawn SUBSCRIPTION `withdrawn_ke`
     /// triggers: for each CLIENT face whose pushed reply ke is now UN-backed, an
     /// unsolicited `UndeclareSubscriber(id)` (interest_id None) that re-arms the pico
     /// publisher's write-filter, clearing the stale `pushed` entry so a later
     /// re-declaration re-pushes (the residual the y146/y150 store documented). Run
-    /// AFTER the withdrawn sub is removed from its table so `any_sub_matches` is
+    /// AFTER the withdrawn sub is removed from its table so [`any_sub_matches_in`] is
     /// post-withdrawal.
-    fn undeclare_push_subs(&self, withdrawn_ke: &str) {
-        let forgets = self
-            .tables
+    fn undeclare_push_subs(&mut self, withdrawn_ke: &str)
+    where
+        T: std::ops::DerefMut,
+    {
+        let tables: &mut Tables = &mut self.tables;
+        let hats = &tables.hats;
+        let forgets = tables
             .future_subs
-            .write()
-            .forgets_for_withdrawn(withdrawn_ke, |rk| self.any_sub_matches(rk));
+            .forgets_for_withdrawn(withdrawn_ke, |rk| any_sub_matches_in(hats, rk));
         for (face, _reply_ke, id) in forgets {
             self.send_one_to_face(
                 face,
@@ -6410,21 +6680,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ///   @ `fn unregister_queryable`) and from a
     ///   node-removal via `queries_remove_node` (:930-940); both route through the same
     ///   `propagate_simple_queryable` value-diff gate (:255). Uses the SAME
-    ///   `merged_qabl_info` fold `push_future_queryable` uses (excludes self + dest).
+    ///   `merged_qabl_info_in` fold `push_future_queryable` uses (excludes self + dest).
     ///
     /// Run AFTER the withdrawn qabl left its table (both folds are post-withdrawal).
     /// `forgets` runs FIRST so `re_pushes` only re-folds the SURVIVORS — no reply ke is
     /// both undeclared and re-pushed (forgets removes the fully-unbacked from `pushed`;
-    /// re_pushes scans what remains). Both store calls read `self.*_qabls` (distinct
-    /// RefCells from `future_qabls`) via their closures — the proven `pushes_for_new`
-    /// borrow shape.
-    fn undeclare_push_qabls(&self, withdrawn_ke: &str) {
-        let self_zid = *self.routers_net().read().self_zid();
+    /// re_pushes scans what remains). Both store calls read the hats (a field of the same
+    /// tables as `future_qabls`, borrowed apart from it) via their closures.
+    fn undeclare_push_qabls(&mut self, withdrawn_ke: &str)
+    where
+        T: std::ops::DerefMut,
+    {
+        let self_zid = *self.routers_net().self_zid();
         let (forgets, re_pushes) = {
-            let mut store = self.tables.future_qabls.write();
-            let forgets = store.forgets_for_withdrawn(withdrawn_ke, |rk| self.any_qabl_matches(rk));
+            let tables: &mut Tables = &mut self.tables;
+            let hats = &tables.hats;
+            let store = &mut tables.future_qabls;
+            let forgets =
+                store.forgets_for_withdrawn(withdrawn_ke, |rk| any_qabl_matches_in(hats, rk));
             let re_pushes = store.re_pushes_for_withdrawn(withdrawn_ke, |rk, dest| {
-                self.merged_qabl_info(rk, &self_zid, dest)
+                merged_qabl_info_in(hats, rk, &self_zid, dest)
             });
             (forgets, re_pushes)
         };
@@ -6490,10 +6765,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     fn sub_contributions(&self, holder: Holder, keyexpr: &str) -> usize {
         match holder {
             Holder::Hat(region) => match self.tables.hats.get(&region) {
-                Some(Hat::Mesh(hat)) => hat.subs.read().source_count(keyexpr),
+                Some(Hat::Mesh(hat)) => hat.subs.source_count(keyexpr),
                 Some(Hat::Broker(hat)) => hat
                     .subs
-                    .read()
                     .values()
                     .filter(|by_id| face_sub_keyexprs(by_id).contains(keyexpr))
                     .count(),
@@ -6503,7 +6777,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Holder::Host => self
                 .tables
                 .local_subscribers
-                .read()
                 .iter()
                 .filter(|sub| sub.keyexpr == keyexpr)
                 .count(),
@@ -6622,14 +6895,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Holder::Hat(region) => match self.tables.hats.get(&region) {
                 Some(Hat::Mesh(hat)) => hat
                     .subs
-                    .read()
                     .entries()
                     .into_iter()
                     .map(|(keyexpr, _peer, ())| keyexpr)
                     .collect(),
                 Some(Hat::Broker(hat)) => hat
                     .subs
-                    .read()
                     .values()
                     .flat_map(|by_id| face_sub_keyexprs(by_id).into_iter().map(str::to_string))
                     .collect(),
@@ -6642,7 +6913,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Holder::Host => self
                 .tables
                 .local_subscribers
-                .read()
                 .iter()
                 .map(|sub| sub.keyexpr.clone())
                 .collect(),
@@ -6716,7 +6986,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .any(|holder| match holder {
                 Holder::Hat(region) => match self.tables.hats.get(&region) {
                     Some(Hat::Mesh(hat)) => {
-                        let sources = hat.tokens.read().sources_of(keyexpr);
+                        let sources = hat.tokens.sources_of(keyexpr);
                         sources.iter().any(|source| {
                             let forwarder = self.token_forwarder(region, source);
                             self.crosses(region, target, Some(source), forwarder.as_ref(), None)
@@ -6740,7 +7010,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     #[cfg(feature = "routing-token-tables")]
     fn token_forwarder(&self, region: Region, source: &Zid) -> Option<Zid> {
         let (net, _dirty) = self.plane(region)?;
-        let net = net.read();
         net.next_hop(source, source)
             .or_else(|| net.next_hop(net.self_zid(), source))
     }
@@ -6753,14 +7022,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Holder::Hat(region) => match self.tables.hats.get(&region) {
                 Some(Hat::Mesh(hat)) => hat
                     .tokens
-                    .read()
                     .entries()
                     .into_iter()
                     .map(|(keyexpr, _peer, ())| keyexpr)
                     .collect(),
                 Some(Hat::Broker(hat)) => hat
                     .tokens
-                    .read()
                     .values()
                     .flat_map(|ids| ids.values().cloned())
                     .collect(),
@@ -6782,10 +7049,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     fn token_contributions(&self, holder: Holder, keyexpr: &str) -> usize {
         match holder {
             Holder::Hat(region) => match self.tables.hats.get(&region) {
-                Some(Hat::Mesh(hat)) => hat.tokens.read().source_count(keyexpr),
+                Some(Hat::Mesh(hat)) => hat.tokens.source_count(keyexpr),
                 Some(Hat::Broker(hat)) => hat
                     .tokens
-                    .read()
                     .values()
                     .map(|ids| ids.values().filter(|k| *k == keyexpr).count())
                     .sum(),
@@ -6798,7 +7064,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     // ── §5.21 routing-token-tables (slice-5): topology-reconcile withdraw->notify ──
 
     /// Whether ANY liveliness token wz still holds INTERSECTS `ke` — the token twin of
-    /// [`any_sub_matches`](Self::any_sub_matches), the post-withdrawal "still backed"
+    /// [`any_sub_matches_in`], the post-withdrawal "still backed"
     /// existence check [`undeclare_push_token`](Self::undeclare_push_token) consults.
     /// Folds GLOBALLY (no face/self exclusion): both mesh tiers via
     /// `matching_entries(ke, None)` ∪ the client leaf tokens (any inner-map VALUE
@@ -6807,18 +7073,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// never in the mesh tables, so `None` (no self-zid filter) is correct.
     #[cfg(feature = "routing-token-tables")]
     fn any_token_matches(&self, ke: &str) -> bool {
-        for table in self.mesh_hats().map(|hat| &hat.tokens) {
-            if !table.read().matching_entries(ke, None).is_empty() {
-                return true;
-            }
-        }
-        let chunks: Vec<&str> = ke.split('/').collect();
-        self.broker_hats().any(|hat| {
-            hat.tokens
-                .read()
-                .values()
-                .any(|ids| ids.values().any(|k| keyexpr_intersects_target(k, &chunks)))
-        })
+        any_token_matches_in(&self.tables.hats, ke)
     }
 
     /// Emit the withdraw->reader UNDECLARE pushes a withdrawn TOKEN `withdrawn_ke`
@@ -6837,16 +7092,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// stale-live residual (a reader told a token appeared is now told it withdrew).
     /// INVARIANT: run AFTER the withdrawn token left its table / store, so
     /// `any_token_matches` reflects the post-withdrawal state (a ke still backed by
-    /// ANOTHER token must NOT be undeclared). Borrow-safe: `future_tokens.write()`
-    /// with the closure reading the DISTINCT token-table RefCells (the
-    /// `undeclare_push_subs` shape).
+    /// ANOTHER token must NOT be undeclared). Borrow-safe: the closure reads the hats, a field
+    /// of the same tables borrowed apart from `future_tokens` (the `undeclare_push_subs` shape).
     #[cfg(feature = "routing-token-tables")]
-    fn undeclare_push_token(&self, withdrawn_ke: &str) {
-        let forgets = self
-            .tables
+    fn undeclare_push_token(&mut self, withdrawn_ke: &str)
+    where
+        T: std::ops::DerefMut,
+    {
+        let tables: &mut Tables = &mut self.tables;
+        let hats = &tables.hats;
+        let forgets = tables
             .future_tokens
-            .write()
-            .forgets_for_withdrawn(withdrawn_ke, |rk| self.any_token_matches(rk));
+            .forgets_for_withdrawn(withdrawn_ke, |rk| any_token_matches_in(hats, rk));
         let announced: Vec<FaceId> = forgets.iter().map(|(face, _, _)| *face).collect();
         for (face, _reply_ke, id) in forgets {
             self.send_one_to_face(
@@ -6865,7 +7122,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let told = self
             .tables
             .future_tokens
-            .read()
             .unannounced_withdrawals(withdrawn_ke, &announced);
         for face in told {
             if let Ok(undeclare) = build_undeclare_token_with_keyexpr(withdrawn_ke) {
@@ -6908,13 +7164,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Holder::Hat(region) => match self.tables.hats.get(&region)? {
                 Hat::Mesh(hat) => hat
                     .qabls
-                    .read()
                     .values_for(keyexpr)
                     .into_iter()
                     .reduce(QueryableInfo::merge),
                 Hat::Broker(hat) => hat
                     .qabls
-                    .read()
                     .values()
                     .filter_map(|by_id| face_qabl_info(by_id, keyexpr))
                     .reduce(QueryableInfo::merge),
@@ -6923,7 +7177,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Holder::Host => self
                 .tables
                 .local_queryables
-                .read()
                 .iter()
                 .filter(|lq| lq.keyexpr == keyexpr)
                 .map(|lq| QueryableInfo::local(lq.complete))
@@ -6938,14 +7191,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Holder::Hat(region) => match self.tables.hats.get(&region) {
                 Some(Hat::Mesh(hat)) => hat
                     .qabls
-                    .read()
                     .entries()
                     .into_iter()
                     .map(|(keyexpr, _peer, _info)| keyexpr)
                     .collect(),
                 Some(Hat::Broker(hat)) => hat
                     .qabls
-                    .read()
                     .values()
                     .flat_map(|by_id| face_qabls(by_id).into_keys().map(str::to_string))
                     .collect(),
@@ -6955,7 +7206,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             Holder::Host => self
                 .tables
                 .local_queryables
-                .read()
                 .iter()
                 .map(|lq| lq.keyexpr.clone())
                 .collect(),
@@ -7006,11 +7256,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             });
             return;
         }
-        let children = {
-            let n = net.read();
-            let self_zid = *n.self_zid();
-            n.tree_children_of(&self_zid)
-        };
+        let self_zid = *net.self_zid();
+        let children = net.tree_children_of(&self_zid);
         if children.is_empty() {
             return;
         }
@@ -7034,7 +7281,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some((net, _dirty)) = self.plane(tier) else {
             return;
         };
-        let self_zid = *net.read().self_zid();
+        let self_zid = *net.self_zid();
         let Some((_, self_delta)) = new_children.iter().find(|(src, _)| *src == self_zid) else {
             return;
         };
@@ -7082,16 +7329,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// first). `complete = true` for the admin queryable (it fully answers its own
     /// `@/<zid>/router/**` subtree).
     pub fn register_local_queryable(
-        &self,
+        &mut self,
         keyexpr: &str,
         complete: bool,
-        handler: LocalQueryHandler,
-    ) {
+        handler: HostedQueryHandler,
+    ) where
+        T: std::ops::DerefMut,
+    {
         let snapshot = self.snapshot::<QablPlane>(keyexpr);
-        self.tables.local_queryables.write().push(LocalQueryable {
+        self.tables.local_queryables.push(HostedQueryable {
             keyexpr: keyexpr.to_string(),
             complete,
-            handler: Rc::new(RefCell::new(handler)),
+            handler: Hosted::new(handler),
         });
         self.repropagate(snapshot);
     }
@@ -7118,11 +7367,14 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Unlike the peer twin this returns no reach count: the router floods into two
     /// meshes rather than one tree, so a single number would have to fold two
     /// answers into one and could not say which mesh a zero came from.
-    pub fn register_local_subscriber(&self, keyexpr: &str, handler: LocalSubscriberHandler) {
+    pub fn register_local_subscriber(&mut self, keyexpr: &str, handler: HostedSubscriberHandler)
+    where
+        T: std::ops::DerefMut,
+    {
         let snapshot = self.snapshot::<SubPlane>(keyexpr);
-        self.tables.local_subscribers.write().push(LocalSubscriber {
+        self.tables.local_subscribers.push(HostedSubscriber {
             keyexpr: keyexpr.to_string(),
-            handler: Rc::new(RefCell::new(handler)),
+            handler: Hosted::new(handler),
         });
         self.repropagate(snapshot);
     }
@@ -7132,15 +7384,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// [`dispatch_local_queryables`](Self::dispatch_local_queryables) and the router
     /// counterpart of `LinkstateForwarder::dispatch_local_subscribers`.
     ///
-    /// RE-ENTRANCY, the same collect-drop-invoke contract the peer plane documents:
-    /// matching handlers are cloned out (`Rc<RefCell<…>>`) under a SHORT borrow of
-    /// `local_subscribers`, the borrow is DROPPED before any handler runs, and each is
-    /// invoked through `try_borrow_mut`. So a handler may re-entrantly register or
-    /// remove a host subscriber — including itself — without panicking the outer
-    /// `RefCell`.
+    /// RUNNING A HANDLER (`docs/router-task-per-face.md`, phase 3e): the matching handlers are
+    /// cloned out of `local_subscribers` and run one at a time, each through [`Hosted::call`], so
+    /// that calls of one handler from different threads are serialized. The handler runs under
+    /// the tables' READ guard, which the whole route holds: it may read the router (the admin
+    /// views do), and it must not call a method that writes the tables (a registration, a
+    /// declaration), which would wait for the guard it runs under.
     ///
     /// ⚠ ONE DIVERGENCE FROM THE PEER TWIN, named rather than left to be discovered:
-    /// on a BUSY handler (`try_borrow_mut` fails — a handler that re-entered this
+    /// on a BUSY handler ([`Hosted::call`] answers `None` — a handler that re-entered this
     /// dispatch for its own pattern) the peer plane QUEUES the sample and redelivers
     /// it off-stack, faithful to zenoh's FIFO requeue. This plane drops it and says
     /// so. The requeue needs the outermost-`forward`-exit drain the peer plane owns,
@@ -7152,7 +7404,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     fn dispatch_local_subscribers(&self, reliable: bool, push: &PushOwned, keyexpr: &str) {
         // Cheap exit before any payload work: the overwhelmingly common case is a
         // router hosting no subscribers at all.
-        if self.tables.local_subscribers.read().is_empty() {
+        if self.tables.local_subscribers.is_empty() {
             return;
         }
         // The body a host subscriber sees — Put payload raw, Del as the Del kind
@@ -7186,22 +7438,21 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 crate::Reliability::BestEffort
             },
         };
-        let matched: Vec<Rc<RefCell<LocalSubscriberHandler>>> = {
-            let locals = self.tables.local_subscribers.read();
+        let matched: Vec<Arc<Hosted<HostedSubscriberHandler>>> = {
+            let locals = &self.tables.local_subscribers;
             let target_chunks: Vec<&str> = keyexpr.split('/').collect();
             locals
                 .iter()
                 .filter(|sub| keyexpr_intersects_target(&sub.keyexpr, &target_chunks))
-                .map(|sub| Rc::clone(&sub.handler))
+                .map(|sub| Arc::clone(&sub.handler))
                 .collect()
         };
         for handler in &matched {
-            match handler.try_borrow_mut() {
-                Ok(mut h) => (**h)(&sample),
-                Err(_) => log::warn!(
+            if handler.call(|h| h(&sample)).is_none() {
+                log::warn!(
                     "router-forward: host subscriber for {keyexpr} is BUSY (self-echo); \
                      the sample is dropped — this plane has no redelivery queue yet"
-                ),
+                );
             }
         }
     }
@@ -7214,15 +7465,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     #[cfg(feature = "adminspace-introspection-handlers")]
     pub fn declarations_view(&self) -> RouterDeclarationsView {
         RouterDeclarationsView {
-            subs: self.mesh_tables(|hat| Arc::clone(&hat.subs)),
-            qabls: self.mesh_tables(|hat| Arc::clone(&hat.qabls)),
-            client_subs: self.broker_tables(|hat| Arc::clone(&hat.subs)),
-            client_qabls: self.broker_tables(|hat| Arc::clone(&hat.qabls)),
-            #[cfg(feature = "routing-token-tables")]
-            tokens: self.mesh_tables(|hat| Arc::clone(&hat.tokens)),
-            #[cfg(feature = "routing-token-tables")]
-            client_tokens: self.broker_tables(|hat| Arc::clone(&hat.tokens)),
-            faces: Arc::clone(&self.tables.faces),
+            tables: Arc::clone(&self.fwd.tables),
         }
     }
 
@@ -7251,7 +7494,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// admin linkstate legs and have no consumer without them.
     #[cfg(feature = "adminspace-router-linkstate")]
     pub fn routers_net_view(&self) -> LinkstateNetView {
-        LinkstateNetView::new(Arc::clone(self.routers_net()))
+        LinkstateNetView::new(Arc::new(TablesNet {
+            tables: Arc::clone(&self.fwd.tables),
+            region: ROUTERS_REGION,
+        }))
     }
 
     /// A read-only [`LinkstateNetView`] over the PEER-tier graph
@@ -7260,14 +7506,28 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     pub fn peers_net_view(&self) -> LinkstateNetView {
         // A partition with no subregion has no peers region; its view is an
         // empty graph holding only this node.
-        LinkstateNetView::new(self.first_peers_net().map(Arc::clone).unwrap_or_else(|| {
-            let self_zid = *self.routers_net().read().self_zid();
-            Arc::new(PlainRwLock::new(LinkstateNetwork::new_in_region(
-                self_zid,
-                WhatAmI::Router,
-                true,
-            )))
-        }))
+        let first_peers_region = self
+            .tables
+            .hats
+            .iter()
+            .find(|(region, hat)| is_peer_hat(*region) && hat.mesh().is_some())
+            .map(|(region, _)| region);
+        let net: Arc<dyn crate::linkstate_forward::NetHandle + Send + Sync> =
+            match first_peers_region {
+                Some(region) => Arc::new(TablesNet {
+                    tables: Arc::clone(&self.fwd.tables),
+                    region,
+                }),
+                None => {
+                    let self_zid = *self.routers_net().self_zid();
+                    Arc::new(PlainRwLock::new(LinkstateNetwork::new_in_region(
+                        self_zid,
+                        WhatAmI::Router,
+                        true,
+                    )))
+                }
+            };
+        LinkstateNetView::new(net)
     }
 
     /// Self-dispatch a routed GET whose only match is a queryable HOSTED BY THIS
@@ -7275,9 +7535,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// `dispatch_local_queryables`, reached from the [`route_request`](Self::route_request)
     /// empty-route tail (self is excluded from the routing targets, so a GET
     /// matching only a self-hosted queryable — e.g. `@/<self-zid>/router/**` —
-    /// arrives with `forwarded == 0`). Snapshots the matching handlers under a
-    /// SHORT borrow, DROPS it, then invokes each borrow-free (the re-entrancy
-    /// discipline the peer documents), accumulating replies via the SAME
+    /// arrives with `forwarded == 0`). Clones the matching handlers out of the
+    /// store and invokes each through [`Hosted::call`], under the tables' read
+    /// guard (see [`dispatch_local_subscribers`](Self::dispatch_local_subscribers)
+    /// for what that allows a handler), accumulating replies via the SAME
     /// `QueryResponder` / `QueryReply::into_response` SSOT the wire queryable path
     /// uses, and emits them + the closing `ResponseFinal` (rid = the querier's) to
     /// `inbound`. The admin handler renders topology data + replies and NEVER
@@ -7296,13 +7557,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     ) -> bool {
         let query_chunks: Vec<&str> = keyexpr.split('/').collect();
         let target = read_request_target(request);
-        let matched: Vec<Rc<RefCell<LocalQueryHandler>>> = {
-            let locals = self.tables.local_queryables.read();
+        let matched: Vec<Arc<Hosted<HostedQueryHandler>>> = {
+            let locals = &self.tables.local_queryables;
             locals
                 .iter()
                 .filter(|lq| keyexpr_intersects_target(&lq.keyexpr, &query_chunks))
                 .filter(|lq| !matches!(target, Some(QueryTarget::AllComplete)) || lq.complete)
-                .map(|lq| Rc::clone(&lq.handler))
+                .map(|lq| Arc::clone(&lq.handler))
                 .collect()
         };
         if matched.is_empty() {
@@ -7329,11 +7590,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             );
             for handler in &matched {
                 // The self-hosted admin handler renders net data + replies; it never
-                // re-queries its own keyexpr, so try_borrow_mut always succeeds and
+                // re-queries its own keyexpr, so `call` is never refused and
                 // no self-query redelivery (the peer's DeferredQuery path) is needed.
-                if let Ok(mut h) = handler.try_borrow_mut() {
-                    (**h)(&view, &mut responder);
-                }
+                let _ = handler.call(|h| h(&view, &mut responder));
             }
         }
         for reply in replies {
@@ -7404,7 +7663,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // Resolve the query keyexpr + the inbound face's zid/link in one scoped
         // borrow (released before any send re-borrows `faces`).
         let resolved = {
-            let faces = self.tables.faces.read();
+            let faces = &self.tables.faces;
             // R2734 — THE ONE SITE THAT PROCEEDS, and the old bail comment is
             // exactly the conflation `InboundFace` exists to split: "the inbound
             // face is gone: nothing to reply to" is TRUE of a dead face and FALSE
@@ -7422,7 +7681,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // The querier is unreachable either way, so what this buys is the one
             // difference an integrator can observe -- the queryable HANDLER runs,
             // as it does on a zenoh router.
-            match classify_inbound(&faces, inbound) {
+            match classify_inbound(faces, inbound) {
                 InboundFace::Held(s) => resolve_wireexpr(&request.keyexpr.body, &s.keyexpr_table)
                     .map(|keyexpr| (s.peer_zid, s.link, keyexpr)),
                 // No routing identity and no alias table: literal-only, exactly as
@@ -7462,15 +7721,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // querier source, so they are unaffected by an unmapped source). A Client
         // inbound has no mesh source (both mesh legs are self-originated cross legs).
         let within = match self.plane(tier) {
-            Some((net, _)) => resolve_source_in(
-                &net.read(),
-                inbound_zid,
-                inbound_link,
-                read_request_source(request),
-            ),
+            Some((net, _)) => {
+                resolve_source_in(net, inbound_zid, inbound_link, read_request_source(request))
+            }
             None => None,
         };
-        let self_zid = *self.routers_net().read().self_zid();
+        let self_zid = *self.routers_net().self_zid();
         // Item 751 — a Query from a group member is that member's: its zid is both
         // the source and the forwarder the filter is handed, as for a Push.
         let member = group.and_then(|g| g.zid);
@@ -7685,7 +7941,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let names = |k: &str| self.names_a_resource(k);
         match self.mesh_hat(block.tier) {
             Some(hat) => query_candidates(
-                &hat.net.read(),
+                &hat.net,
                 &hat.qabls,
                 Cached {
                     routes: &hat.query_routes,
@@ -7992,7 +8248,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         fan: &Arc<QueryFan>,
         deadline: Instant,
     ) -> usize {
-        if !self.tables.faces.read().contains_key(&out_face) {
+        if !self.tables.faces.contains_key(&out_face) {
             return 0;
         }
         let mut carrier = request.clone();
@@ -8044,13 +8300,13 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let keyexpr = if wireexpr_is_empty(&response.keyexpr.body) {
             None
         } else {
-            let faces = self.tables.faces.read();
+            let faces = &self.tables.faces;
             // R2734 — SourceOnly declines, and the line below is why it costs
             // nothing: a Response is matched against `pending` by (inbound, rid),
             // and no Request was ever SENT to a source-only face, so no pending
             // entry can be keyed to it. The pin reaches the same dead end by the
             // same reasoning. Declining here just says so before the lookup.
-            let s = match classify_inbound(&faces, inbound) {
+            let s = match classify_inbound(faces, inbound) {
                 InboundFace::Held(s) => s,
                 InboundFace::SourceOnly | InboundFace::Gone => return,
             };
@@ -8144,7 +8400,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.timed_out.add(reaped.len());
         synthesize_expired_query_returns(
             &reaped,
-            |face| match classify_inbound(&self.tables.faces.read(), face) {
+            |face| match classify_inbound(&self.tables.faces, face) {
                 InboundFace::Held(s) => s.peer_zid,
                 InboundFace::SourceOnly | InboundFace::Gone => None,
             },
@@ -8179,7 +8435,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         reliable: bool,
         mut build: impl FnMut() -> NetworkMessage,
     ) -> bool {
-        let faces = self.tables.faces.read();
+        let faces = &self.tables.faces;
         let Some(state) = faces.get(&target) else {
             return false;
         };
@@ -8337,7 +8593,106 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 /// [`FaceForwarder`] impl below is the lock-taking entry: each call takes the tables once and hands
 /// the held router to the method of the same name here.
 impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
-    fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
+    /// §5.16 INGRESS access control (y113): consult the ingress chain ONCE for a message from
+    /// face `id`, ahead of the kind-dispatch — a denied message is dropped (not counted as
+    /// received Push/Query, not routed) and witnessed. The router twin of
+    /// `LinkstateForwarder::forward`'s admit_inbound gate; the empty-chain fast path (no ACL) is
+    /// a single predicate read.
+    fn admits_ingress(&self, id: FaceId, message: &NetworkMessage) -> bool {
+        let verdict = self.admit_inbound(id, message);
+        if let Some(kind) = verdict.dropped_by() {
+            self.interceptor_dropped.bump();
+            if let Some(face) = self.tables.faces.get(&id) {
+                crate::linkstate_forward::charge_interceptor_drop(
+                    &face.actions,
+                    message,
+                    kind,
+                    InterceptorFlow::Ingress,
+                );
+            }
+        }
+        verdict.is_admitted()
+    }
+
+    /// A topology link-state from face `id` in `tier`: ingest it into the tier's net, re-flood
+    /// the changed nodes onward to the SAME tier, purge the interest of any detached node, and
+    /// coalesce that net's recompute. A face with no net (a client) carries no topology.
+    fn ingest_topology(&mut self, id: FaceId, tier: Region, oam: &wz_codecs::oam::OamOwned)
+    where
+        T: std::ops::DerefMut,
+    {
+        if self.plane(tier).is_none() {
+            return;
+        }
+        match try_parse_linkstate_oam(oam) {
+            LinkstateOam::Decoded(list) => {
+                let changes = self.ingest_inbound_linkstate_tier(id, tier, list);
+                let _ = self.propagate_tier(id, tier, &changes);
+                self.purge_detached_interest_tier(tier, &changes.removed);
+                self.tables.mesh(tier).trees_dirty.set(true);
+            }
+            LinkstateOam::Malformed(_) | LinkstateOam::NotLinkstate => {}
+        }
+    }
+
+    /// A declaration from face `id`: one owner call per plane, whichever hat owns the face
+    /// (R2876, step 3e) — the pin's dispatcher registers in `hats[face.region]` and propagates,
+    /// and never asks what kind of hat that is. A keyexpr-alias declaration records the
+    /// link-local alias for resolution.
+    fn route_declaration(
+        &mut self,
+        id: FaceId,
+        tier: Region,
+        whatami: WhatAmI,
+        reliable: bool,
+        declare: &DeclareOwned,
+    ) where
+        T: std::ops::DerefMut,
+    {
+        // `whatami` is read only by the token answer's refusal, which a build without the token
+        // tables does not have.
+        let _ = whatami;
+        match &declare.body {
+            DeclareOwnedVariant::CodecZenohDeclKexpr(_)
+            | DeclareOwnedVariant::CodecZenohUndeclKexpr(_) => {
+                self.absorb_keyexpr_declaration(id, declare);
+            }
+            DeclareOwnedVariant::CodecZenohDeclSubscriber(_) => {
+                self.declare_subscriber(id, tier, reliable, declare);
+            }
+            DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
+                self.undeclare_subscriber(id, tier, reliable, declare);
+            }
+            DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
+                self.declare_queryable(id, tier, reliable, declare);
+            }
+            DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
+                self.undeclare_queryable(id, tier, reliable, declare);
+            }
+            // A token stamped with an interest id is an ANSWER, and an
+            // answer from below is refused ([`InterestFlow`]).
+            #[cfg(feature = "routing-token-tables")]
+            DeclareOwnedVariant::CodecZenohDeclToken(_)
+                if declare.interest_id.is_some() && !InterestFlow::Answer.admits(tier, whatami) =>
+            {
+                log::debug!("router forward: DROP a token answer from south-bound face {id:?}");
+            }
+            #[cfg(feature = "routing-token-tables")]
+            DeclareOwnedVariant::CodecZenohDeclToken(_) => {
+                self.declare_token(id, tier, reliable, declare);
+            }
+            #[cfg(feature = "routing-token-tables")]
+            DeclareOwnedVariant::CodecZenohUndeclToken(_) => {
+                self.undeclare_token(id, tier, reliable, declare);
+            }
+            _ => {}
+        }
+    }
+
+    fn register(&mut self, id: FaceId, actions: &Arc<SessionLinkActions>)
+    where
+        T: std::ops::DerefMut,
+    {
         // Classify the face by its handshake role (zenoh's
         // `new_transport_unicast_face` whatami branch): a Router/Peer face with
         // a routing zid joins the matching net; a Client face — or one whose
@@ -8355,6 +8710,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         };
         let added = match self.plane(tier) {
             Some((net, _dirty)) => {
+                let self_zid = *net.self_zid();
                 // OBLIGATION-3 self-zid parity: a face whose routing zid IS self's
                 // own zid (a self-connect) is HELD without a link. Adding it would
                 // insert a self entry into `node.links` that `make_link_state` then
@@ -8364,11 +8720,10 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 // `node.links` entry, so the self-loop still floods. zenoh relies
                 // on its transport manager never handing `add_link` a
                 // self-transport; wz guards it here (mirror in `LinkstateForwarder`).
-                let self_zid = *net.read().self_zid();
                 peer_zid_routing(actions)
                     .filter(|neighbour| *neighbour != self_zid)
                     .map(|neighbour| {
-                        let mut net = net.write();
+                        let net = &mut self.tables.mesh_mut(tier).net;
                         // Whether this neighbour is NEW to the GRAPH (not merely a
                         // new face): a second link to a known peer re-advertises
                         // only self's links — zenoh add_link's `new` flag. Queried
@@ -8383,7 +8738,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // Client tier: held with no net (a leaf, not a transit node).
             None => None,
         };
-        self.tables.faces.write().insert(
+        self.tables.faces.insert(
             id,
             RouterFaceState {
                 actions: actions.clone(),
@@ -8406,15 +8761,18 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // tick). A held-without-identity face changed no link-state, so it
         // triggers no flood.
         if let Some((_, neighbour, neighbour_was_new)) = added {
-            if let Some((net, dirty)) = self.plane(tier) {
-                let _ = self.flood_link_added_tier(id, tier, net, &neighbour, neighbour_was_new);
+            if let Some((_, dirty)) = self.plane(tier) {
+                let _ = self.flood_link_added_tier(id, tier, &neighbour, neighbour_was_new);
                 dirty.set(true);
             }
         }
         self.replay_declarations_to_new_face(id, tier);
     }
 
-    fn deregister(&self, id: FaceId) {
+    fn deregister(&mut self, id: FaceId)
+    where
+        T: std::ops::DerefMut,
+    {
         self.shed_registry.remove(id);
         // OBLIGATION-1: purge ALL FaceId-keyed leaf state BEFORE the linkless
         // early-return below (a Client face is `link == None`, so it never reaches
@@ -8457,37 +8815,39 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let owner_region = self
             .tables
             .faces
-            .read()
             .get(&id)
             .map(|state| state.tier)
             .filter(|region| self.broker_hat(*region).is_some());
-        let owner = owner_region.and_then(|region| self.broker_hat(region));
         // R2875/R2876 — snapshot the departing face's keyexprs on each plane
         // while they still count, then propagate what the removal moved. A
         // Client face is skipped by the peer/router fan-out (its tier), so
         // flooding before its `faces` entry is dropped is harmless.
-        let qabl_snapshots: Vec<Snapshot<QablPlane>> = owner
-            .and_then(|hat| {
-                hat.qabls.read().get(&id).map(|by_id| {
-                    face_qabls(by_id)
-                        .into_keys()
-                        .map(str::to_string)
-                        .collect::<Vec<_>>()
-                })
+        let qabl_snapshots: Vec<Snapshot<QablPlane>> = owner_region
+            .and_then(|region| {
+                self.tables
+                    .owner_broker(region)
+                    .qabls
+                    .get(&id)
+                    .map(|by_id| {
+                        face_qabls(by_id)
+                            .into_keys()
+                            .map(str::to_string)
+                            .collect::<Vec<_>>()
+                    })
             })
             .unwrap_or_default()
             .iter()
             .map(|keyexpr| self.snapshot(keyexpr))
             .collect();
-        if let Some(hat) = owner {
-            hat.qabls.write().remove(&id);
+        if let Some(region) = owner_region {
+            self.tables.owner_broker_mut(region).qabls.remove(&id);
         }
         for snapshot in qabl_snapshots {
             self.repropagate(snapshot);
         }
-        let sub_snapshots: Vec<Snapshot<SubPlane>> = owner
-            .and_then(|hat| {
-                hat.subs.read().get(&id).map(|by_id| {
+        let sub_snapshots: Vec<Snapshot<SubPlane>> = owner_region
+            .and_then(|region| {
+                self.tables.owner_broker(region).subs.get(&id).map(|by_id| {
                     face_sub_keyexprs(by_id)
                         .into_iter()
                         .map(str::to_string)
@@ -8498,8 +8858,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             .iter()
             .map(|keyexpr| self.snapshot(keyexpr))
             .collect();
-        if let Some(hat) = owner {
-            hat.subs.write().remove_face(id);
+        if let Some(region) = owner_region {
+            self.tables.owner_broker_mut(region).subs.remove_face(id);
         }
         for snapshot in sub_snapshots {
             self.repropagate(snapshot);
@@ -8516,10 +8876,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // it is not self-notified).
         #[cfg(feature = "routing-token-tables")]
         let departed_token_keys: Vec<String> = {
-            let keyexprs: HashSet<String> = owner
-                .and_then(|hat| {
-                    hat.tokens
-                        .read()
+            let keyexprs: HashSet<String> = owner_region
+                .and_then(|region| {
+                    self.tables
+                        .owner_broker(region)
+                        .tokens
                         .get(&id)
                         .map(|ids| ids.values().cloned().collect())
                 })
@@ -8528,8 +8889,8 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 .iter()
                 .map(|keyexpr| self.snapshot(keyexpr))
                 .collect();
-            if let Some(hat) = owner {
-                hat.tokens.write().remove(&id);
+            if let Some(region) = owner_region {
+                self.tables.owner_broker_mut(region).tokens.remove(&id);
             }
             for snapshot in snapshots {
                 self.repropagate(snapshot);
@@ -8545,12 +8906,12 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // benign over-deliver gap; a liveliness token's stale-live is not benign, so
         // tokens close it — zenoh close_face retracts on face-down for BOTH planes,
         // mod.rs:498/541).
-        self.tables.future_subs.write().purge_face(id);
-        self.tables.future_qabls.write().purge_face(id);
+        self.tables.future_subs.purge_face(id);
+        self.tables.future_qabls.purge_face(id);
         // §5.21 routing-token-tables (slice-4): the token FUTURE store is client leaf
         // state too — purge it alongside future_subs/future_qabls (OBLIGATION 1).
         #[cfg(feature = "routing-token-tables")]
-        self.tables.future_tokens.write().purge_face(id);
+        self.tables.future_tokens.purge_face(id);
         // §5.21 slice-5: NOW notify the surviving future-push readers (future_tokens no
         // longer holds the departed face). Runs before the `link == None` early-return
         // so a Client face is covered.
@@ -8558,7 +8919,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         for keyexpr in departed_token_keys {
             self.undeclare_push_token(&keyexpr);
         }
-        let Some(state) = self.tables.faces.write().remove(&id) else {
+        let Some(state) = self.tables.faces.remove(&id) else {
             return;
         };
         // What it held for its link goes with it, and no face waits on it or for it.
@@ -8569,23 +8930,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             // no link-state; nothing to disconnect or re-flood.
             return;
         };
-        let Some((net, dirty)) = self.plane(tier) else {
+        if self.plane(tier).is_none() {
             return;
-        };
+        }
         // Drop the dead edge from the tier's graph; GC-prune detaches it
         // returns, and purge each pruned node's interest from THAT tier's
         // tables (a neighbour still reachable via another face keeps its
         // interest — only the genuinely detached set is purged).
-        let removed = net.write().remove_link(link);
+        let removed = self.tables.mesh_mut(tier).net.remove_link(link);
         self.purge_detached_interest_tier(tier, &removed);
         // Self LOST a link in this tier: flood its updated links-only entry to
         // the surviving same-tier faces, and coalesce the recompute onto the
         // tick.
-        let _ = self.flood_self_links_changed_tier(tier, net);
-        dirty.set(true);
+        let _ = self.flood_self_links_changed_tier(tier);
+        self.tables.mesh(tier).trees_dirty.set(true);
     }
 
-    fn tick(&self) {
+    fn tick(&mut self)
+    where
+        T: std::ops::DerefMut,
+    {
         // Flush each net's coalesced recompute, if one accumulated, and
         // re-advertise that tier's NATIVE interest to whatever new tree children
         // the recompute produced (C1) — zenoh runs two independent debounce
@@ -8597,11 +8961,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // R2867 — one pass over the mesh hats in the region map's index order,
         // which puts North (the routers) before the peers region, the order the
         // two hand-written flushes had.
-        for (region, hat) in self.tables.hats.iter() {
-            let Some(hat) = hat.mesh() else { continue };
-            if hat.trees_dirty.replace(false) {
-                self.recompute_and_advertise_tier(region);
-            }
+        let dirty: Vec<Region> = self
+            .tables
+            .hats
+            .iter()
+            .filter(|(_, hat)| hat.mesh().is_some_and(|hat| hat.trees_dirty.replace(false)))
+            .map(|(region, _)| region)
+            .collect();
+        for region in dirty {
+            self.recompute_and_advertise_tier(region);
         }
         // Reap pending queries whose ResponseFinal never arrived on a still-up
         // face (zenoh's per-query QueryCleanup timeout) on the same coalescing
@@ -8620,21 +8988,25 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// inbound as the primary's, and this adds no routing state.
     #[cfg(feature = "session-close-ingress")]
     fn register_joined(
-        &self,
+        &mut self,
         joined_id: FaceId,
         _primary_id: FaceId,
         actions: &Arc<SessionLinkActions>,
-    ) {
+    ) where
+        T: std::ops::DerefMut,
+    {
         self.tables
             .joined_links
-            .write()
             .insert(joined_id, Arc::clone(actions));
     }
 
     /// The joined link left the aggregate.
     #[cfg(feature = "session-close-ingress")]
-    fn deregister_joined(&self, joined_id: FaceId) {
-        self.tables.joined_links.write().remove(&joined_id);
+    fn deregister_joined(&mut self, joined_id: FaceId)
+    where
+        T: std::ops::DerefMut,
+    {
+        self.tables.joined_links.remove(&joined_id);
     }
 
     /// Item 751 -- the pin refuses a remote its region rules cannot place
@@ -8823,8 +9195,15 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             self.repropagate(snapshot);
         }
     }
+}
 
-    fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
+impl RouterForwarder {
+    /// One frame from face `id`, a message at a time, each taking the tables for the kind of work
+    /// it is (`docs/router-task-per-face.md`, phase 3e): the data and query planes read them, so
+    /// that frames of different faces route at once, and a declaration, a topology message or an
+    /// interest writes them, alone. The guard of one message is dropped before the next is taken,
+    /// so a frame of declarations does not hold the tables against the data between them.
+    fn forward_frame(&self, id: FaceId, event: IterationEvent<'_>) {
         let IterationEvent::Poll(DriverLoopOutcome::FramePayload {
             messages,
             reliable,
@@ -8837,26 +9216,24 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         // Whatever a destination can take now goes first, so that what an earlier frame left
         // held is ahead of what this one adds; and the destinations this frame fills gate THIS
         // face, which is what `source` records until the guard drops.
-        self.drain_egress();
+        let on = self.on_tables();
+        on.drain_egress();
         let _routing = self.credit.routing_from(id);
         // The inbound face's tier selects which net topology ingests into and
         // which faces a re-flood reaches; with the remote's mode it also
         // decides which way the interest protocol may flow ([`InterestFlow`]).
-        // Read once; the borrow is released before the per-message work
-        // re-borrows `faces`.
-        let (tier, whatami) = {
-            let faces = self.tables.faces.read();
-            match faces.get(&id) {
-                Some(s) => (s.tier, peer_whatami_routing(&s.actions)),
-                None => {
-                    log::debug!(
-                        "router forward: DROP {} inbound message(s) from unregistered face {id:?}",
-                        messages.len()
-                    );
-                    return;
-                }
+        // Read once, under the guard the drain above took.
+        let (tier, whatami) = match on.tables.faces.get(&id) {
+            Some(s) => (s.tier, peer_whatami_routing(&s.actions)),
+            None => {
+                log::debug!(
+                    "router forward: DROP {} inbound message(s) from unregistered face {id:?}",
+                    messages.len()
+                );
+                return;
             }
         };
+        drop(on);
         for message in messages {
             log::debug!(
                 "router forward: face {id:?} tier {tier:?} inbound {}",
@@ -8883,136 +9260,89 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                     _ => "other".to_string(),
                 }
             );
-            // §5.16 INGRESS access control (y113): consult the ingress chain ONCE
-            // here, ahead of the kind-dispatch — a denied message is dropped (not
-            // counted as received Push/Query, not routed) and witnessed. The router
-            // twin of `LinkstateForwarder::forward`'s admit_inbound gate; the
-            // empty-chain fast path (no ACL) is a single predicate read.
-            let verdict = self.admit_inbound(id, message);
-            if let Some(kind) = verdict.dropped_by() {
-                self.interceptor_dropped.bump();
-                if let Some(face) = self.tables.faces.read().get(&id) {
-                    crate::linkstate_forward::charge_interceptor_drop(
-                        &face.actions,
-                        message,
-                        kind,
-                        InterceptorFlow::Ingress,
-                    );
+            // A topology message, a declaration and an interest write the tables; every other
+            // kind reads them. The message takes the guard of its kind once, and the ingress
+            // check below runs under it.
+            if matches!(
+                message,
+                NetworkMessage::Oam(_) | NetworkMessage::Declare(_) | NetworkMessage::Interest(_)
+            ) {
+                let mut on = self.on_tables_mut();
+                if !on.admits_ingress(id, message) {
+                    continue;
                 }
-            }
-            if !verdict.is_admitted() {
-                continue;
-            }
-            match message {
-                // A topology link-state: ingest into the INBOUND tier's net,
-                // re-flood the changed nodes onward to the SAME tier, purge the
-                // interest of any detached node, and coalesce that net's
-                // recompute. A Client face has no net, so it carries no topology.
-                NetworkMessage::Oam(oam) => {
-                    if let Some((net, dirty)) = self.plane(tier) {
-                        match try_parse_linkstate_oam(oam) {
-                            LinkstateOam::Decoded(list) => {
-                                let changes = self.ingest_inbound_linkstate_tier(id, net, list);
-                                let _ = self.propagate_tier(id, tier, net, &changes);
-                                self.purge_detached_interest_tier(tier, &changes.removed);
-                                dirty.set(true);
-                            }
-                            LinkstateOam::Malformed(_) | LinkstateOam::NotLinkstate => {}
+                match message {
+                    // A topology link-state: ingest into the INBOUND tier's net,
+                    // re-flood the changed nodes onward to the SAME tier, purge the
+                    // interest of any detached node, and coalesce that net's
+                    // recompute. A Client face has no net, so it carries no topology.
+                    NetworkMessage::Oam(oam) => on.ingest_topology(id, tier, oam),
+                    // A declaration: one owner call per plane, whichever hat owns the
+                    // face (R2876, step 3e) — the pin's dispatcher registers in
+                    // `hats[face.region]` and propagates, and never asks what kind
+                    // of hat that is. A keyexpr-alias declaration records the
+                    // link-local alias for resolution; the Request/Response query
+                    // plane is the COMPUTE slice.
+                    NetworkMessage::Declare(declare) => {
+                        on.route_declaration(id, tier, whatami, *reliable, declare);
+                    }
+                    // An Interest solicitation (the zenoh-1.x interest-declaration
+                    // handshake). Reply with the matching CURRENT declarations wz
+                    // holds + a DeclareFinal so the soliciting peer's write-filter (a
+                    // pico publisher/querier drops its own data LOCALLY until it learns
+                    // a matching remote declaration) deactivates. Previously dropped
+                    // (`_ => {}`), which black-holed the reverse-data path.
+                    // R2882 — only from below, and never from a router
+                    // ([`InterestFlow`]).
+                    NetworkMessage::Interest(interest) => {
+                        if InterestFlow::Solicitation.admits(tier, whatami) {
+                            on.respond_to_interest(id, interest);
+                        } else {
+                            log::debug!(
+                                "router forward: DROP an interest from {whatami:?} face {id:?} in {tier}"
+                            );
                         }
                     }
+                    _ => {}
                 }
-                // A data Push: count the reception (the data-plane witness), then
-                // route it through [`route_push`](Self::route_push), the router's
-                // full zenoh `compute_data_route` (pubsub.rs:1215) — within-tier
-                // transit (C1) + the master-gated cross-mesh federation bridge (C4)
-                // + local client delivery (C3a) + the client->mesh re-injection
-                // (C3b). The keyexpr resolution + master election run ONCE at the
-                // head; single-router topologies elect self, so every master gate is
-                // a no-op and the behavior is the pre-C4 route.
-                NetworkMessage::Push(push) => {
-                    self.data_seen.bump();
-                    self.route_push(id, tier, *reliable, *priority, push, None);
+            } else {
+                let on = self.on_tables();
+                if !on.admits_ingress(id, message) {
+                    continue;
                 }
-                // A declaration: one owner call per plane, whichever hat owns the
-                // face (R2876, step 3e) — the pin's dispatcher registers in
-                // `hats[face.region]` and propagates, and never asks what kind
-                // of hat that is. A keyexpr-alias declaration records the
-                // link-local alias for resolution; the Request/Response query
-                // plane is the COMPUTE slice.
-                NetworkMessage::Declare(declare) => match &declare.body {
-                    DeclareOwnedVariant::CodecZenohDeclKexpr(_)
-                    | DeclareOwnedVariant::CodecZenohUndeclKexpr(_) => {
-                        self.absorb_keyexpr_declaration(id, declare);
+                match message {
+                    // A data Push: count the reception (the data-plane witness), then
+                    // route it through [`route_push`](Self::route_push), the router's
+                    // full zenoh `compute_data_route` (pubsub.rs:1215) — within-tier
+                    // transit (C1) + the master-gated cross-mesh federation bridge (C4)
+                    // + local client delivery (C3a) + the client->mesh re-injection
+                    // (C3b). The keyexpr resolution + master election run ONCE at the
+                    // head; single-router topologies elect self, so every master gate is
+                    // a no-op and the behavior is the pre-C4 route.
+                    NetworkMessage::Push(push) => {
+                        self.data_seen.bump();
+                        on.route_push(id, tier, *reliable, *priority, push, None);
                     }
-                    DeclareOwnedVariant::CodecZenohDeclSubscriber(_) => {
-                        self.declare_subscriber(id, tier, *reliable, declare);
+                    // A Query Request: count the reception (the query-plane witness),
+                    // then route it through [`route_request`](Self::route_request) — the
+                    // router's full zenoh compute_query_route (3-block master-gated +
+                    // GLOBAL BestMatching over both meshes + clients, C5b).
+                    NetworkMessage::Request(request) => {
+                        self.queries_seen.bump();
+                        on.route_request(id, tier, *reliable, request, None);
                     }
-                    DeclareOwnedVariant::CodecZenohUndeclSubscriber(_) => {
-                        self.undeclare_subscriber(id, tier, *reliable, declare);
+                    // A queryable's reply: route it BACK toward the querier via the
+                    // pending table (C5c) — peek on a Response (more replies may
+                    // follow); take on the ResponseFinal frees that BRANCH, and the
+                    // final propagates upstream only from the fan's LAST branch.
+                    NetworkMessage::Response(response) => {
+                        on.forward_response(id, *reliable, response);
                     }
-                    DeclareOwnedVariant::CodecZenohDeclQueryable(_) => {
-                        self.declare_queryable(id, tier, *reliable, declare);
-                    }
-                    DeclareOwnedVariant::CodecZenohUndeclQueryable(_) => {
-                        self.undeclare_queryable(id, tier, *reliable, declare);
-                    }
-                    // A token stamped with an interest id is an ANSWER, and an
-                    // answer from below is refused ([`InterestFlow`]).
-                    #[cfg(feature = "routing-token-tables")]
-                    DeclareOwnedVariant::CodecZenohDeclToken(_)
-                        if declare.interest_id.is_some()
-                            && !InterestFlow::Answer.admits(tier, whatami) =>
-                    {
-                        log::debug!(
-                            "router forward: DROP a token answer from south-bound face {id:?}"
-                        );
-                    }
-                    #[cfg(feature = "routing-token-tables")]
-                    DeclareOwnedVariant::CodecZenohDeclToken(_) => {
-                        self.declare_token(id, tier, *reliable, declare);
-                    }
-                    #[cfg(feature = "routing-token-tables")]
-                    DeclareOwnedVariant::CodecZenohUndeclToken(_) => {
-                        self.undeclare_token(id, tier, *reliable, declare);
+                    NetworkMessage::ResponseFinal(response_final) => {
+                        on.forward_response_final(id, *reliable, response_final);
                     }
                     _ => {}
-                },
-                // A Query Request: count the reception (the query-plane witness),
-                // then route it through [`route_request`](Self::route_request) — the
-                // router's full zenoh compute_query_route (3-block master-gated +
-                // GLOBAL BestMatching over both meshes + clients, C5b).
-                NetworkMessage::Request(request) => {
-                    self.queries_seen.bump();
-                    self.route_request(id, tier, *reliable, request, None);
                 }
-                // A queryable's reply: route it BACK toward the querier via the
-                // pending table (C5c) — peek on a Response (more replies may
-                // follow); take on the ResponseFinal frees that BRANCH, and the
-                // final propagates upstream only from the fan's LAST branch.
-                NetworkMessage::Response(response) => {
-                    self.forward_response(id, *reliable, response);
-                }
-                NetworkMessage::ResponseFinal(response_final) => {
-                    self.forward_response_final(id, *reliable, response_final);
-                }
-                // An Interest solicitation (the zenoh-1.x interest-declaration
-                // handshake). Reply with the matching CURRENT declarations wz
-                // holds + a DeclareFinal so the soliciting peer's write-filter (a
-                // pico publisher/querier drops its own data LOCALLY until it learns
-                // a matching remote declaration) deactivates. Previously dropped
-                // (`_ => {}`), which black-holed the reverse-data path.
-                // R2882 — only from below, and never from a router
-                // ([`InterestFlow`]).
-                NetworkMessage::Interest(interest) => {
-                    if InterestFlow::Solicitation.admits(tier, whatami) {
-                        self.respond_to_interest(id, interest);
-                    } else {
-                        log::debug!(
-                            "router forward: DROP an interest from {whatami:?} face {id:?} in {tier}"
-                        );
-                    }
-                }
-                _ => {}
             }
         }
     }
@@ -9020,11 +9350,11 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
 
 impl FaceForwarder for RouterForwarder {
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
-        self.on_tables().register(id, actions)
+        self.on_tables_mut().register(id, actions)
     }
 
     fn deregister(&self, id: FaceId) {
-        self.on_tables().deregister(id)
+        self.on_tables_mut().deregister(id)
     }
 
     /// `Some(self.trees_delay)`: the router DOES tick — it flushes the coalesced
@@ -9036,7 +9366,7 @@ impl FaceForwarder for RouterForwarder {
     }
 
     fn tick(&self) {
-        self.on_tables().tick()
+        self.on_tables_mut().tick()
     }
 
     fn read_gate(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
@@ -9070,13 +9400,13 @@ impl FaceForwarder for RouterForwarder {
         primary_id: FaceId,
         actions: &Arc<SessionLinkActions>,
     ) {
-        self.on_tables()
+        self.on_tables_mut()
             .register_joined(joined_id, primary_id, actions)
     }
 
     #[cfg(feature = "session-close-ingress")]
     fn deregister_joined(&self, joined_id: FaceId) {
-        self.on_tables().deregister_joined(joined_id)
+        self.on_tables_mut().deregister_joined(joined_id)
     }
 
     fn refuses_face(&self, actions: &Arc<SessionLinkActions>) -> Option<String> {
@@ -9121,7 +9451,7 @@ impl FaceForwarder for RouterForwarder {
     }
 
     fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
-        self.on_tables().forward(id, event)
+        self.forward_frame(id, event)
     }
 }
 
@@ -9198,7 +9528,7 @@ pub trait RouterLinkWeightSink {
 /// the same shape the `InterceptorSink` impl above takes.
 impl RouterLinkWeightSink for RouterForwarder {
     fn set_router_link_weights(&self, weights: HashMap<Zid, LinkEdgeWeight>) -> bool {
-        self.on_tables().update_router_link_weights(weights)
+        self.on_tables_mut().update_router_link_weights(weights)
     }
 }
 
@@ -9220,22 +9550,6 @@ mod tests {
     use wz_runtime_core::runtime::Runtime;
     use wz_session_core::push_routing_context::read_push_hoplimit;
 
-    /// A table is read and written the same way whichever cell the forwarder keeps it in: the route
-    /// helpers the peer forwarder and the router share take `SharedTable`, so the peer keeps its
-    /// `Rc<RefCell<_>>` and the router its `Arc<PlainRwLock<_>>` and neither pays for the other's.
-    #[test]
-    fn a_shared_table_reads_and_writes_alike_in_either_cell() {
-        use crate::sync::SharedTable;
-        fn push_and_total(table: &impl SharedTable<Vec<u32>>) -> u32 {
-            table.write_table().push(7);
-            table.read_table().iter().sum()
-        }
-        assert_eq!(push_and_total(&RefCell::new(vec![1, 2])), 10);
-        assert_eq!(push_and_total(&Rc::new(RefCell::new(vec![1, 2]))), 10);
-        assert_eq!(push_and_total(&PlainRwLock::new(vec![1, 2])), 10);
-        assert_eq!(push_and_total(&Arc::new(PlainRwLock::new(vec![1, 2]))), 10);
-    }
-
     /// The state the data path reads or writes that is not the tables (`docs/router-task-per-face.md`,
     /// phase 3b) can be shared between the threads that drive the faces: the pending-query table
     /// and the fan target its entries share, the interceptor chains, the autoconnect policy, the
@@ -9252,6 +9566,65 @@ mod tests {
         shared::<PlainMutex<Option<DialIntentSender>>>();
         shared::<Box<dyn Fn() -> Instant + Send + Sync>>();
         shared::<PlainRwLock<wz_session_core::link::LinkSubject>>();
+    }
+
+    /// The tables, with the hosts' handlers in them, can be shared between the threads that drive
+    /// the faces (`docs/router-task-per-face.md`, phase 3e): what one guard round them asks.
+    #[test]
+    fn the_tables_can_be_shared_between_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<Tables>();
+        shared::<PlainRwLock<Tables>>();
+        shared::<Hosted<HostedQueryHandler>>();
+        shared::<Hosted<HostedSubscriberHandler>>();
+    }
+
+    /// Calls of one hosted handler from different threads are serialized, as an `FnMut` needs: a
+    /// count the handler makes without a lock of its own is exact.
+    #[test]
+    fn a_hosted_handler_runs_one_call_at_a_time_across_threads() {
+        let hosted = Hosted::new(0usize);
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let hosted = Arc::clone(&hosted);
+                std::thread::spawn(move || {
+                    for _ in 0..2000 {
+                        assert!(hosted
+                            .call(|n| {
+                                let seen = *n;
+                                std::thread::yield_now();
+                                *n = seen + 1;
+                            })
+                            .is_some());
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("a caller thread finishes");
+        }
+        assert_eq!(hosted.call(|n| *n), Some(16_000));
+    }
+
+    /// A call from inside the handler (it publishes into its own pattern) is refused and not
+    /// waited for, and the handler is callable again once it has returned, also after a panic.
+    #[test]
+    fn a_hosted_handler_refuses_a_call_from_inside_itself() {
+        let hosted = Hosted::new(0u32);
+        let inner = hosted.call(|n| {
+            *n += 1;
+            hosted.call(|_| ())
+        });
+        assert_eq!(inner, Some(None), "the inner call is refused");
+        assert_eq!(hosted.call(|n| *n), Some(1));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            hosted.call(|_| panic!("a handler panics"))
+        }));
+        assert!(panicked.is_err());
+        assert!(
+            hosted.call(|_| ()).is_some(),
+            "the handler is not left marked as running"
+        );
     }
 
     /// R2864 (open-debt item 751) — the tier is now read off the face's REGION,
@@ -9307,7 +9680,7 @@ mod tests {
             !regions.is_empty(),
             "no region derived, so nothing was graded"
         );
-        let mut built: Vec<Region> = fwd.tables.hats.regions().collect();
+        let mut built: Vec<Region> = fwd.on_tables().tables.hats.regions().collect();
         let mut want = regions.clone();
         built.sort_by_key(|r| r.to_string());
         want.sort_by_key(|r| r.to_string());
@@ -9564,15 +9937,13 @@ mod tests {
         let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
         // self + 0xAA in routers_net; only self in linkstatepeers_net.
-        assert_eq!(fwd.on_tables().routers_net().read().node_count(), 2);
-        assert!(fwd
-            .on_tables()
-            .routers_net()
-            .read()
-            .get_node(&zid(0xAA))
-            .is_some());
-        assert_eq!(fwd.on_tables().linkstatepeers_net().read().node_count(), 1);
-        assert_eq!(fwd.tables.faces.read()[&FaceId(0)].tier, ROUTERS_REGION);
+        assert_eq!(fwd.on_tables().routers_net().node_count(), 2);
+        assert!(fwd.on_tables().routers_net().get_node(&zid(0xAA)).is_some());
+        assert_eq!(fwd.on_tables().linkstatepeers_net().node_count(), 1);
+        assert_eq!(
+            fwd.on_tables().tables.faces[&FaceId(0)].tier,
+            ROUTERS_REGION
+        );
     }
 
     #[test]
@@ -9584,16 +9955,13 @@ mod tests {
         // `Network`: the face holds a LINK, and the neighbour's node waits for
         // its own announcement (`zenoh/src/net/protocol/network.rs` @ `if self.full_linkstate || self.gossip_multihop {`).
         // The link alone already makes it self's next hop.
-        assert!(fwd.tables.faces.read()[&FaceId(0)].link.is_some());
+        assert!(fwd.on_tables().tables.faces[&FaceId(0)].link.is_some());
         let on = fwd.on_tables();
         let peers = on.linkstatepeers_net();
-        assert_eq!(peers.read().node_count(), 1, "no node before it announces");
-        assert_eq!(
-            peers.read().next_hop(&zid(0x01), &zid(0xBB)),
-            Some(zid(0xBB))
-        );
-        assert_eq!(fwd.on_tables().routers_net().read().node_count(), 1);
-        assert_eq!(fwd.tables.faces.read()[&FaceId(0)].tier, PEERS_REGION);
+        assert_eq!(peers.node_count(), 1, "no node before it announces");
+        assert_eq!(peers.next_hop(&zid(0x01), &zid(0xBB)), Some(zid(0xBB)));
+        assert_eq!(fwd.on_tables().routers_net().node_count(), 1);
+        assert_eq!(fwd.on_tables().tables.faces[&FaceId(0)].tier, PEERS_REGION);
     }
 
     #[test]
@@ -9602,11 +9970,14 @@ mod tests {
         let (c, _sink) = face(zid(0xCC), WIRE_CLIENT);
         fwd.register(FaceId(0), &c);
         // A client is a leaf: held in `faces` but in neither mesh.
-        assert!(fwd.tables.faces.read().contains_key(&FaceId(0)));
-        assert_eq!(fwd.tables.faces.read()[&FaceId(0)].tier, CLIENTS_REGION);
-        assert_eq!(fwd.tables.faces.read()[&FaceId(0)].link, None);
-        assert_eq!(fwd.on_tables().routers_net().read().node_count(), 1);
-        assert_eq!(fwd.on_tables().linkstatepeers_net().read().node_count(), 1);
+        assert!(fwd.on_tables().tables.faces.contains_key(&FaceId(0)));
+        assert_eq!(
+            fwd.on_tables().tables.faces[&FaceId(0)].tier,
+            CLIENTS_REGION
+        );
+        assert_eq!(fwd.on_tables().tables.faces[&FaceId(0)].link, None);
+        assert_eq!(fwd.on_tables().routers_net().node_count(), 1);
+        assert_eq!(fwd.on_tables().linkstatepeers_net().node_count(), 1);
     }
 
     #[test]
@@ -9617,10 +9988,13 @@ mod tests {
         let (actions, _sink) = recording_actions();
         TokioRuntime::with_mutex_mut(&actions.peer_whatami, |s| *s = Some(WIRE_ROUTER));
         fwd.register(FaceId(0), &actions);
-        assert_eq!(fwd.tables.faces.read()[&FaceId(0)].tier, ROUTERS_REGION);
-        assert_eq!(fwd.tables.faces.read()[&FaceId(0)].link, None);
         assert_eq!(
-            fwd.on_tables().routers_net().read().node_count(),
+            fwd.on_tables().tables.faces[&FaceId(0)].tier,
+            ROUTERS_REGION
+        );
+        assert_eq!(fwd.on_tables().tables.faces[&FaceId(0)].link, None);
+        assert_eq!(
+            fwd.on_tables().routers_net().node_count(),
             1,
             "no neighbour added"
         );
@@ -9631,17 +10005,17 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
-        assert_eq!(fwd.on_tables().routers_net().read().node_count(), 2); // self + 0xAA
-                                                                          // A flood on the ROUTER face discovers 0xDD into the routers tier only.
+        assert_eq!(fwd.on_tables().routers_net().node_count(), 2); // self + 0xAA
+                                                                   // A flood on the ROUTER face discovers 0xDD into the routers tier only.
         discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0xDD, 3, 5);
         assert_eq!(fwd.ingested.get(), 1, "the OAM was ingested");
         assert_eq!(
-            fwd.on_tables().routers_net().read().node_count(),
+            fwd.on_tables().routers_net().node_count(),
             3,
             "0xDD discovered in the routers tier (self + 0xAA + 0xDD)"
         );
         assert_eq!(
-            fwd.on_tables().linkstatepeers_net().read().node_count(),
+            fwd.on_tables().linkstatepeers_net().node_count(),
             1,
             "the peers tier is untouched by a routers-tier flood"
         );
@@ -9706,8 +10080,7 @@ mod tests {
     }
 
     /// Self's advertised weight toward `peer` in one tier's graph.
-    fn self_link_weight(net: &Arc<PlainRwLock<LinkstateNetwork>>, peer: u8) -> LinkEdgeWeight {
-        let net = net.read();
+    fn self_link_weight(net: &LinkstateNetwork, peer: u8) -> LinkEdgeWeight {
         net.get_node(net.self_zid())
             .expect("self node")
             .links
@@ -9798,10 +10171,10 @@ mod tests {
             "no self entry flooded into the north router region carries G"
         );
         assert_eq!(
-            fwd.on_tables().linkstatepeers_net().read().gateways(),
+            fwd.on_tables().linkstatepeers_net().gateways(),
             vec![zid(0x01)]
         );
-        assert!(fwd.on_tables().routers_net().read().gateways().is_empty());
+        assert!(fwd.on_tables().routers_net().gateways().is_empty());
     }
 
     /// A weight configured before a Router face registers is the weight its
@@ -9834,7 +10207,6 @@ mod tests {
         assert!(
             !fwd.on_tables()
                 .linkstatepeers_net()
-                .read()
                 .get_node(&zid(0x01))
                 .expect("self")
                 .links
@@ -9866,7 +10238,6 @@ mod tests {
         let psid_a = fwd
             .on_tables()
             .routers_net()
-            .read()
             .local_psid_of(&zid(0xAA))
             .expect("A indexed");
         for (name, sink) in [("A", &sink_a), ("C", &sink_c)] {
@@ -10312,35 +10683,24 @@ mod tests {
     fn gossip_multihop_reaches_both_of_the_routers_graphs() {
         let fwd = RouterForwarder::new(zid(0x01));
         assert!(
-            !fwd.on_tables().routers_net().read().gossip_multihop(),
+            !fwd.on_tables().routers_net().gossip_multihop(),
             "off by default, as zenoh's config default is"
         );
-        assert!(!fwd
-            .on_tables()
-            .linkstatepeers_net()
-            .read()
-            .gossip_multihop());
+        assert!(!fwd.on_tables().linkstatepeers_net().gossip_multihop());
 
         fwd.set_gossip_multihop(true);
         assert!(
-            fwd.on_tables().routers_net().read().gossip_multihop(),
+            fwd.on_tables().routers_net().gossip_multihop(),
             "routers tier"
         );
         assert!(
-            fwd.on_tables()
-                .linkstatepeers_net()
-                .read()
-                .gossip_multihop(),
+            fwd.on_tables().linkstatepeers_net().gossip_multihop(),
             "peers tier too — one config value, both graphs"
         );
 
         fwd.set_gossip_multihop(false);
-        assert!(!fwd.on_tables().routers_net().read().gossip_multihop());
-        assert!(!fwd
-            .on_tables()
-            .linkstatepeers_net()
-            .read()
-            .gossip_multihop());
+        assert!(!fwd.on_tables().routers_net().gossip_multihop());
+        assert!(!fwd.on_tables().linkstatepeers_net().gossip_multihop());
     }
 
     /// R2637 — the weight reaches the WIRE record, end to end: a configured
@@ -10456,7 +10816,6 @@ mod tests {
             let psid_a = fwd
                 .on_tables()
                 .routers_net()
-                .read()
                 .local_psid_of(&zid(0xAA))
                 .expect("A indexed");
             let slot = states[0]
@@ -10583,12 +10942,6 @@ mod tests {
     /// whose `#[cfg(feature = "transport-qos")]` this test must NOT inherit.
     #[test]
     fn a_router_hosted_subscriber_receives_a_routed_put_and_is_advertised() {
-        use std::cell::Cell;
-        // Scoped to the test: the lib's dispatch builds a `BorrowedSample` and never
-        // names the trait, so a module-level import would be dead in a non-test build
-        // and `-D warnings` rejects it.
-        use wz_session_core::sink::SampleView;
-
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, _sink_a) = face(zid(0xAA), WIRE_PEER); // peer source
         fwd.register(FaceId(0), &a);
@@ -10603,16 +10956,16 @@ mod tests {
             "a router with no host subscriber must not advertise interest"
         );
 
-        let hits = Rc::new(Cell::new(0usize));
-        let seen = Rc::new(RefCell::new(Vec::<u8>::new()));
+        let hits = Arc::new(PlainCell::new(0usize));
+        let seen = Arc::new(PlainMutex::new(Vec::<u8>::new()));
         {
-            let hits = Rc::clone(&hits);
-            let seen = Rc::clone(&seen);
+            let hits = Arc::clone(&hits);
+            let seen = Arc::clone(&seen);
             fwd.register_local_subscriber(
                 "demo/host/**",
                 Box::new(move |s: &dyn SampleView| {
                     hits.set(hits.get() + 1);
-                    *seen.borrow_mut() = s.payload().to_vec();
+                    *seen.guard() = s.payload().to_vec();
                 }),
             );
         }
@@ -10643,7 +10996,7 @@ mod tests {
             "the router-hosted subscriber must receive it"
         );
         assert_eq!(
-            seen.borrow().as_slice(),
+            seen.guard().as_slice(),
             b"payload",
             "and receive the Put's payload, not an empty or stale body"
         );
@@ -10694,13 +11047,13 @@ mod tests {
         advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
         fwd.tick();
 
-        let seen = Rc::new(RefCell::new(Vec::<(SampleKind, Vec<u8>)>::new()));
+        let seen = Arc::new(PlainMutex::new(Vec::<(SampleKind, Vec<u8>)>::new()));
         {
-            let seen = Rc::clone(&seen);
+            let seen = Arc::clone(&seen);
             fwd.register_local_subscriber(
                 "demo/host/**",
                 Box::new(move |s: &dyn SampleView| {
-                    seen.borrow_mut().push((s.kind(), s.payload().to_vec()));
+                    seen.guard().push((s.kind(), s.payload().to_vec()));
                 }),
             );
         }
@@ -10712,7 +11065,7 @@ mod tests {
             .expect("build del push");
         forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(del)));
 
-        let seen = seen.borrow();
+        let seen = seen.guard();
         assert_eq!(
             seen.len(),
             2,
@@ -11850,7 +12203,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/late"),
             vec![zid(0xAA)],
             "self learned A's interest before C joined"
@@ -11885,7 +12237,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .subs
-                .read()
                 .interested("demo/late"),
             vec![zid(0xAA)],
             "the router registers A's subscription"
@@ -11920,7 +12271,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q"),
             vec![zid(0xAA)],
             "self learned A's queryable before C joined"
@@ -11944,14 +12294,15 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, sink_a) = face(zid(0x01), WIRE_PEER); // routing zid == self
         fwd.register(FaceId(0), &a);
-        let faces = fwd.tables.faces.read();
+        let on = fwd.on_tables();
+        let faces = &on.tables.faces;
         let st = faces.get(&FaceId(0)).expect("the face is still held");
         assert_eq!(
             st.link, None,
             "but with no graph link (self-connect guarded)"
         );
         assert_eq!(
-            fwd.on_tables().linkstatepeers_net().read().node_count(),
+            fwd.on_tables().linkstatepeers_net().node_count(),
             1,
             "no self-loop neighbour added to the peer net (only self)"
         );
@@ -12420,7 +12771,11 @@ mod tests {
         let (client, _sink) = face(zid(0xCC), WIRE_CLIENT);
         fwd.register(FaceId(3), &client);
         assert_eq!(
-            fwd.tables.faces.read().get(&FaceId(3)).map(|f| f.peer_zid),
+            fwd.on_tables()
+                .tables
+                .faces
+                .get(&FaceId(3))
+                .map(|f| f.peer_zid),
             Some(peer_zid_routing(&client)),
             "stored at register, equal to what the session reports"
         );
@@ -12433,16 +12788,16 @@ mod tests {
     fn a_targeted_fan_out_skips_a_face_that_is_gone_or_in_another_tier() {
         let (fwd, _sinks, _peer) = router_holding_clients(3);
         let client_tier = fwd
+            .on_tables()
             .tables
             .faces
-            .read()
             .get(&FaceId(2))
             .map(|f| f.tier)
             .expect("client face 2 is held");
         let peer_tier = fwd
+            .on_tables()
             .tables
             .faces
-            .read()
             .get(&FaceId(0))
             .map(|f| f.tier)
             .expect("the peer face is held");
@@ -12559,7 +12914,10 @@ mod tests {
     fn a_partitioned_router_places_each_face_in_its_subregion() {
         let fwd = partitioned_router();
         for region in [SUB0_PEERS, SUB1_PEERS, SUB2_CLIENTS] {
-            assert!(fwd.tables.hats.get(&region).is_some(), "{region} has a hat");
+            assert!(
+                fwd.on_tables().tables.hats.get(&region).is_some(),
+                "{region} has a hat"
+            );
         }
         let (a, _s) = face(zid(0xAA), WIRE_PEER);
         let (b, _s) = face(zid(0xBB), WIRE_PEER);
@@ -12567,7 +12925,7 @@ mod tests {
         fwd.register(FaceId(0), &a);
         fwd.register(FaceId(1), &b);
         fwd.register(FaceId(2), &c);
-        let tier = |id| fwd.tables.faces.read()[&FaceId(id)].tier;
+        let tier = |id| fwd.on_tables().tables.faces[&FaceId(id)].tier;
         assert_eq!(tier(0), SUB0_PEERS);
         assert_eq!(tier(1), SUB1_PEERS);
         assert_eq!(tier(2), SUB2_CLIENTS);
@@ -12750,17 +13108,17 @@ mod tests {
         fwd.register(FaceId(0), &south);
         fwd.register(FaceId(1), &north);
         fwd.tick();
-        assert_eq!(fwd.tables.faces.read()[&FaceId(0)].tier, SUB0_ROUTERS);
-        assert_eq!(fwd.tables.faces.read()[&FaceId(1)].tier, Region::North);
+        assert_eq!(fwd.on_tables().tables.faces[&FaceId(0)].tier, SUB0_ROUTERS);
+        assert_eq!(fwd.on_tables().tables.faces[&FaceId(1)].tier, Region::North);
 
         let on = fwd.on_tables();
         let hat = on.mesh_hat(SUB0_ROUTERS).expect("a router hat serves it");
         assert!(
-            hat.net.read().full_linkstate(),
+            hat.net.full_linkstate(),
             "a router hat's net is full link-state wherever its region lies"
         );
-        assert_eq!(hat.net.read().gateways(), vec![zid(0x05)]);
-        assert!(fwd.on_tables().routers_net().read().gateways().is_empty());
+        assert_eq!(hat.net.gateways(), vec![zid(0x05)]);
+        assert!(fwd.on_tables().routers_net().gateways().is_empty());
 
         let own = |sink: &RecordingLinkDriver| -> Vec<LinkstateOwned> {
             received_link_states(sink)
@@ -12851,16 +13209,20 @@ mod tests {
         fwd.register(FaceId(0), &south);
         fwd.register(FaceId(1), &north);
         assert!(fwd.update_router_link_weights(link_weights(&[(0xAA, 250), (0x09, 300)])));
-        let on = fwd.on_tables();
-        let hat = on.mesh_hat(SUB0_ROUTERS).expect("a router hat serves it");
-        assert_eq!(
-            self_link_weight(&hat.net, 0xAA),
-            LinkEdgeWeight::from_raw(250)
-        );
-        assert_eq!(
-            self_link_weight(fwd.on_tables().routers_net(), 0x09),
-            LinkEdgeWeight::from_raw(300)
-        );
+        {
+            // Dropped before the tables are written again below: a guard held across a write
+            // waits for itself.
+            let on = fwd.on_tables();
+            let hat = on.mesh_hat(SUB0_ROUTERS).expect("a router hat serves it");
+            assert_eq!(
+                self_link_weight(&hat.net, 0xAA),
+                LinkEdgeWeight::from_raw(250)
+            );
+            assert_eq!(
+                self_link_weight(on.routers_net(), 0x09),
+                LinkEdgeWeight::from_raw(300)
+            );
+        }
         // A link is reported once its far end advertises it back.
         advertise_link_back(&fwd, FaceId(0), 0x05, 0xAA, 5);
         advertise_link_back(&fwd, FaceId(1), 0x05, 0x09, 5);
@@ -12874,7 +13236,7 @@ mod tests {
     #[test]
     fn a_router_hands_its_sessions_the_partition_it_places_faces_by() {
         let fwd = router_subregion_router(&[0xAA]);
-        assert_eq!(fwd.south_partition(), fwd.tables.partition);
+        assert_eq!(fwd.south_partition(), fwd.on_tables().tables.partition);
         assert_eq!(
             RouterForwarder::new(zid(0x05)).south_partition(),
             SouthPartition::Auto
@@ -13098,7 +13460,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/data"),
             vec![zid(0xAA)],
             "the foreign router's client sub registers the peer in router_subs"
@@ -13155,7 +13516,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/**"),
             vec![zid(0xAA)],
             "the compound aliased (prefix 'demo' + suffix '/**') sub registers 'demo/**'"
@@ -13342,7 +13702,7 @@ mod tests {
             };
             forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(declare)));
             let on = fwd.on_tables();
-            let tokens = on.mesh(region).tokens.read();
+            let tokens = &on.mesh(region).tokens;
             !tokens.interested("live/k").is_empty()
         };
         assert!(
@@ -13375,7 +13735,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/**"),
             vec![zid(0xAA)]
         );
@@ -14580,21 +14939,21 @@ mod tests {
         let (client, _sc) = face(zid(0xAA), WIRE_CLIENT);
         fwd.register(FaceId(0), &client);
         assert!(
-            fwd.tables.faces.read().contains_key(&FaceId(0)),
+            fwd.on_tables().tables.faces.contains_key(&FaceId(0)),
             "held before deregister"
         );
         fwd.deregister(FaceId(0));
         assert!(
-            !fwd.tables.faces.read().contains_key(&FaceId(0)),
+            !fwd.on_tables().tables.faces.contains_key(&FaceId(0)),
             "removed on deregister"
         );
         assert_eq!(
-            fwd.on_tables().routers_net().read().node_count(),
+            fwd.on_tables().routers_net().node_count(),
             1,
             "routers_net untouched (only self)"
         );
         assert_eq!(
-            fwd.on_tables().linkstatepeers_net().read().node_count(),
+            fwd.on_tables().linkstatepeers_net().node_count(),
             1,
             "peers_net untouched (only self)"
         );
@@ -14631,7 +14990,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .subs
-                .read()
                 .interested("demo/data")
                 .is_empty(),
             "derive-not-store: self is NOT registered in the peer subs table"
@@ -14775,7 +15133,6 @@ mod tests {
             fwd.on_tables()
                 .owner_broker(CLIENTS_REGION)
                 .subs
-                .read()
                 .get(&FaceId(0))
                 .is_none(),
             "the client sub store was purged"
@@ -15652,7 +16009,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/data"),
             vec![zid(0xDD)],
             "the distant node 0xDD's interest is registered (2 hops away)"
@@ -15701,18 +16057,14 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
-        assert_eq!(fwd.on_tables().routers_net().read().node_count(), 2);
+        assert_eq!(fwd.on_tables().routers_net().node_count(), 2);
         fwd.deregister(FaceId(0));
         assert!(
-            !fwd.tables.faces.read().contains_key(&FaceId(0)),
+            !fwd.on_tables().tables.faces.contains_key(&FaceId(0)),
             "face dropped"
         );
         assert!(
-            fwd.on_tables()
-                .routers_net()
-                .read()
-                .get_node(&zid(0xAA))
-                .is_none(),
+            fwd.on_tables().routers_net().get_node(&zid(0xAA)).is_none(),
             "the departed neighbour's link is removed from routers_net"
         );
     }
@@ -15784,16 +16136,16 @@ mod tests {
         fwd.register(FaceId(0), &p);
         // R2896 (751 rules 8d+8e) — self alone: the single-hop gossip `Network`
         // learns 0xBB from 0xBB's own announcement, not from the link.
-        assert_eq!(fwd.on_tables().linkstatepeers_net().read().node_count(), 1);
+        assert_eq!(fwd.on_tables().linkstatepeers_net().node_count(), 1);
         discover_via(&fwd, FaceId(0), 0x01, 0xBB, 0xEE, 3, 5);
         assert_eq!(fwd.ingested.get(), 1);
         assert_eq!(
-            fwd.on_tables().linkstatepeers_net().read().node_count(),
+            fwd.on_tables().linkstatepeers_net().node_count(),
             3,
             "0xEE discovered in the peers tier (self + 0xBB + 0xEE)"
         );
         assert_eq!(
-            fwd.on_tables().routers_net().read().node_count(),
+            fwd.on_tables().routers_net().node_count(),
             1,
             "the routers tier is untouched by a peers-tier flood"
         );
@@ -15835,11 +16187,11 @@ mod tests {
         let (a, _sa) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
         discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0xDD, 3, 5);
-        assert_eq!(fwd.on_tables().routers_net().read().node_count(), 3); // self + AA + DD (via OAM)
+        assert_eq!(fwd.on_tables().routers_net().node_count(), 3); // self + AA + DD (via OAM)
         let (d, sink_d) = face(zid(0xDD), WIRE_ROUTER);
         fwd.register(FaceId(1), &d);
         assert_eq!(
-            fwd.on_tables().routers_net().read().node_count(),
+            fwd.on_tables().routers_net().node_count(),
             3,
             "0xDD was already a graph node via OAM; the direct link adds no node"
         );
@@ -15861,7 +16213,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/data"),
             vec![zid(0xAA)],
             "the router-face source is registered in router_subs"
@@ -15870,7 +16221,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .subs
-                .read()
                 .interested("demo/data")
                 .is_empty(),
             "no native peer entry, and the cross-tier bubble is NOT stored"
@@ -15887,7 +16237,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .subs
-                .read()
                 .interested("demo/data"),
             vec![zid(0xBB)],
         );
@@ -15895,7 +16244,6 @@ mod tests {
             .on_tables()
             .mesh(ROUTERS_REGION)
             .subs
-            .read()
             .interested("demo/data")
             .is_empty());
     }
@@ -15926,7 +16274,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .subs
-                .read()
                 .interested("demo/data")
                 .is_empty(),
             "derive-not-store: self is NOT stored in the peer subs table"
@@ -16025,7 +16372,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/data"),
             vec![zid(0xBB)],
             "the router-native is sourced from the distant router Rd"
@@ -16083,14 +16429,12 @@ mod tests {
             .on_tables()
             .mesh(ROUTERS_REGION)
             .subs
-            .read()
             .interested("demo/data")
             .is_empty());
         assert!(fwd
             .on_tables()
             .mesh(PEERS_REGION)
             .subs
-            .read()
             .interested("demo/data")
             .is_empty());
     }
@@ -16105,7 +16449,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/data"),
             vec![zid(0xAA)]
         );
@@ -16117,7 +16460,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/data")
                 .is_empty(),
             "the source's interest is withdrawn"
@@ -16134,7 +16476,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/data"),
             vec![zid(0xAA)]
         );
@@ -16143,7 +16484,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/data")
                 .is_empty(),
             "the departed source's interest is purged (no bubble to leak)"
@@ -16172,7 +16512,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data"),
             vec![zid(0xAA)],
             "the router-face token source is registered in router_tokens"
@@ -16181,7 +16520,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data")
                 .is_empty(),
             "no native peer token entry (derive-not-store; this is a Router-tier source)"
@@ -16199,7 +16537,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data"),
             vec![zid(0xBB)],
         );
@@ -16207,7 +16544,6 @@ mod tests {
             .on_tables()
             .mesh(ROUTERS_REGION)
             .tokens
-            .read()
             .interested("live/data")
             .is_empty());
     }
@@ -16227,14 +16563,12 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data")
                 .is_empty()
                 && fwd
                     .on_tables()
                     .mesh(PEERS_REGION)
                     .tokens
-                    .read()
                     .interested("live/data")
                     .is_empty(),
             "a client-face token is not stored in either mesh tier (derive-not-store)"
@@ -16266,7 +16600,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data"),
             vec![zid(0xAA)],
             "self learned A's token"
@@ -16317,7 +16650,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data"),
             vec![zid(0xAA)]
         );
@@ -16326,7 +16658,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data")
                 .is_empty(),
             "the departed token source is purged (no leak in the register-only slice)"
@@ -16357,7 +16688,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data"),
             vec![zid(0xAA)]
         );
@@ -16366,7 +16696,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data")
                 .is_empty(),
             "the sourced UndeclareToken withdrew the token source"
@@ -16396,7 +16725,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data")
                 .is_empty(),
             "the token source is withdrawn"
@@ -16436,7 +16764,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data")
                 .is_empty(),
             "derive-not-store: self is NOT stored in the peer tokens table"
@@ -16465,7 +16792,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data")
                 .is_empty(),
             "derive-not-store: self is NOT stored in the router tokens table"
@@ -16687,14 +17013,12 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data")
                 .is_empty()
                 && fwd
                     .on_tables()
                     .mesh(PEERS_REGION)
                     .tokens
-                    .read()
                     .interested("live/data")
                     .is_empty(),
             "derive-not-store: a client token is NOT stored in either mesh tier table"
@@ -16734,14 +17058,12 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .tokens
-                .read()
                 .interested("live/data")
                 .is_empty()
                 && fwd
                     .on_tables()
                     .mesh(PEERS_REGION)
                     .tokens
-                    .read()
                     .interested("live/data")
                     .is_empty(),
             "derive-not-store: self is NOT stored in either mesh token table"
@@ -17545,7 +17867,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q"),
             vec![zid(0xAA)],
             "the router-face source is registered in router_qabls"
@@ -17554,7 +17875,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q")
                 .is_empty(),
             "no native peer entry, and the cross-tier bubble is NOT stored"
@@ -17564,7 +17884,6 @@ mod tests {
             .on_tables()
             .mesh(ROUTERS_REGION)
             .subs
-            .read()
             .interested("demo/q")
             .is_empty());
     }
@@ -17579,7 +17898,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q"),
             vec![zid(0xBB)]
         );
@@ -17587,7 +17905,6 @@ mod tests {
             .on_tables()
             .mesh(ROUTERS_REGION)
             .qabls
-            .read()
             .interested("demo/q")
             .is_empty());
     }
@@ -17621,7 +17938,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q")
                 .is_empty(),
             "derive-not-store: self is NOT stored in the peer qabls table"
@@ -17655,7 +17971,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q")
                 .is_empty(),
             "the native queryable interest is withdrawn"
@@ -17756,14 +18071,12 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q")
                 .is_empty()
                 && fwd
                     .on_tables()
                     .mesh(PEERS_REGION)
                     .qabls
-                    .read()
                     .interested("demo/q")
                     .is_empty(),
             "derive-not-store: self is NOT stored in either qabls table"
@@ -17905,7 +18218,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q"),
             vec![zid(0xAA)]
         );
@@ -17914,7 +18226,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q")
                 .is_empty(),
             "the departed queryable source is purged (the 1a purge covers qabls)"
@@ -17934,7 +18245,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q")
                 .is_empty(),
             "not in the router tier"
@@ -17943,13 +18253,12 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q")
                 .is_empty(),
             "not in the peer tier"
         );
         let on = fwd.on_tables();
-        let store = on.owner_broker(CLIENTS_REGION).qabls.read();
+        let store = &on.owner_broker(CLIENTS_REGION).qabls;
         let hosted = store
             .get(&FaceId(0))
             .expect("the client's queryable is stored");
@@ -18045,7 +18354,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q"),
             vec![zid(0xAA)]
         );
@@ -18060,7 +18368,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q"),
             vec![zid(0xAA)],
             "an id-only UndeclareQueryable carries no keyexpr — the interest survives"
@@ -18081,7 +18388,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q"),
             vec![zid(0xAA)]
         );
@@ -18093,7 +18399,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .qabls
-                .read()
                 .interested("demo/q")
                 .is_empty(),
             "the source's queryable interest is withdrawn"
@@ -18123,7 +18428,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/sub"),
             vec![zid(0xAA)],
             "self learned A is interested"
@@ -18196,7 +18500,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/aliased"),
             vec![zid(0xAA)],
             "the aliased declare resolved to the literal via the face table"
@@ -18301,7 +18604,9 @@ mod tests {
             )),
         );
 
-        let source_aliases = fwd.tables.faces.read()[&FaceId(0)].keyexpr_table.clone();
+        let source_aliases = fwd.on_tables().tables.faces[&FaceId(0)]
+            .keyexpr_table
+            .clone();
         // ANTI-VACUITY on the FIXTURE, not just on the emit: an empty table means
         // the three DeclKexprs never landed, and then `(None, Some(_))` — the
         // failure case — is unreachable by construction.
@@ -18355,7 +18660,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/sub"),
             vec![zid(0xBB)],
             "keyed on the resolved transit source B, not the inbound neighbour A"
@@ -18386,7 +18690,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/sub")
                 .is_empty(),
             "the source's interest is withdrawn"
@@ -18428,7 +18731,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(PEERS_REGION)
                 .subs
-                .read()
                 .interested("demo/sub"),
             vec![zid(0xAA)]
         );
@@ -18456,7 +18758,6 @@ mod tests {
             .on_tables()
             .mesh(ROUTERS_REGION)
             .subs
-            .read()
             .interested("never/declared")
             .is_empty());
     }
@@ -18494,7 +18795,6 @@ mod tests {
             fwd.on_tables()
                 .mesh(ROUTERS_REGION)
                 .subs
-                .read()
                 .interested("demo/aliased")
                 .is_empty(),
             "the alias was removed, so the aliased declare did not resolve"
@@ -18662,20 +18962,21 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (client, _sink) = face(zid(0xAA), WIRE_CLIENT);
         fwd.register(FaceId(0), &client);
-        let faces = fwd.tables.faces.read();
+        let on = fwd.on_tables();
+        let faces = &on.tables.faces;
         assert!(
-            matches!(classify_inbound(&faces, FaceId(0)), InboundFace::Held(_)),
+            matches!(classify_inbound(faces, FaceId(0)), InboundFace::Held(_)),
             "a registered face is Held"
         );
         assert!(
             matches!(
-                classify_inbound(&faces, MCAST_INGRESS_FACE),
+                classify_inbound(faces, MCAST_INGRESS_FACE),
                 InboundFace::SourceOnly
             ),
             "the multicast ingress sentinel is SourceOnly, not Gone"
         );
         assert!(
-            matches!(classify_inbound(&faces, FaceId(7)), InboundFace::Gone),
+            matches!(classify_inbound(faces, FaceId(7)), InboundFace::Gone),
             "an unregistered face is Gone, not SourceOnly"
         );
     }
@@ -19238,7 +19539,6 @@ mod tests {
             fwd.on_tables()
                 .owner_broker(CLIENTS_REGION)
                 .qabls
-                .read()
                 .contains_key(&FaceId(0)),
             "the client's queryable is stored"
         );
@@ -19248,7 +19548,6 @@ mod tests {
             !fwd.on_tables()
                 .owner_broker(CLIENTS_REGION)
                 .qabls
-                .read()
                 .contains_key(&FaceId(0)),
             "client_qabls purged on face-down (OBLIGATION 1)"
         );
@@ -20507,7 +20806,7 @@ mod tests {
                 .derived_cross_tier_qabl_info(tier, key)
                 .is_none());
         }
-        let handler: LocalQueryHandler = Box::new(|_v: &dyn QueryView, _o: &mut dyn ReplyOut| {});
+        let handler: HostedQueryHandler = Box::new(|_v: &dyn QueryView, _o: &mut dyn ReplyOut| {});
         fwd.register_local_queryable(key, true, handler);
         // After: BOTH meshes carry it in the re-advertise SSOT + the merged info
         // (the fold; without it a startup-registered admin qabl is unreachable by a

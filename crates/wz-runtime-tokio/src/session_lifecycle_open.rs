@@ -42,34 +42,34 @@
 
 use std::sync::Arc;
 
-use wz_routing_graph::{LinkstateNetwork, Zid};
+use wz_routing_graph::Zid;
 use wz_session_core::credential_identity::zid_from_wire;
 use wz_session_core::drive::{LifecycleKey, SessionOpener};
 use wz_session_core::lifecycle_query::{OpenOutcome, PeerOpener};
 use wz_session_core::zid_hex::zenoh_hex_to_zid;
 
 use crate::accept_loop::{ConnectReconcile, ReconcileSender};
+use crate::linkstate_forward::{read_net, NetHandle};
 use crate::session_open::plan_endpoint;
-use crate::sync::PlainRwLock;
 
 /// The link-state graphs a node learns where its peers can be reached from: one
 /// for a peer, and one per region for a router. Read-only: all it answers is the
 /// locators a node advertised.
 ///
-/// Holds each graph by `Arc<PlainRwLock<..>>` because that is how the router
-/// already holds it (shared between the threads that drive its faces), so this
-/// shares the graphs the floods populate rather than a copy that could disagree
-/// with them. A forwarder mints one for its own graphs
-/// (`node_locators`); the handle is never something a consumer mints over a graph
-/// it obtained some other way.
+/// Holds each graph by a [`NetHandle`] because that is how the router holds
+/// them (as fields of the hats in its tables, shared between the threads that
+/// drive its faces), so this shares the graphs the floods populate rather than
+/// a copy that could disagree with them. A forwarder mints one for its own
+/// graphs (`node_locators`); the handle is never something a consumer mints
+/// over a graph it obtained some other way.
 #[derive(Clone)]
 pub struct NodeLocators {
-    nets: Vec<Arc<PlainRwLock<LinkstateNetwork>>>,
+    nets: Vec<Arc<dyn NetHandle + Send + Sync>>,
 }
 
 impl NodeLocators {
     /// The locators of `nets`, in order.
-    pub(crate) fn new(nets: Vec<Arc<PlainRwLock<LinkstateNetwork>>>) -> Self {
+    pub(crate) fn new(nets: Vec<Arc<dyn NetHandle + Send + Sync>>) -> Self {
         Self { nets }
     }
 
@@ -80,11 +80,14 @@ impl NodeLocators {
     fn of(&self, zid: &Zid) -> Option<Vec<String>> {
         let mut found: Option<Vec<String>> = None;
         for net in &self.nets {
-            if let Some(locators) = net.read().node_locators(zid) {
+            let locators: Option<Vec<String>> = read_net(&**net, |graph| {
+                graph.node_locators(zid).map(|locators| locators.to_vec())
+            });
+            if let Some(locators) = locators {
                 let all = found.get_or_insert_with(Vec::new);
                 for locator in locators {
-                    if !all.contains(locator) {
-                        all.push(locator.clone());
+                    if !all.contains(&locator) {
+                        all.push(locator);
                     }
                 }
             }
@@ -102,7 +105,7 @@ pub struct LinkstateOpener {
 
 impl LinkstateOpener {
     /// Bind one graph and the connect-set channel this opener works through.
-    pub fn new(net: Arc<PlainRwLock<LinkstateNetwork>>, reconcile: ReconcileSender) -> Self {
+    pub fn new(net: Arc<dyn NetHandle + Send + Sync>, reconcile: ReconcileSender) -> Self {
         Self::over(NodeLocators::new(vec![net]), reconcile)
     }
 
@@ -273,11 +276,12 @@ mod tests {
         }
     }
 
-    fn seeded(locs: &[&str]) -> Arc<PlainRwLock<LinkstateNetwork>> {
-        let mut net = LinkstateNetwork::new(Zid::from_slice(SELF_ZID), WhatAmI::Peer);
+    fn seeded(locs: &[&str]) -> Arc<dyn NetHandle + Send + Sync> {
+        let mut net =
+            wz_routing_graph::LinkstateNetwork::new(Zid::from_slice(SELF_ZID), WhatAmI::Peer);
         let link = net.add_link(Zid::from_slice(NEIGHBOUR_ZID), WhatAmI::Peer);
         net.ingest_linkstate_list(link, flood(locs));
-        Arc::new(PlainRwLock::new(net))
+        Arc::new(crate::sync::PlainRwLock::new(net))
     }
 
     fn key_for(peer_hex: &str) -> String {

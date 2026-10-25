@@ -4174,6 +4174,12 @@ fn host_session_lifecycle<D, I, M, P, E>(
             ),
         }
     }
+    log_lifecycle_verbs(whatami, permit);
+}
+
+/// Say once what the session lifecycle verbs this host serves are permitted to do.
+#[cfg(feature = "session-close-ingress")]
+fn log_lifecycle_verbs(whatami: &str, permit: bool) {
     log::info!(
         "wz-ap-demo {whatami}: session lifecycle verbs {}",
         if permit {
@@ -4182,6 +4188,60 @@ fn host_session_lifecycle<D, I, M, P, E>(
             "refused until --session-close-permit"
         }
     );
+}
+
+/// [`host_session_lifecycle`] for a host whose forwarder runs a handler from any thread (the
+/// router's): the answerer is shared behind a lock and the handler is `Send`, where the peer's is
+/// one task's and an `Rc`. What the queries are and what they answer is the same.
+#[cfg(all(feature = "session-close-ingress", feature = "router-hat-router"))]
+fn host_session_lifecycle_shared<D, I, M, P, E>(
+    zid_hex: &str,
+    whatami: &str,
+    permit: bool,
+    directory: D,
+    loop_side: LoopLifecycle<I, M, P>,
+    mut register: impl FnMut(
+        &str,
+        Box<
+            dyn FnMut(
+                    &dyn wz::runtime_tokio::query_sink::QueryView,
+                    &mut dyn wz::runtime_tokio::query_sink::ReplyOut,
+                ) + Send,
+        >,
+    ) -> Result<usize, E>,
+) where
+    D: wz::runtime_tokio::lifecycle_query::SessionDirectory + Send + 'static,
+    I: wz::runtime_tokio::lifecycle_query::PeerIntent + Send + 'static,
+    M: wz::runtime_tokio::lifecycle_query::PeerMachines + Send + 'static,
+    P: wz::runtime_tokio::lifecycle_query::PeerOpener + Send + 'static,
+    E: std::fmt::Debug,
+{
+    use wz::runtime_tokio::lifecycle_query::LifecycleQueries;
+    use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
+    let queries = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(
+        LifecycleQueries::new(zid_hex, whatami, ClosePermit(permit), directory)
+            .with_intent(loop_side.intent)
+            .with_machines(loop_side.machines)
+            .with_opener(loop_side.opener),
+    ));
+    let patterns = queries.guard().patterns();
+    for pattern in patterns {
+        let answerer = Arc::clone(&queries);
+        let handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
+            let answered = answerer.guard().answer(view, out);
+            log::info!(
+                "wz-ap-demo: session lifecycle query {} -> {answered:?}",
+                view.keyexpr()
+            );
+        };
+        match register(&pattern, Box::new(handler)) {
+            Ok(_) => log::info!("wz-ap-demo {whatami}: session lifecycle query at {pattern}"),
+            Err(e) => log::warn!(
+                "wz-ap-demo {whatami}: session lifecycle registration of {pattern} failed: {e:?}"
+            ),
+        }
+    }
+    log_lifecycle_verbs(whatami, permit);
 }
 
 #[cfg(feature = "routing-peer")]
@@ -6402,7 +6462,7 @@ async fn run_router_hat_until(
     // expressible here rather than merely unwired. The `adminspace-*` host below
     // borrows THIS cell instead of building a second config, for the same reason
     // `with_max_links` states: one source, not two.
-    let host_cfg = std::rc::Rc::new(std::cell::RefCell::new({
+    let host_cfg = Arc::new(wz::runtime_tokio::sync::PlainMutex::new({
         let cfg = wz::runtime_tokio::config::WzConfig::from_init_params(&params)
             // R311y786 — the SAME policy the face loop is handed, so the config
             // GET reports the cadence actually in force rather than the default.
@@ -6499,8 +6559,9 @@ async fn run_router_hat_until(
     // question. This host is a Push subscriber and answers no one, so an
     // earlier refusal would only move a log line, not reach the writer.
     #[cfg(feature = "router-config-mutate")]
-    let pending_config_writes: std::rc::Rc<std::cell::RefCell<Vec<PendingConfigWrite>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let pending_config_writes: Arc<
+        wz::runtime_tokio::sync::PlainMutex<Vec<PendingConfigWrite>>,
+    > = Arc::new(wz::runtime_tokio::sync::PlainMutex::new(Vec::new()));
 
     // Driven through the config's install seam, not by translating rows here, so
     // setup and any later reconfigure take ONE path. A duplicate destination is
@@ -6512,8 +6573,8 @@ async fn run_router_hat_until(
     // registers: a link's graph shape is decided when it is added.
     forwarder.set_peer_region_full_linkstate(opts.peer_region_full_linkstate);
     {
-        let count = host_cfg.borrow().router_link_weights().len();
-        match host_cfg.borrow().install_router_link_weights(&forwarder) {
+        let count = host_cfg.guard().router_link_weights().len();
+        match host_cfg.guard().install_router_link_weights(&forwarder) {
             Ok(_) => {
                 if count > 0 {
                     log::info!("router-hat: {count} configured link weight(s) applied");
@@ -6835,7 +6896,7 @@ async fn run_router_hat_until(
     let probed = wz::runtime_tokio::calibrate_with_probe();
     log::info!("wz-ap-demo router-hat: keepalive cost probe timed {probed} writes");
     let session_ceiling = {
-        let cfg = host_cfg.borrow().clone();
+        let cfg = host_cfg.guard().clone();
         wz::runtime_tokio::accept_loop::SessionCeiling::new(move || {
             cfg.effective_max_sessions().limit
         })
@@ -6848,7 +6909,7 @@ async fn run_router_hat_until(
     // router in that state runs every few seconds.
     if opts.capacity.is_some() {
         if let Err(e) = wz::runtime_tokio::capacity_control::spawn_capacity_control(
-            host_cfg.borrow().clone(),
+            host_cfg.guard().clone(),
             forwarder.shed_registry(),
             session_ceiling.clone(),
         ) {
@@ -6899,10 +6960,10 @@ async fn run_router_hat_until(
         // (the router link weights) had to be both applied to the forwarder and
         // re-readable afterwards. The permits and the retry policy it used to set
         // are set where the cell is built, above.
-        let admin_cfg = std::rc::Rc::clone(&host_cfg);
+        let admin_cfg = Arc::clone(&host_cfg);
         log::info!(
             "wz-ap-demo router-hat: adminspace read permit = {}",
-            wz::runtime_tokio::admin_read_permit(&admin_cfg.borrow().admin_permissions())
+            wz::runtime_tokio::admin_read_permit(&admin_cfg.guard().admin_permissions())
         );
         let node_stats_h = node_stats.clone();
         #[cfg(feature = "router-multicast-faces")]
@@ -6914,7 +6975,7 @@ async fn run_router_hat_until(
             // and the router-tier ctx below, so a permit change can never leave the
             // two halves of one GET disagreeing.
             let admin_read =
-                wz::runtime_tokio::admin_read_permit(&admin_cfg.borrow().admin_permissions());
+                wz::runtime_tokio::admin_read_permit(&admin_cfg.guard().admin_permissions());
             // Root local_data / config / metrics via the shared SSOT.
             //
             // R2684 — this comment said "config \"{}\" + sessions[] empty are named
@@ -6929,7 +6990,7 @@ async fn run_router_hat_until(
                 .map(wz::runtime_tokio::node_stats::NodeStats::snapshot);
             // §5.23 `adminspace-core` — per GET off the same shared config the
             // permit above is read from.
-            let metadata_json = String::from(admin_cfg.borrow().admin_metadata_json());
+            let metadata_json = String::from(admin_cfg.guard().admin_metadata_json());
             // R2859 — the members of this router's group, per GET off the face's
             // own peer table: the rows upstream lists after the unicast ones. A
             // router built without a group face is on no group and lists none.
@@ -6972,7 +7033,7 @@ async fn run_router_hat_until(
             // above is: a config can be rewritten over the admin plane, so an
             // answer captured once would describe a moment the operator did not ask
             // about.
-            let config_json = admin_cfg.borrow().to_admin_json();
+            let config_json = admin_cfg.guard().to_admin_json();
             // R2685 — the router's per-tier sub/qabl introspection, read LIVE per
             // GET off the declaration tables. It was a literal `&[]` here, so this
             // node answered "nothing is declared" whatever its mesh had told it,
@@ -7075,15 +7136,14 @@ async fn run_router_hat_until(
             use wz::runtime_tokio::adminspace::{answer_capacity_query, capacity_report_key};
             let capacity_zid = zid_to_zenoh_hex(&params.zid);
             let capacity_key = capacity_report_key(&capacity_zid);
-            let capacity_cfg = std::rc::Rc::clone(&host_cfg);
+            let capacity_cfg = Arc::clone(&host_cfg);
             let capacity_sessions = forwarder.sessions_view();
             let capacity_counters = session_ceiling.clone();
             let capacity_egress = forwarder.egress_view();
             let capacity_handler = move |view: &dyn QueryView, out: &mut dyn ReplyOut| {
-                let read = wz::runtime_tokio::admin_read_permit(
-                    &capacity_cfg.borrow().admin_permissions(),
-                );
-                let report = capacity_cfg.borrow().capacity_report(
+                let read =
+                    wz::runtime_tokio::admin_read_permit(&capacity_cfg.guard().admin_permissions());
+                let report = capacity_cfg.guard().capacity_report(
                     capacity_sessions.admin_sessions().len(),
                     capacity_counters.refused_over_max_sessions(),
                     capacity_counters.refused_over_capacity(),
@@ -7131,7 +7191,7 @@ async fn run_router_hat_until(
         );
         #[cfg(not(feature = "router-connect-reconcile"))]
         let opener = wz::runtime_tokio::lifecycle_query::NoOpener;
-        host_session_lifecycle(
+        host_session_lifecycle_shared(
             &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
             params.whatami.to_str(),
             session_close_permit,
@@ -7210,7 +7270,7 @@ async fn run_router_hat_until(
         let write_whatami_str = params.whatami.to_str();
         let write_space = AdminConfigWriteSpace::new(&write_zid_hex, write_whatami_str);
         let write_key = String::from(write_space.subscription_pattern());
-        let write_cfg = std::rc::Rc::clone(&host_cfg);
+        let write_cfg = Arc::clone(&host_cfg);
         // Belongs to the ConnectAdd arm alone: the reconcile channel exists
         // only under the feature that intent is named for, and the plane
         // above no longer does.
@@ -7228,14 +7288,14 @@ async fn run_router_hat_until(
         // The intent queue this handler stashes into; the app-tick loop owns
         // the sinks and drains it.
         #[cfg(feature = "router-config-mutate")]
-        let write_pending_config = std::rc::Rc::clone(&pending_config_writes);
+        let write_pending_config = Arc::clone(&pending_config_writes);
         let write_handler = move |sample: &dyn SampleView| {
             // Re-read per PUT off the SAME live config the GET gate reads —
             // a permit captured at setup could not answer a permission changed
             // since, which is the frozen-permit divergence this tree has already
             // paid for twice.
             let write_permitted =
-                wz::runtime_tokio::admin_write_permit(&write_cfg.borrow().admin_permissions());
+                wz::runtime_tokio::admin_write_permit(&write_cfg.guard().admin_permissions());
             match parse_admin_config_write(
                 &write_space,
                 sample.keyexpr(),
@@ -7329,7 +7389,7 @@ async fn run_router_hat_until(
                     // is the only thing separating "the PUT never arrived" from
                     // "the drain never ran" when an apply is missing.
                     log::info!("wz-ap-demo router-hat: config-write {key} queued for apply");
-                    write_pending_config.borrow_mut().push(PendingConfigWrite {
+                    write_pending_config.guard().push(PendingConfigWrite {
                         key,
                         value: Some(value),
                     });
@@ -7344,7 +7404,7 @@ async fn run_router_hat_until(
                 AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey { key }) => {
                     log::info!("wz-ap-demo router-hat: config-write {key} delete queued for apply");
                     write_pending_config
-                        .borrow_mut()
+                        .guard()
                         .push(PendingConfigWrite { key, value: None });
                 }
                 // Every other intent decodes here (the decoder is one SSOT) but
@@ -7420,7 +7480,7 @@ async fn run_router_hat_until(
             // takes it off its own: a router-hat holds faces in the same table
             // and is the node most likely to reach the limit. "One source, not
             // two", which is the rule the `host_cfg` comment states.
-            max_sessions: host_cfg.borrow().effective_max_sessions().limit,
+            max_sessions: host_cfg.guard().effective_max_sessions().limit,
             ceiling: Some(session_ceiling.clone()),
             peer_board: loop_board,
             // R2095 (open-debt item 513) — the capability offer every face this
@@ -7566,7 +7626,7 @@ async fn run_router_hat_until(
                     // the writes run -- the handler is free to stash the next one
                     // while these are being applied.
                     let queued: Vec<PendingConfigWrite> =
-                        std::mem::take(&mut *pending_config_writes.borrow_mut());
+                        std::mem::take(&mut *pending_config_writes.guard());
                     let sinks = wz::runtime_tokio::config::ConfigSinks::none()
                         .with_interceptors(&forwarder)
                         .with_router_link_weights(&forwarder);
@@ -7605,9 +7665,9 @@ async fn run_router_hat_until(
                         let key = write.key.clone();
                         let outcome = match &write.value {
                             Some(value) => {
-                                host_cfg.borrow_mut().set_by_key_with(&key, value, &sinks)
+                                host_cfg.guard().set_by_key_with(&key, value, &sinks)
                             }
-                            None => host_cfg.borrow_mut().remove_by_key_with(&key, &sinks),
+                            None => host_cfg.guard().remove_by_key_with(&key, &sinks),
                         };
                         match outcome {
                             Ok(()) => {
@@ -7696,7 +7756,7 @@ async fn run_router_hat_until(
                 // dearer than the recorded one lowers it; it never rises above the recorded
                 // bound. Said once per change, with the cost behind it.
                 {
-                    let admitted = host_cfg.borrow().effective_max_sessions();
+                    let admitted = host_cfg.guard().effective_max_sessions();
                     let cost = wz::runtime_tokio::keepalive_emission_cost_floor_ns();
                     let median = wz::runtime_tokio::keepalive_emission_cost_median_ns();
                     // A median that wobbles by a few percent moves the limit by a few
@@ -7736,7 +7796,7 @@ async fn run_router_hat_until(
                         log::info!("wz-ap-demo router-hat: keepalive timer lateness max ({late} ms)");
                     }
                     let limit = wz::runtime_tokio::capacity::keepalive_lateness_limit_ms(
-                        host_cfg.borrow().effective_lease_ms(),
+                        host_cfg.guard().effective_lease_ms(),
                     );
                     if !lateness_violation_logged && late > limit {
                         lateness_violation_logged = true;

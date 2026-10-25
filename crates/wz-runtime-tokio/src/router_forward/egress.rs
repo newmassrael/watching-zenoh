@@ -486,7 +486,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             return;
         }
         let holding: Vec<FaceId> = self.credit.holding.guard().iter().copied().collect();
-        let faces = self.tables.faces.read();
+        let faces = &self.tables.faces;
         let mut took = false;
         for id in holding {
             let Some(state) = faces.get(&id) else {
@@ -559,7 +559,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 state.actions.watch_link_room(None);
             }
         }
-        drop(faces);
         self.release_gates();
         if took {
             self.credit.wake.notify_waiters();
@@ -574,7 +573,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         }
         let now = (self.clock)();
         let holding: Vec<FaceId> = self.credit.holding.guard().iter().copied().collect();
-        let faces = self.tables.faces.read();
+        let faces = &self.tables.faces;
         let mut closed_any = false;
         for id in holding {
             let Some(state) = faces.get(&id) else {
@@ -597,7 +596,6 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             let _ = state.actions.settle_blocking_expiry();
             closed_any = true;
         }
-        drop(faces);
         if closed_any {
             self.release_gates();
             self.credit.wake.notify_waiters();
@@ -607,7 +605,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Release every gated face whose destinations are down to half their budget or gone, and,
     /// when the pool is down to half, the faces gated on it.
     fn release_gates(&self) {
-        let faces = self.tables.faces.read();
+        let faces = &self.tables.faces;
         let budget = self.credit.budget;
         let pool_full = self.credit.held_bytes.get() > budget.pool_bytes / 2;
         // What each gating destination holds, read BEFORE `gated` is taken: a queue is never

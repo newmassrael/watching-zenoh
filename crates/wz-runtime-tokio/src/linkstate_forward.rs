@@ -162,7 +162,6 @@ use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{ExpiredQuery, PendingQueries, QueryFan, QueryReturn};
 use crate::route_cache::{RouteCache, RouteInputs};
 use crate::session_glue::{IterationEvent, SessionLinkActions};
-use crate::sync::SharedTable;
 
 /// Re-export `Zid`, the typed [`WhatAmI`] role, and the gossip
 /// [`AutoConnect`] policy so the peer-loop caller (the demo) names them by the
@@ -333,18 +332,77 @@ type ClientQabls = ClientQablStore;
 /// and that is the wrong repair twice: it hides the fact, and it lets a
 /// consumer mint a view over a graph it obtained some other way.
 #[cfg(feature = "adminspace-router-linkstate")]
-pub struct LinkstateNetView<N = Arc<crate::sync::PlainRwLock<LinkstateNetwork>>>(N);
+pub struct LinkstateNetView<N = Arc<dyn NetHandle + Send + Sync>>(N);
+
+/// A topology graph, read through whatever holds it: the single-task peer's `Rc<RefCell<_>>`, a
+/// lock, or the router's tables, where the graph is a field of a hat and a handle names the
+/// region. What a view or a node-locator reads a graph through, so that neither knows how it is
+/// held. The method takes a closure and not a guard because a guard would have to name the
+/// holder's lock type.
+pub trait NetHandle {
+    /// Run `f` over the graph, holding it for as long as `f` runs.
+    fn with_net(&self, f: &mut dyn FnMut(&LinkstateNetwork));
+}
+
+impl NetHandle for RefCell<LinkstateNetwork> {
+    fn with_net(&self, f: &mut dyn FnMut(&LinkstateNetwork)) {
+        f(&self.borrow())
+    }
+}
+
+impl NetHandle for crate::sync::PlainRwLock<LinkstateNetwork> {
+    fn with_net(&self, f: &mut dyn FnMut(&LinkstateNetwork)) {
+        f(&self.read())
+    }
+}
+
+impl<T: NetHandle + ?Sized> NetHandle for Rc<T> {
+    fn with_net(&self, f: &mut dyn FnMut(&LinkstateNetwork)) {
+        (**self).with_net(f)
+    }
+}
+
+impl<T: NetHandle + ?Sized> NetHandle for Arc<T> {
+    fn with_net(&self, f: &mut dyn FnMut(&LinkstateNetwork)) {
+        (**self).with_net(f)
+    }
+}
+
+/// `f` over the graph `net` holds, answering what `f` answers.
+#[cfg(any(
+    feature = "adminspace-router-linkstate",
+    all(
+        feature = "session-close-ingress",
+        feature = "routing-peer",
+        feature = "routing-accept",
+        feature = "router-connect-reconcile",
+        feature = "transport-link-tcp",
+        feature = "transport-unicast"
+    )
+))]
+pub(crate) fn read_net<R>(
+    net: &(impl NetHandle + ?Sized),
+    f: impl FnOnce(&LinkstateNetwork) -> R,
+) -> R {
+    let mut f = Some(f);
+    let mut out = None;
+    net.with_net(&mut |graph| {
+        if let Some(f) = f.take() {
+            out = Some(f(graph));
+        }
+    });
+    out.expect("a graph handle runs the closure it is given")
+}
 
 #[cfg(feature = "adminspace-router-linkstate")]
-impl<N: SharedTable<LinkstateNetwork>> LinkstateNetView<N> {
+impl<N: NetHandle> LinkstateNetView<N> {
     /// Wrap a shared graph in the render seam. `pub(crate)` rather than `pub`:
     /// the handle is a VIEW a forwarder hands out, never something a consumer
     /// mints over a graph it obtained some other way — which is the property
     /// that keeps the write lock from escaping.
     ///
-    /// The cell the graph is held in is the forwarder's: the router's is an
-    /// `Arc<PlainRwLock<_>>` (the default), the single-task peer's an
-    /// `Rc<RefCell<_>>`.
+    /// How the graph is held is the forwarder's: the router's is a [`NetHandle`] over its tables
+    /// (the default), the single-task peer's an `Rc<RefCell<_>>`.
     pub(crate) fn new(net: N) -> Self {
         Self(net)
     }
@@ -354,9 +412,9 @@ impl<N: SharedTable<LinkstateNetwork>> LinkstateNetView<N> {
     /// zid formatter is injected because `dot_with` (in the lower `wz-routing-
     /// graph` crate) cannot reach the `zid_to_zenoh_hex` SSOT itself.
     pub fn dot(&self) -> String {
-        self.0
-            .read_table()
-            .dot_with(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
+        read_net(&self.0, |net| {
+            net.dot_with(|z| wz_session_core::zid_hex::zid_to_zenoh_hex(z.as_slice()))
+        })
     }
 
     /// Every `(source, destination, successor)` triple, each zid in zenoh-hex —
@@ -365,18 +423,18 @@ impl<N: SharedTable<LinkstateNetwork>> LinkstateNetView<N> {
     /// for the `route/successor` legs, zenoh
     /// `zenoh/src/net/routing/hat/router/mod.rs` @ `fn route_successors`).
     pub fn route_successors_hex(&self) -> Vec<(String, String, String)> {
-        self.0
-            .read_table()
-            .route_successors()
-            .into_iter()
-            .map(|(s, d, h)| {
-                (
-                    wz_session_core::zid_hex::zid_to_zenoh_hex(s.as_slice()),
-                    wz_session_core::zid_hex::zid_to_zenoh_hex(d.as_slice()),
-                    wz_session_core::zid_hex::zid_to_zenoh_hex(h.as_slice()),
-                )
-            })
-            .collect()
+        read_net(&self.0, |net| {
+            net.route_successors()
+                .into_iter()
+                .map(|(s, d, h)| {
+                    (
+                        wz_session_core::zid_hex::zid_to_zenoh_hex(s.as_slice()),
+                        wz_session_core::zid_hex::zid_to_zenoh_hex(d.as_slice()),
+                        wz_session_core::zid_hex::zid_to_zenoh_hex(h.as_slice()),
+                    )
+                })
+                .collect()
+        })
     }
 }
 
@@ -2455,8 +2513,8 @@ impl LinkstateForwarder {
         // egress-ACL `fan_out` — over the returned (carrier, children).
         let names = |k: &str| self.names_a_resource(k);
         let Some((carrier, children)) = compute_push_forward(
-            &self.net,
-            &self.subs,
+            &self.net.borrow(),
+            &self.subs.borrow(),
             Cached {
                 routes: &self.data_routes,
                 names_a_resource: &names,
@@ -2591,7 +2649,7 @@ impl LinkstateForwarder {
         let wire = wireexpr_names_a_declaration(&request.keyexpr.body);
         let names = |k: &str| self.names_a_resource(k);
         let client_candidates: Vec<(FaceId, bool)> = client_query_route(
-            &self.client_qabls,
+            &self.client_qabls.borrow(),
             Cached {
                 routes: &self.client_query_routes,
                 names_a_resource: &names,
@@ -2632,7 +2690,7 @@ impl LinkstateForwarder {
         // applied to them below.
         let mesh = query_candidates(
             &self.net.borrow(),
-            &self.qabls,
+            &self.qabls.borrow(),
             Cached {
                 routes: &self.query_routes,
                 names_a_resource: &names,
@@ -3048,8 +3106,8 @@ impl LinkstateForwarder {
         gateways.retain(|g| !self.gateway_withholds(*g, keyexpr, false));
         let names = |k: &str| self.names_a_resource(k);
         let Some((push, children)) = compute_self_publish_forward(
-            &self.net,
-            &self.subs,
+            &self.net.borrow(),
+            &self.subs.borrow(),
             Cached {
                 routes: &self.data_routes,
                 names_a_resource: &names,
@@ -4856,7 +4914,7 @@ impl LinkstateForwarder {
         // unchanged ([`client_route`]).
         let names = |k: &str| self.names_a_resource(k);
         let clients = client_route(
-            &self.client_subs,
+            &self.client_subs.borrow(),
             Cached {
                 routes: &self.client_routes,
                 names_a_resource: &names,
@@ -5511,8 +5569,13 @@ impl LinkstateForwarder {
         // (R311y112); one net here, so pass `self.net`. This forwarder floods via
         // `flood_to_children` (its gossip-gated + egress-ACL `fan_out`).
         re_advertise_interest_into(
-            &self.net,
-            table,
+            |zid| {
+                self.net
+                    .borrow()
+                    .local_psid_of(zid)
+                    .and_then(|p| u16::try_from(p).ok())
+            },
+            table.borrow().entries(),
             new_children,
             build,
             |children, declare| {
@@ -6713,7 +6776,7 @@ pub(crate) fn emit_current_interest_replies<V>(
     aggregate: bool,
     per_ke: HashMap<String, V>,
     merge: impl Fn(V, V) -> V,
-    build: impl Fn(u64, &str, V) -> Result<DeclareOwned, CodecError>,
+    mut build: impl FnMut(u64, &str, V) -> Result<DeclareOwned, CodecError>,
     mut send: impl FnMut(NetworkMessage),
 ) {
     if per_ke.is_empty() {
@@ -6872,13 +6935,12 @@ pub(crate) struct Cached<'a, R> {
 /// computed and not kept.
 fn data_route(
     net: &LinkstateNetwork,
-    subs: &impl SharedTable<LinkstatepeerInterest<()>>,
+    subs: &LinkstatepeerInterest<()>,
     cached: Cached<'_, DataRoutes>,
     source: &Zid,
     keyexpr: &str,
     wire: bool,
 ) -> Arc<[Zid]> {
-    let subs = subs.read_table();
     let inputs = RouteInputs {
         net: net.route_version(),
         table: subs.version(),
@@ -6917,12 +6979,11 @@ pub(crate) type ClientRoutes = RouteCache<Arc<[FaceId]>, ()>;
 ///
 /// `wire` and the resource test as [`data_route`] takes them.
 pub(crate) fn client_route(
-    store: &impl SharedTable<ClientSubStore>,
+    store: &ClientSubStore,
     cached: Cached<'_, ClientRoutes>,
     keyexpr: &str,
     wire: bool,
 ) -> Arc<[FaceId]> {
-    let store = store.read_table();
     // A store holding no client has no client leg; a router keeps one per
     // leaf region, most of them empty, and none of those is worth a route.
     if store.is_empty() {
@@ -6980,12 +7041,11 @@ pub(crate) type ClientQueryRoutes = RouteCache<Arc<[ClientQueryable]>, ()>;
 /// applied by the caller, as upstream applies both to a cached route per
 /// query. `wire` and the resource test as [`data_route`] takes them.
 pub(crate) fn client_query_route(
-    store: &impl SharedTable<ClientQablStore>,
+    store: &ClientQablStore,
     cached: Cached<'_, ClientQueryRoutes>,
     keyexpr: &str,
     wire: bool,
 ) -> Arc<[ClientQueryable]> {
-    let store = store.read_table();
     if store.is_empty() {
         return Arc::from([]);
     }
@@ -7035,23 +7095,22 @@ pub(crate) fn client_query_route(
 /// empty tree direction, an exhausted hop budget (`hop <= 1`), or a carrier the
 /// literal-normalize rejects.
 pub(crate) fn compute_push_forward(
-    net: &impl SharedTable<LinkstateNetwork>,
-    subs: &impl SharedTable<LinkstatepeerInterest<()>>,
+    net: &LinkstateNetwork,
+    subs: &LinkstatepeerInterest<()>,
     cached: Cached<'_, DataRoutes>,
     inbound_zid: Option<Zid>,
     inbound_link: Option<LinkId>,
     push: &PushOwned,
     keyexpr: &str,
 ) -> Option<DataForward> {
-    let net = net.read_table();
     // Resolve the source (tree root) + this node's psid for it — the same seam a
     // sourced Declare uses; both flood along the source's tree.
     let (source_zid, out_node_id) =
-        resolve_source_in(&net, inbound_zid, inbound_link, read_push_source(push))?;
+        resolve_source_in(net, inbound_zid, inbound_link, read_push_source(push))?;
     // R2908 — the route from this source, served from the cache while neither
     // table it reads has changed (upstream's `get_data_route`).
     let wire = wireexpr_names_a_declaration(&push.keyexpr.body);
-    let children = data_route(&net, subs, cached, &source_zid, keyexpr, wire);
+    let children = data_route(net, subs, cached, &source_zid, keyexpr, wire);
     if children.is_empty() {
         return None;
     }
@@ -7168,18 +7227,14 @@ fn relay_answer_for_client(
 /// [`LinkstateForwarder::fan_out_south_push`] says why. The router passes
 /// `false` and keeps the contract above unchanged.
 pub(crate) fn compute_self_publish_forward(
-    net: &impl SharedTable<LinkstateNetwork>,
-    subs: &impl SharedTable<LinkstatepeerInterest<()>>,
+    net: &LinkstateNetwork,
+    subs: &LinkstatepeerInterest<()>,
     cached: Cached<'_, DataRoutes>,
     keyexpr: &str,
     wire: bool,
     to_gateways: bool,
     build: impl FnOnce() -> Result<PushOwned, CodecError>,
 ) -> Result<Option<DataForward>, CodecError> {
-    // Borrow the net once for the whole route compute (the `compute_push_forward`
-    // idiom); `subs` is a distinct cell borrowed as a temp, and `build` touches
-    // neither, so the single held borrow is safe.
-    let net = net.read_table();
     let self_zid = *net.self_zid();
     // R2236 (open-debt item 588) found that a gossip subsystem's edgeless graph
     // gave every self-originated Push zero directions, and answered it HERE.
@@ -7189,7 +7244,7 @@ pub(crate) fn compute_self_publish_forward(
     // one call for both modes.
     // R2908 — self is the source here, so this is the transit route's cache
     // keyed at self's own zid.
-    let children = data_route(&net, subs, cached, &self_zid, keyexpr, wire);
+    let children = data_route(net, subs, cached, &self_zid, keyexpr, wire);
     if children.is_empty() && !to_gateways {
         return Ok(None);
     }
@@ -7308,13 +7363,12 @@ pub(crate) type QueryRoutes = RouteCache<Arc<[QueryCandidate]>>;
 /// [`data_route`] takes them.
 pub(crate) fn query_candidates(
     net: &LinkstateNetwork,
-    qabls: &impl SharedTable<LinkstatepeerInterest<QueryableInfo>>,
+    qabls: &LinkstatepeerInterest<QueryableInfo>,
     cached: Cached<'_, QueryRoutes>,
     source: &Zid,
     keyexpr: &str,
     wire: bool,
 ) -> Arc<[QueryCandidate]> {
-    let qabls = qabls.read_table();
     let inputs = RouteInputs {
         net: net.route_version(),
         table: qabls.version(),
@@ -7477,8 +7531,8 @@ pub(crate) fn complete_query_directions(candidates: &[QueryCandidate]) -> Vec<Zi
 /// re-stamped for the source (`local_psid_of(self) == 0` leaves a self-sourced
 /// declaration self-originated).
 pub(crate) fn re_advertise_interest_into<V: Clone>(
-    net: &impl SharedTable<LinkstateNetwork>,
-    table: &impl SharedTable<LinkstatepeerInterest<V>>,
+    psid_of: impl Fn(&Zid) -> Option<u16>,
+    pairs: Vec<(String, Zid, V)>,
     new_children: &[(Zid, Vec<Zid>)],
     build: impl Fn(&str, &V) -> Result<DeclareOwned, CodecError>,
     mut flood: impl FnMut(&[Zid], &DeclareOwned),
@@ -7486,19 +7540,13 @@ pub(crate) fn re_advertise_interest_into<V: Clone>(
     if new_children.is_empty() {
         return;
     }
-    // Snapshot the (keyexpr, source, value) entries so the table borrow is
-    // released before the per-source net borrow + flood below.
-    let pairs = table.read_table().entries();
+    // `pairs` is the snapshot of the (keyexpr, source, value) entries and `psid_of` this node's
+    // psid for a source: both are read by the caller, so that neither the table nor the graph is
+    // held while `flood` runs.
     for (source_zid, delta_children) in new_children {
-        // this node's psid for the source (the re-stamp value). Scoped net
-        // borrow released before flood (which re-borrows via the caller's seam).
-        let out_node_id = match net
-            .read_table()
-            .local_psid_of(source_zid)
-            .and_then(|p| u16::try_from(p).ok())
-        {
-            Some(n) => n,
-            None => continue,
+        // this node's psid for the source (the re-stamp value).
+        let Some(out_node_id) = psid_of(source_zid) else {
+            continue;
         };
         for (keyexpr, decl_source, value) in &pairs {
             if decl_source != source_zid {
