@@ -341,6 +341,29 @@ it behaves as pico behaves in both of pico's threading arms.
   the listener counting and not counting) and `client_only_dials_a_listener` (a publisher matching
   the session's own subscriber and handed a put before the call returns; Layer C1co, now 8 and 7
   a leg).
+- 2026-10-25: delivery of the session's own get to its own queryables on the cooperative engine
+  (step L-q, `local-queryable`). A get goes out on the link and then to the queryables of the
+  session that made it, as `_z_session_deliver_query_locally` does after a send that succeeded:
+  the observer's queryable only copies the query out and holds its Final, as for a peer's query,
+  and what it queued is handed out with no lock held (D8), so a callback runs inside the get. The
+  query is held under a generation no link has (`0`; the first link's is `1`), so its replies and
+  its Final reach the get's own pending entry and never a link, and the Final is owed at once, so
+  it comes when the last callback, or the last copy a callback kept, has answered. The pending
+  entry expects one Final for the link's peer and one for the session; a get for the session alone
+  takes a request id with the high bit set, which no id the link allocates has, and one with no
+  link up asks only the session. The loopback's Query body is one assembly in session-core
+  (`QueryOptions::loopback_query`), which the tokio runtime's loopback leg now calls in place of
+  its own copy. A querier's write filter or matching listener that counts the session's own
+  entities counts its queryables too (the registry is told after each local declaration), under
+  the queryables' own switch and not the subscribers'. Off, which is pico's default build, none of
+  it is linked, and pico's `local-queryable` no longer selects the tokio engine. Two new size-gate
+  cases measure it: pico-client-coop-query (the requesting and answering ends) is 1,137,368 bytes
+  of text, and pico-client-coop-local-queryable is 1,151,161, 13,793 more. Tests: the engine
+  against a router stand-in (a get for the session alone, for any destination waiting for the
+  peer and the session, for peers alone asking no queryable, a kept query holding its get open,
+  the filter and the listener counting and not counting) and `client_only_dials_a_listener`
+  (a get for the session alone answered by the session's own queryable, a querier matching while
+  it stands; Layer C1co, now 9 a leg with the answering end and 7 without).
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected

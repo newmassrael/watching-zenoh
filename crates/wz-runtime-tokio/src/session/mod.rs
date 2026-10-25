@@ -176,30 +176,9 @@ use crate::sync::Mutex;
 /// `query_value` asserts nothing.
 #[cfg(all(feature = "query-get", feature = "query-queryable"))]
 fn build_loopback_query(opts: &QueryOptions) -> wz_session_core::wire::parts::QueryOwned {
-    // Carry only the queryable-observable Query-body slots (parameters +
-    // value / source_info / attachment); target / consolidation / timeout stay
-    // at their `Default` sentinels. R311y321 review — this comment used to call
-    // all three "loopback-inert (see the doc note)", and the doc note it pointed
-    // at now refutes two thirds of that: `consolidation` is applied (at the
-    // requester's sink, on both origins) and `target`'s absence is the
-    // `query-target` atom's PARTIAL residual, not inertness. Only `timeout` is
-    // genuinely inert here. Read the doc note above, not this line.
-    let full = opts.query_metadata();
-    let meta = wz_session_core::metadata::QueryMetadata {
-        parameters: full.parameters,
-        source_info: full.source_info,
-        attachment: full.attachment,
-        value: full.value,
-        ..Default::default()
-    };
-    let request = wz_session_core::request_build::build_request_query_with_meta(0, 0, None, &meta)
-        .expect("loopback Query body build is infallible on the alloc runtime profile");
-    match request.body {
-        wz_codecs::request::RequestOwnedVariant::CodecZenohQuery(query) => query,
-        _ => {
-            unreachable!("build_request_query_with_meta always produces a CodecZenohQuery body")
-        }
-    }
+    // The assembly is session-core's (`QueryOptions::loopback_query`), shared with the other
+    // engines' loopback legs; this engine's own part is the leg that delivers it.
+    opts.loopback_query()
 }
 // R311s — `TimeSource` is the generic-parameter bound on the
 // type-ungated `Session::query` + `Querier::get` + `QuerierAliased::get`

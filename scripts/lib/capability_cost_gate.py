@@ -176,6 +176,26 @@ CASES: tuple[Case, ...] = (
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          note="the pico-client-coop build that delivers a put to its own subscribers: 898,019 "
               "measured against its 891,519, 2.22 times the same pico (405,414)"),
+    # The cooperative client that asks and answers queries: the requesting end and the answering
+    # end, which is what the next case adds its loopback leg to.
+    Case("pico-client-coop-query", "wz-capi-pico", "libwz_capi_pico.so",
+         "engine-coop,link-udp,query,queryable", 1_160_000,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
+                 MULTICAST, TOKIO_ENGINE),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         note="the pico-client-coop build with the requesting and answering ends of a query: "
+              "1,137,368 measured against pico-client-coop's 875,843, 2.60 times the same pico "
+              "(437,624), and 541 exports against its 441"),
+    # The same, with a get delivered to the session's own queryables
+    # (`Z_FEATURE_LOCAL_QUERYABLE`), which a program that asks its own queryable needs.
+    Case("pico-client-coop-local-queryable", "wz-capi-pico", "libwz_capi_pico.so",
+         "engine-coop,link-udp,query,queryable,local-queryable", 1_174_000,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
+                 MULTICAST, TOKIO_ENGINE),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         note="the pico-client-coop-query build with the get delivered to the session's own "
+              "queryables: 1,151,161 measured against its 1,137,368 (+13,793), 2.62 times the "
+              "same pico (440,160)"),
     Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_946_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),

@@ -861,6 +861,8 @@ mod get;
 mod liveliness;
 #[cfg(feature = "local-subscriber")]
 mod local;
+#[cfg(feature = "local-queryable")]
+mod local_query;
 #[cfg(feature = "queryable")]
 mod queryable;
 #[cfg(feature = "liveliness-get")]

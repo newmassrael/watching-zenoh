@@ -441,7 +441,7 @@ mod asking {
 
     /// Issue a get through `issue`, which is handed the moved reply closure, and step the
     /// session until the get has ended: what it saw.
-    unsafe fn asked(
+    pub(super) unsafe fn asked(
         session: &z_owned_session_t,
         what: &str,
         issue: impl FnOnce(*mut z_moved_closure_reply_t) -> ZResult,
@@ -483,7 +483,7 @@ mod asking {
     }
 
     /// Declare a querier on `key` with `target`.
-    unsafe fn querier(
+    pub(super) unsafe fn querier(
         session: &z_owned_session_t,
         key: &CStr,
         target: z_query_target_t,
@@ -519,7 +519,7 @@ mod asking {
     }
 
     /// Whether `querier` matches, by its poll.
-    unsafe fn matches(querier: &z_owned_querier_t) -> bool {
+    pub(super) unsafe fn matches(querier: &z_owned_querier_t) -> bool {
         let mut status = z_matching_status_t { matching: false };
         assert_eq!(
             z_querier_get_matching_status(z_querier_loan(querier), &mut status),
@@ -634,6 +634,114 @@ mod asking {
                 Vec::<String>::new(),
                 "CONTROL: a get nobody answers ends with the Final alone"
             );
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+}
+
+/// Delivery of the session's own get to its own queryables in the build that cannot listen: a get
+/// made for the session alone is answered by the queryable the session declared, with no peer
+/// declaring any, and a querier matches while that queryable stands and no more once it is gone.
+#[cfg(all(feature = "query", feature = "queryable", feature = "local-queryable"))]
+mod local_query {
+    use super::asking::{asked, matches, querier};
+    use super::*;
+    use wz_capi_pico::locality::Z_LOCALITY_SESSION_LOCAL;
+    use wz_capi_pico::{
+        z_closure_query, z_closure_query_move, z_declare_queryable, z_get, z_get_options_default,
+        z_get_options_t, z_loaned_query_t, z_owned_queryable_t, z_querier_move, z_query_keyexpr,
+        z_query_reply, z_queryable_move, z_undeclare_querier, z_undeclare_queryable,
+        Z_QUERY_TARGET_BEST_MATCHING,
+    };
+
+    unsafe extern "C" fn on_query(query: *const z_loaned_query_t, _ctx: *mut c_void) {
+        let mut bytes = std::mem::zeroed();
+        assert_eq!(z_bytes_copy_from_str(&mut bytes, c"mine".as_ptr()), Z_OK);
+        assert_eq!(
+            z_query_reply(
+                query,
+                z_query_keyexpr(query),
+                z_bytes_move(&mut bytes),
+                std::ptr::null()
+            ),
+            Z_OK
+        );
+    }
+
+    /// Ask a get on `key` for the session alone and step until it has ended: what it saw.
+    unsafe fn ask_locally(session: &z_owned_session_t, key: &CStr) -> Vec<String> {
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+        let mut options: z_get_options_t = std::mem::zeroed();
+        z_get_options_default(&mut options);
+        options.allowed_destination = Z_LOCALITY_SESSION_LOCAL;
+        asked(session, "for the session alone", |closure| {
+            z_get(
+                z_session_loan(session),
+                z_view_keyexpr_loan(&ke),
+                std::ptr::null(),
+                closure,
+                &mut options,
+            )
+        })
+    }
+
+    #[test]
+    fn a_client_only_build_answers_its_own_get_with_its_own_queryable() {
+        let port = free_port();
+        let _listener = Listener::start(port);
+        // SAFETY: a fresh config, session, querier and queryable, all released before the
+        // function returns.
+        unsafe {
+            let mut session = open_to(port);
+            let mut asker = querier(&session, c"lq/only/x", Z_QUERY_TARGET_BEST_MATCHING);
+            assert!(
+                !matches(&asker),
+                "CONTROL: nothing answers the key yet, and no peer ever will"
+            );
+            assert_eq!(
+                ask_locally(&session, c"lq/only/x"),
+                Vec::<String>::new(),
+                "CONTROL: a get for the session alone with no queryable ends with no reply"
+            );
+
+            let mut closure = std::mem::zeroed();
+            assert_eq!(
+                z_closure_query(&mut closure, Some(on_query), None, std::ptr::null_mut()),
+                Z_OK
+            );
+            let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut ke, c"lq/only/**".as_ptr()),
+                Z_OK
+            );
+            let mut queryable: z_owned_queryable_t = std::mem::zeroed();
+            assert_eq!(
+                z_declare_queryable(
+                    z_session_loan(&session),
+                    &mut queryable,
+                    z_view_keyexpr_loan(&ke),
+                    z_closure_query_move(&mut closure),
+                    std::ptr::null(),
+                ),
+                Z_OK
+            );
+            assert!(matches(&asker), "the session's own queryable matches");
+            assert_eq!(ask_locally(&session, c"lq/only/x"), vec!["mine"]);
+
+            assert_eq!(
+                z_undeclare_queryable(z_queryable_move(&mut queryable)),
+                Z_OK
+            );
+            assert!(!matches(&asker), "and matches no more once it is gone");
+            assert_eq!(
+                ask_locally(&session, c"lq/only/x"),
+                Vec::<String>::new(),
+                "a retracted queryable answers nothing"
+            );
+
+            assert_eq!(z_undeclare_querier(z_querier_move(&mut asker)), Z_OK);
             z_close(z_session_loan_mut(&mut session), std::ptr::null());
             z_session_drop(z_session_move(&mut session));
         }

@@ -80,6 +80,8 @@ use {
 
 #[cfg(feature = "queryable")]
 mod query;
+#[cfg(feature = "local-queryable")]
+use wz_session_core::{query::QueryEnvelope, sample::QosLevel};
 
 #[cfg(feature = "liveliness-get")]
 use wz_session_core::query_options::DEFAULT_QUERY_TIMEOUT_MS;
@@ -456,10 +458,21 @@ struct MatchEntry {
     keyexpr: String,
 }
 
+/// The high bit of a request id taken by a get that goes nowhere on the link (`local-queryable`
+/// with no link up, or a destination of the session alone): the ids the link's actions hand out
+/// are the wire's, which carries far fewer bits, so none of them has it.
+#[cfg(feature = "query")]
+const LOCAL_REQUEST: u64 = 1 << 63;
+
 /// The locality a matching criterion carries: what the entity counts. The session's own
-/// entities count (`Any`) only for one that asked them to and in a build that delivers locally.
-fn counted(count_local: bool) -> Locality {
-    if cfg!(feature = "local-subscriber") && count_local {
+/// entities of `plane`'s kind count (`Any`) only for one that asked them to and in a build that
+/// delivers to them locally.
+fn counted(plane: FilterPlane, count_local: bool) -> Locality {
+    let delivers_locally = match plane {
+        FilterPlane::Subscribers => cfg!(feature = "local-subscriber"),
+        FilterPlane::Queryables { .. } => cfg!(feature = "local-queryable"),
+    };
+    if delivers_locally && count_local {
         Locality::Any
     } else {
         Locality::Remote
@@ -1128,6 +1141,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(core) = self.live() else {
             return;
         };
+        // The session's own get is answered to its pending entry, which is the observer's.
+        #[cfg(feature = "local-queryable")]
+        if generation == query::LOCAL_QUERY {
+            let mut observer = core.0.observer.borrow_mut();
+            for reply in replies {
+                observer.replies.deliver_local_reply(&reply.into());
+            }
+            if release && lock(&self.plane.holds).release(generation, rid).is_some() {
+                observer.replies.deliver_local_final(rid);
+            }
+            drop(observer);
+            drop(core);
+            self.deliver();
+            return;
+        }
         let actions = core.0.up_as(generation);
         if let Some(actions) = actions {
             for reply in replies {
@@ -1258,8 +1286,65 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 .subscribers
                 .has_local_matching(keyexpr);
         }
+        #[cfg(feature = "local-queryable")]
+        if let FilterPlane::Queryables { complete_required } = plane {
+            return core
+                .observer
+                .borrow()
+                .queryables
+                .has_local_matching(keyexpr, complete_required);
+        }
         let _ = (core, plane, keyexpr);
         false
+    }
+
+    /// Hand a get of this session to the session's own queryables, as zenoh-pico's
+    /// `_z_session_deliver_query_locally` does after the query went out: each queryable that
+    /// matches holds the get's Final and answers when its callback runs, and the Final is owed
+    /// now, so it reaches the get once the last of them has answered.
+    #[cfg(feature = "local-queryable")]
+    fn ask_own_queryables(
+        &self,
+        core: &mut Core<L, C>,
+        rid: u64,
+        keyexpr: &str,
+        opts: &QueryOptions,
+    ) {
+        let qos = opts.qos.unwrap_or(QosLevel::DEFAULT);
+        let envelope = QueryEnvelope {
+            rid,
+            target: opts.effective_target(),
+            qos,
+        };
+        let query = opts.loopback_query();
+        let mut staged = ReplyStage::new();
+        let mut observer = core.observer.borrow_mut();
+        self.plane.asking_locally(|| {
+            observer
+                .queryables
+                .local_query_with_value(envelope, keyexpr, &query, None, &mut staged)
+        });
+        for reply in staged {
+            observer.replies.deliver_local_reply(&reply.into());
+        }
+        if lock(&self.plane.holds).owe(query::LOCAL_QUERY, rid, qos) {
+            observer.replies.deliver_local_final(rid);
+        }
+    }
+
+    /// The queryables' plane's counterpart of [`Self::reevaluate_subscriber_matching`].
+    #[cfg(feature = "local-queryable")]
+    fn reevaluate_queryable_matching(core: &Core<L, C>) {
+        let mut observer = core.observer.borrow_mut();
+        let ApplicationLayerObserver {
+            queryables,
+            remote_queryables,
+            ..
+        } = &mut *observer;
+        remote_queryables.reevaluate_matching(&|criterion| {
+            criterion.locality.allows_local()
+                && queryables.has_local_matching(&criterion.keyexpr, criterion.complete_required)
+        });
     }
 
     /// What a write filter or a matching listener on `plane` reads: a peer's declaration, or with
@@ -1513,9 +1598,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         plane: FilterPlane,
         keyexpr: String,
         sink: MatchingSink,
-        // The session's own subscribers count with `local-subscriber`, and nothing of its own
-        // does otherwise: zenoh-pico's default build (`Z_FEATURE_LOCAL_SUBSCRIBER` and
-        // `Z_FEATURE_LOCAL_QUERYABLE` 0) delivers nothing locally.
+        // The session's own subscribers count with `local-subscriber` and its own queryables with
+        // `local-queryable`, and nothing of its own does otherwise: zenoh-pico's default build
+        // (`Z_FEATURE_LOCAL_SUBSCRIBER` and `Z_FEATURE_LOCAL_QUERYABLE` 0) delivers nothing
+        // locally.
         count_local: bool,
     ) -> MatchId {
         let Some(mut guard) = self.live() else {
@@ -1548,13 +1634,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 FilterPlane::Subscribers => observer
                     .remote_subscribers
                     .declare_matching_listener_seeded(
-                        PublisherCriterion::new(&keyexpr, counted(count_local)),
+                        PublisherCriterion::new(&keyexpr, counted(plane, count_local)),
                         local,
                         report,
                     ),
                 FilterPlane::Queryables { complete_required } => {
                     observer.remote_queryables.declare_matching_listener_seeded(
-                        QuerierCriterion::new(&keyexpr, counted(count_local), complete_required),
+                        QuerierCriterion::new(
+                            &keyexpr,
+                            counted(plane, count_local),
+                            complete_required,
+                        ),
                         local,
                         report,
                     )
@@ -1748,8 +1838,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         sink: QueryableSink,
     ) -> Option<QblId> {
         let id = self.next_entity_id();
-        let mut core = self.live()?;
-        let core = &mut core.0;
+        let mut guard = self.live()?;
+        let core = &mut guard.0;
         // The observer's queryable only copies a query out and holds its Final; the callback
         // `sink` mints runs when the deliveries are handed out (`query`).
         let plane = self.plane.clone();
@@ -1780,6 +1870,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             entry.declare(actions);
         }
         core.queryables.push(entry);
+        // A matching listener that counts the session's own queryables may now match: it is told,
+        // outside the lock.
+        #[cfg(feature = "local-queryable")]
+        {
+            Self::reevaluate_queryable_matching(core);
+            drop(guard);
+            self.deliver();
+        }
         Some(id)
     }
 
@@ -1792,21 +1890,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         fan: Option<&CancellableFan>,
         leg: &mut dyn FnMut() -> ReplyCallback,
     ) -> Option<usize> {
-        // The one peer this session reaches is its link's; it asks no queryable of its own
-        // (`get`). A get that may not leave the session, or a session with no link up, reaches
-        // nobody, and is over at once.
-        if !opts.allowed_destination.allows_remote() {
-            return Some(0);
-        }
+        // The one peer this session reaches is its link's, and it asks its own queryables only
+        // with `local-queryable` (zenoh-pico's default build asks none,
+        // `Z_FEATURE_LOCAL_QUERYABLE` 0). A get that reaches nobody, because its destination
+        // admits neither a peer nor the session or because no link is up, is over at once.
         let leg_id = self.next_entity_id();
         let Some(mut guard) = self.live() else {
             return Some(0);
         };
         let core = &mut guard.0;
-        let Some(actions) = core.up().cloned() else {
+        let actions = core
+            .up()
+            .cloned()
+            .filter(|_| opts.allowed_destination.allows_remote());
+        let locally = cfg!(feature = "local-queryable") && opts.allowed_destination.allows_local();
+        // One Final for each leg that answers: the link's peer's, and the session's own.
+        let finals = u32::from(actions.is_some()) + u32::from(locally);
+        if finals == 0 {
             return Some(0);
+        }
+        // A request id the link's actions allocate, so a peer's answer names it; a get that goes
+        // nowhere on the link takes one no link will ever hand out (`LOCAL_REQUEST`).
+        let rid = match &actions {
+            Some(actions) => actions.alloc_next_request_id(),
+            None => LOCAL_REQUEST | self.next_entity_id(),
         };
-        let rid = actions.alloc_next_request_id();
         let timeout_ms = opts.effective_timeout_ms();
         // Rounded up, so a get whose deadline the sweep reads in whole milliseconds never ends
         // before its timeout.
@@ -1816,10 +1924,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             opts.resolved_consolidation(),
             get::reply_sink(leg_id, &self.gets),
         );
-        // One Final: the link's peer's.
         let registered = core.observer.borrow_mut().replies.register_sink(
             rid,
-            1,
+            finals,
             deadline_ms,
             ReplyAcceptance::for_query(keyexpr, opts.effective_accept_replies()),
             sink,
@@ -1828,28 +1935,39 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return Some(0);
         }
         lock(&self.targets).push((leg_id, Target::Reply(Arc::new(Mutex::new(leg())))));
-        let (mapping_id, suffix) = if wire.is_literal() {
-            (0, Some(keyexpr))
-        } else {
-            (wire.mapping_id, wire.suffix.as_deref())
-        };
-        if actions
-            .send_request_query_with_meta(rid, mapping_id, suffix, &opts.query_metadata())
-            .is_err()
-        {
-            // Nothing went out: the entry and the leg go, and the get is over.
-            core.observer.borrow_mut().replies.unregister(rid);
-            drop(guard);
-            drop(self.take_target(leg_id));
-            return Some(0);
+        if let Some(actions) = &actions {
+            let (mapping_id, suffix) = if wire.is_literal() {
+                (0, Some(keyexpr))
+            } else {
+                (wire.mapping_id, wire.suffix.as_deref())
+            };
+            if actions
+                .send_request_query_with_meta(rid, mapping_id, suffix, &opts.query_metadata())
+                .is_err()
+            {
+                // Nothing went out: the entry and the leg go, and the get is over, with no
+                // local half asked, as zenoh-pico asks it only once the send succeeded.
+                core.observer.borrow_mut().replies.unregister(rid);
+                drop(guard);
+                drop(self.take_target(leg_id));
+                return Some(0);
+            }
         }
         core.pending_gets.push(PendingGet {
             leg: leg_id,
             rid,
             kind: GetKind::Query,
         });
+        #[cfg(feature = "local-queryable")]
+        if locally {
+            self.ask_own_queryables(core, rid, keyexpr, opts);
+        }
         drop(guard);
         self.cancelling(fan, leg_id);
+        // What the session's own queryables were handed runs inside the get, outside the lock, as
+        // zenoh-pico's `_z_session_deliver_query_locally` does on the caller's thread.
+        #[cfg(feature = "local-queryable")]
+        self.deliver();
         Some(1)
     }
 
@@ -1933,10 +2051,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             if let Some(actions) = core.up() {
                 entry.retract(actions);
             }
+            // One that counted it may now match no more.
+            #[cfg(feature = "local-queryable")]
+            Self::reevaluate_queryable_matching(core);
             Some(entry)
         });
         let callback = self.take_target(id);
         drop((entry, callback));
+        #[cfg(feature = "local-queryable")]
+        self.deliver();
     }
 
     #[cfg(feature = "liveliness")]

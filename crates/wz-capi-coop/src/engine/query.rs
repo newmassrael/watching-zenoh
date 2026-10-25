@@ -28,6 +28,8 @@
 
 use std::cell::Cell;
 use std::collections::VecDeque;
+#[cfg(feature = "local-queryable")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -188,12 +190,22 @@ impl FinalHolds {
     }
 }
 
+/// The generation a query asked by the session's OWN get is held and answered under: no link ever
+/// has it, since the first link's is `1`, so a reply or a Final under it goes to the get's pending
+/// entry and never to a link (`local-queryable`).
+#[cfg(feature = "local-queryable")]
+pub(super) const LOCAL_QUERY: u64 = 0;
+
 /// What the queryable plane shares between the session's state, its dispatch, the observer's
 /// queryables and the queries a C program keeps.
 #[derive(Default)]
 pub(super) struct QueryPlane {
     /// The generation of the link the session dialled last, which every query arrives on.
     pub(super) generation: AtomicU64,
+    /// Set while the session hands its own get to its queryables, under the session's lock: the
+    /// queries that arrive meanwhile are the get's, not the link's (`local-queryable`).
+    #[cfg(feature = "local-queryable")]
+    asking: AtomicBool,
     pub(super) holds: Mutex<FinalHolds>,
     /// The queries waiting for their callbacks, in the order they arrived: the queryable they
     /// matched, the query, and the generation of its link.
@@ -203,9 +215,28 @@ pub(super) struct QueryPlane {
 impl QueryPlane {
     /// What the observer's queryable `id` does with a query: copy it out and hold its Final.
     pub(super) fn arrive(&self, id: QblId, view: &dyn QueryView) {
-        let generation = self.generation.load(Ordering::Acquire);
+        let generation = self.arriving_on();
         lock(&self.holds).take(generation, view.rid());
         lock(&self.queries).push_back((id, OwnedQuery::of(view), generation));
+    }
+
+    /// The generation a query arriving now belongs to.
+    fn arriving_on(&self) -> u64 {
+        #[cfg(feature = "local-queryable")]
+        if self.asking.load(Ordering::Acquire) {
+            return LOCAL_QUERY;
+        }
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Run `ask`, the session handing its own get to its queryables, with what arrives meanwhile
+    /// taken as the get's.
+    #[cfg(feature = "local-queryable")]
+    pub(super) fn asking_locally<R>(&self, ask: impl FnOnce() -> R) -> R {
+        self.asking.store(true, Ordering::Release);
+        let result = ask();
+        self.asking.store(false, Ordering::Release);
+        result
     }
 }
 

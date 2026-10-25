@@ -111,6 +111,11 @@ queryable = [
 # which is pico's default build, the session delivers nothing locally. It needs nothing of
 # session-core that the engine does not already have.
 local-subscriber = []
+# Delivery of the session's own get to the session's own queryables (`Z_FEATURE_LOCAL_QUERYABLE`):
+# a get reaches the queryables of the session that made it, after it has gone out on the link,
+# and a querier's write filter or matching listener that counts the session's own entities counts
+# them. A queryable is the answering end and a get the requesting end, so it needs both planes.
+local-queryable = ["query", "queryable"]
 # The liveliness token and subscriber: the token's declaration and its retraction, the tokens the
 # session holds to answer a peer that asks for them, and the subscriber that hears the peer's.
 # What `wz-capi-core`'s `liveliness` names on its runtime, named on session-core.

@@ -165,7 +165,7 @@ admin-space = ["engine-tokio", "queryable", "unstable-api", "wz-capi-core/admin-
 # program compiled with them links a build that has them; a publisher's and a querier's write
 # filter and matching status count the session's own entities.
 local-subscriber = ["wz-capi-core?/local-subscriber", "wz-capi-coop?/local-subscriber"]
-local-queryable = ["engine-tokio", "wz-capi-core/local-queryable"]
+local-queryable = ["wz-capi-core?/local-queryable", "wz-capi-coop?/local-queryable"]
 # `unstable-api` (`Z_FEATURE_UNSTABLE_API`, on in the reference build and off in upstream's
 # default): the entity ids (`z_session_id`, `z_publisher_id`, ...), the sample's reliability and
 # source info, `z_reliability_default`, `z_bytes_get_contiguous_view`, `z_reply_replier_id`, the

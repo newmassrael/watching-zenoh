@@ -18,9 +18,9 @@ use super::{open, until, CatchAll, Command, Engine, Router};
 /// What a leg's callback saw: each reply as its kind, key and payload, and whether the callback
 /// has been dropped.
 #[derive(Default)]
-struct Leg {
-    replies: Vec<(ReplyKind, String, Vec<u8>)>,
-    ended: bool,
+pub(super) struct Leg {
+    pub(super) replies: Vec<(ReplyKind, String, Vec<u8>)>,
+    pub(super) ended: bool,
 }
 
 /// Owned by a leg's callback, so the leg is marked ended when the callback is dropped.
@@ -35,7 +35,7 @@ impl Drop for Ends {
 /// Ask a get on `keyexpr` with `opts`, its legs recorded in what is returned, each holding
 /// `registration` when there is one, as a C get's callbacks hold theirs. `step`, when given, is
 /// stepped from inside each reply callback.
-fn ask(
+pub(super) fn ask(
     engine: &Engine,
     keyexpr: &str,
     opts: &QueryOptions,
@@ -65,7 +65,7 @@ fn ask(
     (issued, leg)
 }
 
-fn settle(router: &Router, engine: &Engine, command: Command) {
+pub(super) fn settle(router: &Router, engine: &Engine, command: Command) {
     router.send(command);
     until(engine, "the router to settle", || {
         router.seen(|s| s.settled)

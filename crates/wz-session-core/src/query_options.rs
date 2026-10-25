@@ -821,4 +821,44 @@ impl QueryOptions {
             qos: self.qos,
         }
     }
+
+    /// The Query body a get delivers to the session's OWN queryables (zenoh-pico's
+    /// `_z_session_deliver_query_locally`, `vendor/zenoh-pico/src/session/loopback.c`): the
+    /// slots a queryable can observe (the selector's parameters, the value, the source info, the
+    /// attachment), built by the wire builder, so a local queryable reads what a remote one
+    /// would. Shared by every engine's loopback leg, as [`PublishOptions::loopback_sample`] is the
+    /// publish side's.
+    ///
+    /// What a queryable cannot observe is not in the body: the target and the QoS ride the
+    /// dispatch beside it (`QueryEnvelope`), the consolidation is applied at the requester's sink
+    /// on both origins, and the timeout arms the pending entry's deadline.
+    ///
+    /// The wire builder's `rid = 0` / literal-key envelope is discarded: the loopback's request id
+    /// and key ride the dispatch's arguments. Its caller-error asserts are the wire's too, so a
+    /// selector longer than the wire's bound panics here as it would on the link: a selector that
+    /// no wire queryable could receive is not one a local queryable should.
+    ///
+    /// [`PublishOptions::loopback_sample`]: crate::publish_options::PublishOptions::loopback_sample
+    #[cfg(all(
+        feature = "query-get",
+        feature = "query-queryable",
+        feature = "codec-request",
+        feature = "alloc"
+    ))]
+    pub fn loopback_query(&self) -> crate::wire::parts::QueryOwned {
+        let full = self.query_metadata();
+        let meta = QueryMetadata {
+            parameters: full.parameters,
+            source_info: full.source_info,
+            attachment: full.attachment,
+            value: full.value,
+            ..Default::default()
+        };
+        let request = crate::request_build::build_request_query_with_meta(0, 0, None, &meta)
+            .expect("a loopback Query body builds on the heap profile");
+        match request.body {
+            wz_codecs::request::RequestOwnedVariant::CodecZenohQuery(query) => query,
+            _ => unreachable!("build_request_query_with_meta always produces a Query body"),
+        }
+    }
 }
