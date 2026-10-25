@@ -287420,6 +287420,50 @@
         "Read the hosted runs of the earlier pushes at the start of the next round."
       ]
     },
+    "Round 3636": {
+      "decision_summary": "The slot node now paces the replay of its declarations by the declaration-sync-pacing policy. With the policy on, a tick sends the policy's burst of declarations on a session and holds that session's next turn back by the interval, a refused send included; with it off the whole list goes in one turn, as before. ReplayPacing, the pair of limits and the pace a build states, moved from the heap runtime's reconnect module into wz-session-core, because the slot node has no allocator and cannot reach that crate; the supervisor re-exports it, so its paths and tests are unchanged. The build's pace is a constant (ReplayPacing::BUILD), so that a policy value that is neither on nor off stops the build: called at run time, as the first run of this change did with the value 1, it aborted the node at its start. The cooperative engine's redeclare is still unpaced.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/replay_pacing.rs (new, registered in lib.rs): ReplayPacing with new, from_build, the BUILD constant, burst and interval_ms, and its two tests, moved from the supervisor.",
+        "crates/wz-runtime-tokio/src/reconnect.rs: the definition and its tests are gone; a re-export keeps the path, and the supervisor reads ReplayPacing::BUILD.",
+        "crates/wz-session-mcu/src/slot_client.rs and slot_dial.rs: the node holds an optional pace (set_replay_pacing states one regardless of the build), a session keeps the time before which its replay sends nothing, and two pure helpers (the turn's burst, the wait after a turn) carry two new tests, so the guarded leg counts 6.",
+        "scripts/run-ci.sh and docs/declaration-sync-pacing.md (the slot node's row and the phase say what is done)."
+      ],
+      "verification_bullets": [
+        "The six slot replay tests, the moved pace tests in wz-session-core and the supervisor's reconnect tests pass; clippy with every feature and warnings denied is clean for wz-session-core, wz-session-mcu, wz-session-lwip and wz-runtime-tokio, one crate at a time; the round-fed array (113), the guarded-count gate over the range (8 reached) and the resource budget gate pass.",
+        "A beacon built with the policy on, a burst of 2 and an interval of 100 ms passes both token legs against the reference router and the stock watcher, so a paced replay still delivers every declaration; the same beacon built with a burst of 1 and an interval of 40,000 ms fails them at the 30-second wait for the four tokens, which shows the interval is kept. A build with the policy value 1 stops with the policy's own message. The client, get-batching, tls, answerer, server and group images build with the policy off.",
+        "Not run: a witness built with the policy on in CI (the node declaration states no policy, so Layer Z builds only the unpaced node), the Zephyr and lwIP images, the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha, and the Zephyr kit's chain from the next hosted Qzb after the connect manager's planner change; send that figure to the author of the planner, who moves the budget row to it.",
+        "A node declaration cannot state the pacing policy, so no witness in CI builds a paced node: the policy is a build input of the image, not of the declaration. Letting a declaration state it would give the paced replay a stock-peer witness; that is a design choice for the node declaration, not made here.",
+        "The cooperative engine's redeclare is the last host without the cursor and the pace, and belongs to its owner; the heap runtime's phase 3 (declarations_synced on the actions) is in progress with its author.",
+        "A group's table of members fills silently: a JOIN past the row count is refused with no count and no line."
+      ],
+      "publishable_decision_summary": "The slot node now paces the replay of its declarations by the declaration-sync-pacing policy. With the policy on, a tick sends the policy's burst of declarations on a session and holds that session's next turn back by the interval, a refused send included; with it off the whole list goes in one turn, as before. ReplayPacing, the pair of limits and the pace a build states, moved from the heap runtime's reconnect module into wz-session-core, because the slot node has no allocator and cannot reach that crate; the supervisor re-exports it, so its paths and tests are unchanged. The build's pace is a constant (ReplayPacing::BUILD), so that a policy value that is neither on nor off stops the build: called at run time, as the first run of this change did with the value 1, it aborted the node at its start. The cooperative engine's redeclare is still unpaced.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core/src/replay_pacing.rs (new, registered in lib.rs): ReplayPacing with new, from_build, the BUILD constant, burst and interval_ms, and its two tests, moved from the supervisor.",
+        "crates/wz-runtime-tokio/src/reconnect.rs: the definition and its tests are gone; a re-export keeps the path, and the supervisor reads ReplayPacing::BUILD.",
+        "crates/wz-session-mcu/src/slot_client.rs and slot_dial.rs: the node holds an optional pace (set_replay_pacing states one regardless of the build), a session keeps the time before which its replay sends nothing, and two pure helpers (the turn's burst, the wait after a turn) carry two new tests, so the guarded leg counts 6.",
+        "scripts/run-ci.sh and docs/declaration-sync-pacing.md (the slot node's row and the phase say what is done)."
+      ],
+      "publishable_verification_bullets": [
+        "The six slot replay tests, the moved pace tests in wz-session-core and the supervisor's reconnect tests pass; clippy with every feature and warnings denied is clean for wz-session-core, wz-session-mcu, wz-session-lwip and wz-runtime-tokio, one crate at a time; the round-fed array (113), the guarded-count gate over the range (8 reached) and the resource budget gate pass.",
+        "A beacon built with the policy on, a burst of 2 and an interval of 100 ms passes both token legs against the reference router and the stock watcher, so a paced replay still delivers every declaration; the same beacon built with a burst of 1 and an interval of 40,000 ms fails them at the 30-second wait for the four tokens, which shows the interval is kept. A build with the policy value 1 stops with the policy's own message. The client, get-batching, tls, answerer, server and group images build with the policy off.",
+        "Not run: a witness built with the policy on in CI (the node declaration states no policy, so Layer Z builds only the unpaced node), the Zephyr and lwIP images, the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha, and the Zephyr kit's chain from the next hosted Qzb after the connect manager's planner change; send that figure to the author of the planner, who moves the budget row to it.",
+        "A node declaration cannot state the pacing policy, so no witness in CI builds a paced node: the policy is a build input of the image, not of the declaration. Letting a declaration state it would give the paced replay a stock-peer witness; that is a design choice for the node declaration, not made here.",
+        "The cooperative engine's redeclare is the last host without the cursor and the pace, and belongs to its owner; the heap runtime's phase 3 (declarations_synced on the actions) is in progress with its author.",
+        "A group's table of members fills silently: a JOIN past the row count is refused with no count and no line."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
