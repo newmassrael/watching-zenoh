@@ -42,9 +42,12 @@
 
 use heapless::Vec as FixedVec;
 use wz_session_core::bounded::BoundedVec;
-use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_STATIC_CONNECT};
+use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_PEER_NODES, MAX_STATIC_CONNECT};
 use wz_session_core::connect_endpoints::{group_len, ConnectEndpoints, ConnectEntry, EndpointText};
 use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
+use wz_session_core::locator_directory::{
+    DirectoryRefusal, DirectoryZid, Lifetime, LocatorDirectory, LocatorSource,
+};
 use wz_session_core::peer_connection::PeerConnectionState;
 use wz_session_core::peer_planner::{DialEnd, PeerAction, PeerPlanner, PeerPorts};
 use wz_session_core::retry_period::{RetryPeriod, RetryPolicy};
@@ -170,8 +173,26 @@ pub trait Dialer {
         Ok(())
     }
 
+    /// Whether [`Self::dial_for`] makes a dial the session's handshake holds to the node it was
+    /// made for (decision D4): the dial is refused at the InitAck when another node answers. A
+    /// dialer that cannot say so is not asked to dial a node, because a session to whichever node
+    /// answers a stale hint is not a session to the zid.
+    const VERIFIES_NODES: bool = false;
+
     /// Start a session towards `endpoint`.
     fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed>;
+
+    /// Start a session towards `endpoint` FOR the node `node`: the locator is a hint for reaching
+    /// the zid, and the session closes at the InitAck if another node answers. The default
+    /// refuses, so a dialer opens no unverified session for a zid by leaving this out
+    /// ([`Self::VERIFIES_NODES`] says it does).
+    fn dial_for(
+        &mut self,
+        _endpoint: &str,
+        _node: &DirectoryZid,
+    ) -> Result<Self::Session, DialFailed> {
+        Err(DialFailed::Refused(DialRefused::Unsupported))
+    }
 
     /// Whether the session is established now. The manager tells the endpoint's machine
     /// the first time it is, so the machine reads `Established` while the session is up. The
@@ -209,21 +230,91 @@ pub enum SlotState {
     Refused(DialRefused),
 }
 
-/// What names an endpoint to the machines: its text.
-type Key = EndpointText;
+/// Where one node held by its zid stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeState {
+    /// A session is live (or being opened).
+    Live,
+    /// Waiting to (re-)dial at this time.
+    Waiting {
+        /// When the next dial is due, in the manager's clock.
+        at_ms: u64,
+    },
+    /// The directory has no live hint of it that this build can dial: it is dialled again when a
+    /// source confirms one.
+    NoHint,
+    /// Another node answered at the hint it was dialled at (decision D4): the session was hung
+    /// up, and the node is dialled no more until it is opened again.
+    Mismatched,
+}
 
-/// How many dials can be in flight for the endpoints, with the ones an endpoint stopped
-/// wanting while they ran: each of the endpoints dials once at a time.
-const DIALS: usize = 2 * MAX_STATIC_CONNECT;
+/// Where one peer stands, before it is said as an endpoint's or a node's.
+enum Standing {
+    Live,
+    Waiting { at_ms: u64 },
+    NoLocator,
+    Mismatched,
+}
 
-type Planner = PeerPlanner<Key, u64, MAX_STATIC_CONNECT, DIALS>;
+/// Why a node could not be held by its zid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeRefusal {
+    /// The dialer does not hold a session to the node it was made for, so no dial of it could
+    /// be told from one to another node ([`Dialer::VERIFIES_NODES`]).
+    Unverifiable,
+    /// The node holds as many nodes as it was built for ([`MAX_PEER_NODES`]), which is none
+    /// unless the image states more.
+    NoRoom,
+    /// The directory holds no live hint for the node, so there is nothing to dial. The node is
+    /// not taken into a table that a flood of opens for zids nobody advertised would fill.
+    NoLocator,
+    /// The directory holds hints for the node, none of which this build can dial.
+    NoDialableLocator,
+}
 
-/// The machines of a manager's peers, in a table of their own.
+/// What names a peer to the machines: a configured endpoint by the slot of its row, or a node by
+/// its zid.
+///
+/// A name is an identity and not a copy of what it names, so it is small: seventeen bytes, where
+/// the text of an endpoint is sixty-four and more. The planner holds a name in each of its tables,
+/// in every action it asks for and in the sort of a `withdraw`, and the manager's frames hold a
+/// few of those actions at a time, on the stack of the thread that ticks it. The endpoint's text
+/// stays in its row, and a dial reads it there when it is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Key {
+    /// The row of a configured endpoint, by its slot: the lowest not taken by another endpoint,
+    /// so a slot freed by a rewrite of the list is the next endpoint's. The planner forgets a
+    /// peer before its slot is reused (`reconcile`).
+    Endpoint(u8),
+    Node(DirectoryZid),
+}
+
+/// How many peers the machines hold: the endpoints the control names and the nodes asked for.
+const PEERS: usize = MAX_STATIC_CONNECT + MAX_PEER_NODES;
+
+/// How many dials can be in flight for the peers, with the ones a peer stopped wanting while
+/// they ran: each of the peers dials once at a time.
+const DIALS: usize = 2 * PEERS;
+
+/// How many hints the directory holds: two for each node, since a node advertises a few
+/// locators and the soft ones displace each other when it is full.
+const DIRECTORY_ROWS: usize = 2 * MAX_PEER_NODES;
+
+type Planner = PeerPlanner<Key, u64, PEERS, DIALS>;
+
+/// A manager's tables: the machines of its peers and the locators it knows for its nodes.
+struct Tables {
+    planner: Planner,
+    directory: LocatorDirectory<DIRECTORY_ROWS>,
+}
+
+/// The machines of a manager's peers and the locators of its nodes, in a table of their own.
 ///
 /// One connection machine per peer is some 930 bytes on the target (`size_of` of its engine, read
 /// off a `thumbv7m-none-eabi` build: two event queues, the delayed-send ring and the rest of the
 /// runtime's engine, none of which this machine uses), so the table of `MAX_STATIC_CONNECT`
-/// of them, with the planner's tables beside it, is some 10 KB. That does not belong in the
+/// of them (and `MAX_PEER_NODES` more, none by default), with the planner's tables beside it, is
+/// some 10 KB. That does not belong in the
 /// manager, which is a local of the node's loop and sits on the stack of the thread that runs it.
 /// It is a type of its own so that it can be declared where the node's other big tables are, in a
 /// `static` whose initial value is all zero bytes (`slot_node::NodeStorage`), and so that a
@@ -233,20 +324,23 @@ type Planner = PeerPlanner<Key, u64, MAX_STATIC_CONNECT, DIALS>;
 /// node is driven by one cooperative loop, which is the only thing that reaches it, and the guard
 /// makes that a property the type has and not a rule a caller keeps.
 pub struct PeerStore {
-    planner: critical_section::Mutex<core::cell::RefCell<Planner>>,
+    tables: critical_section::Mutex<core::cell::RefCell<Tables>>,
 }
 
 impl PeerStore {
     /// An empty store: no peer held. `const`, so a `static` can be one.
     pub const fn new() -> Self {
         Self {
-            planner: critical_section::Mutex::new(core::cell::RefCell::new(Planner::new())),
+            tables: critical_section::Mutex::new(core::cell::RefCell::new(Tables {
+                planner: Planner::new(),
+                directory: LocatorDirectory::new(),
+            })),
         }
     }
 
-    /// Run `f` on the planner.
-    fn with<R>(&self, f: impl FnOnce(&mut Planner) -> R) -> R {
-        critical_section::with(|cs| f(&mut self.planner.borrow_ref_mut(cs)))
+    /// Run `f` on the tables.
+    fn with<R>(&self, f: impl FnOnce(&mut Tables) -> R) -> R {
+        critical_section::with(|cs| f(&mut self.tables.borrow_ref_mut(cs)))
     }
 }
 
@@ -275,72 +369,116 @@ impl StoreRef {
 }
 
 /// What one call of the planner asked, at most: a session closed, a wait armed and a dial, of
-/// one endpoint. Room for one more of each, so that a count is never the reason an action is
+/// one peer. Room for one more of each, so that a count is never the reason an action is
 /// lost.
-type Actions = FixedVec<PeerAction<Key, u64, Key>, 6>;
+type Actions = FixedVec<PeerAction<Key, u64, ()>, 6>;
 
-/// A session an endpoint holds, with the face the planner knows it as.
+/// A session a peer holds, with the face the planner knows it as.
 struct Held<S> {
     face: u64,
     session: S,
-    /// Whether the endpoint's machine has been told the session is up.
+    /// Whether the peer's machine has been told the session is up.
     up: bool,
 }
 
-/// The moment an endpoint's next dial is due, and which arming of its timer that is.
+/// The moment a peer's next dial is due, and which arming of its timer that is.
 #[derive(Clone, Copy)]
 struct Due {
     generation: u64,
     at_ms: u64,
 }
 
-/// One endpoint of the list, in the order the list named it.
+/// One peer: an endpoint of the list, in the order the list named it, or a node asked for by its
+/// zid, after them.
 struct Row<S> {
-    entry: ConnectEntry,
+    key: Key,
+    /// The text of the endpoint the row is of: where the endpoint is dialled, and what the list
+    /// names it by. `None` for a node.
+    endpoint: Option<EndpointText>,
     /// One locator of a group of several: one session over several links, which this node's
-    /// session cannot hold, so it has no candidate.
+    /// session cannot hold, so it has no candidate. Only an endpoint can be one.
     multi_link: bool,
     held: Option<Held<S>>,
     due: Option<Due>,
 }
 
-/// The endpoints a manager holds, one row each. The list a host writes is itself
+impl<S> Row<S> {
+    /// A row of `key`, with no session and no timer.
+    fn new(key: Key, endpoint: Option<EndpointText>, multi_link: bool) -> Self {
+        Self {
+            key,
+            endpoint,
+            multi_link,
+            held: None,
+            due: None,
+        }
+    }
+
+    /// The endpoint the row is of, `None` for a node.
+    fn endpoint(&self) -> Option<&str> {
+        self.endpoint.as_ref().map(|text| text.as_str())
+    }
+}
+
+/// The peers a manager holds, one row each. The list a host writes is itself
 /// held in `MAX_STATIC_CONNECT` rows (`ConnectEndpoints`), so no list can name more
-/// endpoints than this table has rows: the table is bounded by the same number that
-/// bounds what feeds it, and a manager holds no row it was not told of. The backing
+/// endpoints than that, and a node is taken only while fewer than `MAX_PEER_NODES` are held
+/// (`open_node`): the table is bounded by the numbers that bound what feeds it, and a manager
+/// holds no row it was not told of. The backing
 /// is the profile's (`BoundedVec`): the growable one where there is a heap, a fixed
 /// table of that many rows under `bounded-heapless`, where a row past the bound could
 /// only be a defect and is hung up and refused rather than grown (`reconcile`).
-type Rows<S> = BoundedVec<Row<S>, MAX_STATIC_CONNECT>;
+type Rows<S> = BoundedVec<Row<S>, PEERS>;
 
-/// The retry schedule of each endpoint that is in an outage.
-type Periods = BoundedVec<(Key, RetryPeriod), MAX_STATIC_CONNECT>;
+/// The retry schedule of each peer that is in an outage.
+type Periods = BoundedVec<(Key, RetryPeriod), PEERS>;
 
 /// What this profile answers for the planner.
 struct Ports<'a, D: Dialer> {
     dialer: &'a D,
     rows: &'a Rows<D::Session>,
     periods: &'a mut Periods,
+    directory: &'a LocatorDirectory<DIRECTORY_ROWS>,
     policy: RetryPolicy,
+    now_ms: u64,
 }
 
 impl<D: Dialer> Ports<'_, D> {
     /// The row of `key`.
     fn row(&self, key: &Key) -> Option<&Row<D::Session>> {
-        self.rows.iter().find(|row| row.entry.endpoint == *key)
+        self.rows.iter().find(|row| row.key == *key)
     }
 }
 
 impl<D: Dialer> PeerPorts<Key> for Ports<'_, D> {
-    type Target = Key;
+    /// What a dial is made at is not carried by the action: it is read where it lives when the
+    /// dial is made (`ConnectManager::dial_peer`), so the actions hold names and not copies.
+    type Target = ();
 
-    /// The endpoint itself, unless this build cannot dial it: a peer with no candidate.
-    fn dialable(&self, key: &Key) -> Option<Key> {
+    /// An endpoint is dialled at itself, unless this build cannot dial it: a peer with no
+    /// candidate. A node is dialled at the first of its live hints that this build can dial,
+    /// FOR the node: the hint is where the zid may be, and the session closes at the InitAck
+    /// if another node answers (decision D4). A dialer that cannot hold a session to the node
+    /// it was made for dials none, since a session to whichever node answered would not be one
+    /// to the zid.
+    fn dialable(&self, key: &Key) -> Option<()> {
         let row = self.row(key)?;
-        if row.multi_link || self.dialer.classify(key).is_err() {
-            return None;
+        match (key, row.endpoint.as_ref()) {
+            (Key::Endpoint(_), Some(endpoint)) => {
+                if row.multi_link || self.dialer.classify(endpoint).is_err() {
+                    return None;
+                }
+                Some(())
+            }
+            (Key::Node(zid), _) => {
+                if !D::VERIFIES_NODES {
+                    return None;
+                }
+                first_dialable(self.dialer, self.directory, zid, self.now_ms).map(|_| ())
+            }
+            // An endpoint's row always holds its text.
+            (Key::Endpoint(_), None) => None,
         }
-        Some(key.clone())
     }
 
     fn retry_wait_ms(&mut self, key: &Key) -> u64 {
@@ -351,7 +489,7 @@ impl<D: Dialer> PeerPorts<Key> for Ports<'_, D> {
         let wait = period.next_ms();
         // A table of as many rows as there are endpoints holds every endpoint in an outage; an
         // endpoint it could not hold would start from the first wait again.
-        let _ = self.periods.push((key.clone(), period));
+        let _ = self.periods.push((*key, period));
         wait
     }
 
@@ -360,7 +498,21 @@ impl<D: Dialer> PeerPorts<Key> for Ports<'_, D> {
     }
 }
 
-/// Keeps a node's sessions in step with its [`EndpointSource`].
+/// The first live hint of `zid` that `dialer` can dial, in the order the directory gives them.
+fn first_dialable<'a, D: Dialer>(
+    dialer: &D,
+    directory: &'a LocatorDirectory<DIRECTORY_ROWS>,
+    zid: &'a DirectoryZid,
+    now_ms: u64,
+) -> Option<&'a str> {
+    directory
+        .candidates(zid, now_ms)
+        .map(|row| row.locator())
+        .find(|locator| dialer.classify(locator).is_ok())
+}
+
+/// Keeps a node's sessions in step with its [`EndpointSource`], and holds the nodes it is asked
+/// to open by their zid.
 pub struct ConnectManager<D: Dialer> {
     control: &'static dyn EndpointSource,
     dialer: D,
@@ -428,34 +580,62 @@ impl<D: Dialer> ConnectManager<D> {
 
     /// Where every endpoint stands, in the order the list named them.
     pub fn states(&self) -> impl Iterator<Item = (&str, SlotState)> + '_ {
-        self.rows.iter().map(|row| {
-            let state = match self.store.get().with(|p| p.state(&row.entry.endpoint)) {
-                Some(PeerConnectionState::NoLocator) => SlotState::Refused(self.refusal(row)),
-                Some(PeerConnectionState::Backoff) => SlotState::Waiting {
-                    at_ms: row.due.map_or(0, |due| due.at_ms),
-                },
-                // The manager tells a machine only that a session came up or that a dial
-                // failed, so no other refusal is a state an endpoint is in.
-                _ => SlotState::Live,
+        self.rows.iter().filter_map(|row| {
+            let endpoint = row.endpoint()?;
+            let state = match self.standing(row) {
+                Standing::Waiting { at_ms } => SlotState::Waiting { at_ms },
+                Standing::NoLocator => SlotState::Refused(self.refusal(row, endpoint)),
+                // An endpoint names no node, so no dial of it can find another one answering.
+                Standing::Live | Standing::Mismatched => SlotState::Live,
             };
-            (row.entry.as_str(), state)
+            Some((endpoint, state))
         })
+    }
+
+    /// Where every node asked for by its zid stands, in the order they were asked for.
+    pub fn node_states(&self) -> impl Iterator<Item = (&DirectoryZid, NodeState)> + '_ {
+        self.rows.iter().filter_map(|row| {
+            let Key::Node(zid) = &row.key else {
+                return None;
+            };
+            let state = match self.standing(row) {
+                Standing::Live => NodeState::Live,
+                Standing::Waiting { at_ms } => NodeState::Waiting { at_ms },
+                Standing::NoLocator => NodeState::NoHint,
+                Standing::Mismatched => NodeState::Mismatched,
+            };
+            Some((zid, state))
+        })
+    }
+
+    /// Where one peer stands.
+    fn standing(&self, row: &Row<D::Session>) -> Standing {
+        match self.store.get().with(|t| t.planner.state(&row.key)) {
+            Some(PeerConnectionState::NoLocator) => Standing::NoLocator,
+            Some(PeerConnectionState::Backoff) => Standing::Waiting {
+                at_ms: row.due.map_or(0, |due| due.at_ms),
+            },
+            Some(PeerConnectionState::IdentityMismatch) => Standing::Mismatched,
+            // The manager tells a machine that a session came up, that a dial failed, or that
+            // another node answered, so no other refusal is a state a peer is in.
+            _ => Standing::Live,
+        }
     }
 
     /// R2834 — the sessions this manager holds right now, with the endpoint
     /// each was dialled for, in the list's order. A session is here from its
     /// dial until the manager sees it end, so it may still be handshaking; a
     /// caller that reports sessions asks each one whether it is established.
+    /// The sessions of nodes are not here: they have no endpoint.
     pub fn sessions(&self) -> impl Iterator<Item = (&str, &D::Session)> + '_ {
         self.rows.iter().filter_map(|row| {
-            row.held
-                .as_ref()
-                .map(|held| (row.entry.as_str(), &held.session))
+            let held = row.held.as_ref()?;
+            Some((row.endpoint()?, &held.session))
         })
     }
 
     /// Why this build has no candidate for `row`'s endpoint.
-    fn refusal(&self, row: &Row<D::Session>) -> DialRefused {
+    fn refusal(&self, row: &Row<D::Session>, endpoint: &str) -> DialRefused {
         if row.multi_link {
             return DialRefused::MultiLinkGroup;
         }
@@ -463,9 +643,97 @@ impl<D: Dialer> ConnectManager<D> {
         // dialer no longer gives (it was a group the list has since split) falls back to the
         // one an unreadable endpoint is.
         self.dialer
-            .classify(&row.entry.endpoint)
+            .classify(endpoint)
             .err()
             .unwrap_or(DialRefused::Unsupported)
+    }
+
+    /// `source` confirms that the node `zid` may be reached at `locator`, for `lifetime`: the
+    /// hint a node asked for by its zid is dialled at (decision D3). A build states a node's
+    /// hints this way (`Declared`), and a scouting Hello of the node gives them (`Hello`).
+    pub fn confirm_locator(
+        &mut self,
+        zid: DirectoryZid,
+        locator: &str,
+        source: LocatorSource,
+        now_ms: u64,
+        lifetime: Lifetime,
+    ) -> Result<(), DirectoryRefusal> {
+        self.store
+            .get()
+            .with(|t| t.directory.confirm(zid, locator, source, now_ms, lifetime))
+    }
+
+    /// `source` no longer confirms any hint of the node `zid`.
+    pub fn withdraw_locators(&mut self, zid: &DirectoryZid, source: LocatorSource) {
+        self.store.get().with(|t| t.directory.withdraw(zid, source));
+    }
+
+    /// Hold a session with the node `zid`, dialled at what the directory knows of it (decision D6:
+    /// a lifecycle `open`). A node already held is unchanged, and one that had no hint to dial
+    /// resolves again. The node is refused, and takes no row, when its dial could not be told from
+    /// one to another node, when the node holds as many as it was built for, or when the directory
+    /// has nothing it can dial.
+    pub fn open_node(&mut self, zid: DirectoryZid, now_ms: u64) -> Result<(), NodeRefusal> {
+        if !D::VERIFIES_NODES {
+            return Err(NodeRefusal::Unverifiable);
+        }
+        let key = Key::Node(zid);
+        if !self.rows.iter().any(|row| row.key == key) {
+            let held = self
+                .rows
+                .iter()
+                .filter(|row| matches!(row.key, Key::Node(_)))
+                .count();
+            // Written so that it holds for any value of the limit, none included.
+            if MAX_PEER_NODES.saturating_sub(held) == 0 {
+                return Err(NodeRefusal::NoRoom);
+            }
+            let known = self
+                .store
+                .get()
+                .with(|t| t.directory.candidates(&zid, now_ms).next().is_some());
+            if !known {
+                return Err(NodeRefusal::NoLocator);
+            }
+            let dialable = self
+                .store
+                .get()
+                .with(|t| first_dialable(&self.dialer, &t.directory, &zid, now_ms).is_some());
+            if !dialable {
+                return Err(NodeRefusal::NoDialableLocator);
+            }
+            // Fewer than `MAX_PEER_NODES` nodes are held and the endpoints fit their rows, so
+            // the row fits; one that did not could only be a defect.
+            if self.rows.push(Row::new(key, None, false)).is_err() {
+                return Err(NodeRefusal::NoRoom);
+            }
+        }
+        self.drive(now_ms, |planner, ports, next_id, emit| {
+            // The table holds as many peers as the rows do.
+            let _ = planner.open(key, ports, next_id, emit);
+        });
+        Ok(())
+    }
+
+    /// Stop holding the node `zid`: the session it holds, and the session of any endpoint that
+    /// reached the same node, is hung up (decision D6: a lifecycle `close`), and the node is
+    /// dialled no more. The hints stay: they are the directory's, and a later `open` uses them.
+    pub fn close_node(&mut self, zid: &DirectoryZid, now_ms: u64) {
+        let key = Key::Node(*zid);
+        self.drive(now_ms, |planner, ports, next_id, emit| {
+            planner.withdraw(zid, key, ports, next_id, emit);
+        });
+        if let Some(held) = self.row_mut(&key).and_then(|row| row.held.take()) {
+            let face = held.face;
+            self.dialer.hang_up(held.session);
+            self.drive(now_ms, |planner, ports, next_id, emit| {
+                planner.dial_ended(face, DialEnd::Failed, ports, next_id, emit);
+            });
+        }
+        self.store.get().with(|t| t.planner.forget(&key));
+        self.periods.retain(|(k, _)| *k != key);
+        self.rows.retain(|row| row.key != key);
     }
 
     /// Advance to `now_ms`: reconcile a new list, notice sessions that came up or ended, and
@@ -476,6 +744,7 @@ impl<D: Dialer> ConnectManager<D> {
             self.reconcile(&list, now_ms);
             self.generation = Some(generation);
         }
+        self.store.get().with(|t| t.directory.expire(now_ms));
         self.observe(now_ms);
         self.fire_due(now_ms);
     }
@@ -491,7 +760,7 @@ impl<D: Dialer> ConnectManager<D> {
         now_ms: u64,
         call: impl FnOnce(&mut Planner, &mut Ports<'_, D>, &mut u64, &mut dyn FnMut(Action)),
     ) {
-        let mut actions = self.ask(call);
+        let mut actions = self.ask(now_ms, call);
         let mut failed: FixedVec<u64, 6> = FixedVec::new();
         loop {
             self.take(actions, now_ms, &mut failed);
@@ -499,7 +768,7 @@ impl<D: Dialer> ConnectManager<D> {
                 return;
             };
             // The turn after a failed dial asks for no dial, so the list only shrinks.
-            actions = self.ask(|planner, ports, next_id, emit| {
+            actions = self.ask(now_ms, |planner, ports, next_id, emit| {
                 planner.dial_ended(id, DialEnd::Failed, ports, next_id, emit);
             });
         }
@@ -508,18 +777,21 @@ impl<D: Dialer> ConnectManager<D> {
     /// One call of the planner against this profile's ports, and what it asked for.
     fn ask(
         &mut self,
+        now_ms: u64,
         call: impl FnOnce(&mut Planner, &mut Ports<'_, D>, &mut u64, &mut dyn FnMut(Action)),
     ) -> Actions {
         let mut actions = Actions::new();
-        let mut ports = Ports {
-            dialer: &self.dialer,
-            rows: &self.rows,
-            periods: &mut self.periods,
-            policy: self.policy,
-        };
         let next_id = &mut self.next_id;
-        self.store.get().with(|planner| {
-            call(planner, &mut ports, next_id, &mut |action| {
+        self.store.get().with(|tables| {
+            let mut ports = Ports {
+                dialer: &self.dialer,
+                rows: &self.rows,
+                periods: &mut self.periods,
+                directory: &tables.directory,
+                policy: self.policy,
+                now_ms,
+            };
+            call(&mut tables.planner, &mut ports, next_id, &mut |action| {
                 // At most one of each kind per call and `Actions` holds six.
                 let _ = actions.push(action);
             })
@@ -532,7 +804,7 @@ impl<D: Dialer> ConnectManager<D> {
     fn take(&mut self, actions: Actions, now_ms: u64, failed: &mut FixedVec<u64, 6>) {
         for action in actions {
             match action {
-                PeerAction::Dial { id, key, target } => match self.dialer.dial(&target) {
+                PeerAction::Dial { id, key, .. } => match self.dial_peer(&key, now_ms) {
                     Ok(session) => {
                         if let Some(row) = self.row_mut(&key) {
                             row.held = Some(Held {
@@ -568,8 +840,45 @@ impl<D: Dialer> ConnectManager<D> {
         }
     }
 
+    /// Dial `key`: an endpoint at its own text, a node at the first live hint of the directory
+    /// that this build can dial, FOR the node. The planner asked for the dial having found there
+    /// was something to dial, and nothing moves the rows or the directory between that and here,
+    /// so a peer with nothing to dial now is the dialer disagreeing with itself, a failed attempt.
+    ///
+    /// Out of line, so that the locator it holds (sixty-four bytes of a node's hint) is a frame of
+    /// the dial and not of the loop that ticks the manager.
+    #[inline(never)]
+    fn dial_peer(&mut self, key: &Key, now_ms: u64) -> Result<D::Session, DialFailed> {
+        match key {
+            Key::Endpoint(_) => {
+                let endpoint = self
+                    .rows
+                    .iter()
+                    .find(|row| row.key == *key)
+                    .and_then(|row| row.endpoint.as_ref())
+                    .ok_or(DialFailed::Unreachable)?;
+                self.dialer.dial(endpoint)
+            }
+            Key::Node(zid) => {
+                // Read out of the critical section: a dial is not made inside one.
+                let locator: Option<EndpointText> = self.store.get().with(|t| {
+                    first_dialable(&self.dialer, &t.directory, zid, now_ms)
+                        .and_then(|locator| EndpointText::try_from(locator).ok())
+                });
+                let locator = locator.ok_or(DialFailed::Unreachable)?;
+                self.dialer.dial_for(&locator, zid)
+            }
+        }
+    }
+
     fn row_mut(&mut self, key: &Key) -> Option<&mut Row<D::Session>> {
-        self.rows.iter_mut().find(|row| row.entry.endpoint == *key)
+        self.rows.iter_mut().find(|row| row.key == *key)
+    }
+
+    /// The lowest slot no endpoint's row holds. A freed slot is the next endpoint's, which is why
+    /// `reconcile` forgets a peer in the planner before it drops its row.
+    fn free_slot(&self) -> Option<u8> {
+        (0..=u8::MAX).find(|slot| !self.rows.iter().any(|row| row.key == Key::Endpoint(*slot)))
     }
 
     /// Hang up the session held as face `id`, if a row holds it.
@@ -587,6 +896,10 @@ impl<D: Dialer> ConnectManager<D> {
     /// Tell each machine whose session came up or ended.
     fn observe(&mut self, now_ms: u64) {
         for at in 0..self.rows.len() {
+            let node = match &self.rows[at].key {
+                Key::Node(zid) => Some(*zid),
+                Key::Endpoint(_) => None,
+            };
             let Some(held) = self.rows[at].held.as_mut() else {
                 continue;
             };
@@ -600,6 +913,18 @@ impl<D: Dialer> ConnectManager<D> {
             };
             if came_up {
                 held.up = true;
+            }
+            // A session to a node that names another node is not one to the node, whatever
+            // the dialer's handshake let through (decision D4): it is hung up, and the dial
+            // is the mismatch of a stale hint.
+            if matches!((node, remote), (Some(expected), Some(named)) if expected != named) {
+                if let Some(held) = self.rows[at].held.take() {
+                    self.dialer.hang_up(held.session);
+                }
+                self.drive(now_ms, |planner, ports, next_id, emit| {
+                    planner.dial_ended(face, DialEnd::Mismatch, ports, next_id, emit);
+                });
+                continue;
             }
             let ended = self.dialer.ended(&mut held.session);
             let mut up = was_up || came_up;
@@ -641,13 +966,13 @@ impl<D: Dialer> ConnectManager<D> {
 
     /// Dial the endpoints whose wait is up.
     fn fire_due(&mut self, now_ms: u64) {
-        let mut due: FixedVec<(Key, u64), MAX_STATIC_CONNECT> = FixedVec::new();
+        let mut due: FixedVec<(Key, u64), PEERS> = FixedVec::new();
         for row in self.rows.iter_mut() {
             if let Some(timer) = row.due {
                 if now_ms >= timer.at_ms {
                     row.due = None;
                     // At most one timer per row, and the table has a row each.
-                    let _ = due.push((row.entry.endpoint.clone(), timer.generation));
+                    let _ = due.push((row.key, timer.generation));
                 }
             }
         }
@@ -665,9 +990,12 @@ impl<D: Dialer> ConnectManager<D> {
     fn reconcile(&mut self, list: &ConnectEndpoints, now_ms: u64) {
         // An empty group names nothing to dial.
         let dialable = |e: &ConnectEntry| !e.endpoint.is_empty();
-        let named = |key: &Key| {
-            list.iter()
-                .any(|entry| dialable(entry) && entry.endpoint == *key)
+        // A node is not the list's to name: it stays until it is closed.
+        let named = |row: &Row<D::Session>| match row.endpoint() {
+            Some(endpoint) => list
+                .iter()
+                .any(|entry| dialable(entry) && entry.endpoint.as_str() == endpoint),
+            None => true,
         };
 
         // Hang up what the list no longer names: stop the machine (a session it holds is
@@ -675,9 +1003,9 @@ impl<D: Dialer> ConnectManager<D> {
         // still handshaking has no face the machine holds), and forget the endpoint.
         let mut gone: FixedVec<Key, MAX_STATIC_CONNECT> = FixedVec::new();
         for row in self.rows.iter() {
-            if !named(&row.entry.endpoint) {
+            if !named(row) {
                 // One row per endpoint, and the table has as many rows as this holds.
-                let _ = gone.push(row.entry.endpoint.clone());
+                let _ = gone.push(row.key);
             }
         }
         for key in gone {
@@ -693,9 +1021,9 @@ impl<D: Dialer> ConnectManager<D> {
                     planner.dial_ended(face, DialEnd::Failed, ports, next_id, emit);
                 });
             }
-            self.store.get().with(|planner| planner.forget(&key));
+            self.store.get().with(|t| t.planner.forget(&key));
             self.periods.retain(|(k, _)| *k != key);
-            self.rows.retain(|row| row.entry.endpoint != key);
+            self.rows.retain(|row| row.key != key);
         }
 
         // A new endpoint is due now, and a refused one is given another chance, since a
@@ -705,30 +1033,33 @@ impl<D: Dialer> ConnectManager<D> {
         // rather than dialled as separate sessions to what is one peer.
         for entry in list.iter().filter(|e| dialable(e)) {
             let multi_link = entry.group.is_some_and(|g| group_len(list, g.index) > 1);
-            let key = entry.endpoint.clone();
-            let retry = match self.row_mut(&key) {
+            let held = self
+                .rows
+                .iter_mut()
+                .find(|row| row.endpoint() == Some(entry.endpoint.as_str()));
+            let key = match held {
                 Some(row) => {
                     row.multi_link = multi_link;
-                    true
+                    row.key
                 }
                 None => {
-                    let row = Row {
-                        entry: entry.clone(),
-                        multi_link,
-                        held: None,
-                        due: None,
+                    // The list holds as many entries as this table has rows for endpoints, so a
+                    // slot is always free and a row always fits; one that did not could only
+                    // be a defect.
+                    let Some(slot) = self.free_slot() else {
+                        continue;
                     };
-                    // The list holds as many entries as this table has rows, so a row always
-                    // fits; a row that did not could only be a defect.
-                    self.rows.push(row).is_ok()
+                    let key = Key::Endpoint(slot);
+                    let row = Row::new(key, Some(entry.endpoint.clone()), multi_link);
+                    if self.rows.push(row).is_err() {
+                        continue;
+                    }
+                    key
                 }
             };
-            if !retry {
-                continue;
-            }
             // `open` of an endpoint already held or being reached changes nothing; one its
             // machine refused resolves again.
-            let state = self.store.get().with(|planner| planner.state(&key));
+            let state = self.store.get().with(|t| t.planner.state(&key));
             if state == Some(PeerConnectionState::NoLocator) || state.is_none() {
                 self.drive(now_ms, |planner, ports, next_id, emit| {
                     let _ = planner.open(key, ports, next_id, emit);
@@ -736,8 +1067,8 @@ impl<D: Dialer> ConnectManager<D> {
             }
         }
 
-        // Keep the list's order.
-        let mut kept: BoundedVec<Option<Row<D::Session>>, MAX_STATIC_CONNECT> = BoundedVec::new();
+        // Keep the list's order, and the nodes after it in the order they were asked for.
+        let mut kept: BoundedVec<Option<Row<D::Session>>, PEERS> = BoundedVec::new();
         for row in core::mem::take(&mut self.rows) {
             let _ = kept.push(Some(row));
         }
@@ -746,17 +1077,20 @@ impl<D: Dialer> ConnectManager<D> {
                 .iter()
                 .position(|row| {
                     row.as_ref()
-                        .is_some_and(|row| row.entry.endpoint == entry.endpoint)
+                        .is_some_and(|row| row.endpoint() == Some(entry.endpoint.as_str()))
                 })
                 .and_then(|at| kept[at].take());
             if let Some(row) = held {
                 let _ = self.rows.push(row);
             }
         }
+        for row in kept.into_iter().flatten() {
+            let _ = self.rows.push(row);
+        }
     }
 }
 
-type Action = PeerAction<Key, u64, Key>;
+type Action = PeerAction<Key, u64, ()>;
 
 #[cfg(all(test, feature = "adminspace-write"))]
 mod tests {
@@ -778,10 +1112,23 @@ mod tests {
         up: Vec<(String, Option<[u8; CREDENTIAL_ZID_BYTES]>)>,
         /// Answer every dial with `Exhausted`.
         exhausted: bool,
+        /// The dials made for a node: the locator and the zid it was made for.
+        dials_for: RefCell<Vec<(String, DirectoryZid)>>,
     }
 
     impl Dialer for FakeDialer {
         type Session = String;
+
+        const VERIFIES_NODES: bool = true;
+
+        /// The session of a dial made for a node is the locator and `@`, so that a test can
+        /// tell it from an endpoint's and have the dialer say it is up or has ended.
+        fn dial_for(&mut self, endpoint: &str, node: &DirectoryZid) -> Result<String, DialFailed> {
+            self.dials_for
+                .borrow_mut()
+                .push((String::from(endpoint), *node));
+            Ok(alloc::format!("{endpoint}@"))
+        }
 
         fn classify(&self, endpoint: &str) -> Result<(), DialRefused> {
             if endpoint.starts_with("serial/") {
@@ -1098,5 +1445,190 @@ mod tests {
         m.tick(0);
         std::assert_eq!(dials(&mut m), ["udp/10.0.0.1:7447"]);
         std::assert_eq!(m.states().count(), 1);
+    }
+
+    /// The nodes a build is asked to hold by their zid are `MAX_PEER_NODES`, and the default is
+    /// none, so a node-holding test has a build that states some (`WZ_LIMIT_MAX_PEER_NODES`, as
+    /// the leg that counts these tests does). A build that states none refuses every open for
+    /// want of room, which is what is asserted of it.
+    fn nodes_asked_for() -> bool {
+        MAX_PEER_NODES != 0
+    }
+
+    const NODE_A: DirectoryZid = [0xa1; CREDENTIAL_ZID_BYTES];
+    const NODE_B: DirectoryZid = [0xb2; CREDENTIAL_ZID_BYTES];
+
+    fn declare(m: &mut ConnectManager<FakeDialer>, zid: DirectoryZid, locator: &str) {
+        m.confirm_locator(
+            zid,
+            locator,
+            LocatorSource::Declared,
+            0,
+            Lifetime::Permanent,
+        )
+        .expect("the directory has a row for the hint");
+    }
+
+    /// A node whose zid the build was told a locator of is dialled at that locator, FOR the zid,
+    /// and held beside the endpoints the list names, which a rewrite of the list leaves alone.
+    #[test]
+    fn a_node_with_a_hint_is_dialled_for_its_zid_beside_the_endpoints() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        if !nodes_asked_for() {
+            std::assert_eq!(m.open_node(NODE_A, 0), Err(NodeRefusal::NoRoom));
+            return;
+        }
+        write(&CONTROL, &["udp/10.0.0.1:7447"]);
+        declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
+        m.tick(0);
+        std::assert_eq!(dials(&mut m), ["udp/10.0.0.1:7447"]);
+
+        std::assert_eq!(m.open_node(NODE_A, 1), Ok(()));
+        let made: Vec<(String, DirectoryZid)> =
+            m.dialer().dials_for.borrow_mut().drain(..).collect();
+        std::assert_eq!(made, [(String::from("udp/10.0.0.9:7447"), NODE_A)]);
+        std::assert_eq!(m.node_states().count(), 1);
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
+        std::assert_eq!(m.states().count(), 1, "the endpoints are the list's alone");
+
+        write(&CONTROL, &["udp/10.0.0.2:7447"]);
+        m.tick(2);
+        std::assert_eq!(dials(&mut m), ["udp/10.0.0.2:7447"]);
+        std::assert_eq!(
+            m.node_states().count(),
+            1,
+            "a rewrite of the list leaves the node"
+        );
+        std::assert!(m.dialer().hang_ups.iter().all(|s| !s.ends_with('@')));
+    }
+
+    /// An open for a node that is not held takes no row until there is something to dial: a zid
+    /// nobody advertised, and a node whose hints this build cannot dial, are each refused by name,
+    /// and a flood of opens does not fill the table.
+    #[test]
+    fn a_node_nothing_can_be_dialled_for_is_refused_and_takes_no_row() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        if !nodes_asked_for() {
+            return;
+        }
+        std::assert_eq!(m.open_node(NODE_A, 0), Err(NodeRefusal::NoLocator));
+        declare(&mut m, NODE_B, "serial//dev/ttyS0");
+        std::assert_eq!(m.open_node(NODE_B, 0), Err(NodeRefusal::NoDialableLocator));
+        std::assert_eq!(m.node_states().count(), 0);
+        std::assert!(m.dialer().dials_for.borrow().is_empty());
+    }
+
+    /// A dialer that does not hold a session to the node it was made for is not asked to dial one:
+    /// the session would be to whichever node answered the hint.
+    #[test]
+    fn a_dialer_that_cannot_verify_a_node_opens_none() {
+        struct Plain;
+        impl Dialer for Plain {
+            type Session = ();
+            fn dial(&mut self, _endpoint: &str) -> Result<(), DialFailed> {
+                Ok(())
+            }
+            fn ended(&mut self, _session: &mut ()) -> Option<Ended> {
+                None
+            }
+            fn hang_up(&mut self, _session: ()) {}
+        }
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, Plain, &STORE);
+        std::assert_eq!(m.open_node(NODE_A, 0), Err(NodeRefusal::Unverifiable));
+    }
+
+    /// The node holds as many nodes as it was built for, and a further open is refused.
+    #[test]
+    fn a_node_past_the_built_capacity_is_refused() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        if !nodes_asked_for() {
+            return;
+        }
+        for at in (1u8..).take(MAX_PEER_NODES) {
+            let zid = [at; CREDENTIAL_ZID_BYTES];
+            declare(&mut m, zid, "udp/10.0.0.9:7447");
+            std::assert_eq!(m.open_node(zid, 0), Ok(()));
+        }
+        let over = [0xee; CREDENTIAL_ZID_BYTES];
+        declare(&mut m, over, "udp/10.0.0.9:7447");
+        std::assert_eq!(m.open_node(over, 0), Err(NodeRefusal::NoRoom));
+        std::assert_eq!(m.node_states().count(), MAX_PEER_NODES);
+        // One already held is not another: asking again changes nothing.
+        std::assert_eq!(m.open_node([1; CREDENTIAL_ZID_BYTES], 0), Ok(()));
+        std::assert_eq!(m.node_states().count(), MAX_PEER_NODES);
+    }
+
+    /// A session that comes up naming another node than the one asked for is no session to it,
+    /// whatever the dialer let through: it is hung up, and the machine refuses the node as one
+    /// another answered for (decision D4), so it is not dialled again until it is opened.
+    #[test]
+    fn a_session_that_names_another_node_is_hung_up() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        if !nodes_asked_for() {
+            return;
+        }
+        declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
+        std::assert_eq!(m.open_node(NODE_A, 0), Ok(()));
+        m.dialer()
+            .up
+            .push((String::from("udp/10.0.0.9:7447@"), Some(NODE_B)));
+        m.tick(10);
+        std::assert_eq!(
+            m.dialer().hang_ups,
+            vec![String::from("udp/10.0.0.9:7447@")],
+            "the session of another node is not kept"
+        );
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Mismatched);
+        m.dialer().up.clear();
+        m.tick(60_000);
+        std::assert_eq!(
+            m.dialer().dials_for.borrow().len(),
+            1,
+            "a node another answered for is not dialled again by waiting"
+        );
+    }
+
+    /// A `close` of a node hangs up its session and takes its row, and leaves the hints: they are
+    /// the directory's, and a later `open` dials them again.
+    #[test]
+    fn closing_a_node_hangs_it_up_and_keeps_its_hints() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        if !nodes_asked_for() {
+            return;
+        }
+        declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
+        std::assert_eq!(m.open_node(NODE_A, 0), Ok(()));
+        m.dialer()
+            .up
+            .push((String::from("udp/10.0.0.9:7447@"), Some(NODE_A)));
+        m.tick(10);
+        std::assert_eq!(m.node_states().next().unwrap().1, NodeState::Live);
+
+        m.close_node(&NODE_A, 20);
+        std::assert_eq!(
+            m.dialer().hang_ups,
+            vec![String::from("udp/10.0.0.9:7447@")]
+        );
+        std::assert_eq!(m.node_states().count(), 0);
+
+        m.dialer().up.clear();
+        std::assert_eq!(
+            m.open_node(NODE_A, 30),
+            Ok(()),
+            "the hint outlived the node"
+        );
+        std::assert_eq!(m.dialer().dials_for.borrow().len(), 2);
     }
 }

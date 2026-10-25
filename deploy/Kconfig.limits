@@ -187,6 +187,18 @@ config WZ_LIMIT_MAX_STATIC_CONNECT
 	  The locators a node is told to connect to. A list longer than this stops
 	  at the limit; a fixed deployment names a few peers.
 
+config WZ_LIMIT_MAX_PEER_NODES
+	int "MAX_PEER_NODES"
+	default 0
+	help
+	  The nodes a fixed-memory image may be asked to open a session with by their
+	  zid, beside the locators it is told to connect to: one a session lifecycle
+	  open names, whose locators the node learned from a Hello or was built with.
+	  Each holds a connection machine of some 930 bytes and its share of the
+	  peer tables, so the default is 0: a node that is never asked to open a peer
+	  by its zid declares none of that, and refuses the open. One more than this
+	  is refused.
+
 config WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES
 	int "QUERIER_MAX_PENDING_QUERIES"
 	default 0

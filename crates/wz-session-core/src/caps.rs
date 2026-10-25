@@ -347,6 +347,15 @@ pub const MAX_LOCATOR_LEN: usize = generated::MAX_LOCATOR_LEN;
 /// (e.g. one AP for a fixed AP<->MCU pair), so few configured locators.
 pub const MAX_STATIC_CONNECT: usize = generated::MAX_STATIC_CONNECT;
 
+/// Maximum number of nodes a fixed-memory image holds a session with BY THEIR ZID, beside the
+/// [`MAX_STATIC_CONNECT`] locators it is told to connect to: the peers a lifecycle `open` names
+/// (decision D6 of `docs/session-lifecycle-intent.md`), whose locators the node holds as hints
+/// in a directory (decision D3). It sizes the rows of the connect manager's peer tables past
+/// the endpoints, and of the directory (two hints for each node). Each node is a connection
+/// machine of about 930 bytes, so the default is 0: an image that is never asked to open a peer
+/// by its zid declares none of it, and refuses the open.
+pub const MAX_PEER_NODES: usize = generated::MAX_PEER_NODES;
+
 /// Maximum number of queries ONE declared querier has in flight at once, as a
 /// [`crate::quota::Quota`] states it: a query past it is refused, and a place comes back
 /// when the pending query ends (its final arrives, its deadline passes, or it is

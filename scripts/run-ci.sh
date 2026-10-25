@@ -11386,18 +11386,28 @@ layer_c1m_session_lwip() {
     # a dropped endpoint with a session up is hung up and a rewrite dials it
     # afresh, an endpoint written twice is one endpoint. And by ONE more (17 -> 18, 27 -> 28):
     # the manager does not carry its peers' machines (a size bound that the manager sits on the
-    # stack and the store beside it does not).
+    # stack and the store beside it does not). Decision D6 step 6.2b adds SIX more (18 -> 24,
+    # 28 -> 34): the manager holds nodes by their zid beside the endpoints (a node with a hint is
+    # dialled for its zid, one nothing can be dialled for takes no row, a dialer that cannot
+    # verify a node opens none, a node past the built capacity is refused, a session that names
+    # another node is hung up, a close keeps the hints). A build states no node by default
+    # (`MAX_PEER_NODES` is 0), so under these two legs those tests assert the refusal for want
+    # of room and return; the leg after them states two and runs the same tests to their end.
     _runci_guarded_test "C1m mcu default" 4 \
         cargo test -p wz-session-mcu --quiet || return 1
     _runci_guarded_test "C1m mcu unicast app layer" 5 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 18 \
+    _runci_guarded_test "C1m mcu adminspace-write" 24 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
+    _runci_guarded_test "C1m mcu peer nodes" 15 \
+        env WZ_LIMIT_MAX_PEER_NODES=2 \
+        cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
+        --quiet || return 1
     _runci_guarded_test "C1m mcu adminspace-core" 8 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 28 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 34 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =

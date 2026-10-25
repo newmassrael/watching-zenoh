@@ -169,26 +169,25 @@ where
     }
 }
 
-impl<C, T, B, F, const S: usize, const P: usize> Dialer for SlotDialer<'_, C, T, B, F, S, P>
+impl<C, T, B, F, const S: usize, const P: usize> SlotDialer<'_, C, T, B, F, S, P>
 where
     C: ClockSource + 'static,
     T: SlotStack,
     B: Bind<T::Driver>,
     F: SessionFactory<C>,
 {
-    type Session = SlotSession<C>;
-
-    fn classify(&self, endpoint: &str) -> Result<(), crate::connect_manager::DialRefused> {
-        parse_locator(endpoint).map(|_| ())
-    }
-
     // Not inlined into the loop that ticks the manager: a dial holds the socket's driver (the two
     // buffers of a link, some 3 KB) and the session's parameters, by value, several times over on
     // the way into the slot. Inlined, that frame is under the loop for the node's whole life and
     // adds to every receive's; kept apart, it exists for the length of a dial, which the receive
-    // path's frames are not beneath.
+    // path's frames are not beneath. A dial of an endpoint and a dial for a node share it, so
+    // that the two are one frame and not two.
     #[inline(never)]
-    fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed> {
+    fn dial_expecting(
+        &mut self,
+        endpoint: &str,
+        expected_zid: Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]>,
+    ) -> Result<SlotSession<C>, DialFailed> {
         let to = parse_locator(endpoint).map_err(DialFailed::Refused)?;
         let entropy = self.factory.borrow_mut().entropy();
         let params = self.factory.borrow_mut().params();
@@ -198,9 +197,10 @@ where
             .host
             .dial(
                 || bind.bind(to),
-                // A configured endpoint names no node, as upstream's
-                // `connect/endpoints` does not.
-                None,
+                // `None` for a configured endpoint, which names no node, as upstream's
+                // `connect/endpoints` does not; the node's zid for a dial made for one, so that
+                // the session closes at the InitAck if another node answers (decision D4).
+                expected_zid,
                 entropy,
                 params,
                 SessionDriveConfig {
@@ -218,6 +218,37 @@ where
                 DialRefused::Open(_) => DialFailed::Exhausted,
             })?;
         Ok(SlotSession::new(opened))
+    }
+}
+
+impl<C, T, B, F, const S: usize, const P: usize> Dialer for SlotDialer<'_, C, T, B, F, S, P>
+where
+    C: ClockSource + 'static,
+    T: SlotStack,
+    B: Bind<T::Driver>,
+    F: SessionFactory<C>,
+{
+    type Session = SlotSession<C>;
+
+    fn classify(&self, endpoint: &str) -> Result<(), crate::connect_manager::DialRefused> {
+        parse_locator(endpoint).map(|_| ())
+    }
+
+    /// The slot host's handshake holds a session to the node it was made for, so a node may be
+    /// opened by its zid over this dialer (decision D4).
+    const VERIFIES_NODES: bool = true;
+
+    fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed> {
+        // A configured endpoint names no node, as upstream's `connect/endpoints` does not.
+        self.dial_expecting(endpoint, None)
+    }
+
+    fn dial_for(
+        &mut self,
+        endpoint: &str,
+        node: &wz_session_core::locator_directory::DirectoryZid,
+    ) -> Result<Self::Session, DialFailed> {
+        self.dial_expecting(endpoint, Some(*node))
     }
 
     fn established(&mut self, session: &mut Self::Session) -> bool {

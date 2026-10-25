@@ -845,8 +845,49 @@ Each step lands with its own done-when; sizes are not estimated here.
      the engine default. A test holds the bound: the store is over 8 KiB and
      the manager under 4 KiB. The Zephyr stack figure can be read only on
      the hosted run; the image edit there is not buildable here.
-   - Next in step 6: the nodes held by zid beside the endpoints, with the
-     locator directory (6.2b), then the verbs on the fixed-memory profile,
+   - 6.2b-1, the nodes held by zid beside the endpoints, in the same manager.
+     A peer is keyed by an enum, an endpoint by its text or a node by its
+     zid, so the one table, the one planner and the one retry schedule serve
+     both, as the AP loop's `PeerKey` does. A node is dialled at the first
+     live hint of the locator directory (D3) that the build can dial, FOR its
+     zid: the dial target carries the zid, the dialer's `dial_for` makes a
+     session whose handshake closes at the InitAck when another node answers
+     (D4), and the manager hangs up a session that comes up naming another
+     node whatever the dialer let through, which the machine reads as an
+     identity mismatch and does not dial again until the node is opened. The
+     port refuses by default: `Dialer::VERIFIES_NODES` is false, and a dialer
+     that does not say so opens no node, because a session to whichever node
+     answers a stale hint is not a session to the zid. The slot dialer says
+     so, since the slot host already took the expected zid; the heap UDP
+     dialer does not yet.
+     A peer's name is an identity and not a copy of what it names: seventeen
+     bytes, an endpoint's row slot or a node's zid, where the endpoint's text
+     is sixty-four and more. Round 3613 keyed the machines by that text, and
+     the planner holds a name in every table, in every action and in the sort
+     of a `withdraw`, so the frames the dial passes through under the node's
+     loop carried several copies of it: the Zephyr kit's worst chain read
+     8900 of 9216 bytes with the manager's dial in it. The action now names the
+     peer and nothing else, and the dial reads the locator where it lives (the
+     endpoint's row, or the directory's hint) when it is made, out of the
+     critical section. Read off the lwIP fixed-memory image for the bare-metal
+     target, the frames of the manager's own methods fell (the one that takes
+     an action list from 1184 to 368 bytes, the planner's step from 600 to 200)
+     and the sort of names, which this step would have grown to 3544 bytes, is
+     912; the Zephyr figure is read on the hosted run.
+     The cost is a limit, `MAX_PEER_NODES`, whose default is 0: a node is a
+     machine of some 930 bytes and its share of the tables, and an image that
+     is never asked to open a peer by its zid declares none of it. The
+     directory is sized at two hints per node and lives in the same store, so
+     it is under the one critical section the planner is. An open that cannot
+     be served takes no row, so a flood of opens for zids nobody advertised
+     does not fill the table: no room, no hint, or no hint this build can dial,
+     each by its own name (`NodeRefusal`). Tests that hold nodes run in a leg
+     that states two (`C1m mcu peer nodes`); under the default they assert the
+     refusal for want of room.
+   - Next in step 6 (6.2b-2): the opener port over this manager, with the
+     decision of how `NodeRefusal::NoRoom` is said to the caller (the open
+     outcome has no word for it), the sources of hints (a build's declared
+     ones, a Hello), then the verbs on the fixed-memory profile,
      `wz-session-lwip` forwarding the feature, and the witness on the image.
 7. **D7** transports 2 and 3 as values of the build configuration axis.
 
