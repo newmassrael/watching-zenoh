@@ -5749,6 +5749,166 @@ mod reconnect_tx_tests {
         }
     }
 
+    /// A frame the peer sends that holds one `Declare(DeclFinal)` with the given interest id.
+    fn final_outcome(interest_id: Option<u64>) -> wz_session_core::driver_loop::DriverLoopOutcome {
+        use wz_session_core::network_message::NetworkMessage;
+        let declare = wz_codecs::declare::DeclareOwned {
+            header: 0,
+            interest_id,
+            extensions: None,
+            body: wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclFinal(
+                wz_codecs::decl_final::DeclFinal::default()
+                    .try_into_owned()
+                    .expect("DeclFinal::default owns no borrowed data"),
+            ),
+        };
+        wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+            priority: wz_session_core::qos::Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            messages: vec![NetworkMessage::Declare(Box::new(declare))],
+            has_ext: false,
+            extensions: Vec::new(),
+        }
+    }
+
+    /// Hands the actions the frame the peer sent, as the inbound dispatch does.
+    fn deliver(
+        actions: &super::SessionLinkActions,
+        outcome: &wz_session_core::driver_loop::DriverLoopOutcome,
+    ) {
+        actions.note_declare_finals_in(wz_session_core::driver_loop::IterationEvent::Poll(outcome));
+    }
+
+    /// A session that sent no interest and replays nothing has nothing to wait for.
+    #[test]
+    fn a_session_with_no_interest_sent_is_synced() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .expect("declare subscriber");
+        assert!(actions.declarations_synced());
+    }
+
+    /// An interest that asks for what exists now is answered by a final, and until it arrives the
+    /// node is not synced.
+    #[test]
+    fn a_get_interest_is_waited_for_until_its_final_arrives() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_interest_liveliness_get(14, 0, Some("home/get"))
+            .expect("liveliness get interest");
+        assert!(!actions.declarations_synced(), "the answer is owed");
+        deliver(&actions, &final_outcome(Some(14)));
+        assert!(actions.declarations_synced(), "the answer arrived");
+    }
+
+    /// A subscriber interest that asks for history is answered by a final; one that asks only for
+    /// what is declared later has none, so it is not waited for.
+    #[test]
+    fn only_an_interest_that_asks_for_what_exists_is_waited_for() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_interest_liveliness_subscriber(13, /*history=*/ false, 0, Some("home/live"))
+            .expect("future-only interest");
+        assert!(actions.declarations_synced(), "no final is coming");
+        actions
+            .send_interest_liveliness_subscriber(15, /*history=*/ true, 0, Some("home/hist"))
+            .expect("history interest");
+        assert!(!actions.declarations_synced(), "the history is owed");
+        deliver(&actions, &final_outcome(Some(15)));
+        assert!(actions.declarations_synced());
+    }
+
+    /// A final answers the interest it names and no other, and one with no interest id is the
+    /// peer's own and answers none.
+    #[test]
+    fn a_final_answers_only_the_interest_it_names() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_interest_liveliness_get(14, 0, Some("home/get"))
+            .expect("liveliness get interest");
+        deliver(&actions, &final_outcome(Some(99)));
+        assert!(!actions.declarations_synced(), "another interest's final");
+        deliver(&actions, &final_outcome(None));
+        assert!(
+            !actions.declarations_synced(),
+            "a final that names no interest"
+        );
+        deliver(&actions, &final_outcome(Some(14)));
+        assert!(actions.declarations_synced());
+    }
+
+    /// A peer that never answers is given up on after the timeout: the node is synced without it.
+    #[test]
+    fn an_interest_the_peer_never_answers_is_given_up_on_at_the_timeout() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_interest_liveliness_get(14, 0, Some("home/get"))
+            .expect("liveliness get interest");
+        assert!(!actions.declarations_synced_at(0), "just sent");
+        assert!(
+            actions.declarations_synced_at(u64::MAX / 2),
+            "waited the whole timeout"
+        );
+    }
+
+    /// An interest the node withdrew is not answered, so it is not waited for.
+    #[test]
+    fn a_withdrawn_interest_is_not_waited_for() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_interest_liveliness_subscriber(15, /*history=*/ true, 0, Some("home/hist"))
+            .expect("history interest");
+        assert!(!actions.declarations_synced());
+        actions.send_interest_final(15);
+        assert!(actions.declarations_synced());
+    }
+
+    /// A replay that is still owed is not synced, and the interests it sends are waited for from
+    /// the turn that sends them, not before: the new peer has been asked nothing until then.
+    #[test]
+    fn a_replay_still_owed_is_not_synced_and_its_interests_are_waited_for_when_sent() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        actions
+            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .expect("declare subscriber");
+        actions
+            .send_interest_liveliness_get(14, 0, Some("home/get"))
+            .expect("liveliness get interest");
+        deliver(&actions, &final_outcome(Some(14)));
+        assert!(actions.declarations_synced());
+
+        reopened(&actions);
+        assert!(actions.declarations_synced(), "nothing begun, nothing owed");
+        actions.begin_paced_replay();
+        assert!(!actions.declarations_synced(), "the replay is owed");
+        assert_eq!(actions.replay_turn(1).expect("turn").emitted, 1);
+        assert!(!actions.declarations_synced(), "one entry is still owed");
+        assert_eq!(actions.replay_turn(1).expect("turn").emitted, 1);
+        assert!(
+            !actions.declarations_synced(),
+            "the get interest was sent again and its final is awaited"
+        );
+        deliver(&actions, &final_outcome(Some(14)));
+        assert!(actions.declarations_synced());
+    }
+
+    /// The generation moves with the set of declarations, which is what makes a wait for a stable
+    /// state restart when a declaration is made or withdrawn.
+    #[test]
+    fn the_declaration_generation_moves_when_a_declaration_is_made_or_withdrawn() {
+        let (actions, _driver) = crate::test_fixtures::recording_actions();
+        let start = actions.declaration_generation();
+        actions
+            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .expect("declare subscriber");
+        let made = actions.declaration_generation();
+        assert_ne!(made, start);
+        actions.send_undeclare_subscriber(10);
+        assert_ne!(actions.declaration_generation(), made);
+    }
+
     /// A turn sends at most the burst and nothing else is sent between turns.
     #[test]
     fn a_paced_replay_sends_a_burst_a_turn_and_nothing_between() {

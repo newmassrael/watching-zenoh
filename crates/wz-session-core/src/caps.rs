@@ -379,6 +379,13 @@ pub const TX_NO_PROGRESS_WINDOW_US: usize = generated::TX_NO_PROGRESS_WINDOW_US;
 /// sends nothing never finishes. A count of messages and not a table size: it sizes no memory.
 pub const DECLARATION_SYNC_BURST_MESSAGES: usize = generated::DECLARATION_SYNC_BURST_MESSAGES;
 
+/// How long, in milliseconds, a node waits for the peer's answer to an interest it sent before it
+/// counts the interest as unanswered and goes on ([`crate::declaration_sync::DeclarationSync`]).
+/// It bounds `declarations_synced` and `wait_declarations_stable`, and is read whether or not the
+/// `declaration-sync-pacing` policy is on. Must be at least `1`. A time and not a table size: it
+/// sizes no memory.
+pub const DECLARATION_SYNC_FINAL_TIMEOUT_MS: usize = generated::DECLARATION_SYNC_FINAL_TIMEOUT_MS;
+
 /// How long, in milliseconds, a paced declaration replay waits between two turns, when the
 /// `declaration-sync-pacing` policy is on. It is read only then, and must be at least `1`. A time
 /// and not a table size: it sizes no memory.

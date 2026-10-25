@@ -15274,3 +15274,115 @@ async fn a_buffered_subscription_waits_rather_than_dropping_the_newest_sample() 
          reds the moment delivery drops instead of waiting"
     );
 }
+
+/// A frame from the peer holding one `Declare(DeclFinal)` for `interest_id`.
+#[cfg(all(
+    feature = "session-reconnect",
+    feature = "codec-declare",
+    feature = "declare-interest"
+))]
+fn peer_final_for(interest_id: u64) -> wz_session_core::driver_loop::DriverLoopOutcome {
+    let declare = wz_codecs::declare::DeclareOwned {
+        header: 0,
+        interest_id: Some(interest_id),
+        extensions: None,
+        body: wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclFinal(
+            wz_codecs::decl_final::DeclFinal::default()
+                .try_into_owned()
+                .expect("DeclFinal::default owns no borrowed data"),
+        ),
+    };
+    wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable: true,
+        sn: 0,
+        messages: vec![wz_session_core::network_message::NetworkMessage::Declare(
+            Box::new(declare),
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    }
+}
+
+/// The session reads the finals its peer sends through the inbound dispatch: an interest it sent
+/// is waited for until the final of that id is dispatched.
+#[cfg(all(
+    feature = "session-reconnect",
+    feature = "codec-declare",
+    feature = "declare-interest"
+))]
+#[test]
+fn the_inbound_dispatch_ends_the_wait_for_an_interests_final() {
+    let (session, _driver) = build_session();
+    session
+        .actions()
+        .send_interest_liveliness_get(14, 0, Some("home/get"))
+        .expect("liveliness get interest");
+    assert!(!session.declarations_synced(), "the answer is owed");
+
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&peer_final_for(
+        14,
+    )));
+    assert!(session.declarations_synced(), "the final was dispatched");
+}
+
+/// Stable is synced and unchanged for one interval: a session with nothing owed is stable, and one
+/// whose answer never comes is not, within the time given.
+#[cfg(all(
+    feature = "session-reconnect",
+    feature = "codec-declare",
+    feature = "declare-interest"
+))]
+#[tokio::test]
+async fn waiting_for_stable_declarations_ends_when_nothing_is_owed_and_fails_when_it_is() {
+    let (session, _driver) = build_session();
+    assert!(
+        session
+            .wait_declarations_stable(std::time::Duration::from_secs(5))
+            .await,
+        "nothing owed"
+    );
+
+    session
+        .actions()
+        .send_interest_liveliness_get(14, 0, Some("home/get"))
+        .expect("liveliness get interest");
+    assert!(
+        !session
+            .wait_declarations_stable(std::time::Duration::from_millis(50))
+            .await,
+        "the answer is owed and does not come in 50 ms"
+    );
+}
+
+/// A declaration made while the wait runs restarts it: the state the first check saw is not the one
+/// the peer must hold now, so the wait takes at least a second interval.
+#[cfg(all(
+    feature = "session-reconnect",
+    feature = "codec-declare",
+    feature = "declare-subscriber"
+))]
+#[tokio::test]
+async fn a_declaration_made_during_the_wait_restarts_it() {
+    let (session, _driver) = build_session();
+    let interval = std::time::Duration::from_millis(
+        wz_session_core::caps::DECLARATION_SYNC_INTERVAL_MS as u64,
+    );
+    let started = std::time::Instant::now();
+    let declare_midway = async {
+        tokio::time::sleep(interval / 2).await;
+        session
+            .actions()
+            .send_declare_subscriber(10, 0, Some("home/sub"))
+            .expect("declare subscriber");
+    };
+    let (stable, ()) = tokio::join!(
+        session.wait_declarations_stable(std::time::Duration::from_secs(5)),
+        declare_midway
+    );
+    assert!(stable, "the declarations settle once nothing changes");
+    assert!(
+        started.elapsed() >= interval * 2,
+        "a change between the check and its confirmation restarts the wait"
+    );
+}

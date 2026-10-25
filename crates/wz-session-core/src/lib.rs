@@ -1933,6 +1933,12 @@ pub mod session_slot;
 #[cfg(all(feature = "alloc", feature = "session-unicast"))]
 pub mod reconnect;
 
+/// What a session still waits for from its peer before its declarations are SYNCED:
+/// [`declaration_sync::DeclarationSync`], the interests it sent whose final has not arrived, each
+/// with a deadline (`docs/declaration-sync-pacing.md`, phase 3). Pure: it reads no clock.
+#[cfg(all(feature = "alloc", feature = "session-unicast"))]
+pub mod declaration_sync;
+
 /// Stage 3 — runtime-agnostic drive-loop dispatch core. `dispatch_link_event`
 /// (the synchronous body of the AP `poll_and_dispatch_one`) + the const-generic
 /// `report_outcome_reassembling` (reassembly-pool ingest) so the lwIP MCU sync

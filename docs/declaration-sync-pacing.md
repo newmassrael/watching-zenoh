@@ -28,11 +28,11 @@ nobody asked. With pacing it is a real state, and the node needs to be able to w
 | `declaration-sync-pacing` | policy, bool | off | Off: the replay is one call, as upstream. On: it runs in turns. |
 | `DECLARATION_SYNC_BURST_MESSAGES` | limit | 8 when on | Messages emitted in one turn. Zero is refused. |
 | `DECLARATION_SYNC_INTERVAL_MS` | limit | 10 when on | Wait between turns. Zero is refused. |
-| `DECLARATION_SYNC_FINAL_TIMEOUT_MS` | limit | 1000 when on | How long the sync waits for the peer's final for an interest before it counts the interest as unanswered and goes on. Never longer than the session's own lease. NOT DECLARED YET: it is declared with phase 3, the first code that reads it. |
+| `DECLARATION_SYNC_FINAL_TIMEOUT_MS` | limit | 1000, read policy on or off | How long a node waits for the peer's final for an interest it sent before it counts the interest as unanswered and goes on. Not gated by the policy: `declarations_synced` is a query a session answers whether or not its replay is paced. |
 
-A value of a limit is refused at build time when it is zero (the heap runtime asserts it where it
-reads them), and the timeout, when it is declared, must not be shorter than the interval; every
-limit here is declared in `deploy/wz-config.toml`.
+A value of a limit is refused at build time when it is zero (the heap runtime asserts the burst and
+the interval where it reads them, the core asserts the timeout); every limit here is declared in
+`deploy/wz-config.toml`.
 
 ## What has to stay true
 
@@ -120,10 +120,20 @@ convention in three files.
 - **The host owns the pacing.** The tokio supervisor sleeps `DECLARATION_SYNC_INTERVAL_MS` between
   turns, the cooperative engine and the slot node use their clocks. The core only says "one turn,
   and whether there is more".
-- **The wait** is `declarations_synced` per session (cursor finished and no interest of the replay
-  awaiting its final, within `DECLARATION_SYNC_FINAL_TIMEOUT_MS`), and a node-level
-  `wait_declarations_stable(timeout)` by rule 9, which also restarts if the declaration count or
-  the topology changed while it waited, so a declaration made during the wait is not missed.
+- **The wait** is `declarations_synced` per session: no paced replay is owed
+  (`DeclarationCache::replaying`), and every interest the node sent that asks for what exists now
+  (a liveliness subscriber with history, a liveliness get, a matching interest with `current`) has
+  had its `Declare(DeclFinal)` carrying the interest's id, or has waited
+  `DECLARATION_SYNC_FINAL_TIMEOUT_MS`. The peer's own initial final is not required: a router never
+  sends one to a client, so a wait that required it would never end for the common case. A
+  node-level `wait_declarations_stable(timeout)` by rule 9 is synced and unchanged for one
+  `DECLARATION_SYNC_INTERVAL_MS`: it restarts when the cache's `generation` moves (a declaration
+  made or withdrawn while it waited), so a declaration made during the wait is not missed.
+- **The bookkeeping is pure.** `DeclarationSync` holds each awaited interest with the time it was
+  sent and reads no clock; the actions give it the time. The inbound dispatch hands every delivered
+  frame to `note_declare_finals_in`, which reads the owned batch of a heap-profile frame. An
+  interest the node withdraws, or a one-shot get that ended, is forgotten; a session that ends
+  clears it, and the replay of the next session notes each interest as it sends it.
 
 With the policy off the cursor is never used: the replay is the same single call each host makes
 today (rule 6). The slot node's repeat-from-zero after a refused send is a defect whether or not
@@ -142,9 +152,11 @@ pacing is on, and the cursor removes it; that part is worth landing as its own c
    one task, so a failing turn ends the drive with its error). Off is the same single call, with
    a test that a paced replay of one turn sends the unpaced replay's bytes, and a supervisor test
    over real TCP for both.
-3. `declarations_synced` and `wait_declarations_stable` on the heap session, and the per-peer
-   completion of the queryable and token planes beside the subscriber plane that has it today
-   (`initial_final`).
+3. `declarations_synced` and `wait_declarations_stable` on the heap session. DONE: the wait covers
+   the interests the node sent, as above, and the limit `DECLARATION_SYNC_FINAL_TIMEOUT_MS` is
+   declared with the first code that reads it. Not done: the per-peer completion of the queryable
+   and token planes beside the subscriber plane that has it today (`initial_final`); a node does
+   not wait for the peer's initial final (see "Still open").
 4. The cooperative engine's `redeclare` and the slot node's `declare_all` take the cursor, each
    written by the session that owns the file (the cooperative engine: session 11; the slot node:
    session ef, who offered to do or review it). This document does not edit their files. DONE for
@@ -157,8 +169,8 @@ pacing is on, and the cursor removes it; that part is worth landing as its own c
 A declaration made during a paced replay is replayed in its turn, and a data message that names a
 mapping id (an aliased publish) is valid at the peer only after the declaration of that mapping has
 reached it. A literal publish names its key in full and is always valid. An application that sends
-aliased messages therefore waits for `declarations_synced` (phase 3) before it does; until that
-exists, such an application keeps the policy off.
+aliased messages therefore waits for `wait_declarations_stable` (phase 3) before it does, or keeps
+the policy off.
 
 ## Not part of this
 
@@ -185,9 +197,10 @@ Settled with the owners on 2026-10-25:
 
 Still open:
 
-- The per-peer completion of the queryable and token planes (phase 3) needs the wire's interest
-  final for those planes; whether the peers send it for every plane is to be measured against
-  upstream before the design of `declarations_synced` is final.
+- The per-peer completion of the queryable and token planes: `declarations_synced` waits only for
+  the finals of interests the node sent, so it says nothing of whether a peer has finished
+  declaring its own queryables and tokens to the node. Whether a peer sends the initial final for
+  every plane is to be measured against upstream before that is added.
 - The fixed-memory profile has no allocator, so `ReplayCursor` and its returns are plain values
   there; the cursor's `total` growing on `Owed` assumes the host's sequence can grow, which the
   slot node's static slice cannot (it never declares at run time), and the cooperative engine's

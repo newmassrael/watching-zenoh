@@ -4175,6 +4175,10 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     ) where
         SessionLinkActions<R, T>: Send + Sync + 'static,
     {
+        // A final the peer sends for an interest this node sent ends the wait that
+        // `declarations_synced` reports on; the registries below read the same final for their own
+        // interests, so this notes it without claiming it.
+        self.actions().note_declare_finals_in(event);
         R::with_mutex_mut(&self.observer, |obs| {
             // R311y516 (transport-shm) — restamp the LIVE negotiated SHM
             // capability onto the subscriber registry BEFORE the un-swap can
@@ -4278,6 +4282,46 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
             }
         });
         self.drain_deferred_fires();
+    }
+
+    /// Whether this session's declarations are in step with its peer right now
+    /// (`docs/declaration-sync-pacing.md`, phase 3): no paced replay is still owed to the peer, and
+    /// every interest this node sent that asks for what exists now has been answered by its final,
+    /// or has waited `DECLARATION_SYNC_FINAL_TIMEOUT_MS`. A session that sent no such interest and
+    /// replays nothing is synced.
+    ///
+    /// A snapshot: a declaration made a moment later makes it stale. Use
+    /// [`Self::wait_declarations_stable`] to wait for a state that holds.
+    pub fn declarations_synced(&self) -> bool {
+        self.actions().declarations_synced()
+    }
+
+    /// Waits until the declarations are synced and stay so for one pacing interval, or until
+    /// `timeout` has passed. Returns whether they were stable in time.
+    ///
+    /// A declaration made, or withdrawn, while the wait runs restarts the check: the set the peer
+    /// must hold has changed, and a sync that was true of the old set says nothing of the new one.
+    /// The interval is `DECLARATION_SYNC_INTERVAL_MS`, the pace a paced replay is driven at.
+    pub async fn wait_declarations_stable(&self, timeout: std::time::Duration) -> bool {
+        let step = std::time::Duration::from_millis(
+            wz_session_core::caps::DECLARATION_SYNC_INTERVAL_MS as u64,
+        );
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let seen = self.actions().declaration_generation();
+            let synced = self.actions().declarations_synced();
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            tokio::time::sleep(step.min(deadline - now)).await;
+            if synced
+                && seen == self.actions().declaration_generation()
+                && self.actions().declarations_synced()
+            {
+                return true;
+            }
+        }
     }
 
     // R311mn (B2) — `clock` is transport-agnostic and now lives in the

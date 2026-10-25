@@ -90,6 +90,8 @@ use crate::peer_init_caps::PeerInitCaps;
 // so the signature-stable `replay_declarations` / `declaration_cache_snapshot`
 // surface keeps its types when `session-reconnect` is off (R311g1).
 #[cfg(feature = "session-reconnect")]
+use crate::declaration_sync::DeclarationSync;
+#[cfg(feature = "session-reconnect")]
 use crate::reconnect::DeclarationCache;
 #[cfg(feature = "alloc")]
 use crate::reconnect::{CachedDeclaration, ReplayDeclarationsError, ReplayTurn};
@@ -1799,6 +1801,13 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// [`Self::retract_subscriber_recorded`] and their siblings).
     #[cfg(feature = "session-reconnect")]
     declaration_cache: R::Mutex<DeclarationCache>,
+    /// The interests this session sent whose final has not arrived, each with the time it was sent
+    /// ([`DeclarationSync`], `docs/declaration-sync-pacing.md` phase 3): what
+    /// [`Self::declarations_synced`] waits for beside the replay in the cache. Noted where an
+    /// interest is sent (live, or by the replay), answered by [`Self::note_declare_final`], cleared
+    /// when the session is reset for a new peer. Locked on its own and never while the cache is.
+    #[cfg(feature = "session-reconnect")]
+    declaration_sync: R::Mutex<DeclarationSync>,
     /// §5.21 routing-namespace — the per-participant EGRESS prefix (the wz
     /// mirror of zenoh's `Namespace` decorator value). `None` until the AP
     /// layer installs it at session bring-up via [`Self::set_namespace`] (the
@@ -3311,6 +3320,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 egress_reply_gate_set: core::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "session-reconnect")]
                 declaration_cache: R::new_mutex(DeclarationCache::new()),
+                #[cfg(feature = "session-reconnect")]
+                declaration_sync: R::new_mutex(DeclarationSync::new()),
                 // §5.21 routing-namespace — `None` until the AP layer installs the
                 // namespace via `set_namespace` at bring-up (the `is_lowlatency`
                 // config-default pattern). Zero footprint when the feature is off.
@@ -13775,10 +13786,44 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                     let _ = R::with_mutex_mut(&self.declaration_cache, |cache| {
                         cache.retract(|held| *held == probe)
                     });
+                } else if let Some(interest_id) = Self::final_expected_for(&probe) {
+                    self.note_interest_sent(interest_id);
                 }
                 sent
             }
         }
+    }
+
+    /// The id of the interest `entry` is, when the peer answers it with a final: an interest that
+    /// asks for what exists NOW. A liveliness subscriber with `history`, a one-shot liveliness get
+    /// and a matching interest with `current` are answered; one that asks only for what is declared
+    /// LATER has no final to wait for, and a declaration is not an interest at all.
+    #[cfg(feature = "session-reconnect")]
+    fn final_expected_for(entry: &CachedDeclaration) -> Option<u64> {
+        match entry {
+            CachedDeclaration::LivelinessSubscriberInterest {
+                interest_id,
+                history: true,
+                ..
+            }
+            | CachedDeclaration::LivelinessGetInterest { interest_id, .. }
+            | CachedDeclaration::MatchingInterest {
+                interest_id,
+                current: true,
+                ..
+            } => Some(*interest_id),
+            _ => None,
+        }
+    }
+
+    /// Note that an interest answered by a final was just sent: [`Self::declarations_synced`]
+    /// waits for the final from now.
+    #[cfg(feature = "session-reconnect")]
+    fn note_interest_sent(&self, interest_id: u64) {
+        let now = self.clock.now_monotonic_ms();
+        R::with_mutex_mut(&self.declaration_sync, |sync| {
+            sync.interest_sent(interest_id, now)
+        });
     }
 
     /// A4 — remove the first cache entry `pred` matches and send its retraction, as ONE step:
@@ -13905,6 +13950,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ) -> Option<Out> {
         #[cfg(feature = "session-reconnect")]
         {
+            // The interest is withdrawn, so no answer is owed to it whichever the cache says
+            // about telling the peer.
+            R::with_mutex_mut(&self.declaration_sync, |sync| sync.forget(interest_id));
             self.retract_and_send(|entry| entry.interest_id() == Some(interest_id), emit)
         }
         #[cfg(not(feature = "session-reconnect"))]
@@ -13930,7 +13978,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(feature = "liveliness-get")]
     pub fn prune_liveliness_get_interest(&self, interest_id: u64) {
         // Nothing is sent whichever the answer: the requester emits no interest-FINAL for a
-        // one-shot get. The cache still says it, so a running replay's cursor stays in step.
+        // one-shot get. The cache still says it, so a running replay's cursor stays in step, and
+        // the get that ended is not waited for.
+        #[cfg(feature = "session-reconnect")]
+        R::with_mutex_mut(&self.declaration_sync, |sync| sync.forget(interest_id));
         #[cfg(feature = "session-reconnect")]
         let _ = R::with_mutex_mut(&self.declaration_cache, |cache| {
             cache.retract(|entry| {
@@ -14021,6 +14072,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // FSM saw the loss; this also covers a reset without a prior
             // terminal). record_established_at re-opens it.
             R::with_mutex_mut(&self.link.transport_available, |g| *g = false);
+            // The next peer has been asked for nothing: the answers owed by the last are not
+            // owed to it, and the replay asks again, noting each interest as it does.
+            R::with_mutex_mut(&self.declaration_sync, |sync| sync.clear());
             R::with_mutex_mut(&self.inbound_cookie, |slot| *slot = None);
             R::with_mutex_mut(&self.inbound_opensyn_cookie, |slot| *slot = None);
             // R2782 — a reopen awaits no OpenAck until its own OpenSyn is out;
@@ -14142,6 +14196,85 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// Every `Declare(DeclFinal)` that carries an interest id and that `event` delivers is the
+    /// peer's answer to an interest the node sent: the node stops waiting for each
+    /// ([`Self::note_declare_final`]). The inbound dispatch calls this for every event.
+    /// R311g1 — signature-stability: a no-op without `session-reconnect` and `codec-declare`.
+    pub fn note_declare_finals_in(&self, event: crate::driver_loop::IterationEvent<'_>) {
+        #[cfg(all(feature = "session-reconnect", feature = "codec-declare"))]
+        crate::declaration_sync::finals_in_event(event, |interest_id| {
+            let _ = self.note_declare_final(interest_id);
+        });
+        #[cfg(not(all(feature = "session-reconnect", feature = "codec-declare")))]
+        let _ = event;
+    }
+
+    /// The peer's `Declare(DeclFinal)` for `interest_id` arrived: the node stops waiting for it.
+    /// Returns whether the node was waiting for it; a final for an interest it never sent, or one it
+    /// was not waiting for (a future-only interest, one already answered), changes nothing.
+    /// R311g1 — signature-stability: always `false` without `session-reconnect`.
+    pub fn note_declare_final(&self, interest_id: u64) -> bool {
+        #[cfg(feature = "session-reconnect")]
+        {
+            R::with_mutex_mut(&self.declaration_sync, |sync| sync.final_seen(interest_id))
+        }
+        #[cfg(not(feature = "session-reconnect"))]
+        {
+            let _ = interest_id;
+            false
+        }
+    }
+
+    /// Whether this session's declarations are SYNCED with its peer: no paced replay owes the peer
+    /// a declaration, and every interest the node sent that asks for what exists now has been
+    /// answered with a final, or has waited `DECLARATION_SYNC_FINAL_TIMEOUT_MS` and is given up on
+    /// (`docs/declaration-sync-pacing.md`, phase 3). A session that sent no interest and runs no
+    /// replay is synced.
+    ///
+    /// The peer's own initial final is not required: a router sends none to a client.
+    /// R311g1 — signature-stability: always `true` without `session-reconnect`, which has no
+    /// replay to run and no interest bookkeeping to wait on.
+    pub fn declarations_synced(&self) -> bool {
+        self.declarations_synced_at(self.clock.now_monotonic_ms())
+    }
+
+    /// [`Self::declarations_synced`] at the given time in milliseconds: the form a test gives a
+    /// time to, and the one [`Self::declarations_synced`] reads the clock for.
+    pub fn declarations_synced_at(&self, now_ms: u64) -> bool {
+        #[cfg(feature = "session-reconnect")]
+        {
+            // The two locks are taken one after the other, never together.
+            let replaying = R::with_mutex_mut(&self.declaration_cache, |cache| cache.replaying());
+            !replaying
+                && R::with_mutex_mut(&self.declaration_sync, |sync| {
+                    sync.is_synced(
+                        now_ms,
+                        crate::caps::DECLARATION_SYNC_FINAL_TIMEOUT_MS as u64,
+                    )
+                })
+        }
+        #[cfg(not(feature = "session-reconnect"))]
+        {
+            let _ = now_ms;
+            true
+        }
+    }
+
+    /// How many times the set of declarations this session holds has changed
+    /// ([`DeclarationCache::generation`]): a wait for the declarations to be stable reads it before
+    /// and after, and a change meanwhile restarts the wait. R311g1 — signature-stability: always `0`
+    /// without `session-reconnect`.
+    pub fn declaration_generation(&self) -> u64 {
+        #[cfg(feature = "session-reconnect")]
+        {
+            R::with_mutex_mut(&self.declaration_cache, |cache| cache.generation())
+        }
+        #[cfg(not(feature = "session-reconnect"))]
+        {
+            0
+        }
+    }
+
     /// Whether a paced replay ([`Self::begin_paced_replay`]) still owes the peer declarations: the
     /// host drives [`Self::replay_turn`] for as long as this is `true`. R311g1 —
     /// signature-stability: always `false` without `session-reconnect`.
@@ -14218,6 +14351,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// stays total across feature states.
     #[cfg(feature = "session-reconnect")]
     fn replay_one(&self, entry: CachedDeclaration) -> Result<(), ReplayDeclarationsError> {
+        // A replayed interest asks the new peer again, so its final is waited for again from the
+        // moment it is sent here, which is what keeps a paced replay's later interests from
+        // timing out while the replay is still on its way to them.
+        let expects_final = Self::final_expected_for(&entry);
+        self.replay_one_entry(entry)?;
+        if let Some(interest_id) = expects_final {
+            self.note_interest_sent(interest_id);
+        }
+        Ok(())
+    }
+
+    /// [`Self::replay_one`] without the bookkeeping: the arms of the match.
+    #[cfg(feature = "session-reconnect")]
+    fn replay_one_entry(&self, entry: CachedDeclaration) -> Result<(), ReplayDeclarationsError> {
         match entry {
             CachedDeclaration::Keyexpr { mapping_id, suffix } => {
                 #[cfg(feature = "declare-keyexpr")]

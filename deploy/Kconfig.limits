@@ -228,6 +228,16 @@ config WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES
 	  declaration-sync-pacing policy is on. It is read only when that policy is on.
 	  It must be at least 1: a turn that sends nothing would never finish.
 
+config WZ_LIMIT_DECLARATION_SYNC_FINAL_TIMEOUT_MS
+	int "DECLARATION_SYNC_FINAL_TIMEOUT_MS"
+	default 1000
+	help
+	  How long, in milliseconds, a node waits for the peer's answer to an interest it
+	  sent before it counts the interest as unanswered and goes on. It bounds the
+	  wait of declarations_synced and wait_declarations_stable: a peer that never
+	  answers an interest does not hold a node unsynced for ever. It is read whether
+	  or not the declaration-sync-pacing policy is on, and must be at least 1.
+
 config WZ_LIMIT_DECLARATION_SYNC_INTERVAL_MS
 	int "DECLARATION_SYNC_INTERVAL_MS"
 	default 10

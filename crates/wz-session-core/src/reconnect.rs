@@ -381,6 +381,10 @@ pub struct ReplayTurn {
 pub struct DeclarationCache {
     entries: alloc::vec::Vec<CachedDeclaration>,
     replay: Option<crate::replay_cursor::ReplayCursor>,
+    /// Counts every change to the set of declarations (a record, or a retraction that removed an
+    /// entry), so a wait for the declarations to be stable can tell that one was made while it
+    /// waited.
+    generation: u64,
 }
 
 impl DeclarationCache {
@@ -389,7 +393,15 @@ impl DeclarationCache {
         Self {
             entries: alloc::vec::Vec::new(),
             replay: None,
+            generation: 0,
         }
+    }
+
+    /// How many times the set of declarations has changed: it moves on every record and on every
+    /// retraction that removes an entry, and never on a replay turn, which changes what the peer
+    /// has been told and not what the node holds.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The recorded declarations in replay order.
@@ -414,6 +426,7 @@ impl DeclarationCache {
     pub fn record(&mut self, entry: CachedDeclaration) -> crate::replay_cursor::Insertion {
         let place = self.entries.len();
         self.entries.push(entry);
+        self.generation += 1;
         match &mut self.replay {
             Some(cursor) => {
                 let insertion = cursor.inserted(place);
@@ -438,6 +451,7 @@ impl DeclarationCache {
             return crate::replay_cursor::Removal::Retract;
         };
         self.entries.remove(place);
+        self.generation += 1;
         match &mut self.replay {
             Some(cursor) => {
                 let removal = cursor.removed(place);
@@ -1187,6 +1201,32 @@ mod declaration_cache_tests {
             !cache.replaying(),
             "a closed session leaves no replay behind"
         );
+    }
+
+    /// The generation moves when the set of declarations changes and only then: a record and a
+    /// retraction that removed an entry move it, a retraction that found nothing and a replay turn
+    /// do not.
+    #[test]
+    fn the_generation_moves_with_the_set_of_declarations_and_not_with_a_replay_turn() {
+        let mut cache = DeclarationCache::new();
+        assert_eq!(cache.generation(), 0);
+        assert_eq!(cache.record(keyexpr(1)), Insertion::EmitNow);
+        assert_eq!(cache.record(keyexpr(2)), Insertion::EmitNow);
+        assert_eq!(cache.generation(), 2);
+        assert_eq!(cache.retract(is_keyexpr(9)), Removal::Retract);
+        assert_eq!(cache.generation(), 2, "nothing was removed");
+        cache.begin_replay();
+        assert_eq!(cache.turn(1), 0..1);
+        cache.refused(0);
+        assert_eq!(
+            cache.generation(),
+            2,
+            "a replay changes what was told, not what is held"
+        );
+        // The refused send left the cursor at entry 0, so the replay has told the peer of neither:
+        // the retraction is silent, and the set of declarations changed all the same.
+        assert_eq!(cache.retract(is_keyexpr(1)), Removal::Silent);
+        assert_eq!(cache.generation(), 3);
     }
 
     /// Whatever the order of turns, live declarations and live retractions, the peer ends holding
