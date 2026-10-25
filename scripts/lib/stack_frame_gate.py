@@ -151,6 +151,17 @@ IMAGES = (
     # dial, a handshake and 4000 answered queries is 6,000 bytes of the main stack, so the chain
     # is above what a run reaches: it counts a call no run makes in that order. It is the figure a
     # change to the code moves, and is held for that.
+    #
+    # 7,128 bytes in the hosted image of 2026-10-25 (10 frames, 13 calls through a register not
+    # followed), 224 above the figure above: 208 of it is `wz_app_main`'s own frame (1,760 against
+    # 1,552), which holds the whole node's construction because `run` is inlined into it, and 16 is
+    # the frames beneath. What the node's construction gained since is the declared node's entities
+    # (a subscription's answer from a cell, the liveliness tokens), the listening acceptor and the
+    # group plane, each a value `ClientNode` holds and `run` takes apart; the two this image has
+    # (`Listening::NONE` and `NoPlane`) are zero-sized, so the growth is the code around them and
+    # not their storage. Read off the failing run's own report, not derived: the first run to show
+    # 7,064 (frame 1,688) is the one before the listener and the plane landed, and the commits in
+    # between are not separated further than that.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -158,7 +169,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=6904,
+        peak=7128,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
