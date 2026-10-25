@@ -69,6 +69,14 @@ num-traits = { version = "0.2", default-features = false }
 up_util = { package = "zenoh-util", version = "=1.10.1", features = ["test"] }
 wz_util = { package = "zenoh-util", path = "../../crates/wz-zenoh-util", features = ["test"] }
 humantime = "2"
+# `zenoh-config`: the pair again, each over its own family crates, each built with `unstable` (the
+# TOML reader and the unstable keys) and `internal`. `serde_yaml` and `json5` are what its files are
+# read with, one package for both crates, so the tests name them.
+up_config = { package = "zenoh-config", version = "=1.10.1", features = ["unstable", "internal"] }
+wz_config = { package = "zenoh-config", path = "../../crates/wz-zenoh-config", features = ["unstable", "internal"] }
+json5 = "0.4.1"
+serde_yaml = "0.9.34"
+serde = { version = "1", features = ["derive"] }
 # The timer tests implement `Timed`, whose method is an `async fn` of a trait: one package for both
 # crates.
 async-trait = "0.1"

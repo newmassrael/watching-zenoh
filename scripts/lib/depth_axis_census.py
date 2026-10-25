@@ -2841,7 +2841,10 @@ PIN_NO_SYMBOL = 0
 # R3650 -- 47 -> 48, one atom. `api-compat-rust`'s reason cites the test that runs the Windows half
 # of `zenoh-util` on a Windows host. READ off the census's own FAIL line, `wz citations: 48 against
 # a pin of 47`.
-PIN_WZ_CITATIONS = 48
+# R3664 -- 48 -> 51, one atom. `api-compat-rust`'s reason gains `zenoh-config`, which lands whole in
+# one slice, and cites the three tests that hold its files, its keys and its types to upstream's.
+# READ off the census's own FAIL line, `wz citations: 51 against a pin of 48`.
+PIN_WZ_CITATIONS = 51
 # R2626 — 44 -> 42, and this one is worth a sentence because it HELD through
 # every earlier retirement in this run (R2612, R2622). `time-hlc`'s reason is the
 # first retiree carrying AMBIGUOUS citations of its own: its oldest clauses cite

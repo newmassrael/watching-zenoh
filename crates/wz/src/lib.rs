@@ -97,6 +97,7 @@ pub mod zenoh_family {
     pub use zenoh_buffers;
     pub use zenoh_codec;
     pub use zenoh_collections;
+    pub use zenoh_config;
     pub use zenoh_core;
     pub use zenoh_keyexpr;
     pub use zenoh_macros;

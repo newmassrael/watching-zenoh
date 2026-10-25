@@ -166,7 +166,16 @@ original reproduced by naming it. Three things follow from it:
   or short socket address and reads the scope identifier from its own field, the Windows interface
   index is the one of the address's family, and the timer drops an event whose future a clone
   shares, where upstream panics or asks the first adapter for ever or ends the timer or loses the
-  IPv6 addresses; the Windows half is run on a Windows host by the unit tests of `ffi/win.rs`)
+  IPv6 addresses; the Windows half is run on a Windows host by the unit tests of `ffi/win.rs`),
+  `zenoh-config` (surface complete in one slice: `Config` and its validated keys, the files it is
+  read from, the values that depend on the mode, the defaults, the connection retry, the quality
+  of service rules, the gateway, the wrappers of the identifiers and the plugin section, 523 of
+  523 lines in each of the arms `default`, `unstable` and `transport_tcp`; held to upstream's by
+  files of every kind and the includes between them, by every key given every value, by the
+  validators and by the types of the values read from three formats; a path whose extension is
+  not UTF-8 is refused where upstream panics, a priority that is a positive integer is taken by
+  JSON and YAML where upstream's visitor refuses it, and a range of payload sizes with a bound
+  left out comes back as written where upstream writes the bound as 0)
   and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each

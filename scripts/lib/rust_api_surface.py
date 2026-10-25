@@ -175,6 +175,9 @@ MEMBERS: tuple[Member, ...] = (
            {"default": 0, "test": 0}, split_wz=True),
     Member("zenoh-util", "zenoh_util", "zenoh-util", (("default", ""), ("test", "test")),
            {"default": 0, "test": 0}, split_wz=True),
+    Member("zenoh-config", "zenoh_config", "zenoh-config",
+           (("default", ""), ("unstable", "unstable"), ("transport_tcp", "transport_tcp")),
+           {"default": 0, "unstable": 0, "transport_tcp": 0}, split_wz=True),
 )
 
 

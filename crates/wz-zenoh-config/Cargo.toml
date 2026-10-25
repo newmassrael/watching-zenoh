@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# This package reproduces the public API and the documentation of the crate of the same name of
+# eclipse-zenoh/zenoh, which is EPL-2.0 OR Apache-2.0, so the whole package is under that expression.
+# The notices of the upstream files it derives from are kept in its sources (see LICENSES/ and
+# THIRD_PARTY.md at the root of this repository).
+#
+# zenoh-config -- the configuration of a zenoh session as Rust types: the `Config` that a user fills
+# in or reads from a JSON5 or YAML file, its validated keys, the defaults of each mode, the
+# connection retry and the quality of service rules, over watching-zenoh (inventory atom
+# `api-compat-rust`, open-debt item 910, docs/build-configuration.md C13).
+#
+# Named `zenoh-config` and versioned as the pinned zenoh, like every crate of the family (see
+# `../wz-zenoh-result/Cargo.toml` for why the name is the mechanism). `zenoh` takes its `Config`
+# from this crate and the plugins read their section of it, so an ecosystem crate that names
+# `zenoh_config::Config` must meet the one of this graph.
+
+[package]
+name = "zenoh-config"
+version = "1.10.1"
+edition.workspace = true
+rust-version.workspace = true
+license = "EPL-2.0 OR Apache-2.0"
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Configuration of the zenoh family (1.10.1), as a drop-in over watching-zenoh."
+
+[lib]
+name = "zenoh_config"
+path = "src/lib.rs"
+
+# Upstream's three features by their names: `transport_tcp` changes the default of the TCP
+# transport, `unstable` adds the unstable keys (and the TOML reader), and `internal` is a marker
+# the zenoh crate turns on for its own members.
+[features]
+internal = []
+transport_tcp = []
+unstable = ["dep:toml", "zenoh-protocol/unstable"]
+
+[dependencies]
+json5 = "0.4.1"
+nonempty-collections = { version = "0.3.1", features = ["serde"] }
+num_cpus = "1.17.0"
+secrecy = { version = "0.8.0", features = ["alloc", "serde"] }
+serde = { version = "1.0.225", features = ["derive"] }
+serde_json = "1.0.145"
+serde_with = "3.14.1"
+serde_yaml = "0.9.34"
+toml = { version = "0.9.6", optional = true }
+tracing = "0.1.41"
+uhlc = { version = "0.8.0", default-features = false }
+validated_struct = { version = "2.2.0", features = ["json5", "json_get"] }
+zenoh-core = { path = "../wz-zenoh-core" }
+zenoh-keyexpr = { path = "../wz-zenoh-keyexpr", default-features = false }
+zenoh-macros = { path = "../wz-zenoh-macros" }
+zenoh-protocol = { path = "../wz-zenoh-protocol", default-features = false }
+zenoh-result = { path = "../wz-zenoh-result", default-features = false }
+zenoh-util = { path = "../wz-zenoh-util" }
+
+[lints]
+workspace = true
