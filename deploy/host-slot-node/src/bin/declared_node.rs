@@ -26,7 +26,7 @@ use host_slot_node_glue::fresh_zid;
 #[cfg(feature = "tls")]
 use host_slot_node_glue::tls;
 use host_slot_node_glue::tuning::{
-    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RX, SESSIONS, TASKS, TASK_BYTES_ANSWERING,
+    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RX, SESSIONS, TASKS, TASK_BYTES_PUBLISHING,
     TIMERS, TX,
 };
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
@@ -41,9 +41,10 @@ use wz_session_core::sample_kind::SampleKind;
 use wz_session_mcu::connect_manager::StaticEndpoints;
 use wz_session_mcu::latest::{LatestCells, LatestRef, LatestWatch};
 use wz_session_mcu::slot_node::{
-    documents_of, Answering, BodyPool, ClientNode, Declared, Entities, Mirror, NodeApp, NodeHandle,
+    documents_of, BodyPool, ClientNode, Declared, Entities, Mirror, NodeApp, NodeHandle,
     NodeIdentity, NodePort, NodeStorage, Subscription,
 };
+use wz_session_mcu::slot_publisher::{Publication, PublishCounts, PublishWatch, Publishing};
 
 wz_runtime_posix::posix_image_no_heap!();
 
@@ -53,8 +54,8 @@ mod declared {
 }
 
 use declared::{
-    DECLARATION_SHA256, DOCS, DOCUMENTS, MIRRORED, MIRRORS, NODE_ID, ROUTER, SAMPLE_MAX,
-    SUBSCRIBERS, SUBSCRIPTIONS, TLS,
+    DECLARATION_SHA256, DOCS, DOCUMENTS, MIRRORED, MIRRORS, NODE_ID, PUBLISHED, PUBLISHERS, ROUTER,
+    SAMPLE_MAX, SUBSCRIBERS, SUBSCRIPTIONS, TLS,
 };
 
 /// The declarations the node sends on a session: its documents, the queryables that answer from a
@@ -113,6 +114,20 @@ const _: () = {
         at += 1;
     }
 };
+const _: () = {
+    let mut at = 0;
+    while at < PUBLISHERS {
+        assert!(
+            PUBLISHED[at].1 >= 1,
+            "a publisher has a period of no milliseconds"
+        );
+        assert!(
+            PUBLISHED[at].2 <= DOC_MAX,
+            "a publisher puts a document longer than the body pool"
+        );
+        at += 1;
+    }
+};
 const _: () = assert!(
     TLS == cfg!(feature = "tls"),
     "the declaration's endpoint is `tls/` exactly when the node is built with the `tls` feature"
@@ -137,7 +152,7 @@ type Stack = tls::Stack;
 /// The node's big tables, in one `static` whose initial value is ALL ZERO BYTES, so the linker
 /// places it in `.bss` and not in `.data`.
 type Storage =
-    NodeStorage<Clock, Stack, PosixEntropy, TASKS, TASK_BYTES_ANSWERING, TIMERS, SESSIONS, RX, TX>;
+    NodeStorage<Clock, Stack, PosixEntropy, TASKS, TASK_BYTES_PUBLISHING, TIMERS, SESSIONS, RX, TX>;
 
 static NODE: Storage = Storage::new();
 
@@ -152,6 +167,9 @@ static DECLARED: Declared<DECLS> = Declared::new();
 
 /// The latest sample of each subscription, in the cells the declaration sized.
 static CELLS: LatestCells<SUBSCRIBERS, SAMPLE_MAX> = LatestCells::new();
+
+/// How many puts each publisher sent and had refused.
+static COUNTS: PublishCounts<PUBLISHERS> = PublishCounts::new();
 
 /// The name this front end's console lines carry.
 struct Console;
@@ -194,16 +212,34 @@ fn mirrors() -> [Mirror; MIRRORS] {
     })
 }
 
+/// The publications the declaration chose: each key, its period and a document of the declared
+/// length, a prefix of the body pool.
+fn publications() -> [Publication; PUBLISHERS] {
+    core::array::from_fn(|at| Publication {
+        key: PUBLISHED[at].0,
+        period_ms: PUBLISHED[at].1,
+        body: BODY.text(PUBLISHED[at].2).unwrap_or(""),
+    })
+}
+
 /// What the node says when a subscription takes a sample: the console line a lab waits for, once for
 /// each round that found a cell moved. The payload is in hex, so the line is one line whatever the
 /// bytes are; `seq` is how many samples the cell has taken, so a run of samples that arrived between
-/// two rounds shows as a jump.
+/// two rounds shows as a jump. A publisher is said the same way, as `HOST-WZ-PUBLISHED <key>
+/// sent=<n> refused=<n>`, once for each round that found its counts moved.
 struct Report {
     watch: LatestWatch<SUBSCRIBERS>,
+    published: PublishWatch<PUBLISHERS>,
 }
 
 impl NodeApp for Report {
     fn after_tick(&mut self, _now_ms: u64, _node: &dyn NodeHandle) -> ControlFlow<i32> {
+        self.published.poll(&COUNTS, |at, sent, refused| {
+            log_args(format_args!(
+                "HOST-WZ-PUBLISHED {} sent={} refused={}",
+                PUBLISHED[at].0, sent, refused
+            ));
+        });
         self.watch.poll(&CELLS, SUBSCRIBERS, |_, sample| {
             let mut hex = [0u8; 2 * SAMPLE_MAX];
             for (at, byte) in sample.payload.iter().enumerate() {
@@ -292,7 +328,10 @@ fn run() -> i32 {
             subscriptions: &subscribed,
             mirrors: &mirrored,
         },
-        layer: Answering,
+        layer: Publishing {
+            publications: publications(),
+            counts: &COUNTS,
+        },
         idle_sleep_us: IDLE_SLEEP_US,
         report_every_ms: 0,
     };
@@ -300,6 +339,7 @@ fn run() -> i32 {
     // `host-slot-node` says, so a lab that waits for it waits for either.
     let mut report = Report {
         watch: LatestWatch::new(),
+        published: PublishWatch::new(),
     };
     node.run(
         &mut HostPort::<Console>::new(),

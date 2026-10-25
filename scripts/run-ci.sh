@@ -11340,6 +11340,11 @@ layer_c1m_session_lwip() {
     # loop's watch that says each new sample once.
     _runci_guarded_test "C1m mcu latest sample" 8 \
         cargo test -p wz-session-mcu --features client-slot --lib latest::tests --quiet || return 1
+    # The publisher (`slot_publisher`, the same profile): the schedule (the first put at once, the
+    # cadence kept on the grid, a late loop sending once, a retry soon, a lost session starting
+    # over, a period of zero not a spin) and the counts and the watch that says them.
+    _runci_guarded_test "C1m mcu publisher" 10 \
+        cargo test -p wz-session-mcu --features client-slot --lib slot_publisher::tests --quiet || return 1
     # R3167 moved EVERY wz-session-lwip leg below by FIVE, and the legs that turn
     # on `codec-push` by SIX: the driver's lend tests (the datagram equals the
     # copying send's, the size written, an abandoned lend, the table of places,
@@ -19889,15 +19894,24 @@ layer_z_zenohd_interop() {
     # both directions, so the node is judged by a peer it shares no code with. Two legs: a put is
     # kept and the answer follows the latest; another key is not kept, a payload over the
     # declared size is cut, and a delete empties the answer.
-    local decl_pkg decl_rc=0
+    local decl_pkg decl_rc=0 decl_node
     decl_pkg="$(mktemp -d)" || return 1
-    python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc --artifact declared-node \
-        --node slot-recorder --out "$decl_pkg/pkg" || decl_rc=1
-    [ "$decl_rc" -eq 0 ] && { [ -x "$decl_pkg/pkg/bin/declared-node" ] \
-        || { echo "  Zdecl FAIL: the packaged node is not executable"; decl_rc=1; }; }
+    for decl_node in slot-recorder slot-reporter; do
+        [ "$decl_rc" -eq 0 ] || break
+        python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc --artifact declared-node \
+            --node "$decl_node" --out "$decl_pkg/$decl_node" || decl_rc=1
+        [ "$decl_rc" -eq 0 ] && { [ -x "$decl_pkg/$decl_node/bin/declared-node" ] \
+            || { echo "  Zdecl FAIL: the packaged $decl_node is not executable"; decl_rc=1; }; }
+    done
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zdecl 2 env WZ_ZENOHD_BIN="$zenohd" \
-        WZ_DECLARED_NODE_RECORDER="$decl_pkg/pkg/bin/declared-node" \
+        WZ_DECLARED_NODE_RECORDER="$decl_pkg/slot-recorder/bin/declared-node" \
         cargo test -p wz-integration-tests --test wz_declared_node_zenohd_interop \
+        -- --ignored --quiet --test-threads=1 || decl_rc=1; }
+    # The publisher, the same way: the router's REST stream shows the declared document on the
+    # declared period, and the node puts again with the session that follows a router restart.
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zpub 2 env WZ_ZENOHD_BIN="$zenohd" \
+        WZ_DECLARED_NODE_REPORTER="$decl_pkg/slot-reporter/bin/declared-node" \
+        cargo test -p wz-integration-tests --test wz_declared_publisher_zenohd_interop \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     rm -rf "$decl_pkg"
     [ "$decl_rc" -eq 0 ] || return 1

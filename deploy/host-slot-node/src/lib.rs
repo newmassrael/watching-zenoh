@@ -49,6 +49,13 @@ pub mod tuning {
     /// cell is for. Measured the same day: the asking node is refused at 2,304 bytes and held at
     /// 2,560; the cell is the next step up with about a fifth to spare.
     pub const TASK_BYTES_ASKING: usize = 3072;
+    /// Bytes of one task cell of a node that PUBLISHES: what the answering node keeps, and a handle to
+    /// its own session, the schedule and the publications of at most four publishers (a declaration
+    /// holds no more, `wz_node.py`). Not found by the search the two numbers above were: it is the
+    /// asking node's cell, the next step up from what the answering node needs, and a task a cell
+    /// cannot hold is refused and said on the console, so the node that does not start says why. The
+    /// interop run of a publishing node starts a session in it.
+    pub const TASK_BYTES_PUBLISHING: usize = 3072;
     /// Timers the runtime holds: the handshake and lease deadlines of the session.
     pub const TIMERS: usize = 4;
     /// The batch the node advertises: an Ethernet frame less the IPv4 and UDP headers, as the kit's.

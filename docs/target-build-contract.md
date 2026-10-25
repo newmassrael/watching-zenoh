@@ -568,8 +568,25 @@ plugin on both sides: a put it routes reaches the subscription, and a get it rou
 from the latest sample (`wz_declared_node_zenohd_interop.rs`, which runs the file the entry
 packaged).
 
+**Publisher (landed).** `kind = "publisher"`, `key` (a literal key, not a pattern), `period_ms` and
+`document_bytes`: while a session is established the node puts a document of that length on that
+key, the first put when the session is established and then every period. The session's own
+application layer does it, inside its event (`wz_session_mcu::slot_publisher`): after it has
+dispatched what the iteration brought it asks a pure schedule what is due, sends each due put,
+and tells the drive loop the moment it needs to be awake next, which the loop budgets its wait
+by with the transport's own. Nothing runs on the program's main loop and nothing waits in a
+mailbox, so the cadence is the session's. A loop that was late sends one put and counts again
+from there, a put the session cannot take (between transports) is tried again after 10 ms and is
+not counted, and a session that is lost starts over with the next one. The node says what it
+published (`HOST-WZ-PUBLISHED <key> sent=<n> refused=<n>`, once for each round that found the
+counts moved). A node holds at most four publishers, the size of their schedule in the
+session's task cell, and the task cell of a declared node is the larger one. The witness is the
+reference router's REST SSE stream: the declared document, eight bytes of `x`, arrives about
+every 200 ms, and it arrives again from the next session after the router is stopped and
+started (`wz_declared_publisher_zenohd_interop.rs`).
+
 Not written: the entities the slot profile does not build yet (a listening endpoint, multicast, a
-publisher, a token, a querier), each of which is a change to the profile before it is a word the
+token, a querier), each of which is a change to the profile before it is a word the
 declaration accepts; a port of the declared node for QNX or Android; and the budgets that are
 still tuning constants of the library (the task cells, the receive and send storage), which the
 declaration cannot state.

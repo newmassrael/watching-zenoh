@@ -25,7 +25,9 @@ not build the node.
     [[endpoint]]               role = "dial", locator = "<scheme>/<a.b.c.d>:<port>"
     [[entity]]                 kind = "queryable", key, and document_bytes (a fixed document) or
                                from = "<subscriber key>" (the latest sample of that subscription);
-                               kind = "subscriber", key, sample_bytes (the payload bytes it keeps)
+                               kind = "subscriber", key, sample_bytes (the payload bytes it keeps);
+                               kind = "publisher", key, period_ms, document_bytes (the document it
+                               puts on that key every period)
     [limits]                   <LIMIT_ID> = <integer>, any limit `deploy/wz-config.toml` declares
 
 ## What it refuses, and why that is an exit and not a skip
@@ -71,7 +73,7 @@ ENDPOINT_ROLES = ("dial", "listen", "multicast")
 ENTITY_KINDS = ("publisher", "subscriber", "queryable", "querier", "liveliness-token")
 NODE_KEYS = {"id", "help", "target"}
 ENDPOINT_KEYS = {"role", "locator"}
-ENTITY_KEYS = {"kind", "key", "document_bytes", "sample_bytes", "from"}
+ENTITY_KEYS = {"kind", "key", "document_bytes", "sample_bytes", "from", "period_ms"}
 TOP_KEYS = {"node", "endpoint", "entity", "limits"}
 
 # What each target builds. `slot` is the per-session fixed-memory profile of the cooperative runtime:
@@ -84,17 +86,21 @@ TARGETS = {
         "max_endpoints": 1,
         "endpoint_roles": {"dial"},
         "schemes": ("tcp", "udp", "tls"),
-        "entity_kinds": {"queryable", "subscriber"},
+        "entity_kinds": {"queryable", "subscriber", "publisher"},
         # `DOC_MAX` of the same file: the static every document is a prefix of.
         "document_max": 4096,
         # The bytes of a payload a subscription keeps (`LatestCells` of `wz_session_mcu::latest`).
         "sample_max": 4096,
+        # What a publisher puts: one document, at most what a frame carries with room to spare, and
+        # the schedules of at most `max_publishers` in the session's task cell.
+        "publish_max": 1024,
+        "max_publishers": 4,
+        "period_max": 3_600_000,
         "refused": {
             "listen": "the slot node holds one session that it dials; it has no accept loop",
             "multicast": "the multicast group session has a slot table but no node that joins "
             "one yet",
-            "publisher": "the slot node declares queryables and subscriptions only",
-            "liveliness-token": "the slot node declares queryables and subscriptions only",
+            "liveliness-token": "the slot node declares queryables, subscriptions and publishers only",
             "querier": "the slot node's getter is a plan its arguments drive (a lab tool), not an "
             "entity a declaration can state",
         },
@@ -190,10 +196,10 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             if any(int(match[o]) > 255 for o in "abcd") or not 1 <= int(match["port"]) <= 65535:
                 out.append(f"{who}: locator {ep['locator']!r} has an octet above 255 or a port outside 1..65535")
 
-    seen: dict[str, set[str]] = {"queryable": set(), "subscriber": set()}
+    seen: dict[str, set[str]] = {"queryable": set(), "subscriber": set(), "publisher": set()}
     sample_sizes: dict[str, int] = {}
     mirrors: list[tuple[str, object]] = []
-    queryables = subscribers = 0
+    queryables = subscribers = publishers = 0
     for n, ent in enumerate(data.get("entity", []), 1):
         who = f"entity {n}"
         for extra in sorted(set(ent) - ENTITY_KEYS):
@@ -207,6 +213,9 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             continue
         queryables += kind == "queryable"
         subscribers += kind == "subscriber"
+        publishers += kind == "publisher"
+        if kind != "publisher" and "period_ms" in ent:
+            out.append(f"{who}: only a publisher has a `period_ms`")
         key = ent.get("key")
         why = key_problem(key, values["MAX_KEYEXPR_BYTES"]) if isinstance(key, str) else "is missing"
         if why:
@@ -225,6 +234,19 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
             elif isinstance(key, str):
                 sample_sizes[key] = size
             continue
+        if kind == "publisher":
+            for extra in ("sample_bytes", "from"):
+                if extra in ent:
+                    out.append(f"{who}: a publisher puts a document of its own and has no `{extra}`")
+            if isinstance(key, str) and ("*" in key or "$" in key):
+                out.append(f"{who}: a publisher puts on one key, and {key!r} is a pattern (`*` or `$`)")
+            period = ent.get("period_ms")
+            if isinstance(period, bool) or not isinstance(period, int) or not 1 <= period <= target["period_max"]:
+                out.append(f"{who}: period_ms is {period!r}, not an integer from 1 to {target['period_max']}")
+            size = ent.get("document_bytes")
+            if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= target["publish_max"]:
+                out.append(f"{who}: document_bytes is {size!r}, not an integer from 0 to {target['publish_max']}")
+            continue
         if "sample_bytes" in ent:
             out.append(f"{who}: a queryable has no `sample_bytes`; the subscription it answers from has")
         if "from" in ent:
@@ -242,6 +264,9 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         elif sample_sizes.get(source, 0) > values["MAX_REPLY_PAYLOAD_BYTES"]:
             out.append(f"{who}: the subscription {source!r} keeps {sample_sizes[source]} bytes, more than a "
                        f"reply holds (MAX_REPLY_PAYLOAD_BYTES is {values['MAX_REPLY_PAYLOAD_BYTES']})")
+    if publishers > target["max_publishers"]:
+        out.append(f"{publishers} publishers; the {node['target']} target keeps the schedule of "
+                   f"{target['max_publishers']} in the session's task cell")
     stated = data.get("limits", {})
     for name, need, what in (("MAX_QUERYABLES", queryables, "queryables"),
                              ("MAX_SUBSCRIPTIONS", subscribers, "subscriptions")):
@@ -287,6 +312,8 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
     place = {k: at for at, (k, _) in enumerate(subscribed)}
     mirrored = [(e["key"], place[e["from"]]) for e in every if e["kind"] == "queryable" and "from" in e]
     mirrors = ", ".join(f"({rust_string(k)}, {at})" for k, at in mirrored)
+    published = [(e["key"], e["period_ms"], e["document_bytes"]) for e in every if e["kind"] == "publisher"]
+    pubs = ", ".join(f"({rust_string(k)}, {p}, {b})" for k, p, b in published)
     return "\n".join(
         [
             f"// {wz_config.SPDX}",
@@ -313,6 +340,9 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             "/// The queryables that answer from a subscription: (key, index into `SUBSCRIPTIONS`).",
             f"pub const MIRRORS: usize = {len(mirrored)};",
             f"pub const MIRRORED: [(&str, usize); {len(mirrored)}] = [{mirrors}];",
+            "/// The publishers: (key, the period in milliseconds, the bytes of the document it puts).",
+            f"pub const PUBLISHERS: usize = {len(published)};",
+            f"pub const PUBLISHED: [(&str, u32, usize); {len(published)}] = [{pubs}];",
             "",
         ]
     )
@@ -505,8 +535,38 @@ def _selftest() -> int:
             SAMPLE.replace('role = "dial"', 'role = "listen"'), "no accept loop")
     refuses("a multicast endpoint", SAMPLE.replace('role = "dial"', 'role = "multicast"'), "not built on slot")
     refuses("a role outside the vocabulary", SAMPLE.replace('role = "dial"', 'role = "dail"'), "not one of dial")
-    refuses("a publisher is refused, not dropped", SAMPLE.replace('kind = "queryable"', 'kind = "publisher"'),
+    refuses("a querier is refused, not dropped", SAMPLE.replace('kind = "queryable"', 'kind = "querier"'),
             "not built on slot")
+    refuses("a liveliness token is refused, not dropped",
+            SAMPLE.replace('kind = "queryable"', 'kind = "liveliness-token"'), "not built on slot")
+
+    # A publisher puts a document of its own on one key, every period.
+    pub = '\n[[entity]]\nkind = "publisher"\nkey = "lab/out/beat"\nperiod_ms = 200\ndocument_bytes = 8\n'
+    expect("a publisher is a valid entity", problems(SAMPLE + pub) == [])
+    puts = emit("n", wz_config.read_decl_toml(SAMPLE + pub), sha)
+    expect("the publisher, its period and its document are generated",
+           'pub const PUBLISHED: [(&str, u32, usize); 1] = [("lab/out/beat", 200, 8)];' in puts
+           and "pub const PUBLISHERS: usize = 1;" in puts)
+    expect("a node with no publisher declares none",
+           "pub const PUBLISHERS: usize = 0;" in rs and "pub const PUBLISHED: [(&str, u32, usize); 0] = [];" in rs)
+    expect("a publisher decides no budget", budgets(wz_config.read_decl_toml(SAMPLE + pub), decl)
+           == budgets(data, decl))
+    refuses("a publisher with no period", SAMPLE + pub.replace("period_ms = 200\n", ""), "period_ms is None")
+    refuses("a period of zero", SAMPLE + pub.replace("200", "0"), "period_ms is 0")
+    refuses("a period above the target's", SAMPLE + pub.replace("200", "3600001"), "period_ms is 3600001")
+    refuses("a publisher with no document", SAMPLE + pub.replace("document_bytes = 8\n", ""), "document_bytes is None")
+    refuses("a document above what a put carries", SAMPLE + pub.replace("= 8\n", "= 1025\n"), "document_bytes is 1025")
+    refuses("a publisher of a pattern", SAMPLE + pub.replace("lab/out/beat", "lab/out/*"), "is a pattern")
+    refuses("a publisher of a pattern with $", SAMPLE + pub.replace("lab/out/beat", "lab/out/$*"), "is a pattern")
+    refuses("a publisher with a source", SAMPLE + pub + 'from = "lab/in/a"\n', "has no `from`")
+    refuses("a publisher with a sample size", SAMPLE + pub + "sample_bytes = 4\n", "has no `sample_bytes`")
+    refuses("a period on a queryable", SAMPLE.replace("512", "512\nperiod_ms = 5"), "only a publisher has a `period_ms`")
+    refuses("a period on a subscriber", SAMPLE + sub + "period_ms = 5\n", "only a publisher has a `period_ms`")
+    refuses("two publishers of one key", SAMPLE + pub + pub, "declared twice")
+    refuses("more publishers than the task cell keeps",
+            SAMPLE + "".join(pub.replace("lab/out/beat", f"lab/out/{i}") for i in range(5)), "5 publishers")
+    expect("a publisher and a subscriber of one key are not a duplicate",
+           problems(SAMPLE + sub + pub.replace("lab/out/beat", "lab/in/a")) == [])
     refuses("a subscription with no size", SAMPLE + '\n[[entity]]\nkind = "subscriber"\nkey = "lab/in/a"\n',
             "sample_bytes is None")
     refuses("a subscription of no bytes", SAMPLE + sub.replace("64", "0"), "sample_bytes is 0")

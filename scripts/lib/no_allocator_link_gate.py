@@ -577,6 +577,20 @@ IMAGES: dict[str, Image] = {
                 ),
                 label="linux-x86_64-slot-recorder",
             ),
+            # A node that publishes: the schedule lives in the session's task cell and the counts in
+            # a zeroed static; it states no budget of its own (`wz_node.py --env slot-reporter`).
+            Build(
+                HOST,
+                None,
+                ("declared",),
+                env=(
+                    (
+                        "WZ_DECLARED_RS",
+                        str(REPO_ROOT / "deploy" / "nodes" / "generated" / "slot-reporter.rs"),
+                    ),
+                ),
+                label="linux-x86_64-slot-reporter",
+            ),
         ),
     ),
     # The wz half of the zenoh-pico comparison image: the CYT4BF MAC behind Zephyr's Ethernet

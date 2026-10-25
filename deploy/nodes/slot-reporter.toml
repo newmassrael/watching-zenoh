@@ -1,0 +1,25 @@
+# A node declaration (docs/target-build-contract.md section 5b), checked by scripts/lib/wz_node.py.
+#
+# A fixed-memory node that publishes: it dials one router and, while the session is up, puts an
+# eight-byte document on `lab/out/beat` every 200 ms, on the per-session slot profile (no
+# allocator). The first put goes out when the session is established.
+#
+# The endpoint is this machine's loopback on a port of its own, because this is the node the
+# interop test builds and runs against the reference router
+# (crates/wz-integration-tests/tests/wz_declared_publisher_zenohd_interop.rs): the locator is part of
+# what the node IS, so the router it is tested against listens there.
+
+[node]
+id = "slot-reporter"
+help = "A fixed-memory client that dials a router over TCP and puts a document on one key every period."
+target = "slot"
+
+[[endpoint]]
+role = "dial"
+locator = "tcp/127.0.0.1:17472"
+
+[[entity]]
+kind = "publisher"
+key = "lab/out/beat"
+period_ms = 200
+document_bytes = 8
