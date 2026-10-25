@@ -5,8 +5,9 @@
 //!
 //! [`PosixTcpSocket`] is the socket `wz_runtime_coop::stream_link` is written against
 //! ([`StreamSocket`]), and [`PosixTcpDial`] the dial a stack opens it with ([`StreamDial`]); the
-//! session's link over it is that module's `StreamDriver`. Nothing here allocates: the socket is a
-//! file descriptor and its two ends.
+//! session's link over it is that module's `StreamDriver`. [`PosixTcpListener`] is the other
+//! direction ([`StreamListen`]): the port a node accepts connections on, yielding the same
+//! socket. Nothing here allocates: the socket is a file descriptor and its two ends.
 //!
 //! The socket blocks on a write and never on a read: a write returns once the kernel has taken
 //! every byte (a length and its batch go out in one `sendmsg`), and a read is `MSG_DONTWAIT`, the
@@ -20,7 +21,7 @@ use core::mem::size_of;
 use wz_runtime_coop::session_drive::LinkOpenError;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use wz_runtime_coop::session_drive::LinkReadiness;
-use wz_runtime_coop::stream_link::{StreamDial, StreamSocket};
+use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 
 use crate::net::{errno, sockaddr, PosixNetError};
 
@@ -52,6 +53,27 @@ fn name_of(
     ))
 }
 
+/// Switch the boolean socket option `name` of `level` on for `fd`: the `errno` when the kernel
+/// refuses.
+fn set_flag(fd: c_int, level: c_int, name: c_int) -> Result<(), c_int> {
+    let one: c_int = 1;
+    // SAFETY: `one` is a live `c_int` and the length passed is its size.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            name,
+            (&one as *const c_int).cast(),
+            size_of::<c_int>() as libc::socklen_t,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(errno())
+    }
+}
+
 impl PosixTcpSocket {
     /// Connect to `addr:port`, blocking until the connection is made or refused.
     pub fn connect(addr: [u8; 4], port: u16) -> Result<Self, PosixNetError> {
@@ -66,20 +88,7 @@ impl PosixTcpSocket {
             local: ([0; 4], 0),
             peer: (addr, port),
         };
-        let one: c_int = 1;
-        // SAFETY: `one` is a live `c_int` and the length passed is its size.
-        let rc = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_TCP,
-                libc::TCP_NODELAY,
-                (&one as *const c_int).cast(),
-                size_of::<c_int>() as libc::socklen_t,
-            )
-        };
-        if rc != 0 {
-            return Err(PosixNetError::NoDelay(errno()));
-        }
+        set_flag(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY).map_err(PosixNetError::NoDelay)?;
         let peer = sockaddr(addr, port);
         // SAFETY: `peer` is a live `sockaddr_in` of the length passed.
         let rc = unsafe {
@@ -112,6 +121,137 @@ impl StreamDial for PosixTcpDial {
             PosixNetError::Socket(_) => LinkOpenError::Exhausted,
             _ => LinkOpenError::Refused,
         })
+    }
+}
+
+/// A TCP port the host listens on: the half of the seam [`PosixTcpDial`] is not, handing the stack
+/// the connections that arrive as the same [`PosixTcpSocket`] a dial yields.
+///
+/// The listening descriptor never blocks (`accept` answers at once, and the node's loop is what
+/// waits), and `SO_REUSEADDR` is set so that a node restarted on its port is not kept off it by
+/// the closed connections the kernel still holds.
+pub struct PosixTcpListener {
+    fd: c_int,
+    local: ([u8; 4], u16),
+}
+
+impl PosixTcpListener {
+    /// The connections that may queue on the port before the kernel refuses new ones: a node
+    /// takes them off in its next loop pass, so a handful covers clients arriving together.
+    const BACKLOG: c_int = 8;
+
+    /// Listen on `addr:port` (port 0: the kernel picks one, read back with
+    /// [`StreamListen::local`]).
+    pub fn bind(addr: [u8; 4], port: u16) -> Result<Self, PosixNetError> {
+        // SAFETY: plain system call with value arguments.
+        let fd = unsafe {
+            libc::socket(
+                libc::AF_INET,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+                0,
+            )
+        };
+        if fd < 0 {
+            return Err(PosixNetError::Socket(errno()));
+        }
+        // Owned from here, so an early return closes it.
+        let mut this = Self {
+            fd,
+            local: (addr, port),
+        };
+        set_flag(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR).map_err(PosixNetError::ReuseAddr)?;
+        let at = sockaddr(addr, port);
+        // SAFETY: `at` is a live `sockaddr_in` of the length passed.
+        let rc = unsafe {
+            libc::bind(
+                fd,
+                (&at as *const libc::sockaddr_in).cast(),
+                size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            return Err(PosixNetError::Bind(errno()));
+        }
+        // SAFETY: plain system call with value arguments.
+        if unsafe { libc::listen(fd, Self::BACKLOG) } != 0 {
+            return Err(PosixNetError::Listen(errno()));
+        }
+        this.local = name_of(fd, libc::getsockname).map_err(PosixNetError::SockName)?;
+        Ok(this)
+    }
+}
+
+impl StreamListen for PosixTcpListener {
+    type Stream = PosixTcpSocket;
+
+    fn local(&self) -> ([u8; 4], u16) {
+        self.local
+    }
+
+    fn accept(&self) -> Result<Option<PosixTcpSocket>, LinkOpenError> {
+        // SAFETY: a null address and length ask for no peer name; the descriptor is this
+        // listener's own. The accepted socket is close-on-exec and blocking, as a dialled one is:
+        // its reads are `MSG_DONTWAIT` and its writes wait for the kernel.
+        let fd = unsafe {
+            libc::accept4(
+                self.fd,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                libc::SOCK_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return match errno() {
+                // Nothing waits, or the connection gave up before it was taken; the accept(2)
+                // errors it lists for retrying "as for EAGAIN" are connections the network
+                // dropped on the way, which leave nothing to take either.
+                libc::EAGAIN
+                | libc::EINTR
+                | libc::ECONNABORTED
+                | libc::EPROTO
+                | libc::ENETDOWN
+                | libc::ENOPROTOOPT
+                | libc::EHOSTDOWN
+                | libc::ENONET
+                | libc::EHOSTUNREACH
+                | libc::EOPNOTSUPP
+                | libc::ENETUNREACH => Ok(None),
+                // No descriptor or memory to give it: the connection stays queued and a later
+                // call tries again, as a full table is retried.
+                libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM => {
+                    Err(LinkOpenError::Exhausted)
+                }
+                // The descriptor itself is bad: no later call mends it.
+                _ => Err(LinkOpenError::Unsupported),
+            };
+        }
+        // Owned from here, so an early return closes it.
+        let mut socket = PosixTcpSocket {
+            fd,
+            local: ([0; 4], 0),
+            peer: ([0; 4], 0),
+        };
+        // A connection reset between the accept and these calls is one that gave up: nothing to
+        // take, and the close above is the answer its peer already has.
+        if set_flag(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY).is_err() {
+            return Ok(None);
+        }
+        let (Ok(local), Ok(peer)) = (
+            name_of(fd, libc::getsockname),
+            name_of(fd, libc::getpeername),
+        ) else {
+            return Ok(None);
+        };
+        socket.local = local;
+        socket.peer = peer;
+        Ok(Some(socket))
+    }
+}
+
+impl Drop for PosixTcpListener {
+    fn drop(&mut self) {
+        // SAFETY: `fd` is this listener's own descriptor, closed exactly once.
+        unsafe { libc::close(self.fd) };
     }
 }
 
@@ -364,15 +504,14 @@ mod tests {
         assert_eq!(far.read(&mut buf).expect("a read"), 0);
     }
 
-    #[test]
-    fn nagle_is_off() {
-        let (near, _far) = pair();
+    /// Whether `TCP_NODELAY` is on for `fd`.
+    fn nodelay_of(fd: c_int) -> bool {
         let mut on: c_int = 0;
         let mut len = size_of::<c_int>() as libc::socklen_t;
         // SAFETY: `on` and `len` are live and writable, and `len` is `on`'s size.
         let rc = unsafe {
             libc::getsockopt(
-                near.fd,
+                fd,
                 libc::IPPROTO_TCP,
                 libc::TCP_NODELAY,
                 (&mut on as *mut c_int).cast(),
@@ -380,6 +519,122 @@ mod tests {
             )
         };
         assert_eq!(rc, 0);
-        assert_eq!(on, 1);
+        on == 1
+    }
+
+    #[test]
+    fn nagle_is_off() {
+        let (near, _far) = pair();
+        assert!(nodelay_of(near.fd));
+    }
+
+    /// A connection std makes to the loopback `port`.
+    fn std_connect(port: u16) -> TcpStream {
+        TcpStream::connect(("127.0.0.1", port)).expect("a connection")
+    }
+
+    /// A listener on a port the kernel picked, and that port.
+    fn listening() -> (PosixTcpListener, u16) {
+        let listener = PosixTcpListener::bind(LOOPBACK, 0).expect("a listener");
+        let (addr, port) = listener.local();
+        assert_eq!(addr, LOOPBACK);
+        assert_ne!(port, 0, "the kernel's choice is read back");
+        (listener, port)
+    }
+
+    /// The connection `listener` has waiting, polled until it comes: a connect completes in the
+    /// kernel before the peer calls `accept`, but not before this thread's next instruction.
+    fn accepted(listener: &PosixTcpListener) -> PosixTcpSocket {
+        for _ in 0..200 {
+            if let Some(socket) = listener.accept().expect("a sound listener") {
+                return socket;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("no connection arrived");
+    }
+
+    #[test]
+    fn an_accept_with_no_connection_waiting_answers_at_once() {
+        let (listener, _) = listening();
+        for _ in 0..3 {
+            assert!(matches!(listener.accept(), Ok(None)));
+        }
+    }
+
+    #[test]
+    fn an_accepted_connection_names_both_its_ends_and_has_nagle_off() {
+        let (listener, port) = listening();
+        let far = std_connect(port);
+        let near = accepted(&listener);
+        assert_eq!(near.local(), (LOOPBACK, port));
+        assert_eq!(near.peer(), (LOOPBACK, far.local_addr().unwrap().port()));
+        assert!(nodelay_of(near.fd));
+    }
+
+    #[test]
+    fn an_accepted_connection_is_a_stream_in_both_directions_and_its_reads_do_not_block() {
+        let (listener, port) = listening();
+        let mut far = std_connect(port);
+        let near = accepted(&listener);
+        let mut buf = [0u8; 16];
+        assert_eq!(
+            near.try_read(&mut buf),
+            Ok(None),
+            "the listener's own non-blocking flag is not the connection's, and a read is MSG_DONTWAIT"
+        );
+        far.write_all(b"hello").expect("a write");
+        assert_eq!(read_exactly(&near, 5), b"hello");
+        near.send_parts(&[b"\x02\x00", b"ok"]).expect("a send");
+        let mut got = [0u8; 4];
+        far.read_exact(&mut got).expect("the bytes");
+        assert_eq!(&got, b"\x02\x00ok");
+    }
+
+    #[test]
+    fn connections_arrive_in_the_order_they_were_made() {
+        let (listener, port) = listening();
+        let first = std_connect(port);
+        let second = std_connect(port);
+        assert_eq!(
+            accepted(&listener).peer().1,
+            first.local_addr().unwrap().port()
+        );
+        assert_eq!(
+            accepted(&listener).peer().1,
+            second.local_addr().unwrap().port()
+        );
+    }
+
+    #[test]
+    fn a_connection_closed_before_it_is_taken_still_comes_and_reads_as_ended() {
+        let (listener, port) = listening();
+        drop(std_connect(port));
+        let near = accepted(&listener);
+        near.wait_readable(1000);
+        let mut buf = [0u8; 16];
+        assert_eq!(near.try_read(&mut buf), Ok(Some(0)));
+    }
+
+    #[test]
+    fn a_port_already_listened_on_is_a_bind_error_not_a_second_listener() {
+        let (_held, port) = listening();
+        match PosixTcpListener::bind(LOOPBACK, port) {
+            Err(PosixNetError::Bind(e)) => assert_eq!(e, libc::EADDRINUSE),
+            Err(other) => panic!("a different error: {other:?}"),
+            Ok(_) => panic!("the port is taken"),
+        }
+    }
+
+    #[test]
+    fn a_closed_listener_frees_its_port_for_the_next() {
+        let (listener, port) = listening();
+        let far = std_connect(port);
+        let near = accepted(&listener);
+        drop(listener);
+        drop(near);
+        drop(far);
+        PosixTcpListener::bind(LOOPBACK, port)
+            .expect("SO_REUSEADDR: the closed connections do not hold the port");
     }
 }

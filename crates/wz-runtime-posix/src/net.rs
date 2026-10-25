@@ -31,6 +31,10 @@ pub enum PosixNetError {
     ReceiveTimeout(c_int),
     /// `bind` failed with this `errno`.
     Bind(c_int),
+    /// `setsockopt(SO_REUSEADDR)` failed with this `errno`.
+    ReuseAddr(c_int),
+    /// `listen` failed with this `errno`.
+    Listen(c_int),
     /// `getsockname` failed with this `errno` reading back the port a bind on port 0 was given.
     SockName(c_int),
     /// A bind on port 0 succeeded and the kernel reported port 0 all the same, so there is no
