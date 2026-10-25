@@ -6941,6 +6941,94 @@ fn consolidation_still_orders_by_the_timestamp_the_callback_is_not_shown() {
     );
 }
 
+/// What [`stamped_reply_outcome`] reports: the (time, identity) of each reply's stamp, what the
+/// callback was told when it replied, and the session's own identity.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp"
+))]
+type StampedReplyOutcome = (
+    Vec<Option<(u64, Vec<u8>)>>,
+    Option<Result<(), StampedReplyError>>,
+    Vec<u8>,
+);
+
+/// What a local query sees of the replies of a queryable declared with `options` whose callback
+/// replies once through the session's [`NodeStamp`] at `time`.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp"
+))]
+fn stamped_reply_outcome(options: QueryableOptions, time: u64) -> StampedReplyOutcome {
+    let (session, _driver) = build_session();
+    let stamp = session.queryable_stamp(&options);
+    let told = Arc::new(std::sync::Mutex::new(None));
+    let told_in = told.clone();
+    let _queryable = session.declare_queryable("home/temp", options, move |query, out| {
+        *told_in.lock().unwrap() = Some(stamp.reply_at(query, out, time, b"v"));
+    });
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = seen.clone();
+    session
+        .query(
+            "home/temp",
+            get_opts_in_arrival_order()
+                .with_expose_timestamp(true)
+                .with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                writer
+                    .lock()
+                    .unwrap()
+                    .push(reply.timestamp().map(|t| (t.time, t.zid.clone())));
+            },
+            |_| {},
+        )
+        .expect("query-get is on");
+    let seen = seen.lock().unwrap().clone();
+    let told = *told.lock().unwrap();
+    (seen, told, session.zid().to_vec())
+}
+
+/// `entity-timestamp-opt-in`, the answering side: a queryable declared to stamp takes one time
+/// value and the reply carries this node's identity, which the callback had no way to name.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp"
+))]
+#[test]
+fn a_stamping_queryable_stamps_the_given_time_with_its_own_nodes_identity() {
+    let (seen, told, zid) =
+        stamped_reply_outcome(QueryableOptions::new().with_stamp_timestamp(true), 0xBEEF);
+    assert_eq!(told, Some(Ok(())));
+    assert_eq!(seen, [Some((0xBEEF, zid))]);
+}
+
+/// The pair: a queryable declared not to stamp refuses the stamped reply and stages nothing.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp"
+))]
+#[test]
+fn a_queryable_declared_not_to_stamp_refuses_a_stamped_reply_and_stages_nothing() {
+    let (seen, told, _zid) =
+        stamped_reply_outcome(QueryableOptions::new().with_stamp_timestamp(false), 0xBEEF);
+    assert_eq!(told, Some(Err(StampedReplyError::NotStamping)));
+    assert!(seen.is_empty(), "no reply reached the querier");
+}
+
+#[cfg(feature = "pubsub-timestamp")]
+#[test]
+fn a_queryable_that_says_nothing_gets_the_builds_default() {
+    assert_eq!(
+        QueryableOptions::new().stamp_timestamp(),
+        wz_session_core::timestamp_visibility::default_exposed()
+    );
+}
+
 /// A query that says nothing gets the build's default.
 #[cfg(feature = "query-get")]
 #[test]

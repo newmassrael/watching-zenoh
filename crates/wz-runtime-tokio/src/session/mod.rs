@@ -3761,6 +3761,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self.transport.params.zid
     }
 
+    /// The stamp a queryable declared with `options` replies with: this session's node identity and
+    /// the declaration's choice about stamping ([`QueryableOptions::with_stamp_timestamp`]). Made
+    /// here and nowhere else, so the identity a reply carries is the session's, which a callback
+    /// cannot name. Make it before declaring and move it into the callback ([`NodeStamp`]).
+    #[cfg(feature = "pubsub-timestamp")]
+    pub fn queryable_stamp(&self, options: &QueryableOptions) -> NodeStamp {
+        NodeStamp::new(self.zid(), options.stamp_timestamp())
+    }
+
     /// R311y450 — borrow THIS node's §5.18 clock, wz's counterpart of zenoh's
     /// `Runtime::hlc()` (`zenoh/src/net/runtime/mod.rs:336`).
     ///

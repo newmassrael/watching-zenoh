@@ -13,6 +13,102 @@ use super::*;
 #[cfg(feature = "query-queryable")]
 use wz_session_core::reply_stage::ReplyStaging;
 
+/// Why a stamped reply ([`NodeStamp::reply_at`]) was not staged.
+///
+/// `#[non_exhaustive]` so a later reason is a new variant and not a break.
+#[cfg(feature = "pubsub-timestamp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StampedReplyError {
+    /// The queryable was declared not to stamp
+    /// ([`QueryableOptions::with_stamp_timestamp`]). Nothing was staged.
+    NotStamping,
+    /// The reply itself was refused, for the reason a plain reply is.
+    Reply(wz_session_core::query_sink::ReplyError),
+}
+
+#[cfg(feature = "pubsub-timestamp")]
+impl From<wz_session_core::query_sink::ReplyError> for StampedReplyError {
+    fn from(error: wz_session_core::query_sink::ReplyError) -> Self {
+        Self::Reply(error)
+    }
+}
+
+#[cfg(feature = "pubsub-timestamp")]
+impl std::fmt::Display for StampedReplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotStamping => write!(
+                f,
+                "StampedReplyError: the queryable was declared not to stamp; nothing was staged"
+            ),
+            Self::Reply(error) => write!(f, "StampedReplyError: {error}"),
+        }
+    }
+}
+
+#[cfg(feature = "pubsub-timestamp")]
+impl std::error::Error for StampedReplyError {}
+
+/// What a queryable's callback stamps a reply with: THIS session's node identity and the
+/// declaration's choice about stamping, made by [`Session::queryable_stamp`] and by nothing else,
+/// so a callback cannot name an identity of its own. The callback gives one time value
+/// ([`Self::reply_at`]) and the node supplies the rest of the stamp.
+///
+/// Cheap to clone, and made before the callback, which moves it in:
+///
+/// ```ignore
+/// let options = QueryableOptions::new().with_stamp_timestamp(true);
+/// let stamp = session.queryable_stamp(&options);
+/// session.declare_queryable("home/temp", options, move |query, out| {
+///     let _ = stamp.reply_at(query, out, now_ntp64(), b"22.5");
+/// });
+/// ```
+#[cfg(feature = "pubsub-timestamp")]
+#[derive(Debug, Clone)]
+pub struct NodeStamp {
+    zid: Vec<u8>,
+    stamps: bool,
+}
+
+#[cfg(feature = "pubsub-timestamp")]
+impl NodeStamp {
+    /// Only the session makes one: see [`Session::queryable_stamp`].
+    pub(crate) fn new(zid: &[u8], stamps: bool) -> Self {
+        Self {
+            zid: zid.to_vec(),
+            stamps,
+        }
+    }
+
+    /// Whether the queryable this was made for stamps.
+    pub fn stamps(&self) -> bool {
+        self.stamps
+    }
+
+    /// Reply to `query` with `payload` under the query's own key, as a plain `reply` does, stamped
+    /// with `time` (an NTP64 word; see
+    /// [`wz_session_core::timestamp_visibility::ntp64_from_unix_ms`]) and this node's identity. A
+    /// queryable declared not to stamp refuses and stages nothing: a time that was given and
+    /// silently left off would read as a reply nobody stamped.
+    pub fn reply_at(
+        &self,
+        query: &dyn QueryView,
+        out: &mut dyn ReplyOut,
+        time: u64,
+        payload: &[u8],
+    ) -> Result<(), StampedReplyError> {
+        if !self.stamps {
+            return Err(StampedReplyError::NotStamping);
+        }
+        let stamp = wz_session_core::sample::TimestampHint {
+            time,
+            zid: self.zid.clone(),
+        };
+        Ok(out.reply_keyed_stamped(query.keyexpr(), payload, None, &stamp)?)
+    }
+}
+
 /// R246 — options bundle for [`Session::declare_queryable`].
 /// Mirrors zenoh-pico's `z_queryable_options_t` — R311up wired the
 /// `complete` flag (the BestMatching producer signal). `#[non_exhaustive]`.
@@ -54,9 +150,29 @@ pub struct QueryableOptions {
     /// The key the retraction names, when it names one — see
     /// [`Self::with_retraction_naming`].
     retraction_key: Option<RetractionKey>,
+    /// Whether this queryable stamps the replies it is given a time for: see
+    /// [`Self::with_stamp_timestamp`].
+    stamp_timestamp: wz_session_core::timestamp_visibility::StampTimestamp,
 }
 
 impl QueryableOptions {
+    /// Whether a queryable declared with these options takes a time per reply and stamps it, through
+    /// the [`NodeStamp`] that [`Session::queryable_stamp`] makes of them. The stamp supplies this
+    /// session's node identity beside the caller's time, so a caller cannot sign a reply as another
+    /// node. When it does not stamp, the stamped reply is refused rather than sent without the stamp.
+    ///
+    /// What a declaration that does not say gets is the build's `entity-timestamp-opt-in` policy:
+    /// it stamps when the policy is off, which is upstream's behaviour of attaching what it is given.
+    pub fn with_stamp_timestamp(mut self, stamp: bool) -> Self {
+        self.stamp_timestamp = wz_session_core::timestamp_visibility::StampTimestamp(stamp);
+        self
+    }
+
+    /// See [`Self::with_stamp_timestamp`].
+    pub fn stamp_timestamp(&self) -> bool {
+        self.stamp_timestamp.0
+    }
+
     /// Default options — `allowed_origin = Locality::Any`, `complete = false`,
     /// id-only retraction.
     pub fn new() -> Self {
