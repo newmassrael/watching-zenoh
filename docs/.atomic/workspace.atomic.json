@@ -286338,6 +286338,56 @@
         "Read the hosted Layer C0 of this push per job, compared by head sha."
       ]
     },
+    "Round 3610": {
+      "decision_summary": "Step L-q: delivery of the session's own get to its own queryables on the cooperative engine (local-queryable). A get goes out on the link and then to the queryables of the session that made it, as zenoh-pico's _z_session_deliver_query_locally does after a send that succeeded: the observer's queryable copies the query out and holds its Final, what it queued is handed out with no lock held (D8), so a callback runs inside the get. The query is held under generation 0, which no link has, so replies and Final reach the get's pending entry; the entry expects one Final per leg that answers. A get for the session alone takes a request id with the high bit set. The loopback Query body is one assembly in session-core (QueryOptions::loopback_query), which the tokio loopback leg now calls. A querier's filter and matching listener count the session's own queryables under their own switch. Off, as pico's default build, none of it is linked.",
+      "changes_bullets": [
+        "wz-session-core: QueryOptions::loopback_query, the one assembly of a local get's Query body.",
+        "wz-runtime-tokio: build_loopback_query forwards to it.",
+        "wz-capi-coop: feature local-queryable (query + queryable); QueryPlane holds a local-asking flag and arrive() takes generation 0 while it is set; answer() under generation 0 delivers replies and the Final to the observer's reply registry, then hands out; get_on_wire expects one Final per leg that answers (peer, session), allocates a request id with the high bit set for a get that goes nowhere on the link, and asks the session's own queryables after a send that succeeded; the Queryables plane counts local queryables in write filters and matching listeners (counted() now takes the plane) and re-evaluates after each queryable declare and retract.",
+        "wz-capi-pico: local-queryable selects neither engine (it selected engine-tokio before).",
+        "scripts/lib/capability_cost_gate.py: cases pico-client-coop-query (budget 1,160,000) and pico-client-coop-local-queryable (budget 1,174,000).",
+        "scripts/run-ci.sh: Layer C1co builds with local-queryable and counts 9 and 7.",
+        "Tests: five coop tests on the router stand-in (a get for the session alone answered inside the call and sent to no router, a get for any destination waiting for the peer and the session, a get for peers alone asking no queryable, a kept query holding its get open, a filter and a listener counting and not counting the session's own queryables); client_only_dials_a_listener gains a get for the session alone answered by the session's own queryable with a querier matching while it stands.",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-capi-coop (local-queryable alone; with local-subscriber and liveliness-get; default), wz-capi-pico with engine-coop and local-queryable, with local-queryable alone, default, wz-runtime-tokio (all features), wz-session-core (all features).",
+        "Tests: wz-capi-coop 19 passed with local-queryable alone, 30 with local-subscriber and liveliness-get, 8 default; the tokio loopback query tests (18 and 5) and the session-core query options tests pass. Layer C1co: 9, 7, 9 and 7 passed.",
+        "C1bz for wz-session-core, wz-runtime-tokio, wz-capi-coop and wz-capi-pico spends exactly their budgets; capability_cost_gate --check after the rebase: 15 cases within budget, pico-client-coop-query 1138872 of 1160000, pico-client-coop-local-queryable 1152665 of 1174000, pico-client-coop 877351 of 895000; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next: the rest of section 6 of docs/capi-pico-on-coop-engine.md, one step each: the listening role (on the cooperative stream accept another session has begun), scouting, the advanced publisher and subscriber, the connectivity plane, the admin space, then the engine flip.",
+        "The tokio engine's retraction of live liveliness entities at close (carry of 3595) is still owed its own round.",
+        "Read the hosted runs of 3599, 3602, 3605 and this round at the start of the next round; job pico-client-only has no margin gate yet."
+      ],
+      "publishable_decision_summary": "Step L-q: delivery of the session's own get to its own queryables on the cooperative engine (local-queryable). A get goes out on the link and then to the queryables of the session that made it, as zenoh-pico's _z_session_deliver_query_locally does after a send that succeeded: the observer's queryable copies the query out and holds its Final, what it queued is handed out with no lock held (D8), so a callback runs inside the get. The query is held under generation 0, which no link has, so replies and Final reach the get's pending entry; the entry expects one Final per leg that answers. A get for the session alone takes a request id with the high bit set. The loopback Query body is one assembly in session-core (QueryOptions::loopback_query), which the tokio loopback leg now calls. A querier's filter and matching listener count the session's own queryables under their own switch. Off, as pico's default build, none of it is linked.",
+      "publishable_changes_bullets": [
+        "wz-session-core: QueryOptions::loopback_query, the one assembly of a local get's Query body.",
+        "wz-runtime-tokio: build_loopback_query forwards to it.",
+        "wz-capi-coop: feature local-queryable (query + queryable); QueryPlane holds a local-asking flag and arrive() takes generation 0 while it is set; answer() under generation 0 delivers replies and the Final to the observer's reply registry, then hands out; get_on_wire expects one Final per leg that answers (peer, session), allocates a request id with the high bit set for a get that goes nowhere on the link, and asks the session's own queryables after a send that succeeded; the Queryables plane counts local queryables in write filters and matching listeners (counted() now takes the plane) and re-evaluates after each queryable declare and retract.",
+        "wz-capi-pico: local-queryable selects neither engine (it selected engine-tokio before).",
+        "scripts/lib/capability_cost_gate.py: cases pico-client-coop-query (budget 1,160,000) and pico-client-coop-local-queryable (budget 1,174,000).",
+        "scripts/run-ci.sh: Layer C1co builds with local-queryable and counts 9 and 7.",
+        "Tests: five coop tests on the router stand-in (a get for the session alone answered inside the call and sent to no router, a get for any destination waiting for the peer and the session, a get for peers alone asking no queryable, a kept query holding its get open, a filter and a listener counting and not counting the session's own queryables); client_only_dials_a_listener gains a get for the session alone answered by the session's own queryable with a querier matching while it stands.",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-capi-coop (local-queryable alone; with local-subscriber and liveliness-get; default), wz-capi-pico with engine-coop and local-queryable, with local-queryable alone, default, wz-runtime-tokio (all features), wz-session-core (all features).",
+        "Tests: wz-capi-coop 19 passed with local-queryable alone, 30 with local-subscriber and liveliness-get, 8 default; the tokio loopback query tests (18 and 5) and the session-core query options tests pass. Layer C1co: 9, 7, 9 and 7 passed.",
+        "C1bz for wz-session-core, wz-runtime-tokio, wz-capi-coop and wz-capi-pico spends exactly their budgets; capability_cost_gate --check after the rebase: 15 cases within budget, pico-client-coop-query 1138872 of 1160000, pico-client-coop-local-queryable 1152665 of 1174000, pico-client-coop 877351 of 895000; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next: the rest of section 6 of docs/capi-pico-on-coop-engine.md, one step each: the listening role (on the cooperative stream accept another session has begun), scouting, the advanced publisher and subscriber, the connectivity plane, the admin space, then the engine flip.",
+        "The tokio engine's retraction of live liveliness entities at close (carry of 3595) is still owed its own round.",
+        "Read the hosted runs of 3599, 3602, 3605 and this round at the start of the next round; job pico-client-only has no margin gate yet."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
