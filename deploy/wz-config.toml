@@ -1698,7 +1698,7 @@ id = "tx-no-progress-deadline"
 kind = "bool"
 kconfig = "WZ_POLICY_TX_NO_PROGRESS_DEADLINE"
 default = "off"
-upstream = "Gives a blocking message one wait_before_close for the whole of it, however many fragments go out (io/zenoh-transport/src/common/pipeline.rs: Deadline::new with no max wait, so WaitTime::advance leaves the deadline where it is)."
+upstream = "Gives a blocking message one wait_before_close for the whole of it, however many fragments go out: its deadline has no cap to extend by, so a fragment out leaves the deadline where it is."
 since = 2
 help = '''
 Whether a blocking message gets a second bound beside its total wait: the
@@ -1713,7 +1713,7 @@ id = "tx-expiry-keeps-session"
 kind = "bool"
 kconfig = "WZ_POLICY_TX_EXPIRY_KEEPS_SESSION"
 default = "off"
-upstream = "Closes the session as unresponsive when a blocking message found no room in its deadline, and tells the sender nothing (io/zenoh-transport/src/unicast/universal/tx.rs, handle_push_result)."
+upstream = "Closes the session as unresponsive when a blocking message found no room in its deadline, and tells the sender nothing."
 since = 2
 help = '''
 What happens when a blocking message finds no room within its deadline. Off,

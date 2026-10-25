@@ -41,9 +41,8 @@ config WZ_POLICY_TX_NO_PROGRESS_DEADLINE
 	  total wait still ends it, whichever comes first. A fragment out is progress
 	  and starts the window again, and the total wait is never made longer.
 	  Upstream: Gives a blocking message one wait_before_close for the whole of it,
-	  however many fragments go out (io/zenoh-transport/src/common/pipeline.rs:
-	  Deadline::new with no max wait, so WaitTime::advance leaves the deadline where
-	  it is).
+	  however many fragments go out: its deadline has no cap to extend by, so a
+	  fragment out leaves the deadline where it is.
 
 config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION
 	bool "tx-expiry-keeps-session"
@@ -55,7 +54,6 @@ config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION
 	  and the session stays open: a slow link costs the message and not the
 	  session. A multicast group never closes either way.
 	  Upstream: Closes the session as unresponsive when a blocking message found no
-	  room in its deadline, and tells the sender nothing (io/zenoh-
-	  transport/src/unicast/universal/tx.rs, handle_push_result).
+	  room in its deadline, and tells the sender nothing.
 
 endmenu

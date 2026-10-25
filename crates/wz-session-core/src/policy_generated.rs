@@ -61,13 +61,11 @@ pub struct SessionPolicy {
     /// so each sending socket keeps the operating system's setting.
     pub multicast_loopback: MulticastLoopback,
     /// `tx-no-progress-deadline`. Upstream: Gives a blocking message one wait_before_close
-    /// for the whole of it, however many fragments go out (io/zenoh-
-    /// transport/src/common/pipeline.rs: Deadline::new with no max wait, so
-    /// WaitTime::advance leaves the deadline where it is).
+    /// for the whole of it, however many fragments go out: its deadline has no cap to
+    /// extend by, so a fragment out leaves the deadline where it is.
     pub tx_no_progress_deadline: bool,
     /// `tx-expiry-keeps-session`. Upstream: Closes the session as unresponsive when a
-    /// blocking message found no room in its deadline, and tells the sender nothing
-    /// (io/zenoh-transport/src/unicast/universal/tx.rs, handle_push_result).
+    /// blocking message found no room in its deadline, and tells the sender nothing.
     pub tx_expiry_keeps_session: bool,
 }
 
