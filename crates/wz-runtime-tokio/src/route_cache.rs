@@ -168,6 +168,15 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
         changes: impl FnOnce(u64, &mut dyn FnMut(&str)) -> bool,
         reaches: impl Fn(&str, &str) -> bool,
     ) {
+        // The common case, a cache already at `inputs`, is decided under the read lock: this runs
+        // on every message of the data path, and a write lock taken here would make every face's
+        // task wait for every other's whether or not anything changed. A write is taken only to
+        // move the inputs, which a mutation of the tables caused (and which holds them for
+        // writing), so two threads that both see the move and both take the write lock find it
+        // already done by the second, and return.
+        if self.fresh.read().inputs == Some(inputs) {
+            return;
+        }
         let mut fresh = self.fresh.write();
         let Some(was) = fresh.inputs else {
             fresh.inputs = Some(inputs);
