@@ -289148,6 +289148,38 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3678": {
+      "decision_summary": "Step 7b of decision D7 (one contract, three transports): the transport is an axis of the image. deploy/wz-config.toml declares lifecycle-transport on zephyr-admin-node with in-band (the default, what the image did) and declared (selectable only on the fixed admin node over lwIP), and its cargo rule adds the image selector lifecycle-declared. In fixed_node.rs the selector types the node's opener NoOpening instead of ControlledOpener, so the code that serves session/open is not in the image. The third value, out-of-band, is not declared: an option that cannot be built is not declared, and its control port is step 7d. The no-allocator gate carries the declared build as a row of the same image and reads it clean (no allocator entry point, implementation or alloc-crate code).",
+      "changes_bullets": [
+        "deploy/wz-config.toml: the axis lifecycle-transport and its options in-band and declared, and the cargo rule of lifecycle-declared; deploy/zephyr-admin-node/Kconfig.axes and wz_axes.cmake are the generated result and wz_config.py --check holds them current.",
+        "deploy/zephyr-admin-node/rust: the lifecycle-declared selector in Cargo.toml and the opener type in fixed_node.rs; scripts/lib/no_allocator_link_gate.py: the build cyt4bf-lwip-fixed-declared of zephyr-admin-node-fixed."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): the no-allocator gate read zephyr-admin-node-fixed for thumbv7em-none-eabihf, both builds (cyt4bf-lwip-fixed and cyt4bf-lwip-fixed-declared) clean as gated; the gate's selftest and population pass; wz_config.py --check passes (3 image axes, 12 generated files current); rustfmt is clean; the whole round-fed gate array passes.",
+        "Not run here: the Zephyr image through west (the Qzb row builds the table's images on the hosted run), the size the declared build saves (not measured), and a board that selects the declared value."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the first finished hosted run holding rounds 3674 and this one: Qzb (the admin node's chain and size rows, which a type change may move) and the no-allocator row of the declared build. Next is 7c: the declared peers of a node declaration, [[endpoint]] with role peer, a zid and its locators, checked against MAX_PEER_NODES, and confirmed into the node's directory as Declared; then 7d, the control port that makes out-of-band an option. Not measured: what the declared value saves in text. Still open: the Hello hint source, the image witness (the lane owner agrees), the heap UDP dialer verifying nodes, the Qzb chain fall and the C1cn shard 1 time budget."
+      ],
+      "publishable_decision_summary": "Step 7b of decision D7 (one contract, three transports): the transport is an axis of the image. deploy/wz-config.toml declares lifecycle-transport on zephyr-admin-node with in-band (the default, what the image did) and declared (selectable only on the fixed admin node over lwIP), and its cargo rule adds the image selector lifecycle-declared. In fixed_node.rs the selector types the node's opener NoOpening instead of ControlledOpener, so the code that serves session/open is not in the image. The third value, out-of-band, is not declared: an option that cannot be built is not declared, and its control port is step 7d. The no-allocator gate carries the declared build as a row of the same image and reads it clean (no allocator entry point, implementation or alloc-crate code).",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml: the axis lifecycle-transport and its options in-band and declared, and the cargo rule of lifecycle-declared; deploy/zephyr-admin-node/Kconfig.axes and wz_axes.cmake are the generated result and wz_config.py --check holds them current.",
+        "deploy/zephyr-admin-node/rust: the lifecycle-declared selector in Cargo.toml and the opener type in fixed_node.rs; scripts/lib/no_allocator_link_gate.py: the build cyt4bf-lwip-fixed-declared of zephyr-admin-node-fixed."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): the no-allocator gate read zephyr-admin-node-fixed for thumbv7em-none-eabihf, both builds (cyt4bf-lwip-fixed and cyt4bf-lwip-fixed-declared) clean as gated; the gate's selftest and population pass; wz_config.py --check passes (3 image axes, 12 generated files current); rustfmt is clean; the whole round-fed gate array passes.",
+        "Not run here: the Zephyr image through west (the Qzb row builds the table's images on the hosted run), the size the declared build saves (not measured), and a board that selects the declared value."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first finished hosted run holding rounds 3674 and this one: Qzb (the admin node's chain and size rows, which a type change may move) and the no-allocator row of the declared build. Next is 7c: the declared peers of a node declaration, [[endpoint]] with role peer, a zid and its locators, checked against MAX_PEER_NODES, and confirmed into the node's directory as Declared; then 7d, the control port that makes out-of-band an option. Not measured: what the declared value saves in text. Still open: the Hello hint source, the image witness (the lane owner agrees), the heap UDP dialer verifying nodes, the Qzb chain fall and the C1cn shard 1 time budget."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
