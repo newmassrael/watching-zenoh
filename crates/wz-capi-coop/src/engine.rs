@@ -81,6 +81,9 @@ use {
 #[cfg(feature = "queryable")]
 mod query;
 
+#[cfg(feature = "liveliness-get")]
+use wz_session_core::query_options::DEFAULT_QUERY_TIMEOUT_MS;
+
 #[cfg(feature = "liveliness")]
 mod liveliness;
 #[cfg(feature = "liveliness")]
@@ -93,7 +96,7 @@ use {
 mod get;
 #[cfg(feature = "query")]
 use {
-    get::{GetEvent, GetPlane, PendingGet},
+    get::{GetEvent, GetKind, GetPlane, PendingGet},
     wz_capi_port::{cancellation::CancellableFan, ReplyCallback},
     wz_session_core::query_options::QueryOptions,
     wz_session_core::reply_acceptance::ReplyAcceptance,
@@ -688,7 +691,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // pending entry is dropped, which ends its leg (`get`).
         #[cfg(feature = "query")]
         for pending in self.pending_gets.drain(..) {
-            observer.replies.unregister(pending.rid);
+            pending.unregister(&mut observer);
         }
     }
 
@@ -723,6 +726,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
+    /// When the earliest pending get is due: a query's or a liveliness snapshot's.
+    #[cfg(feature = "query")]
+    fn next_get_deadline_ms(&self) -> Option<u64> {
+        let observer = self.observer.borrow();
+        let due = observer.replies.next_deadline_ms();
+        #[cfg(feature = "liveliness-get")]
+        let due = [due, observer.liveliness_gets.next_deadline_ms()]
+            .into_iter()
+            .flatten()
+            .min();
+        due
+    }
+
     /// What a read waits for before it steps the session: the link's next input, for at most
     /// [`CoopConfig::idle_wait_ms`], unless the link already holds some or waits in its own loop;
     /// and while no link is open, the next dial, for no longer either. zenoh-pico's read waits
@@ -731,7 +747,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let most = self.config.idle_wait_ms;
         // A get whose deadline comes first is swept when it is due, not up to a whole wait late.
         #[cfg(feature = "query")]
-        let most = match self.observer.borrow().replies.next_deadline_ms() {
+        let most = match self.next_get_deadline_ms() {
             Some(due_ms) => {
                 let left_us = due_ms
                     .saturating_mul(1000)
@@ -977,16 +993,31 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
-    /// Cancel leg `leg` of request `rid` (its get's cancellation token was cancelled): its
-    /// pending entry is dropped, and its callback with it, here, with no lock held, so a
-    /// `cancel` that waits for the leg's callback to be dropped returns whether or not the
-    /// session is stepped.
+    /// Tell `fan`, when the get can be cancelled, how to undo leg `leg`: a token cancelled while
+    /// the leg is issued undoes it at once (`record` runs it).
     #[cfg(feature = "query")]
-    fn cancel_get(&self, leg: u64, rid: u64) {
+    fn cancelling(&self, fan: Option<&CancellableFan>, leg: u64) {
+        if let Some(fan) = fan {
+            let engine = self.this.clone();
+            fan.record(move || {
+                if let Some(engine) = engine.upgrade() {
+                    engine.cancel_get(leg);
+                }
+            });
+        }
+    }
+
+    /// Cancel leg `leg` (its get's cancellation token was cancelled): its pending entry is
+    /// dropped, and its callback with it, here, with no lock held, so a `cancel` that waits for
+    /// the leg's callback to be dropped returns whether or not the session is stepped.
+    #[cfg(feature = "query")]
+    fn cancel_get(&self, leg: u64) {
         if let Some(mut core) = self.live() {
             let core = &mut core.0;
-            core.observer.borrow_mut().replies.unregister(rid);
-            core.pending_gets.retain(|pending| pending.leg != leg);
+            if let Some(at) = core.pending_gets.iter().position(|p| p.leg == leg) {
+                let pending = core.pending_gets.remove(at);
+                pending.unregister(&mut core.observer.borrow_mut());
+            }
         }
         drop(self.take_target(leg));
     }
@@ -1032,7 +1063,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "query")]
         {
             let now_ms = core.clock.now_us() / 1000;
-            core.observer.borrow_mut().replies.sweep_timed_out(now_ms);
+            let mut observer = core.observer.borrow_mut();
+            observer.replies.sweep_timed_out(now_ms);
+            // A liveliness snapshot that expired ends the same way. Its terminated ids are
+            // staged for a reconnect cache this engine does not keep (it declares again from its
+            // own entries), so they are drained and dropped: staged ones would pile up.
+            #[cfg(feature = "liveliness-get")]
+            {
+                observer.liveliness_gets.sweep_timed_out(now_ms);
+                drop(observer.liveliness_gets.take_finalized());
+            }
         }
         let redial_ms = core.config.redial_ms;
         if core.poll_link(redial_ms).is_err() {
@@ -1670,17 +1710,80 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             drop(self.take_target(leg_id));
             return Some(0);
         }
-        core.pending_gets.push(PendingGet { leg: leg_id, rid });
+        core.pending_gets.push(PendingGet {
+            leg: leg_id,
+            rid,
+            kind: GetKind::Query,
+        });
         drop(guard);
-        if let Some(fan) = fan {
-            // A token cancelled while this leg was issued undoes it at once (`record` runs it).
-            let engine = self.this.clone();
-            fan.record(move || {
-                if let Some(engine) = engine.upgrade() {
-                    engine.cancel_get(leg_id, rid);
-                }
-            });
+        self.cancelling(fan, leg_id);
+        Some(1)
+    }
+
+    #[cfg(feature = "liveliness-get")]
+    fn liveliness_get_on_wire(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        timeout_ms: u32,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Option<usize> {
+        // The one peer this session reaches is its link's; a session with no link up reaches
+        // nobody, and the snapshot is over at once.
+        let leg_id = self.next_entity_id();
+        let Some(mut guard) = self.live() else {
+            return Some(0);
+        };
+        let core = &mut guard.0;
+        let Some(actions) = core.up().cloned() else {
+            return Some(0);
+        };
+        let interest_id = actions.alloc_next_interest_id();
+        // `0` is the platform default and never no deadline, as pico's `z_liveliness_get`
+        // rewrites it (`vendor/zenoh-pico/src/api/liveliness.c` @
+        // `if (opt.timeout_ms == 0) {`); rounded up as a query's deadline is.
+        let timeout_ms = match timeout_ms {
+            0 => DEFAULT_QUERY_TIMEOUT_MS,
+            set => set,
+        };
+        let deadline_ms = Some(core.clock.now_us().div_ceil(1000) + u64::from(timeout_ms));
+        // One DeclFinal: the link's peer's. Registered before the Interest goes out, so no
+        // answer can arrive before its entry.
+        let registered = core.observer.borrow_mut().liveliness_gets.register(
+            interest_id,
+            deadline_ms,
+            get::reply_sink(leg_id, &self.gets),
+        );
+        if !matches!(registered, Ok(true)) {
+            return Some(0);
         }
+        lock(&self.targets).push((leg_id, Target::Reply(Arc::new(Mutex::new(leg())))));
+        let (mapping_id, suffix) = if wire.is_literal() {
+            (0, Some(keyexpr))
+        } else {
+            (wire.mapping_id, wire.suffix.as_deref())
+        };
+        if actions
+            .send_interest_liveliness_get(interest_id, mapping_id, suffix)
+            .is_err()
+        {
+            // Nothing went out: the entry and the leg go, and the snapshot is over.
+            core.observer
+                .borrow_mut()
+                .liveliness_gets
+                .unregister(interest_id);
+            drop(guard);
+            drop(self.take_target(leg_id));
+            return Some(0);
+        }
+        core.pending_gets.push(PendingGet {
+            leg: leg_id,
+            rid: interest_id,
+            kind: GetKind::Liveliness,
+        });
+        drop(guard);
+        self.cancelling(fan, leg_id);
         Some(1)
     }
 
@@ -1834,7 +1937,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             core.pending_gets
                 .drain(..)
                 .map(|pending| {
-                    observer.replies.unregister(pending.rid);
+                    pending.unregister(&mut observer);
                     pending.leg
                 })
                 .collect()

@@ -33,6 +33,10 @@
 use std::ffi::c_void;
 use std::sync::Arc;
 
+#[cfg(feature = "liveliness-get")]
+use wz_capi_port::cancellation::CancellationToken;
+#[cfg(feature = "liveliness-get")]
+use wz_capi_port::WireKey;
 use wz_capi_port::{LivelinessSink, TokenId};
 use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
 
@@ -44,8 +48,6 @@ use crate::pubsub::{
     SubscriberState, Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
 use crate::result::{ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_OK};
-#[cfg(feature = "liveliness-get")]
-use crate::session::session_state;
 use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::PicoSession;
 
@@ -414,16 +416,12 @@ impl z_liveliness_get_options_t {
     /// # Safety
     /// The field must be null or a moved token this crate produced.
     #[cfg(feature = "unstable-api")]
-    unsafe fn take_cancellation_token(
-        &self,
-    ) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
+    unsafe fn take_cancellation_token(&self) -> Option<Arc<CancellationToken>> {
         crate::cancellation::take_moved_cancellation_token(self.cancellation_token)
     }
 
     #[cfg(not(feature = "unstable-api"))]
-    unsafe fn take_cancellation_token(
-        &self,
-    ) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
+    unsafe fn take_cancellation_token(&self) -> Option<Arc<CancellationToken>> {
         None
     }
 }
@@ -476,21 +474,21 @@ pub unsafe extern "C" fn z_liveliness_get_options_default(
 /// The wire here is the DECLARATION plane, not the query plane: the request is
 /// a CURRENT liveliness `Interest`, each live token comes back as a
 /// `Declare(DeclToken)` and the snapshot ends with one `DeclFinal`. wz models
-/// that with [`wz_capi_core::runtime::session::Session::liveliness_get`], whose
-/// application surface is already reply-shaped — which is why this maps onto
-/// the same `z_owned_closure_reply_t` and the same [`crate::get::fire_reply`]
-/// marshal that `z_get` uses, rather than a parallel one.
+/// that through the engine's `liveliness_get_on_wire`, whose application surface is
+/// already reply-shaped — which is why this maps onto the same
+/// `z_owned_closure_reply_t` and the same [`crate::get::fire_reply`] marshal that
+/// `z_get` uses, rather than a parallel one.
 ///
 /// Consumes the moved closure on EVERY path (pico's contract), and because the
 /// C `drop(context)` IS the completion signal, an early error correctly reports
 /// "this snapshot is over".
 ///
-/// Fanned across every connected face for the reason every declaration in this
-/// crate is: one C session is N per-face wz sessions, and a snapshot that
+/// Fanned across every leg the engine reaches for the reason every declaration in
+/// this crate is: one C session can be N per-face wz sessions, and a snapshot that
 /// polled only the first face would silently under-report. The C thread holds
-/// its own clone across the loop so a face that answers and finalises early
-/// cannot complete the get while later faces are still being issued — the same
-/// `guard` discipline as [`crate::get`]'s fan.
+/// its own clone across the fan so a leg that answers and finalises early
+/// cannot complete the get while later legs are still being issued — the same
+/// `guard` discipline as [`crate::get`]'s fan, which this one is.
 #[cfg(feature = "liveliness-get")]
 #[no_mangle]
 pub unsafe extern "C" fn z_liveliness_get(
@@ -516,9 +514,8 @@ pub unsafe extern "C" fn z_liveliness_get(
         // Adopt the closure FIRST and null the source (consume-on-all-paths).
         let closure = crate::get::adopt_reply_closure(callback);
 
-        let state = match session_state(zs) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
+        let Some(handle) = session_handle(zs) else {
+            return Z_ERR_NULL;
         };
         let ke = match keyexpr_str(keyexpr) {
             Some(k) => k.to_owned(),
@@ -536,8 +533,7 @@ pub unsafe extern "C" fn z_liveliness_get(
         // wz's field is a `u32`; saturate rather than wrap, for the reason
         // `crate::get::get_timeout_ms` records — a wrapped huge timeout becomes
         // a tiny one and expires the snapshot immediately.
-        let opts = wz_capi_core::runtime::session::LivelinessGetOptions::default()
-            .with_timeout_ms(timeout_ms.min(u32::MAX as u64) as u32);
+        let timeout_ms = timeout_ms.min(u32::MAX as u64) as u32;
 
         // A liveliness reply's keyexpr is the TOKEN's, which intersects the
         // interest by construction; the gate is carried anyway so this plane
@@ -548,73 +544,14 @@ pub unsafe extern "C" fn z_liveliness_get(
             anyke: false,
         });
 
-        let guard = closure.clone();
-        // R311y575 — registered BEFORE the first face is issued, the ordering
-        // upstream uses (`src/net/liveliness.c:341` registers the cancellation
-        // before `_z_send_n_msg`). The `Z_ERR_CANCELLED` arm is reached when the
-        // token was ALREADY cancelled: no Interest goes out and `closure` /
-        // `guard` drop on the return, so the C `drop(context)` still reports the
-        // get over. Shared with `z_get` through the core cancellation plane
-        // (`wz_capi_core::cancellation`, R2949), so the two planes cannot drift
-        // in their cancellation semantics — including `cancel`'s wait for every
-        // face's callback, which each [`crate::get::LegReply`] holds open.
-        let fan = match &token {
-            None => None,
-            Some(token) => {
-                let Some((fan, registration)) = wz_capi_core::cancellation::register_fan(token)
-                else {
-                    return crate::result::Z_ERR_CANCELLED;
-                };
-                Some((fan, Arc::new(registration)))
-            }
-        };
-        let registration = fan.as_ref().map(|(_, r)| Arc::clone(r));
-        let fan = fan.map(|(f, _)| f);
-        for (session, revised) in state.shared.face_sessions_with_wake() {
-            let per_face = crate::get::LegReply {
-                closure: closure.clone(),
-                gate: gate.clone(),
-                _registration: registration.clone(),
-            };
-            let issued = session.liveliness_get(
-                ke.clone(),
-                opts,
-                move |view: &dyn wz_session_core::reply_sink::ReplyView| {
-                    per_face.fire(view);
-                },
-                // Completion is signalled by the pending entry's sink being
-                // DROPPED, which covers a real final, a timeout sweep and a
-                // face death alike — the same reason `z_get`'s `on_final` is
-                // empty.
-                |_id| {},
-            );
-            // R311y575 — the interest id this face registered under, recorded so
-            // a later cancel can unregister it. `record` answers `false` when the
-            // token cancelled while the fan was running; it has already undone
-            // THIS registration, so the only thing left is to stop issuing.
-            let cancelled_mid_fan = match (&fan, &issued) {
-                (Some(fan), Ok(interest_id)) => {
-                    let undo_session = session.clone();
-                    let interest_id = *interest_id;
-                    !fan.record(move || {
-                        undo_session.cancel_pending_liveliness_get(interest_id);
-                    })
-                }
-                _ => false,
-            };
-            drop(issued);
-            if cancelled_mid_fan {
-                break;
-            }
-            // Wake this face's drive loop so it re-arms on the deadline just
-            // registered; without it a silent session sweeps the snapshot only
-            // at the next keepalive wake.
-            revised.notify_one();
-        }
-        drop(guard);
-        // After `guard`, for the reason `crate::get::fan_get` gives.
-        drop(registration);
-        Z_OK
+        // The cancellation, each leg's ownership and the order they drop in are the fan's, shared
+        // with `z_get` (R311y575, R2949): registered BEFORE the first leg is issued, as upstream
+        // does (`src/net/liveliness.c:341` registers it before `_z_send_n_msg`), an already
+        // cancelled token answering `Z_ERR_CANCELLED` with no Interest sent.
+        let engine = engine_of(handle);
+        crate::get::fan_get(closure, gate, token, |fan, leg| {
+            engine.liveliness_get_on_wire(&ke, &WireKey::literal(), timeout_ms, fan, leg)
+        })
     })
 }
 

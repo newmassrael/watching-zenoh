@@ -78,6 +78,10 @@ enum Command {
     /// Answer no query from now on, as a peer gone quiet: a frame that carries one is dropped.
     #[cfg(feature = "query")]
     Silence,
+    /// Answer no Interest from now on, as a peer gone quiet: a frame that carries one is dropped
+    /// (after it is counted).
+    #[cfg(feature = "liveliness-get")]
+    MuteInterests,
     /// Hold token `.0` on the key and announce it.
     #[cfg(feature = "liveliness")]
     DeclareToken(u64, &'static str),
@@ -112,6 +116,10 @@ struct Seen {
     /// The tokens the session holds, by the id it announced them under.
     #[cfg(feature = "liveliness")]
     tokens: Vec<(u64, String)>,
+    /// How many tokens the router has been told to hold, once each is registered, so a test that
+    /// asks right after is not answered before the router holds what it asked about.
+    #[cfg(feature = "liveliness")]
+    held: usize,
 }
 
 /// Whether the router holds a catch-all subscriber. It is a subscriber like any other: the router
@@ -220,6 +228,12 @@ fn run_router(
     #[cfg(feature = "liveliness")]
     let holding = observer.clone();
     #[cfg(feature = "liveliness")]
+    let holds = seen.clone();
+    #[cfg(feature = "liveliness-get")]
+    let muted = std::rc::Rc::new(std::cell::Cell::new(false));
+    #[cfg(feature = "liveliness-get")]
+    let muting = muted.clone();
+    #[cfg(feature = "liveliness")]
     {
         let declared = seen.clone();
         let undeclared = seen.clone();
@@ -280,6 +294,14 @@ fn run_router(
                 {
                     return;
                 }
+                #[cfg(feature = "liveliness-get")]
+                if muted.get()
+                    && messages
+                        .iter()
+                        .any(|m| matches!(m, NetworkMessage::Interest(_)))
+                {
+                    return;
+                }
             }
             dispatch(event);
         },
@@ -296,6 +318,11 @@ fn run_router(
             Ok(Command::UndeclareQueryable(id)) => {
                 actions.send_undeclare_queryable(id);
             }
+            #[cfg(feature = "liveliness-get")]
+            Ok(Command::MuteInterests) => {
+                muting.set(true);
+                counted_queries.lock().unwrap().settled = true;
+            }
             #[cfg(feature = "liveliness")]
             Ok(Command::DeclareToken(id, key)) => {
                 let _ = holding.borrow_mut().local_tokens.register(id, key);
@@ -309,6 +336,7 @@ fn run_router(
             #[cfg(feature = "liveliness")]
             Ok(Command::HoldToken(id, key)) => {
                 let _ = holding.borrow_mut().local_tokens.register(id, key);
+                holds.lock().unwrap().held += 1;
             }
             Ok(Command::Push(key, value)) => {
                 let _ = actions.send_push_literal(key, value, true);
@@ -831,3 +859,5 @@ mod get;
 mod liveliness;
 #[cfg(feature = "queryable")]
 mod queryable;
+#[cfg(feature = "liveliness-get")]
+mod snapshot;

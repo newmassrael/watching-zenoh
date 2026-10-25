@@ -12,10 +12,10 @@
 //!
 //! The queryable joined when the cooperative engine answered queries, the get (over
 //! session-core's `QueryOptions`) when it asked them, and the liveliness token and subscriber
-//! when it held and heard them; a capability no second engine has yet (the liveliness get,
-//! scouting, the connectivity and admin planes, the advanced publisher) is not here: an ABI
-//! module that needs one still names its engine, and joins this trait when a second engine
-//! implements it.
+//! when it held and heard them, and the liveliness get when it asked for the ones alive; a
+//! capability no second engine has yet (scouting, the connectivity and admin planes, the
+//! advanced publisher) is not here: an ABI module that needs one still names its engine, and
+//! joins this trait when a second engine implements it.
 
 use wz_session_core::declare_form::{InterestForm, RetractionKey};
 use wz_session_core::locality::Locality;
@@ -174,6 +174,26 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// nothing.
     fn undeclare_queryable(&self, id: QblId) {
         let _ = id;
+    }
+
+    /// Ask which liveliness tokens are alive on `keyexpr` (named on the wire as `wire`): one leg
+    /// per peer the engine reaches, each ended by its peer's DeclFinal, `timeout_ms` (`0` is the
+    /// platform default, never none) or the loss of its link. Its replies are token
+    /// declarations, with the token's key as the reply's. `leg` and `fan` are as
+    /// [`Self::get_on_wire`]'s: `leg` mints each leg's [`ReplyCallback`], whose drop is that
+    /// leg's end, and `fan` is told of each leg as it is issued. The number of legs issued, or
+    /// `None` from an engine with no liveliness get in this build, which is the provided
+    /// answer.
+    fn liveliness_get_on_wire(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        timeout_ms: u32,
+        fan: Option<&CancellableFan>,
+        leg: &mut dyn FnMut() -> ReplyCallback,
+    ) -> Option<usize> {
+        let _ = (keyexpr, wire, timeout_ms, fan, leg);
+        None
     }
 
     /// Declare a liveliness token on `keyexpr`, announced as `wire`, to every peer the session

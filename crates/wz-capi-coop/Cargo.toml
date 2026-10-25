@@ -113,6 +113,10 @@ liveliness = [
     "wz-session-core/liveliness-token",
     "wz-session-core/liveliness-subscriber",
 ]
+# The liveliness get: a snapshot of the tokens alive on a key, asked as an Interest and answered
+# with token declarations and a DeclFinal, ended by its deadline as a query is. It is a get of
+# the requesting end (the one plane that delivers and ends a get's legs), so it brings `query`.
+liveliness-get = ["liveliness", "query", "wz-session-core/liveliness-get"]
 # The requesting end of a query: a get, the slots of its request (target, timeout,
 # consolidation, attachment, parameters, source info, value) and everything a reply carries back
 # to it. What `wz-capi-core`'s `query` names on its runtime, named on session-core.

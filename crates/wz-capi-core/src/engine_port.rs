@@ -284,6 +284,55 @@ impl SessionEngine for SharedSession {
         SharedSession::undeclare_queryable(self, id);
     }
 
+    // One leg per connected face, as the snapshot get always fanned; it asks by the literal key,
+    // which the runtime's liveliness get has no other form of, so `wire` is not read.
+    #[cfg(feature = "liveliness-get")]
+    fn liveliness_get_on_wire(
+        &self,
+        keyexpr: &str,
+        _wire: &WireKey,
+        timeout_ms: u32,
+        fan: Option<&crate::cancellation::CancellableFan>,
+        leg: &mut dyn FnMut() -> wz_capi_port::ReplyCallback,
+    ) -> Option<usize> {
+        let opts =
+            crate::runtime::session::LivelinessGetOptions::default().with_timeout_ms(timeout_ms);
+        let mut issued = 0;
+        for (session, revised) in self.face_sessions_with_wake() {
+            let mut reply = leg();
+            // Completion is the pending entry's sink being DROPPED, which covers a real final,
+            // a timeout sweep and a face death alike, so the final needs no body.
+            let got = session.liveliness_get(
+                keyexpr.to_owned(),
+                opts,
+                move |view: &dyn wz_session_core::reply_sink::ReplyView| reply(view),
+                |_id| {},
+            );
+            // The interest id this face registered under, recorded so a later cancel can
+            // unregister it. `record` answers `false` when the token cancelled while the fan was
+            // running; it has already undone THIS registration, so only the issuing stops.
+            let cancelled_mid_fan = match (fan, &got) {
+                (Some(fan), Ok(interest_id)) => {
+                    let undo = session.clone();
+                    let interest_id = *interest_id;
+                    !fan.record(move || {
+                        undo.cancel_pending_liveliness_get(interest_id);
+                    })
+                }
+                _ => false,
+            };
+            issued += usize::from(got.is_ok());
+            drop(got);
+            if cancelled_mid_fan {
+                break;
+            }
+            // Wake this face's drive loop so it re-arms on the deadline just registered;
+            // without it a silent session sweeps the snapshot only at the next keepalive wake.
+            revised.notify_one();
+        }
+        Some(issued)
+    }
+
     // The runtime's token names in its retraction the key it was declared on, which is the key
     // `retraction` names: so whether it names one is all it needs.
     #[cfg(feature = "liveliness")]

@@ -294,7 +294,24 @@ it behaves as pico behaves in both of pico's threading arms.
   session's), and `client_only_dials_a_listener` holding a token the listener sees and hearing
   the listener's, on both engines (Layer C1co, now with `liveliness`). The liveliness get stays
   with the tokio engine.
-- Next: the liveliness get on the cooperative engine (L2), then the rest of section 6.
+- 2026-10-25: liveliness, step L2: the liveliness get on both engines. `liveliness_get_on_wire`
+  on `SessionEngine` asks which tokens are alive on a key with the contract of `get_on_wire`: one
+  reply callback minted per leg, whose drop is that leg's end, each leg's undo recorded with the
+  get's cancellation fan; `0` is the platform default timeout and never none, as pico rewrites
+  it. The tokio engine keeps its per-face fan behind it. The cooperative engine
+  (`wz-capi-coop`'s `liveliness-get`) registers one leg with the observer's liveliness gets
+  under its Interest id and sends the Interest; the entry's sink is the query get's (it only
+  queues an owned reply and says the leg's end from a guard it owns, D8), a pending leg now says
+  which registry its entry is in, and every step sweeps both registries' deadlines, an idle read
+  waiting no longer than the earlier of them. An expired snapshot delivers zenoh's timeout reply
+  before its end; a cancelled token and a lost link end the leg as a query's do. pico's
+  `z_liveliness_get` is the port's, sharing its fan (cancellation, leg ownership, drop order)
+  with `z_get`; its `liveliness-get` feature selects neither engine. Tests: the engine against a
+  router stand-in (the tokens alive on the asked key and not the one beside it, no token and the
+  DeclFinal alone, a deadline, a cancel with no step, a lost link), and
+  `client_only_dials_a_listener` asking the listener which tokens are alive, on both engines
+  (Layer C1co, now 6 and 5 a leg).
+- Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
   engine's session, and the modules of capabilities the cooperative engine does not have yet
@@ -306,7 +323,6 @@ it behaves as pico behaves in both of pico's threading arms.
 
 ## 6. Open
 
-- The liveliness get (`z_liveliness_get`) on the cooperative engine.
 - The listening role. pico's `z_open(listen)` holds several peers in one
   session; the cooperative session host holds sessions in slots, and whether
   one C session maps to several slots or to one multi-face session is a design

@@ -135,6 +135,9 @@ fn a_history_subscriber_is_told_the_tokens_alive_when_it_asked() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     router.send(Command::HoldToken(4, "demo/held"));
+    until(&engine, "the router to hold its token", || {
+        router.seen(|s| s.held == 1)
+    });
     // The future-only subscriber is declared first, so the history one's answer comes after its
     // Interest reached the router.
     let (_, future) = subscribe(&engine, "demo/**", false);

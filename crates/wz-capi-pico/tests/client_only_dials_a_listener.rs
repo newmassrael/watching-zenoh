@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
 //! The build without the `peer` feature opens a client session to a node that listens, publishes
-//! to it and hears from it, answers its queries and asks it queries, and holds liveliness tokens
-//! and hears the node's.
+//! to it and hears from it, answers its queries and asks it queries, holds liveliness tokens,
+//! hears the node's and asks it which are alive.
 //!
 //! Such a build cannot listen, so the node it dials is the `hold_a_listener` example of the
 //! FULL build, run as a process. The two are built by two invocations (a feature set is one per
@@ -14,7 +14,7 @@
 //! cargo build --release -p wz-capi-pico --example hold_a_listener
 //! WZ_PICO_LISTENER_BIN=$PWD/target/release/examples/hold_a_listener \
 //!     cargo test --release -p wz-capi-pico --no-default-features \
-//!     --features engine-coop,link-udp,query,queryable,liveliness \
+//!     --features engine-coop,link-udp,query,queryable,liveliness-get \
 //!     --test client_only_dials_a_listener
 //! ```
 //!
@@ -794,6 +794,140 @@ mod living {
                 z_undeclare_subscriber(z_subscriber_move(&mut future_sub)),
                 Z_OK
             );
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+}
+
+/// The liveliness get in the build that cannot listen: the client asks which tokens are alive,
+/// the listener answers with the ones it holds and its DeclFinal ends the get.
+#[cfg(feature = "liveliness-get")]
+mod snapshot {
+    use super::*;
+    use wz_capi_pico::liveliness::{
+        z_liveliness_get, z_liveliness_get_options_default, z_liveliness_get_options_t,
+    };
+    use wz_capi_pico::{
+        z_closure_reply, z_closure_reply_move, z_loaned_reply_t, z_owned_closure_reply_t,
+        z_reply_is_ok, z_reply_ok,
+    };
+
+    impl Listener {
+        /// Give the listener a line of input (`token <key>`).
+        fn declare(&mut self, key: &str) {
+            use std::io::Write;
+            let stdin = self.child.stdin.as_mut().expect("a piped stdin");
+            writeln!(stdin, "token {key}").expect("the listener reads its input");
+            stdin.flush().expect("the listener reads its input");
+        }
+    }
+
+    /// What a snapshot's closure saw: the key of each token (`err` for an error reply), and
+    /// whether the closure has been dropped.
+    #[derive(Default)]
+    struct Alive {
+        keys: Vec<String>,
+        done: bool,
+    }
+
+    unsafe extern "C" fn on_token(reply: *mut z_loaned_reply_t, ctx: *mut c_void) {
+        let alive = &*(ctx as *const Mutex<Alive>);
+        if !z_reply_is_ok(reply) {
+            alive.lock().unwrap().keys.push("err".to_owned());
+            return;
+        }
+        let mut view: z_view_string_t = std::mem::zeroed();
+        assert_eq!(
+            z_keyexpr_as_view_string(z_sample_keyexpr(z_reply_ok(reply)), &mut view),
+            Z_OK
+        );
+        let string = z_view_string_loan(&view);
+        let bytes =
+            std::slice::from_raw_parts(z_string_data(string) as *const u8, z_string_len(string));
+        alive
+            .lock()
+            .unwrap()
+            .keys
+            .push(String::from_utf8_lossy(bytes).into_owned());
+    }
+
+    unsafe extern "C" fn on_done(ctx: *mut c_void) {
+        let alive = Arc::from_raw(ctx as *const Mutex<Alive>);
+        alive.lock().unwrap().done = true;
+    }
+
+    /// Ask which tokens are alive on `key` and step the session until the snapshot has ended:
+    /// their keys, sorted.
+    unsafe fn alive_on(session: &z_owned_session_t, key: &CStr) -> Vec<String> {
+        let alive = Arc::new(Mutex::new(Alive::default()));
+        let mut closure: z_owned_closure_reply_t = std::mem::zeroed();
+        assert_eq!(
+            z_closure_reply(
+                &mut closure,
+                Some(on_token),
+                Some(on_done),
+                Arc::into_raw(alive.clone()) as *mut c_void
+            ),
+            Z_OK
+        );
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+        let mut options: z_liveliness_get_options_t = std::mem::zeroed();
+        assert_eq!(z_liveliness_get_options_default(&mut options), Z_OK);
+        assert_eq!(
+            z_liveliness_get(
+                z_session_loan(session),
+                z_view_keyexpr_loan(&ke),
+                z_closure_reply_move(&mut closure),
+                &mut options,
+            ),
+            Z_OK
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !alive.lock().unwrap().done {
+            assert!(
+                Instant::now() < deadline,
+                "the snapshot on {key:?} never ended"
+            );
+            step_for(session, Duration::from_millis(20));
+        }
+        let mut keys = std::mem::take(&mut alive.lock().unwrap().keys);
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn a_client_only_build_asks_the_listeners_tokens_alive() {
+        let port = free_port();
+        let mut listener = Listener::start(port);
+        // SAFETY: a fresh config and session, released before the function returns.
+        unsafe {
+            let mut session = open_to(port);
+            assert_eq!(
+                alive_on(&session, c"demo/listener/**"),
+                ["demo/listener/alive"]
+            );
+            assert_eq!(
+                alive_on(&session, c"demo/nobody/**"),
+                Vec::<String>::new(),
+                "CONTROL: a key nothing is alive on ends with the DeclFinal alone"
+            );
+
+            // A token the listener declares after the first snapshot: the answer is the ones
+            // alive when asked, so it is asked again until the new one is in.
+            listener.declare("demo/listener/more");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let keys = alive_on(&session, c"demo/listener/**");
+                if keys == ["demo/listener/alive", "demo/listener/more"] {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the new token never came back: {keys:?}"
+                );
+            }
             z_close(z_session_loan_mut(&mut session), std::ptr::null());
             z_session_drop(z_session_move(&mut session));
         }

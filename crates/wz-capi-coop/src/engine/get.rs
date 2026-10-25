@@ -18,6 +18,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use wz_session_core::observer::ApplicationLayerObserver;
 use wz_session_core::reply::InboundReply;
 use wz_session_core::reply_sink::{BoxedReplySink, ReplyView};
 
@@ -42,11 +43,37 @@ pub(super) struct GetPlane {
     pub(super) events: Mutex<VecDeque<GetEvent>>,
 }
 
-/// A leg the session has pending: the id its callback is held under, and the request id its
-/// entry is registered with.
+/// Which of the observer's registries a pending leg's entry is in.
+#[derive(Clone, Copy)]
+pub(super) enum GetKind {
+    /// A query: its entry is under its request id, and its peer owes a Final.
+    Query,
+    /// A liveliness snapshot: its entry is under its Interest id, and its peer owes a DeclFinal.
+    #[cfg(feature = "liveliness-get")]
+    Liveliness,
+}
+
+/// A leg the session has pending: the id its callback is held under, and the id its entry is
+/// registered with (a request id or an Interest id, as its kind says).
 pub(super) struct PendingGet {
     pub(super) leg: u64,
     pub(super) rid: u64,
+    pub(super) kind: GetKind,
+}
+
+impl PendingGet {
+    /// Drop this leg's entry from the observer, which ends the leg (its sink's guard says so).
+    pub(super) fn unregister(&self, observer: &mut ApplicationLayerObserver) {
+        match self.kind {
+            GetKind::Query => {
+                observer.replies.unregister(self.rid);
+            }
+            #[cfg(feature = "liveliness-get")]
+            GetKind::Liveliness => {
+                observer.liveliness_gets.unregister(self.rid);
+            }
+        }
+    }
 }
 
 /// The end of a leg, said once: when the pending entry that owns it is dropped.

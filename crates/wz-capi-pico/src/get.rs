@@ -129,7 +129,7 @@
 use std::ffi::{c_int, c_void};
 use std::sync::Arc;
 
-use wz_capi_port::cancellation::{register_fan, CancellationToken, Registration};
+use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, Registration};
 use wz_capi_port::ReplyCallback;
 use wz_session_core::locality::Locality;
 use wz_session_core::query_mode::{ConsolidationMode, QueryTarget};
@@ -1351,7 +1351,9 @@ pub(crate) fn issue_get(
         value_meta,
     );
 
-    fan_get(engine, &keyexpr, &wire, &opts, closure, gate, token)
+    fan_get(closure, gate, token, |fan, leg| {
+        engine.get_on_wire(&keyexpr, &wire, &opts, fan, leg)
+    })
 }
 
 /// Fan one C get across every connected face and, where its destination admits
@@ -1375,14 +1377,16 @@ pub(crate) fn issue_get(
 /// immediately with no reply. That is pico's own behaviour for an empty peer set
 /// — `_z_query` runs `_z_drop_handler_execute(dropper, arg)` on the caller
 /// thread when `remaining_finals == 0` (`src/net/primitives.c:560-562`).
-fn fan_get(
-    engine: &Engine,
-    keyexpr: &str,
-    wire: &WireKey,
-    opts: &QueryOptions,
+///
+/// `issue` is the engine's call, handed the fan to record each leg against and the factory
+/// that mints a leg's callback: `get_on_wire` for a query, `liveliness_get_on_wire` for a
+/// liveliness snapshot. Both are asked in the one way, so the cancellation, the leg's
+/// ownership and the order they are dropped in are stated once.
+pub(crate) fn fan_get(
     closure: Arc<CReplyClosure>,
     gate: Arc<ReplyGate>,
     token: Option<Arc<CancellationToken>>,
+    issue: impl FnOnce(Option<&CancellableFan>, &mut dyn FnMut() -> ReplyCallback) -> Option<usize>,
 ) -> ZResult {
     let guard = closure.clone();
     // R311y575 — the cancellation is registered BEFORE the first face is
@@ -1420,7 +1424,7 @@ fn fan_get(
     // reply gate still matches the literal. A leg whose issue fails is not one: its
     // callback was dropped with its rolled-back pending entry, so it cannot hold the get
     // open, and if EVERY leg fails, `guard` below completes it.
-    let issued = engine.get_on_wire(keyexpr, wire, opts, fan.as_deref(), &mut || {
+    let issued = issue(fan.as_deref(), &mut || {
         let leg = LegReply {
             closure: closure.clone(),
             gate: gate.clone(),

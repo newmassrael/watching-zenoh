@@ -136,9 +136,14 @@ queryable = ["wz-capi-core?/queryable", "wz-capi-coop?/queryable"]
 # selects neither.
 liveliness = ["wz-capi-core?/liveliness", "wz-capi-coop?/liveliness"]
 # `liveliness-get`: the snapshot get of the liveliness plane. It is a query, so it needs the
-# requesting end of one; the get half is `wz-capi-core`'s `liveliness-get` (its drive loop
-# sweeps the get deadlines) and the runtime's feature behind it.
-liveliness-get = ["engine-tokio", "liveliness", "query", "wz-capi-core/liveliness-get"]
+# requesting end of one; both engines ask it (the tokio engine's drive loop sweeps the get
+# deadlines, the cooperative engine's every step does), so it selects neither.
+liveliness-get = [
+    "liveliness",
+    "query",
+    "wz-capi-core?/liveliness-get",
+    "wz-capi-coop?/liveliness-get",
+]
 # `advanced`: the advanced publisher and subscriber and the plane they replay through.
 # It implies `liveliness`, because an advanced subscriber's publisher detection is a liveliness
 # subscription declared through the liveliness plane, and `queryable`, because the publisher's

@@ -325,10 +325,12 @@ transport-link-unixpipe,transport-link-ws|"
     # leg ends with its Final, its deadline, its cancelled token or its lost link. Their tests
     # are compiled only with `queryable` and `query`. Its liveliness tokens reach the router and
     # come back over a new link, and its liveliness subscribers hear the router's, with history
-    # and across a lost link; those are compiled only with `liveliness`. MEASURED: 8 passed with
-    # default features, 12 with `liveliness` (its 4), 18 with all three (and the 4 of `query` and
-    # the 2 of `queryable`), 5 s.
-    "wz-capi-coop|hook|liveliness,query,queryable|"
+    # and across a lost link; those are compiled only with `liveliness`. Its liveliness get lists
+    # the tokens alive and ends like a query's get does (final, deadline, cancel, lost link);
+    # those are compiled only with `liveliness-get`. MEASURED: 8 passed with default features,
+    # 12 with `liveliness` (its 4), 23 with all four (and the 4 of `query`, the 2 of `queryable`
+    # and the 5 of `liveliness-get`), 5 s.
+    "wz-capi-coop|hook|liveliness,liveliness-get,query,queryable|"
     # Open-debt item 913 -- the in-memory group every group test of the workspace runs over
     # (`multicast_bus`) holds a member's place while a send half of its link lives, as a socket
     # does, which the departure test of the group face depends on. The module exists only with
