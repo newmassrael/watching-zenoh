@@ -47,6 +47,7 @@ use wz::session_lwip::admin_fixed::{
 };
 use wz::session_lwip::admin_host::{host_connect_writes_fixed, ConnectControl};
 use wz::session_lwip::app_layer::{NoReplies, SlotApp, SlotDispatch};
+use wz::session_lwip::connect_manager::PeerStore;
 use wz::session_lwip::driver::LwipUdpDriver;
 use wz::session_lwip::listener::SessionListener;
 use wz::session_lwip::session_host::SessionHost;
@@ -150,6 +151,9 @@ struct Statics {
     sessions: Slots,
     pumps: PumpSlots<Clock, LwipSessionLink<&'static LwipLink>, SESSIONS>,
     listener: SessionListener<LANES>,
+    /// The machines of what the node dials, some 10 KB: here, with the other tables, and not on
+    /// the stack of the thread that runs the node.
+    peers: PeerStore,
     admin: AdminHost<1024>,
     app: SlotApp<Sinks>,
 }
@@ -181,6 +185,7 @@ impl Statics {
             sessions: SessionSlots::new(),
             pumps: PumpSlots::new(),
             listener: SessionListener::new(),
+            peers: PeerStore::new(),
             admin: AdminHost::new(),
             app: SlotApp::new(),
         }
@@ -354,6 +359,7 @@ pub fn run(mut net: LwipMacNet) -> i32 {
         &factory,
         &NODE.listener,
         &CONTROL.control,
+        &NODE.peers,
         &CONTROL.status,
         zid_hex,
         "peer",

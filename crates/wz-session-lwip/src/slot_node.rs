@@ -52,7 +52,7 @@ use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::text_out::FixedText;
 use wz_session_mcu::admin_fixed::{FixedAdminSession, FixedNodeStatus, RowRefused};
 use wz_session_mcu::admin_status::DialStatus;
-use wz_session_mcu::connect_manager::{ConnectManager, SlotState};
+use wz_session_mcu::connect_manager::{ConnectManager, PeerStore, SlotState};
 use wz_session_mcu::slot_dial::{events_of, Bind};
 
 use wz_link_lwip::LwipLink;
@@ -143,7 +143,9 @@ where
     F: SessionFactory<C>,
 {
     /// A node that listens on `listen_port` through `listener`, dials what `control`
-    /// names, answers as `zid_hex` / `whatami` and reports through `status`.
+    /// names, answers as `zid_hex` / `whatami` and reports through `status`. `peers` is the
+    /// table of the machines of what it dials (some 10 KB), declared with the image's other
+    /// tables and not carried by the node, which a loop holds on its stack.
     ///
     /// The observer the sessions dispatch to is the factory's business (its
     /// `on_event`), and the config subscriber and admin queryable are registered on it
@@ -159,6 +161,7 @@ where
         factory: &'a RefCell<F>,
         listener: &'static SessionListener<LANES>,
         control: &'static wz_session_mcu::admin_host::ConnectControl,
+        peers: &'static PeerStore,
         status: &'static FixedNodeStatus<S>,
         zid_hex: &str,
         whatami: &'static str,
@@ -185,9 +188,10 @@ where
             listening: false,
             timeouts,
             status,
-            manager: ConnectManager::new(
+            manager: ConnectManager::in_static_store(
                 control,
                 SlotDialer::new(&**host, LwipBinder { links }, factory, timeouts),
+                peers,
             ),
             accepted: BoundedVec::new(),
             admin_key,

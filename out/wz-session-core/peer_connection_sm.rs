@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 7aa5ee66a90b974107d7866c9df10aae02d443d8781822b302702012da15cddd
+// source-hash: a1025b1d9432dd8aa7925cfb0c07a43fa513ecd4f03f4f852b36b1d799da15d4
 
 
 // SPDX-License-Identifier: AGPL-3.0-only WITH LicenseRef-SCE-Linking-Exception OR LicenseRef-SCE-Commercial
@@ -70,10 +70,19 @@
 // closure; this one suspicious-category lint reads the `match` of a constant
 // default as a hand-written `unwrap_or_default`.
 
-// SCE-MAP: peer_connection.scxml:75 :: _machine
+// SCE-MAP: peer_connection.scxml:82 :: _machine
 
 use core::time::Duration;
 use sce_rust_runtime::{Engine, StatePolicy};
+
+// SCE Protocol-Synthesis RFC §synth-5-J-2 + §synth-5-L (item C3): per-document
+// event-queue capacity declared via
+// `<scxml sce:capacity="N">` or sourced from deploy.yaml
+// `machines.<m>.scheduler.default_event_queue_capacity`. Consumed
+// below by `type EventQueue` as the no_std `heapless::Deque` depth
+// for this machine's W3C Appendix D internal/external queues
+// (the policy-carried SSOT for the per-machine queue size).
+pub const EVENT_QUEUE_CAPACITY: usize = 2;
 
 // ======================================================================
 // State enum (W3C SCXML 3.3)
@@ -268,7 +277,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
     // inherits the runtime default `MAX_EVENT_QUEUE_DEPTH` (the single source of
     // the default). Inert under std (`VecDeque`), so this one emission compiles
     // on both runtime profiles.
-    type EventQueue = sce_rust_runtime::EventQueueManager<sce_rust_runtime::EventWithMetadata<Self::Event, Self::Payload>>;
+    type EventQueue = sce_rust_runtime::EventQueueManager<sce_rust_runtime::EventWithMetadata<Self::Event, Self::Payload>, { EVENT_QUEUE_CAPACITY }>;
 
     // W3C SCXML 6.3: the delayed-send scheduler keeps a per-entry `send_id` only
     // so `<cancel sendid>` can find and drop the matching entry; the timer-fire
@@ -473,12 +482,12 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
 
 
     // W3C SCXML 3.7: Execute <onentry> actions for a state
-    #[doc = "SCE-MAP: peer_connection.scxml:75 :: _machine"]
-// SCE-MAP: peer_connection.scxml:75 :: _machine
+    #[doc = "SCE-MAP: peer_connection.scxml:82 :: _machine"]
+// SCE-MAP: peer_connection.scxml:82 :: _machine
     fn execute_entry_actions(&mut self, state: Self::State, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
         match state {
             PeerConnectionState::Backoff => {
-                // SCE-MAP: peer_connection.scxml:123 :: Backoff :: _state_body
+                // SCE-MAP: peer_connection.scxml:131 :: Backoff :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -488,7 +497,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
                 }
             }
             PeerConnectionState::Connecting => {
-                // SCE-MAP: peer_connection.scxml:100 :: Connecting :: _state_body
+                // SCE-MAP: peer_connection.scxml:108 :: Connecting :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -498,7 +507,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
                 }
             }
             PeerConnectionState::Established => {
-                // SCE-MAP: peer_connection.scxml:113 :: Established :: _state_body
+                // SCE-MAP: peer_connection.scxml:121 :: Established :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -508,7 +517,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
                 }
             }
             PeerConnectionState::Resolving => {
-                // SCE-MAP: peer_connection.scxml:89 :: Resolving :: _state_body
+                // SCE-MAP: peer_connection.scxml:97 :: Resolving :: _state_body
                 // W3C SCXML 3.8: onentry block 1/1
                 // Labeled block allows actions to break out on error (W3C 3.8: error stops block)
                 'action_block: {
@@ -528,8 +537,8 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
     // recorded runs nothing.
 
     // W3C SCXML 3.8: Execute <onexit> actions for a state
-    #[doc = "SCE-MAP: peer_connection.scxml:75 :: _machine"]
-// SCE-MAP: peer_connection.scxml:75 :: _machine
+    #[doc = "SCE-MAP: peer_connection.scxml:82 :: _machine"]
+// SCE-MAP: peer_connection.scxml:82 :: _machine
     fn execute_exit_actions(
         &mut self,
         state: Self::State,
@@ -549,8 +558,8 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
     // the first of `state`'s own transitions, in document order, that `event`
     // enables. The engine walks the atomic states and their ancestors and
     // keeps the ordered set. `Event::Null` asks for eventless transitions.
-    #[doc = "SCE-MAP: peer_connection.scxml:75 :: _machine"]
-// SCE-MAP: peer_connection.scxml:75 :: _machine
+    #[doc = "SCE-MAP: peer_connection.scxml:82 :: _machine"]
+// SCE-MAP: peer_connection.scxml:82 :: _machine
     fn first_enabled_transition(
         &mut self,
         state: Self::State,
@@ -769,8 +778,8 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
 
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries.
-    #[doc = "SCE-MAP: peer_connection.scxml:75 :: _machine"]
-// SCE-MAP: peer_connection.scxml:75 :: _machine
+    #[doc = "SCE-MAP: peer_connection.scxml:82 :: _machine"]
+// SCE-MAP: peer_connection.scxml:82 :: _machine
     fn execute_transition_content(
         &mut self,
         source: Self::State,
@@ -781,7 +790,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
             PeerConnectionState::Backoff => {
                 match transition_index {
                     1 => {
-                        // SCE-MAP: peer_connection.scxml:128 :: Backoff :: _transition_1
+                        // SCE-MAP: peer_connection.scxml:136 :: Backoff :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -796,7 +805,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
             PeerConnectionState::Connecting => {
                 match transition_index {
                     4 => {
-                        // SCE-MAP: peer_connection.scxml:108 :: Connecting :: _transition_4
+                        // SCE-MAP: peer_connection.scxml:116 :: Connecting :: _transition_4
                         // W3C SCXML 3.13: Transition 4 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -811,7 +820,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
             PeerConnectionState::Established => {
                 match transition_index {
                     1 => {
-                        // SCE-MAP: peer_connection.scxml:118 :: Established :: _transition_1
+                        // SCE-MAP: peer_connection.scxml:126 :: Established :: _transition_1
                         // W3C SCXML 3.13: Transition 1 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {
@@ -826,7 +835,7 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
             PeerConnectionState::Resolving => {
                 match transition_index {
                     2 => {
-                        // SCE-MAP: peer_connection.scxml:95 :: Resolving :: _transition_2
+                        // SCE-MAP: peer_connection.scxml:103 :: Resolving :: _transition_2
                         // W3C SCXML 3.13: Transition 2 actions
                         // W3C SCXML 4.9: a transition's content is one block; an error ends it.
                         'action_block: {

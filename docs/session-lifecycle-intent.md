@@ -833,6 +833,18 @@ Each step lands with its own done-when; sizes are not estimated here.
      afresh on a rewrite, an endpoint written twice), `wz-session-mcu`'s own
      suite and clippy over all features, the slot-profile shape for the
      bare-metal target, and the lwIP slot admin node test.
+   - Repair of 6.2a (stack): the manager had taken the planner's tables
+     inside itself, and on the Zephyr image the manager is a local of the
+     node's run function, so about 14 KB of peer tables and machines sat on
+     a 9216 B main-thread stack. The tables now live in a `PeerStore`, a
+     static the image owns beside the rest of its node storage, and the
+     manager holds a reference to it (`ConnectManager::in_static_store`);
+     only the heap build boxes its own. The peer machine declares
+     `sce:capacity="2"`, because the host raises one event at a time and
+     nothing in the machine raises or sends, so its queue is 16 B instead of
+     the engine default. A test holds the bound: the store is over 8 KiB and
+     the manager under 4 KiB. The Zephyr stack figure can be read only on
+     the hosted run; the image edit there is not buildable here.
    - Next in step 6: the nodes held by zid beside the endpoints, with the
      locator directory (6.2b), then the verbs on the fixed-memory profile,
      `wz-session-lwip` forwarding the feature, and the witness on the image.

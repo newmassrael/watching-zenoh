@@ -62,7 +62,7 @@ use wz_session_mcu::admin_fixed::{
 };
 use wz_session_mcu::admin_host::{host_connect_writes_fixed, ConnectControl};
 use wz_session_mcu::app_layer::{NoReplies, SlotApp, SlotDispatch};
-use wz_session_mcu::connect_manager::SlotState;
+use wz_session_mcu::connect_manager::{PeerStore, SlotState};
 
 #[path = "support/alloc_count.rs"]
 mod alloc_count;
@@ -126,6 +126,8 @@ struct Statics<const S: usize> {
     listener: SessionListener<LANES>,
     status: FixedNodeStatus<S>,
     control: ConnectControl,
+    /// The machines of what the node dials.
+    peers: PeerStore,
     admin: AdminHost<1024>,
     app: SlotApp<Sinks<S>>,
 }
@@ -140,6 +142,7 @@ impl<const S: usize> Statics<S> {
             listener: SessionListener::new(),
             status: FixedNodeStatus::new(true),
             control: ConnectControl::new(true),
+            peers: PeerStore::new(),
             admin: AdminHost::new(),
             app: SlotApp::new(),
         }
@@ -249,6 +252,7 @@ fn rig<const S: usize>(s: &'static Statics<S>, link: LinkRef, zid: u8, port: u16
         factory,
         &s.listener,
         &s.control,
+        &s.peers,
         &s.status,
         &zid_hex,
         "peer",

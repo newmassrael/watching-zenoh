@@ -32,6 +32,7 @@ use wz::session_lwip::admin_fixed::{
 };
 use wz::session_lwip::admin_host::{host_connect_writes_fixed, ConnectControl};
 use wz::session_lwip::app_layer::{NoReplies, SlotApp, SlotDispatch};
+use wz::session_lwip::connect_manager::PeerStore;
 use wz::session_lwip::driver::LwipUdpDriver;
 use wz::session_lwip::listener::SessionListener;
 use wz::session_lwip::session_host::SessionHost;
@@ -135,6 +136,9 @@ struct Statics {
     /// Writes are PERMITTED on this node: upstream's default is to refuse, and the node
     /// opts in, because being reconfigured is what it is for.
     control: ConnectControl,
+    /// The machines of what the node dials, some 10 KB: here, with the other tables, and not on
+    /// the stack of the loop.
+    peers: PeerStore,
     admin: AdminHost<1024>,
     app: SlotApp<Sinks>,
 }
@@ -158,6 +162,7 @@ impl Statics {
             listener: SessionListener::new(),
             status: FixedNodeStatus::new(true),
             control: ConnectControl::new(true),
+            peers: PeerStore::new(),
             admin: AdminHost::new(),
             app: SlotApp::new(),
         }
@@ -295,6 +300,7 @@ pub fn run() -> ! {
         &factory,
         &NODE.listener,
         &NODE.control,
+        &NODE.peers,
         &NODE.status,
         zid_hex,
         "peer",

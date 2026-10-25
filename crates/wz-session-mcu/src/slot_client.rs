@@ -40,7 +40,7 @@ use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::slot_observer::{NoSink, ObserverSinks};
 
-use crate::connect_manager::{ConnectManager, EndpointSource};
+use crate::connect_manager::{ConnectManager, EndpointSource, PeerStore};
 use crate::latest::{LatestRef, LatestSink};
 use crate::slot_dial::{events_of, Bind, SessionFactory, SlotDialer, SlotSession};
 use crate::slot_host::SessionHost;
@@ -128,7 +128,9 @@ where
 {
     /// A node that dials `endpoints` through `host` (sockets from `bind`, sessions made by
     /// `factory` with the handshake deadlines `timeouts`), takes the connections `acceptor`
-    /// yields, and declares `declarations` on each session as it establishes.
+    /// yields, and declares `declarations` on each session as it establishes. `peers` is where the
+    /// machines of the endpoints it holds live: a table of some 10 KB that is declared with the
+    /// node's other big tables and not carried by the node, which is a local of the loop.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         host: &'a SessionHost<C, T, F::Entropy, S, P>,
@@ -136,11 +138,16 @@ where
         listening: Listening<X, A>,
         factory: &'a RefCell<F>,
         endpoints: &'static dyn EndpointSource,
+        peers: &'static PeerStore,
         timeouts: SessionTimeouts,
         declarations: &'static [Declaration],
     ) -> Self {
         Self {
-            manager: ConnectManager::new(endpoints, SlotDialer::new(host, bind, factory, timeouts)),
+            manager: ConnectManager::in_static_store(
+                endpoints,
+                SlotDialer::new(host, bind, factory, timeouts),
+                peers,
+            ),
             declarations,
             host,
             factory,

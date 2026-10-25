@@ -11372,18 +11372,20 @@ layer_c1m_session_lwip() {
     # `adminspace-write` gates: 14 -> 17 and 24 -> 27, the numbers the command
     # PRINTED. The three: a session seen up and then lost starts the schedule over,
     # a dropped endpoint with a session up is hung up and a rewrite dials it
-    # afresh, an endpoint written twice is one endpoint.
+    # afresh, an endpoint written twice is one endpoint. And by ONE more (17 -> 18, 27 -> 28):
+    # the manager does not carry its peers' machines (a size bound that the manager sits on the
+    # stack and the store beside it does not).
     _runci_guarded_test "C1m mcu default" 4 \
         cargo test -p wz-session-mcu --quiet || return 1
     _runci_guarded_test "C1m mcu unicast app layer" 5 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 17 \
+    _runci_guarded_test "C1m mcu adminspace-write" 18 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     _runci_guarded_test "C1m mcu adminspace-core" 8 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 27 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 28 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =

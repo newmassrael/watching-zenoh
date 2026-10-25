@@ -218,6 +218,62 @@ const DIALS: usize = 2 * MAX_STATIC_CONNECT;
 
 type Planner = PeerPlanner<Key, u64, MAX_STATIC_CONNECT, DIALS>;
 
+/// The machines of a manager's peers, in a table of their own.
+///
+/// One connection machine per peer is some 930 bytes on the target (`size_of` of its engine, read
+/// off a `thumbv7m-none-eabi` build: two event queues, the delayed-send ring and the rest of the
+/// runtime's engine, none of which this machine uses), so the table of `MAX_STATIC_CONNECT`
+/// of them, with the planner's tables beside it, is some 10 KB. That does not belong in the
+/// manager, which is a local of the node's loop and sits on the stack of the thread that runs it.
+/// It is a type of its own so that it can be declared where the node's other big tables are, in a
+/// `static` whose initial value is all zero bytes (`slot_node::NodeStorage`), and so that a
+/// manager holds only a reference to it.
+///
+/// A critical section guards it, as the crate's other shared state is (`ConnectControl`): the
+/// node is driven by one cooperative loop, which is the only thing that reaches it, and the guard
+/// makes that a property the type has and not a rule a caller keeps.
+pub struct PeerStore {
+    planner: critical_section::Mutex<core::cell::RefCell<Planner>>,
+}
+
+impl PeerStore {
+    /// An empty store: no peer held. `const`, so a `static` can be one.
+    pub const fn new() -> Self {
+        Self {
+            planner: critical_section::Mutex::new(core::cell::RefCell::new(Planner::new())),
+        }
+    }
+
+    /// Run `f` on the planner.
+    fn with<R>(&self, f: impl FnOnce(&mut Planner) -> R) -> R {
+        critical_section::with(|cs| f(&mut self.planner.borrow_ref_mut(cs)))
+    }
+}
+
+impl Default for PeerStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Where a manager's [`PeerStore`] is: in a `static` the image declared, or, on a profile with a
+/// heap, in a box the manager owns.
+enum StoreRef {
+    Static(&'static PeerStore),
+    #[cfg(not(feature = "session-slot"))]
+    Boxed(alloc::boxed::Box<PeerStore>),
+}
+
+impl StoreRef {
+    fn get(&self) -> &PeerStore {
+        match self {
+            Self::Static(store) => store,
+            #[cfg(not(feature = "session-slot"))]
+            Self::Boxed(store) => store,
+        }
+    }
+}
+
 /// What one call of the planner asked, at most: a session closed, a wait armed and a dial, of
 /// one endpoint. Room for one more of each, so that a count is never the reason an action is
 /// lost.
@@ -312,22 +368,45 @@ pub struct ConnectManager<D: Dialer> {
     generation: Option<u32>,
     rows: Rows<D::Session>,
     periods: Periods,
-    planner: Planner,
+    store: StoreRef,
     /// The counter the planner mints the face of a dial from.
     next_id: u64,
 }
 
 impl<D: Dialer> ConnectManager<D> {
-    /// A manager over `control`, dialling with `dialer`, on upstream's
-    /// default retry schedule.
+    /// A manager over `control`, dialling with `dialer`, on upstream's default retry schedule,
+    /// holding its machines in a box. Only a profile with a heap has one; the slot profile hands
+    /// the manager a store the image declared ([`Self::in_store`]).
+    #[cfg(not(feature = "session-slot"))]
     pub fn new(control: &'static dyn EndpointSource, dialer: D) -> Self {
-        Self::with_policy(control, dialer, RetryPolicy::ZENOH_DEFAULT)
+        Self::in_store(
+            control,
+            dialer,
+            StoreRef::Boxed(alloc::boxed::Box::default()),
+            RetryPolicy::ZENOH_DEFAULT,
+        )
     }
 
-    /// The same, on an explicit retry schedule.
-    pub fn with_policy(
+    /// A manager over `control`, dialling with `dialer`, holding its machines in `store`, on
+    /// upstream's default retry schedule. One store serves one manager: a second manager over the
+    /// same store would share its machines.
+    pub fn in_static_store(
         control: &'static dyn EndpointSource,
         dialer: D,
+        store: &'static PeerStore,
+    ) -> Self {
+        Self::in_store(
+            control,
+            dialer,
+            StoreRef::Static(store),
+            RetryPolicy::ZENOH_DEFAULT,
+        )
+    }
+
+    fn in_store(
+        control: &'static dyn EndpointSource,
+        dialer: D,
+        store: StoreRef,
         policy: RetryPolicy,
     ) -> Self {
         Self {
@@ -337,7 +416,7 @@ impl<D: Dialer> ConnectManager<D> {
             generation: None,
             rows: BoundedVec::new(),
             periods: BoundedVec::new(),
-            planner: Planner::new(),
+            store,
             next_id: 0,
         }
     }
@@ -350,7 +429,7 @@ impl<D: Dialer> ConnectManager<D> {
     /// Where every endpoint stands, in the order the list named them.
     pub fn states(&self) -> impl Iterator<Item = (&str, SlotState)> + '_ {
         self.rows.iter().map(|row| {
-            let state = match self.planner.state(&row.entry.endpoint) {
+            let state = match self.store.get().with(|p| p.state(&row.entry.endpoint)) {
                 Some(PeerConnectionState::NoLocator) => SlotState::Refused(self.refusal(row)),
                 Some(PeerConnectionState::Backoff) => SlotState::Waiting {
                     at_ms: row.due.map_or(0, |due| due.at_ms),
@@ -438,15 +517,13 @@ impl<D: Dialer> ConnectManager<D> {
             periods: &mut self.periods,
             policy: self.policy,
         };
-        call(
-            &mut self.planner,
-            &mut ports,
-            &mut self.next_id,
-            &mut |action| {
+        let next_id = &mut self.next_id;
+        self.store.get().with(|planner| {
+            call(planner, &mut ports, next_id, &mut |action| {
                 // At most one of each kind per call and `Actions` holds six.
                 let _ = actions.push(action);
-            },
-        );
+            })
+        });
         actions
     }
 
@@ -616,7 +693,7 @@ impl<D: Dialer> ConnectManager<D> {
                     planner.dial_ended(face, DialEnd::Failed, ports, next_id, emit);
                 });
             }
-            self.planner.forget(&key);
+            self.store.get().with(|planner| planner.forget(&key));
             self.periods.retain(|(k, _)| *k != key);
             self.rows.retain(|row| row.entry.endpoint != key);
         }
@@ -651,9 +728,8 @@ impl<D: Dialer> ConnectManager<D> {
             }
             // `open` of an endpoint already held or being reached changes nothing; one its
             // machine refused resolves again.
-            if self.planner.state(&key) == Some(PeerConnectionState::NoLocator)
-                || self.planner.state(&key).is_none()
-            {
+            let state = self.store.get().with(|planner| planner.state(&key));
+            if state == Some(PeerConnectionState::NoLocator) || state.is_none() {
                 self.drive(now_ms, |planner, ports, next_id, emit| {
                     let _ = planner.open(key, ports, next_id, emit);
                 });
@@ -764,7 +840,8 @@ mod tests {
     #[test]
     fn a_written_list_is_dialled_at_once_and_an_empty_one_dials_nothing() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
-        let mut m = ConnectManager::new(&CONTROL, FakeDialer::default());
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
         m.tick(0);
         std::assert!(dials(&mut m).is_empty(), "no list, no dial");
 
@@ -789,7 +866,8 @@ mod tests {
     #[test]
     fn re_dials_follow_upstreams_schedule_per_outage() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
-        let mut m = ConnectManager::new(&CONTROL, FakeDialer::default());
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
         write(&CONTROL, &["udp/10.0.0.1:7447"]);
         m.tick(0);
         std::assert_eq!(dials(&mut m).len(), 1);
@@ -836,7 +914,8 @@ mod tests {
     #[test]
     fn a_session_seen_up_and_then_lost_starts_the_schedule_over() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
-        let mut m = ConnectManager::new(&CONTROL, FakeDialer::default());
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
         write(&CONTROL, &["udp/10.0.0.1:7447"]);
         m.tick(0);
         std::assert_eq!(dials(&mut m).len(), 1);
@@ -873,12 +952,14 @@ mod tests {
     #[test]
     fn an_exhausted_dial_waits_its_period_and_is_not_refused() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
-        let mut m = ConnectManager::new(
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(
             &CONTROL,
             FakeDialer {
                 exhausted: true,
                 ..FakeDialer::default()
             },
+            &STORE,
         );
         write(&CONTROL, &["udp/10.0.0.1:7447"]);
         m.tick(0);
@@ -903,7 +984,8 @@ mod tests {
     #[test]
     fn a_group_of_one_is_dialled_and_a_group_of_several_is_refused() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
-        let mut m = ConnectManager::new(&CONTROL, FakeDialer::default());
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
         CONTROL.apply_for_test(
             br#"[{ strategy: "allOf", locators: ["udp/10.0.0.1:1", "udp/10.0.0.2:1"] },
                  { strategy: "allOf", locators: ["udp/10.0.0.3:1"] },
@@ -932,7 +1014,8 @@ mod tests {
     #[test]
     fn an_endpoint_the_list_drops_is_hung_up_and_one_it_cannot_dial_waits_for_a_rewrite() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
-        let mut m = ConnectManager::new(&CONTROL, FakeDialer::default());
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
         write(&CONTROL, &["udp/10.0.0.1:7447", "serial//dev/ttyS0"]);
         m.tick(0);
         std::assert_eq!(dials(&mut m), ["udp/10.0.0.1:7447"]);
@@ -963,7 +1046,8 @@ mod tests {
     #[test]
     fn a_dropped_endpoint_with_a_session_up_is_hung_up_and_a_rewrite_dials_it_afresh() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
-        let mut m = ConnectManager::new(&CONTROL, FakeDialer::default());
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
         write(&CONTROL, &["udp/10.0.0.1:7447"]);
         m.tick(0);
         m.dialer()
@@ -984,11 +1068,32 @@ mod tests {
         std::assert_eq!(dials(&mut m), ["udp/10.0.0.1:7447"], "dialled afresh");
     }
 
+    /// The manager is a local of the node's loop, which runs on a stack of a few KB on the
+    /// smallest image, so it does not carry the machines of its peers (each some 930 bytes on
+    /// the target, a table of them some 10 KB): they are in a [`PeerStore`] it only refers to.
+    /// A manager that held them would pass every other test here and overflow that stack, which
+    /// round 3613 did and this bound exists to refuse. The bound is loose on purpose: it says
+    /// "a few rows and some references", not an exact figure a field would move.
+    #[test]
+    fn the_manager_does_not_carry_the_machines_of_its_peers() {
+        let manager = core::mem::size_of::<ConnectManager<FakeDialer>>();
+        let store = core::mem::size_of::<PeerStore>();
+        std::assert!(
+            store > 8 * 1024,
+            "the store is where the machines are ({store} bytes), or this test guards nothing"
+        );
+        std::assert!(
+            manager < 4 * 1024,
+            "the manager is {manager} bytes: it is carrying the machines it should refer to"
+        );
+    }
+
     /// The list is a set: an endpoint written twice is one endpoint, one session.
     #[test]
     fn an_endpoint_written_twice_is_one_endpoint() {
         static CONTROL: ConnectControl = ConnectControl::new(true);
-        let mut m = ConnectManager::new(&CONTROL, FakeDialer::default());
+        static STORE: PeerStore = PeerStore::new();
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
         write(&CONTROL, &["udp/10.0.0.1:7447", "udp/10.0.0.1:7447"]);
         m.tick(0);
         std::assert_eq!(dials(&mut m), ["udp/10.0.0.1:7447"]);

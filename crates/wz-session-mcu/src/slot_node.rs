@@ -64,7 +64,7 @@ use wz_session_core::zid_hex::write_zenoh_hex;
 use wz_session_core::WhatAmI;
 
 use crate::app_layer::{NoReplies, SessionEvents, SlotApp, SlotDispatch};
-use crate::connect_manager::EndpointSource;
+use crate::connect_manager::{EndpointSource, PeerStore};
 use crate::latest::{LatestRef, LatestSink};
 use crate::slot_client::{
     register_answer, register_document, register_latest, Answer, Declaration, DeclarationKind,
@@ -117,6 +117,9 @@ pub struct NodeStorage<
     pub rx: ByteCells<RX, SESSIONS>,
     /// The buffers the links' frames are encoded into, one batch long each.
     pub tx: ByteCells<TX, SESSIONS>,
+    /// The machines of the endpoints the node holds, one per endpoint: some 10 KB, which would sit on
+    /// the stack of the loop's thread if the node carried them.
+    pub peers: PeerStore,
 }
 
 // SAFETY: the profile's rule, stated on the type: the node is driven by one cooperative loop on
@@ -165,6 +168,7 @@ where
             app: SlotApp::new(),
             rx: ByteCells::new(),
             tx: ByteCells::new(),
+            peers: PeerStore::new(),
         }
     }
 }
@@ -1011,6 +1015,7 @@ where
             listening,
             &factory,
             endpoints,
+            &storage.peers,
             SessionTimeouts::spec_defaults(),
             declared.all(),
         );

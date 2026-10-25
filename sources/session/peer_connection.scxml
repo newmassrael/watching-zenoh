@@ -72,11 +72,19 @@
     session.lost    — the established session ended without a `manual.stop`.
     retry.due       — the retry timer fired.
 -->
+<!--
+  Queue depth: the host raises one event at a time and no transition raises or
+  sends another, so each of the two queues holds one event at most. Declared at 2
+  because a machine that declares nothing gets the runtime's depth of 64 in BOTH
+  queues, which is some 1.1 KB of every engine, and a node holds one engine per
+  peer in a table of fixed size on a stack of a few KB (`sce:capacity`).
+-->
 <scxml xmlns="http://www.w3.org/2005/07/scxml"
        xmlns:sce="http://sce.dev/ext"
        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
        xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
        sce:kind="statechart"
+       sce:capacity="2"
        name="peer_connection"
        version="1.0"
        initial="Idle">
