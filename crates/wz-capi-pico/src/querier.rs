@@ -40,10 +40,10 @@
 //! accessor.
 
 use std::ffi::{c_char, c_int, c_void};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
-use wz_capi_core::faces::SharedSession;
-use wz_capi_port::{FilterPlane, MatchId, MatchingSink};
+use wz_capi_port::cancellation::CancellationToken;
+use wz_capi_port::FilterPlane;
 
 use crate::abi::{handle_ref, impl_handle_ownership7, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::ffi::guarded;
@@ -54,13 +54,13 @@ use crate::get::{
 };
 use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::matching::{
-    consume_matching_closure, z_matching_status_t, z_moved_closure_matching_status_t,
-    z_owned_matching_listener_t, MatchingListenerState,
+    declare_on_filter, z_matching_status_t, z_moved_closure_matching_status_t,
+    z_owned_matching_listener_t,
 };
 use crate::qos::{Z_CONGESTION_CONTROL_BLOCK, Z_PRIORITY_DEFAULT};
 use crate::reply_keyexpr::{z_reply_keyexpr_t, Z_REPLY_KEYEXPR_MATCHING_QUERY};
 use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK};
-use crate::session::{tokio_session, z_loaned_session_t};
+use crate::session::{engine_of, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
 
 // --- options ---------------------------------------------------------------
@@ -134,16 +134,12 @@ impl z_querier_get_options_t {
     /// # Safety
     /// The field must be null or a moved token this crate produced.
     #[cfg(feature = "unstable-api")]
-    unsafe fn take_cancellation_token(
-        &self,
-    ) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
+    unsafe fn take_cancellation_token(&self) -> Option<Arc<CancellationToken>> {
         crate::cancellation::take_moved_cancellation_token(self.cancellation_token)
     }
 
     #[cfg(not(feature = "unstable-api"))]
-    unsafe fn take_cancellation_token(
-        &self,
-    ) -> Option<std::sync::Arc<wz_capi_core::cancellation::CancellationToken>> {
+    unsafe fn take_cancellation_token(&self) -> Option<Arc<CancellationToken>> {
         None
     }
 }
@@ -215,16 +211,12 @@ pub unsafe extern "C" fn z_querier_get_options_default(options: *mut z_querier_g
 // --- handle ----------------------------------------------------------------
 
 /// Behind a `z_owned_querier_t`: the declared keyexpr, the options every get
-/// through it inherits, and the registry to fan them over.
-///
-/// `matches` is the same back-reference `PublisherState` carries, for the same
-/// reason: the matching SSOT is keyed on the SESSION (the verdict is aggregated
-/// across faces), so without it a retracted querier's C closure keeps firing.
-/// See `PublisherState::record_matching_listener` for the defect that taught it.
+/// through it inherits, and the session's engine to ask them on.
 pub(crate) struct QuerierState {
-    shared: Arc<SharedSession>,
+    shared: Arc<Engine>,
     /// R2962 — pico's write filter for this querier, which decides whether a get
-    /// is SENT. Declared BEFORE `key` so it drops first, as the publisher's does.
+    /// is SENT, and which its matching listeners are declared on and retracted with.
+    /// Declared BEFORE `key` so it drops first, as the publisher's does.
     filter: WriteFilter,
     /// R2959 — the querier's key with the whole-key declaration pico makes
     /// for it; retracted after the querier, as the publisher's is.
@@ -253,7 +245,6 @@ pub(crate) struct QuerierState {
     /// and a get without one of its own sends with it (`vendor/zenoh-pico/src/api/api.c` @
     /// `&querier->_encoding);  // it is safe to use alias`).
     encoding: Option<wz_session_core::sample::EncodingHint>,
-    matches: StdMutex<Vec<MatchId>>,
 }
 
 impl QuerierState {
@@ -277,41 +268,6 @@ impl QuerierState {
     /// The cached borrow `z_querier_keyexpr` hands back.
     pub(crate) fn loaned_keyexpr(&self) -> *const crate::abi::z_loaned_keyexpr_t {
         &self.loaned_keyexpr as *const crate::abi::z_loaned_keyexpr_t
-    }
-
-    pub(crate) fn keyexpr(&self) -> &str {
-        self.key.literal()
-    }
-
-    pub(crate) fn shared_session(&self) -> Arc<SharedSession> {
-        self.shared.clone()
-    }
-
-    pub(crate) fn record_matching_listener(&self, id: MatchId) {
-        self.matches
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(id);
-    }
-}
-
-/// Retract on DROP, not inside `z_undeclare_querier`: `z_querier_drop` reaches
-/// the same state through `free_querier`, and putting the retraction in only one
-/// of the two exports is how the publisher-side leak happened.
-impl Drop for QuerierState {
-    fn drop(&mut self) {
-        // The guard is a temporary of this statement, so the loop runs UNLOCKED:
-        // releasing the last `MatchingSink` runs the C `drop(context)`, which is
-        // entitled to re-enter the session.
-        let ids = std::mem::take(
-            &mut *self
-                .matches
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        );
-        for id in ids {
-            self.shared.undeclare_matching_listener(id);
-        }
     }
 }
 
@@ -391,10 +347,10 @@ pub unsafe extern "C" fn z_declare_querier(
         } else {
             crate::encoding::take_moved_encoding((*options).encoding)
         };
-        let (handle, state) = match tokio_session(zs) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
+        let Some(handle) = session_handle(zs) else {
+            return Z_ERR_NULL;
         };
+        let engine = engine_of(handle);
         let ke = match keyexpr_str(keyexpr) {
             Some(k) => k.to_owned(),
             None => return Z_ERR_INVALID,
@@ -431,18 +387,14 @@ pub unsafe extern "C" fn z_declare_querier(
         // (`vendor/zenoh-pico/src/net/primitives.c` @
         // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare(zn, &querier->_key, keyexpr), _z_undeclare_querier(querier));`)
         // and its gets are issued on that declaration.
-        let key = match DeclaredKeyexpr::declare(
-            &crate::session::engine_of(handle),
-            &ke,
-            declared_of(keyexpr),
-        ) {
+        let key = match DeclaredKeyexpr::declare(&engine, &ke, declared_of(keyexpr)) {
             Ok(key) => key,
             Err(rc) => return rc,
         };
         // Its entity id, taken before the filter's Interest takes the next, as pico's
         // `_z_declare_querier` takes it (`vendor/zenoh-pico/src/net/primitives.c` @
         // `querier->_id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`) before the filter is made.
-        let eid = state.shared.next_entity_id();
+        let eid = engine.next_entity_id();
         #[cfg(not(feature = "unstable-api"))]
         let _ = eid;
         // R2962 — and its write filter, counting QUERYABLES; a target of
@@ -460,7 +412,7 @@ pub unsafe extern "C" fn z_declare_querier(
         let mut boxed = Box::new(QuerierState {
             #[cfg(feature = "unstable-api")]
             eid,
-            shared: state.shared.clone(),
+            shared: engine,
             filter,
             key,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
@@ -470,7 +422,6 @@ pub unsafe extern "C" fn z_declare_querier(
             accept_replies,
             qos,
             encoding,
-            matches: StdMutex::new(Vec::new()),
         });
         boxed.bind();
         *querier = z_owned_querier_t {
@@ -589,9 +540,9 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
             value_meta.encoding = state.encoding.clone();
         }
         issue_get(
-            state.shared.engine_ref(),
+            &*state.shared,
             state.key.literal().to_owned(),
-            state.key.wire(state.shared.engine_ref()),
+            state.key.wire(&*state.shared),
             params_in,
             state.target,
             state.consolidation,
@@ -643,24 +594,7 @@ pub unsafe extern "C" fn z_querier_declare_matching_listener(
     listener: *mut z_owned_matching_listener_t,
     callback: *mut z_moved_closure_matching_status_t,
 ) -> ZResult {
-    guarded(|| match declare_querier_matching(querier, callback) {
-        Ok((shared, id)) => {
-            if listener.is_null() {
-                // No handle slot to fill, so the watch would be unreachable:
-                // retract it rather than leaving an un-undeclarable listener.
-                shared.undeclare_matching_listener(id);
-                return Z_ERR_NULL;
-            }
-            *listener = MatchingListenerState::into_handle(shared, id);
-            Z_OK
-        }
-        Err(code) => {
-            if !listener.is_null() {
-                *listener = z_owned_matching_listener_t::null_value();
-            }
-            code
-        }
-    })
+    guarded(|| declare_on_filter(querier_filter(querier), Some(listener), callback))
 }
 
 /// Declare a session-lifetime querier matching listener with no handle (pico
@@ -670,41 +604,20 @@ pub unsafe extern "C" fn z_querier_declare_background_matching_listener(
     querier: *const z_loaned_querier_t,
     callback: *mut z_moved_closure_matching_status_t,
 ) -> ZResult {
-    guarded(|| match declare_querier_matching(querier, callback) {
-        // The id is deliberately dropped: a background listener lives for the
-        // session, and the registry (not a C handle) owns it from here. It is
-        // still retracted when the QUERIER goes away — `QuerierState::drop`
-        // holds the back-reference.
-        Ok(_) => Z_OK,
-        Err(code) => code,
-    })
+    // The listener has no handle; the querier's write filter retracts it with the querier.
+    guarded(|| declare_on_filter(querier_filter(querier), None, callback))
 }
 
-/// The shared body of the two querier declare forms, mirroring
-/// `matching::declare_matching` on the publisher side.
-unsafe fn declare_querier_matching(
-    querier: *const z_loaned_querier_t,
-    callback: *mut z_moved_closure_matching_status_t,
-) -> Result<(Arc<crate::session::Engine>, MatchId), ZResult> {
-    // Take the closure FIRST, so an invalid querier still releases it.
-    let sink: MatchingSink = consume_matching_closure(callback)?;
-    let state = match handle_ref::<z_loaned_querier_t, QuerierState>(querier) {
-        Some(s) => s,
-        // `sink` drops here, running the caller's `drop(context)`.
-        None => return Err(Z_ERR_NULL),
-    };
-    let shared = state.shared_session();
-    // The querier's matching listener counts what its write filter counts: the
-    // session's own queryables too, for a querier whose destination admits them.
-    let id = shared.declare_querier_matching_listener_counting_local(
-        state.keyexpr().to_owned(),
-        sink,
-        state.qos.destination.allows_local(),
-    );
-    state.record_matching_listener(id);
-    // The listener's handle keeps the port's engine, handed out by the engine
-    // (`as_engine`) so this crate never coerces the registry itself.
-    Ok((shared.as_engine(), id))
+/// The write filter a querier's matching listener is declared on — its own, as pico
+/// declares it (`vendor/zenoh-pico/src/api/api.c` @
+/// `ret = _z_matching_listener_register(&_listener_id, _Z_RC_IN_VAL(&sess_rc), &querier->_filter.ctx,`):
+/// so the listener counts what the filter counts, a complete queryable alone for a target of
+/// `ALL_COMPLETE` and the session's own for a querier whose destination admits them.
+///
+/// # Safety
+/// `querier` must be null or a live loaned querier.
+unsafe fn querier_filter<'a>(querier: *const z_loaned_querier_t) -> Option<&'a WriteFilter> {
+    handle_ref::<z_loaned_querier_t, QuerierState>(querier).map(|state| &state.filter)
 }
 
 #[cfg(test)]

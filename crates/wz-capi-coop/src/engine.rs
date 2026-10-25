@@ -427,6 +427,8 @@ impl InterestHold {
 
 struct MatchEntry {
     id: MatchId,
+    /// What the listener counts, as a write filter names it: which registry `watch` is in.
+    plane: FilterPlane,
     watch: u64,
     keyexpr: String,
 }
@@ -441,17 +443,6 @@ fn kinds(plane: FilterPlane) -> InterestKinds {
         FilterPlane::Subscribers => InterestKinds::SUBSCRIBERS,
         FilterPlane::Queryables { .. } => InterestKinds::QUERYABLES,
     }
-}
-
-fn same_plane(a: FilterPlane, b: FilterPlane) -> bool {
-    matches!(
-        (a, b),
-        (FilterPlane::Subscribers, FilterPlane::Subscribers)
-            | (
-                FilterPlane::Queryables { .. },
-                FilterPlane::Queryables { .. }
-            )
-    )
 }
 
 /// What one send's failure means for a publish: a link that is down skips it, anything else is
@@ -1012,7 +1003,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if let Some(hold) = core
             .interests
             .iter_mut()
-            .find(|h| same_plane(h.plane, plane) && h.keyexpr == keyexpr)
+            .find(|h| h.plane.same_kind(plane) && h.keyexpr == keyexpr)
         {
             hold.holds += 1;
             return;
@@ -1037,7 +1028,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(at) = core
             .interests
             .iter()
-            .position(|h| same_plane(h.plane, plane) && h.keyexpr == keyexpr)
+            .position(|h| h.plane.same_kind(plane) && h.keyexpr == keyexpr)
         else {
             return;
         };
@@ -1291,12 +1282,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             .unwrap_or_default()
     }
 
-    fn declare_matching_listener_counting_local(
+    fn declare_matching_listener(
         &self,
+        plane: FilterPlane,
         keyexpr: String,
         sink: MatchingSink,
-        // The session's own subscribers never match: this engine delivers nothing locally, as
-        // zenoh-pico's default build (`Z_FEATURE_LOCAL_SUBSCRIBER` 0) does not.
+        // The session's own subscribers and queryables never match: this engine delivers
+        // nothing locally, as zenoh-pico's default build (`Z_FEATURE_LOCAL_SUBSCRIBER` and
+        // `Z_FEATURE_LOCAL_QUERYABLE` 0) does not.
         _count_local: bool,
     ) -> MatchId {
         let Some(mut guard) = self.live() else {
@@ -1307,7 +1300,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         core.next_match += 1;
         self.acquire_interest(
             core,
-            FilterPlane::Subscribers,
+            plane,
             &keyexpr,
             &InterestForm {
                 mapping_id: 0,
@@ -1315,26 +1308,44 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 aggregate: false,
             },
         );
-        let now = Self::peer_matches(core, FilterPlane::Subscribers, &keyexpr);
+        let now = Self::peer_matches(core, plane, &keyexpr);
         let queue = self.matching.clone();
-        let watch = core
-            .observer
-            .borrow_mut()
-            .remote_subscribers
-            .declare_matching_listener_seeded(
-                PublisherCriterion::new(&keyexpr, Locality::Remote),
-                false,
-                BoxedMatchingSink::new(move |matching| {
-                    lock(&queue).push_back((id, matching));
-                }),
-            );
+        let report = BoxedMatchingSink::new(move |matching| {
+            lock(&queue).push_back((id, matching));
+        });
+        // The watch is in the registry of what `plane` counts, with the criterion its write
+        // filter reads ([`Self::peer_matches`]), so the listener and the filter cannot differ.
+        let watch = {
+            let mut observer = core.observer.borrow_mut();
+            match plane {
+                FilterPlane::Subscribers => observer
+                    .remote_subscribers
+                    .declare_matching_listener_seeded(
+                        PublisherCriterion::new(&keyexpr, Locality::Remote),
+                        false,
+                        report,
+                    ),
+                FilterPlane::Queryables { complete_required } => {
+                    observer.remote_queryables.declare_matching_listener_seeded(
+                        QuerierCriterion::new(&keyexpr, Locality::Remote, complete_required),
+                        false,
+                        report,
+                    )
+                }
+            }
+        };
         lock(&self.targets).push((id, Target::Matching(sink)));
         // An already-matching registration is told so at once, as zenoh-pico tells it
         // (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_add_callback`).
         if now {
             lock(&self.matching).push_back((id, true));
         }
-        core.matches.push(MatchEntry { id, watch, keyexpr });
+        core.matches.push(MatchEntry {
+            id,
+            plane,
+            watch,
+            keyexpr,
+        });
         drop(guard);
         self.deliver();
         id
@@ -1345,11 +1356,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             let core = &mut core.0;
             if let Some(at) = core.matches.iter().position(|m| m.id == id) {
                 let entry = core.matches.remove(at);
-                core.observer
-                    .borrow_mut()
-                    .remote_subscribers
-                    .undeclare_matching_listener(entry.watch);
-                Self::release_interest(core, FilterPlane::Subscribers, &entry.keyexpr);
+                {
+                    let mut observer = core.observer.borrow_mut();
+                    match entry.plane {
+                        FilterPlane::Subscribers => observer
+                            .remote_subscribers
+                            .undeclare_matching_listener(entry.watch),
+                        FilterPlane::Queryables { .. } => observer
+                            .remote_queryables
+                            .undeclare_matching_listener(entry.watch),
+                    };
+                }
+                Self::release_interest(core, entry.plane, &entry.keyexpr);
             }
         }
         drop(self.take_target(id));
@@ -1361,7 +1379,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         keyexpr: String,
         _wire: &WireKey,
         ask: Option<InterestForm>,
-        // See `declare_matching_listener_counting_local`: no entity of this session matches.
+        // See `declare_matching_listener`: no entity of this session matches.
         _count_local: bool,
     ) -> FilterId {
         let Some(mut core) = self.live() else {

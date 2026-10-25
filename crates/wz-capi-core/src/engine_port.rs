@@ -189,13 +189,14 @@ impl SessionEngine for SharedSession {
         SharedSession::keyexpr_declarations(self)
     }
 
-    fn declare_matching_listener_counting_local(
+    fn declare_matching_listener(
         &self,
+        plane: FilterPlane,
         keyexpr: String,
         sink: MatchingSink,
         count_local: bool,
     ) -> MatchId {
-        SharedSession::declare_matching_listener_counting_local(self, keyexpr, sink, count_local)
+        SharedSession::declare_plane_matching_listener(self, plane, keyexpr, sink, count_local)
     }
 
     fn undeclare_matching_listener(&self, id: MatchId) {

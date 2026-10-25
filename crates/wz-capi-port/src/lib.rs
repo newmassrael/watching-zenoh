@@ -88,6 +88,22 @@ pub enum FilterPlane {
     },
 }
 
+impl FilterPlane {
+    /// Whether `self` and `other` count the same kind of declaration — subscribers, or
+    /// queryables — whatever more either asks of a queryable. An Interest is held per kind and
+    /// key, and a declaration of one kind reaches every filter and listener of that kind.
+    pub fn same_kind(self, other: FilterPlane) -> bool {
+        matches!(
+            (self, other),
+            (FilterPlane::Subscribers, FilterPlane::Subscribers)
+                | (
+                    FilterPlane::Queryables { .. },
+                    FilterPlane::Queryables { .. }
+                )
+        )
+    }
+}
+
 /// Why a fan-out publish could not be delivered to ANY face.
 ///
 /// Named `FanoutError`, not `PublishError`: `wz_session_core::publish_options::PublishError` is

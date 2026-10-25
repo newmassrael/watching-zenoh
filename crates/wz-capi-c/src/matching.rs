@@ -602,6 +602,7 @@ pub unsafe extern "C" fn z_querier_declare_matching_listener(
         let id = state.shared.declare_querier_matching_listener(
             state.keyexpr.literal().to_owned(),
             matching_sink(closure),
+            state.matching_needs_complete(),
         );
         // SAFETY: the slot was gravestoned above.
         unsafe { install_listener(matching_listener, state.shared.clone(), id) };
@@ -663,8 +664,9 @@ pub unsafe extern "C" fn z_querier_get_matching_status(
         };
         // SAFETY: as above.
         unsafe {
-            (*matching_status).matching =
-                state.shared.has_matching_queryable(state.keyexpr.literal())
+            (*matching_status).matching = state
+                .shared
+                .has_matching_queryable(state.keyexpr.literal(), state.matching_needs_complete())
         };
         Z_OK
     })

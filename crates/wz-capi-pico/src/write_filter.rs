@@ -45,13 +45,13 @@
 //! the key they were held on, which a client's do not
 //! (`DeclaredKeyexpr::retraction_naming`).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 #[cfg(any(feature = "liveliness", feature = "advanced"))]
 use wz_capi_core::faces::SharedSession;
 #[cfg(feature = "advanced")]
 use wz_capi_core::runtime::node_clock::NodeHlc;
-use wz_capi_port::{FilterId, FilterPlane, FilteredPut, WireKey};
+use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, WireKey};
 use wz_session_core::declare_form::InterestForm;
 use wz_session_core::WhatAmI;
 
@@ -115,8 +115,14 @@ impl PicoSession {
     }
 }
 
-/// A publisher's or querier's write filter. Dropping it retracts the filter,
-/// which releases the Interest it took.
+/// A publisher's or querier's write filter, and the matching listeners declared on it.
+/// Dropping it retracts the listeners, then the filter, which releases the Interest it took.
+///
+/// A matching listener is the filter's: pico registers its callback on the entity's
+/// filter (`vendor/zenoh-pico/src/api/api.c` @
+/// `ret = _z_matching_listener_register(&_listener_id, _Z_RC_IN_VAL(&sess_rc), &querier->_filter.ctx,`),
+/// so it counts what the filter counts, and goes when the filter goes. A background
+/// listener, which has no handle, goes with it too.
 ///
 /// Declared BEFORE the entity's key in the owning struct, so the Interest is
 /// retracted while the declaration it names still stands — upstream's order
@@ -124,6 +130,11 @@ impl PicoSession {
 pub(crate) struct WriteFilter {
     shared: Arc<Engine>,
     id: FilterId,
+    /// What the filter counts, and on which key: what each of its listeners counts.
+    plane: FilterPlane,
+    keyexpr: String,
+    count_local: bool,
+    listeners: Mutex<Vec<MatchId>>,
 }
 
 impl WriteFilter {
@@ -143,9 +154,34 @@ impl WriteFilter {
         // the key, or the literal when nothing covers it.
         let wire = key.wire(&*shared);
         let ask = interest_form(&shared, session.mode, key, &wire);
-        let id =
-            shared.declare_write_filter(plane, key.literal().to_owned(), &wire, ask, count_local);
-        Self { shared, id }
+        let keyexpr = key.literal().to_owned();
+        let id = shared.declare_write_filter(plane, keyexpr.clone(), &wire, ask, count_local);
+        Self {
+            shared,
+            id,
+            plane,
+            keyexpr,
+            count_local,
+            listeners: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Declare a matching listener on this filter (pico `_z_matching_listener_register` on
+    /// the entity's filter): `sink` is told whether what the filter counts matches, now and
+    /// each time that changes. The listener is retracted with the filter, or before it by
+    /// its id. The engine is handed back with the id, for a handle that retracts it.
+    pub(crate) fn declare_matching_listener(&self, sink: MatchingSink) -> (Arc<Engine>, MatchId) {
+        let id = self.shared.declare_matching_listener(
+            self.plane,
+            self.keyexpr.clone(),
+            sink,
+            self.count_local,
+        );
+        self.listeners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(id);
+        (self.shared.clone(), id)
     }
 
     /// pico `_z_write_filter_active`: `true` when nothing has said it matches,
@@ -176,8 +212,20 @@ impl WriteFilter {
     }
 }
 
+/// Retracting on DROP reaches every path that releases the entity: `z_undeclare_*` and
+/// `z_*_drop` alike. Retracting a listener its handle already retracted does nothing.
 impl Drop for WriteFilter {
     fn drop(&mut self) {
+        // Taken out first, so no lock is held while a listener goes: releasing its last
+        // `MatchingSink` runs the C `drop(context)`, which may re-enter the session.
+        let listeners = std::mem::take(
+            self.listeners
+                .get_mut()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for id in listeners {
+            self.shared.undeclare_matching_listener(id);
+        }
         self.shared.undeclare_write_filter(self.id);
     }
 }

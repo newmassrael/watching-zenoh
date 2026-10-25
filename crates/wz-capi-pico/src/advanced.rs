@@ -1511,11 +1511,13 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_matching_listener(
     listener: *mut crate::matching::z_owned_matching_listener_t,
     callback: *mut crate::matching::z_moved_closure_matching_status_t,
 ) -> ZResult {
-    crate::matching::declare_advanced_matching(
-        advanced_publisher_match_target(publisher),
-        Some(listener),
-        callback,
-    )
+    crate::ffi::guarded(|| {
+        crate::matching::declare_on_filter(
+            advanced_publisher_filter(publisher),
+            Some(listener),
+            callback,
+        )
+    })
 }
 
 /// The background form (pico
@@ -1529,33 +1531,27 @@ pub unsafe extern "C" fn ze_advanced_publisher_declare_background_matching_liste
     publisher: *const ze_loaned_advanced_publisher_t,
     callback: *mut crate::matching::z_moved_closure_matching_status_t,
 ) -> ZResult {
-    crate::matching::declare_advanced_matching(
-        advanced_publisher_match_target(publisher),
-        None,
-        callback,
-    )
+    crate::ffi::guarded(|| {
+        crate::matching::declare_on_filter(advanced_publisher_filter(publisher), None, callback)
+    })
 }
 
-/// The `(session, keyexpr, counts_local)` a matching watch on an advanced publisher
-/// targets.
+/// The write filter a matching watch on an advanced publisher is declared on: its wrapped
+/// publisher's, as pico's advanced publisher declares the listener on its publisher
+/// (`vendor/zenoh-pico/src/api/advanced_publisher.c` @
+/// `return z_publisher_declare_matching_listener(z_publisher_loan(&publisher->_publisher), matching_listener, callback);`).
 ///
-/// The keyexpr is the publisher's OWN, not its `@adv` cache key: matching asks
-/// "is anyone subscribed to what I publish", and what an advanced publisher
-/// publishes is the plain keyexpr.
+/// The key is the publisher's OWN, not its `@adv` cache key: matching asks "is anyone
+/// subscribed to what I publish", and what an advanced publisher publishes is the plain
+/// keyexpr.
 ///
 /// # Safety
 /// `pub_` must be null or a live loaned advanced publisher.
-unsafe fn advanced_publisher_match_target(
+unsafe fn advanced_publisher_filter<'a>(
     pub_: *const ze_loaned_advanced_publisher_t,
-) -> Option<(Arc<crate::session::Engine>, String, bool)> {
-    crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_).map(|state| {
-        (
-            state.shared.as_engine(),
-            state.publisher.keyexpr().to_owned(),
-            // As the wrapped publisher's own matching listener counts.
-            state.publisher.publisher().counts_local(),
-        )
-    })
+) -> Option<&'a crate::write_filter::WriteFilter> {
+    crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
+        .map(|state| state.publisher.publisher().filter())
 }
 
 /// Declare a miss listener that lives as long as its subscriber (pico

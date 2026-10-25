@@ -256,8 +256,27 @@ it behaves as pico behaves in both of pico's threading arms.
   `client_only_dials_a_listener` asking the listener's queryable (a reply, then the end) and a
   key nobody answers (the end alone), on both engines. pico-client-coop 888,951 bytes (it has
   no query).
-- Next: queries Q2d, the querier on the cooperative engine, and a lane for
-  `client_only_dials_a_listener`; then the rest of section 6, one step each.
+- 2026-10-25: queries, step Q2d: the querier on both engines. A matching listener counts what a
+  write filter on its plane counts: `declare_matching_listener` on `SessionEngine` takes the
+  plane, so a querier's listener watches the peers' queryables, only complete ones for a target
+  of `ALL_COMPLETE`, as zenoh's querier asks. pico declares a listener on its entity's write
+  filter, so pico's `WriteFilter` declares it here too, from the plane, key and local switch the
+  filter was made with, and retracts it with the filter; the publisher, the advanced publisher
+  and the querier keep no list of their own, and a background listener goes with its entity.
+  The cooperative engine keeps each listener in the registry of its plane, with the criterion its
+  filter reads. The tokio engine installs a querier watch through a querier whose target is
+  `ALL_COMPLETE` when the plane requires it (it counted any queryable before), the zenoh-c
+  querier's poll and listener read its target the same way, and its requesting end now hears
+  the peers' queryable declarations without the answering end: a querier built without
+  `queryable` matched nothing and sent no get. pico's querier is the port's, and the
+  `engine-tokio` gate on it is gone. Tests: the engine against a router stand-in (a listener on
+  any queryable and one on complete queryables, told apart by a queryable that is not complete,
+  with a subscriber as the CONTROL), and `client_only_dials_a_listener` asking through a querier
+  that its poll and its listener say matches, beside an `ALL_COMPLETE` querier that nothing
+  matches and whose get ends at once, with and without the answering end, on both engines.
+  Layer C1co runs those four builds against the full build's listener, in a job of its own.
+  pico-client-coop 890,395 bytes.
+- Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
   engine's session, and the modules of capabilities the cooperative engine does not have yet
@@ -269,9 +288,7 @@ it behaves as pico behaves in both of pico's threading arms.
 
 ## 6. Open
 
-- The querier and liveliness on the cooperative engine.
-- `client_only_dials_a_listener` runs in no CI lane: it needs the full build's example and a
-  client build, two invocations, and has been run by hand on each engine.
+- Liveliness on the cooperative engine.
 - The listening role. pico's `z_open(listen)` holds several peers in one
   session; the cooperative session host holds sessions in slots, and whether
   one C session maps to several slots or to one multi-face session is a design

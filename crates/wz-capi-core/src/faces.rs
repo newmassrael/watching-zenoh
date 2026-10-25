@@ -975,7 +975,15 @@ struct MatchEntry {
     /// [`MatchAggregate`] behind `state`, so exactly one place owns it and
     /// `undeclare_matching_listener` can retire it deterministically.
     state: Arc<StdMutex<MatchAggregate>>,
-    scope: MatchScope,
+    /// What the listener watches, as a write filter names it.
+    ///
+    /// R311y528 — carried on the SSOT entry rather than passed at the declare call
+    /// only, because `face_up` REPLAYS every entry onto each new face and has to
+    /// install the same kind of watch the original declare did. A plane that lived
+    /// only at the call site would silently degrade every replayed querier watch
+    /// into a publisher one, and the failure would appear as "matching works until
+    /// a peer reconnects".
+    plane: FilterPlane,
     /// Whether the session's OWN entities count toward the verdict, as one more
     /// member of the aggregate ([`LOCAL_PLANE_MEMBER`]) beside the faces — see
     /// [`FilterEntry::count_local`].
@@ -986,55 +994,39 @@ struct MatchEntry {
 /// ids of its faces. Face ids count up from zero and never reach it.
 const LOCAL_PLANE_MEMBER: u64 = u64::MAX;
 
-/// Which remote declaration a C matching listener watches.
+/// Install the per-face watch of what `plane` counts on `session` for `keyexpr`: a publisher's
+/// for the subscribers, a querier's for the queryables.
 ///
-/// R311y528 — carried on the SSOT entry rather than passed at the declare call
-/// only, because `face_up` REPLAYS every entry onto each new face and has to
-/// install the same kind of watch the original declare did. A scope that lived
-/// only at the call site would silently degrade every replayed querier watch
-/// into a publisher one, and the failure would appear as "matching works until
-/// a peer reconnects".
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MatchScope {
-    /// pico `z_publisher_*_matching_*`: watch remote SUBSCRIBERS.
-    RemoteSubscribers,
-    /// pico `z_querier_*_matching_*`: watch remote QUERYABLES.
-    RemoteQueryables,
+/// One function rather than a match at each of the two call sites (declare and `face_up`
+/// replay) for the same reason `face_matching_callback` is one function: the two must not
+/// drift.
+fn install_matching_watch(
+    plane: FilterPlane,
+    session: &TokioSession,
+    keyexpr: &str,
+    callback: impl FnMut(MatchingStatus) + Send + 'static,
+) -> Option<MatchingListener<TokioRuntime>> {
+    match plane {
+        FilterPlane::Subscribers => session
+            .declare_publisher(keyexpr.to_owned(), PublishOptions::put())
+            .declare_matching_listener(callback)
+            .ok(),
+        FilterPlane::Queryables { complete_required } => session
+            .declare_querier(keyexpr.to_owned(), querier_watching(complete_required))
+            .declare_matching_listener(callback)
+            .ok(),
+    }
 }
 
-impl MatchScope {
-    /// The plane the scope's entities are on, as a write filter names it. A matching
-    /// listener asks for a match, never for a complete one.
-    fn plane(self) -> FilterPlane {
-        match self {
-            MatchScope::RemoteSubscribers => FilterPlane::Subscribers,
-            MatchScope::RemoteQueryables => FilterPlane::Queryables {
-                complete_required: false,
-            },
-        }
-    }
-
-    /// Install this scope's per-face watch on `session` for `keyexpr`.
-    ///
-    /// One function rather than a match at each of the two call sites (declare
-    /// and `face_up` replay) for the same reason `face_matching_callback` is one
-    /// function: the two must not drift.
-    fn install(
-        self,
-        session: &TokioSession,
-        keyexpr: &str,
-        callback: impl FnMut(MatchingStatus) + Send + 'static,
-    ) -> Option<MatchingListener<TokioRuntime>> {
-        match self {
-            MatchScope::RemoteSubscribers => session
-                .declare_publisher(keyexpr.to_owned(), PublishOptions::put())
-                .declare_matching_listener(callback)
-                .ok(),
-            MatchScope::RemoteQueryables => session
-                .declare_querier(keyexpr.to_owned(), QueryOptions::default())
-                .declare_matching_listener(callback)
-                .ok(),
-        }
+/// The options of the querier a queryable watch is made through: one whose target is
+/// `ALL_COMPLETE` when only a complete queryable counts, as zenoh's querier asks
+/// (`zenoh/src/api/querier.rs` @ `self.target == QueryTarget::AllComplete,`), for the runtime's
+/// querier counts complete queryables for that target alone.
+fn querier_watching(complete_required: bool) -> QueryOptions {
+    if complete_required {
+        QueryOptions::default().with_target(wz_session_core::query_mode::QueryTarget::AllComplete)
+    } else {
+        QueryOptions::default()
     }
 }
 
@@ -2360,11 +2352,12 @@ impl SharedSession {
         // observer must move this replay out of the lock.
         let mut matches = BTreeMap::new();
         for entry in &guard.matches {
-            if let Some(listener) =
-                entry
-                    .scope
-                    .install(&session, &entry.keyexpr, face_matching_callback(id, entry))
-            {
+            if let Some(listener) = install_matching_watch(
+                entry.plane,
+                &session,
+                &entry.keyexpr,
+                face_matching_callback(id, entry),
+            ) {
                 matches.insert(entry.id, listener);
             }
         }
@@ -4112,40 +4105,26 @@ impl SharedSession {
     /// has no handle filed; its listener handle is dropped after the lock is
     /// released.
     pub fn declare_matching_listener(&self, keyexpr: String, sink: MatchingSink) -> MatchId {
-        self.declare_matching_listener_scoped(keyexpr, sink, MatchScope::RemoteSubscribers, false)
+        self.declare_plane_matching_listener(FilterPlane::Subscribers, keyexpr, sink, false)
     }
 
-    /// [`Self::declare_matching_listener`] that also counts the session's OWN subscribers
-    /// when `count_local` is set: zenoh-pico's matching status with its local subscriber
-    /// switch on, for a publisher whose locality admits session-local traffic. Its
-    /// matching listener is a write filter's callback
-    /// (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_update_state`),
-    /// and that filter counts the local subscribers.
-    pub fn declare_matching_listener_counting_local(
-        &self,
-        keyexpr: String,
-        sink: MatchingSink,
-        count_local: bool,
-    ) -> MatchId {
-        self.declare_matching_listener_scoped(
-            keyexpr,
-            sink,
-            MatchScope::RemoteSubscribers,
-            count_local,
-        )
-    }
-
-    /// The shared body of the publisher and querier declare forms — see
-    /// [`MatchScope`] for why the scope is recorded on the entry.
+    /// The matching listener of everything else: it counts what a write filter on `plane`
+    /// counts — the subscribers, or the queryables (only complete ones when `plane` requires
+    /// it) — and, with `count_local`, the session's own too: zenoh-pico's matching status
+    /// with its local switch on, for an entity whose locality admits session-local traffic.
+    /// pico's matching listener is its entity's write filter's callback
+    /// (`vendor/zenoh-pico/src/net/filtering.c` @ `_z_write_filter_ctx_update_state`), so it
+    /// counts what that filter counts. The plane is recorded on the registry's entry, so a
+    /// face that comes up later installs the same watch (`MatchEntry::plane`).
     ///
     /// A listener that counts the session's own entities is given their verdict once its
     /// faces are installed, and again after every local declaration that could move it
-    /// ([`Self::refresh_local_matches`]).
-    fn declare_matching_listener_scoped(
+    /// (`refresh_local_matches`).
+    pub fn declare_plane_matching_listener(
         &self,
+        plane: FilterPlane,
         keyexpr: String,
         sink: MatchingSink,
-        scope: MatchScope,
         count_local: bool,
     ) -> MatchId {
         // R311y535 — the sink moves INTO the aggregate, which is now its ONE
@@ -4165,7 +4144,7 @@ impl SharedSession {
                 id,
                 keyexpr: keyexpr.clone(),
                 state: state.clone(),
-                scope,
+                plane,
                 count_local,
             });
             (id, faces)
@@ -4187,7 +4166,8 @@ impl SharedSession {
                 .collect();
             drop(guard);
             for ((fid, session), callback) in faces.into_iter().zip(callbacks) {
-                if let Some(listener) = scope.install(&session, &keyexpr, callback) {
+                if let Some(listener) = install_matching_watch(plane, &session, &keyexpr, callback)
+                {
                     installed.push((fid, listener));
                 }
             }
@@ -4210,7 +4190,7 @@ impl SharedSession {
         // Phase 4 — the session's own entities, for a listener that counts them. No lock
         // is held here, as the matching lock order requires.
         if count_local {
-            self.fold_local_match(&state, scope, &keyexpr);
+            self.fold_local_match(&state, plane, &keyexpr);
         }
         id
     }
@@ -4223,38 +4203,44 @@ impl SharedSession {
     /// allows ([`deliver_matching_flip`]), and two folds racing a declaration each read the
     /// declarations as they stand when they hold the aggregate, so the last fold delivered
     /// is the current answer.
-    fn fold_local_match(&self, state: &StdMutex<MatchAggregate>, scope: MatchScope, keyexpr: &str) {
+    fn fold_local_match(
+        &self,
+        state: &StdMutex<MatchAggregate>,
+        plane: FilterPlane,
+        keyexpr: &str,
+    ) {
         deliver_matching_flip(state, |agg| {
-            let matching = self.lock().local_entity_matches(scope.plane(), keyexpr);
+            let matching = self.lock().local_entity_matches(plane, keyexpr);
             agg.apply(LOCAL_PLANE_MEMBER, matching)
         });
     }
 
-    /// Give every matching listener that counts the session's own entities of `plane`, and
-    /// whose key meets `keyexpr`, the verdict after a local declaration or retraction on
-    /// `keyexpr` — pico's `_z_write_filter_notify_subscriber` /
+    /// Give every matching listener that counts the session's own entities of `plane`'s
+    /// kind, and whose key meets `keyexpr`, the verdict after a local declaration or
+    /// retraction on `keyexpr` — pico's `_z_write_filter_notify_subscriber` /
     /// `_z_write_filter_notify_queryable` (`vendor/zenoh-pico/src/net/filtering.c`), which
-    /// run inside the declare or undeclare, on its thread.
+    /// run inside the declare or undeclare, on its thread. Each listener reads the verdict
+    /// on its own plane, so one that counts only complete queryables is told whether one is.
     ///
     /// Called with no lock held. The listeners are read under the registry lock and folded
     /// after it is released, by the matching lock order.
     fn refresh_local_matches(&self, plane: FilterPlane, keyexpr: &str) {
         use wz_runtime_tokio::keyexpr_match::keyexpr_intersects_text;
-        let affected: Vec<(Arc<StdMutex<MatchAggregate>>, MatchScope, String)> = {
+        let affected: Vec<(Arc<StdMutex<MatchAggregate>>, FilterPlane, String)> = {
             let guard = self.lock();
             guard
                 .matches
                 .iter()
                 .filter(|entry| {
                     entry.count_local
-                        && entry.scope.plane() == plane
+                        && entry.plane.same_kind(plane)
                         && keyexpr_intersects_text(&entry.keyexpr, keyexpr)
                 })
-                .map(|entry| (entry.state.clone(), entry.scope, entry.keyexpr.clone()))
+                .map(|entry| (entry.state.clone(), entry.plane, entry.keyexpr.clone()))
                 .collect()
         };
-        for (state, scope, key) in affected {
-            self.fold_local_match(&state, scope, &key);
+        for (state, plane, key) in affected {
+            self.fold_local_match(&state, plane, &key);
         }
     }
 
@@ -4273,43 +4259,37 @@ impl SharedSession {
     /// [`deliver_matching_flip`] serialisation — is shared with the publisher
     /// path by construction: the only difference is which declaration the
     /// per-face watch is installed on.
+    ///
+    /// `complete_required` is a querier whose target is `ALL_COMPLETE`: only a complete
+    /// queryable matches it, as zenoh's querier asks
+    /// (`zenoh/src/api/querier.rs` @ `self.target == QueryTarget::AllComplete,`).
     pub fn declare_querier_matching_listener(
         &self,
         keyexpr: String,
         sink: MatchingSink,
+        complete_required: bool,
     ) -> MatchId {
-        self.declare_matching_listener_scoped(keyexpr, sink, MatchScope::RemoteQueryables, false)
-    }
-
-    /// [`Self::declare_querier_matching_listener`] that also counts the session's OWN
-    /// queryables when `count_local` is set — the querier twin of
-    /// [`Self::declare_matching_listener_counting_local`].
-    pub fn declare_querier_matching_listener_counting_local(
-        &self,
-        keyexpr: String,
-        sink: MatchingSink,
-        count_local: bool,
-    ) -> MatchId {
-        self.declare_matching_listener_scoped(
+        self.declare_plane_matching_listener(
+            FilterPlane::Queryables { complete_required },
             keyexpr,
             sink,
-            MatchScope::RemoteQueryables,
-            count_local,
+            false,
         )
     }
 
     /// The SESSION's matching verdict for a QUERIER's `keyexpr` (pico
     /// `z_querier_get_matching_status`): `true` when any connected peer has a
-    /// matching QUERYABLE, or this session itself declared one. The publisher
-    /// twin is [`Self::has_matching`].
+    /// matching QUERYABLE, or this session itself declared one — a complete one
+    /// when `complete_required`, as [`Self::declare_querier_matching_listener`]
+    /// counts. The publisher twin is [`Self::has_matching`].
     ///
     /// R2579 — over [`Self::matching_planes`], not `face_sessions`: the doc on
     /// that method carries the measurement, and the clause this sentence used to
     /// open with ("ANY connected peer") was the defect written down.
-    pub fn has_matching_queryable(&self, keyexpr: &str) -> bool {
+    pub fn has_matching_queryable(&self, keyexpr: &str, complete_required: bool) -> bool {
         self.matching_planes().into_iter().any(|session| {
             session
-                .declare_querier(keyexpr.to_owned(), QueryOptions::default())
+                .declare_querier(keyexpr.to_owned(), querier_watching(complete_required))
                 .get_matching_status()
                 .matching
         })
@@ -4326,7 +4306,7 @@ impl SharedSession {
     ///
     /// ⚠ R2579 — it CAN still disagree with one, and in one direction only:
     /// this poll now reads [`Self::matching_planes`] while
-    /// `declare_matching_listener_scoped` still installs per FACE, so a
+    /// `declare_plane_matching_listener` still installs per FACE, so a
     /// session-local subscriber with no peer connected is seen by the poll and
     /// not by the listener. Closing that is the same repair applied to the
     /// watch, and it needs a measurement this round did not take: whether the
@@ -5503,7 +5483,12 @@ mod matching_aggregate_tests {
         let heard = Arc::new(StdMutex::new(Vec::new()));
         let log = heard.clone();
         let sink: MatchingSink = Arc::new(move |matching| log.lock().unwrap().push(matching));
-        shared.declare_matching_listener_counting_local("wz/local/a".to_owned(), sink, true);
+        shared.declare_plane_matching_listener(
+            FilterPlane::Subscribers,
+            "wz/local/a".to_owned(),
+            sink,
+            true,
+        );
         let no_op: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
 
         // A remote-only subscriber is no session-local match.

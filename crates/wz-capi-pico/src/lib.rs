@@ -114,9 +114,7 @@ mod os;
 pub mod platform;
 pub mod pubsub;
 pub mod qos;
-// A querier watches whether a queryable matches, a plane only the tokio engine has yet; it joins
-// the cooperative engine with that plane.
-#[cfg(all(feature = "query", feature = "engine-tokio"))]
+#[cfg(feature = "query")]
 pub mod querier;
 #[cfg(feature = "queryable")]
 pub mod query;
@@ -153,7 +151,7 @@ pub use get::*;
 pub use keyexpr::*;
 pub use pubsub::*;
 pub use qos::*;
-#[cfg(all(feature = "query", feature = "engine-tokio"))]
+#[cfg(feature = "query")]
 pub use querier::*;
 #[cfg(feature = "queryable")]
 pub use query::*;

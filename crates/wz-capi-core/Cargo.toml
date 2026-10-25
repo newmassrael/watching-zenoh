@@ -283,6 +283,11 @@ query = [
     "wz-runtime-tokio/codec-request",
     "wz-runtime-tokio/codec-response",
     "wz-runtime-tokio/codec-response-final",
+    # The peers' queryable declarations, which a querier's write filter and matching listener
+    # count: without them a querier matches nothing and sends no get. zenoh-pico's filter
+    # hears them in any build with Interests, the answering end or not
+    # (`vendor/zenoh-pico/src/net/filtering.c` @ `#if Z_FEATURE_INTEREST == 1`).
+    "wz-runtime-tokio/declare-queryable",
 ]
 # The answering end of a query: the queryable and its replies.
 queryable = [

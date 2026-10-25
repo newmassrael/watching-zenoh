@@ -323,9 +323,8 @@ transport-link-unixpipe,transport-link-ws|"
     # The cooperative engine's two ends of a query, against a router stand-in on its own thread:
     # the queryable answers outside the session's lock and a kept query holds its Final; a get's
     # leg ends with its Final, its deadline, its cancelled token or its lost link. Their tests
-    # are compiled only with `queryable` and `query`. MEASURED: 9 passed with `queryable` alone
-    # (its 7 default tests and the 2 the feature reaches), 13 with both (and the 4 of `query`),
-    # 4 s.
+    # are compiled only with `queryable` and `query`. MEASURED: 8 passed with default features,
+    # 12 with `query` (its 4), 14 with both (and the 2 of `queryable`), 4 s.
     "wz-capi-coop|hook|query,queryable|"
     # Open-debt item 913 -- the in-memory group every group test of the workspace runs over
     # (`multicast_bus`) holds a member's place while a send half of its link lives, as a socket

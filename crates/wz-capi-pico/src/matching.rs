@@ -26,15 +26,15 @@
 //! asymmetry, and an asymmetric family fails to link for the NEXT program
 //! instead of this one.
 //!
-//! ## The background listener leaks its handle, on purpose
+//! ## A listener is its entity's write filter's
 //!
-//! pico's `*_declare_background_*` forms register a listener with no handle
-//! returned: it lives for the session. wz's `MatchingListener` has no `Drop`
-//! hook (dropping it leaves the watch installed — the documented wz contract),
-//! so the background form is `std::mem::forget` of the id rather than a special
-//! registry mode. The one-shot form hands the id back inside a
-//! `z_owned_matching_listener_t` and `z_undeclare_matching_listener` retracts
-//! it.
+//! pico registers a matching listener on the entity's write filter, so it counts
+//! what the filter counts and goes when the filter goes. Every form here declares
+//! it on the entity's `WriteFilter` (`write_filter.rs`), which
+//! retracts it with the entity. pico's `*_declare_background_*` forms return no
+//! handle: their listener lives as long as its entity. The one-shot form hands
+//! the id back inside a `z_owned_matching_listener_t`, and
+//! `z_undeclare_matching_listener` retracts it sooner.
 
 use std::ffi::c_void;
 
@@ -46,6 +46,7 @@ use crate::abi::handle_ref;
 use crate::ffi::{guarded, CClosure};
 use crate::pubsub::{z_closure_drop_callback_t, z_loaned_publisher_t, PublisherState};
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
+use crate::write_filter::WriteFilter;
 use std::sync::Arc;
 
 /// pico `z_matching_status_t` — `{ bool matching }`, 1 B measured, field at
@@ -411,23 +412,12 @@ pub unsafe extern "C" fn z_publisher_declare_matching_listener(
     listener: *mut z_owned_matching_listener_t,
     callback: *mut z_moved_closure_matching_status_t,
 ) -> ZResult {
-    guarded(|| match declare_matching(publisher, callback) {
-        Ok((shared, id)) => {
-            if listener.is_null() {
-                // No handle slot to fill, so the watch would be unreachable:
-                // retract it rather than leaving an un-undeclarable listener.
-                shared.undeclare_matching_listener(id);
-                return Z_ERR_NULL;
-            }
-            *listener = MatchingListenerState::into_handle(shared, id);
-            Z_OK
-        }
-        Err(code) => {
-            if !listener.is_null() {
-                *listener = z_owned_matching_listener_t::null_value();
-            }
-            code
-        }
+    guarded(|| {
+        declare_on_filter(
+            handle_ref::<z_loaned_publisher_t, PublisherState>(publisher).map(|s| s.filter()),
+            Some(listener),
+            callback,
+        )
     })
 }
 
@@ -438,11 +428,12 @@ pub unsafe extern "C" fn z_publisher_declare_background_matching_listener(
     publisher: *const z_loaned_publisher_t,
     callback: *mut z_moved_closure_matching_status_t,
 ) -> ZResult {
-    guarded(|| match declare_matching(publisher, callback) {
-        // The id is deliberately dropped: a background listener lives for the
-        // session, and the registry (not a C handle) owns it from here.
-        Ok(_) => Z_OK,
-        Err(code) => code,
+    guarded(|| {
+        declare_on_filter(
+            handle_ref::<z_loaned_publisher_t, PublisherState>(publisher).map(|s| s.filter()),
+            None,
+            callback,
+        )
     })
 }
 
@@ -466,87 +457,54 @@ pub unsafe extern "C" fn z_undeclare_matching_listener(
     })
 }
 
-/// The shared body of the two declare forms: consume the moved closure, adapt
-/// it to a [`MatchingSink`], and register it on the session.
+/// The one body of every matching listener declare — a publisher's, an advanced
+/// publisher's and a querier's, each with a handle and in the background: consume the
+/// moved closure, adapt it to a [`MatchingSink`], and declare it on the entity's write
+/// filter ([`WriteFilter::declare_matching_listener`]), which is where pico registers it.
 ///
-/// One body rather than two so the closure-consumption contract and the sink
-/// adaptation cannot drift between the handle and background forms — the
-/// sibling asymmetry this crate has already paid for once.
-unsafe fn declare_matching(
-    publisher: *const z_loaned_publisher_t,
-    callback: *mut z_moved_closure_matching_status_t,
-) -> Result<(Arc<Engine>, MatchId), ZResult> {
-    // Take the closure FIRST, so an invalid publisher still releases it.
-    let sink: MatchingSink = consume_matching_closure(callback)?;
-
-    let state = match handle_ref::<z_loaned_publisher_t, PublisherState>(publisher) {
-        Some(s) => s,
-        // `sink` drops here, running the caller's `drop(context)`.
-        None => return Err(Z_ERR_NULL),
-    };
-
-    let shared = state.shared_session();
-    // pico's matching listener is its publisher's write filter's callback, so it counts
-    // what the filter counts: the session's own subscribers too, for a publisher whose
-    // destination admits them (`local-subscriber`).
-    let id = shared.declare_matching_listener_counting_local(
-        state.keyexpr().to_owned(),
-        sink,
-        state.counts_local(),
-    );
-    // R311y528 — the publisher owns the retraction. Without this the entry
-    // outlives `z_undeclare_publisher` / `z_publisher_drop` and the C closure
-    // keeps firing for a publisher the program has released; see
-    // `PublisherState::record_matching_listener`.
-    state.record_matching_listener(id);
-    Ok((shared, id))
-}
-
-/// Declare a matching watch on an ADVANCED publisher (R311y559).
+/// `filter` is the entity's, `None` when the entity's handle was not a live one.
+/// `listener` is the handle slot, or `None` for the BACKGROUND form, whose listener has no
+/// handle and lives as long as its entity: the filter retracts it with the entity.
 ///
-/// Shared by the handled and background advanced forms, and shaped like
-/// [`declare_matching`] rather than reusing it because the target is resolved
-/// differently: an advanced publisher's state is a different type, so the
-/// caller hands over the already-resolved `(session, keyexpr)` pair.
-///
-/// `listener` of `None` is the BACKGROUND form — the watch lives for the
-/// session and the id is deliberately dropped, exactly as
-/// [`z_publisher_declare_background_matching_listener`] does.
+/// One body rather than one per form, so the closure-consumption contract and the sink
+/// adaptation cannot drift between them — the sibling asymmetry this crate has already
+/// paid for once.
 ///
 /// # Safety
-/// `listener` must be null or valid and writable; `callback` must be a valid
-/// moved closure, which is consumed on every path.
-#[cfg(feature = "advanced")]
-pub(crate) unsafe fn declare_advanced_matching(
-    target: Option<(Arc<Engine>, String, bool)>,
+/// `listener`'s slot must be null or valid and writable; `callback` must be null or a
+/// valid moved closure, which is consumed on every path.
+pub(crate) unsafe fn declare_on_filter(
+    filter: Option<&WriteFilter>,
     listener: Option<*mut z_owned_matching_listener_t>,
     callback: *mut z_moved_closure_matching_status_t,
 ) -> ZResult {
-    guarded(|| {
-        // Take the closure FIRST, so an invalid publisher still releases it.
-        let sink: MatchingSink = match consume_matching_closure(callback) {
-            Ok(sink) => sink,
-            Err(code) => return code,
-        };
-        let Some((shared, keyexpr, counts_local)) = target else {
-            // `sink` drops here, running the caller's `drop(context)`.
-            return Z_ERR_NULL;
-        };
-        let id = shared.declare_matching_listener_counting_local(keyexpr, sink, counts_local);
-        match listener {
-            None => Z_OK,
-            Some(slot) if slot.is_null() => {
-                // No handle slot to fill, so the watch would be unreachable:
-                // retract it rather than leaving an un-undeclarable listener.
-                shared.undeclare_matching_listener(id);
-                Z_ERR_NULL
-            }
-            Some(slot) => {
-                *slot = MatchingListenerState::into_handle(shared, id);
-                Z_OK
-            }
+    let slot = listener.filter(|slot| !slot.is_null());
+    if let Some(slot) = slot {
+        *slot = z_owned_matching_listener_t::null_value();
+    }
+    // Take the closure FIRST, so an invalid entity still releases it.
+    let sink: MatchingSink = match consume_matching_closure(callback) {
+        Ok(sink) => sink,
+        Err(code) => return code,
+    };
+    let Some(filter) = filter else {
+        // `sink` drops here, running the caller's `drop(context)`.
+        return Z_ERR_NULL;
+    };
+    let (shared, id) = filter.declare_matching_listener(sink);
+    match (listener, slot) {
+        (None, _) => Z_OK,
+        (Some(_), Some(slot)) => {
+            *slot = MatchingListenerState::into_handle(shared, id);
+            Z_OK
         }
-    })
+        (Some(_), None) => {
+            // No handle slot to fill, so the watch would be unreachable: retract it
+            // rather than leaving an un-undeclarable listener.
+            shared.undeclare_matching_listener(id);
+            Z_ERR_NULL
+        }
+    }
 }
 
 /// Consume a moved matching closure and adapt it to a [`MatchingSink`].

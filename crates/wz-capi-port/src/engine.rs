@@ -89,10 +89,16 @@ pub trait SessionEngine: Send + Sync + 'static {
     /// The key expression declarations the session holds, `(id, keyexpr)` in declaration order.
     fn keyexpr_declarations(&self) -> Vec<(u64, String)>;
 
-    /// Tell `sink` whether any peer subscribes to `keyexpr`, now and each time that changes; with
-    /// `count_local`, the session's own subscribers count too.
-    fn declare_matching_listener_counting_local(
+    /// Tell `sink` whether anything a write filter on `plane` counts matches `keyexpr`, now and
+    /// each time that changes: a peer's subscriber, or its queryable (only a complete one when
+    /// `plane` requires it); with `count_local`, the session's own too. It counts what that
+    /// filter counts, because zenoh-pico's matching listener is its entity's write filter's
+    /// callback (`vendor/zenoh-pico/src/api/api.c` @
+    /// `_z_matching_listener_register(&_listener_id, _Z_RC_IN_VAL(&sess_rc), &querier->_filter.ctx,`)
+    /// and zenoh's querier asks for complete queryables when its target is `ALL_COMPLETE`.
+    fn declare_matching_listener(
         &self,
+        plane: FilterPlane,
         keyexpr: String,
         sink: MatchingSink,
         count_local: bool,

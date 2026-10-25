@@ -11,12 +11,13 @@
 //!
 //! ```text
 //! cargo build --release -p wz-capi-pico --example hold_a_listener
-//! WZ_PICO_LISTENER_BIN=target/release/examples/hold_a_listener \
+//! WZ_PICO_LISTENER_BIN=$PWD/target/release/examples/hold_a_listener \
 //!     cargo test --release -p wz-capi-pico --no-default-features \
 //!     --features engine-coop,link-udp,query,queryable --test client_only_dials_a_listener
 //! ```
 //!
-//! and again with `engine-tokio` in place of `engine-coop`.
+//! and again with `engine-tokio` in place of `engine-coop`, and each without `queryable`. Layer
+//! C1co runs the four (`scripts/run-ci.sh`).
 //!
 //! A missing example is a failure and not a skip: a test that passes by not running would say a
 //! stripped build connects when nothing has shown it.
@@ -388,10 +389,18 @@ mod answering {
 #[cfg(feature = "query")]
 mod asking {
     use super::*;
+    use wz_capi_pico::matching::{
+        z_closure_matching_status, z_closure_matching_status_move, z_matching_status_t,
+        z_owned_closure_matching_status_t,
+    };
     use wz_capi_pico::{
-        z_bytes_to_slice, z_closure_reply, z_closure_reply_move, z_get, z_loaned_reply_t,
-        z_owned_closure_reply_t, z_owned_slice_t, z_reply_is_ok, z_reply_ok, z_sample_payload,
-        z_slice_data, z_slice_drop, z_slice_len, z_slice_loan, z_slice_move,
+        z_bytes_to_slice, z_closure_reply, z_closure_reply_move, z_declare_querier, z_get,
+        z_loaned_reply_t, z_moved_closure_reply_t, z_owned_closure_reply_t, z_owned_querier_t,
+        z_owned_slice_t, z_querier_declare_background_matching_listener, z_querier_get,
+        z_querier_get_matching_status, z_querier_loan, z_querier_move, z_querier_options_default,
+        z_querier_options_t, z_query_target_t, z_reply_is_ok, z_reply_ok, z_sample_payload,
+        z_slice_data, z_slice_drop, z_slice_len, z_slice_loan, z_slice_move, z_undeclare_querier,
+        ZResult, Z_QUERY_TARGET_ALL_COMPLETE, Z_QUERY_TARGET_BEST_MATCHING,
     };
 
     /// What a get's closure saw: each reply's payload (`err` for an error reply), and whether
@@ -428,8 +437,13 @@ mod asking {
         asked.lock().unwrap().done = true;
     }
 
-    /// Ask a get on `key` and step the session until it has ended: what it saw.
-    unsafe fn ask(session: &z_owned_session_t, key: &CStr) -> Vec<String> {
+    /// Issue a get through `issue`, which is handed the moved reply closure, and step the
+    /// session until the get has ended: what it saw.
+    unsafe fn asked(
+        session: &z_owned_session_t,
+        what: &str,
+        issue: impl FnOnce(*mut z_moved_closure_reply_t) -> ZResult,
+    ) -> Vec<String> {
         let asked = Arc::new(Mutex::new(Asked::default()));
         let mut closure: z_owned_closure_reply_t = std::mem::zeroed();
         assert_eq!(
@@ -441,25 +455,168 @@ mod asking {
             ),
             Z_OK
         );
-        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
-        assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
-        assert_eq!(
-            z_get(
-                z_session_loan(session),
-                z_view_keyexpr_loan(&ke),
-                std::ptr::null(),
-                z_closure_reply_move(&mut closure),
-                std::ptr::null_mut(),
-            ),
-            Z_OK
-        );
+        assert_eq!(issue(z_closure_reply_move(&mut closure)), Z_OK);
         let deadline = Instant::now() + Duration::from_secs(10);
         while !asked.lock().unwrap().done {
-            assert!(Instant::now() < deadline, "the get on {key:?} never ended");
+            assert!(Instant::now() < deadline, "the get {what} never ended");
             step_for(session, Duration::from_millis(20));
         }
         let replies = std::mem::take(&mut asked.lock().unwrap().replies);
         replies
+    }
+
+    /// Ask a get on `key` and step the session until it has ended: what it saw.
+    unsafe fn ask(session: &z_owned_session_t, key: &CStr) -> Vec<String> {
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+        asked(session, &format!("on {key:?}"), |closure| {
+            z_get(
+                z_session_loan(session),
+                z_view_keyexpr_loan(&ke),
+                std::ptr::null(),
+                closure,
+                std::ptr::null_mut(),
+            )
+        })
+    }
+
+    /// Declare a querier on `key` with `target`.
+    unsafe fn querier(
+        session: &z_owned_session_t,
+        key: &CStr,
+        target: z_query_target_t,
+    ) -> z_owned_querier_t {
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
+        let mut options: z_querier_options_t = std::mem::zeroed();
+        z_querier_options_default(&mut options);
+        options.target = target;
+        let mut querier: z_owned_querier_t = std::mem::zeroed();
+        assert_eq!(
+            z_declare_querier(
+                z_session_loan(session),
+                &mut querier,
+                z_view_keyexpr_loan(&ke),
+                &mut options,
+            ),
+            Z_OK
+        );
+        querier
+    }
+
+    /// Ask a get through `querier` and step the session until it has ended: what it saw.
+    unsafe fn ask_through(session: &z_owned_session_t, querier: &z_owned_querier_t) -> Vec<String> {
+        asked(session, "through the querier", |closure| {
+            z_querier_get(
+                z_querier_loan(querier),
+                std::ptr::null(),
+                closure,
+                std::ptr::null_mut(),
+            )
+        })
+    }
+
+    /// Whether `querier` matches, by its poll.
+    unsafe fn matches(querier: &z_owned_querier_t) -> bool {
+        let mut status = z_matching_status_t { matching: false };
+        assert_eq!(
+            z_querier_get_matching_status(z_querier_loan(querier), &mut status),
+            Z_OK
+        );
+        status.matching
+    }
+
+    /// What a matching listener was told, and whether its closure has been dropped.
+    #[derive(Default)]
+    struct Heard {
+        told: Vec<bool>,
+        dropped: bool,
+    }
+
+    unsafe extern "C" fn on_status(status: *const z_matching_status_t, ctx: *mut c_void) {
+        let heard = &*(ctx as *const Mutex<Heard>);
+        heard.lock().unwrap().told.push((*status).matching);
+    }
+
+    unsafe extern "C" fn on_status_drop(ctx: *mut c_void) {
+        let heard = Arc::from_raw(ctx as *const Mutex<Heard>);
+        heard.lock().unwrap().dropped = true;
+    }
+
+    /// A querier asks the listener's queryable, which its write filter and its matching listener
+    /// both see; a querier that targets ALL_COMPLETE matches nothing there, because the
+    /// listener's queryable is not complete, and its get ends at once, sending nothing. The
+    /// matching listener goes with its querier.
+    #[test]
+    fn a_client_only_build_asks_through_a_querier_its_matching_says_is_answered() {
+        let port = free_port();
+        let _listener = Listener::start(port);
+        // SAFETY: a fresh config and session, released before the function returns.
+        unsafe {
+            let mut session = open_to(port);
+            // The querier that counts complete queryables alone is declared first, so the
+            // declarations that reach the other have reached it too.
+            let mut complete = querier(&session, c"demo/listener/a", Z_QUERY_TARGET_ALL_COMPLETE);
+            let mut best = querier(&session, c"demo/listener/a", Z_QUERY_TARGET_BEST_MATCHING);
+            let listen = |querier: &z_owned_querier_t| {
+                let heard = Arc::new(Mutex::new(Heard::default()));
+                let mut closure: z_owned_closure_matching_status_t = std::mem::zeroed();
+                assert_eq!(
+                    z_closure_matching_status(
+                        &mut closure,
+                        Some(on_status),
+                        Some(on_status_drop),
+                        Arc::into_raw(heard.clone()) as *mut c_void
+                    ),
+                    Z_OK
+                );
+                assert_eq!(
+                    z_querier_declare_background_matching_listener(
+                        z_querier_loan(querier),
+                        z_closure_matching_status_move(&mut closure)
+                    ),
+                    Z_OK
+                );
+                heard
+            };
+            let heard_complete = listen(&complete);
+            let heard = listen(&best);
+
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !(matches(&best) && heard.lock().unwrap().told == [true]) {
+                assert!(
+                    Instant::now() < deadline,
+                    "the querier never matched the listener's queryable"
+                );
+                step_for(&session, Duration::from_millis(20));
+            }
+            assert_eq!(ask_through(&session, &best), vec!["listened"]);
+
+            assert!(
+                !matches(&complete),
+                "CONTROL: the listener's queryable is not complete"
+            );
+            assert!(
+                heard_complete.lock().unwrap().told.is_empty(),
+                "and the listener on that querier counts what its filter counts"
+            );
+            assert_eq!(
+                ask_through(&session, &complete),
+                Vec::<String>::new(),
+                "a querier nothing matches sends nothing, and its get ends"
+            );
+
+            assert!(!heard.lock().unwrap().dropped);
+            assert_eq!(z_undeclare_querier(z_querier_move(&mut best)), Z_OK);
+            assert!(
+                heard.lock().unwrap().dropped,
+                "the background listener goes with its querier"
+            );
+            assert_eq!(z_undeclare_querier(z_querier_move(&mut complete)), Z_OK);
+            assert!(heard_complete.lock().unwrap().dropped);
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
     }
 
     #[test]

@@ -218,6 +218,14 @@ pub(crate) struct QuerierState {
 }
 
 impl QuerierState {
+    /// Whether only a COMPLETE queryable matches this querier: its target is `ALL_COMPLETE`,
+    /// which is how zenoh's querier asks for its matching status and listener
+    /// (`zenoh/src/api/querier.rs` @ `self.target == QueryTarget::AllComplete,`).
+    pub(crate) fn matching_needs_complete(&self) -> bool {
+        self.base.effective_target()
+            == Some(wz_runtime_tokio::session_glue::QueryTarget::AllComplete)
+    }
+
     /// Attach a matching listener, replacing (and so undeclaring) any previous.
     fn attach_matching(&self, hold: MatchingHold) {
         let mut slot = self.matching.lock().unwrap_or_else(|e| e.into_inner());
@@ -554,6 +562,7 @@ pub unsafe extern "C" fn z_querier_declare_background_matching_listener(
             return Z_ENULL;
         };
         let closure = Arc::new(cclosure);
+        let complete_required = state.matching_needs_complete();
         let id = state.shared.declare_querier_matching_listener(
             state.keyexpr.literal().to_owned(),
             Arc::new(move |matching: bool| {
@@ -569,6 +578,7 @@ pub unsafe extern "C" fn z_querier_declare_background_matching_listener(
                     call(&status, ctx);
                 }));
             }),
+            complete_required,
         );
         state.attach_matching(MatchingHold::new(state.shared.clone(), id));
         Z_OK

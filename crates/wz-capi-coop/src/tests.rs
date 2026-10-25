@@ -62,6 +62,10 @@ fn params(whatami: WhatAmI, zid: u8) -> SessionInitParams {
 /// What the test tells the router to do.
 enum Command {
     DeclareSubscriber(u64, &'static str),
+    /// Declare queryable `.0` on the key, complete as `.2` says. Declared only: it answers
+    /// nothing, which is all a test of what matches needs.
+    DeclareQueryable(u64, &'static str, bool),
+    UndeclareQueryable(u64),
     Push(&'static str, &'static [u8]),
     /// Close the session and stop, as a router that goes away does.
     Close,
@@ -254,6 +258,12 @@ fn run_router(
         match inbox.try_recv() {
             Ok(Command::DeclareSubscriber(id, key)) => {
                 let _ = actions.send_declare_subscriber(id, 0, Some(key));
+            }
+            Ok(Command::DeclareQueryable(id, key, complete)) => {
+                let _ = actions.send_declare_queryable(id, 0, Some(key), complete);
+            }
+            Ok(Command::UndeclareQueryable(id)) => {
+                actions.send_undeclare_queryable(id);
             }
             Ok(Command::Push(key, value)) => {
                 let _ = actions.send_push_literal(key, value, true);
@@ -453,6 +463,112 @@ fn a_write_filter_suppresses_until_a_subscriber_is_declared() {
     SessionDrive::close(&*engine);
     assert!(SessionDrive::is_closed(&*engine));
     assert!(SessionDrive::read(&*engine, false).is_err());
+}
+
+/// A matching listener records each verdict it is told.
+fn heard() -> (wz_capi_port::MatchingSink, Arc<Mutex<Vec<bool>>>) {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let into = log.clone();
+    (
+        Arc::new(move |matching| into.lock().unwrap().push(matching)),
+        log,
+    )
+}
+
+/// A matching listener on the queryables counts what a querier's write filter on the same plane
+/// counts: any queryable on the key, or only a complete one when the plane requires it, as
+/// zenoh-pico's listener is that filter's callback. The CONTROL is a subscriber on the key, which
+/// the router declares first and which opens a subscriber filter while neither listener hears it.
+#[test]
+fn a_queryable_matching_listener_counts_what_its_filter_counts() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let ask = || {
+        Some(InterestForm {
+            mapping_id: 0,
+            suffix: Some("demo/q".to_owned()),
+            aggregate: false,
+        })
+    };
+    let any_plane = FilterPlane::Queryables {
+        complete_required: false,
+    };
+    let complete_plane = FilterPlane::Queryables {
+        complete_required: true,
+    };
+    let (sink, any) = heard();
+    let any_id = engine.declare_matching_listener(any_plane, "demo/q".to_owned(), sink, false);
+    let (sink, complete) = heard();
+    engine.declare_matching_listener(complete_plane, "demo/q".to_owned(), sink, false);
+    let complete_filter = engine.declare_write_filter(
+        complete_plane,
+        "demo/q".to_owned(),
+        &WireKey::literal(),
+        ask(),
+        false,
+    );
+    let subscriber_filter = engine.declare_write_filter(
+        FilterPlane::Subscribers,
+        "demo/q".to_owned(),
+        &WireKey::literal(),
+        ask(),
+        false,
+    );
+    until(&engine, "the router to see the Interests", || {
+        router.seen(|s| s.interests) >= 2
+    });
+
+    router.send(Command::DeclareSubscriber(1, "demo/**"));
+    until(&engine, "the subscriber filter to open", || {
+        !engine.write_filter_active(subscriber_filter)
+    });
+    assert!(
+        any.lock().unwrap().is_empty() && complete.lock().unwrap().is_empty(),
+        "CONTROL: a subscriber is no queryable"
+    );
+
+    router.send(Command::DeclareQueryable(2, "demo/**", false));
+    until(&engine, "the listener on any queryable to match", || {
+        *any.lock().unwrap() == [true]
+    });
+    assert!(
+        complete.lock().unwrap().is_empty(),
+        "a queryable that is not complete matches no complete listener"
+    );
+    assert!(
+        engine.write_filter_active(complete_filter),
+        "nor the filter the listener counts with"
+    );
+
+    router.send(Command::DeclareQueryable(3, "demo/q", true));
+    until(&engine, "the complete listener to match", || {
+        *complete.lock().unwrap() == [true]
+    });
+    assert!(!engine.write_filter_active(complete_filter));
+
+    router.send(Command::UndeclareQueryable(3));
+    until(&engine, "the complete listener to match no more", || {
+        *complete.lock().unwrap() == [true, false]
+    });
+    assert!(engine.write_filter_active(complete_filter));
+    assert_eq!(
+        *any.lock().unwrap(),
+        [true],
+        "the queryable that is not complete still matches"
+    );
+
+    // A retracted listener hears nothing more, while the other is told.
+    engine.undeclare_matching_listener(any_id);
+    router.send(Command::DeclareQueryable(4, "demo/q", true));
+    until(&engine, "the complete listener to match again", || {
+        *complete.lock().unwrap() == [true, false, true]
+    });
+    router.send(Command::UndeclareQueryable(2));
+    router.send(Command::UndeclareQueryable(4));
+    until(&engine, "the complete listener to match no more", || {
+        complete.lock().unwrap().len() == 4
+    });
+    assert_eq!(*any.lock().unwrap(), [true]);
 }
 
 /// A session whose router goes away outlives the link: what that router declared goes with it,

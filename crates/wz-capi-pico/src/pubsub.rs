@@ -27,7 +27,7 @@
 //!   the duration of `call`) and reads the keyexpr / payload back out.
 
 use std::ffi::{c_int, c_void};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
 #[cfg(feature = "liveliness")]
 use wz_capi_core::runtime::declare::LivelinessSample;
@@ -50,7 +50,7 @@ use crate::result::{
 };
 use crate::session::{engine_of, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{PicoSession, WriteFilter};
-use wz_capi_port::{FilterPlane, FilteredPut, MatchId, SubId, WireKey};
+use wz_capi_port::{FilterPlane, FilteredPut, SubId, WireKey};
 
 // --- opaque loaned sample --------------------------------------------------
 
@@ -999,16 +999,17 @@ impl PlainPublisher {
         &self.key
     }
 
-    /// Whether its write filter and matching status count the session's own
-    /// subscribers ([`PublisherQos::counts_local`]).
-    pub(crate) fn counts_local(&self) -> bool {
-        self.declared.counts_local()
-    }
-
     /// pico's matching status of the publisher: whether its write filter has a match
     /// (`!_z_write_filter_active`).
     pub(crate) fn filter_matches(&self) -> bool {
         !self.filter.active()
+    }
+
+    /// The publisher's write filter: its matching listeners are declared on it
+    /// ([`WriteFilter::declare_matching_listener`]), and it retracts them when the publisher
+    /// goes, as pico's filter takes its callbacks with it at `z_undeclare_publisher`.
+    pub(crate) fn filter(&self) -> &WriteFilter {
+        &self.filter
     }
 }
 
@@ -1023,9 +1024,6 @@ pub(crate) struct PublisherState {
     /// same reason. R2959 — it carries the declaration, as pico's loan of
     /// `&pub->_key` does, so a put on it aliases.
     loaned_keyexpr: z_loaned_keyexpr_t,
-    /// Every matching listener declared THROUGH this publisher, retracted when
-    /// it goes away. See [`PublisherState::record_matching_listener`].
-    matches: StdMutex<Vec<MatchId>>,
 }
 
 impl PublisherState {
@@ -1062,75 +1060,15 @@ impl PublisherState {
         &self.loaned_keyexpr as *const z_loaned_keyexpr_t
     }
 
-    /// The declared keyexpr — what the MATCHING plane watches.
-    pub(crate) fn keyexpr(&self) -> &str {
-        self.core.key.literal()
-    }
-
-    /// Whether the publisher's matching status counts the session's own
-    /// subscribers ([`PublisherQos::counts_local`]).
-    pub(crate) fn counts_local(&self) -> bool {
-        self.core.counts_local()
-    }
-
     /// pico's matching status: whether the write filter has a match, which is
     /// `!_z_write_filter_active`.
     pub(crate) fn filter_matches(&self) -> bool {
         self.core.filter_matches()
     }
 
-    /// The session registry this publisher publishes through. Cloned rather
-    /// than borrowed because a matching listener outlives the borrow: its
-    /// handle must reach `undeclare_matching_listener` after the publisher's
-    /// `handle_ref` borrow has ended.
-    pub(crate) fn shared_session(&self) -> Arc<Engine> {
-        self.core.shared.clone()
-    }
-
-    /// Remember that `id` was declared through this publisher, so dropping the
-    /// publisher retracts it.
-    ///
-    /// R311y528 — the matching plane's registry SSOT is keyed on the SESSION,
-    /// not on the publisher, because the verdict is aggregated across faces.
-    /// That is the right SSOT and it created an ownership gap: pico ties its
-    /// write-filter context to the publisher, so `z_undeclare_publisher` there
-    /// takes the callbacks with it, while here nothing did — the [`MatchEntry`]
-    /// stayed registered, every per-face wz listener stayed installed, and the C
-    /// closure kept being invoked for a publisher the program had already
-    /// dropped. This list is the missing back-reference.
-    ///
-    /// [`MatchEntry`]: wz_capi_core::faces::SharedSession::declare_matching_listener
-    pub(crate) fn record_matching_listener(&self, id: MatchId) {
-        self.matches
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(id);
-    }
-}
-
-/// Retracting on DROP rather than inside `z_undeclare_publisher` is the point:
-/// `z_publisher_drop` reaches the same state through `free_publisher`, and
-/// putting the retraction in only one of the two exports is exactly how the leak
-/// would come back. Every path that releases a `PublisherState` runs this.
-///
-/// Retraction is idempotent by construction — `undeclare_matching_listener`
-/// searches the registry by id and does nothing when the entry is gone — so a C
-/// program that undeclares its listener first and its publisher second (the
-/// ordinary case) is not double-retracting anything.
-impl Drop for PublisherState {
-    fn drop(&mut self) {
-        // The guard is a temporary of this statement, so the loop below runs
-        // with the list UNLOCKED: releasing the last `MatchingSink` runs the C
-        // `drop(context)`, which is entitled to re-enter the session.
-        let ids = std::mem::take(
-            &mut *self
-                .matches
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        );
-        for id in ids {
-            self.core.shared.undeclare_matching_listener(id);
-        }
+    /// The publisher's write filter, which its matching listeners are declared on.
+    pub(crate) fn filter(&self) -> &WriteFilter {
+        self.core.filter()
     }
 }
 
@@ -1916,7 +1854,6 @@ pub unsafe extern "C" fn z_declare_publisher(
         let mut boxed = Box::new(PublisherState {
             core,
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(std::ptr::null(), 0),
-            matches: StdMutex::new(Vec::new()),
         });
         boxed.bind();
         *publisher = z_owned_publisher_t {
