@@ -42,9 +42,10 @@ use wz_runtime_coop::session_drive::SlotStack;
 use wz_runtime_coop::{CoopRuntime, CoopTime};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_slot::SessionSlots;
-#[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_client::Listening;
-use wz_session_mcu::slot_node::{Answering, NoPlane};
+#[cfg(not(feature = "get"))]
+use wz_session_mcu::slot_node::Answering;
+use wz_session_mcu::slot_node::NoPlane;
 use wz_session_mcu::slot_node::{
     ClientNode, Declared, Document, Entities, NodeIdentity, NodePort, NodeStorage,
     SIGNING_KEY_BYTES,

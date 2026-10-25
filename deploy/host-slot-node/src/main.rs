@@ -65,9 +65,10 @@ use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps::MAX_QUERYABLES;
 use wz_session_mcu::dial::parse_locator;
-#[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_client::Listening;
-use wz_session_mcu::slot_node::{Answering, NoPlane};
+#[cfg(not(feature = "get"))]
+use wz_session_mcu::slot_node::Answering;
+use wz_session_mcu::slot_node::NoPlane;
 use wz_session_mcu::slot_node::{
     documents_of, BodyPool, ClientNode, Declared, Entities, NodeIdentity, NodePort, NodeStorage,
     SingleEndpoint,
