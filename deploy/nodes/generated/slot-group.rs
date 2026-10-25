@@ -6,7 +6,7 @@
 
 pub const NODE_ID: &str = "slot-group";
 /// The digest of the declaration file this was generated from; the node's facts note carries it.
-pub const DECLARATION_SHA256: &str = "4c18c646902563ac52d75f3d02dcb770adf2eae5e339a387c40319d452c68190";
+pub const DECLARATION_SHA256: &str = "f18f465859a7c002476aa746bb1f6f3e9eba843550695f3cbf8678b185433e9d";
 /// The routers the node dials, as locators.
 pub const DIALS: usize = 0;
 pub const DIALED: [&str; 0] = [];
@@ -29,7 +29,7 @@ pub const GROUP: &str = "udp/224.0.0.224:7490";
 pub const GROUP_ADDR: [u8; 4] = [224, 0, 0, 224];
 pub const GROUP_PORT: u16 = 7490;
 pub const GROUP_TTL: u8 = 1;
-pub const MEMBERS: usize = 4;
+pub const MEMBERS: usize = 8;
 /// The queryables the node declares, and the documents they answer with: (key, bytes).
 pub const DOCS: usize = 0;
 pub const DOCUMENTS: [(&str, usize); 0] = [];

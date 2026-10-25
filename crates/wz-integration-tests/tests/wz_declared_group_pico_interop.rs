@@ -24,7 +24,10 @@
 //!   node admitted pico's JOIN and decoded its Frames; a put on a key the node does not subscribe
 //!   to is kept by nothing;
 //! - the node counts its members: none until pico joins, one while pico is there and none again
-//!   once pico has left (its lease runs out, since the CLI says no Close when it is stopped).
+//!   once pico has left (its lease runs out, since the CLI says no Close when it is stopped);
+//! - a put longer than the batch, which pico cuts into a Fragment chain, is put back together and
+//!   kept (the whole length is said, the cell keeps what it holds), one that fits a frame is kept
+//!   the same way, and one longer than the reassembly slot (4,096 bytes) is dropped whole.
 //!
 //! Multicast needs a route on the host: the legs run on the interface the default route uses, as
 //! pico's `#iface=` names it and as the node's own join (the kernel's routing) picks it, so both meet
@@ -41,6 +44,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     default_route_iface, graceful_terminate, read_captured, wait_for_substring,
     zenoh_pico_cli_binary, ChildGuard, ZENOH_MULTICAST_GROUP,
@@ -268,5 +272,87 @@ fn the_multicast_node_counts_its_members_as_pico_joins_and_its_lease_runs_out() 
             .is_some_and(|(_, tail)| tail.trim_start().starts_with('0'))
     });
     assert_eq!(members(&node_out), Some(0), "{}", read(&node_out));
+    graceful_terminate(node.child_mut(), Duration::from_secs(5));
+}
+
+/// One put of `bytes` bytes of `fill` on `KEPT`, from a pico peer of its own that joins the group,
+/// puts once and leaves (its lease, not a Close, ends its membership). `z_put` takes the whole value
+/// as the payload, where `z_pub` cuts it to 255 bytes, so this is how a put longer than the batch is
+/// made.
+fn put_once(bytes: usize, fill: char) {
+    let value: String = std::iter::repeat_n(fill, bytes).collect();
+    let output = Command::new("stdbuf")
+        .args(["-oL", "-eL"])
+        .arg(zenoh_pico_cli_binary("z_put"))
+        .args(["-k", KEPT, "-v", &value, "-l", &locator(), "-m", "peer"])
+        .output_bounded()
+        .expect("run z_put");
+    assert!(
+        output.status.success(),
+        "z_put failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Put `bytes` bytes of `fill` until the node says a sample of that whole length, trying a few
+/// peers (a first put can precede the node's admission of its JOIN); whether it said one by then.
+fn put_until_kept(node: &File, bytes: usize, fill: char) -> bool {
+    let line = format!("HOST-WZ-SAMPLE {KEPT} put len={bytes} ");
+    for _ in 0..3 {
+        put_once(bytes, fill);
+        let until = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < until {
+            if read(node).contains(&line) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    false
+}
+
+// wz-proves: none -- the same node, for the same reason: reassembly on the group has no catalog atom for the fixed-memory profile
+#[test]
+#[ignore = "environment-dependent multicast e2e (the packaged slot-group, which Layer M makes, + the pico CLI); runs via --ignored"]
+fn the_multicast_node_reassembles_a_put_pico_cuts_into_fragments_and_drops_one_too_long() {
+    let (mut node, node_out) = start_node();
+
+    // A put that fits one frame arrives whole and is kept: the cell holds 64 bytes of it and the
+    // line says the 1,000 it was. (Pico cuts at the link's MTU, about 1,470 bytes, before it cuts at
+    // the batch of 2,048, so a put a little over a thousand is the last that is not a chain.)
+    assert!(
+        put_until_kept(&node_out, 1_000, 'A'),
+        "a put that fits one frame was not kept\n{}",
+        read(&node_out)
+    );
+    // A put of 3,000 bytes is past the batch, so pico sends it as a Fragment chain, and the node puts
+    // it back together: the same line, with the whole length.
+    assert!(
+        put_until_kept(&node_out, 3_000, 'B'),
+        "a put pico fragmented was not reassembled\n{}",
+        read(&node_out)
+    );
+    let said = read(&node_out);
+    assert!(
+        said.lines().any(|line| line
+            .starts_with(&format!("HOST-WZ-SAMPLE {KEPT} put len=3000 kept=64 "))
+            && line.contains(&hex(&"B".repeat(64)))),
+        "the reassembled put is not the bytes pico put\n{said}"
+    );
+    // A put past the reassembly slot (4,096 bytes) is dropped whole: nothing of it is kept, and the
+    // node still takes the next put, so the drop did not wedge the chain table.
+    put_once(5_000, 'C');
+    put_once(5_000, 'C');
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(
+        !read(&node_out).contains("len=5000"),
+        "a put longer than the reassembly slot was kept\n{}",
+        read(&node_out)
+    );
+    assert!(
+        put_until_kept(&node_out, 2_500, 'D'),
+        "the node stopped taking puts after a chain it dropped\n{}",
+        read(&node_out)
+    );
     graceful_terminate(node.child_mut(), Duration::from_secs(5));
 }

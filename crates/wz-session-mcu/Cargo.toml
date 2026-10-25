@@ -137,8 +137,16 @@ listen = ["client-slot", "wz-session-core/session-unicast-accept"]
 # The client on the slot profile that is also a MEMBER of a multicast group (`slot_group`): the group's
 # JOIN beacons and datagrams, the node's subscriptions fed from what the members put and its publishers
 # putting on the group. The literal Put is the whole of the group's outbound vocabulary with no
-# allocator, so a node with a group carries publishers and subscriptions and no more.
-group = ["client-slot", "transport-multicast", "codec-push"]
+# allocator, so a node with a group carries publishers and subscriptions and no more. A member's put
+# longer than the batch arrives as a Fragment chain (zenoh-pico fragments at its batch), so the group
+# reassembles: the router that stages a chain per member, and the fragment codec it reads them with.
+group = [
+    "client-slot",
+    "transport-multicast",
+    "codec-push",
+    "reassembly",
+    "wz-session-core/transport-fragmentation",
+]
 adminspace-write = [
     "dial",
     "wz-session-core/adminspace-write",

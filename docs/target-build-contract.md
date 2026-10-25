@@ -698,18 +698,29 @@ rather than serve them on its sessions and drop them on the group. The node says
 <locator> joins=<n> refused=<n> members=<n>` each time any of the three moves. One set of peer
 tables serves the whole group, so an alias a member declares is an id of the group: a put that names
 its key in full, which is what zenoh-pico's multicast peer sends, is unaffected, and two members that
-alias different keys under one id are not told apart. A payload longer than the batch arrives as a
-fragment chain, which this build does not reassemble. The witness is zenoh-pico's own multicast peers
+alias different keys under one id are not told apart. A put longer than one frame arrives as a
+Fragment chain (zenoh-pico cuts at the link's MTU, about 1,470 bytes, before it cuts at the batch),
+and the `group` feature turns on the router that stages a chain per member
+(`reassembly`, with `transport-fragmentation`'s fragment codec): the chain is put back together and
+the subscription's cell keeps what it holds of the whole, and the line says the whole length. A chain
+past the reassembly slot (4,096 bytes) is dropped whole. The router is about 22 KiB of the image's
+`.bss`, which is what the feature costs a node that is a member of a group; a build with no group
+does not carry it. The witness is zenoh-pico's own multicast peers
 (`wz_declared_group_pico_interop.rs`, Layer M, since a multicast route is the host's): a pico
 `z_sub` hears the node's eight-byte document more than once and a `z_sub` of another key hears none;
 a pico `z_pub`'s puts reach the node's subscription, which keeps the latest, and a put on a key the
-node does not subscribe to is kept by nothing; and the node counts its members, none, one while pico
-is there and none again once its lease has run out. Advertising another sequence-number resolution
-fails all three, which is what ties the group's parameters to the witness.
+node does not subscribe to is kept by nothing; the node counts its members, none, one while pico
+is there and none again once its lease has run out; and a pico `z_put` of 1,000 bytes is kept whole,
+one of 3,000 (a chain) is reassembled and one of 5,000 is dropped, after which the node still takes
+the next. Advertising another sequence-number resolution fails the first three, which is what ties
+the group's parameters to the witness, and building without `reassembly` fails the fourth at the
+chain, after its whole-frame put passed, which is what ties the reassembly to it.
 
 Not written: the group's queryables, queriers and tokens, each of which is a change to the shared
 group emit (an allocator-free Response, Request and DeclareReply) before it is a word a node with a
-group accepts; reassembly of a fragmented put on the group; peer tables of each member; a UDP or a
+group accepts (no stock peer answers a query over a group at all: neither zenoh-pico, with or
+without its multicast declarations, nor zenoh's own, so there is nothing to prove one against);
+peer tables of each member; a UDP or a
 secure listener; declarations toward accepted peers that are not clients (they are sent as to the
 router today, and no peer has judged them); a port of the declared node for QNX or Android; and the
 budgets that are still tuning constants of the library (the task cells, the receive and send

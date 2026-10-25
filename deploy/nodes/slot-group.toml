@@ -22,7 +22,7 @@ target = "slot"
 [[endpoint]]
 role = "multicast"
 locator = "udp/224.0.0.224:7490"
-members = 4
+members = 8
 
 [[entity]]
 kind = "publisher"
