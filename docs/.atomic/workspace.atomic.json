@@ -288390,6 +288390,38 @@
         "Read the hosted run of this push per job, compared by head sha. Reds found in run 40191687498 that are not this session's: the tokio lib test that calls a ReplyRegistry method (C1an), the multicast and reconnect counts and the datagram pool test (C1bnl, C1q, C1u), the router capacity report (E7g) and the C ABI text size (C1cs)."
       ]
     },
+    "Round 3660": {
+      "decision_summary": "Step 6, seventh part (6.2b-5): a node held by its zid is a session of the node like any other. It was held, but nothing declared the admin space on it and no node reported it: the slot node and client read the manager's sessions(), which is the endpoints' and must stay so, since the status pairs it with states() by position. ConnectManager::node_sessions() is the nodes', read beside the others, so an open of a node ends in a session whose declarations went out and which the admin root lists. The slot node gains the build's source of hints, declare_node(zid, locator), and open_node, node_opener and two for_each readers. Witnessed on the lwIP loopback: B, built with room for two, is refused a zid it has no hint for, opens A by its zid, dials it FOR that zid, and both report one session. Nothing is forwarded by wz-session-lwip. Not done: the Hello source (no scouting receive on the fixed profile) and the witness on a built image (a lane step, its grammar shared with the board).",
+      "changes_bullets": [
+        "wz-session-mcu connect_manager: node_sessions(), the nodes' sessions with the zid each was dialled for (sessions() stays the endpoints'); a test assertion that a held node shows there and not in sessions(). slot_client: live() reads node_sessions() too.",
+        "wz-session-lwip slot_node (SlotAdminNode): declare_node, open_node, node_opener, for_each_dialled_node, for_each_node; declare_on_new_sessions and report read node_sessions(). tests/admin_node_slot.rs: a_node_opened_by_its_zid_is_dialled_for_it_declared_on_and_reported (asserts the refusal for want of room at the default limit). run-ci.sh: C1m admin node slot 3 to 4, and a leg C1m admin node slot nodes (1, WZ_LIMIT_MAX_PEER_NODES=2). docs/session-lifecycle-intent.md: 6.2b-5 and what is not done."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): admin_node_slot passes at the default limit (4 passed, the new test asserting the refusal for want of room) and, in a leg that states two node rows, the new test runs to its end (it prints that a node was held, Live, for A's zid; 1 passed); the mcu manager tests, the adminspace-write and read+write legs pass at their unchanged counts; clippy of wz-session-lwip (the slot node's feature list), wz-session-mcu (slot with client-slot, adminspace-write) is clean; the hook's whole round-fed gate array passes.",
+        "Not run: the images' builds and Layer Qa and Qzb (hosted only for the Zephyr one; the lwIP image's build is unchanged by this round, since the slot node is not the image's loop)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the first finished hosted run holding rounds 3649 to this one (Qza, Qa and Qzb with the opener bound; the open of a node on the Zephyr image). Not done in step 6: the Hello source of hints (waits on scouting receive on the cooperative engine, another track's), and the witness on a built image (a step of admin_node_verdict.py, grammar shared with the board: the lane owner agrees it). Owed: the heap UDP dialer does not yet verify nodes. Then D7. Open and not mine: the C1an build red from 83a1ed2ce (nobody has claimed it) and the tokio, router and pico reds of run 40191687498."
+      ],
+      "publishable_decision_summary": "Step 6, seventh part (6.2b-5): a node held by its zid is a session of the node like any other. It was held, but nothing declared the admin space on it and no node reported it: the slot node and client read the manager's sessions(), which is the endpoints' and must stay so, since the status pairs it with states() by position. ConnectManager::node_sessions() is the nodes', read beside the others, so an open of a node ends in a session whose declarations went out and which the admin root lists. The slot node gains the build's source of hints, declare_node(zid, locator), and open_node, node_opener and two for_each readers. Witnessed on the lwIP loopback: B, built with room for two, is refused a zid it has no hint for, opens A by its zid, dials it FOR that zid, and both report one session. Nothing is forwarded by wz-session-lwip. Not done: the Hello source (no scouting receive on the fixed profile) and the witness on a built image (a lane step, its grammar shared with the board).",
+      "publishable_changes_bullets": [
+        "wz-session-mcu connect_manager: node_sessions(), the nodes' sessions with the zid each was dialled for (sessions() stays the endpoints'); a test assertion that a held node shows there and not in sessions(). slot_client: live() reads node_sessions() too.",
+        "wz-session-lwip slot_node (SlotAdminNode): declare_node, open_node, node_opener, for_each_dialled_node, for_each_node; declare_on_new_sessions and report read node_sessions(). tests/admin_node_slot.rs: a_node_opened_by_its_zid_is_dialled_for_it_declared_on_and_reported (asserts the refusal for want of room at the default limit). run-ci.sh: C1m admin node slot 3 to 4, and a leg C1m admin node slot nodes (1, WZ_LIMIT_MAX_PEER_NODES=2). docs/session-lifecycle-intent.md: 6.2b-5 and what is not done."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): admin_node_slot passes at the default limit (4 passed, the new test asserting the refusal for want of room) and, in a leg that states two node rows, the new test runs to its end (it prints that a node was held, Live, for A's zid; 1 passed); the mcu manager tests, the adminspace-write and read+write legs pass at their unchanged counts; clippy of wz-session-lwip (the slot node's feature list), wz-session-mcu (slot with client-slot, adminspace-write) is clean; the hook's whole round-fed gate array passes.",
+        "Not run: the images' builds and Layer Qa and Qzb (hosted only for the Zephyr one; the lwIP image's build is unchanged by this round, since the slot node is not the image's loop)."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first finished hosted run holding rounds 3649 to this one (Qza, Qa and Qzb with the opener bound; the open of a node on the Zephyr image). Not done in step 6: the Hello source of hints (waits on scouting receive on the cooperative engine, another track's), and the witness on a built image (a step of admin_node_verdict.py, grammar shared with the board: the lane owner agrees it). Owed: the heap UDP dialer does not yet verify nodes. Then D7. Open and not mine: the C1an build red from 83a1ed2ce (nobody has claimed it) and the tokio, router and pico reds of run 40191687498."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
