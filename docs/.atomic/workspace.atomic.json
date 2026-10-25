@@ -288470,6 +288470,36 @@
         "Still open: wait_declarations_stable and a synced query on the cooperative engine."
       ]
     },
+    "Round 3662": {
+      "decision_summary": "Repair of a build red nobody had claimed, from the first finished hosted run holding the dissect round (run 40191687498, Layer C1an): a test helper added with the querier's pending bound (83a1ed2ce), finish_query, calls ReplyRegistry::dispatch_response_final, which exists only with the codec-response-final feature, and the helper and its one test were gated on query-get alone. query-get does not imply that codec in this crate (a build that asks and does not decode a final never sees a query end by one), so the lib tests of every no-default build with query-get failed to compile. Both are gated on the two features now, which says what the test needs; the crate's features are unchanged, since making query-get imply the codec would change what every asking build links. The failing leg compiles and passes with its 4, the sibling legs pass, clippy is clean with and without the codec, and the querier tests with the codec still run the test.",
+      "changes_bullets": [
+        "wz-runtime-tokio session/tests.rs: finish_query and a_query_ending_by_its_final_gives_its_place_back are gated on query-get and codec-response-final (they were on query-get alone), with the reason in the helper's comment. No crate feature changed."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): the failing command of Layer C1an (cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace) compiles and prints 4 passed, the count the leg guards; the two sibling no-default legs (adminspace-metrics, and adminspace-read with metrics) pass; the querier tests with codec-response-final added run 16, the gated test among them; clippy of the lib and its tests is clean in both feature shapes; rustfmt clean.",
+        "Attribution: the helper and test came with 83a1ed2ce, which no session claims; the compile error was named by the first finished hosted run holding it."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the first finished hosted run holding this round: C1an and its sibling no-default legs compile. Still red in run 40191687498 and not claimed: C1bnl (multicast::a_frame_past_the_batch_is_fragmented_from_the_heap at datagram_tx_pool_allocations.rs:916), C1q (udp_multicast_config count 14), C1u (session_reconnect_e2e count 7), E7g (router capacity report) and C1cs (pico text over budget by 3019, 1612 and 1320), and the C1cn shard 1 job at 97 percent of its time budget."
+      ],
+      "publishable_decision_summary": "Repair of a build red nobody had claimed, from the first finished hosted run holding the dissect round (run 40191687498, Layer C1an): a test helper added with the querier's pending bound (83a1ed2ce), finish_query, calls ReplyRegistry::dispatch_response_final, which exists only with the codec-response-final feature, and the helper and its one test were gated on query-get alone. query-get does not imply that codec in this crate (a build that asks and does not decode a final never sees a query end by one), so the lib tests of every no-default build with query-get failed to compile. Both are gated on the two features now, which says what the test needs; the crate's features are unchanged, since making query-get imply the codec would change what every asking build links. The failing leg compiles and passes with its 4, the sibling legs pass, clippy is clean with and without the codec, and the querier tests with the codec still run the test.",
+      "publishable_changes_bullets": [
+        "wz-runtime-tokio session/tests.rs: finish_query and a_query_ending_by_its_final_gives_its_place_back are gated on query-get and codec-response-final (they were on query-get alone), with the reason in the helper's comment. No crate feature changed."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): the failing command of Layer C1an (cargo test -p wz-runtime-tokio --no-default-features --features adminspace-core,query-get --lib declare_adminspace) compiles and prints 4 passed, the count the leg guards; the two sibling no-default legs (adminspace-metrics, and adminspace-read with metrics) pass; the querier tests with codec-response-final added run 16, the gated test among them; clippy of the lib and its tests is clean in both feature shapes; rustfmt clean.",
+        "Attribution: the helper and test came with 83a1ed2ce, which no session claims; the compile error was named by the first finished hosted run holding it."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first finished hosted run holding this round: C1an and its sibling no-default legs compile. Still red in run 40191687498 and not claimed: C1bnl (multicast::a_frame_past_the_batch_is_fragmented_from_the_heap at datagram_tx_pool_allocations.rs:916), C1q (udp_multicast_config count 14), C1u (session_reconnect_e2e count 7), E7g (router capacity report) and C1cs (pico text over budget by 3019, 1612 and 1320), and the C1cn shard 1 job at 97 percent of its time budget."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
