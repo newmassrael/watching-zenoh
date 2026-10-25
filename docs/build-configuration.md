@@ -139,9 +139,11 @@ original reproduced by naming it. Three things follow from it:
   `zenoh-codec` (surface complete: the codec traits, the integer, byte string, array and buffer
   codecs, the codecs of the core types and the extensions, and the scouting, zenoh, network and
   transport messages with the batch codec, 95 of 95 default lines and 103 of 103 with
-  `shared-memory`; this crate's surface is small, so the bytes are held by differential tests of
-  the wire format, and the codec of a pointer into shared memory waits for the `zenoh-shm` member,
-  so that arm is held by the surface gate only until a test package builds both crates with it),
+  `shared-memory`, and that arm complete too: the codecs of `zenoh-shm`'s descriptors and
+  segments and of the slice that points into shared memory; this crate's surface is small, so the
+  bytes are held by differential tests of the wire format, and the shared-memory arm, whose
+  implementations the surface lines do not show, by `conformance/differential-shm`, a second
+  package that builds both crates of each pair with the feature),
   `zenoh-shm` (surface complete: the platform segments, the segments of arrays and structures,
   the chunk descriptors, the metadata and watchdog that keep a buffer alive across processes, the
   buffers with the reader that reads one another process described, and the provider with its
@@ -149,8 +151,8 @@ original reproduced by naming it. Three things follow from it:
   `test`; two processes share a segment by its id and by what is in it, so the layouts and the
   names `<id>.zenoh` are upstream's and the differential tests open each crate's segments, link
   each crate's descriptors, read each crate's buffers and read what each crate's provider
-  allocated with the other; the codec of a pointer into shared memory is the next slice, of
-  `zenoh-codec`)
+  allocated with the other; the codec of a pointer into shared memory is `zenoh-codec`'s
+  `shared-memory` arm)
   and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each

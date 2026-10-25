@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+
+# Differential tests of the family's `shared-memory` arms: the same input to upstream's crate and to
+# wz's, and the outputs held equal, as `../differential` does for the arms every build has (inventory
+# atom `api-compat-rust`, docs/build-configuration.md C13).
+#
+# A second package, because the arm changes the types: with `shared-memory` a `Put` has an `ext_shm`
+# field and a `ZSlice` has a kind, so the struct literals of `../differential` do not compile
+# against it, and one build of a package takes one setting of a feature for every test binary in
+# it. This package builds both crates of each pair with the feature and tests only what it changes:
+# the codecs of `zenoh-shm`'s descriptors, the codecs of a buffer of slices (`Zenoh080Sliced`), and
+# the messages that carry the shared-memory extension (put, error, query body, init, open).
+#
+# The two crates have one package name, so each is taken under a local name (`up`: upstream's, from
+# the registry at the pinned version; `wz`: this tree's, by path), with no `[patch]`, as in
+# `../differential`.
+#
+# NOT a member of wz's workspace, like every package that links upstream.
+[workspace]
+
+[package]
+name = "wz-family-differential-shm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+up_buffers = { package = "zenoh-buffers", version = "=1.10.1", features = ["shared-memory"] }
+wz_buffers = { package = "zenoh-buffers", path = "../../crates/wz-zenoh-buffers", features = ["shared-memory"] }
+up_protocol = { package = "zenoh-protocol", version = "=1.10.1", features = ["unstable", "internal", "test", "shared-memory"] }
+wz_protocol = { package = "zenoh-protocol", path = "../../crates/wz-zenoh-protocol", features = ["unstable", "internal", "test", "shared-memory"] }
+up_codec = { package = "zenoh-codec", version = "=1.10.1", features = ["shared-memory"] }
+wz_codec = { package = "zenoh-codec", path = "../../crates/wz-zenoh-codec", features = ["shared-memory"] }
+# `test` makes the metadata and watchdog modules public, which is how a test plays the provider.
+up_shm = { package = "zenoh-shm", version = "=1.10.1", features = ["test"] }
+wz_shm = { package = "zenoh-shm", path = "../../crates/wz-zenoh-shm", features = ["test"] }
+# The timestamp of a put is `uhlc`'s, one package for both crates.
+uhlc = { version = "0.8.0", default-features = false, features = ["std"] }
+rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
+num-traits = { version = "0.2", default-features = false }
+
+# The exhaustive comparisons read millions of mutated encodings through two crates; optimised, they
+# take seconds.
+[profile.test]
+opt-level = 3

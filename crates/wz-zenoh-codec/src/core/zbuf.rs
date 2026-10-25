@@ -103,14 +103,22 @@ impl LCodec<&ZBuf> for Zenoh080 {
 
 // ZBuf sliced
 //
-// A buffer of slices that are each tagged with what they hold. The kind of a slice that points into
-// shared memory is carried by a buffer of `zenoh-shm`, the member of the family that follows the
-// codec (debt-910): until it lands, a slice of that kind cannot be made by a program of this
-// graph, and the codec refuses it in both directions where upstream writes the descriptor it finds
-// in it and reads one back. The raw kind is complete.
+// A buffer of slices that are each tagged with what they hold: the bytes of a raw slice, or the
+// descriptor of a buffer in shared memory (`zenoh-shm`'s `ShmBufInner`).
+//
+// Two departures from upstream, both in writing a slice that points into shared memory:
+//  - a slice of that kind whose buffer is not a `ShmBufInner` is refused with `DidntWrite`. A
+//    program makes one: the reader below tags the bytes of a descriptor with the kind and nothing
+//    else, and a buffer so read and written again reaches upstream's `unwrap` and panics.
+//  - the reference counts of the buffers are raised once the whole buffer is written. Upstream
+//    raises each as its descriptor is written, so a write that fails on a later slice leaves the
+//    earlier buffers held for a receiver that will never get them, until the watchdog recovers
+//    them.
+// Nothing is written by a refused buffer.
 #[cfg(feature = "shared-memory")]
 mod shm {
-    use zenoh_buffers::ZSliceKind;
+    use zenoh_buffers::{ZSlice, ZSliceKind};
+    use zenoh_shm::ShmBufInner;
 
     use super::*;
     use crate::Zenoh080Sliced;
@@ -139,16 +147,39 @@ mod shm {
                 #[inline(always)]
                 fn write(self, writer: &mut W, x: &ZBuf) -> Self::Output {
                     if self.is_sliced {
+                        let mut held: Vec<&ShmBufInner> = Vec::new();
+                        for zs in x.zslices() {
+                            if let ZSliceKind::ShmPtr = zs.kind {
+                                held.push(zs.downcast_ref::<ShmBufInner>().ok_or(DidntWrite)?);
+                            }
+                        }
+
                         self.codec.write(&mut *writer, x.zslices().count())?;
 
+                        // `held` has one buffer per slice of the shared-memory kind, in the order
+                        // of the slices.
+                        let mut next_held = held.iter();
                         for zs in x.zslices() {
                             match zs.kind {
                                 ZSliceKind::Raw => {
                                     self.codec.write(&mut *writer, RAW)?;
                                     self.codec.write(&mut *writer, zs)?;
                                 }
-                                ZSliceKind::ShmPtr => return Err(DidntWrite),
+                                ZSliceKind::ShmPtr => {
+                                    self.codec.write(&mut *writer, SHM_PTR)?;
+                                    let shmb = next_held.next().ok_or(DidntWrite)?;
+                                    let mut info = vec![];
+                                    Zenoh080::new().write(&mut &mut info, &shmb.info)?;
+                                    self.codec.write(&mut *writer, &*info)?;
+                                }
                             }
+                        }
+
+                        // Keep the buffers valid until they are received.
+                        for shmb in held {
+                            // SAFETY: the buffer is alive for the borrow, and the count is
+                            // released by the receiver that reads the descriptor.
+                            unsafe { shmb.inc_ref_count() };
                         }
                     } else {
                         self.codec.write(&mut *writer, x)?;
@@ -176,7 +207,11 @@ mod shm {
                                     let len: usize = self.codec.read(&mut *reader)?;
                                     reader.read_zslices(len, |s| zbuf.push_zslice(s))?;
                                 }
-                                SHM_PTR => return Err(DidntRead),
+                                SHM_PTR => {
+                                    let mut zslice: ZSlice = self.codec.read(&mut *reader)?;
+                                    zslice.kind = ZSliceKind::ShmPtr;
+                                    zbuf.push_zslice(zslice);
+                                }
                                 _ => return Err(DidntRead),
                             }
                         }

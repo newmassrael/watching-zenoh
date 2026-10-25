@@ -20,7 +20,7 @@
 #
 # It is built in slices, each landing whole with the ratchet of `scripts/lib/rust_api_surface.py`
 # lowered in its own round. Until a slice lands its items are missing lines of the surface gate, not
-# stubs here. The `shared-memory` arm waits for `zenoh-shm`, a later member.
+# stubs here. The `shared-memory` arm is the last slice, over `zenoh-shm`.
 
 [package]
 name = "zenoh-codec"
@@ -39,15 +39,16 @@ path = "src/lib.rs"
 
 # Upstream's features by their names and by what they turn on in the crates below. `tracing` is what
 # a skipped extension is logged through, and only with `std`, as upstream's. `shared-memory` is
-# upstream's plus `zenoh-shm`, which joins it with the member of that name: until then the feature
-# carries the codecs of a buffer of slices and the extension that marks one (`Zenoh080Sliced`), for
-# the raw slices, and refuses a slice that points into shared memory in both directions.
+# upstream's: the codecs of a buffer of slices and the extension that marks one (`Zenoh080Sliced`),
+# the codecs of the descriptors of `zenoh-shm`, and the slice that points into shared memory in both
+# directions.
 [features]
 default = ["std"]
 shared-memory = [
     "std",
     "zenoh-buffers/shared-memory",
     "zenoh-protocol/shared-memory",
+    "zenoh-shm",
 ]
 std = [
     "tracing",
@@ -57,10 +58,12 @@ std = [
 ]
 
 [dependencies]
+rand = { version = "0.8.5", default-features = false }
 tracing = { version = "0.1.41", optional = true }
 uhlc = { version = "0.8.0", default-features = false }
 zenoh-buffers = { path = "../wz-zenoh-buffers", default-features = false }
 zenoh-protocol = { path = "../wz-zenoh-protocol", default-features = false }
+zenoh-shm = { path = "../wz-zenoh-shm", optional = true }
 
 # The `test` feature of the protocol crate is what its random constructors are built with, and they
 # draw from `rand`'s thread generator, which exists with its `std` features: upstream's dev

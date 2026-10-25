@@ -1133,6 +1133,7 @@ dependencies = [
 name = "zenoh-codec"
 version = "1.10.1"
 dependencies = [
+ "rand",
  "tracing",
  "uhlc",
  "zenoh-buffers 1.10.1",

@@ -16,6 +16,8 @@
 // src/core/mod.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.1).
 mod encoding;
 mod locator;
+#[cfg(feature = "shared-memory")]
+mod shm;
 mod timestamp;
 mod wire_expr;
 mod zbuf;

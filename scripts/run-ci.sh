@@ -23592,7 +23592,8 @@ layer_e17_stats_registry_writes_upstreams_document() {
 # surface gate (`rust_api_surface.py`, Layer C0 and Z) cannot say:
 #
 #   1. DIFFERENTIAL: the same input to upstream's crate and to wz's gives equal outputs
-#      (`conformance/differential`).
+#      (`conformance/differential`, and for the `shared-memory` arm, whose types change the
+#      structs the tests build, `conformance/differential-shm`).
 #   2. THE SWAP: with the patch, an UPSTREAM crate that depends on the family crate and this
 #      graph's own crate meet one type (`conformance/patch-scenario`).
 #   3. ITS CONTROL: the same graph without the patch holds two, so the probe of 2 is not blind
@@ -23656,6 +23657,15 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh-shm provider)" 13 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_shm_provider || return 1
+    # The shared-memory arm of zenoh-codec is its own package (`conformance/differential-shm`): with
+    # the feature a Put has an ext_shm field and a ZSlice a kind, so it cannot share a build with the
+    # tests of the arm every build has.
+    _runci_guarded_test "Layer E18 (differential, zenoh-codec shared-memory core)" 15 \
+        cargo test --locked --manifest-path ../conformance/differential-shm/Cargo.toml \
+        --test zenoh_codec_shm_core || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh-codec shared-memory messages)" 6 \
+        cargo test --locked --manifest-path ../conformance/differential-shm/Cargo.toml \
+        --test zenoh_codec_shm_messages || return 1
     _runci_guarded_test "Layer E18 (differential, zenoh-buffers)" 5 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_buffers || return 1
