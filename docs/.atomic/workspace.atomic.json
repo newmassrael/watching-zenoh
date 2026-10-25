@@ -286542,6 +286542,54 @@
         "The hosted runs of this family's pushes are still unread per job; the reds of Layers C1bf and C1bz on wz-session-mcu belong to the slot-* work and were told to the sessions that could own them."
       ]
     },
+    "Round 3615": {
+      "decision_summary": "The policy entity-timestamp-opt-in makes the timestamp something an entity takes part in only if it says so. Off is upstream: a subscriber and a querier see the timestamp of what they receive and a publisher attaches what it is given. On changes what a declaration that says nothing gets, and each declaration can state its own choice: SubscribeOptions and QueryOptions carry expose_timestamp, and a callback that does not expose it is handed a view that answers as a sample or reply with no timestamp and is the inner view in every other way. It is applied where a subscriber is registered and inside the consolidating sink of a query, so consolidation still orders by the stamp the callback is not shown. A publisher declared to stamp takes a time per message (put_at, delete_at) and supplies its own session's identity beside it, so a caller cannot sign as another node; one declared not to stamp refuses with StampedPutError::NotStamping and sends nothing.",
+      "changes_bullets": [
+        "deploy/wz-config.toml declares the policy entity-timestamp-opt-in (bool, off); policy_generated.rs and deploy/Kconfig.policies follow.",
+        "crates/wz-session-core: timestamp_visibility.rs (default_exposed, ExposeTimestamp and StampTimestamp whose Default is the build's, HiddenTimestamp over SampleView, HiddenReplyTimestamp over ReplyView, ntp64_from_unix_ms), registered in lib.rs; QueryOptions gains expose_timestamp and PublishOptions gains stamp_timestamp, both private with a with_ setter and a getter.",
+        "crates/wz-runtime-tokio: SubscribeOptions gains expose_timestamp (its Default now reads the build) and register_subscriber_local applies it; query_via applies the query's choice to the caller's callback inside the consolidating sink; Publisher gains put_at, delete_at and StampedPutError, gated on pubsub-timestamp; the five recovery queries of advanced_subscriber.rs ask to expose the timestamp, because they read it and are the runtime's own queries, not an entity of the application.",
+        "crates/wz-runtime-tokio session/tests.rs: eleven tests, a pair for each of the subscriber, the query and the publisher, the consolidation control, the delete, and the default of each."
+      ],
+      "verification_bullets": [
+        "On the build host, all features: the visibility tests of wz-session-core (three) and the eleven tests of wz-runtime-tokio pass in the default build, where the policy is off.",
+        "Red first, three times, each reverted with no trace left: a subscriber callback handed the timestamp whatever its flag fails exactly the not-exposed test; a query reply handed it whatever the flag fails exactly the two not-exposed tests (the plain one and the consolidation control); a publisher that stamps whatever its flag fails exactly the refusal test.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-session-core, wz-runtime-tokio (also after the rebase), wz-ap-demo and wz-capi-core; rustfmt clean; wz_config --check and --selftest pass; feature_gate_diagnostic --check passes; session_slot_bytes --check passes on the build host.",
+        "The pre-push round-fed array, 113 gates, exits 0 on the rebased tree with 0 failed; the count-guard lint, the citation form gate and the reason pin gate pass.",
+        "Not run: the tests with the policy ON (the build value is read at compile time, and the tests name the choice per entity or read the default from the build, so the ON default is covered by the pair of each and by default_exposed, not by a second build), the hosted run, Layer C1bz and the other lanes as lanes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "A queryable that answers with a time, the fourth entity of the item, takes the same shape (a stamp flag on its declaration, the node identity supplied by the session) and is not built yet; the aliased publisher and querier take their options from the same structs but have no put_at yet.",
+        "The C ABIs and the cooperative engine have their own subscriber, query and publish paths and do not read the policy; the session doing the cooperative engine owns that area, so it is asked first. A build with the policy ON hides timestamps from a C ABI caller only where the ABI goes through the tokio session.",
+        "The REST bridge and the storage services ask queries with the default; under the policy ON they show no reply timestamp unless they ask, and none of them reads one today.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "The policy entity-timestamp-opt-in makes the timestamp something an entity takes part in only if it says so. Off is upstream: a subscriber and a querier see the timestamp of what they receive and a publisher attaches what it is given. On changes what a declaration that says nothing gets, and each declaration can state its own choice: SubscribeOptions and QueryOptions carry expose_timestamp, and a callback that does not expose it is handed a view that answers as a sample or reply with no timestamp and is the inner view in every other way. It is applied where a subscriber is registered and inside the consolidating sink of a query, so consolidation still orders by the stamp the callback is not shown. A publisher declared to stamp takes a time per message (put_at, delete_at) and supplies its own session's identity beside it, so a caller cannot sign as another node; one declared not to stamp refuses with StampedPutError::NotStamping and sends nothing.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml declares the policy entity-timestamp-opt-in (bool, off); policy_generated.rs and deploy/Kconfig.policies follow.",
+        "crates/wz-session-core: timestamp_visibility.rs (default_exposed, ExposeTimestamp and StampTimestamp whose Default is the build's, HiddenTimestamp over SampleView, HiddenReplyTimestamp over ReplyView, ntp64_from_unix_ms), registered in lib.rs; QueryOptions gains expose_timestamp and PublishOptions gains stamp_timestamp, both private with a with_ setter and a getter.",
+        "crates/wz-runtime-tokio: SubscribeOptions gains expose_timestamp (its Default now reads the build) and register_subscriber_local applies it; query_via applies the query's choice to the caller's callback inside the consolidating sink; Publisher gains put_at, delete_at and StampedPutError, gated on pubsub-timestamp; the five recovery queries of advanced_subscriber.rs ask to expose the timestamp, because they read it and are the runtime's own queries, not an entity of the application.",
+        "crates/wz-runtime-tokio session/tests.rs: eleven tests, a pair for each of the subscriber, the query and the publisher, the consolidation control, the delete, and the default of each."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, all features: the visibility tests of wz-session-core (three) and the eleven tests of wz-runtime-tokio pass in the default build, where the policy is off.",
+        "Red first, three times, each reverted with no trace left: a subscriber callback handed the timestamp whatever its flag fails exactly the not-exposed test; a query reply handed it whatever the flag fails exactly the two not-exposed tests (the plain one and the consolidation control); a publisher that stamps whatever its flag fails exactly the refusal test.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-session-core, wz-runtime-tokio (also after the rebase), wz-ap-demo and wz-capi-core; rustfmt clean; wz_config --check and --selftest pass; feature_gate_diagnostic --check passes; session_slot_bytes --check passes on the build host.",
+        "The pre-push round-fed array, 113 gates, exits 0 on the rebased tree with 0 failed; the count-guard lint, the citation form gate and the reason pin gate pass.",
+        "Not run: the tests with the policy ON (the build value is read at compile time, and the tests name the choice per entity or read the default from the build, so the ON default is covered by the pair of each and by default_exposed, not by a second build), the hosted run, Layer C1bz and the other lanes as lanes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A queryable that answers with a time, the fourth entity of the item, takes the same shape (a stamp flag on its declaration, the node identity supplied by the session) and is not built yet; the aliased publisher and querier take their options from the same structs but have no put_at yet.",
+        "The C ABIs and the cooperative engine have their own subscriber, query and publish paths and do not read the policy; the session doing the cooperative engine owns that area, so it is asked first. A build with the policy ON hides timestamps from a C ABI caller only where the ABI goes through the tokio session.",
+        "The REST bridge and the storage services ask queries with the default; under the policy ON they show no reply timestamp unless they ask, and none of them reads one today.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
