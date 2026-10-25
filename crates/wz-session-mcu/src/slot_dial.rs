@@ -24,6 +24,7 @@ use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle};
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::{DriverOutcome, IterationEvent};
 use wz_session_core::entropy::EntropySource;
+use wz_session_core::replay_cursor::ReplayCursor;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 
@@ -85,8 +86,12 @@ pub struct SlotSession<C: ClockSource + 'static> {
     /// re-dial continues the old outage's period: it errs towards waiting longer, never towards
     /// dialling harder).
     established: bool,
-    /// Whether the node's declarations have gone out on it.
-    declared: Cell<bool>,
+    /// How far the node's declarations have gone out on it: `None` until a replay begins, then the
+    /// place in the node's sequence the peer has been told up to
+    /// ([`ReplayCursor`](wz_session_core::replay_cursor::ReplayCursor)). A session that ends takes
+    /// its cursor with it, so a redial or a new accept begins at the start, as a peer that holds
+    /// nothing needs.
+    replay: Cell<Option<ReplayCursor>>,
 }
 
 impl<C: ClockSource + 'static> SlotSession<C> {
@@ -95,7 +100,7 @@ impl<C: ClockSource + 'static> SlotSession<C> {
         Self {
             opened,
             established: false,
-            declared: Cell::new(false),
+            replay: Cell::new(None),
         }
     }
 
@@ -104,14 +109,27 @@ impl<C: ClockSource + 'static> SlotSession<C> {
         &self.opened.actions
     }
 
-    /// Whether the node's declarations have gone out on this session.
+    /// Whether the node's declarations have gone out on this session: a replay was begun and has
+    /// told the peer every entry.
     pub fn declared(&self) -> bool {
-        self.declared.get()
+        self.replay.get().is_some_and(|cursor| cursor.finished())
     }
 
-    /// Note that the node's declarations have gone out on this session.
+    /// Note that the node's declarations have gone out on this session, for a host that sends its
+    /// declarations in one step and has no sequence to resume.
     pub fn mark_declared(&self) {
-        self.declared.set(true);
+        self.replay.set(Some(ReplayCursor::idle()));
+    }
+
+    /// The replay of the node's `total` declarations on this session, begun at the first entry when
+    /// none was: the peer holds nothing of a session that has just established.
+    pub fn replay(&self, total: usize) -> ReplayCursor {
+        self.replay.get().unwrap_or(ReplayCursor::begin(total))
+    }
+
+    /// Keep where the replay has got to, for the next round to resume from.
+    pub fn set_replay(&self, cursor: ReplayCursor) {
+        self.replay.set(Some(cursor));
     }
 
     /// Whether the session's task has ended.

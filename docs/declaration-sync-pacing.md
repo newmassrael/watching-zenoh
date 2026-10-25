@@ -76,7 +76,7 @@ different shapes:
 |---|---|---|---|
 | Heap runtime (tokio) | one ordered `Vec` of cached declarations, `SessionCore::declaration_cache` | yes | `replay_declarations`, one call, from the reconnect driver |
 | Cooperative engine | separate lists by kind (key expressions, subscribers, interests, queryables, tokens, liveliness) | yes | `Core::redeclare`, one call, kinds in a fixed order |
-| Fixed-memory slot node | one `&'static [Declaration]` built at start, wire id = index + 1 | no | `declare_all`, one call per established session; a refused send makes the next tick REPEAT THE LIST FROM INDEX 0 |
+| Fixed-memory slot node | one `&'static [Declaration]` built at start, wire id = index + 1 | no | `replay_declarations` (`slot_client`), one turn per established session over a per-session `ReplayCursor` whose burst is the whole list until the policy is declared; a refused send resumes at the entry it failed on (it was the whole list from index 0 before phase 4 landed for this host) |
 
 What is common is not a cache. It is a position in a sequence the host can recite in a fixed order.
 So the shared part is a pure type with no list, no clock, no heap and no I/O, in `wz-session-core`:

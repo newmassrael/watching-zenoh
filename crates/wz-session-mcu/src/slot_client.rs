@@ -36,6 +36,7 @@ use wz_session_core::pubsub::SubscriberTable;
 use wz_session_core::query::QueryableRegistry;
 use wz_session_core::query_sink::{FnQuerySink, QueryView, ReplyOut};
 use wz_session_core::registry_error::RegisterError;
+use wz_session_core::replay_cursor::ReplayCursor;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::slot_observer::{NoSink, ObserverSinks};
@@ -223,13 +224,19 @@ where
         self.admit();
         self.manager.tick(now_ms);
         for session in self.live() {
-            if session.actions().is_established()
-                && !session.declared()
-                && declare_all(session, self.declarations)
-            {
-                session.mark_declared();
+            if session.actions().is_established() && !session.declared() {
+                replay_declarations(session, self.declarations);
             }
         }
+    }
+
+    /// Whether every established session's peer has been told every declaration the node owes it: a
+    /// session that is not yet established owes nothing yet, so a node that listens is synced before
+    /// any client has come, and is not once one has established and has not been told.
+    pub fn declarations_synced(&self) -> bool {
+        self.live()
+            .filter(|session| session.actions().is_established())
+            .all(SlotSession::declared)
     }
 
     /// One accept pass: free the rows of the sessions that ended, then take what waits on the
@@ -284,17 +291,105 @@ where
     }
 }
 
-/// Send the declarations on `session`: `true` once every one went out. A declaration that did not
-/// (the session's stage was busy) leaves the rest for the next tick, which repeats the whole list;
-/// a router that sees a declaration twice under one id takes the second as the first.
-fn declare_all<C: ClockSource + 'static>(
+/// How many declarations one turn of the replay sends. The whole list: the policy that paces a
+/// replay (`docs/declaration-sync-pacing.md`) is not declared yet, so this is the replay of today,
+/// one call for the list, and the cursor is what makes a refused send resume where it failed.
+const REPLAY_BURST: usize = usize::MAX;
+
+/// Send the declarations `session`'s peer has not been told, from where the session's replay stands:
+/// the whole list the first time, and after a send the session's stage refused (it was busy) the
+/// entries from the one that failed, never again the ones that went out. A router takes a
+/// declaration it sees twice under one id as the first, so a repeat was harmless on the wire and
+/// wasted a frame each, and a node with many declarations on a busy stage could repeat them for as
+/// long as the stage stayed busy.
+fn replay_declarations<C: ClockSource + 'static>(
     session: &SlotSession<C>,
     declarations: &[Declaration],
-) -> bool {
-    declarations
-        .iter()
-        .enumerate()
-        .all(|(index, declaration)| declare(session.actions(), index as u64 + 1, declaration))
+) {
+    let mut cursor = session.replay(declarations.len());
+    replay_turn(&mut cursor, REPLAY_BURST, |at| {
+        declare(session.actions(), at as u64 + 1, &declarations[at])
+    });
+    session.set_replay(cursor);
+}
+
+/// One turn of a replay: ask `send` for each entry of the turn in order, and on the first it
+/// refuses stop and put the cursor back on that entry.
+fn replay_turn(cursor: &mut ReplayCursor, burst: usize, mut send: impl FnMut(usize) -> bool) {
+    for at in cursor.turn(burst) {
+        if !send(at) {
+            cursor.refused(at);
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec::Vec;
+
+    /// Run turns of `burst` until the cursor finishes or `limit` turns pass, `refuse` naming the
+    /// sends the stage refuses (each once); every entry offered, in order.
+    fn replay(total: usize, burst: usize, mut refuse: Vec<usize>, limit: usize) -> Vec<usize> {
+        let mut cursor = ReplayCursor::begin(total);
+        let mut offered = Vec::new();
+        for _ in 0..limit {
+            if cursor.finished() {
+                break;
+            }
+            replay_turn(&mut cursor, burst, |at| {
+                offered.push(at);
+                match refuse.iter().position(|&r| r == at) {
+                    Some(found) => {
+                        refuse.remove(found);
+                        false
+                    }
+                    None => true,
+                }
+            });
+        }
+        offered
+    }
+
+    #[test]
+    fn a_replay_with_nothing_refused_offers_each_entry_once_in_order() {
+        assert_eq!(replay(5, REPLAY_BURST, Vec::new(), 4), [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_refused_send_resumes_at_the_entry_it_failed_on_and_not_at_the_start() {
+        // Entry 3 is refused once: 0, 1 and 2 are offered once, 3 twice, and 4 after it.
+        assert_eq!(
+            replay(5, REPLAY_BURST, alloc::vec![3], 4),
+            [0, 1, 2, 3, 3, 4],
+            "the old repeat of the whole list would offer 0, 1 and 2 again"
+        );
+    }
+
+    #[test]
+    fn a_burst_bounds_a_turn_and_the_turns_cover_the_list() {
+        let mut cursor = ReplayCursor::begin(5);
+        let mut turns = Vec::new();
+        while !cursor.finished() {
+            let mut turn = Vec::new();
+            replay_turn(&mut cursor, 2, |at| {
+                turn.push(at);
+                true
+            });
+            turns.push(turn);
+        }
+        assert_eq!(
+            turns,
+            [alloc::vec![0, 1], alloc::vec![2, 3], alloc::vec![4]]
+        );
+    }
+
+    #[test]
+    fn a_list_with_no_declaration_is_finished_at_once() {
+        assert!(replay(0, REPLAY_BURST, Vec::new(), 1).is_empty());
+        assert!(ReplayCursor::begin(0).finished());
+    }
 }
 
 /// Send one declaration under `id`: `true` once it went out.
