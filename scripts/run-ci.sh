@@ -13426,6 +13426,10 @@ layer_c1bz_docs_resolve() {
     # wz-runtime-tokio 467 -> 466, by removal: the public `Permit` doc in
     # `writer_queue.rs` linked the private `LaneState::has_room`; it is plain
     # code there now (the one finding the line above left standing).
+    # wz-runtime-tokio 449 -> 438, by removal, COUNTED on this lane's command on the tree of the
+    # router's tables under one guard (phase 3e), which removed the shared-table seam and the
+    # docs that linked it. The lane only says the count fell below the budget; it was taken on this
+    # tree and is not split between this change and what landed beside it.
     # wz-runtime-tokio 459 -> 449, by removal, COUNTED on this lane's command: the node's time
     # (`node_clock.rs`, `timestamp_source.rs`) moved to wz-node-time, and the ten findings their
     # docs held (links to the storage and replication services, the session's publish path and
@@ -13449,7 +13453,7 @@ layer_c1bz_docs_resolve() {
         wz-mcu-session-acceptor:1
         wz-routing-graph:5
         wz-runtime-coop:7
-        wz-runtime-tokio:449
+        wz-runtime-tokio:438
         wz-session-core:494
         wz-switchboard-codegen:8
         zenoh-pico-sys:3

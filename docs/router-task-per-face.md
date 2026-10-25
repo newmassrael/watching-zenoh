@@ -148,7 +148,7 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
      `RwLock<Tables>` this step was first written as; see "3c, what it did and what it cost" below for why, and
      3e for the form it reached. Every table was an `Arc<PlainRwLock<_>>` and the three views that share
      `faces` held the handle. 3e replaced that form.
-   - **3e. One guard per forward (done).** The tables are one value, `Tables`, behind one `PlainRwLock`; the
+   - **3e. One guard per forward (done, round 3668).** The tables are one value, `Tables`, behind one `PlainRwLock`; the
      data path takes it once per message, as upstream's `zread!` does, and passes it down. See "3e, what it did".
    - **3d. The handlers** of local subscribers and queryables (`Send`), and the forwarder's `Send + Sync`
      proof, with the test of many faces' threads into one router that the earlier steps could not write
