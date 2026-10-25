@@ -65,6 +65,27 @@ impl<const RX: usize> PosixGroupTransport<RX> {
         })
     }
 
+    /// Join `group` on `port` through the interface routing picks for it, and when routing has none
+    /// (a host with one subnet route and no default route refuses the join with `ENODEV`), through
+    /// the first interface that is up, can multicast and is not a loopback
+    /// ([`crate::net::multicast_interface`]), which is then also the one the node sends out of. A
+    /// host whose routing answers is joined exactly as [`Self::join`] does with the unspecified
+    /// address; only a refusal reaches the second try, and a host with no such interface keeps the
+    /// first refusal.
+    pub fn join_by_routing_or_first_interface(
+        group: [u8; 4],
+        port: u16,
+        ttl: u8,
+    ) -> Result<Self, PosixNetError> {
+        match Self::join(group, port, [0; 4], ttl) {
+            Err(first @ PosixNetError::Membership(_)) => match crate::net::multicast_interface() {
+                Some(interface) => Self::join(group, port, interface, ttl),
+                None => Err(first),
+            },
+            other => other,
+        }
+    }
+
     /// The `(group, port)` this transport sends to and receives on.
     pub fn group(&self) -> ([u8; 4], u16) {
         self.group

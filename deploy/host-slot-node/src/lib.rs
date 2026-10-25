@@ -152,7 +152,9 @@ pub mod group {
     /// The transport of the group, as the host opens it.
     pub type HostGroupTransport = PosixGroupTransport<GROUP_RX>;
 
-    /// Joins `group` on `port` through the interface the kernel's routing picks, sending with `ttl`.
+    /// Joins `group` on `port` through the interface the kernel's routing picks, or, on a host whose
+    /// routing has none for the group, through the first interface that is up and can multicast,
+    /// sending with `ttl`.
     #[derive(Debug, Clone, Copy)]
     pub struct PosixGroupBind {
         /// The group's address.
@@ -165,14 +167,13 @@ pub mod group {
 
     impl GroupBind<HostGroupTransport> for PosixGroupBind {
         fn bind(&mut self) -> Result<HostGroupTransport, LinkOpenError> {
-            PosixGroupTransport::join(self.group, self.port, [0; 4], self.ttl).map_err(
-                |e| match e {
+            PosixGroupTransport::join_by_routing_or_first_interface(self.group, self.port, self.ttl)
+                .map_err(|e| match e {
                     // The process has no descriptor left: worth a later try.
                     PosixNetError::Socket(_) => LinkOpenError::Exhausted,
                     // The kernel would not bind the port or join the group.
                     _ => LinkOpenError::Refused,
-                },
-            )
+                })
         }
     }
 }

@@ -215,6 +215,48 @@ pub(crate) fn set_close_on_exec(fd: c_int) -> Result<(), c_int> {
     Ok(())
 }
 
+/// The IPv4 address of the first interface that is up, can multicast and is not a loopback, or
+/// none: the interface to give a multicast join when routing has no answer for the group (a board
+/// with one subnet route and no default route, where joining on "the interface routing picks"
+/// fails with `ENODEV`). The C library's `getifaddrs` is what lists them, on every OS this crate is
+/// built for; it takes a list from the C library's own heap and gives it back before returning,
+/// and the program's own allocator, which it has none of, is not asked.
+pub fn multicast_interface() -> Option<[u8; 4]> {
+    let mut list: *mut libc::ifaddrs = core::ptr::null_mut();
+    // SAFETY: `list` is a live pointer the call fills; it is freed below whenever the call succeeds.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return None;
+    }
+    let wanted = (libc::IFF_UP | libc::IFF_MULTICAST) as u32;
+    let mut found = None;
+    let mut at = list;
+    while !at.is_null() {
+        // SAFETY: `at` is an entry of the list `getifaddrs` returned, live until `freeifaddrs`.
+        let entry = unsafe { &*at };
+        let flags = entry.ifa_flags as u32;
+        if flags & wanted == wanted
+            && flags & (libc::IFF_LOOPBACK as u32) == 0
+            && !entry.ifa_addr.is_null()
+        {
+            // SAFETY: a non-null `ifa_addr` points at a socket address whose family field is valid.
+            let family = unsafe { (*entry.ifa_addr).sa_family } as c_int;
+            if family == libc::AF_INET {
+                // SAFETY: an `AF_INET` address is a `sockaddr_in`.
+                let sin = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in) };
+                let address = sin.sin_addr.s_addr.to_ne_bytes();
+                if address != [0; 4] {
+                    found = Some(address);
+                    break;
+                }
+            }
+        }
+        at = entry.ifa_next;
+    }
+    // SAFETY: `list` is the list `getifaddrs` returned, freed once.
+    unsafe { libc::freeifaddrs(list) };
+    found
+}
+
 pub(crate) fn sockaddr(addr: [u8; 4], port: u16) -> libc::sockaddr_in {
     libc::sockaddr_in {
         // Neutrino's socket address, as the BSDs', carries its own length.
@@ -488,6 +530,15 @@ mod tests {
             Err(libc::EBADF),
             "a descriptor that is not one is the kernel's refusal, with its errno"
         );
+    }
+
+    #[test]
+    fn the_interface_for_a_group_is_never_a_loopback_or_the_unspecified_address() {
+        // A host in a sandbox may have none; a host that has one names a real, routable address.
+        if let Some(address) = multicast_interface() {
+            assert_ne!(address, [0; 4], "the unspecified address is no interface");
+            assert_ne!(address[0], 127, "a loopback is not where a group is joined");
+        }
     }
 
     #[test]
