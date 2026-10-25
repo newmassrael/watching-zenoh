@@ -12394,8 +12394,13 @@ layer_c1bf_cargo_clippy_all_features() {
     # `query-get`, so a struct literal of either names the fields of the build its author made.
     # Its features are independent axes, so `--all-features` is a real arm and no narrowing is
     # needed.
+    #
+    # `wz-zenoh-config` joined it with the configuration crate (R3664, caught hosted at R3683): a
+    # `Config`'s `unstable` field exists with `unstable`, so a struct literal of it names the fields
+    # of the build its author made. Its features are independent axes, so `--all-features` is a
+    # real arm and no narrowing is needed.
     local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c wz-capi-core wz-capi-pico
-        wz-zenoh-buffers wz-zenoh-protocol wz-session-mcu)
+        wz-zenoh-buffers wz-zenoh-protocol wz-session-mcu wz-zenoh-config)
 
     # Drift audit: re-derive the hazard class from source. A crate qualifies when
     # a `#[cfg(feature ...)]` attribute is immediately followed by a `pub <field>:`
@@ -23748,7 +23753,19 @@ layer_e17_stats_registry_writes_upstreams_document() {
 # Each is a standalone workspace with its own lock, because each links upstream and upstream never
 # enters `crates/`'s dependency graph. They are HERE with E16 and E17, the other two that link
 # upstream's crates, and need the registry and nothing else.
+#
+# R3683 -- THE SHARED-MEMORY TESTS NEED LOCKABLE MEMORY. `shm::Segment::map` `mlock`s every mapping it
+# makes, upstream's crate and wz's alike, and a reader opens the process's own metadata segment a
+# second time, so a test binary that builds buffers holds more than one copy of it locked. A hosted
+# runner grants 8 MiB (`uring-memlock.sh` measured `soft=8388608 hard=8388608`), and two tests of
+# `zenoh_codec_shm_core` failed there with `OS error 12` in BOTH crates (run 40214179507), while
+# every dev box grants GiB and never sees it. MEASURED the same on a build host with
+# `prlimit --memlock=8388608`: the same failures. The raise is the one the io_uring lanes make, for
+# the same reason, so it is that file's function rather than a second spelling of it; the limit
+# belongs to this shell and its children, so it is made here and not in a lane's own shell.
 layer_e18_zenoh_family_conformance() {
+    uring_raise_memlock $((64 * 1024 * 1024))
+    echo "  E18: RLIMIT_MEMLOCK soft=$(uring_soft_memlock_bytes) hard=$(uring_hard_memlock_bytes) bytes (-1 = unlimited)"
     _runci_guarded_test "Layer E18 (differential, zenoh-result)" 6 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_result || return 1
