@@ -286010,6 +286010,46 @@
         "A node says session established when it first holds a session and session lost when it holds none, not once for each; a count of the sessions held would let a lab see the table fill."
       ]
     },
+    "Round 3602": {
+      "decision_summary": "Step U1: the unstable API on the cooperative engine. wz-capi-pico's unstable-api required engine-tokio for no reason its code held: wz-capi-core's feature of that name is an empty marker, and everything the ABI does behind it (entity global ids, a sample's reliability and source info, z_reply_replier_id, the cancellation token and the option fields that carry them) goes through the port. The feature now selects neither engine, and the cooperative client builds with it unchanged, which the reference pico of the test lanes (Z_FEATURE_UNSTABLE_API) needs of a build that stands in for it. A size-gate case measures it: pico-client-coop-unstable is 894,893 bytes of text against 891,491 without it, 448 exports against 441, 2.21 times the same pico. Layer C1co builds its four legs with the feature.",
+      "changes_bullets": [
+        "wz-capi-pico: unstable-api no longer requires engine-tokio.",
+        "scripts/lib/capability_cost_gate.py: case pico-client-coop-unstable (budget 913,000).",
+        "Tests: client_only_dials_a_listener gains a module on both engines (a global id naming its session and not the session's own; a get refusing a token already cancelled, nothing sent and its closure dropped; a get carrying a token nobody cancels); Layer C1co builds with unstable-api and counts 7 and 6.",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "verification_bullets": [
+        "On the build host: cargo check and clippy -D warnings with all targets of wz-capi-pico with engine-coop+unstable-api, engine-coop with query+queryable+liveliness-get+unstable-api, engine-tokio with query+unstable-api, default and all features, all clean. The wz-capi-pico suite passes in the default build and in engine-coop+unstable-api.",
+        "Layer C1co: 7, 6, 7 and 6 passed (coop and tokio, with and without queryable). capability_cost_gate: 12 cases within budget; C1bz for wz-capi-pico spends exactly its budget; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed on the rebased tree."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Still on the tokio engine in the pico ABI: the listening role, scouting, the advanced plane, the connectivity plane, the admin space, the session-local delivery switches and the transports beyond TCP and UDP. The cooperative runtime has begun accepting stream connections (another session's); the listening role is to be built on it, not beside it.",
+        "pico-client-coop-unstable is 18,107 bytes under its budget; pico-client-coop 3,509.",
+        "The tokio engine's retraction of live liveliness entities at close (carry of 3595) is still owed its own round."
+      ],
+      "publishable_decision_summary": "Step U1: the unstable API on the cooperative engine. wz-capi-pico's unstable-api required engine-tokio for no reason its code held: wz-capi-core's feature of that name is an empty marker, and everything the ABI does behind it (entity global ids, a sample's reliability and source info, z_reply_replier_id, the cancellation token and the option fields that carry them) goes through the port. The feature now selects neither engine, and the cooperative client builds with it unchanged, which the reference pico of the test lanes (Z_FEATURE_UNSTABLE_API) needs of a build that stands in for it. A size-gate case measures it: pico-client-coop-unstable is 894,893 bytes of text against 891,491 without it, 448 exports against 441, 2.21 times the same pico. Layer C1co builds its four legs with the feature.",
+      "publishable_changes_bullets": [
+        "wz-capi-pico: unstable-api no longer requires engine-tokio.",
+        "scripts/lib/capability_cost_gate.py: case pico-client-coop-unstable (budget 913,000).",
+        "Tests: client_only_dials_a_listener gains a module on both engines (a global id naming its session and not the session's own; a get refusing a token already cancelled, nothing sent and its closure dropped; a get carrying a token nobody cancels); Layer C1co builds with unstable-api and counts 7 and 6.",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host: cargo check and clippy -D warnings with all targets of wz-capi-pico with engine-coop+unstable-api, engine-coop with query+queryable+liveliness-get+unstable-api, engine-tokio with query+unstable-api, default and all features, all clean. The wz-capi-pico suite passes in the default build and in engine-coop+unstable-api.",
+        "Layer C1co: 7, 6, 7 and 6 passed (coop and tokio, with and without queryable). capability_cost_gate: 12 cases within budget; C1bz for wz-capi-pico spends exactly its budget; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed on the rebased tree."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Still on the tokio engine in the pico ABI: the listening role, scouting, the advanced plane, the connectivity plane, the admin space, the session-local delivery switches and the transports beyond TCP and UDP. The cooperative runtime has begun accepting stream connections (another session's); the listening role is to be built on it, not beside it.",
+        "pico-client-coop-unstable is 18,107 bytes under its budget; pico-client-coop 3,509.",
+        "The tokio engine's retraction of live liveliness entities at close (carry of 3595) is still owed its own round."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
