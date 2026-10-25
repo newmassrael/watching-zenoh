@@ -288326,6 +288326,34 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3658": {
+      "decision_summary": "Repair of round 3502: Layer U (upstream-release-distance) has been red since the two Mbed TLS submodules were added (vendor/mbedtls and vendor/tf-psa-crypto, Zephyr's forks, pinned at the revisions Zephyr's west.yml pins): the gate says a repository the tree fetches carries no pinned row. It sits at the end of the validate job, behind reds it did not cause, so it was read late, in the first finished hosted run holding the dissect round (run 40191687498), where it is the one red of that job that is mine. Neither repository publishes a release (the releases API answers an empty list, as for lwip), so the rows are NO_RELEASES at distance 0, with the reason beside the table; a release either fork publishes later moves them like any other row. The gate's selftest and live run pass here. Read in the same run and not mine: the tokio reds, the router capacity report, and the pico size budgets.",
+      "changes_bullets": [
+        "scripts/lib/upstream_release_distance.py: PINNED gains zephyrproject-rtos/mbedtls and zephyrproject-rtos/tf-psa-crypto, both NO_RELEASES at distance 0, with the reason in the comment above the table."
+      ],
+      "verification_bullets": [
+        "upstream_release_distance.py --selftest passes, and its live run (the releases API answered here) reads both repositories as NO_RELEASES at distance 0 and prints OK. The first finished hosted run holding the dissect round (40191687498), read per job: Qz, Qza and Qa are green (the group, the stack rows and the entry of the fixed admin node repaired in round 3642 hold); the reds are C1bnl, C1q, C1u, C1an, E7g and C1cs (tokio, the router capacity report and the pico budgets, none in a file this session changed) and Layer U, which this round repairs."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the first finished hosted run holding rounds 3649 to 3657 (the open verb on the fixed images, the lwIP and Zephyr admin images, the Zephyr stack rows with a registration that holds one more reference, Layer U). The C1cn shard 1 job ran at 97 percent of its 1800 s budget in run 40191687498: not mine, but it is one slow census away from a red of its own. Step 6.2b-5: the sources of hints (a build's declared ones, a Hello), wz-session-lwip forwarding the feature, and the witness on the image (a lane step, the grammar shared with the board)."
+      ],
+      "publishable_decision_summary": "Repair of round 3502: Layer U (upstream-release-distance) has been red since the two Mbed TLS submodules were added (vendor/mbedtls and vendor/tf-psa-crypto, Zephyr's forks, pinned at the revisions Zephyr's west.yml pins): the gate says a repository the tree fetches carries no pinned row. It sits at the end of the validate job, behind reds it did not cause, so it was read late, in the first finished hosted run holding the dissect round (run 40191687498), where it is the one red of that job that is mine. Neither repository publishes a release (the releases API answers an empty list, as for lwip), so the rows are NO_RELEASES at distance 0, with the reason beside the table; a release either fork publishes later moves them like any other row. The gate's selftest and live run pass here. Read in the same run and not mine: the tokio reds, the router capacity report, and the pico size budgets.",
+      "publishable_changes_bullets": [
+        "scripts/lib/upstream_release_distance.py: PINNED gains zephyrproject-rtos/mbedtls and zephyrproject-rtos/tf-psa-crypto, both NO_RELEASES at distance 0, with the reason in the comment above the table."
+      ],
+      "publishable_verification_bullets": [
+        "upstream_release_distance.py --selftest passes, and its live run (the releases API answered here) reads both repositories as NO_RELEASES at distance 0 and prints OK. The first finished hosted run holding the dissect round (40191687498), read per job: Qz, Qza and Qa are green (the group, the stack rows and the entry of the fixed admin node repaired in round 3642 hold); the reds are C1bnl, C1q, C1u, C1an, E7g and C1cs (tokio, the router capacity report and the pico budgets, none in a file this session changed) and Layer U, which this round repairs."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first finished hosted run holding rounds 3649 to 3657 (the open verb on the fixed images, the lwIP and Zephyr admin images, the Zephyr stack rows with a registration that holds one more reference, Layer U). The C1cn shard 1 job ran at 97 percent of its 1800 s budget in run 40191687498: not mine, but it is one slow census away from a red of its own. Step 6.2b-5: the sources of hints (a build's declared ones, a Hello), wz-session-lwip forwarding the feature, and the witness on the image (a lane step, the grammar shared with the board)."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
