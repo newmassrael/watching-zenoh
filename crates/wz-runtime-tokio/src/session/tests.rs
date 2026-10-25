@@ -15427,7 +15427,8 @@ fn offload_inbound(
     feature = "codec-push"
 ))]
 struct OffloadGate {
-    open: std::sync::Mutex<bool>,
+    /// Callbacks that may finish before the gate shuts again, and whether it is open for good.
+    state: std::sync::Mutex<(usize, bool)>,
     changed: std::sync::Condvar,
 }
 
@@ -15439,20 +15440,33 @@ struct OffloadGate {
 impl OffloadGate {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            open: std::sync::Mutex::new(false),
+            state: std::sync::Mutex::new((0, false)),
             changed: std::sync::Condvar::new(),
         })
     }
 
     fn wait(&self) {
-        let mut open = self.open.lock().unwrap();
-        while !*open {
-            open = self.changed.wait(open).unwrap();
+        let mut state = self.state.lock().unwrap();
+        loop {
+            if state.1 {
+                return;
+            }
+            if state.0 > 0 {
+                state.0 -= 1;
+                return;
+            }
+            state = self.changed.wait(state).unwrap();
         }
     }
 
+    /// Let exactly `n` more callbacks finish.
+    fn allow(&self, n: usize) {
+        self.state.lock().unwrap().0 += n;
+        self.changed.notify_all();
+    }
+
     fn release(&self) {
-        *self.open.lock().unwrap() = true;
+        self.state.lock().unwrap().1 = true;
         self.changed.notify_all();
     }
 
@@ -15583,10 +15597,15 @@ async fn a_full_lane_refuses_counts_by_reason_and_by_how_the_sample_was_sent() {
     let delivered = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
     let (gate_cb, delivered_cb) = (gate.clone(), delivered.clone());
     let offloaded = session
-        .declare_subscriber_offloaded("demo/**", SubscribeOptions::default(), move |sample| {
-            gate_cb.wait();
-            delivered_cb.lock().unwrap().push(sample.payload().to_vec());
-        })
+        .declare_subscriber_offloaded(
+            "demo/**",
+            SubscribeOptions::default()
+                .with_overload(wz_session_core::policy::SubscriberOverload::Reject),
+            move |sample| {
+                gate_cb.wait();
+                delivered_cb.lock().unwrap().push(sample.payload().to_vec());
+            },
+        )
         .expect("offloaded subscriber declares");
 
     for i in 0..events {
@@ -15630,28 +15649,154 @@ async fn a_full_lane_refuses_counts_by_reason_and_by_how_the_sample_was_sent() {
 }
 
 /// The claim: the byte bound refuses a sample that does not fit, by its own reason, and takes
-/// nothing for it.
+/// nothing for it. Under BOTH answers: a sample longer than the whole area would wait for room
+/// that can never come, so `block` refuses it too instead of holding the session for ever.
 #[cfg(all(
     feature = "declare-subscriber",
     feature = "pubsub-put",
     feature = "codec-push"
 ))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_sample_larger_than_the_byte_area_is_refused_by_the_byte_bound() {
+async fn a_sample_larger_than_the_byte_area_is_refused_by_the_byte_bound_under_either_answer() {
+    use wz_session_core::policy::SubscriberOverload;
+    for overload in [SubscriberOverload::Block, SubscriberOverload::Reject] {
+        let (session, _driver) = build_session();
+        let offloaded = session
+            .declare_subscriber_offloaded(
+                "demo/**",
+                SubscribeOptions::default().with_overload(overload),
+                |_| {},
+            )
+            .expect("offloaded subscriber declares");
+        let big = vec![7u8; wz_session_core::caps::DELIVERY_LANE_BYTES + 1];
+        let outcome = offload_inbound(&big, true, None);
+        session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+        let stats = offloaded.stats();
+        assert_eq!(stats.lane.refused.bytes_full, 1, "{overload:?}");
+        assert_eq!(stats.dropped_reliable, 1, "{overload:?}");
+        assert_eq!(stats.held, 0, "{overload:?}: it is not held, it never fits");
+        assert_eq!(
+            stats.lane.pending_bytes, 0,
+            "{overload:?}: a refused sample charged nothing"
+        );
+    }
+}
+
+/// The claim: under `block` a full lane HOLDS the sample instead of refusing it, nothing is lost, and
+/// the drain the loop awaits admits the held samples in the order they arrived once the consumer
+/// has made room. The gate keeps the consumer slow, so the lane is provably full; the drain is
+/// provably waiting (it does not finish while the gate is shut) and provably finishes after.
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn under_block_a_full_lane_holds_and_the_drain_admits_in_order_when_room_comes() {
+    use wz_session_core::policy::SubscriberOverload;
+    let events = wz_session_core::caps::DELIVERY_LANE_EVENTS;
+    let extra = 5usize;
     let (session, _driver) = build_session();
+    let gate = OffloadGate::new();
+    let _release = gate.release_on_exit();
+    let delivered = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let (gate_cb, delivered_cb) = (gate.clone(), delivered.clone());
     let offloaded = session
-        .declare_subscriber_offloaded("demo/**", SubscribeOptions::default(), |_| {})
+        .declare_subscriber_offloaded(
+            "demo/**",
+            SubscribeOptions::default().with_overload(SubscriberOverload::Block),
+            move |sample| {
+                gate_cb.wait();
+                delivered_cb.lock().unwrap().push(sample.payload().to_vec());
+            },
+        )
         .expect("offloaded subscriber declares");
-    let big = vec![7u8; wz_session_core::caps::DELIVERY_LANE_BYTES + 1];
-    let outcome = offload_inbound(&big, true, None);
-    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
-    let stats = offloaded.stats();
-    assert_eq!(stats.lane.refused.bytes_full, 1);
-    assert_eq!(stats.dropped_reliable, 1);
-    assert_eq!(
-        stats.lane.pending_bytes, 0,
-        "a refused sample charged nothing"
+
+    for i in 0..events + extra {
+        let outcome = offload_inbound(&[(i % 250) as u8], true, None);
+        session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    }
+    let held = offloaded.stats();
+    assert_eq!(held.lane.queued_events, events, "the lane is full");
+    assert_eq!(held.held, extra, "the rest waits outside it");
+    assert_eq!(held.lane.refused.total, 0, "waiting is not refusing");
+    assert_eq!(held.dropped_reliable + held.dropped_best_effort, 0);
+
+    // The drain waits for room, and a drain that waits holds up only the loop that awaits it.
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(150),
+            session.drain_buffered()
+        )
+        .await
+        .is_err(),
+        "the drain does not finish while the consumer is held"
     );
+    assert_eq!(offloaded.stats().held, extra, "and it admitted nothing");
+
+    // A sample that arrives while others are held waits behind them even if the lane has room for
+    // it at that moment: it must not overtake. Exactly one callback is let finish, which frees one
+    // slot, and then a late sample arrives while the lane has that room and the drain has not run.
+    gate.allow(1);
+    for _ in 0..300 {
+        if offloaded.stats().lane.queued_events < events {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        offloaded.stats().lane.queued_events < events,
+        "a slot was freed"
+    );
+    let late = [201u8];
+    let outcome = offload_inbound(&late, true, None);
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    assert_eq!(
+        offloaded.stats().held,
+        extra + 1,
+        "a late sample waits behind the held ones and does not take the slot that was freed"
+    );
+
+    gate.release();
+    tokio::time::timeout(std::time::Duration::from_secs(10), session.drain_buffered())
+        .await
+        .expect("the drain finishes once the consumer makes room");
+    let total = events + extra + 1;
+    for _ in 0..300 {
+        if delivered.lock().unwrap().len() == total {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let delivered = delivered.lock().unwrap();
+    assert_eq!(delivered.len(), total, "nothing was lost");
+    let mut expected: Vec<Vec<u8>> = (0..events + extra).map(|i| vec![(i % 250) as u8]).collect();
+    expected.push(late.to_vec());
+    assert_eq!(
+        *delivered, expected,
+        "in the order they arrived: the held ones behind the ones that were in the lane, and the \
+         late sample behind the held ones although the lane had room for it first"
+    );
+    let end = offloaded.stats();
+    assert_eq!(end.held, 0);
+    assert_eq!(end.lane.refused.total, 0);
+}
+
+/// The default answer is the build's policy, and a declaration can say its own.
+#[cfg(feature = "transport-unicast")]
+#[test]
+fn a_subscription_takes_the_overload_answer_of_the_build_unless_it_says_its_own() {
+    use wz_session_core::policy::{SessionPolicy, SubscriberOverload};
+    assert_eq!(
+        SubscribeOptions::default().overload(),
+        SessionPolicy::from_build().subscriber_overload
+    );
+    for own in [SubscriberOverload::Block, SubscriberOverload::Reject] {
+        assert_eq!(
+            SubscribeOptions::default().with_overload(own).overload(),
+            own
+        );
+    }
 }
 
 /// The claim: what the callback sees is what an inline callback sees. The attachment, the

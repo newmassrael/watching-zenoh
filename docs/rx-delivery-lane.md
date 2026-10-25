@@ -152,9 +152,29 @@ callbacks are slow and leaves the rest inline.
      timestamp, encoding, source and QoS arrive as an inline callback sees them; dropping the handle
      stops the deliveries; and a call off a runtime is refused. The tests found one defect of this
      phase's own, a lock taken twice by the callback cell, which hung the dropping test.
-   - 3b: the `block` answer through the drain step, and the policy `subscriber-overload` with it (a
-     policy with one value is not a policy, so it is declared when its second value has code), and the
-     capability `rx-callback-offload` when the C ABIs' manifests are to name it.
+   - 3b: the `block` answer through the drain step, and the policy `subscriber-overload` with it. DONE.
+     * The policy is a choice (`block`, `reject`), default `block`, declared in the change that gave
+       its second value code. A declaration states its own with
+       `SubscribeOptions::with_overload`; what it leaves unsaid is the build's, as the timestamp
+       policy's default is. The 3a tests, which were about `reject`, now name it.
+     * `block` holds a sample outside the lane when the lane has no room, and every sample behind
+       it, so that nothing overtakes. The drain the drive loop already awaits every iteration
+       (the buffered subscriptions' registry) admits held samples in order and waits for room,
+       woken when the consumer finishes one. A sample longer than the whole byte area can never be
+       admitted, so waiting for it would end the session's progress for ever: it is refused under
+       either answer. What is held is bounded by what one dispatch delivers, because the drain
+       awaits while the loop is not polling.
+     * The lane gained `fits` (would a sample be admitted, counting nothing, since a wait is not an
+       overload) and `can_ever_fit`.
+     * Not declared: the capability `rx-callback-offload`. The API exists only on the Rust session,
+       and no door of a C ABI exports it, so a capability would name nothing a deployer could turn
+       on or off; a build that does not call it does not link it. It is declared with the first door
+       that exports it.
+     Tests: under `block` a full lane holds and loses nothing, the drain waits while the consumer
+     is held and admits in order after it makes room, and a late sample that arrives while a slot is
+     free but others are held waits behind them (the case a no-overtaking rule exists for, and the
+     one a first version of the test did not discriminate); a sample longer than the area is refused
+     under both answers and not held; the default answer is the build's.
 4. The snapshot through `adminspace-metrics`.
 5. The cooperative engine and the slot node take the lane, each written by the session that owns the
    file (session 11 and session ef).

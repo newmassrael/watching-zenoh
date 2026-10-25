@@ -35,19 +35,31 @@
 //!   never binds before the event bound. This host holds ONE LANE PER OFFLOADED SUBSCRIPTION, so
 //!   each has its own bounds and its own order; a lane for the whole session is a change to the
 //!   session's state that this one does not need.
-//! * Only `reject` is built: a full lane refuses. A lane that makes the receive path wait waits in
-//!   the drain step, outside the observer lock, and is the next part of the design.
+//! * A full lane does one of two things, and the subscription says which
+//!   ([`SubscribeOptions::with_overload`], default the build's `subscriber-overload` policy).
+//!   `reject` refuses the sample at the sink: the receive path is never held and the sample is
+//!   lost and counted. `block` must not wait at the sink, which runs under the observer lock that
+//!   the consumer's callback may be waiting for, so the sink HOLDS a copy outside the lane and
+//!   returns, and the drain step the drive loop awaits after the lock is released admits the held
+//!   samples in order and waits for room: the transport's own backpressure is the flow control, as
+//!   it is for a buffered subscriber, and no sample is lost. A sample longer than the whole lane
+//!   would wait for ever, so it is refused under either answer.
 
+use std::collections::VecDeque;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::Notify;
 use wz_session_core::caps;
-use wz_session_core::delivery_lane::{DeliveryLane, Next, Overload, Stats};
+use wz_session_core::delivery_lane::{DeliveryLane, Next, Overload, Refusal, Stats};
+use wz_session_core::policy::SubscriberOverload;
 use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::sink::SampleView;
 
+use super::buffered::{BufferedDrain, BufferedWork, RegisteredDrain};
 use super::*;
 use crate::sync::PlainMutex;
 
@@ -69,12 +81,22 @@ struct Meta {
     source_info: Option<SourceInfo>,
 }
 
+/// A sample the lane had no room for under `block`: its four parts in one buffer, cut by the lengths
+/// in its record, waiting outside the lane for the drain to admit it.
+struct Held {
+    bytes: Vec<u8>,
+    meta: Meta,
+}
+
 struct State {
     lane: DeliveryLane<EVENTS>,
     /// The bytes of the waiting samples, the lane's ring.
     area: Vec<u8>,
     /// The record of each waiting sample, at the event slot the lane gave it.
     meta: Vec<Option<Meta>>,
+    /// Samples held for room under `block`, oldest first. Bounded by what one dispatch delivers:
+    /// while the drain awaits room the loop is not polling, so nothing more arrives.
+    held: VecDeque<Held>,
     dropped_best_effort: usize,
     dropped_reliable: usize,
 }
@@ -82,7 +104,10 @@ struct State {
 /// The lane of one offloaded subscription and what wakes its consumer.
 pub struct OffloadLane {
     state: PlainMutex<State>,
+    /// Wakes the consumer: a sample is published, or the lane is stopping.
     wake: Notify,
+    /// Wakes the drain: the consumer finished a sample, so a held one may now fit.
+    room: Notify,
 }
 
 /// A snapshot of an offloaded subscription's lane.
@@ -90,6 +115,8 @@ pub struct OffloadLane {
 pub struct OffloadStats {
     /// What waits, against what bound, and what was refused by reason.
     pub lane: Stats,
+    /// Samples held outside the lane under `block`, waiting for room: delayed and not lost.
+    pub held: usize,
     /// Samples sent best-effort that a full lane refused: lost, as that reliability allows.
     pub dropped_best_effort: usize,
     /// Samples sent RELIABLY that a full lane refused: lost although the sender asked for more, so
@@ -97,24 +124,16 @@ pub struct OffloadStats {
     pub dropped_reliable: usize,
 }
 
-impl OffloadLane {
-    fn new() -> Self {
-        Self {
-            state: PlainMutex::new(State {
-                lane: DeliveryLane::new(caps::DELIVERY_LANE_BYTES, caps::DELIVERY_LANE_CALLBACKS),
-                area: vec![0; caps::DELIVERY_LANE_BYTES],
-                meta: (0..EVENTS).map(|_| None).collect(),
-                dropped_best_effort: 0,
-                dropped_reliable: 0,
-            }),
-            wake: Notify::new(),
-        }
-    }
+/// A view's parts and what is not bytes, taken once, so the direct path and the held one write the
+/// same thing.
+struct Captured<'a> {
+    slices: [Option<&'a [u8]>; 4],
+    total: usize,
+    meta: Meta,
+}
 
-    /// Copy `view` in and wake the consumer, or count why it was refused. Runs on the drive loop,
-    /// under the observer lock, so it takes the lane's lock for the length of one copy and nothing
-    /// else.
-    fn admit(&self, view: &dyn SampleView) {
+impl<'a> Captured<'a> {
+    fn of(view: &'a dyn SampleView) -> Self {
         let key = view.keyexpr().as_bytes();
         let payload = view.payload();
         let attachment = view.attachment();
@@ -122,24 +141,10 @@ impl OffloadLane {
         let schema = encoding
             .and_then(|hint| hint.schema.as_deref())
             .map(str::as_bytes);
-        let total = key.len()
-            + payload.len()
-            + attachment.map_or(0, <[u8]>::len)
-            + schema.map_or(0, <[u8]>::len);
-        let admitted = self.state.with(|state| {
-            let reservation = match state.lane.reserve(total) {
-                Ok(reservation) => reservation,
-                Err(_) => return Err(()),
-            };
-            let (index, mut at) = (reservation.index(), reservation.offset());
-            for part in [Some(key), Some(payload), attachment, schema]
-                .into_iter()
-                .flatten()
-            {
-                state.area[at..at + part.len()].copy_from_slice(part);
-                at += part.len();
-            }
-            state.meta[index] = Some(Meta {
+        let slices = [Some(key), Some(payload), attachment, schema];
+        Self {
+            total: slices.iter().flatten().map(|part| part.len()).sum(),
+            meta: Meta {
                 key: key.len(),
                 payload: payload.len(),
                 attachment: attachment.map(<[u8]>::len),
@@ -150,23 +155,173 @@ impl OffloadLane {
                 timestamp: view.timestamp().cloned(),
                 encoding_id: encoding.map(|hint| hint.packed_id),
                 source_info: view.source_info().cloned(),
-            });
-            // One callback: this sink is one subscription's. A refusal here can only be the
-            // callback budget, which is larger than the event bound on this host.
-            if state.lane.publish(reservation, 1).is_err() {
-                state.meta[index] = None;
-                return Err(());
+            },
+            slices,
+        }
+    }
+
+    /// The sample in one buffer, to hold it outside the lane.
+    fn held(self) -> Held {
+        let mut bytes = Vec::with_capacity(self.total);
+        for part in self.slices.into_iter().flatten() {
+            bytes.extend_from_slice(part);
+        }
+        Held {
+            bytes,
+            meta: self.meta,
+        }
+    }
+}
+
+/// What the sink did with a sample.
+enum Admission {
+    Admitted,
+    Held,
+    Refused,
+}
+
+impl State {
+    /// Write a sample into the lane, or say it was refused. The parts are cut by `meta`.
+    fn write(
+        &mut self,
+        parts: [Option<&[u8]>; 4],
+        total: usize,
+        meta: Meta,
+    ) -> Result<(), Refusal> {
+        let reservation = self.lane.reserve(total)?;
+        let (index, mut at) = (reservation.index(), reservation.offset());
+        for part in parts.into_iter().flatten() {
+            self.area[at..at + part.len()].copy_from_slice(part);
+            at += part.len();
+        }
+        self.meta[index] = Some(meta);
+        // One callback: this sink is one subscription's. A refusal here can only be the callback
+        // budget, which is larger than the event bound on this host.
+        if let Err(why) = self.lane.publish(reservation, 1) {
+            self.meta[index] = None;
+            return Err(why);
+        }
+        Ok(())
+    }
+
+    /// Write a held sample, which `fits` said the lane has room for.
+    fn write_held(&mut self, held: Held) -> Result<(), Refusal> {
+        let Held { bytes, meta } = held;
+        let total = bytes.len();
+        let rest = bytes.as_slice();
+        let (key, rest) = rest.split_at(meta.key);
+        let (payload, rest) = rest.split_at(meta.payload);
+        let (attachment, rest) = match meta.attachment {
+            Some(len) => {
+                let (attachment, rest) = rest.split_at(len);
+                (Some(attachment), rest)
             }
-            Ok(())
-        });
-        match admitted {
-            Ok(()) => self.wake.notify_one(),
-            Err(()) => self.state.with(|state| {
-                match Overload::of(view.reliability()) {
-                    Overload::Drop => state.dropped_best_effort += 1,
-                    Overload::LocalResourceLimit => state.dropped_reliable += 1,
-                };
+            None => (None, rest),
+        };
+        let schema = meta.schema.map(|len| &rest[..len]);
+        self.write([Some(key), Some(payload), attachment, schema], total, meta)
+    }
+
+    /// A sample was lost to the lane: count it by how it was sent.
+    fn lose(&mut self, reliability: Reliability) {
+        match Overload::of(reliability) {
+            Overload::Drop => self.dropped_best_effort += 1,
+            Overload::LocalResourceLimit => self.dropped_reliable += 1,
+        }
+    }
+}
+
+impl OffloadLane {
+    fn new() -> Self {
+        Self {
+            state: PlainMutex::new(State {
+                lane: DeliveryLane::new(caps::DELIVERY_LANE_BYTES, caps::DELIVERY_LANE_CALLBACKS),
+                area: vec![0; caps::DELIVERY_LANE_BYTES],
+                meta: (0..EVENTS).map(|_| None).collect(),
+                held: VecDeque::new(),
+                dropped_best_effort: 0,
+                dropped_reliable: 0,
             }),
+            wake: Notify::new(),
+            room: Notify::new(),
+        }
+    }
+
+    /// Copy `view` in and wake the consumer, or count why it was refused. Runs on the drive loop,
+    /// under the observer lock, so it takes the lane's lock for the length of one copy and nothing
+    /// else.
+    fn admit(&self, view: &dyn SampleView, overload: SubscriberOverload) {
+        let captured = Captured::of(view);
+        let reliability = captured.meta.reliability;
+        let admission = self.state.with(|state| {
+            // Under `block`, a sample the lane has no room for waits outside it, and so does every
+            // sample behind it, so that nothing overtakes it. One that could never fit, however
+            // empty the lane, is refused: waiting for it would never end.
+            if overload == SubscriberOverload::Block && state.lane.can_ever_fit(captured.total) {
+                let no_room = matches!(
+                    state.lane.fits(captured.total),
+                    Err(Refusal::EventsFull | Refusal::BytesFull)
+                );
+                if no_room || !state.held.is_empty() {
+                    state.held.push_back(captured.held());
+                    return Admission::Held;
+                }
+            }
+            // `write` reserves, and a reservation that is refused counts the reason.
+            match state.write(captured.slices, captured.total, captured.meta) {
+                Ok(()) => Admission::Admitted,
+                Err(_) => {
+                    state.lose(reliability);
+                    Admission::Refused
+                }
+            }
+        });
+        match admission {
+            Admission::Admitted => self.wake.notify_one(),
+            // The drain, which the loop awaits once it has released the observer lock, admits it.
+            Admission::Held | Admission::Refused => {}
+        }
+    }
+
+    /// Admit the held samples that now fit, in order, and wait for room for the one that does not.
+    /// Returns when nothing is held, or the lane is stopping (what is held is then lost with it).
+    ///
+    /// Awaited by the drive loop after it has released the observer lock, so the wait holds up the
+    /// loop and nothing else: the backpressure `block` is. It awaits only the room notification, and
+    /// moves a sample in one step under the lane's lock, so a drain cancelled while it waits has
+    /// taken nothing.
+    async fn drain_held(&self) {
+        loop {
+            let (empty, stopping, admitted) = self.state.with(|state| {
+                let mut admitted = false;
+                while let Some(front) = state.held.front() {
+                    if state.lane.fits(front.bytes.len()).is_err() {
+                        break;
+                    }
+                    let held = state.held.pop_front().expect("front was there");
+                    let reliability = held.meta.reliability;
+                    match state.write_held(held) {
+                        Ok(()) => admitted = true,
+                        Err(_) => state.lose(reliability),
+                    }
+                }
+                (state.held.is_empty(), state.lane.is_stopping(), admitted)
+            });
+            if admitted {
+                self.wake.notify_one();
+            }
+            if empty {
+                return;
+            }
+            if stopping {
+                self.state.with(|state| {
+                    while let Some(held) = state.held.pop_front() {
+                        state.lose(held.meta.reliability);
+                    }
+                });
+                return;
+            }
+            self.room.notified().await;
         }
     }
 
@@ -188,11 +343,14 @@ impl OffloadLane {
         self.state.with(|state| {
             let _ = state.lane.complete();
         });
+        // A sample that was held for room may fit now.
+        self.room.notify_one();
     }
 
     fn stop(&self) {
         self.state.with(|state| state.lane.stop());
         self.wake.notify_one();
+        self.room.notify_one();
     }
 
     fn is_stopped(&self) -> bool {
@@ -203,6 +361,7 @@ impl OffloadLane {
     pub fn stats(&self) -> OffloadStats {
         self.state.with(|state| OffloadStats {
             lane: state.lane.stats(),
+            held: state.held.len(),
             dropped_best_effort: state.dropped_best_effort,
             dropped_reliable: state.dropped_reliable,
         })
@@ -338,6 +497,12 @@ impl<F: FnMut(&dyn SampleView)> CallbackCell<F> {
     }
 }
 
+impl BufferedDrain for OffloadLane {
+    fn drain(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(self.drain_held())
+    }
+}
+
 /// Stops the lane when the consumer ends, however it ends: a callback that panics ends the task, and
 /// a lane nobody empties would fill and refuse without saying why.
 struct StopOnDrop(Arc<OffloadLane>);
@@ -413,10 +578,15 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     ///
     /// Each matching sample is copied into a lane of at most `DELIVERY_LANE_EVENTS` samples and
     /// `DELIVERY_LANE_BYTES` bytes, and the callback runs on a task of its own, in order, with no
-    /// lock of the session held, so it may declare, undeclare, publish or query. A sample the lane
-    /// has no room for is refused, counted by reason in [`OffloadedSubscriber::stats`], and not
-    /// delivered: this subscription loses samples under overload, which an inline subscriber does
-    /// not (it stalls the loop instead).
+    /// lock of the session held, so it may declare, undeclare, publish or query.
+    ///
+    /// What a full lane does is `options`' [`SubscribeOptions::overload`]: under `reject` the sample
+    /// is refused, counted by reason in [`OffloadedSubscriber::stats`] and lost, and the receive
+    /// path is never held; under `block` the sample waits outside the lane and the drive loop waits
+    /// for room, so nothing is lost and a slow callback slows the session instead. The drive loop
+    /// awaits that wait on its own (`drive_session_until_terminal*` drain this session's buffered
+    /// work every iteration); an embedder driving a loop of its own awaits
+    /// [`Session::drain_buffered`].
     ///
     /// Call it on a tokio runtime: the consumer is a task.
     pub fn declare_subscriber_offloaded(
@@ -429,14 +599,25 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         wz_session_core::session_actions::SessionLinkActions<R, T>: Send + Sync,
         <R as SessionRuntime>::LinkSink: Send + Sync,
         T: 'static,
+        <R as SessionRuntime>::IterationWork: BufferedWork,
     {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| OffloadError::NoRuntime)?;
         let lane = Arc::new(OffloadLane::new());
         let cell = Arc::new(CallbackCell::new(callback));
+        let overload = options.overload();
         let sink_lane = lane.clone();
         let subscriber = self
-            .declare_subscriber(keyexpr, options, move |view| sink_lane.admit(view))
+            .declare_subscriber(keyexpr, options, move |view| {
+                sink_lane.admit(view, overload)
+            })
             .map_err(OffloadError::Subscribe)?;
+        // Registered on the kernel, as a buffered subscription is, so the loop finds it unasked.
+        // The registry holds it weakly: the lane the handle keeps is what keeps it alive.
+        let drain: Arc<dyn BufferedDrain> = lane.clone();
+        self.transport
+            .core
+            .iteration_work
+            .register(&RegisteredDrain::of(drain));
         runtime.spawn(consume(lane.clone(), cell.clone()));
         Ok(OffloadedSubscriber {
             subscriber: Some(subscriber),

@@ -292,6 +292,15 @@ pub trait BufferedWork {
 /// One buffered subscription's drain, opaque. See [`BufferedWork::register`].
 pub struct RegisteredDrain(Arc<dyn BufferedDrain>);
 
+impl RegisteredDrain {
+    /// A drain the loop will await, built by a sibling that is not a buffered subscription
+    /// (an offloaded one, whose held samples wait for room in its lane). The registry holds it
+    /// weakly, so whoever keeps the `Arc` keeps the drain alive.
+    pub(crate) fn of(drain: Arc<dyn BufferedDrain>) -> Self {
+        Self(drain)
+    }
+}
+
 /// R2708 (item 785) — PUBLIC because it is now this profile's
 /// `SessionRuntime::IterationWork`, which is an associated type on a public
 /// trait. Its methods stay `pub(crate)`: a consumer names the type only where

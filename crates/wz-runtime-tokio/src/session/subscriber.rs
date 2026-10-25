@@ -32,6 +32,8 @@ pub struct SubscribeOptions {
     retraction_key: Option<RetractionKey>,
     /// Whether the callback sees the timestamp of a sample: see [`Self::with_expose_timestamp`].
     expose_timestamp: bool,
+    /// What a full delivery lane does: see [`Self::with_overload`].
+    overload: wz_session_core::policy::SubscriberOverload,
 }
 
 impl Default for SubscribeOptions {
@@ -40,6 +42,7 @@ impl Default for SubscribeOptions {
             allowed_origin: Locality::default(),
             retraction_key: None,
             expose_timestamp: wz_session_core::timestamp_visibility::default_exposed(),
+            overload: wz_session_core::policy::SessionPolicy::from_build().subscriber_overload,
         }
     }
 }
@@ -96,6 +99,24 @@ impl SubscribeOptions {
     /// See [`Self::with_expose_timestamp`].
     pub fn expose_timestamp(&self) -> bool {
         self.expose_timestamp
+    }
+
+    /// What the delivery lane of an OFFLOADED subscriber does when it is full: `block` makes the
+    /// session wait for room, so no sample is lost and a slow callback slows the session; `reject`
+    /// refuses the sample, so the session is never held and the sample is lost and counted. Only
+    /// [`Session::declare_subscriber_offloaded`] reads it: a plain subscriber's callback runs inline
+    /// and has no lane.
+    ///
+    /// What a declaration that does not say gets is the build's `subscriber-overload` policy, which
+    /// is `block`, upstream's behaviour, unless the build states `reject`.
+    pub fn with_overload(mut self, overload: wz_session_core::policy::SubscriberOverload) -> Self {
+        self.overload = overload;
+        self
+    }
+
+    /// See [`Self::with_overload`].
+    pub fn overload(&self) -> wz_session_core::policy::SubscriberOverload {
+        self.overload
     }
 }
 

@@ -309,6 +309,29 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
         None
     }
 
+    /// Whether a sample of `bytes` bytes would be admitted by [`Self::reserve`] now, and the
+    /// reason when it would not, WITHOUT counting a refusal. A host that waits for room instead of
+    /// refusing asks this, because asking [`Self::reserve`] would count an overload that is only a
+    /// wait. A sample that is longer than the whole byte area never fits, however empty the lane.
+    pub fn fits(&self, bytes: usize) -> Result<(), Refusal> {
+        if self.stopping {
+            Err(Refusal::Stopping)
+        } else if self.len == EVENTS {
+            Err(Refusal::EventsFull)
+        } else if self.place(bytes).is_none() {
+            Err(Refusal::BytesFull)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Whether a sample of `bytes` bytes could be admitted by an empty lane: it is not longer than
+    /// the byte area. A host that waits for room refuses a sample for which this is `false`,
+    /// because waiting for it would never end.
+    pub const fn can_ever_fit(&self, bytes: usize) -> bool {
+        bytes <= self.byte_capacity
+    }
+
     /// Take a slot and room for `bytes` bytes, or say why not. The producer writes the sample at
     /// [`Reservation::offset`] and then calls [`Self::publish`], or [`Self::cancel`] if it cannot.
     /// Until it does, the reservation holds the head of the lane.
@@ -696,6 +719,30 @@ mod tests {
         );
         assert_eq!(lane.front(), Next::Empty);
         assert!(lane.is_stopped());
+    }
+
+    #[test]
+    fn fits_says_what_reserve_would_say_and_counts_nothing() {
+        let mut lane = lane::<2>(10, 10);
+        assert_eq!(lane.fits(4), Ok(()));
+        admit(&mut lane, 8, 1).unwrap();
+        assert_eq!(lane.fits(3), Err(Refusal::BytesFull));
+        admit(&mut lane, 0, 1).unwrap();
+        assert_eq!(lane.fits(0), Err(Refusal::EventsFull));
+        lane.stop();
+        assert_eq!(lane.fits(0), Err(Refusal::Stopping));
+        assert_eq!(
+            lane.stats().refused.total,
+            0,
+            "asking whether a sample fits is not a refusal"
+        );
+    }
+
+    #[test]
+    fn a_sample_longer_than_the_area_can_never_fit_and_one_that_fits_empty_can() {
+        let lane = lane::<2>(10, 10);
+        assert!(lane.can_ever_fit(10));
+        assert!(!lane.can_ever_fit(11));
     }
 
     #[test]

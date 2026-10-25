@@ -53,6 +53,49 @@ impl Default for MulticastLoopback {
     }
 }
 
+/// `subscriber-overload`: What a subscriber whose callback runs off the receive path does
+/// when its delivery lane is full and its declaration says nothing. `block` makes the
+/// session wait for room, outside the lock the receive path holds, so the transport's own
+/// backpressure is the flow control and no sample is lost. `reject` refuses the sample at
+/// once: the receive path is never held, the sample is lost, and it is counted by reason
+/// and by whether it was sent reliably. A sample longer than the whole lane can never wait
+/// for room, so it is refused either way. Each declaration can still state its own choice;
+/// this sets the default for the ones that do not.
+/// Upstream: Hands a sample to a channel handler that blocks its sender when the handler is
+/// full, so a slow consumer applies backpressure into the session and no sample is lost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubscriberOverload {
+    /// `block`.
+    Block,
+    /// `reject`.
+    Reject,
+}
+
+impl SubscriberOverload {
+    /// The value as the declaration, the Kconfig and the environment spell it.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Reject => "reject",
+        }
+    }
+
+    const CHOICES: [&str; 2] = ["block", "reject"];
+    const ALL: [Self; 2] = [Self::Block, Self::Reject];
+
+    const fn stated() -> Self {
+        let stated = option_env!("WZ_POLICY_SUBSCRIBER_OVERLOAD");
+        let index = policy_choice(stated, &Self::CHOICES, 0);
+        Self::ALL[index]
+    }
+}
+
+impl Default for SubscriberOverload {
+    fn default() -> Self {
+        Self::stated()
+    }
+}
+
 /// What this build decided beyond upstream's behaviour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -74,6 +117,10 @@ pub struct SessionPolicy {
     /// subscriber and every reply's to the querier, and lets any publisher attach the
     /// timestamp it is given.
     pub entity_timestamp_opt_in: bool,
+    /// `subscriber-overload`. Upstream: Hands a sample to a channel handler that blocks its
+    /// sender when the handler is full, so a slow consumer applies backpressure into the
+    /// session and no sample is lost.
+    pub subscriber_overload: SubscriberOverload,
 }
 
 impl SessionPolicy {
@@ -84,12 +131,14 @@ impl SessionPolicy {
         let tx_expiry_keeps_session = policy_bool(option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION"));
         let declaration_sync_pacing = policy_bool(option_env!("WZ_POLICY_DECLARATION_SYNC_PACING"));
         let entity_timestamp_opt_in = policy_bool(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"));
+        let subscriber_overload = SubscriberOverload::stated();
         Self {
             multicast_loopback,
             tx_no_progress_deadline,
             tx_expiry_keeps_session,
             declaration_sync_pacing,
             entity_timestamp_opt_in,
+            subscriber_overload,
         }
     }
 }
