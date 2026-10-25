@@ -645,8 +645,8 @@ listens on nothing): a pass of its tick frees the rows of sessions that ended, t
 the port and, if every row is taken, closes the connection before any table is claimed for it
 (`refused_over_capacity`); the sessions a node holds are then dialled and accepted alike to
 everything it does (declaring, answering, reporting). The identity differs in one respect, and
-upstream says which: a client refuses a client (`zenoh/src/net/runtime/region.rs` @ `North-north
-client-client configuration (invalid)`), so a session a peer opened is met as a PEER while the
+upstream says which: a client refuses a client (`zenoh/src/net/runtime/region.rs` @
+`client-client configuration (invalid)`), so a session a peer opened is met as a PEER while the
 routers the node dials still meet a client. A node built to listen carries the accept side of the
 handshake, which a client does not (`wz-session-mcu/listen`, forwarded by the image's `listen`
 feature): an acceptor given to a node without it would read each InitSyn and answer none, so the
