@@ -288126,6 +288126,42 @@
         "Step 6.2b-4: an image that binds the verb (MAX_PEER_NODES above zero, ControlledOpener handed to the registration, which the Zephyr and lwIP images build and the kit lane reads), the sources of hints (a build's declared ones, a Hello), wz-session-lwip forwarding the feature, and the witness on the image. The in-band switchboard (the Push form) and close, reset and status are not on this profile. The heap UDP dialer does not yet verify nodes. Read the first completed hosted run holding rounds 3646 to this one (the Qzb chain, the C1bz budget). Then D7."
       ]
     },
+    "Round 3653": {
+      "decision_summary": "Survey of the advanced publisher and subscriber for the cooperative engine (section 6 of the pico-on-coop note), recorded in docs/advanced-pubsub-on-a-neutral-core.md. The mechanism exists once, in wz-runtime-tokio (13,314 lines in five files, 8,486 of them the subscriber), and a cooperative pico build must not link that crate. The structure chosen: a new crate of pure rules that reads no clock and spawns nothing, the publisher's beacon and the subscriber as state machines of events and commands that each engine drives as a host, time passed in by the caller, and the three periodic jobs (heartbeat beacon, periodic recovery queries, retention sweep) as ticks. The publisher already has the seam (AdvancedPublisherPlane) and CacheStore is already runtime-neutral; the subscriber is written against the heap session's internals and is the large step. Five steps: neutral parts, vocabulary, publisher, subscriber, retirement behind a differential test and the interop tests. Nothing is built.",
+      "changes_bullets": [
+        "docs/advanced-pubsub-on-a-neutral-core.md (new): the inventory with measured dependencies, the structure, what a cooperative host cannot give (a tick is as late as the next read), the five steps, the gates each step moves, and two open points.",
+        "docs/capi-pico-on-coop-engine.md: the entry for the survey."
+      ],
+      "verification_bullets": [
+        "Documentation only. The line counts, the dependency lists and the task and channel sites were read off the tree; the claims about the cooperative engine (no node clock, no timer, the primitives it has) were read from its source and feature list.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Step 1 of the advanced plane (neutral parts into a new crate) waits on the session that lands the zenoh-util family: time_range exists in two readings, wz-runtime-tokio's and that family's, and which is kept is theirs to say; ask before step 1 touches the tokio one.",
+        "Read the catalog wording of the ext-pubsub-advanced atoms before the crate is named.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the hosted runs of earlier pushes."
+      ],
+      "publishable_decision_summary": "Survey of the advanced publisher and subscriber for the cooperative engine (section 6 of the pico-on-coop note), recorded in docs/advanced-pubsub-on-a-neutral-core.md. The mechanism exists once, in wz-runtime-tokio (13,314 lines in five files, 8,486 of them the subscriber), and a cooperative pico build must not link that crate. The structure chosen: a new crate of pure rules that reads no clock and spawns nothing, the publisher's beacon and the subscriber as state machines of events and commands that each engine drives as a host, time passed in by the caller, and the three periodic jobs (heartbeat beacon, periodic recovery queries, retention sweep) as ticks. The publisher already has the seam (AdvancedPublisherPlane) and CacheStore is already runtime-neutral; the subscriber is written against the heap session's internals and is the large step. Five steps: neutral parts, vocabulary, publisher, subscriber, retirement behind a differential test and the interop tests. Nothing is built.",
+      "publishable_changes_bullets": [
+        "docs/advanced-pubsub-on-a-neutral-core.md (new): the inventory with measured dependencies, the structure, what a cooperative host cannot give (a tick is as late as the next read), the five steps, the gates each step moves, and two open points.",
+        "docs/capi-pico-on-coop-engine.md: the entry for the survey."
+      ],
+      "publishable_verification_bullets": [
+        "Documentation only. The line counts, the dependency lists and the task and channel sites were read off the tree; the claims about the cooperative engine (no node clock, no timer, the primitives it has) were read from its source and feature list.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 1 of the advanced plane (neutral parts into a new crate) waits on the session that lands the zenoh-util family: time_range exists in two readings, wz-runtime-tokio's and that family's, and which is kept is theirs to say; ask before step 1 touches the tokio one.",
+        "Read the catalog wording of the ext-pubsub-advanced atoms before the crate is named.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine; the hosted runs of earlier pushes."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
