@@ -34,9 +34,19 @@ Measured facts the design rests on:
    shape.
 2. **`CacheStore` is already runtime-neutral** by its own account. What binds it is a wall clock read
    inside the answer, which a host can pass in.
-3. **The subscriber is the heavy part.** Its decisions (what order a sample is delivered in, when a
-   sequence number is a miss, what range a recovery asks for, when history is complete) are pure,
-   but they are written against the heap session's internals and not against a vocabulary.
+3. **The subscriber is the big part, and its decisions are already apart from its wiring.** This
+   note first said they were written against the heap session's internals; reading the production
+   code (lines 1 to 4,462 of the file; the rest is tests) corrected that. What orders a sample,
+   counts a miss, buffers a gap, picks a recovery range, decides history is complete and reclaims
+   a quiet source is one struct, `State`, with its per-source states and about a dozen free
+   helpers (about 1,500 lines). It touches no session: it takes a sample or an event, calls the
+   sample callback and the miss listeners it holds, and RETURNS what the caller must then do
+   (`RecoveryRequest`, a `bool` for "issue a get") so that the get is issued with its lock
+   released. The wiring around it (about 2,900 lines) is what binds the file to the heap session:
+   issuing the gets and feeding their replies back, the in-flight bookkeeping that cancels them,
+   the two timer tasks, and the declarations of the subscriber, the heartbeat subscriber, the
+   liveliness subscriber and the detection token. That is the host's, and it is the part a
+   cooperative engine writes for itself.
 4. **The time-driven work is three periodic jobs**: the publisher's heartbeat beacon, the
    subscriber's periodic recovery queries, and its retention sweep (upstream's `gc_task`). Each is a
    task today, spawned onto the process's runtime and aborted when its handle drops.
@@ -73,6 +83,58 @@ The publisher is not designed first and the subscriber after: the subscriber is 
 cancellable queries, liveliness events with history and a timer, and a facade cut from the publisher
 alone would be cut again. The two are surveyed together to fix the vocabulary, and landed in order.
 
+## The subscriber's vocabulary
+
+What the machine takes and gives, read off the code that exists. The machine is the moved `State`;
+nothing here is a new design, which is the point of reading before writing.
+
+**Events in** (each a method; `now_ms` is the host's clock reading, the one new argument):
+
+| Event | Today | What the machine does |
+|---|---|---|
+| a live sample | `handle_live` / `ingest(sample, true)` | routes by shape (sequenced, timestamped, neither); delivers in order, buffers a gap, drops a duplicate; may ask for a recovery |
+| a recovered sample | `ingest(sample, false)` | the same path, with no new recovery asked (the get that produced it is the one in flight) |
+| a get's terminal Final, or a get that could not be issued | `finish_recovery(key)`, `finish_history()`, `finish_timestamped_recovery(zid)` | closes the in-flight slot; when it was the last one, flushes the buffer in order and reports a `Miss` for each hole left |
+| a heartbeat beacon `(zid, eid, last_sn)` | `handle_heartbeat` | asks for a bounded `_sn=last+1..hb` get when the beacon is ahead |
+| a publisher's liveliness token, put or delete | `handle_late_publisher`, `handle_late_timestamped_publisher`, `open_global_history_slot`, `set_source_alive` | opens a history slot for a publisher seen late, and marks it alive or gone for the sweep |
+| the periodic tick | `periodic_requests` | asks `_sn=last+1..` for every source with no get in flight |
+| the retention tick | `reclaim_expired_sources(now, period)` | drops the sources not heard from, sparing the live ones |
+| a listener declared or retracted | `MissHandlers::register` / `unregister` | the registry the misses fire into |
+
+**Commands out**: a sample to the application's callback, a `Miss` to each listener (both called
+by the machine, as today), and the one thing handed back to the host to do: a `RecoveryRequest`
+(`zid`, `eid`, `from_sn`, optional `to_sn`), or "issue the history get", or "issue the late
+publisher's get". A request becomes a get through a **plan**, a plain value the host executes: the
+key expression (`recovery_get_ke`, `history_get_ke`), the selector (`history_selector`, the `_sn`
+range, always with `_anyke`), the timeout (`recovery_query_timeout_ms`), the target `All`, no
+consolidation, the exposed timestamp, the locality. The plan is pure, so it moves with the
+machine and both hosts issue the same get.
+
+**The host's seam**, which is small: issue a plan and give each reply and the terminal Final back
+(`Session::query` on the heap session, the engine's `get_on_wire` on the cooperative one); cancel
+what is in flight at teardown (the in-flight set, `PendingGets`, is pure bookkeeping over request
+ids and moves too, with its cancel-before-recorded ordering); run the two timers as ticks; declare
+the four entities in the retraction order `DeclarationForms` already fixes. Replies are turned into
+samples by `recovered_sample_from_reply`, which reads a `ReplyView` and so moves as well.
+
+**The clock**: the machine reads `Instant::now()` in three places (the default of a source's
+retention, the touch of a source on a sample, beacon or reply, and where the sweep task hands the
+sweep its "now"); the sweep's age compares two such readings. The machine takes the host's reading
+instead, in milliseconds, so a test chooses the instant and the cooperative engine passes its
+clock source. This is the only edit to the logic itself.
+
+**The publisher's beacon** is smaller: a task that publishes the last sequence number every
+period, or on demand (`emit_heartbeat_once`). Its decision, whether a beacon is due and what it
+says, is a value of the publisher's state; the host's part is the timer. The publisher's plane
+trait is already the seam, and the beacon's tick joins it when step 3 moves the composite.
+
+**Tests**: the file has 60 tests after its production code. The ones that drive `State` and the
+helpers directly move with them and keep their assertions; the ones that need a session (a real
+publisher, a cache queryable and a subscriber on one loopback session) stay with the tokio host and
+become its end-to-end legs. The split between the two is counted when step 4 starts, test by test,
+and not estimated here. The differential check of step 5 is then a claim about the host seams only,
+because the machine is the same code on both sides.
+
 ## What a cooperative host cannot give, stated
 
 A cooperative session moves only when the program calls `read` (or runs its read task). A tick
@@ -96,14 +158,15 @@ defect of this plane; it is documented on the plane and not worked around with a
    session stamp through it as well. They are a crate of their own, `wz-node-time` (the wall clock
    in NTP64, the node HLC with its per-role switch and forward-path stamp, and the fallback
    stamper), which sits under both the tokio runtime and, next, the advanced plane's host trait.
-2. **The vocabulary**: events and commands of the publisher's beacon and of the subscriber, written
-   as types with the tests that state each rule, from the code in `advanced_publisher.rs` and
-   `advanced_subscriber.rs` and against zenoh-ext at the pinned version.
+2. **The vocabulary** (surveyed; the section "The subscriber's vocabulary" below states it, and
+   step 4 builds it): events and commands of the subscriber and of the publisher's beacon.
 3. **The publisher on it**: the composite and `AdvancedPublisherPlane` move; the tokio host and
    the pico plane are adapters; the cooperative host gets a plane and the engine port the
    declarations it needs.
-4. **The subscriber on it**: the decisions come out of the heap session's internals into the
-   machine; the tokio host adapts them back. The largest step.
+4. **The subscriber on it**: `State` and its helpers move to `wz-ext-pubsub` (about 1,500 lines,
+   and the tests that drive it directly), with the clock made an argument; the tokio host keeps its wiring and calls the moved machine; the
+   cooperative host writes its own. The largest step, and the moved code is not rewritten, so what
+   changes is where it lives and what it is handed.
 5. **Retire the old paths** only after a differential test (the same events into the old and the
    new give the same commands and deliveries) and the existing interop tests pass: the zenoh-ext
    interop (`wz_advanced_pubsub_zenoh_ext_interop`), the pico interop

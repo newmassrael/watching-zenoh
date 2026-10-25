@@ -490,9 +490,15 @@ it behaves as pico behaves in both of pico's threading arms.
   periodic jobs (heartbeat, periodic recovery queries, retention sweep) as ticks. The note
   records what each unit depends on, the five steps (neutral parts, vocabulary, publisher,
   subscriber, retirement behind a differential test and the interop tests), what a cooperative
-  host cannot give (a tick is as late as the next read), and the gates each step moves. Nothing is
-  built yet; `time_range` exists in two readings (the tokio crate's and the zenoh-util family's),
-  and the family's session agreed they stay apart.
+  host cannot give (a tick is as late as the next read), and the gates each step moves.
+  `time_range` exists in two readings (the tokio crate's and the zenoh-util family's), and the
+  family's session agreed they stay apart. Step 1 is done: the `@adv` grammar, the `_time`
+  selector and the cache ring are in `wz-ext-pubsub`, and the node's time (wall clock, node HLC,
+  fallback stamper) is in `wz-node-time`, both re-exported by the tokio crate at the old paths.
+  Step 2, the vocabulary, corrected the survey: the subscriber's decisions are one pure `State`
+  that takes events and returns the requests to issue, so the machine moves as it is with its
+  clock made an argument, and the host's part is the gets, their cancel, the two timers and the
+  declarations (see the note's section "The subscriber's vocabulary").
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected
