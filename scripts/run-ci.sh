@@ -10676,8 +10676,9 @@ layer_c1cs_capability_cost() {
 # ─── Layer C1co — the pico client-only build dials a listener ──────────
 #
 # The pico build without `peer` opens a client session to a node that listens: it publishes to
-# it and hears from it, answers its queries, and asks it queries through `z_get` and through a
-# querier whose write filter and matching listener count the listener's queryable
+# it and hears from it, answers its queries, asks it queries through `z_get` and through a
+# querier whose write filter and matching listener count the listener's queryable, and holds a
+# liveliness token the node sees while it hears the node's
 # (`crates/wz-capi-pico/tests/client_only_dials_a_listener.rs`). Such a build cannot listen, so
 # the node is the FULL build's `hold_a_listener` example, run as a process. A feature set is one
 # per build, so this takes two invocations, which no row of the non-default test table (built
@@ -10693,11 +10694,11 @@ layer_c1co_pico_client_dials_a_listener() {
     local engine answering expect
     for engine in engine-coop engine-tokio; do
         for answering in ",queryable" ""; do
-            if [[ -n "$answering" ]]; then expect=4; else expect=3; fi
+            if [[ -n "$answering" ]]; then expect=5; else expect=4; fi
             _runci_guarded_test "C1co ${engine}${answering}" "$expect" \
                 env WZ_PICO_LISTENER_BIN="$listener" \
                 cargo test -p wz-capi-pico --no-default-features \
-                --features "${engine},link-udp,query${answering}" \
+                --features "${engine},link-udp,query${answering},liveliness" \
                 --test client_only_dials_a_listener || return 1
         done
     done
