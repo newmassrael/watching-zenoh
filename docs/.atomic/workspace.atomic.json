@@ -287464,6 +287464,52 @@
         "A group's table of members fills silently: a JOIN past the row count is refused with no count and no line."
       ]
     },
+    "Round 3637": {
+      "decision_summary": "Step Sc4 of scouting on the cooperative engine: pico's scout feature runs on either engine. The feature no longer selects the tokio engine; it names the session's scouting vocabulary and turns the window on in the engine the build has (wz-capi-core?/scout, wz-capi-coop?/scout), so a cooperative client scouts and a z_open with no locator finds a node with no tokio runtime linked. The pico plane picks its window by the rule z_open picks the engine by (tokio whenever it is in the build): a window module with run and first, over wz-capi-core's scouting or over wz-capi-coop's scout with the host clock. Pico's own copies are gone: its Ipv4-only locator parser (the session's also parses an IPv6 group) and the three defaults. Layer C1co gains a fifth leg, the open that names no locator on the cooperative build, and the size gate a case, pico-client-coop-scout.",
+      "changes_bullets": [
+        "wz-capi-pico: feature scout = link-udp, session-core scouting-active/codec-scout/codec-hello, wz-capi-core?/scout, wz-capi-coop?/scout (no engine selected); src/scout.rs reads the locator grammar and the defaults from wz_session_core::scouting_host, drops its own parser and constants, and runs and looks up through a window module chosen by the engine feature; module docs corrected.",
+        "wz-capi-coop: crate doc names the scout feature and no longer lists scouting, query and liveliness among what it lacks.",
+        "scripts/lib/capability_cost_gate.py: case pico-client-coop-scout (engine-coop,link-udp,scout; budget 981,000) and the COOP_SCOUT pattern; scripts/run-ci.sh: Layer C1co leg \"C1co scout engine-coop\" (the open_scouts_for_a_locator test, one test, no tokio engine).",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-capi-pico with engine-coop,scout (no default features) and with its default features.",
+        "Tests: open_scouts_for_a_locator 1 passed on the cooperative build (engine-coop,scout) and 1 passed on the default build; the pico scout unit tests 2 passed on both.",
+        "Size: pico-client-coop-scout measured 961,479 bytes of text (464 exports), 2.34 times the same pico (410,391), with none of the tokio engine's symbols; the gate's check of that case and of pico-client-coop exits 0.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed.",
+        "Not witnessed: an ANSWERED window on the cooperative pico build. The window's own tests answer over loopback; a router answering a real multicast group is not run here."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Scouting is done on both engines. Next in section 6 of the note: the advanced publisher and subscriber, then the listening role (a face registry with an observer per face; the heap stack needs its own stream accept beside open_acceptor, reusing StreamListen), then the engine flip.",
+        "Still to do from earlier: route the coop engine's redeclare through the replay cursor and its declaration-sync pacing policy (ledger 3634); the tokio engine's close-time retraction of live liveliness entities; the admin space's connectivity half.",
+        "An answered scouting window on the cooperative pico build wants a leg with a router on a multicast group; read the hosted runs of the earlier pushes at the start of the next round."
+      ],
+      "publishable_decision_summary": "Step Sc4 of scouting on the cooperative engine: pico's scout feature runs on either engine. The feature no longer selects the tokio engine; it names the session's scouting vocabulary and turns the window on in the engine the build has (wz-capi-core?/scout, wz-capi-coop?/scout), so a cooperative client scouts and a z_open with no locator finds a node with no tokio runtime linked. The pico plane picks its window by the rule z_open picks the engine by (tokio whenever it is in the build): a window module with run and first, over wz-capi-core's scouting or over wz-capi-coop's scout with the host clock. Pico's own copies are gone: its Ipv4-only locator parser (the session's also parses an IPv6 group) and the three defaults. Layer C1co gains a fifth leg, the open that names no locator on the cooperative build, and the size gate a case, pico-client-coop-scout.",
+      "publishable_changes_bullets": [
+        "wz-capi-pico: feature scout = link-udp, session-core scouting-active/codec-scout/codec-hello, wz-capi-core?/scout, wz-capi-coop?/scout (no engine selected); src/scout.rs reads the locator grammar and the defaults from wz_session_core::scouting_host, drops its own parser and constants, and runs and looks up through a window module chosen by the engine feature; module docs corrected.",
+        "wz-capi-coop: crate doc names the scout feature and no longer lists scouting, query and liveliness among what it lacks.",
+        "scripts/lib/capability_cost_gate.py: case pico-client-coop-scout (engine-coop,link-udp,scout; budget 981,000) and the COOP_SCOUT pattern; scripts/run-ci.sh: Layer C1co leg \"C1co scout engine-coop\" (the open_scouts_for_a_locator test, one test, no tokio engine).",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-capi-pico with engine-coop,scout (no default features) and with its default features.",
+        "Tests: open_scouts_for_a_locator 1 passed on the cooperative build (engine-coop,scout) and 1 passed on the default build; the pico scout unit tests 2 passed on both.",
+        "Size: pico-client-coop-scout measured 961,479 bytes of text (464 exports), 2.34 times the same pico (410,391), with none of the tokio engine's symbols; the gate's check of that case and of pico-client-coop exits 0.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed.",
+        "Not witnessed: an ANSWERED window on the cooperative pico build. The window's own tests answer over loopback; a router answering a real multicast group is not run here."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Scouting is done on both engines. Next in section 6 of the note: the advanced publisher and subscriber, then the listening role (a face registry with an observer per face; the heap stack needs its own stream accept beside open_acceptor, reusing StreamListen), then the engine flip.",
+        "Still to do from earlier: route the coop engine's redeclare through the replay cursor and its declaration-sync pacing policy (ledger 3634); the tokio engine's close-time retraction of live liveliness entities; the admin space's connectivity half.",
+        "An answered scouting window on the cooperative pico build wants a leg with a router on a multicast group; read the hosted runs of the earlier pushes at the start of the next round."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
