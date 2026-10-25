@@ -150,6 +150,8 @@ ABIS = ("core", "pico", "c")
 SCHEMA_VERSION = 1
 # rustfmt's default `max_width`; the crates carry no rustfmt.toml.
 RUST_MAX_WIDTH = 100
+# rustfmt's default `fn_call_width`: a call whose arguments are wider goes one argument a line.
+RUST_FN_CALL_WIDTH = 60
 # rustfmt's default `struct_lit_width`: a struct literal whose body is longer goes one field a line.
 RUST_STRUCT_LIT_WIDTH = 18
 
@@ -1318,6 +1320,22 @@ def rust_const(name: str, value: str) -> list[str]:
     return [f"pub(super) const {name}: usize =", f"    {value};"]
 
 
+def rust_limit_const(name: str, kconfig: str, default: object) -> list[str]:
+    """One limit's const as rustfmt lays it out: on one line when it fits, else after the `=`, and
+    one argument a line when the arguments of `limit(..)` are themselves wider than rustfmt keeps
+    a call (a long limit name is what makes them so)."""
+    args = f'option_env!("{kconfig}"), {default}'
+    value = f"limit({args})"
+    if len(f"pub(super) const {name}: usize = {value};") > RUST_MAX_WIDTH and len(args) > RUST_FN_CALL_WIDTH:
+        return [
+            f"pub(super) const {name}: usize = limit(",
+            f'    option_env!("{kconfig}"),',
+            f"    {default},",
+            ");",
+        ]
+    return rust_const(name, value)
+
+
 def emit_rust_limits(decl: dict) -> str:
     out = generated_header("//", "rust-limits") + [
         "",
@@ -1329,8 +1347,7 @@ def emit_rust_limits(decl: dict) -> str:
         "",
     ]
     for lim in decl["limits"]:
-        value = f'limit(option_env!("{lim["kconfig"]}"), {lim["default"]})'
-        out += rust_const(lim["id"], value)
+        out += rust_limit_const(lim["id"], lim["kconfig"], lim["default"])
     return "\n".join(out) + "\n"
 
 
@@ -2410,6 +2427,16 @@ def cmd_selftest() -> int:
     long_name = "MAX_" + "X" * 80
     expect("a value line past rustfmt's width breaks after `=` as rustfmt does",
            rust_const(long_name, "limit(1)") == [f"pub(super) const {long_name}: usize =", "    limit(1);"])
+    wide_name = "DECLARATION_SYNC_FINAL_TIMEOUT_MS"
+    expect("arguments wider than rustfmt keeps a call go one a line, as rustfmt lays them out",
+           rust_limit_const(wide_name, f"WZ_LIMIT_{wide_name}", 1000) == [
+               f"pub(super) const {wide_name}: usize = limit(",
+               f'    option_env!("WZ_LIMIT_{wide_name}"),',
+               "    1000,",
+               ");"])
+    expect("a short limit stays on one line",
+           rust_limit_const("MAX_A", "WZ_LIMIT_MAX_A", 4)
+           == ['pub(super) const MAX_A: usize = limit(option_env!("WZ_LIMIT_MAX_A"), 4);'])
     bound = "pub const MAX_A: usize = generated::MAX_A;\n"
     expect("one binding per limit is clean", check_caps_rs(sdecl, bound) == [])
     expect("a missing binding is a finding", any("0 times" in f for f in check_caps_rs(sdecl, "")))
