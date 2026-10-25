@@ -1246,6 +1246,17 @@ if [[ "${1:-}" == "--census" ]]; then
             echo "  census: $pkg SKIPPED -- gate 7 excludes it from all-features"
             continue
         fi
+        # Gate 7 checks a `lib-only` member's library alone because a test target of
+        # it does not build with every feature on (nondefault-features-gate.sh says
+        # which, measured). The census population is what `--all-features` lists, so
+        # it cannot be derived for such a member, and it is said here: the listing
+        # used to fail unseen and read as a crate with nothing to claim. Its legs
+        # still run; what is not checked is that no test of it is claimed by none.
+        if [[ "$tier" == "lib-only" ]]; then
+            echo "  census: $pkg SKIPPED -- gate 7 checks it lib-only (its tests do not build" \
+                 "with every feature on), so its feature-only tests are not derived"
+            continue
+        fi
 
         if ! list_names "$pkg" "" "" > "$tmp/d" ||
             ! list_names "$pkg" "@all" "" > "$tmp/a"; then
