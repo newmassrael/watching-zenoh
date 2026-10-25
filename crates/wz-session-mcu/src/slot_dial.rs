@@ -178,6 +178,10 @@ where
 {
     type Session = SlotSession<C>;
 
+    fn classify(&self, endpoint: &str) -> Result<(), crate::connect_manager::DialRefused> {
+        parse_locator(endpoint).map(|_| ())
+    }
+
     // Not inlined into the loop that ticks the manager: a dial holds the socket's driver (the two
     // buffers of a link, some 3 KB) and the session's parameters, by value, several times over on
     // the way into the slot. Inlined, that frame is under the loop for the node's whole life and
@@ -214,6 +218,18 @@ where
                 DialRefused::Open(_) => DialFailed::Exhausted,
             })?;
         Ok(SlotSession::new(opened))
+    }
+
+    fn established(&mut self, session: &mut Self::Session) -> bool {
+        session.established |= session.opened.actions.is_established();
+        session.established
+    }
+
+    fn remote(
+        &self,
+        session: &Self::Session,
+    ) -> Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]> {
+        session.opened.actions.peer_zid_array()
     }
 
     fn ended(&mut self, session: &mut Self::Session) -> Option<Ended> {

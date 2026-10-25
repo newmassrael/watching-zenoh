@@ -11,8 +11,18 @@
 //!
 //! 1. notices a new generation on the control and reconciles: an endpoint no
 //!    longer named is hung up, a new one is dialled at once;
-//! 2. notices a session that has ended and schedules its re-dial; and
+//! 2. notices a session that has come up or has ended, and tells its endpoint's
+//!    machine; and
 //! 3. dials whatever is due.
+//!
+//! Each endpoint is a peer of the connection machine of decision D5 of
+//! `docs/session-lifecycle-intent.md`, and the manager is that machine's host on this
+//! profile, as the face loop of an AP node is on its own. What both do for a
+//! machine (which face a dial opened, which timer is still its peer's, when to
+//! start a schedule over) is written once, in `wz_session_core::peer_planner`;
+//! what is this profile's is here: the rows in the order the list named them, the
+//! session each holds, the moment its next dial is due, and the endpoints the build
+//! cannot dial, which the machine knows as a peer with no candidate (`NoLocator`).
 //!
 //! The waits are upstream's `connect.retry` schedule, from the one
 //! transcription the AP uses too (`wz_session_core::retry_period`): 1 s, 2 s,
@@ -30,9 +40,13 @@
 //! schedule exists to prevent. It is tried again only when the list is
 //! written again, since that is the only event that can change it.
 
+use heapless::Vec as FixedVec;
 use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps::{MAX_LOCATOR_LEN, MAX_STATIC_CONNECT};
 use wz_session_core::connect_endpoints::{group_len, ConnectEndpoints, ConnectEntry, EndpointText};
+use wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES;
+use wz_session_core::peer_connection::PeerConnectionState;
+use wz_session_core::peer_planner::{DialEnd, PeerAction, PeerPlanner, PeerPorts};
 use wz_session_core::retry_period::{RetryPeriod, RetryPolicy};
 
 /// Where a [`ConnectManager`] reads the endpoints it should hold sessions with.
@@ -148,8 +162,31 @@ pub trait Dialer {
     /// Whatever the dialer needs to keep per live session.
     type Session;
 
+    /// Whether this build can dial `endpoint` at all, asked before any dial is made. An
+    /// endpoint it cannot (a scheme it has no link for, an address it cannot read) is a peer
+    /// with no candidate: refused, and not retried. The default can dial anything, and a dial
+    /// that finds otherwise says [`DialFailed::Refused`].
+    fn classify(&self, _endpoint: &str) -> Result<(), DialRefused> {
+        Ok(())
+    }
+
     /// Start a session towards `endpoint`.
     fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed>;
+
+    /// Whether the session is established now. The manager tells the endpoint's machine
+    /// the first time it is, so the machine reads `Established` while the session is up. The
+    /// default never says so, and the manager learns it from [`Self::ended`] instead, as it
+    /// did before the machine: an end after establishing is reported as established and then
+    /// lost.
+    fn established(&mut self, _session: &mut Self::Session) -> bool {
+        false
+    }
+
+    /// The zid the session's remote named, once it has, in the sixteen-byte form of a derived
+    /// zid. Remembered by the machine, so that a `close` can name the node an endpoint reached.
+    fn remote(&self, _session: &Self::Session) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
+        None
+    }
 
     /// `Some` once the session has ended, saying how.
     fn ended(&mut self, session: &mut Self::Session) -> Option<Ended>;
@@ -172,23 +209,43 @@ pub enum SlotState {
     Refused(DialRefused),
 }
 
-enum State<S> {
-    /// The period rides along so a session that ends before establishing
-    /// continues the SAME outage's schedule.
-    Live {
-        session: S,
-        period: RetryPeriod,
-    },
-    Waiting {
-        at_ms: u64,
-        period: RetryPeriod,
-    },
-    Refused(DialRefused),
+/// What names an endpoint to the machines: its text.
+type Key = EndpointText;
+
+/// How many dials can be in flight for the endpoints, with the ones an endpoint stopped
+/// wanting while they ran: each of the endpoints dials once at a time.
+const DIALS: usize = 2 * MAX_STATIC_CONNECT;
+
+type Planner = PeerPlanner<Key, u64, MAX_STATIC_CONNECT, DIALS>;
+
+/// What one call of the planner asked, at most: a session closed, a wait armed and a dial, of
+/// one endpoint. Room for one more of each, so that a count is never the reason an action is
+/// lost.
+type Actions = FixedVec<PeerAction<Key, u64, Key>, 6>;
+
+/// A session an endpoint holds, with the face the planner knows it as.
+struct Held<S> {
+    face: u64,
+    session: S,
+    /// Whether the endpoint's machine has been told the session is up.
+    up: bool,
 }
 
-struct Slot<S> {
+/// The moment an endpoint's next dial is due, and which arming of its timer that is.
+#[derive(Clone, Copy)]
+struct Due {
+    generation: u64,
+    at_ms: u64,
+}
+
+/// One endpoint of the list, in the order the list named it.
+struct Row<S> {
     entry: ConnectEntry,
-    state: State<S>,
+    /// One locator of a group of several: one session over several links, which this node's
+    /// session cannot hold, so it has no candidate.
+    multi_link: bool,
+    held: Option<Held<S>>,
+    due: Option<Due>,
 }
 
 /// The endpoints a manager holds, one row each. The list a host writes is itself
@@ -198,7 +255,54 @@ struct Slot<S> {
 /// is the profile's (`BoundedVec`): the growable one where there is a heap, a fixed
 /// table of that many rows under `bounded-heapless`, where a row past the bound could
 /// only be a defect and is hung up and refused rather than grown (`reconcile`).
-type Slots<S> = BoundedVec<Slot<S>, MAX_STATIC_CONNECT>;
+type Rows<S> = BoundedVec<Row<S>, MAX_STATIC_CONNECT>;
+
+/// The retry schedule of each endpoint that is in an outage.
+type Periods = BoundedVec<(Key, RetryPeriod), MAX_STATIC_CONNECT>;
+
+/// What this profile answers for the planner.
+struct Ports<'a, D: Dialer> {
+    dialer: &'a D,
+    rows: &'a Rows<D::Session>,
+    periods: &'a mut Periods,
+    policy: RetryPolicy,
+}
+
+impl<D: Dialer> Ports<'_, D> {
+    /// The row of `key`.
+    fn row(&self, key: &Key) -> Option<&Row<D::Session>> {
+        self.rows.iter().find(|row| row.entry.endpoint == *key)
+    }
+}
+
+impl<D: Dialer> PeerPorts<Key> for Ports<'_, D> {
+    type Target = Key;
+
+    /// The endpoint itself, unless this build cannot dial it: a peer with no candidate.
+    fn dialable(&self, key: &Key) -> Option<Key> {
+        let row = self.row(key)?;
+        if row.multi_link || self.dialer.classify(key).is_err() {
+            return None;
+        }
+        Some(key.clone())
+    }
+
+    fn retry_wait_ms(&mut self, key: &Key) -> u64 {
+        if let Some((_, period)) = self.periods.iter_mut().find(|(k, _)| k == key) {
+            return period.next_ms();
+        }
+        let mut period = self.policy.period();
+        let wait = period.next_ms();
+        // A table of as many rows as there are endpoints holds every endpoint in an outage; an
+        // endpoint it could not hold would start from the first wait again.
+        let _ = self.periods.push((key.clone(), period));
+        wait
+    }
+
+    fn retry_restart(&mut self, key: &Key) {
+        self.periods.retain(|(k, _)| k != key);
+    }
+}
 
 /// Keeps a node's sessions in step with its [`EndpointSource`].
 pub struct ConnectManager<D: Dialer> {
@@ -206,7 +310,11 @@ pub struct ConnectManager<D: Dialer> {
     dialer: D,
     policy: RetryPolicy,
     generation: Option<u32>,
-    slots: Slots<D::Session>,
+    rows: Rows<D::Session>,
+    periods: Periods,
+    planner: Planner,
+    /// The counter the planner mints the face of a dial from.
+    next_id: u64,
 }
 
 impl<D: Dialer> ConnectManager<D> {
@@ -227,7 +335,10 @@ impl<D: Dialer> ConnectManager<D> {
             dialer,
             policy,
             generation: None,
-            slots: BoundedVec::new(),
+            rows: BoundedVec::new(),
+            periods: BoundedVec::new(),
+            planner: Planner::new(),
+            next_id: 0,
         }
     }
 
@@ -238,13 +349,17 @@ impl<D: Dialer> ConnectManager<D> {
 
     /// Where every endpoint stands, in the order the list named them.
     pub fn states(&self) -> impl Iterator<Item = (&str, SlotState)> + '_ {
-        self.slots.iter().map(|slot| {
-            let state = match slot.state {
-                State::Live { .. } => SlotState::Live,
-                State::Waiting { at_ms, .. } => SlotState::Waiting { at_ms },
-                State::Refused(why) => SlotState::Refused(why),
+        self.rows.iter().map(|row| {
+            let state = match self.planner.state(&row.entry.endpoint) {
+                Some(PeerConnectionState::NoLocator) => SlotState::Refused(self.refusal(row)),
+                Some(PeerConnectionState::Backoff) => SlotState::Waiting {
+                    at_ms: row.due.map_or(0, |due| due.at_ms),
+                },
+                // The manager tells a machine only that a session came up or that a dial
+                // failed, so no other refusal is a state an endpoint is in.
+                _ => SlotState::Live,
             };
-            (slot.entry.as_str(), state)
+            (row.entry.as_str(), state)
         })
     }
 
@@ -253,13 +368,28 @@ impl<D: Dialer> ConnectManager<D> {
     /// dial until the manager sees it end, so it may still be handshaking; a
     /// caller that reports sessions asks each one whether it is established.
     pub fn sessions(&self) -> impl Iterator<Item = (&str, &D::Session)> + '_ {
-        self.slots.iter().filter_map(|slot| match &slot.state {
-            State::Live { session, .. } => Some((slot.entry.as_str(), session)),
-            _ => None,
+        self.rows.iter().filter_map(|row| {
+            row.held
+                .as_ref()
+                .map(|held| (row.entry.as_str(), &held.session))
         })
     }
 
-    /// Advance to `now_ms`: reconcile a new list, notice ended sessions, and
+    /// Why this build has no candidate for `row`'s endpoint.
+    fn refusal(&self, row: &Row<D::Session>) -> DialRefused {
+        if row.multi_link {
+            return DialRefused::MultiLinkGroup;
+        }
+        // The endpoint is refused by the dialer when it is refused at all; a refusal the
+        // dialer no longer gives (it was a group the list has since split) falls back to the
+        // one an unreadable endpoint is.
+        self.dialer
+            .classify(&row.entry.endpoint)
+            .err()
+            .unwrap_or(DialRefused::Unsupported)
+    }
+
+    /// Advance to `now_ms`: reconcile a new list, notice sessions that came up or ended, and
     /// dial what is due.
     pub fn tick(&mut self, now_ms: u64) {
         if self.generation != Some(self.control.generation()) {
@@ -267,48 +397,187 @@ impl<D: Dialer> ConnectManager<D> {
             self.reconcile(&list, now_ms);
             self.generation = Some(generation);
         }
-        for slot in self.slots.iter_mut() {
-            let next = match &mut slot.state {
-                State::Live { session, period } => match self.dialer.ended(session) {
-                    None => None,
-                    Some(how) => {
-                        // Before establishing, a failure is part of the same
-                        // outage and grows its period; after, the outage is a
-                        // new one and starts from the first wait, as upstream
-                        // builds a fresh period per outage.
-                        let mut period = match how {
-                            Ended::BeforeEstablished => *period,
-                            Ended::AfterEstablished => self.policy.period(),
-                        };
-                        let wait = period.next_ms();
-                        Some(State::Waiting {
-                            at_ms: now_ms.saturating_add(wait),
-                            period,
-                        })
+        self.observe(now_ms);
+        self.fire_due(now_ms);
+    }
+
+    /// Run one call of the planner against this profile's ports, and take what it asked for.
+    ///
+    /// A dial that does not start is a failed attempt of the endpoint's outage, which the
+    /// planner is told of in the next turn of this loop and answers with a wait and no further
+    /// dial. It is a loop and not a call back into this function, so that no call of the
+    /// manager is its own callee and the worst chain of calls under a tick is a bound.
+    fn drive(
+        &mut self,
+        now_ms: u64,
+        call: impl FnOnce(&mut Planner, &mut Ports<'_, D>, &mut u64, &mut dyn FnMut(Action)),
+    ) {
+        let mut actions = self.ask(call);
+        let mut failed: FixedVec<u64, 6> = FixedVec::new();
+        loop {
+            self.take(actions, now_ms, &mut failed);
+            let Some(id) = failed.pop() else {
+                return;
+            };
+            // The turn after a failed dial asks for no dial, so the list only shrinks.
+            actions = self.ask(|planner, ports, next_id, emit| {
+                planner.dial_ended(id, DialEnd::Failed, ports, next_id, emit);
+            });
+        }
+    }
+
+    /// One call of the planner against this profile's ports, and what it asked for.
+    fn ask(
+        &mut self,
+        call: impl FnOnce(&mut Planner, &mut Ports<'_, D>, &mut u64, &mut dyn FnMut(Action)),
+    ) -> Actions {
+        let mut actions = Actions::new();
+        let mut ports = Ports {
+            dialer: &self.dialer,
+            rows: &self.rows,
+            periods: &mut self.periods,
+            policy: self.policy,
+        };
+        call(
+            &mut self.planner,
+            &mut ports,
+            &mut self.next_id,
+            &mut |action| {
+                // At most one of each kind per call and `Actions` holds six.
+                let _ = actions.push(action);
+            },
+        );
+        actions
+    }
+
+    /// Take the actions of one call: start the dials, arm the waits, hang up the sessions.
+    /// The faces of the dials that did not start go to `failed`.
+    fn take(&mut self, actions: Actions, now_ms: u64, failed: &mut FixedVec<u64, 6>) {
+        for action in actions {
+            match action {
+                PeerAction::Dial { id, key, target } => match self.dialer.dial(&target) {
+                    Ok(session) => {
+                        if let Some(row) = self.row_mut(&key) {
+                            row.held = Some(Held {
+                                face: id,
+                                session,
+                                up: false,
+                            });
+                        }
+                    }
+                    // `Refused` is the answer `classify` already gave, so a dial that finds it
+                    // is the dialer disagreeing with itself; it is a failed attempt and the
+                    // endpoint waits, which cannot do harm.
+                    Err(_) => {
+                        // At most six actions, so at most six dials.
+                        let _ = failed.push(id);
                     }
                 },
-                State::Waiting { at_ms, period } if now_ms >= *at_ms => {
-                    Some(match self.dialer.dial(slot.entry.as_str()) {
-                        Ok(session) => State::Live {
-                            session,
-                            period: *period,
-                        },
-                        Err(DialFailed::Refused(why)) => State::Refused(why),
-                        Err(DialFailed::Exhausted | DialFailed::Unreachable) => {
-                            let mut period = *period;
-                            let wait = period.next_ms();
-                            State::Waiting {
-                                at_ms: now_ms.saturating_add(wait),
-                                period,
-                            }
-                        }
-                    })
+                PeerAction::Retry {
+                    key,
+                    generation,
+                    after_ms,
+                    ..
+                } => {
+                    if let Some(row) = self.row_mut(&key) {
+                        row.due = Some(Due {
+                            generation,
+                            at_ms: now_ms.saturating_add(after_ms),
+                        });
+                    }
                 }
-                _ => None,
-            };
-            if let Some(state) = next {
-                slot.state = state;
+                PeerAction::Close { id } => self.hang_up_face(id),
             }
+        }
+    }
+
+    fn row_mut(&mut self, key: &Key) -> Option<&mut Row<D::Session>> {
+        self.rows.iter_mut().find(|row| row.entry.endpoint == *key)
+    }
+
+    /// Hang up the session held as face `id`, if a row holds it.
+    fn hang_up_face(&mut self, id: u64) {
+        let held = self
+            .rows
+            .iter_mut()
+            .find(|row| row.held.as_ref().is_some_and(|held| held.face == id))
+            .and_then(|row| row.held.take());
+        if let Some(held) = held {
+            self.dialer.hang_up(held.session);
+        }
+    }
+
+    /// Tell each machine whose session came up or ended.
+    fn observe(&mut self, now_ms: u64) {
+        for at in 0..self.rows.len() {
+            let Some(held) = self.rows[at].held.as_mut() else {
+                continue;
+            };
+            let face = held.face;
+            let was_up = held.up;
+            let came_up = !was_up && self.dialer.established(&mut held.session);
+            let remote = if came_up {
+                self.dialer.remote(&held.session)
+            } else {
+                None
+            };
+            if came_up {
+                held.up = true;
+            }
+            let ended = self.dialer.ended(&mut held.session);
+            let mut up = was_up || came_up;
+            if came_up {
+                self.drive(now_ms, |planner, ports, next_id, emit| {
+                    planner.dial_ended(face, DialEnd::Established { remote }, ports, next_id, emit);
+                });
+            }
+            let Some(how) = ended else {
+                continue;
+            };
+            if !up && how == Ended::AfterEstablished {
+                // A dialer that does not say when a session comes up says only that it did, at
+                // its end: the machine is told it was up, and then that it was lost.
+                self.drive(now_ms, |planner, ports, next_id, emit| {
+                    planner.dial_ended(
+                        face,
+                        DialEnd::Established { remote: None },
+                        ports,
+                        next_id,
+                        emit,
+                    );
+                });
+                up = true;
+            }
+            // The session is over: nothing is left to hang up, and its handle goes.
+            self.rows[at].held = None;
+            if up {
+                self.drive(now_ms, |planner, ports, next_id, emit| {
+                    planner.face_down(face, ports, next_id, emit);
+                });
+            } else {
+                self.drive(now_ms, |planner, ports, next_id, emit| {
+                    planner.dial_ended(face, DialEnd::Failed, ports, next_id, emit);
+                });
+            }
+        }
+    }
+
+    /// Dial the endpoints whose wait is up.
+    fn fire_due(&mut self, now_ms: u64) {
+        let mut due: FixedVec<(Key, u64), MAX_STATIC_CONNECT> = FixedVec::new();
+        for row in self.rows.iter_mut() {
+            if let Some(timer) = row.due {
+                if now_ms >= timer.at_ms {
+                    row.due = None;
+                    // At most one timer per row, and the table has a row each.
+                    let _ = due.push((row.entry.endpoint.clone(), timer.generation));
+                }
+            }
+        }
+        for (key, generation) in due {
+            self.drive(now_ms, |planner, ports, next_id, emit| {
+                planner.retry_due(key, generation, ports, next_id, emit);
+            });
         }
     }
 
@@ -319,75 +588,99 @@ impl<D: Dialer> ConnectManager<D> {
     fn reconcile(&mut self, list: &ConnectEndpoints, now_ms: u64) {
         // An empty group names nothing to dial.
         let dialable = |e: &ConnectEntry| !e.endpoint.is_empty();
-        // Hang up what the list no longer names. The rows that stay are held as
-        // `Option`s so one can be taken out by position without shifting the rest.
-        let mut kept_rows: BoundedVec<Option<Slot<D::Session>>, MAX_STATIC_CONNECT> =
-            BoundedVec::new();
-        for slot in core::mem::take(&mut self.slots) {
-            if list.iter().any(|e| dialable(e) && *e == slot.entry) {
-                // At most as many rows as the table has, which it just held.
-                let _ = kept_rows.push(Some(slot));
-            } else if let State::Live { session, .. } = slot.state {
-                self.dialer.hang_up(session);
+        let named = |key: &Key| {
+            list.iter()
+                .any(|entry| dialable(entry) && entry.endpoint == *key)
+        };
+
+        // Hang up what the list no longer names: stop the machine (a session it holds is
+        // hung up by the close that asks for), then hang up what is still held (a session
+        // still handshaking has no face the machine holds), and forget the endpoint.
+        let mut gone: FixedVec<Key, MAX_STATIC_CONNECT> = FixedVec::new();
+        for row in self.rows.iter() {
+            if !named(&row.entry.endpoint) {
+                // One row per endpoint, and the table has as many rows as this holds.
+                let _ = gone.push(row.entry.endpoint.clone());
             }
         }
-        // Keep the list's order; a new endpoint is due now, and a refused one
-        // is given another chance, since a rewrite is what could change it.
-        let mut slots: Slots<D::Session> = BoundedVec::new();
+        for key in gone {
+            self.drive(now_ms, |planner, ports, next_id, emit| {
+                planner.stop(&key, ports, next_id, emit);
+            });
+            if let Some(held) = self.row_mut(&key).and_then(|row| row.held.take()) {
+                let face = held.face;
+                self.dialer.hang_up(held.session);
+                // A dial the machine stopped is abandoned, and its end is the planner's to
+                // clear.
+                self.drive(now_ms, |planner, ports, next_id, emit| {
+                    planner.dial_ended(face, DialEnd::Failed, ports, next_id, emit);
+                });
+            }
+            self.planner.forget(&key);
+            self.periods.retain(|(k, _)| *k != key);
+            self.rows.retain(|row| row.entry.endpoint != key);
+        }
+
+        // A new endpoint is due now, and a refused one is given another chance, since a
+        // rewrite is what could change it. R2841 — upstream opens a group of several
+        // locators as ONE transport over all its locators (`allOf`, the only strategy its
+        // runtime implements); an MCU session holds one link, so each is refused by name
+        // rather than dialled as separate sessions to what is one peer.
         for entry in list.iter().filter(|e| dialable(e)) {
-            let fresh = self.first_state(list, entry, now_ms);
-            let held = kept_rows
-                .iter()
-                .position(|s| s.as_ref().is_some_and(|s| s.entry == *entry))
-                .and_then(|i| kept_rows[i].take());
-            let slot = match held {
-                Some(mut slot) => {
-                    if let State::Refused(_) = slot.state {
-                        slot.state = fresh;
-                    }
-                    slot
+            let multi_link = entry.group.is_some_and(|g| group_len(list, g.index) > 1);
+            let key = entry.endpoint.clone();
+            let retry = match self.row_mut(&key) {
+                Some(row) => {
+                    row.multi_link = multi_link;
+                    true
                 }
-                None => Slot {
-                    entry: entry.clone(),
-                    state: fresh,
-                },
+                None => {
+                    let row = Row {
+                        entry: entry.clone(),
+                        multi_link,
+                        held: None,
+                        due: None,
+                    };
+                    // The list holds as many entries as this table has rows, so a row always
+                    // fits; a row that did not could only be a defect.
+                    self.rows.push(row).is_ok()
+                }
             };
-            // The list holds as many entries as this table has rows, so a row
-            // always fits. A row that did not could only be a defect, and a live
-            // session left in it would be one nobody tells to close: hang it up.
-            if let Err(wz_session_core::bounded::CapacityFull(refused)) = slots.push(slot) {
-                if let State::Live { session, .. } = refused.state {
-                    self.dialer.hang_up(session);
-                }
+            if !retry {
+                continue;
+            }
+            // `open` of an endpoint already held or being reached changes nothing; one its
+            // machine refused resolves again.
+            if self.planner.state(&key) == Some(PeerConnectionState::NoLocator)
+                || self.planner.state(&key).is_none()
+            {
+                self.drive(now_ms, |planner, ports, next_id, emit| {
+                    let _ = planner.open(key, ports, next_id, emit);
+                });
             }
         }
-        self.slots = slots;
-    }
 
-    /// Where a newly written entry starts: due now, unless it is one locator
-    /// of a group of several. R2841 — upstream opens such a group as ONE
-    /// transport over all its locators (`allOf`, the only strategy its runtime
-    /// implements); an MCU session holds one link, so that is refused by name
-    /// rather than dialled as separate sessions to what is one peer.
-    fn first_state(
-        &self,
-        list: &ConnectEndpoints,
-        entry: &ConnectEntry,
-        now_ms: u64,
-    ) -> State<D::Session> {
-        match entry.group {
-            Some(g) if group_len(list, g.index) > 1 => State::Refused(DialRefused::MultiLinkGroup),
-            _ => self.due_now(now_ms),
+        // Keep the list's order.
+        let mut kept: BoundedVec<Option<Row<D::Session>>, MAX_STATIC_CONNECT> = BoundedVec::new();
+        for row in core::mem::take(&mut self.rows) {
+            let _ = kept.push(Some(row));
         }
-    }
-
-    fn due_now(&self, now_ms: u64) -> State<D::Session> {
-        State::Waiting {
-            at_ms: now_ms,
-            period: self.policy.period(),
+        for entry in list.iter().filter(|e| dialable(e)) {
+            let held = kept
+                .iter()
+                .position(|row| {
+                    row.as_ref()
+                        .is_some_and(|row| row.entry.endpoint == entry.endpoint)
+                })
+                .and_then(|at| kept[at].take());
+            if let Some(row) = held {
+                let _ = self.rows.push(row);
+            }
         }
     }
 }
+
+type Action = PeerAction<Key, u64, Key>;
 
 #[cfg(all(test, feature = "adminspace-write"))]
 mod tests {
@@ -405,6 +698,8 @@ mod tests {
         hang_ups: Vec<String>,
         /// Sessions to end on the next `ended` call, and how.
         endings: Vec<(String, Ended)>,
+        /// Sessions that are established now, and the zid each names.
+        up: Vec<(String, Option<[u8; CREDENTIAL_ZID_BYTES]>)>,
         /// Answer every dial with `Exhausted`.
         exhausted: bool,
     }
@@ -412,15 +707,30 @@ mod tests {
     impl Dialer for FakeDialer {
         type Session = String;
 
-        fn dial(&mut self, endpoint: &str) -> Result<String, DialFailed> {
+        fn classify(&self, endpoint: &str) -> Result<(), DialRefused> {
             if endpoint.starts_with("serial/") {
-                return Err(DialFailed::Refused(DialRefused::Unsupported));
+                return Err(DialRefused::Unsupported);
             }
+            Ok(())
+        }
+
+        fn dial(&mut self, endpoint: &str) -> Result<String, DialFailed> {
             if self.exhausted {
                 return Err(DialFailed::Exhausted);
             }
             self.dials.borrow_mut().push(String::from(endpoint));
             Ok(String::from(endpoint))
+        }
+
+        fn established(&mut self, session: &mut String) -> bool {
+            self.up.iter().any(|(s, _)| s == session)
+        }
+
+        fn remote(&self, session: &String) -> Option<[u8; CREDENTIAL_ZID_BYTES]> {
+            self.up
+                .iter()
+                .find(|(s, _)| s == session)
+                .and_then(|(_, zid)| *zid)
         }
 
         fn ended(&mut self, session: &mut String) -> Option<Ended> {
@@ -520,6 +830,43 @@ mod tests {
         );
     }
 
+    /// A dialer that says when a session comes up gives the same schedule: a session
+    /// that was seen up and then dropped starts again from the first wait, and one that
+    /// is up is Live, not waiting.
+    #[test]
+    fn a_session_seen_up_and_then_lost_starts_the_schedule_over() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        let mut m = ConnectManager::new(&CONTROL, FakeDialer::default());
+        write(&CONTROL, &["udp/10.0.0.1:7447"]);
+        m.tick(0);
+        std::assert_eq!(dials(&mut m).len(), 1);
+
+        // Two failed attempts first, so the wait has grown.
+        m.dialer()
+            .endings
+            .push((String::from("udp/10.0.0.1:7447"), Ended::BeforeEstablished));
+        m.tick(100);
+        m.tick(1100);
+        std::assert_eq!(dials(&mut m).len(), 1);
+
+        m.dialer()
+            .up
+            .push((String::from("udp/10.0.0.1:7447"), Some([0xab; 16])));
+        m.tick(1500);
+        std::assert_eq!(m.states().next().unwrap().1, SlotState::Live);
+
+        m.dialer().up.clear();
+        m.dialer()
+            .endings
+            .push((String::from("udp/10.0.0.1:7447"), Ended::AfterEstablished));
+        m.tick(9000);
+        std::assert_eq!(
+            m.states().next().unwrap().1,
+            SlotState::Waiting { at_ms: 10000 },
+            "the first wait again, not the grown one"
+        );
+    }
+
     /// A node that cannot afford a session right now is not refused: the
     /// endpoint waits its period like a dial nobody answered, and is dialled
     /// once the node can.
@@ -608,5 +955,43 @@ mod tests {
             SlotState::Refused(DialRefused::Unsupported),
             "a rewrite tries the refused endpoint again, and it is refused again"
         );
+    }
+
+    /// An endpoint the list drops while its session is up is hung up too, and the machine
+    /// it leaves behind holds nothing: the list written again with it is a new endpoint,
+    /// dialled at once.
+    #[test]
+    fn a_dropped_endpoint_with_a_session_up_is_hung_up_and_a_rewrite_dials_it_afresh() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        let mut m = ConnectManager::new(&CONTROL, FakeDialer::default());
+        write(&CONTROL, &["udp/10.0.0.1:7447"]);
+        m.tick(0);
+        m.dialer()
+            .up
+            .push((String::from("udp/10.0.0.1:7447"), None));
+        m.tick(10);
+        std::assert_eq!(dials(&mut m).len(), 1);
+
+        write(&CONTROL, &["udp/10.0.0.2:7447"]);
+        m.tick(20);
+        std::assert_eq!(m.dialer().hang_ups, vec![String::from("udp/10.0.0.1:7447")]);
+        std::assert_eq!(dials(&mut m), ["udp/10.0.0.2:7447"]);
+        std::assert_eq!(m.states().count(), 1, "the dropped endpoint is gone");
+
+        write(&CONTROL, &["udp/10.0.0.1:7447", "udp/10.0.0.2:7447"]);
+        m.dialer().up.clear();
+        m.tick(30);
+        std::assert_eq!(dials(&mut m), ["udp/10.0.0.1:7447"], "dialled afresh");
+    }
+
+    /// The list is a set: an endpoint written twice is one endpoint, one session.
+    #[test]
+    fn an_endpoint_written_twice_is_one_endpoint() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        let mut m = ConnectManager::new(&CONTROL, FakeDialer::default());
+        write(&CONTROL, &["udp/10.0.0.1:7447", "udp/10.0.0.1:7447"]);
+        m.tick(0);
+        std::assert_eq!(dials(&mut m), ["udp/10.0.0.1:7447"]);
+        std::assert_eq!(m.states().count(), 1);
     }
 }

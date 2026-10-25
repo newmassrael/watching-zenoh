@@ -1968,11 +1968,15 @@ impl PeerHost<'_> {
                     tokio::time::sleep(Duration::from_millis(after_ms)).await;
                     (key, generation)
                 })),
-                #[cfg(feature = "session-close-ingress")]
+                // Only a peer's machine being stopped asks for it, and an AP loop stops
+                // a peer only for a lifecycle `close`, which is that seam's.
                 PeerAction::Close { id } => {
+                    #[cfg(feature = "session-close-ingress")]
                     if let Some(actions) = self.sessions.get(&id) {
                         actions.request_close();
                     }
+                    #[cfg(not(feature = "session-close-ingress"))]
+                    let _ = id;
                 }
             }
         }

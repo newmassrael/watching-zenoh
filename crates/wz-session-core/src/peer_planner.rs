@@ -64,10 +64,10 @@ pub enum PeerAction<K, I, T> {
         /// wait an operator is told of at a higher level than the others.
         after_loss: bool,
     },
-    /// Drop face `id`: a session its peer no longer wants. Raised only by a
-    /// lifecycle `close` (`manual.stop` from Established), so only a build with the
-    /// close seam can be asked for it.
-    #[cfg(feature = "session-close-ingress")]
+    /// Drop face `id`: a session its peer no longer wants. Raised only when a
+    /// peer's machine is stopped from Established (`manual.stop`: a lifecycle
+    /// `close`, or a host that stops holding a peer and hangs its session up), so a
+    /// host that never stops a peer is never asked for it.
     Close {
         /// The face.
         id: I,
@@ -321,7 +321,6 @@ where
     /// session it holds is closed, a dial it runs is dropped and a wait it is in is
     /// cancelled, and the peer is not dialled again until an `open` starts it. The
     /// machine stays in the table, `Idle`.
-    #[cfg(feature = "session-close-ingress")]
     pub fn withdraw<P: PeerPorts<K>>(
         &mut self,
         zid: &DirectoryZid,
@@ -341,9 +340,25 @@ where
         // The node's own machine last, with a table that has room for it or not.
         let _ = keys.push(node);
         for key in keys {
-            let duties = self.table.close(&key);
-            self.perform(key, duties, false, ports, next_id, emit);
+            self.stop(&key, ports, next_id, emit);
         }
+    }
+
+    /// Stop the machine of `key` (`manual.stop`): the session it holds is closed
+    /// (a [`PeerAction::Close`]), a dial it runs is dropped and a wait it is in is
+    /// cancelled, and the peer is not dialled again until an `open` starts it. The
+    /// machine stays in the table, `Idle`; [`Self::forget`] takes it out. A host
+    /// that stops holding a peer it dialled (a configured endpoint the list no
+    /// longer names) stops it, so the session is hung up, and then forgets it.
+    pub fn stop<P: PeerPorts<K>>(
+        &mut self,
+        key: &K,
+        ports: &mut P,
+        next_id: &mut u64,
+        emit: &mut dyn FnMut(PeerAction<K, I, P::Target>),
+    ) {
+        let duties = self.table.close(key);
+        self.perform(key.clone(), duties, false, ports, next_id, emit);
     }
 
     /// Stop working to hold `key`, and leave a session it has standing: its machine
@@ -415,7 +430,6 @@ where
                     }
                 }
             }
-            #[cfg(feature = "session-close-ingress")]
             if duties.close_session() {
                 if let Some(id) = row(&self.held, &key).copied() {
                     drop_row(&mut self.held, &key);
@@ -494,7 +508,6 @@ mod tests {
     }
 
     const A: DirectoryZid = [0xa1; 16];
-    #[cfg(feature = "session-close-ingress")]
     const B: DirectoryZid = [0xb2; 16];
 
     /// A host that dials a peer if it has a candidate for it, waits 100 ms and
@@ -683,28 +696,23 @@ mod tests {
         let two = dial_of(&actions(|e| {
             plan.open(2, &mut host, &mut next_id, e).unwrap()
         }));
-        #[cfg(feature = "session-close-ingress")]
-        {
-            let none = actions(|e| plan.withdraw(&B, 2, &mut host, &mut next_id, e));
-            assert!(none.is_empty());
-            assert_eq!(plan.state(&2), Some(S::Idle));
-            let ended = actions(|e| {
-                assert_eq!(
-                    plan.dial_ended(
-                        two,
-                        DialEnd::Established { remote: None },
-                        &mut host,
-                        &mut next_id,
-                        e
-                    ),
-                    Some(false),
-                    "the dial of a stopped peer is dropped when it ends"
-                );
-            });
-            assert!(ended.is_empty());
-        }
-        #[cfg(not(feature = "session-close-ingress"))]
-        let _ = two;
+        let none = actions(|e| plan.withdraw(&B, 2, &mut host, &mut next_id, e));
+        assert!(none.is_empty());
+        assert_eq!(plan.state(&2), Some(S::Idle));
+        let ended = actions(|e| {
+            assert_eq!(
+                plan.dial_ended(
+                    two,
+                    DialEnd::Established { remote: None },
+                    &mut host,
+                    &mut next_id,
+                    e
+                ),
+                Some(false),
+                "the dial of a stopped peer is dropped when it ends"
+            );
+        });
+        assert!(ended.is_empty());
     }
 
     /// A face can hold several peers (a node and an endpoint that reach one remote),
@@ -759,7 +767,6 @@ mod tests {
 
     /// The close of a node stops the machine of the node and that of each peer whose
     /// session reached it, and no other.
-    #[cfg(feature = "session-close-ingress")]
     #[test]
     fn a_withdrawal_stops_every_machine_that_reached_the_node() {
         let mut host = Host {
@@ -802,6 +809,39 @@ mod tests {
             plan.state(&3),
             Some(S::Established),
             "another node's machine is untouched"
+        );
+    }
+
+    /// A host that stops holding one peer stops its machine: the session it holds
+    /// is closed, and forgetting it then leaves nothing of it; a peer the planner
+    /// does not hold is stopped without effect.
+    #[test]
+    fn a_stopped_peer_closes_its_session_and_a_forgotten_one_leaves_nothing() {
+        let mut host = Host {
+            candidates: Vector::from([1]),
+            ..Host::default()
+        };
+        let mut plan = Plan::new();
+        let mut next_id = 0;
+        let id = dial_of(&actions(|e| {
+            plan.open(1, &mut host, &mut next_id, e).unwrap()
+        }));
+        plan.dial_ended(
+            id,
+            DialEnd::Established { remote: None },
+            &mut host,
+            &mut next_id,
+            &mut |_| {},
+        );
+
+        let closed = actions(|e| plan.stop(&1, &mut host, &mut next_id, e));
+        assert_eq!(closed, [PeerAction::Close { id }]);
+        assert_eq!(plan.state(&1), Some(S::Idle));
+        plan.forget(&1);
+        assert_eq!(plan.state(&1), None);
+        assert!(
+            actions(|e| plan.stop(&1, &mut host, &mut next_id, e)).is_empty(),
+            "a peer the planner does not hold has nothing to stop"
         );
     }
 

@@ -127,7 +127,7 @@ mod heap {
     use wz_session_core::session_init_params::SessionInitParams;
     use wz_session_core::session_timeouts::SessionTimeouts;
 
-    use super::{dial_failed, parse_locator, McuActions};
+    use super::{dial_failed, parse_locator, DialRefused, McuActions};
     use crate::connect_manager::{DialFailed, Dialer, Ended};
 
     /// What a dialled session reports its iterations to — typically
@@ -264,6 +264,10 @@ mod heap {
     {
         type Session = UdpSession<C>;
 
+        fn classify(&self, endpoint: &str) -> Result<(), DialRefused> {
+            parse_locator(endpoint).map(|_| ())
+        }
+
         fn dial(&mut self, endpoint: &str) -> Result<Self::Session, DialFailed> {
             let to = parse_locator(endpoint).map_err(DialFailed::Refused)?;
             // The stack picks the local port, one per session, and may have none
@@ -290,6 +294,18 @@ mod heap {
                 actions,
                 established: false,
             })
+        }
+
+        fn established(&mut self, session: &mut Self::Session) -> bool {
+            session.established |= session.actions.is_established();
+            session.established
+        }
+
+        fn remote(
+            &self,
+            session: &Self::Session,
+        ) -> Option<[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES]> {
+            session.actions.peer_zid_array()
         }
 
         fn ended(&mut self, session: &mut Self::Session) -> Option<Ended> {
