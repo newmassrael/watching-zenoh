@@ -4,9 +4,10 @@
 //! The memory gate (design D7): what a replayed capture's handle keeps per row.
 //!
 //! A consumer reported that a dissection handle held five to six times the
-//! capture file it was opened from. A list of rows now keeps a 48-byte entry per
-//! message and reads its bytes again from a source (the stream, or a unit log),
-//! so the handle's heap per row is a small constant. Nothing but this keeps it
+//! capture file it was opened from. A list of rows now keeps a packed entry per
+//! message (about a dozen bytes, no wider than its values need) and reads its
+//! bytes again from a source (the stream, or a unit log), so the handle's heap per
+//! row is a small constant. Nothing but this keeps it
 //! so: a change that stores a decoded message beside the entry again would pass
 //! every behaviour test and bring the multiple back.
 //!
@@ -123,10 +124,14 @@ enum Door {
 ///
 /// | case        | after replay | after reads |
 /// |-------------|--------------|-------------|
-/// | udp owned   | 82.0         | 95.9        |
-/// | udp lent    | 49.2         | 63.1        |
-/// | tcp owned   | 130.4        | 152.2       |
-/// | tcp lent    | 90.2         | 112.1       |
+/// | udp owned   | 46.4         | 59.8        |
+/// | udp lent    | 15.5         | 28.9        |
+/// | tcp owned   | 61.1         | 82.2        |
+/// | tcp lent    | 26.9         | 48.1        |
+///
+/// (Before the entries and the run map were kept as packed columns, D10, these
+/// were 82.0 and 95.9, 49.2 and 63.1, 130.4 and 152.2, 90.2 and 112.1: a row's
+/// entry was 48 bytes of words and a run 40, most of them zeros.)
 ///
 /// The reads are every field window to the end of the capture, the selection door
 /// from the start and again from where it ended, then the census. They add 14 to
@@ -457,8 +462,8 @@ fn a_datagram_capture_s_handle_holds_a_constant_per_row() {
         name: "udp owned",
         transport: RunTransport::Datagram,
         door: Door::Owned,
-        after_replay_ceiling: 90.0,
-        after_reads_ceiling: 106.0,
+        after_replay_ceiling: 52.0,
+        after_reads_ceiling: 66.0,
     });
 }
 
@@ -468,8 +473,8 @@ fn a_lent_datagram_capture_s_handle_holds_a_constant_per_row() {
         name: "udp lent",
         transport: RunTransport::Datagram,
         door: Door::Lent,
-        after_replay_ceiling: 54.0,
-        after_reads_ceiling: 70.0,
+        after_replay_ceiling: 18.0,
+        after_reads_ceiling: 32.0,
     });
 }
 
@@ -479,8 +484,8 @@ fn a_stream_capture_s_handle_holds_a_constant_per_row() {
         name: "tcp owned",
         transport: RunTransport::Stream,
         door: Door::Owned,
-        after_replay_ceiling: 144.0,
-        after_reads_ceiling: 168.0,
+        after_replay_ceiling: 68.0,
+        after_reads_ceiling: 92.0,
     });
 }
 
@@ -490,7 +495,7 @@ fn a_lent_stream_capture_s_handle_holds_a_constant_per_row() {
         name: "tcp lent",
         transport: RunTransport::Stream,
         door: Door::Lent,
-        after_replay_ceiling: 100.0,
-        after_reads_ceiling: 124.0,
+        after_replay_ceiling: 30.0,
+        after_reads_ceiling: 54.0,
     });
 }

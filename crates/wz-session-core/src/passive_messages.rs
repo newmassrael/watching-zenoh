@@ -77,6 +77,7 @@ use alloc::vec::Vec;
 
 use crate::byte_log::{LogPlace, UnitLog, MASK_KEY_LEN};
 use crate::chunk_log::{ChunkLog, Iter};
+use crate::column_log::{ColumnLog, Kind};
 use crate::inbound::InboundFrame;
 #[cfg(feature = "reassembly")]
 use crate::passive::FragmentFate;
@@ -812,7 +813,7 @@ impl Default for Store {
 #[derive(Debug, Default)]
 struct Index {
     /// One per row, oldest first.
-    entries: ChunkLog<UnitRow>,
+    entries: UnitRows,
     /// The units whose entries are logged ([`LOGGED`]): a copy of each one's
     /// bytes, in the order they were logged, or its place in the container the
     /// list's holder lends. A unit's copy goes when a discard takes the unit's
@@ -1241,7 +1242,137 @@ type Fate = FragmentFate;
 #[cfg(not(feature = "reassembly"))]
 type Fate = core::convert::Infallible;
 
+/// The columns of a [`UnitRow`] in the order [`UnitRows`] keeps them, and how each
+/// is kept (open-debt item 924, D10): the positions, the instant and the context
+/// rise from one row to the next, so a chunk keeps what each moves and not what it
+/// is; the rest are as narrow as they are.
+const COLUMN_KINDS: [Kind; 11] = [
+    Kind::Rising, // anchor
+    Kind::Rising, // locator
+    Kind::Rising, // observed_at_ns
+    Kind::Plain,  // unit_len
+    Kind::Plain,  // wire_len
+    Kind::Plain,  // unit_offset
+    Kind::Plain,  // batch_index
+    Kind::Rising, // context
+    Kind::Plain,  // prefix_width
+    Kind::Plain,  // kind
+    Kind::Plain,  // flags
+];
+
+/// The place of [`UnitRow::flags`] among the columns.
+const FLAGS_COLUMN: usize = 10;
+
+/// An [`Index`]'s rows, one [`UnitRow`] each, kept as the columns a reader cannot
+/// recompute and no wider than they need to be.
+///
+/// A [`UnitRow`] is 48 bytes of machine words, most of them zeros: a unit's length
+/// of 64 is in a word, a flag word that never passes 2^12 is in a word, and an
+/// anchor 1.5 MB into a stream is in a word. The log keeps a row as a few bytes a
+/// column (see [`crate::column_log`]), and hands a [`UnitRow`] back by value.
+#[derive(Debug)]
+struct UnitRows {
+    log: ColumnLog<11>,
+}
+
+impl Default for UnitRows {
+    fn default() -> Self {
+        Self {
+            log: ColumnLog::new(COLUMN_KINDS),
+        }
+    }
+}
+
+impl UnitRows {
+    fn len(&self) -> usize {
+        self.log.len()
+    }
+
+    fn allocated_bytes(&self) -> usize {
+        self.log.allocated_bytes()
+    }
+
+    fn push_back(&mut self, row: UnitRow) {
+        self.log.push_back(row.columns());
+    }
+
+    /// Append a row kept whole. No other field of it means anything, so the
+    /// columns that rise repeat the row before's, and the row costs the least a row
+    /// can and cannot end a chunk.
+    fn push_held(&mut self) {
+        let mut columns = UnitRow::HELD_ROW.columns();
+        if let Some(last) = self.log.back() {
+            for (column, (kind, last)) in columns.iter_mut().zip(COLUMN_KINDS.iter().zip(last)) {
+                if *kind == Kind::Rising {
+                    *column = last;
+                }
+            }
+        }
+        self.log.push_back(columns);
+    }
+
+    fn get(&self, index: usize) -> Option<UnitRow> {
+        self.log.get(index).map(UnitRow::from_columns)
+    }
+
+    fn set(&mut self, index: usize, row: UnitRow) -> bool {
+        self.log.set(index, row.columns())
+    }
+
+    /// Say the row at `index` is kept whole now. Its other fields mean nothing
+    /// from here on, and are left as they are.
+    fn hold(&mut self, index: usize) {
+        if let Some(mut columns) = self.log.get(index) {
+            columns[FLAGS_COLUMN] = u64::from(HELD);
+            let _ = self.log.set(index, columns);
+        }
+    }
+
+    fn pop_front(&mut self) -> Option<UnitRow> {
+        self.log.pop_front().map(UnitRow::from_columns)
+    }
+
+    fn iter_from(&self, from: usize) -> impl Iterator<Item = UnitRow> + '_ {
+        self.log.iter_from(from).map(UnitRow::from_columns)
+    }
+}
+
 impl UnitRow {
+    /// The row's fields as [`UnitRows`] keeps them, in the order [`COLUMN_KINDS`]
+    /// names.
+    fn columns(&self) -> [u64; 11] {
+        [
+            self.anchor,
+            self.locator,
+            self.observed_at_ns,
+            u64::from(self.unit_len),
+            u64::from(self.wire_len),
+            u64::from(self.unit_offset),
+            u64::from(self.batch_index),
+            u64::from(self.context),
+            u64::from(self.prefix_width),
+            u64::from(self.kind),
+            u64::from(self.flags),
+        ]
+    }
+
+    /// The row [`Self::columns`] came from.
+    fn from_columns(columns: [u64; 11]) -> Self {
+        Self {
+            anchor: columns[0],
+            locator: columns[1],
+            observed_at_ns: columns[2],
+            unit_len: columns[3] as u32,
+            wire_len: columns[4] as u32,
+            unit_offset: columns[5] as u32,
+            batch_index: columns[6] as u32,
+            context: columns[7] as u32,
+            prefix_width: columns[8] as u8,
+            kind: columns[9] as u8,
+            flags: columns[10] as u16,
+        }
+    }
+
     /// The row of a message kept whole.
     const HELD_ROW: Self = Self {
         anchor: 0,
@@ -1508,7 +1639,7 @@ impl ReadAgain {
 impl Index {
     /// Append a row kept whole; `produced` is its produced-index.
     fn push_held(&mut self, produced: u64, frame: PassiveFrame) {
-        self.entries.push_back(UnitRow::HELD_ROW);
+        self.entries.push_held();
         self.held.insert(produced, frame);
     }
 
@@ -1606,9 +1737,7 @@ impl Index {
             let mut unit = self.read_unit(position, first_produced, source);
             while let Some(frame) = unit.take(position) {
                 let key = first_produced + position as u64;
-                if let Some(slot) = self.entries.get_mut(position) {
-                    *slot = UnitRow::HELD_ROW;
-                }
+                self.entries.hold(position);
                 self.sparse.remove(&key);
                 // The frame kept whole carries what the fate says.
                 #[cfg(feature = "reassembly")]
@@ -1655,9 +1784,10 @@ impl Index {
                         Some(end) => self.wire_ends.insert(key, end as u64),
                         None => self.wire_ends.remove(&key),
                     };
-                    if let Some(slot) = self.entries.get_mut(position) {
+                    if let Some(mut slot) = self.entries.get(position) {
                         slot.anchor = offset as u64;
                         slot.flags |= WIRE_END;
+                        self.entries.set(position, slot);
                     }
                 }
                 None => break,
@@ -2476,6 +2606,14 @@ impl DoubleEndedIterator for Heads<'_> {
         }
         self.back -= 1;
         self.at(self.back)
+    }
+
+    /// Without this, the default reads (and decodes) every head it skips: a `take`
+    /// of a window read from its end skipped everything after the window one head
+    /// at a time.
+    fn nth_back(&mut self, n: usize) -> Option<RowHead> {
+        self.back = self.back.saturating_sub(n).max(self.front);
+        self.next_back()
     }
 }
 
@@ -3669,5 +3807,77 @@ mod tests {
     #[test]
     fn an_entry_is_forty_eight_bytes() {
         assert_eq!(core::mem::size_of::<UnitRow>(), 48);
+    }
+
+    /// A row held in the entry log reads back as it went in, whatever it holds
+    /// (open-debt item 924, D10): every field at its largest, at zero, a row kept
+    /// whole between them, a row turned whole in place, a row rewritten to a value
+    /// below the chunk's first.
+    #[test]
+    fn rows_come_back_from_the_column_log_as_they_went_in() {
+        let largest = UnitRow {
+            anchor: u64::MAX,
+            locator: u64::MAX,
+            observed_at_ns: u64::MAX,
+            unit_len: u32::MAX,
+            wire_len: u32::MAX,
+            unit_offset: u32::MAX,
+            batch_index: u32::MAX,
+            context: u32::MAX,
+            prefix_width: u8::MAX,
+            kind: u8::MAX,
+            flags: !HELD,
+        };
+        let plain = |k: u64| UnitRow {
+            anchor: 1_000 + 70 * k,
+            locator: 1_002 + 70 * k,
+            observed_at_ns: 1_700_000_000_000_000_000 + 25_000 * k,
+            unit_len: 64,
+            wire_len: 64,
+            unit_offset: (k % 3) as u32,
+            batch_index: (k % 3) as u32,
+            context: (k / 500) as u32,
+            prefix_width: 2,
+            kind: 7,
+            flags: (if k % 2 == 1 { SIDE_B } else { 0 }) | TIMED,
+        };
+        let mut rows = UnitRows::default();
+        let mut expected: Vec<UnitRow> = Vec::new();
+        for k in 0..3_000u64 {
+            let row = if k == 1_500 { largest } else { plain(k) };
+            rows.push_back(row);
+            expected.push(row);
+            if k % 1_000 == 999 {
+                rows.push_held();
+                expected.push(UnitRow::HELD_ROW);
+            }
+        }
+        assert_eq!(rows.len(), expected.len());
+        for (at, want) in expected.iter().enumerate() {
+            let got = rows.get(at).expect("a row");
+            if want.flags & HELD != 0 {
+                assert!(matches!(got.entry(), Entry::Held), "row {at} is kept whole");
+            } else {
+                assert_eq!(got.columns(), want.columns(), "row {at}");
+            }
+        }
+        // A row turned whole in place, and one rewritten below the chunk's first.
+        rows.hold(5);
+        assert!(matches!(rows.get(5).expect("a row").entry(), Entry::Held));
+        let mut moved = plain(6);
+        moved.anchor = 3;
+        assert!(rows.set(6, moved));
+        assert_eq!(rows.get(6).expect("a row").columns(), moved.columns());
+        assert_eq!(rows.get(7).expect("a row").columns(), plain(7).columns());
+        assert_eq!(
+            rows.iter_from(2_999).count(),
+            expected.len() - 2_999,
+            "the iterator reaches the end"
+        );
+        let mut released = 0;
+        while rows.pop_front().is_some() {
+            released += 1;
+        }
+        assert_eq!(released, expected.len());
     }
 }

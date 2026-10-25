@@ -365,34 +365,61 @@ What each holds, and what of it a later reader could not recompute:
   its cost is lowered by not holding it: a consumer that does not ask for
   `revised` has no use for it.
 
-Decision. The first two are stored by frame of reference, the textbook
-column-store layout for a sorted integer log: a chunk of at most 1024 items
-carries a base for each of its columns and an item carries its columns as 32-bit
-distances from that base. An item that does not fit (a distance over 2^32, or a
-value below the base) begins a new chunk, so the encoding has no escape code,
-no exception table to search, and no value it cannot hold, and a chunk is
-shorter only where the data is unlike anything a capture does. The capture
-instant is the one column kept whole: it moves a billion a second, so as a
-distance it would end a chunk every fourth row of a flow that sends one segment
-a second (a keepalive does), and the first version of the run map, which rebased
-it, held 87 bytes a row on the matrix's fixture, whose packets are a second
-apart, where 70 were expected. The run map is 20 bytes a run (three distances
-and the instant), from 40. Chunks are found
-by bisecting their first positions, so a position is still found without
-reading the items before it, and a release from the front is still free. The
-sparse columns (`segment_offset`, `unit_offset`, `batch_index`, a `wire_len`
-unlike the unit's) are the existing sparse tables of the index, keyed by row.
-Every figure stays an allocation count: a chunk's capacity times its item size,
-so the report remains exact and the gate that holds it to the allocator holds
-the new structure with no new case. The digests get a choice and a door, step
-by step below.
+Decision. The first two are stored by frame of reference with the narrowest
+width the chunk's data allows (`wz-session-core`'s `column_log`), the textbook
+column-store layout for an integer log: a chunk of at most 1024 rows carries a
+base for each column that rises, and a row carries each column as a distance
+from that base in 0, 1, 2, 4 or 8 bytes, as wide as the chunk's largest value
+needs (a length of 64 is a byte, a flag word that stays under 2^12 is two, a
+column that is zero throughout is none). A value that needs more widens its
+column for the chunk, which rewrites the chunk once, and a rising value below
+the base begins a new chunk, so the encoding has no escape code and no value it
+cannot hold. Chunks are found by bisecting their first numbers (with the last
+one found asked first, since a reader goes on from where it was, forwards or
+back), so a position is found without reading the rows before it, and a release
+from the front is still free. A row is read with its columns' offsets within the
+row kept per chunk, and a chunk keeps eight zero bytes after its last row so a
+column is one word load and a mask.
 
-Order: (1) the log itself, in `wz-session-core`, with the run map on it, which
-is private to the TCP assembler and so a change of one module; (2) the index
-entry on it; (3) the digests' door, which changes the C ABI (a revision, and
-the consumer's pin). Each lowers the figure that its report key names, and each
-is judged at 60,000 and 240,000 rows, because a value that falls at one size
-only is a fixed cost that fell.
+Two things were learned by building it. The capture instant is a rising column
+like the others, and so is the context: a first version that kept the instant
+whole spent eight bytes where a chunk spans milliseconds, and a first version
+that rebased a plain column ended chunks for no reason. Which column is which is
+the holder's decision, made once. And a chunk's width is the chunk's: a chunk of
+16-byte units spans 16 KB and a chunk of 4096-byte units spans 4 MB, so a row
+costs up to eleven bytes more at the larger unit (the memory matrix's sweep
+allows twelve for it, none of which is the unit's bytes).
+
+The run map is `RunMap` over four columns (offset, place, packet, instant); a
+run's length is the next run's offset, since the runs tile the stream, and the
+few runs that began inside their packet's payload (a partial overlap) are kept
+apart by offset. The index entries are `UnitRows` over the eleven fields of a
+`UnitRow`, which stays the value a reader works with (48 bytes, by value). A row
+kept whole repeats the rising columns of the row before it, so it cannot end a
+chunk. Every figure stays an allocation count (a chunk's buffer capacity), so the
+report remains exact and the gate that holds it to the allocator holds the new
+structure with no new case.
+
+Measured on the matrix (bytes a row, handed and lent, from the figures of D7's
+table): udp 60.1 and 49.2 to 28.5 and 19.7; tcp 101.1 and 90.2 to 44.0 and 35.1;
+websocket 150.3 and 139.4 to 92.1 and 83.3; tls 121.9 to 67.6; quic datagram and
+stream 60.1 and 79.1 to 22.4 and 41.8; the fragment-chain captures 134.9 and
+175.9 to 95.2 and 110.6. On the C gate's fixture, after the reads: udp 95.9 and
+63.1 to 59.8 and 28.9, tcp 152.2 and 112.1 to 82.2 and 48.1 (owned and lent),
+whose capture file is 90 to 104 bytes a row. Time, release build, 300,000 rows
+of TCP: replay 148 to 147 ms, fields windows 2.12 to 1.95 s, selection 1.15 to
+1.12 s, census 225 to 268 ms (noise on the host), and 300 one-row windows at
+random 726 to 4 ms. The last is not the log's doing: `Take<Heads>::rev` skipped
+the rows after a window one at a time (`Heads` had no `nth_back`), a scan that
+the base paid at a few instructions a row and the packed rows at a hundred; it
+is a jump now.
+
+Order: (1) the log itself and the run map on it; (2) the index entries on it;
+(3) the digests' door, which changes the C ABI (a revision, and the consumer's
+pin), not done: the digests are 8 bytes a row and the consumer asks whether a
+handle can be told not to keep them. Each step lowers the figure that its report
+key names, and each is judged at two sizes, because a value that falls at one
+size only is a fixed cost that fell.
 
 ## 5. Expected cost, not yet measured
 

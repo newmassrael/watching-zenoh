@@ -606,16 +606,21 @@ fn is_stream(o: &MessageListOrigin) -> bool {
 ///
 /// | kind                | handed | lent   | what its rows are                    |
 /// |---------------------|--------|--------|--------------------------------------|
-/// | udp                 |  60.1  |  49.2  | one Push a datagram                  |
-/// | tcp                 | 101.1  |  90.2  | one Frame a segment                  |
-/// | serial              |  68.4  |  68.4  | batches of one to three              |
-/// | websocket           | 150.3  | 139.4  | one message a frame                  |
-/// | tls                 | 121.9  | (none) | records of 9 to 27 bytes             |
+/// | udp                 |  28.5  |  19.7  | one Push a datagram                  |
+/// | tcp                 |  44.0  |  35.1  | one Frame a segment                  |
+/// | serial              |  30.6  |  30.6  | batches of one to three              |
+/// | websocket           |  92.1  |  83.3  | one message a frame                  |
+/// | tls                 |  67.6  | (none) | records of 9 to 27 bytes             |
 /// | scouting            |  57.3  |  41.0  | a SCOUT, a HELLO, a SCOUT with tail  |
-/// | quic datagram       |  60.1  | (none) | recovered plaintext                  |
-/// | quic stream         |  79.1  | (none) | recovered plaintext                  |
-/// | udp fragment chains | 134.9  | 113.0  | two fragments a chain                |
-/// | tcp fragment chains | 175.9  | 154.0  | two fragments a chain                |
+/// | quic datagram       |  22.4  | (none) | recovered plaintext                  |
+/// | quic stream         |  41.8  | (none) | recovered plaintext                  |
+/// | udp fragment chains |  95.2  |  75.3  | two fragments a chain                |
+/// | tcp fragment chains | 110.6  |  90.8  | two fragments a chain                |
+///
+/// Before the entries and the run map were packed columns (D10) these read 60.1 and
+/// 49.2, 101.1 and 90.2, 68.4 and 68.4, 150.3 and 139.4, 121.9, 57.3 and 41.0, 60.1,
+/// 79.1, 134.9 and 113.0, 175.9 and 154.0: an entry was 48 bytes of words and a run
+/// 40, most of them zeros. The scouting list is not an index and did not move.
 ///
 /// The handshake is a fixed cost and is not in a slope. Each of these includes the
 /// SN verdict class a row carries in its flags: before that class, a capture that
@@ -638,40 +643,40 @@ fn cases() -> Vec<Case> {
             build: udp,
             lendable: true,
             expect: Expect::List(|o| matches!(o, MessageListOrigin::Datagram)),
-            ceiling: 67.0,
-            ceiling_lent: 55.0,
+            ceiling: 32.0,
+            ceiling_lent: 22.0,
         },
         Case {
             name: "tcp",
             build: tcp,
             lendable: true,
             expect: Expect::List(is_stream),
-            ceiling: 112.0,
-            ceiling_lent: 100.0,
+            ceiling: 49.0,
+            ceiling_lent: 39.0,
         },
         Case {
             name: "serial",
             build: serial,
             lendable: true,
             expect: Expect::List(|o| matches!(o, MessageListOrigin::Serial)),
-            ceiling: 76.0,
-            ceiling_lent: 76.0,
+            ceiling: 34.0,
+            ceiling_lent: 34.0,
         },
         Case {
             name: "websocket",
             build: websocket,
             lendable: true,
             expect: Expect::List(is_stream),
-            ceiling: 166.0,
-            ceiling_lent: 154.0,
+            ceiling: 102.0,
+            ceiling_lent: 92.0,
         },
         Case {
             name: "tls",
             build: tls,
             lendable: false,
             expect: Expect::List(is_stream),
-            ceiling: 135.0,
-            ceiling_lent: 135.0,
+            ceiling: 75.0,
+            ceiling_lent: 75.0,
         },
         Case {
             name: "scouting",
@@ -686,16 +691,16 @@ fn cases() -> Vec<Case> {
             build: quic_datagrams,
             lendable: false,
             expect: Expect::List(|o| matches!(o, MessageListOrigin::QuicDatagram)),
-            ceiling: 67.0,
-            ceiling_lent: 67.0,
+            ceiling: 25.0,
+            ceiling_lent: 25.0,
         },
         Case {
             name: "quic stream",
             build: quic_stream,
             lendable: false,
             expect: Expect::List(|o| matches!(o, MessageListOrigin::QuicStream(_))),
-            ceiling: 88.0,
-            ceiling_lent: 88.0,
+            ceiling: 47.0,
+            ceiling_lent: 47.0,
         },
     ];
     #[cfg(feature = "fixtures")]
@@ -707,16 +712,16 @@ fn cases() -> Vec<Case> {
                 build: udp_chains,
                 lendable: true,
                 expect: Expect::List(|o| matches!(o, MessageListOrigin::Datagram)),
-                ceiling: 152.0,
-                ceiling_lent: 128.0,
+                ceiling: 105.0,
+                ceiling_lent: 83.0,
             },
             Case {
                 name: "tcp fragment chains",
                 build: tcp_chains,
                 lendable: true,
                 expect: Expect::List(is_stream),
-                ceiling: 194.0,
-                ceiling_lent: 173.0,
+                ceiling: 122.0,
+                ceiling_lent: 100.0,
             },
         ]);
         cases
@@ -930,6 +935,16 @@ fn every_kind_of_list_holds_what_it_reports_and_no_more_than_its_ceiling() {
 /// varies and the cases above hold at four.
 const PAYLOADS: [usize; 3] = [16, 256, 4096];
 
+/// Bytes a row may cost more at a larger unit for the columns that count positions
+/// in the stream (open-debt item 924, D10). A chunk keeps each column as wide as
+/// its largest value needs, so where a chunk of 1024 rows of 16-byte units spans
+/// 16 KB (two bytes an offset), one of 4096-byte units spans 4 MB (four): the two
+/// position columns (the anchor and the place) widen by two bytes each, the two
+/// lengths by one each, and a fragmented message's run map adds a few more. That
+/// is eleven bytes a row at the most between 16 and 4096, however large the unit
+/// is past 64 KB, and none of it is the unit's bytes.
+const WIDTH_SLACK: f64 = 12.0;
+
 /// A kind whose rows' unit carries a payload the sweep can size, and how many
 /// times the unit's bytes it may hold as that payload grows.
 ///
@@ -1063,7 +1078,7 @@ fn what_a_row_costs_does_not_follow_the_size_of_its_unit() {
             // The unit's own bytes the row's unit gained over the smallest.
             let gained = (payload - PAYLOADS[0]) as f64;
             let lent_grew = lent[at] - lent[0];
-            if lent_grew > kind.lent_copies * gained {
+            if lent_grew > kind.lent_copies * gained + WIDTH_SLACK {
                 findings.push(alloc::format!(
                     "{} (lent) unit of {payload} B: a row holds {lent_grew:.1} B more than at \
                      {} B, over {} times the {gained} B the unit gained",
@@ -1073,7 +1088,7 @@ fn what_a_row_costs_does_not_follow_the_size_of_its_unit() {
                 ));
             }
             let owned = (handed[at] - lent[at]) - (handed[0] - lent[0]);
-            if owned < gained || owned > kind.handed_copies * gained {
+            if owned < gained || owned > kind.handed_copies * gained + WIDTH_SLACK {
                 findings.push(alloc::format!(
                     "{} (handed) unit of {payload} B: a row holds {owned:.1} B for the copy it \
                      owns beyond the lent door's, where the {gained} B the unit gained is the \
