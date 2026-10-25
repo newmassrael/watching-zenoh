@@ -285398,6 +285398,54 @@
         "The Zephyr kit image still calls ClientNode with Entities::NONE and has not been built here; a publisher on it needs the kit's task cell sized for the layer."
       ]
     },
+    "Round 3589": {
+      "decision_summary": "Queries step Q2d: the querier on both engines. A matching listener counts what a write filter on its plane counts, so SessionEngine::declare_matching_listener takes the plane: a querier's listener watches the peers' queryables, only complete ones for a target of ALL_COMPLETE, as zenoh's querier and pico's filter callback do. pico's WriteFilter declares its listeners and retracts them with itself, so no entity keeps a list of its own and a background listener goes with its entity. The cooperative engine keeps each listener in its plane's registry with the criterion its filter reads; the tokio engine installs a querier watch whose target says the same, and the zenoh-c querier's poll and listener read its target. The tokio requesting end now hears peers' queryable declarations without the answering end: a querier built without it matched nothing and sent no get. pico's querier is the port's. Layer C1co runs the client-only build against the full build's listener.",
+      "changes_bullets": [
+        "wz-capi-port: FilterPlane::same_kind; SessionEngine::declare_matching_listener takes the plane in place of the subscriber-only form.",
+        "wz-capi-core: the matching registry records the plane and installs a querier watch through a querier whose target is ALL_COMPLETE when the plane requires it; declare_plane_matching_listener; the querier listener and has_matching_queryable take complete_required; query carries declare-queryable.",
+        "wz-capi-coop: a listener per plane in the observer's subscriber or queryable registry; FilterPlane::same_kind replaces its own helper.",
+        "wz-capi-pico: WriteFilter owns its matching listeners; one declare body for publisher, advanced publisher and querier; the querier holds the port's engine and its engine-tokio gate is gone.",
+        "wz-capi-c: the querier's poll and listener honour ALL_COMPLETE.",
+        "Tests: a coop listener test on the queryable plane (router stand-in DeclareQueryable/UndeclareQueryable); client_only_dials_a_listener asks through a querier, with an ALL_COMPLETE CONTROL.",
+        "CI: Layer C1co in job pico-client-only (a rust-ci reader); the coop row's measured counts."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-capi-port, wz-capi-core (default, query alone), wz-capi-c, wz-capi-coop (query+queryable, and its lib with query), wz-capi-pico default, all features, and engine-coop and engine-tokio each with link-udp+query, with and without queryable.",
+        "Tests: wz-capi-coop 8 / 12 / 14 passed (none / query / both); wz-capi-core lib 89; wz-capi-c lib 190; wz-capi-pico default suite. Layer C1co: 4, 3, 4 and 3 passed (coop and tokio, with and without queryable); before the declare-queryable change the tokio leg without queryable failed, its querier never matching.",
+        "C1bz for the five touched crates spends exactly their budgets; capability_cost_gate: 11 cases within budget, pico-client-coop 890395 of 895000; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed; A3 rc 0."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Job pico-client-only has no budget gate: its first hosted run is the measurement its margin step is derived from.",
+        "Next on this track: the rest of section 6 of docs/capi-pico-on-coop-engine.md, liveliness first.",
+        "C1bn's feature-gate diagnostic still needs its probe workspace to carry the [patch.crates-io] table (R3581); not this track's."
+      ],
+      "publishable_decision_summary": "Queries step Q2d: the querier on both engines. A matching listener counts what a write filter on its plane counts, so SessionEngine::declare_matching_listener takes the plane: a querier's listener watches the peers' queryables, only complete ones for a target of ALL_COMPLETE, as zenoh's querier and pico's filter callback do. pico's WriteFilter declares its listeners and retracts them with itself, so no entity keeps a list of its own and a background listener goes with its entity. The cooperative engine keeps each listener in its plane's registry with the criterion its filter reads; the tokio engine installs a querier watch whose target says the same, and the zenoh-c querier's poll and listener read its target. The tokio requesting end now hears peers' queryable declarations without the answering end: a querier built without it matched nothing and sent no get. pico's querier is the port's. Layer C1co runs the client-only build against the full build's listener.",
+      "publishable_changes_bullets": [
+        "wz-capi-port: FilterPlane::same_kind; SessionEngine::declare_matching_listener takes the plane in place of the subscriber-only form.",
+        "wz-capi-core: the matching registry records the plane and installs a querier watch through a querier whose target is ALL_COMPLETE when the plane requires it; declare_plane_matching_listener; the querier listener and has_matching_queryable take complete_required; query carries declare-queryable.",
+        "wz-capi-coop: a listener per plane in the observer's subscriber or queryable registry; FilterPlane::same_kind replaces its own helper.",
+        "wz-capi-pico: WriteFilter owns its matching listeners; one declare body for publisher, advanced publisher and querier; the querier holds the port's engine and its engine-tokio gate is gone.",
+        "wz-capi-c: the querier's poll and listener honour ALL_COMPLETE.",
+        "Tests: a coop listener test on the queryable plane (router stand-in DeclareQueryable/UndeclareQueryable); client_only_dials_a_listener asks through a querier, with an ALL_COMPLETE CONTROL.",
+        "CI: Layer C1co in job pico-client-only (a rust-ci reader); the coop row's measured counts."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-capi-port, wz-capi-core (default, query alone), wz-capi-c, wz-capi-coop (query+queryable, and its lib with query), wz-capi-pico default, all features, and engine-coop and engine-tokio each with link-udp+query, with and without queryable.",
+        "Tests: wz-capi-coop 8 / 12 / 14 passed (none / query / both); wz-capi-core lib 89; wz-capi-c lib 190; wz-capi-pico default suite. Layer C1co: 4, 3, 4 and 3 passed (coop and tokio, with and without queryable); before the declare-queryable change the tokio leg without queryable failed, its querier never matching.",
+        "C1bz for the five touched crates spends exactly their budgets; capability_cost_gate: 11 cases within budget, pico-client-coop 890395 of 895000; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed; A3 rc 0."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Job pico-client-only has no budget gate: its first hosted run is the measurement its margin step is derived from.",
+        "Next on this track: the rest of section 6 of docs/capi-pico-on-coop-engine.md, liveliness first.",
+        "C1bn's feature-gate diagnostic still needs its probe workspace to carry the [patch.crates-io] table (R3581); not this track's."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
