@@ -7,7 +7,7 @@
 //! What is here is what a querier IS and what is kept of it: the [`Query`] (a key, a period, how long
 //! it may stay pending, how many bytes of a reply are kept), the [`QueryState`] the replies are
 //! delivered to (the latest reply of each query goes to a cell of the node's
-//! [`LatestSlots`](crate::latest::LatestSlots), the same cells a subscription keeps its samples in, so a
+//! [`LatestSlots`], the same cells a subscription keeps its samples in, so a
 //! queryable can answer from either; and the counts of what was asked and what came back), and the
 //! watch the program's loop says the counts with ([`QueryWatch`]). The queries themselves are asked by
 //! the session's application layer, inside its event, on the cadence of
