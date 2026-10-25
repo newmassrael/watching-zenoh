@@ -220,4 +220,21 @@ config WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US
 	  It is read only when that policy is on, and must be at least 1 and no more
 	  than the total wait before the session is closed, which is set as before.
 
+config WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES
+	int "DECLARATION_SYNC_BURST_MESSAGES"
+	default 8
+	help
+	  How many declarations one turn of a paced declaration replay sends, when the
+	  declaration-sync-pacing policy is on. It is read only when that policy is on.
+	  It must be at least 1: a turn that sends nothing would never finish.
+
+config WZ_LIMIT_DECLARATION_SYNC_INTERVAL_MS
+	int "DECLARATION_SYNC_INTERVAL_MS"
+	default 10
+	help
+	  How long, in milliseconds, a paced declaration replay waits between two of its
+	  turns, when the declaration-sync-pacing policy is on. The session keeps being
+	  served during the wait. It is read only when that policy is on, and must be at
+	  least 1.
+
 endmenu

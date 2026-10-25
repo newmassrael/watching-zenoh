@@ -48,3 +48,7 @@ pub(super) const QUERIER_MAX_PENDING_QUERIES: usize =
     limit(option_env!("WZ_LIMIT_QUERIER_MAX_PENDING_QUERIES"), 0);
 pub(super) const TX_NO_PROGRESS_WINDOW_US: usize =
     limit(option_env!("WZ_LIMIT_TX_NO_PROGRESS_WINDOW_US"), 1000000);
+pub(super) const DECLARATION_SYNC_BURST_MESSAGES: usize =
+    limit(option_env!("WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES"), 8);
+pub(super) const DECLARATION_SYNC_INTERVAL_MS: usize =
+    limit(option_env!("WZ_LIMIT_DECLARATION_SYNC_INTERVAL_MS"), 10);

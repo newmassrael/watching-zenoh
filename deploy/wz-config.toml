@@ -1688,6 +1688,27 @@ It is read only when that policy is on, and must be at least 1 and no more
 than the total wait before the session is closed, which is set as before.
 '''
 
+[[limit]]
+id = "DECLARATION_SYNC_BURST_MESSAGES"
+kconfig = "WZ_LIMIT_DECLARATION_SYNC_BURST_MESSAGES"
+default = 8
+help = '''
+How many declarations one turn of a paced declaration replay sends, when the
+declaration-sync-pacing policy is on. It is read only when that policy is on.
+It must be at least 1: a turn that sends nothing would never finish.
+'''
+
+[[limit]]
+id = "DECLARATION_SYNC_INTERVAL_MS"
+kconfig = "WZ_LIMIT_DECLARATION_SYNC_INTERVAL_MS"
+default = 10
+help = '''
+How long, in milliseconds, a paced declaration replay waits between two of its
+turns, when the declaration-sync-pacing policy is on. The session keeps being
+served during the wait. It is read only when that policy is on, and must be at
+least 1.
+'''
+
 # A policy is behaviour upstream does not have; it is declared with what upstream does and
 # defaults to that, so a build that states nothing is the original's (docs/build-configuration.md,
 # C2). `kind` is `bool` (default `off`) or `choice` (`choices`, one of them the default). Each is a
@@ -1738,6 +1759,24 @@ the session is closed as unresponsive and the send reports success. On, the
 message is dropped, the send reports that the transport was not available,
 and the session stays open: a slow link costs the message and not the
 session. A multicast group never closes either way.
+'''
+
+[[policy]]
+id = "declaration-sync-pacing"
+kind = "bool"
+kconfig = "WZ_POLICY_DECLARATION_SYNC_PACING"
+default = "off"
+upstream = "Replays every declaration it holds to a new peer in one call, as soon as the session is open again."
+since = 2
+help = '''
+How a node tells a peer its declarations again after a reconnect. Off, all of
+them are sent at once. On, they are sent in turns of
+DECLARATION_SYNC_BURST_MESSAGES with DECLARATION_SYNC_INTERVAL_MS between
+turns, and the session is served during the waits, so a node with many
+declarations does not hand its peer a burst or stop answering while it sends
+them. A declaration made while the replay runs is sent in its turn, after
+everything it depends on; the retraction of one the peer was never told of
+sends nothing.
 '''
 
 [[policy]]

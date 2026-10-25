@@ -276,6 +276,63 @@ pub struct ReconnectingSession {
     /// has nothing to flush. Widening beside them keeps every existing caller
     /// compiling unchanged.
     liveliness_session: Option<TokioSession>,
+    /// How the declaration cache is replayed after a reopen: `None` is upstream's one call, and
+    /// `Some` is the paced replay of the `declaration-sync-pacing` policy
+    /// ([`ReplayPacing::from_build`] sets it from the build).
+    replay_pacing: Option<ReplayPacing>,
+}
+
+/// The pace of a paced declaration replay (`docs/declaration-sync-pacing.md`): how many
+/// declarations a turn sends and how long to wait between turns. The supervisor holds it as an
+/// `Option` and so a test, or a caller that wants it on regardless of the build, can state it
+/// ([`ReconnectingSession::set_replay_pacing`]); the build states it through
+/// [`Self::from_build`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplayPacing {
+    burst: usize,
+    interval_ms: u64,
+}
+
+impl ReplayPacing {
+    /// A pace of `burst` declarations a turn and `interval_ms` between turns. Both must be at least
+    /// 1: a turn that sends nothing would never finish, and no wait would run the turns together.
+    pub const fn new(burst: usize, interval_ms: u64) -> Option<Self> {
+        if burst == 0 || interval_ms == 0 {
+            None
+        } else {
+            Some(Self { burst, interval_ms })
+        }
+    }
+
+    /// The pace the build states: `None`, upstream's one call, unless the `declaration-sync-pacing`
+    /// policy is on, in which case the pace is the burst and interval limits. The limits are
+    /// checked where they are used, at compile time, so a build that sets one to zero does not
+    /// build.
+    pub const fn from_build() -> Option<Self> {
+        const _: () = assert!(
+            wz_session_core::caps::DECLARATION_SYNC_BURST_MESSAGES >= 1
+                && wz_session_core::caps::DECLARATION_SYNC_INTERVAL_MS >= 1,
+            "DECLARATION_SYNC_BURST_MESSAGES and DECLARATION_SYNC_INTERVAL_MS must be at least 1"
+        );
+        if wz_session_core::policy::SessionPolicy::from_build().declaration_sync_pacing {
+            Self::new(
+                wz_session_core::caps::DECLARATION_SYNC_BURST_MESSAGES,
+                wz_session_core::caps::DECLARATION_SYNC_INTERVAL_MS as u64,
+            )
+        } else {
+            None
+        }
+    }
+
+    /// Declarations sent in one turn.
+    pub const fn burst(&self) -> usize {
+        self.burst
+    }
+
+    /// Milliseconds between two turns.
+    pub const fn interval_ms(&self) -> u64 {
+        self.interval_ms
+    }
 }
 
 /// R311py — the handles [`ReconnectingSession::into_teardown`] hands back: the
@@ -312,6 +369,61 @@ impl ReconnectingSession {
     /// observer alone cannot deliver anything.
     pub fn set_liveliness_flush(&mut self, session: TokioSession) {
         self.liveliness_session = Some(session);
+    }
+
+    /// State how the declaration cache is replayed after a reopen, overriding the build's
+    /// ([`ReplayPacing::from_build`]): `None` is upstream's one call, `Some` the paced replay.
+    /// A setter for the reason [`Self::set_liveliness_flush`] is one, and for a test that must
+    /// name the value it is about, which a build-time policy cannot give it.
+    pub fn set_replay_pacing(&mut self, pacing: Option<ReplayPacing>) {
+        self.replay_pacing = pacing;
+    }
+
+    /// [`drive_session_until_terminal`] over the current connection, with the turns of a paced
+    /// replay sent between its work, until the connection ends. The turns and the drive run in
+    /// this one task, so the drive is never starved by a wait and the replay is not run from a
+    /// task nobody can return its error from: a turn that fails ends the drive with that error.
+    ///
+    /// A refused send (the link is going down) is such an error too, and the reopen that follows
+    /// begins the replay again from the start, the next peer holding nothing.
+    async fn drive_with_paced_replay<F>(
+        &mut self,
+        pacing: ReplayPacing,
+        timeouts: &SessionTimeouts,
+        max_iters_per_connection: Option<usize>,
+        on_event: &mut F,
+    ) -> Result<DriverOutcome, ReplayDeclarationsError>
+    where
+        F: FnMut(IterationEvent<'_>),
+    {
+        let clock = self.opened.clock;
+        let actions = self.actions.clone();
+        let driven = drive_session_until_terminal(
+            &mut self.opened.inbound,
+            &self.actions,
+            &mut self.opened.engine,
+            max_iters_per_connection,
+            &clock,
+            timeouts,
+            on_event,
+        );
+        tokio::pin!(driven);
+        let paced = async {
+            loop {
+                let turn = actions.replay_turn(pacing.burst())?;
+                if turn.finished {
+                    return Ok::<(), ReplayDeclarationsError>(());
+                }
+                clock.sleep(pacing.interval_ms()).await;
+            }
+        };
+        tokio::pin!(paced);
+        tokio::select! {
+            outcome = &mut driven => return Ok(outcome),
+            sent = &mut paced => sent?,
+        }
+        // Every turn is sent; what is left is the connection itself.
+        Ok(driven.await)
     }
 
     /// The shared actions bundle — the surviving half across reconnects.
@@ -497,16 +609,43 @@ impl ReconnectingSession {
     {
         loop {
             let clock = self.opened.clock;
-            let outcome = drive_session_until_terminal(
-                &mut self.opened.inbound,
-                &self.actions,
-                &mut self.opened.engine,
-                max_iters_per_connection,
-                &clock,
-                timeouts,
-                &mut on_event,
-            )
-            .await;
+            let outcome = match self.replay_pacing {
+                // A paced replay is owed: serve the session while its turns are sent, so the
+                // waits between turns do not stop the keepalives or the reading.
+                Some(pacing) if self.actions.paced_replay_running() => {
+                    match self
+                        .drive_with_paced_replay(
+                            pacing,
+                            timeouts,
+                            max_iters_per_connection,
+                            &mut on_event,
+                        )
+                        .await
+                    {
+                        Ok(outcome) => outcome,
+                        // The same breach as an unpaced replay's reject, found later: the
+                        // builders accepted these arguments once and now refuse them.
+                        Err(err) => {
+                            return ReconnectDriveOutcome::GaveUp {
+                                attempts: 0,
+                                last: ReconnectError::Replay(err),
+                            };
+                        }
+                    }
+                }
+                _ => {
+                    drive_session_until_terminal(
+                        &mut self.opened.inbound,
+                        &self.actions,
+                        &mut self.opened.engine,
+                        max_iters_per_connection,
+                        &clock,
+                        timeouts,
+                        &mut on_event,
+                    )
+                    .await
+                }
+            };
             match outcome {
                 DriverOutcome::IterationLimit => return ReconnectDriveOutcome::IterationLimit,
                 DriverOutcome::Terminated => {
@@ -646,11 +785,20 @@ impl ReconnectingSession {
                     // pico parity: the reopen task replays the declaration
                     // cache right after `_z_open` succeeds; a replay reject
                     // is an invariant breach, not a retryable condition.
-                    if let Err(err) = self.actions.replay_declarations() {
-                        return ReconnectDriveOutcome::GaveUp {
-                            attempts,
-                            last: ReconnectError::Replay(err),
-                        };
+                    //
+                    // Under the `declaration-sync-pacing` policy the replay only BEGINS here: its
+                    // turns are sent from the steady-state loop below, between the session's own
+                    // work, and a declaration made meanwhile is replayed in its turn.
+                    match self.replay_pacing {
+                        None => {
+                            if let Err(err) = self.actions.replay_declarations() {
+                                return ReconnectDriveOutcome::GaveUp {
+                                    attempts,
+                                    last: ReconnectError::Replay(err),
+                                };
+                            }
+                        }
+                        Some(_) => self.actions.begin_paced_replay(),
                     }
                     self.reconnects += 1;
                 }
@@ -755,6 +903,7 @@ pub async fn open_session_with_reconnect(
         opened,
         reconnects: 0,
         liveliness_session: None,
+        replay_pacing: ReplayPacing::from_build(),
     })
 }
 
@@ -847,5 +996,38 @@ mod backoff_tests {
             // start at 500; a factor read from either period would not be 3x.
             vec![70, 210, 500, 500],
         );
+    }
+}
+
+#[cfg(test)]
+mod replay_pacing_tests {
+    use super::*;
+
+    /// A pace of nothing is refused: a turn that sends nothing never finishes, and no wait would
+    /// run the turns together.
+    #[test]
+    fn a_pace_needs_a_burst_and_a_wait_of_at_least_one() {
+        assert_eq!(ReplayPacing::new(0, 10), None);
+        assert_eq!(ReplayPacing::new(8, 0), None);
+        let pace = ReplayPacing::new(8, 10).expect("a real pace");
+        assert_eq!((pace.burst(), pace.interval_ms()), (8, 10));
+    }
+
+    /// The build states the pace through the policy: off is upstream's one call, on is the two
+    /// limits. The test build states nothing, so this asserts the default and that the two agree.
+    #[test]
+    fn the_build_states_a_pace_exactly_when_the_policy_is_on() {
+        let on = wz_session_core::policy::SessionPolicy::from_build().declaration_sync_pacing;
+        assert_eq!(ReplayPacing::from_build().is_some(), on);
+        if let Some(pace) = ReplayPacing::from_build() {
+            assert_eq!(
+                pace.burst(),
+                wz_session_core::caps::DECLARATION_SYNC_BURST_MESSAGES
+            );
+            assert_eq!(
+                pace.interval_ms(),
+                wz_session_core::caps::DECLARATION_SYNC_INTERVAL_MS as u64
+            );
+        }
     }
 }

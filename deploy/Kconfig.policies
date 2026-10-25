@@ -56,6 +56,21 @@ config WZ_POLICY_TX_EXPIRY_KEEPS_SESSION
 	  Upstream: Closes the session as unresponsive when a blocking message found no
 	  room in its deadline, and tells the sender nothing.
 
+config WZ_POLICY_DECLARATION_SYNC_PACING
+	bool "declaration-sync-pacing"
+	default n
+	help
+	  How a node tells a peer its declarations again after a reconnect. Off, all of
+	  them are sent at once. On, they are sent in turns of
+	  DECLARATION_SYNC_BURST_MESSAGES with DECLARATION_SYNC_INTERVAL_MS between
+	  turns, and the session is served during the waits, so a node with many
+	  declarations does not hand its peer a burst or stop answering while it sends
+	  them. A declaration made while the replay runs is sent in its turn, after
+	  everything it depends on; the retraction of one the peer was never told of
+	  sends nothing.
+	  Upstream: Replays every declaration it holds to a new peer in one call, as
+	  soon as the session is open again.
+
 config WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN
 	bool "entity-timestamp-opt-in"
 	default n

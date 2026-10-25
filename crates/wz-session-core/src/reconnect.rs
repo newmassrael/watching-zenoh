@@ -365,15 +365,18 @@ pub struct ReplayTurn {
 
 /// The declaration cache of a session and the replay that is walking it, if one is.
 ///
-/// This is the heap runtime's host of [`ReplayCursor`] (`docs/declaration-sync-pacing.md`): the
+/// This is the heap runtime's host of [`crate::replay_cursor::ReplayCursor`]
+/// (`docs/declaration-sync-pacing.md`): the
 /// cache is the ordered sequence the cursor is a place in, and every change to it that a live
 /// caller makes goes through [`Self::record`] or [`Self::retract`], which ask the cursor what to do
 /// about the peer. They are kept together in one value so that the entry and the cursor change
 /// under one lock and a declaration made between two turns of a replay cannot be missed.
 ///
 /// With no replay running (`replay` is `None`, which is always so when pacing is off) it is the
-/// plain ordered list it was: [`Self::record`] answers [`Insertion::EmitNow`] and [`Self::retract`]
-/// answers [`Removal::Retract`], so the caller does what it did before the cursor existed.
+/// plain ordered list it was: [`Self::record`] answers
+/// [`crate::replay_cursor::Insertion::EmitNow`] and [`Self::retract`] answers
+/// [`crate::replay_cursor::Removal::Retract`], so the caller does what it did before the cursor
+/// existed.
 #[derive(Debug, Default)]
 pub struct DeclarationCache {
     entries: alloc::vec::Vec<CachedDeclaration>,
@@ -405,8 +408,9 @@ impl DeclarationCache {
     }
 
     /// Record a live declaration at the end of the cache and say what its caller does about the
-    /// peer: [`Insertion::Owed`] while a replay is running (the replay reaches the entry, in order,
-    /// after everything it depends on) and [`Insertion::EmitNow`] otherwise.
+    /// peer: [`crate::replay_cursor::Insertion::Owed`] while a replay is running (the replay
+    /// reaches the entry, in order, after everything it depends on) and
+    /// [`crate::replay_cursor::Insertion::EmitNow`] otherwise.
     pub fn record(&mut self, entry: CachedDeclaration) -> crate::replay_cursor::Insertion {
         let place = self.entries.len();
         self.entries.push(entry);
@@ -422,8 +426,9 @@ impl DeclarationCache {
 
     /// Remove the FIRST entry `pred` matches, as pico's prune does (one undeclare retracts one
     /// declare, so a re-declared id keeps its later entries), and say what the caller does about the
-    /// peer: [`Removal::Retract`] when the peer holds the entry, [`Removal::Silent`] when a running
-    /// replay had not reached it. No entry matching is [`Removal::Retract`], as it always was: the
+    /// peer: [`crate::replay_cursor::Removal::Retract`] when the peer holds the entry,
+    /// [`crate::replay_cursor::Removal::Silent`] when a running replay had not reached it. No entry
+    /// matching is [`crate::replay_cursor::Removal::Retract`], as it always was: the
     /// caller sends the retraction it was asked to send.
     pub fn retract(
         &mut self,

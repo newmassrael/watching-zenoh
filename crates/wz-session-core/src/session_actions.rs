@@ -12177,10 +12177,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// A4 — record a declared key expression for reconnect replay and send its declaration, as one
-    /// step ([`Self::record_and_send`]): the twin of [`Self::declare_subscriber_recorded`] for the
+    /// step (`record_and_send`): the twin of [`Self::declare_subscriber_recorded`] for the
     /// `Declare(DeclKexpr)` that registers a `mapping_id`. Signature-stable: without
-    /// `session-reconnect` this is `emit()`.
-    #[cfg(feature = "declare-keyexpr")]
+    /// `session-reconnect` this is `emit()`. Gated on `alloc` (the suffix is copied into the cache)
+    /// and not on `declare-keyexpr`, which implies it: the callers are, and the method itself is
+    /// the same whichever declaration feature built it.
+    #[cfg(feature = "alloc")]
     pub fn declare_keyexpr_recorded<E>(
         &self,
         mapping_id: u64,
@@ -12205,7 +12207,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R311mw — record a declared liveliness token for reconnect replay and send its declaration,
-    /// as one step ([`Self::record_and_send`]): `emit` sends the `Declare(DeclToken)` and runs only
+    /// as one step (`record_and_send`): `emit` sends the `Declare(DeclToken)` and runs only
     /// if the peer is to be told now, and a failed `emit` caches nothing. The session-level
     /// counterpart to the `Session::declare_token` seam emit: pico caches the declaration on
     /// `_Z_RES_OK` from `_z_send_n_msg`, so the cache is session-state bookkeeping AROUND the wire
@@ -12863,7 +12865,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// R311mw/R311mx — record a liveliness subscriber Interest for reconnect replay and send it, as
-    /// one step ([`Self::record_and_send`]). The session-level counterpart to the
+    /// one step (`record_and_send`). The session-level counterpart to the
     /// `Session::declare_liveliness_subscriber` seam emit — shared by the
     /// `send_interest_liveliness_subscriber` wrapper and the seam-routed declare so the cache is
     /// authored once. Signature-stable: without `session-reconnect` this is `emit()` per R311g1,
@@ -13803,7 +13805,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// A4 — remove the key expression `mapping_id` from the replay cache and send its retraction, as
-    /// one step ([`Self::retract_and_send`]): `emit` runs unless a paced replay had not yet reached
+    /// one step (`retract_and_send`): `emit` runs unless a paced replay had not yet reached
     /// the entry, in which case the peer never learned of it and the answer is `None`. Otherwise
     /// it is `Some` of what `emit` returned. Signature-stable: without `session-reconnect` there is
     /// no cache and this is `Some(emit())`.
@@ -14137,6 +14139,21 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(not(feature = "session-reconnect"))]
         {
             Err(ReplayDeclarationsError::FeatureDisabled)
+        }
+    }
+
+    /// Whether a paced replay ([`Self::begin_paced_replay`]) still owes the peer declarations: the
+    /// host drives [`Self::replay_turn`] for as long as this is `true`. R311g1 —
+    /// signature-stability: always `false` without `session-reconnect`.
+    #[cfg(feature = "alloc")]
+    pub fn paced_replay_running(&self) -> bool {
+        #[cfg(feature = "session-reconnect")]
+        {
+            R::with_mutex_mut(&self.declaration_cache, |cache| cache.replaying())
+        }
+        #[cfg(not(feature = "session-reconnect"))]
+        {
+            false
         }
     }
 

@@ -13386,7 +13386,7 @@ layer_c1bz_docs_resolve() {
         wz-routing-graph:5
         wz-runtime-coop:7
         wz-runtime-tokio:466
-        wz-session-core:495
+        wz-session-core:494
         wz-switchboard-codegen:8
         zenoh-pico-sys:3
     "

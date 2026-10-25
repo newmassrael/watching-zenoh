@@ -5684,6 +5684,241 @@ mod reconnect_tx_tests {
         );
     }
 
+    /// The declarations of the paced-replay tests: a key expression, a subscriber that names it by
+    /// its mapping id (so it is valid only after the key expression), and plain subscribers, sent
+    /// in this order. Returns the wire bytes of each frame as it was first sent.
+    fn paced_fixture_declarations(
+        actions: &super::SessionLinkActions,
+        driver: &crate::test_fixtures::RecordingLinkDriver,
+        plain_subscribers: u64,
+    ) -> Vec<Vec<u8>> {
+        actions
+            .send_declare_keyexpr(7, "home/base")
+            .expect("declare keyexpr");
+        actions
+            .send_declare_subscriber(10, 7, Some("/tail"))
+            .expect("aliased subscriber declare");
+        for id in 0..plain_subscribers {
+            actions
+                .send_declare_subscriber(11 + id, 0, Some(&format!("home/s{id}")))
+                .expect("plain subscriber declare");
+        }
+        (0..driver.frame_count())
+            .map(|i| driver.frame_bytes(i))
+            .collect()
+    }
+
+    /// The session after a link loss and a re-handshake: the gate is open, nothing of the old peer
+    /// is held, and the declarations are in the cache and owed to the new peer.
+    fn reopened(actions: &super::SessionLinkActions) {
+        use wz_runtime_core::Runtime;
+        actions.reset_for_reopen();
+        TokioRuntime::with_mutex_mut(&actions.link.transport_available, |gate| *gate = true);
+    }
+
+    /// With the policy off nothing is paced, and a paced replay that sends everything in one turn
+    /// is that same replay: the bytes of the frames are the unpaced replay's, in its order.
+    #[test]
+    fn a_paced_replay_in_one_turn_sends_what_the_unpaced_replay_does() {
+        let (unpaced, unpaced_driver) = crate::test_fixtures::recording_actions();
+        let original = paced_fixture_declarations(&unpaced, &unpaced_driver, 2);
+        reopened(&unpaced);
+        assert_eq!(unpaced.replay_declarations().expect("replay"), 4);
+
+        let (paced, paced_driver) = crate::test_fixtures::recording_actions();
+        paced_fixture_declarations(&paced, &paced_driver, 2);
+        reopened(&paced);
+        paced.begin_paced_replay();
+        assert!(paced.paced_replay_running());
+        let turn = paced.replay_turn(usize::MAX).expect("one turn");
+        assert_eq!(
+            turn,
+            wz_session_core::reconnect::ReplayTurn {
+                emitted: 4,
+                finished: true
+            }
+        );
+        assert!(!paced.paced_replay_running(), "every entry is told");
+        for (i, first_sent) in original.iter().enumerate() {
+            assert_eq!(
+                paced_driver.frame_bytes(4 + i),
+                unpaced_driver.frame_bytes(4 + i),
+                "replayed frame {i}: paced equals unpaced"
+            );
+            assert_eq!(&unpaced_driver.frame_bytes(4 + i), first_sent);
+        }
+    }
+
+    /// A turn sends at most the burst and nothing else is sent between turns.
+    #[test]
+    fn a_paced_replay_sends_a_burst_a_turn_and_nothing_between() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        paced_fixture_declarations(&actions, &driver, 3);
+        let sent_before = driver.frame_count();
+        reopened(&actions);
+        actions.begin_paced_replay();
+        assert_eq!(driver.frame_count(), sent_before, "beginning sends nothing");
+
+        let mut turns = Vec::new();
+        while actions.paced_replay_running() {
+            let before = driver.frame_count();
+            let turn = actions.replay_turn(2).expect("turn");
+            assert_eq!(driver.frame_count() - before, turn.emitted);
+            turns.push((turn.emitted, turn.finished));
+        }
+        assert_eq!(turns, [(2, false), (2, false), (1, true)]);
+        let after = driver.frame_count();
+        assert_eq!(
+            actions.replay_turn(2).expect("a turn with no replay"),
+            wz_session_core::reconnect::ReplayTurn {
+                emitted: 0,
+                finished: true
+            }
+        );
+        assert_eq!(
+            driver.frame_count(),
+            after,
+            "a finished replay sends nothing"
+        );
+    }
+
+    /// A declaration made while the replay runs is not sent ahead of what it depends on: it is
+    /// recorded and goes out in its turn, after the key expression it names, and the peer is told
+    /// exactly what an unpaced session that declared the same four things in order would tell it.
+    #[test]
+    fn a_declaration_made_during_a_paced_replay_is_sent_in_its_turn_after_what_it_depends_on() {
+        let (reference, reference_driver) = crate::test_fixtures::recording_actions();
+        paced_fixture_declarations(&reference, &reference_driver, 1);
+        reference
+            .send_declare_subscriber(12, 7, Some("/new"))
+            .expect("the same declaration, made with no replay running");
+        let expected: Vec<Vec<u8>> = (0..4).map(|i| reference_driver.frame_bytes(i)).collect();
+
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        paced_fixture_declarations(&actions, &driver, 1);
+        reopened(&actions);
+        actions.begin_paced_replay();
+        assert_eq!(actions.replay_turn(1).expect("turn").emitted, 1);
+        let before = driver.frame_count();
+        actions
+            .send_declare_subscriber(12, 7, Some("/new"))
+            .expect("a live declaration during the replay succeeds from the caller's side");
+        assert_eq!(
+            driver.frame_count(),
+            before,
+            "it is recorded and owed, not sent ahead of what it depends on"
+        );
+        let turn = actions.replay_turn(10).expect("the rest");
+        assert_eq!((turn.emitted, turn.finished), (3, true));
+        for (i, want) in expected.iter().enumerate() {
+            assert_eq!(
+                &driver.frame_bytes(3 + i),
+                want,
+                "frame {i} of the replay is the reference's, in its order"
+            );
+        }
+    }
+
+    /// The retraction of a declaration the replay has not reached sends nothing: the peer was
+    /// never told of it, and a Retract for an id it does not hold would be a protocol error. The
+    /// entry is not replayed either.
+    #[test]
+    fn a_retraction_of_a_declaration_the_replay_has_not_reached_sends_nothing() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        paced_fixture_declarations(&actions, &driver, 2);
+        reopened(&actions);
+        actions.begin_paced_replay();
+        assert_eq!(actions.replay_turn(1).expect("turn").emitted, 1);
+        let before = driver.frame_count();
+        // Subscriber 12 is the last entry and has not been told to this peer.
+        actions.send_undeclare_subscriber(12);
+        assert_eq!(
+            driver.frame_count(),
+            before,
+            "nothing is sent to retract it"
+        );
+        assert_eq!(actions.declaration_cache_snapshot().len(), 3);
+        let turn = actions.replay_turn(10).expect("the rest");
+        assert_eq!(
+            (turn.emitted, turn.finished),
+            (2, true),
+            "key expression, aliased and plain subscriber remain; the retracted one does not"
+        );
+        assert_eq!(driver.frame_count(), before + 2);
+    }
+
+    /// The retraction of a declaration the replay has told is sent: the peer holds it.
+    #[test]
+    fn a_retraction_of_a_declaration_the_replay_has_told_is_sent() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        paced_fixture_declarations(&actions, &driver, 2);
+        reopened(&actions);
+        actions.begin_paced_replay();
+        assert_eq!(actions.replay_turn(2).expect("turn").emitted, 2);
+        let before = driver.frame_count();
+        // Subscriber 10 was told in the turn above.
+        actions.send_undeclare_subscriber(10);
+        assert_eq!(driver.frame_count(), before + 1, "the retraction is sent");
+        let turn = actions.replay_turn(10).expect("the rest");
+        assert_eq!(
+            (turn.emitted, turn.finished),
+            (2, true),
+            "the two plain subscribers still owed are told, once"
+        );
+    }
+
+    /// A refused send ends the turn with the error and the replay resumes AT the entry it failed
+    /// on: the entries that went out are not sent again.
+    #[test]
+    fn a_refused_turn_resumes_at_the_entry_it_failed_on_and_not_at_the_beginning() {
+        use wz_runtime_core::Runtime;
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        let original = paced_fixture_declarations(&actions, &driver, 2);
+        reopened(&actions);
+        actions.begin_paced_replay();
+        assert_eq!(actions.replay_turn(1).expect("turn").emitted, 1);
+        // The link goes down again before the second entry.
+        TokioRuntime::with_mutex_mut(&actions.link.transport_available, |gate| *gate = false);
+        assert!(
+            actions.replay_turn(2).is_err(),
+            "the send is refused and the turn says so"
+        );
+        assert!(actions.paced_replay_running(), "the replay is still owed");
+        TokioRuntime::with_mutex_mut(&actions.link.transport_available, |gate| *gate = true);
+        let turn = actions.replay_turn(10).expect("the rest");
+        assert_eq!(
+            (turn.emitted, turn.finished),
+            (3, true),
+            "entries 1, 2 and 3, and not entry 0 again"
+        );
+        let first_replayed = original.len();
+        for (i, want) in original.iter().enumerate() {
+            assert_eq!(
+                &driver.frame_bytes(first_replayed + i),
+                want,
+                "replayed frame {i}, each exactly once and in order"
+            );
+        }
+    }
+
+    /// A reopen that begins a replay while one is running discards it: the new peer holds nothing.
+    #[test]
+    fn beginning_a_paced_replay_discards_one_that_was_running() {
+        let (actions, driver) = crate::test_fixtures::recording_actions();
+        paced_fixture_declarations(&actions, &driver, 1);
+        reopened(&actions);
+        actions.begin_paced_replay();
+        assert_eq!(actions.replay_turn(1).expect("turn").emitted, 1);
+        reopened(&actions);
+        actions.begin_paced_replay();
+        let turn = actions.replay_turn(10).expect("a whole replay");
+        assert_eq!(
+            (turn.emitted, turn.finished),
+            (3, true),
+            "all three again, from the beginning"
+        );
+    }
+
     /// `reset_for_reopen` clears exactly the handshake-scoped state and
     /// preserves the session-scoped state (pico: new `_z_transport_t`,
     /// surviving `_z_session_t`).

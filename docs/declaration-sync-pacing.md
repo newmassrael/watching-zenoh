@@ -28,10 +28,11 @@ nobody asked. With pacing it is a real state, and the node needs to be able to w
 | `declaration-sync-pacing` | policy, bool | off | Off: the replay is one call, as upstream. On: it runs in turns. |
 | `DECLARATION_SYNC_BURST_MESSAGES` | limit | 8 when on | Messages emitted in one turn. Zero is refused. |
 | `DECLARATION_SYNC_INTERVAL_MS` | limit | 10 when on | Wait between turns. Zero is refused. |
-| `DECLARATION_SYNC_FINAL_TIMEOUT_MS` | limit | 1000 when on | How long the sync waits for the peer's final for an interest before it counts the interest as unanswered and goes on. Never longer than the session's own lease. |
+| `DECLARATION_SYNC_FINAL_TIMEOUT_MS` | limit | 1000 when on | How long the sync waits for the peer's final for an interest before it counts the interest as unanswered and goes on. Never longer than the session's own lease. NOT DECLARED YET: it is declared with phase 3, the first code that reads it. |
 
-A value of a limit is refused at build time when it is zero or when the timeout is shorter than
-the interval, as every limit here is checked where it is declared (`deploy/wz-config.toml`).
+A value of a limit is refused at build time when it is zero (the heap runtime asserts it where it
+reads them), and the timeout, when it is declared, must not be shorter than the interval; every
+limit here is declared in `deploy/wz-config.toml`.
 
 ## What has to stay true
 
@@ -130,18 +131,31 @@ pacing is on, and the cursor removes it; that part is worth landing as its own c
 
 ## Phases
 
-1. This document.
+1. This document. DONE.
 2. `ReplayCursor` in `wz-session-core`, pure, with a unit test per return value of `inserted` and
-   `removed`, per rule of 2 to 5, and the policy `declaration-sync-pacing` with its three limits,
+   `removed`. DONE. Then the policy `declaration-sync-pacing` with its burst and interval limits,
    declared in the same change as the first code that reads them (a switch no code reads is not
-   landed). The heap runtime's `replay_declarations` is the first host: off is the same single
-   call, on is the paced turns, with the pair of tests of rule 6 over a recording link.
+   landed). DONE for the heap runtime, the first host: `DeclarationCache` holds the replay and the
+   cursor together, every live declaration and retraction goes through one per-kind method of
+   `SessionLinkActions` that asks the cache what to do about the peer, and the reconnect
+   supervisor (`ReconnectingSession`) runs the turns between the session's own work (`select!`,
+   one task, so a failing turn ends the drive with its error). Off is the same single call, with
+   a test that a paced replay of one turn sends the unpaced replay's bytes, and a supervisor test
+   over real TCP for both.
 3. `declarations_synced` and `wait_declarations_stable` on the heap session, and the per-peer
    completion of the queryable and token planes beside the subscriber plane that has it today
    (`initial_final`).
 4. The cooperative engine's `redeclare` and the slot node's `declare_all` take the cursor, each
    written by the session that owns the file (the cooperative engine: session 11; the slot node:
    session ef, who offered to do or review it). This document does not edit their files.
+
+## What a user of aliased sends must know
+
+A declaration made during a paced replay is replayed in its turn, and a data message that names a
+mapping id (an aliased publish) is valid at the peer only after the declaration of that mapping has
+reached it. A literal publish names its key in full and is always valid. An application that sends
+aliased messages therefore waits for `declarations_synced` (phase 3) before it does; until that
+exists, such an application keeps the policy off.
 
 ## Not part of this
 

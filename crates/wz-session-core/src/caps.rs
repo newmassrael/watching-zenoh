@@ -372,3 +372,14 @@ pub const QUERIER_MAX_PENDING_QUERIES: usize = generated::QUERIER_MAX_PENDING_QU
 /// total wait, `wait_before_close`, which bounds the message as before. A time and not a
 /// table size: it sizes no memory.
 pub const TX_NO_PROGRESS_WINDOW_US: usize = generated::TX_NO_PROGRESS_WINDOW_US;
+
+/// How many declarations one turn of a paced declaration replay sends, when the
+/// `declaration-sync-pacing` policy is on (`docs/declaration-sync-pacing.md`). It is read only
+/// then, by the reconnect supervisor of the heap runtime, and must be at least `1`: a turn that
+/// sends nothing never finishes. A count of messages and not a table size: it sizes no memory.
+pub const DECLARATION_SYNC_BURST_MESSAGES: usize = generated::DECLARATION_SYNC_BURST_MESSAGES;
+
+/// How long, in milliseconds, a paced declaration replay waits between two turns, when the
+/// `declaration-sync-pacing` policy is on. It is read only then, and must be at least `1`. A time
+/// and not a table size: it sizes no memory.
+pub const DECLARATION_SYNC_INTERVAL_MS: usize = generated::DECLARATION_SYNC_INTERVAL_MS;

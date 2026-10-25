@@ -67,6 +67,9 @@ pub struct SessionPolicy {
     /// `tx-expiry-keeps-session`. Upstream: Closes the session as unresponsive when a
     /// blocking message found no room in its deadline, and tells the sender nothing.
     pub tx_expiry_keeps_session: bool,
+    /// `declaration-sync-pacing`. Upstream: Replays every declaration it holds to a new
+    /// peer in one call, as soon as the session is open again.
+    pub declaration_sync_pacing: bool,
     /// `entity-timestamp-opt-in`. Upstream: Hands every received sample's timestamp to the
     /// subscriber and every reply's to the querier, and lets any publisher attach the
     /// timestamp it is given.
@@ -79,11 +82,13 @@ impl SessionPolicy {
         let multicast_loopback = MulticastLoopback::stated();
         let tx_no_progress_deadline = policy_bool(option_env!("WZ_POLICY_TX_NO_PROGRESS_DEADLINE"));
         let tx_expiry_keeps_session = policy_bool(option_env!("WZ_POLICY_TX_EXPIRY_KEEPS_SESSION"));
+        let declaration_sync_pacing = policy_bool(option_env!("WZ_POLICY_DECLARATION_SYNC_PACING"));
         let entity_timestamp_opt_in = policy_bool(option_env!("WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"));
         Self {
             multicast_loopback,
             tx_no_progress_deadline,
             tx_expiry_keeps_session,
+            declaration_sync_pacing,
             entity_timestamp_opt_in,
         }
     }

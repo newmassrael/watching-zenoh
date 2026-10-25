@@ -748,6 +748,162 @@ async fn queryable_declares_replay_after_link_loss_and_reconnect() {
     .await;
 }
 
+/// Drive an Established acceptor session until `count` inbound `Declare`s have been observed and
+/// return each one's Debug rendering with the instant it arrived: the timed twin of
+/// [`collect_first_declare`], for a replay whose turns are spread over time.
+async fn collect_declares_timed(
+    opened: &mut OpenedSession,
+    count: usize,
+) -> Vec<(std::time::Instant, String)> {
+    let mut declares = Vec::new();
+    while declares.len() < count {
+        let outcome = drive_session_until_terminal(
+            &mut opened.inbound,
+            &opened.actions,
+            &mut opened.engine,
+            Some(1),
+            &opened.clock,
+            &SessionTimeouts::spec_defaults(),
+            |event| {
+                if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) =
+                    event
+                {
+                    for message in messages {
+                        if matches!(message, NetworkMessage::Declare(_)) {
+                            declares.push((std::time::Instant::now(), format!("{message:?}")));
+                        }
+                    }
+                }
+            },
+        )
+        .await;
+        assert!(
+            !matches!(outcome, DriverOutcome::Terminated),
+            "peer terminated before all {count} Declares arrived (got {})",
+            declares.len()
+        );
+    }
+    declares
+}
+
+/// The `declaration-sync-pacing` policy end to end: a supervised client holds five declarations,
+/// the link is lost, and with a pace of two declarations a turn and a wait between turns the new
+/// peer is told all five, once each and in the order they were declared, over at least two waits,
+/// and the supervisor is stopped cleanly afterwards. The unpaced control below tells the same peer
+/// the same five in the same order.
+async fn assert_paced_replay_tells_the_peer_everything(
+    pacing: Option<wz_runtime_tokio::reconnect::ReplayPacing>,
+) -> std::time::Duration {
+    const DECLARED: usize = 5;
+    let (listener, locator) = ip_loopback().await;
+    let mut params = fixture_session_init_params();
+    params.zid = vec![0x01; 4];
+    let policy = ReconnectPolicy {
+        retry_delay_ms: 50,
+        max_attempts: Some(100),
+        ..ReconnectPolicy::default()
+    };
+    let (mut client, (server_conn1, declares_conn1)) = tokio::join!(
+        async {
+            let session = open_session_with_reconnect(
+                locator,
+                params,
+                DialConfig::default(),
+                TokioTime::new(),
+                policy,
+                Some(ITER_CAP),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("client reaches Established");
+            for id in 0..DECLARED as u64 {
+                session
+                    .actions()
+                    .send_declare_subscriber(10 + id, 0, Some(&format!("paced/k{id}")))
+                    .expect("declare subscriber");
+            }
+            session
+        },
+        async {
+            let (stream, _peer) = listener.accept().await.expect("accept");
+            let mut params = fixture_session_init_params();
+            params.zid = vec![0x02; 4];
+            let mut opened = accept_and_open_session(
+                DialedLink::Tcp(stream),
+                params,
+                TokioTime::new(),
+                Some(ITER_CAP),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("acceptor reaches Established");
+            let declares = collect_declares_timed(&mut opened, DECLARED).await;
+            (opened, declares)
+        },
+    );
+    assert_eq!(declares_conn1.len(), DECLARED);
+    client.set_replay_pacing(pacing);
+    drop(server_conn1);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_for_server = stop.clone();
+    let timeouts = SessionTimeouts::spec_defaults();
+    let (outcome, declares_conn2) = tokio::join!(
+        client.drive(&timeouts, &stop, Some(ITER_CAP), |_| {}),
+        async {
+            let (stream, _peer) = listener.accept().await.expect("accept");
+            let mut params = fixture_session_init_params();
+            params.zid = vec![0x02; 4];
+            let mut opened = accept_and_open_session(
+                DialedLink::Tcp(stream),
+                params,
+                TokioTime::new(),
+                Some(ITER_CAP),
+                DEFAULT_OPEN_TICK_MS,
+            )
+            .await
+            .expect("acceptor reaches Established");
+            let declares = collect_declares_timed(&mut opened, DECLARED).await;
+            stop_for_server.store(true, Ordering::Release);
+            drop(opened);
+            declares
+        },
+    );
+    assert!(
+        matches!(outcome, ReconnectDriveOutcome::Stopped),
+        "supervisor must observe the stop flag, got {outcome:?}"
+    );
+    let told_first: Vec<&String> = declares_conn1.iter().map(|(_, text)| text).collect();
+    let told_again: Vec<&String> = declares_conn2.iter().map(|(_, text)| text).collect();
+    assert_eq!(
+        told_again, told_first,
+        "the new peer is told the same declarations, in the same order, once each"
+    );
+    declares_conn2.last().expect("declares").0 - declares_conn2.first().expect("declares").0
+}
+
+/// Paced: five declarations at two a turn are three turns with two waits of 100 ms between them,
+/// so the peer hears the first and the last at least 120 ms apart (the slack covers the delivery
+/// delay of the first, which can only shorten what the receiver measures).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paced_replay_tells_the_new_peer_everything_in_turns() {
+    let span = assert_paced_replay_tells_the_peer_everything(
+        wz_runtime_tokio::reconnect::ReplayPacing::new(2, 100),
+    )
+    .await;
+    assert!(
+        span >= std::time::Duration::from_millis(120),
+        "three turns with two 100 ms waits cannot arrive within {span:?}"
+    );
+}
+
+/// The control: with no pacing the same scenario tells the peer the same declarations in the same
+/// order (asserted inside), as the policy being off does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unpaced_replay_tells_the_new_peer_the_same_declarations() {
+    let _ = assert_paced_replay_tells_the_peer_everything(None).await;
+}
+
 /// R311pw — debt B: a DNS-NAMED `--connect` endpoint reconnects. The supervisor
 /// previously held only a numeric [`parse_locator`] result, so a hostname —
 /// which the dial seam classifies to `AnyLocator::Named` (R311ps) — could be
