@@ -175,11 +175,52 @@ callbacks are slow and leaves the rest inline.
      free but others are held waits behind them (the case a no-overtaking rule exists for, and the
      one a first version of the test did not discriminate); a sample longer than the area is refused
      under both answers and not held; the default answer is the build's.
-4. The snapshot through `adminspace-metrics`.
+4. The snapshot through `adminspace-metrics`. NOT DONE, and not planned as written: the metrics
+   registry (`stats_registry`) mirrors upstream's `zenoh-stats` names and labels one for one, and
+   upstream has no delivery lane, so a lane gauge there would be a name upstream never emits in a
+   namespace that exists to match it. The snapshot is `OffloadedSubscriber::stats()` today. Whether
+   a deployment's admin space should show it is a decision about wz's own vocabulary beside
+   upstream's, and waits for a deployment that asks.
 5. The cooperative engine and the slot node take the lane, each written by the session that owns the
    file (session 11 and session ef).
-6. Measurement: callback latency and receive throughput for inline, buffered and lane, on the same
-   machine and condition, before any claim that the lane is better than either.
+6. Measurement, on one machine in one condition. DONE for the tokio host
+   (`crates/wz-runtime-tokio/tests/rx_delivery_lane_cost.rs`, which prints and asserts only that
+   every sample was delivered in order):
+
+   Run on the shared build machine (32 cores), release build, three runs of the whole table that
+   agreed within a few per cent, a callback that busy-waits `W` microseconds, ONE subscriber, a lane
+   of 64 events and 65536 bytes, a payload of 4 bytes (and of 1000 bytes in one run, which moved
+   nothing below by more than the noise). Times are for the whole burst of `n` samples.
+
+   | n | W (us) | inline dispatch | buffered dispatch | offloaded `reject` dispatch | offloaded `block` dispatch | total until every callback ran (inline / lane) |
+   |---|---|---|---|---|---|---|
+   | 64 | 0 | 35 us | 45 us | 45 us | 45 us | 35 / 45 us |
+   | 64 | 20 | 1.3 ms | 33 us | 35 us | 35 us | 1.31 / 1.34 ms |
+   | 64 | 200 | 12.85 ms | 33 us | 40 us | 45 us | 12.87 / 12.90 ms |
+   | 256 | 20 | 5.25 ms | 3.97 ms | 0.1 ms (64 of 256 delivered) | 3.99 ms | 5.25 / 5.31 ms |
+   | 256 | 200 | 51.4 ms | 38.4 ms | 0.12 ms (64 of 256 delivered) | 38.6 ms | 51.4 / 51.5 ms |
+
+   What this measures, and nothing beyond it:
+   * **The claim holds that the callback leaves the loop.** A burst the lane can hold costs the
+     dispatching loop 35 to 50 us whatever the callback does, where inline it costs `n * W`
+     (12.85 ms at 200 us a callback: 300 times as much).
+   * **What the lane costs.** On the dispatch call itself, no allocation more than the inline path
+     makes (6.05 per sample, counted on the dispatching thread alone); about 0.1 us a sample more
+     time when the callback does nothing (0.3 us a sample at 256 samples); and the time until the
+     last callback has run is the inline time plus 0 to 1 per cent. The lane does NOT make the
+     callbacks finish sooner: there is one consumer, so the sum of the work is the same.
+   * **`block` is the buffered subscriber's backpressure with the lane's bounds.** When the burst is
+     four times the lane, the loop is held for what the lane cannot absorb (38.6 ms of 51.4 ms at
+     200 us), as the buffered subscriber's is, and nothing is lost; the held path costs 0.75
+     allocations a sample more while a sample waits.
+   * **`reject` never holds the loop and loses what does not fit:** 64 of 256 delivered.
+
+   What it does NOT measure: one subscriber only (several offloaded ones hold one lane each, and
+   what they cost together is not measured); one consumer thread per lane; a drive loop over a real
+   link and its syscalls (the dispatch is called directly); payloads past a kilobyte; contention
+   between the receive lock and a second thread publishing; and zenoh-c or zenoh-pico, which are not
+   in this process, so no comparison with them is claimed. A single machine, and the times of a
+   shared one: the figures are a reading, not a gate.
 
 ## Open for the owner
 
