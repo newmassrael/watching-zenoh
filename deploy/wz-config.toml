@@ -645,9 +645,9 @@ help = "The session node and the traffic driver, one executable driven by its ar
 
 # A node built from a declaration (deploy/nodes/<id>.toml, docs/target-build-contract.md 5b): the
 # package is not in the crates workspace, so its own manifest and binary are named, and the entry
-# takes the declaration as an input (`--node`). The posix port under it exists for Linux and for QNX
-# Neutrino (both stacks, io-pkt and io-sock), so a platform of another operating system is refused by
-# name before anything is built.
+# takes the declaration as an input (`--node`). The posix port under it exists for Linux, for Android
+# and for QNX Neutrino (both stacks, io-pkt and io-sock), so a platform of another operating system
+# is refused by name before anything is built.
 [[artifact]]
 id = "declared-node"
 package = "host-slot-node"
@@ -657,8 +657,8 @@ family = "declared-node"
 input = "node"
 manifest = "deploy/host-slot-node/Cargo.toml"
 bin = "declared-node"
-os = ["linux", "nto"]
-os_note = "its runtime is the posix port, which is written for Linux and QNX Neutrino only"
+os = ["linux", "android", "nto"]
+os_note = "its runtime is the posix port, which is written for Linux, Android and QNX Neutrino only"
 help = "A fixed-memory node built from one node declaration: its endpoint, its documents, its budgets."
 
 [[role]]

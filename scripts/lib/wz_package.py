@@ -1076,18 +1076,24 @@ def _selftest() -> int:
             "which platform linux-x86_64-glibc does not provide",
             lambda: node_entry(node_file(), plat=next(p for p in no_tcp["platforms"] if p["id"] == host),
                                dec=no_tcp))
-    refuses("a node for the android-arm64 platform, whose port does not exist",
-            "operating system android): its runtime is the posix port, which is written for Linux and "
-            "QNX Neutrino only",
-            lambda: preflight(decl, "android-arm64", ["declared-node"]))
-    for qnx in ("qnx710-iosock-aarch64", "qnx710-iopkt-aarch64"):
-        expect(f"a node is accepted for the {qnx} platform, whose port exists",
-               preflight(decl, qnx, ["declared-node"])[1] == [node_row])
-    registered = sorted(p.stem for p in wz_node.NODES.glob("*.toml"))
-    plain, nodes = lane_plan(decl, "android-arm64")
-    expect("the lane asks an Android platform for no node, whose port does not exist",
+    # No platform row names an operating system the port lacks, so one is made: the Android row moved
+    # to an OS nobody ported to.
+    no_port = copy.deepcopy(decl)
+    for p in no_port["platforms"]:
+        if p["id"] == "android-arm64":
+            p["os"] = "haiku"
+    refuses("a node for a platform whose operating system has no port",
+            "operating system haiku): its runtime is the posix port, which is written for Linux, "
+            "Android and QNX Neutrino only",
+            lambda: preflight(no_port, "android-arm64", ["declared-node"]))
+    plain, nodes = lane_plan(no_port, "android-arm64")
+    expect("the lane asks a platform whose operating system has no port for no node",
            nodes == [] and "declared-node" not in plain and plain != [])
-    for with_port in ("qnx710-iosock-aarch64", "linux-aarch64-glibc"):
+    for with_port in ("android-arm64", "qnx710-iosock-aarch64", "qnx710-iopkt-aarch64"):
+        expect(f"a node is accepted for the {with_port} platform, whose port exists",
+               preflight(decl, with_port, ["declared-node"])[1] == [node_row])
+    registered = sorted(p.stem for p in wz_node.NODES.glob("*.toml"))
+    for with_port in ("android-arm64", "qnx710-iosock-aarch64", "linux-aarch64-glibc"):
         plain, nodes = lane_plan(decl, with_port)
         expect(f"the lane asks {with_port} for every registered node and the artifacts that need none",
                nodes == registered and registered != [] and "declared-node" not in plain)

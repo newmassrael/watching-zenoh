@@ -118,6 +118,14 @@ pub(crate) fn errno() -> c_int {
     unsafe { *libc::__errno_location() }
 }
 
+/// The calling thread's `errno`: bionic's `__errno()`, the same address by another name.
+#[cfg(target_os = "android")]
+pub(crate) fn errno() -> c_int {
+    // SAFETY: `__errno` returns the address of the calling thread's `errno`, valid for the
+    // thread's life.
+    unsafe { *libc::__errno() }
+}
+
 /// The calling thread's `errno`.
 #[cfg(target_os = "nto")]
 pub(crate) fn errno() -> c_int {

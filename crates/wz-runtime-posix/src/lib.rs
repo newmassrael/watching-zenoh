@@ -28,14 +28,15 @@
 //! The profile is single-threaded by construction, and the `critical_section` implementation says
 //! so: it takes no lock, because nothing else runs.
 //!
-//! Linux and QNX Neutrino only. Two OS calls differ between them and are named once each: `errno`
-//! (glibc's `__errno_location`, Neutrino's `__get_errno_ptr`) and the entropy (`getrandom(2)`;
-//! Neutrino 7.1's C library has none, so `/dev/urandom` is read). A socket the two make alike is
-//! made by one code path, and the one thing Linux has that Neutrino does not (`SOCK_NONBLOCK`,
-//! `accept4`) is two calls where Linux has one. On another OS this crate is empty, so a
-//! workspace-wide build there does not stop on it; a port names its own calls here.
+//! Linux, Android and QNX Neutrino only. Two OS calls differ between them and are named once each:
+//! `errno` (glibc's `__errno_location`, bionic's `__errno`, Neutrino's `__get_errno_ptr`) and the
+//! entropy (`getrandom(2)` on Linux and Android; Neutrino 7.1's C library has none, so
+//! `/dev/urandom` is read). A socket the three make alike is made by one code path, and the one
+//! thing Linux has that Neutrino does not (`SOCK_NONBLOCK`, `accept4`) is two calls where Linux has
+//! one. On another OS this crate is empty, so a workspace-wide build there does not stop on it; a
+//! port names its own calls here.
 #![no_std]
-#![cfg(any(target_os = "linux", target_os = "nto"))]
+#![cfg(any(target_os = "linux", target_os = "android", target_os = "nto"))]
 
 #[cfg(test)]
 extern crate std;
@@ -108,7 +109,7 @@ impl wz_session_core::entropy::EntropySource for PosixEntropy {
 
 /// Fill the front of `rest` from the kernel's CSPRNG: how many bytes it gave, none when it could
 /// not.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn random_bytes(rest: &mut [u8]) -> usize {
     // SAFETY: `rest` is live and writable for its whole length.
     let got = unsafe { libc::getrandom(rest.as_mut_ptr().cast(), rest.len(), 0) };
