@@ -287200,6 +287200,46 @@
         "Read the hosted runs of the earlier pushes at the start of the next round."
       ]
     },
+    "Round 3631": {
+      "decision_summary": "The fixed-memory slot node no longer repeats its whole declaration list after one refused send. Each session keeps a ReplayCursor in place of the declared flag, a tick runs one replay turn over the static declaration slice, and a send the session's stage refuses puts the cursor back on the entry that failed, so the entries that went out are not sent again. The burst of a turn is the whole list, because the pacing policy is not declared anywhere yet: today's frames are the same, only the repeat is gone. A node can now ask whether every established session has been told every declaration (declarations_synced). The session keeps declared() and mark_declared(), because the lwIP slot node sends its declarations in one step and has no sequence to resume. This is phase 4 of the pacing design for the slot node; the cooperative engine's redeclare stays with its owner.",
+      "changes_bullets": [
+        "crates/wz-session-mcu/src/slot_dial.rs: SlotSession holds a replay cursor (none until a replay begins); declared() reads it as finished, mark_declared() sets an idle one, replay() and set_replay() give and keep it.",
+        "crates/wz-session-mcu/src/slot_client.rs: replay_declarations and replay_turn replace declare_all, with four unit tests (each entry once in order, a refused entry resumes in place, a burst bounds a turn, an empty list is finished) and SlotClientNode::declarations_synced.",
+        "scripts/run-ci.sh (C1m guarded leg of 4 for the replay tests) and docs/declaration-sync-pacing.md (the slot node's row says what it does now)."
+      ],
+      "verification_bullets": [
+        "The four replay tests pass, and clippy over wz-session-mcu and wz-session-lwip with every feature and warnings denied is clean, before and after the rebase onto the tip that carries the planner change to the same dial file.",
+        "The client, get-batching and tls images and the declared answerer, server and group images build; the declared answerer, recorder, reporter, asker and beacon witnesses (two legs each) and the server witness (three legs) pass against the reference router and stock peers with the packaged nodes; the round-fed array (113), the guarded-count gate over the range and the resource budget gate pass.",
+        "Not run: the replay under a stage that really refuses (the unit tests refuse by a stub; no witness makes the stage busy), the Zephyr and lwIP images, the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha. Read the next hosted Qzb after the planner change that shrank the connect manager's frames and send the Zephyr kit's chain figure to its author, who moves the budget row to what is read; the old 8,900-byte figure is not to be committed.",
+        "Phase 4 for the cooperative engine's redeclare is its owner's; the pacing policy and its three limits are still declared nowhere, so the slot node's burst stays the whole list until they are.",
+        "A group's table of members fills silently: a JOIN past the row count is refused with no count and no line. A refusal count in the group's report is the small change."
+      ],
+      "publishable_decision_summary": "The fixed-memory slot node no longer repeats its whole declaration list after one refused send. Each session keeps a ReplayCursor in place of the declared flag, a tick runs one replay turn over the static declaration slice, and a send the session's stage refuses puts the cursor back on the entry that failed, so the entries that went out are not sent again. The burst of a turn is the whole list, because the pacing policy is not declared anywhere yet: today's frames are the same, only the repeat is gone. A node can now ask whether every established session has been told every declaration (declarations_synced). The session keeps declared() and mark_declared(), because the lwIP slot node sends its declarations in one step and has no sequence to resume. This is phase 4 of the pacing design for the slot node; the cooperative engine's redeclare stays with its owner.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu/src/slot_dial.rs: SlotSession holds a replay cursor (none until a replay begins); declared() reads it as finished, mark_declared() sets an idle one, replay() and set_replay() give and keep it.",
+        "crates/wz-session-mcu/src/slot_client.rs: replay_declarations and replay_turn replace declare_all, with four unit tests (each entry once in order, a refused entry resumes in place, a burst bounds a turn, an empty list is finished) and SlotClientNode::declarations_synced.",
+        "scripts/run-ci.sh (C1m guarded leg of 4 for the replay tests) and docs/declaration-sync-pacing.md (the slot node's row says what it does now)."
+      ],
+      "publishable_verification_bullets": [
+        "The four replay tests pass, and clippy over wz-session-mcu and wz-session-lwip with every feature and warnings denied is clean, before and after the rebase onto the tip that carries the planner change to the same dial file.",
+        "The client, get-batching and tls images and the declared answerer, server and group images build; the declared answerer, recorder, reporter, asker and beacon witnesses (two legs each) and the server witness (three legs) pass against the reference router and stock peers with the packaged nodes; the round-fed array (113), the guarded-count gate over the range and the resource budget gate pass.",
+        "Not run: the replay under a stage that really refuses (the unit tests refuse by a stub; no witness makes the stage busy), the Zephyr and lwIP images, the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha. Read the next hosted Qzb after the planner change that shrank the connect manager's frames and send the Zephyr kit's chain figure to its author, who moves the budget row to what is read; the old 8,900-byte figure is not to be committed.",
+        "Phase 4 for the cooperative engine's redeclare is its owner's; the pacing policy and its three limits are still declared nowhere, so the slot node's burst stays the whole list until they are.",
+        "A group's table of members fills silently: a JOIN past the row count is refused with no count and no line. A refusal count in the group's report is the small change."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
