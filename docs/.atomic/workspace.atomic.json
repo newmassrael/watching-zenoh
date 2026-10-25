@@ -289092,6 +289092,62 @@
         "The QNX build workspace on the SDK machine (toolchain, synced source, release cache, about 5 GB) is still there; removing it is the owner's decision."
       ]
     },
+    "Round 3677": {
+      "decision_summary": "An offloaded subscriber's full delivery lane can make the session wait for room instead of refusing, and a build or a declaration chooses which: the policy subscriber-overload (block, reject; default block, the blocking handler upstream gives) with SubscribeOptions::with_overload (docs/rx-delivery-lane.md, phase 3b). Under block the sink cannot wait, since it runs under the observer lock the consumer's callback may wait for, so it holds a copy of the sample outside the lane and returns; the drain step the drive loop already awaits admits held samples in order and waits for room, so nothing is lost and a slow callback slows the session. A sample arriving while others are held waits behind them even if the lane has room. A sample longer than the whole byte area could wait for ever, so it is refused under either answer. The lane gains fits and can_ever_fit, which count nothing. The capability rx-callback-offload is not declared: no C ABI door exports the API.",
+      "changes_bullets": [
+        "deploy/wz-config.toml declares the policy subscriber-overload (choice block or reject, default block), with the upstream behaviour it matches; the generated SessionPolicy field and the Kconfig follow.",
+        "crates/wz-runtime-tokio session/subscriber.rs: SubscribeOptions::with_overload and overload, defaulting to the build's policy.",
+        "crates/wz-runtime-tokio session/offload.rs: the sink captures a sample once and either writes it to the lane, holds it outside the lane under block (and behind any held sample), or refuses it and counts it; OffloadLane is a BufferedDrain whose drain admits held samples in order and awaits the room notification the consumer sends after each sample; OffloadStats gains held; a sample longer than the byte area is never held.",
+        "crates/wz-runtime-tokio session/buffered.rs: RegisteredDrain::of lets a sibling module register a drain on the kernel's registry, which holds it weakly.",
+        "crates/wz-session-core delivery_lane.rs: fits (would a sample be admitted, counting nothing) and can_ever_fit, with tests.",
+        "tests (session/tests.rs): under block a full lane holds and loses nothing, the drain waits while the consumer is held and admits in order, and a late sample waits behind held ones although a slot is free; a sample longer than the area is refused under both answers and not held; the default answer is the build's; the 3a refusal tests name reject. The test gate became a permit counter so one callback can be let finish.",
+        "docs/rx-delivery-lane.md records phase 3b as done, and why the capability is not declared."
+      ],
+      "verification_bullets": [
+        "On the build host the whole wz-runtime-tokio lib suite (2297 passed, 4 ignored) and the wz-session-core lib suite (2687 passed) pass with all features; the ten tests of the offloaded subscriber pass.",
+        "Red first, three times, each reverted with no trace left: block made to refuse fails the block test and the refusal test; block with no guard for a sample that never fits fails exactly the byte-bound test; block without the rule that a sample waits behind held ones passed the first version of the test, which had no case that told the two apart, and fails exactly the block test once it had one (a slot freed by letting one callback finish, then a late sample).",
+        "clippy -D warnings over all targets and all features exits 0 for wz-runtime-tokio and wz-session-core; cargo doc counts 438 and 494, exactly their budgets (the first was lowered by another session before this change); the pre-push round-fed array, 113 gates, exits 0 before the rebase and again after.",
+        "Not run: the hosted run, the block answer under a real drive loop over a link (the tests await the drain by hand), a measurement of what block costs a session against inline delivery, and the C ABIs, the cooperative engine and the slot node."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "The block answer is tested by awaiting the drain by hand; the drive loop awaits it unasked through the buffered registry, but no test drives a real loop over a link with an offloaded subscriber. Add one before block is relied on in a deployment.",
+        "A refused RELIABLE sample is still only counted: a recorded local failure on the receive path needs a result channel from the registry's sink seam.",
+        "One lane per subscription, so the byte bound is per subscription; a lane for the whole session is a change to the session's state.",
+        "The capability rx-callback-offload is declared with the first C ABI door that exports the API, or the cooperative engine and the slot node take the lane (sessions 11 and ef), whichever comes first.",
+        "No claim that the lane or block is faster than inline or buffered delivery: measure callback latency and receive throughput on one machine and condition first.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "An offloaded subscriber's full delivery lane can make the session wait for room instead of refusing, and a build or a declaration chooses which: the policy subscriber-overload (block, reject; default block, the blocking handler upstream gives) with SubscribeOptions::with_overload (docs/rx-delivery-lane.md, phase 3b). Under block the sink cannot wait, since it runs under the observer lock the consumer's callback may wait for, so it holds a copy of the sample outside the lane and returns; the drain step the drive loop already awaits admits held samples in order and waits for room, so nothing is lost and a slow callback slows the session. A sample arriving while others are held waits behind them even if the lane has room. A sample longer than the whole byte area could wait for ever, so it is refused under either answer. The lane gains fits and can_ever_fit, which count nothing. The capability rx-callback-offload is not declared: no C ABI door exports the API.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml declares the policy subscriber-overload (choice block or reject, default block), with the upstream behaviour it matches; the generated SessionPolicy field and the Kconfig follow.",
+        "crates/wz-runtime-tokio session/subscriber.rs: SubscribeOptions::with_overload and overload, defaulting to the build's policy.",
+        "crates/wz-runtime-tokio session/offload.rs: the sink captures a sample once and either writes it to the lane, holds it outside the lane under block (and behind any held sample), or refuses it and counts it; OffloadLane is a BufferedDrain whose drain admits held samples in order and awaits the room notification the consumer sends after each sample; OffloadStats gains held; a sample longer than the byte area is never held.",
+        "crates/wz-runtime-tokio session/buffered.rs: RegisteredDrain::of lets a sibling module register a drain on the kernel's registry, which holds it weakly.",
+        "crates/wz-session-core delivery_lane.rs: fits (would a sample be admitted, counting nothing) and can_ever_fit, with tests.",
+        "tests (session/tests.rs): under block a full lane holds and loses nothing, the drain waits while the consumer is held and admits in order, and a late sample waits behind held ones although a slot is free; a sample longer than the area is refused under both answers and not held; the default answer is the build's; the 3a refusal tests name reject. The test gate became a permit counter so one callback can be let finish.",
+        "docs/rx-delivery-lane.md records phase 3b as done, and why the capability is not declared."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host the whole wz-runtime-tokio lib suite (2297 passed, 4 ignored) and the wz-session-core lib suite (2687 passed) pass with all features; the ten tests of the offloaded subscriber pass.",
+        "Red first, three times, each reverted with no trace left: block made to refuse fails the block test and the refusal test; block with no guard for a sample that never fits fails exactly the byte-bound test; block without the rule that a sample waits behind held ones passed the first version of the test, which had no case that told the two apart, and fails exactly the block test once it had one (a slot freed by letting one callback finish, then a late sample).",
+        "clippy -D warnings over all targets and all features exits 0 for wz-runtime-tokio and wz-session-core; cargo doc counts 438 and 494, exactly their budgets (the first was lowered by another session before this change); the pre-push round-fed array, 113 gates, exits 0 before the rebase and again after.",
+        "Not run: the hosted run, the block answer under a real drive loop over a link (the tests await the drain by hand), a measurement of what block costs a session against inline delivery, and the C ABIs, the cooperative engine and the slot node."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "The block answer is tested by awaiting the drain by hand; the drive loop awaits it unasked through the buffered registry, but no test drives a real loop over a link with an offloaded subscriber. Add one before block is relied on in a deployment.",
+        "A refused RELIABLE sample is still only counted: a recorded local failure on the receive path needs a result channel from the registry's sink seam.",
+        "One lane per subscription, so the byte bound is per subscription; a lane for the whole session is a change to the session's state.",
+        "The capability rx-callback-offload is declared with the first C ABI door that exports the API, or the cooperative engine and the slot node take the lane (sessions 11 and ef), whichever comes first.",
+        "No claim that the lane or block is faster than inline or buffered delivery: measure callback latency and receive throughput on one machine and condition first.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
