@@ -175,6 +175,12 @@ pub mod quota;
 /// Unconditional, no_std and no_alloc.
 pub mod replay_cursor;
 
+/// The pace of a paced declaration replay: [`replay_pacing::ReplayPacing`], the burst and the
+/// interval between turns, and the pace a build states through the `declaration-sync-pacing`
+/// policy. A value and not a clock, so the heap runtime and the slot node hold the same type.
+/// Unconditional, no_std and no_alloc.
+pub mod replay_pacing;
+
 /// Who sees a sample's timestamp: the `entity-timestamp-opt-in` policy's shared half, the default
 /// an entity gets ([`timestamp_visibility::default_exposed`]), the view that hides a timestamp
 /// ([`timestamp_visibility::HiddenTimestamp`]), and the conversion of a time in milliseconds to

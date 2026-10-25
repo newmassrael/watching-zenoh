@@ -282,58 +282,12 @@ pub struct ReconnectingSession {
     replay_pacing: Option<ReplayPacing>,
 }
 
-/// The pace of a paced declaration replay (`docs/declaration-sync-pacing.md`): how many
-/// declarations a turn sends and how long to wait between turns. The supervisor holds it as an
-/// `Option` and so a test, or a caller that wants it on regardless of the build, can state it
+/// The pace of a paced declaration replay (`docs/declaration-sync-pacing.md`), shared with the
+/// slot node and so defined in `wz-session-core`. The supervisor holds it as an `Option`, so a
+/// test, or a caller that wants it on regardless of the build, can state it
 /// ([`ReconnectingSession::set_replay_pacing`]); the build states it through
-/// [`Self::from_build`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReplayPacing {
-    burst: usize,
-    interval_ms: u64,
-}
-
-impl ReplayPacing {
-    /// A pace of `burst` declarations a turn and `interval_ms` between turns. Both must be at least
-    /// 1: a turn that sends nothing would never finish, and no wait would run the turns together.
-    pub const fn new(burst: usize, interval_ms: u64) -> Option<Self> {
-        if burst == 0 || interval_ms == 0 {
-            None
-        } else {
-            Some(Self { burst, interval_ms })
-        }
-    }
-
-    /// The pace the build states: `None`, upstream's one call, unless the `declaration-sync-pacing`
-    /// policy is on, in which case the pace is the burst and interval limits. The limits are
-    /// checked where they are used, at compile time, so a build that sets one to zero does not
-    /// build.
-    pub const fn from_build() -> Option<Self> {
-        const _: () = assert!(
-            wz_session_core::caps::DECLARATION_SYNC_BURST_MESSAGES >= 1
-                && wz_session_core::caps::DECLARATION_SYNC_INTERVAL_MS >= 1,
-            "DECLARATION_SYNC_BURST_MESSAGES and DECLARATION_SYNC_INTERVAL_MS must be at least 1"
-        );
-        if wz_session_core::policy::SessionPolicy::from_build().declaration_sync_pacing {
-            Self::new(
-                wz_session_core::caps::DECLARATION_SYNC_BURST_MESSAGES,
-                wz_session_core::caps::DECLARATION_SYNC_INTERVAL_MS as u64,
-            )
-        } else {
-            None
-        }
-    }
-
-    /// Declarations sent in one turn.
-    pub const fn burst(&self) -> usize {
-        self.burst
-    }
-
-    /// Milliseconds between two turns.
-    pub const fn interval_ms(&self) -> u64 {
-        self.interval_ms
-    }
-}
+/// [`ReplayPacing::from_build`].
+pub use wz_session_core::replay_pacing::ReplayPacing;
 
 /// R311py — the handles [`ReconnectingSession::into_teardown`] hands back: the
 /// surviving [`SessionLinkActions`] bundle (the last sink clone — the writer
@@ -903,7 +857,7 @@ pub async fn open_session_with_reconnect(
         opened,
         reconnects: 0,
         liveliness_session: None,
-        replay_pacing: ReplayPacing::from_build(),
+        replay_pacing: ReplayPacing::BUILD,
     })
 }
 
@@ -996,38 +950,5 @@ mod backoff_tests {
             // start at 500; a factor read from either period would not be 3x.
             vec![70, 210, 500, 500],
         );
-    }
-}
-
-#[cfg(test)]
-mod replay_pacing_tests {
-    use super::*;
-
-    /// A pace of nothing is refused: a turn that sends nothing never finishes, and no wait would
-    /// run the turns together.
-    #[test]
-    fn a_pace_needs_a_burst_and_a_wait_of_at_least_one() {
-        assert_eq!(ReplayPacing::new(0, 10), None);
-        assert_eq!(ReplayPacing::new(8, 0), None);
-        let pace = ReplayPacing::new(8, 10).expect("a real pace");
-        assert_eq!((pace.burst(), pace.interval_ms()), (8, 10));
-    }
-
-    /// The build states the pace through the policy: off is upstream's one call, on is the two
-    /// limits. The test build states nothing, so this asserts the default and that the two agree.
-    #[test]
-    fn the_build_states_a_pace_exactly_when_the_policy_is_on() {
-        let on = wz_session_core::policy::SessionPolicy::from_build().declaration_sync_pacing;
-        assert_eq!(ReplayPacing::from_build().is_some(), on);
-        if let Some(pace) = ReplayPacing::from_build() {
-            assert_eq!(
-                pace.burst(),
-                wz_session_core::caps::DECLARATION_SYNC_BURST_MESSAGES
-            );
-            assert_eq!(
-                pace.interval_ms(),
-                wz_session_core::caps::DECLARATION_SYNC_INTERVAL_MS as u64
-            );
-        }
     }
 }

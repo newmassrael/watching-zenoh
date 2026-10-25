@@ -77,7 +77,7 @@ different shapes:
 |---|---|---|---|
 | Heap runtime (tokio) | one ordered `Vec` of cached declarations, `SessionCore::declaration_cache` | yes | `replay_declarations`, one call, from the reconnect driver |
 | Cooperative engine | separate lists by kind (key expressions, subscribers, interests, queryables, tokens, liveliness) | yes | `Core::redeclare`, one call, kinds in a fixed order |
-| Fixed-memory slot node | one `&'static [Declaration]` built at start, wire id = index + 1 | no | `replay_declarations` (`slot_client`), one turn per established session over a per-session `ReplayCursor` whose burst is the whole list until the policy is declared; a refused send resumes at the entry it failed on (it was the whole list from index 0 before phase 4 landed for this host) |
+| Fixed-memory slot node | one `&'static [Declaration]` built at start, wire id = index + 1 | no | `replay_declarations` (`slot_client`), one turn per established session over a per-session `ReplayCursor`, a burst and an interval from `ReplayPacing` (in `wz-session-core`, the one type the heap runtime shares) when the policy is on and the whole list when it is off, and a per-session next-turn time that holds the next turn back; a refused send resumes at the entry it failed on (it was the whole list from index 0 before phase 4 landed for this host) |
 
 What is common is not a cache. It is a position in a sequence the host can recite in a fixed order.
 So the shared part is a pure type with no list, no clock, no heap and no I/O, in `wz-session-core`:
@@ -147,7 +147,10 @@ pacing is on, and the cursor removes it; that part is worth landing as its own c
    (`initial_final`).
 4. The cooperative engine's `redeclare` and the slot node's `declare_all` take the cursor, each
    written by the session that owns the file (the cooperative engine: session 11; the slot node:
-   session ef, who offered to do or review it). This document does not edit their files.
+   session ef, who offered to do or review it). This document does not edit their files. DONE for
+   the slot node: the cursor (a refused send resumes where it failed), then the policy's burst and
+   interval through the shared `ReplayPacing`, with `SlotClientNode::declarations_synced`. The
+   cooperative engine's `redeclare` is not done.
 
 ## What a user of aliased sends must know
 

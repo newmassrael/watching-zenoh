@@ -92,6 +92,10 @@ pub struct SlotSession<C: ClockSource + 'static> {
     /// its cursor with it, so a redial or a new accept begins at the start, as a peer that holds
     /// nothing needs.
     replay: Cell<Option<ReplayCursor>>,
+    /// The time, in the node's milliseconds, before which the replay sends nothing more: the end of
+    /// the wait a paced turn leaves. `0` is due now, which is every session's state until its first
+    /// turn and the state of an unpaced one throughout.
+    next_turn_ms: Cell<u64>,
 }
 
 impl<C: ClockSource + 'static> SlotSession<C> {
@@ -101,6 +105,7 @@ impl<C: ClockSource + 'static> SlotSession<C> {
             opened,
             established: false,
             replay: Cell::new(None),
+            next_turn_ms: Cell::new(0),
         }
     }
 
@@ -130,6 +135,16 @@ impl<C: ClockSource + 'static> SlotSession<C> {
     /// Keep where the replay has got to, for the next round to resume from.
     pub fn set_replay(&self, cursor: ReplayCursor) {
         self.replay.set(Some(cursor));
+    }
+
+    /// Whether the replay may send at `now_ms`: the wait the last paced turn left is over.
+    pub fn replay_due(&self, now_ms: u64) -> bool {
+        now_ms >= self.next_turn_ms.get()
+    }
+
+    /// Hold the replay's next turn back until `at_ms`.
+    pub fn set_next_turn(&self, at_ms: u64) {
+        self.next_turn_ms.set(at_ms);
     }
 
     /// Whether the session's task has ended.

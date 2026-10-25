@@ -11858,9 +11858,11 @@ layer_c1m_session_lwip() {
         cargo test -p wz-session-mcu --features group --lib slot_group:: --quiet || return 1
     # The replay of a node's declarations on a session (`slot_client`, the slot profile with
     # `client-slot`): each entry is offered once in order, a refused send resumes at the entry it failed
-    # on and never again at the start, a burst bounds a turn and the turns cover the list, and an empty
-    # list is finished at once: 4 = what that command PRINTED.
-    _runci_guarded_test "C1m mcu slot declaration replay" 4 \
+    # on and never again at the start, a burst bounds a turn and the turns cover the list, an empty
+    # list is finished at once, an unpaced node sends the whole list and a paced one its burst, and
+    # a paced replay waits the interval until it has told the peer everything: 6 = what that command
+    # PRINTED.
+    _runci_guarded_test "C1m mcu slot declaration replay" 6 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_client::tests:: --quiet || return 1
     # Fixed-memory step S6, the exhaustion cases of the N-session pool (R1, R2, R6):
     # a node holds at most the generated MAX_SESSIONS sessions, and every table a

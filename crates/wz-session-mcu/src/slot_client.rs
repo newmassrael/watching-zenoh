@@ -37,6 +37,7 @@ use wz_session_core::query::QueryableRegistry;
 use wz_session_core::query_sink::{FnQuerySink, QueryView, ReplyOut};
 use wz_session_core::registry_error::RegisterError;
 use wz_session_core::replay_cursor::ReplayCursor;
+use wz_session_core::replay_pacing::ReplayPacing;
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::slot_observer::{NoSink, ObserverSinks};
@@ -116,6 +117,9 @@ where
     acceptor: X,
     accepted: BoundedVec<SlotSession<C>, A>,
     over_capacity: u32,
+    /// How the declarations of a session go out: `None`, one turn for the whole list, unless the
+    /// build's `declaration-sync-pacing` policy states a pace ([`ReplayPacing::from_build`]).
+    pacing: Option<ReplayPacing>,
 }
 
 impl<'a, C, T, B, F, X, const S: usize, const P: usize, const A: usize>
@@ -156,7 +160,17 @@ where
             acceptor: listening.acceptor,
             accepted: BoundedVec::new(),
             over_capacity: 0,
+            pacing: ReplayPacing::BUILD,
         }
+    }
+
+    /// State how the declarations of a session go out, for a caller that wants a pace regardless
+    /// of the build (a test, or a node whose image is built for another policy); the build states
+    /// it by default ([`ReplayPacing::from_build`]). `Some` sends the burst's worth of
+    /// declarations a turn, and waits at least the interval before the next: the wait is the
+    /// interval or the node's tick, whichever is longer, because the replay moves on a tick.
+    pub fn set_replay_pacing(&mut self, pacing: Option<ReplayPacing>) {
+        self.pacing = pacing;
     }
 
     /// Every session the node holds, accepted and dialled.
@@ -219,13 +233,14 @@ where
 
     /// Advance the node to `now_ms`: let go of the accepted sessions that have ended, take the
     /// connections that wait on the port, keep the dialled sessions in step with the endpoints,
-    /// and send the declarations on every established session that has not had them.
+    /// and send the declarations on every established session that has not had them: all of them at
+    /// once, or a burst a turn when the node is paced.
     pub fn tick(&mut self, now_ms: u64) {
         self.admit();
         self.manager.tick(now_ms);
         for session in self.live() {
             if session.actions().is_established() && !session.declared() {
-                replay_declarations(session, self.declarations);
+                replay_declarations(session, self.declarations, self.pacing, now_ms);
             }
         }
     }
@@ -291,25 +306,49 @@ where
     }
 }
 
-/// How many declarations one turn of the replay sends. The whole list: the policy that paces a
-/// replay (`docs/declaration-sync-pacing.md`) is not declared yet, so this is the replay of today,
-/// one call for the list, and the cursor is what makes a refused send resume where it failed.
-const REPLAY_BURST: usize = usize::MAX;
+/// How many declarations one turn of the replay sends: the pace's burst, or the whole list when the
+/// node is not paced, which is the replay of upstream and of this node before the policy existed.
+const fn replay_burst(pacing: Option<ReplayPacing>) -> usize {
+    match pacing {
+        Some(pace) => pace.burst(),
+        None => usize::MAX,
+    }
+}
+
+/// When the next turn of a replay may send, after a turn at `now_ms`: `None` when nothing is to be
+/// waited for (the node is not paced, or the replay has told the peer everything), else the end of
+/// the interval. A turn a refused send cut short is not finished, so it waits the interval too: the
+/// stage that refused is given the time a pace is meant to give it.
+fn next_turn_after(pacing: Option<ReplayPacing>, finished: bool, now_ms: u64) -> Option<u64> {
+    match pacing {
+        Some(pace) if !finished => Some(now_ms.saturating_add(pace.interval_ms())),
+        _ => None,
+    }
+}
 
 /// Send the declarations `session`'s peer has not been told, from where the session's replay stands:
 /// the whole list the first time, and after a send the session's stage refused (it was busy) the
 /// entries from the one that failed, never again the ones that went out. A router takes a
 /// declaration it sees twice under one id as the first, so a repeat was harmless on the wire and
 /// wasted a frame each, and a node with many declarations on a busy stage could repeat them for as
-/// long as the stage stayed busy.
+/// long as the stage stayed busy. A paced node sends a burst a turn and leaves the interval between
+/// turns, and does nothing at all at a time before the session's next turn.
 fn replay_declarations<C: ClockSource + 'static>(
     session: &SlotSession<C>,
     declarations: &[Declaration],
+    pacing: Option<ReplayPacing>,
+    now_ms: u64,
 ) {
+    if !session.replay_due(now_ms) {
+        return;
+    }
     let mut cursor = session.replay(declarations.len());
-    replay_turn(&mut cursor, REPLAY_BURST, |at| {
+    replay_turn(&mut cursor, replay_burst(pacing), |at| {
         declare(session.actions(), at as u64 + 1, &declarations[at])
     });
+    if let Some(at_ms) = next_turn_after(pacing, cursor.finished(), now_ms) {
+        session.set_next_turn(at_ms);
+    }
     session.set_replay(cursor);
 }
 
@@ -354,14 +393,17 @@ mod tests {
 
     #[test]
     fn a_replay_with_nothing_refused_offers_each_entry_once_in_order() {
-        assert_eq!(replay(5, REPLAY_BURST, Vec::new(), 4), [0, 1, 2, 3, 4]);
+        assert_eq!(
+            replay(5, replay_burst(None), Vec::new(), 4),
+            [0, 1, 2, 3, 4]
+        );
     }
 
     #[test]
     fn a_refused_send_resumes_at_the_entry_it_failed_on_and_not_at_the_start() {
         // Entry 3 is refused once: 0, 1 and 2 are offered once, 3 twice, and 4 after it.
         assert_eq!(
-            replay(5, REPLAY_BURST, alloc::vec![3], 4),
+            replay(5, replay_burst(None), alloc::vec![3], 4),
             [0, 1, 2, 3, 3, 4],
             "the old repeat of the whole list would offer 0, 1 and 2 again"
         );
@@ -387,8 +429,28 @@ mod tests {
 
     #[test]
     fn a_list_with_no_declaration_is_finished_at_once() {
-        assert!(replay(0, REPLAY_BURST, Vec::new(), 1).is_empty());
+        assert!(replay(0, replay_burst(None), Vec::new(), 1).is_empty());
         assert!(ReplayCursor::begin(0).finished());
+    }
+
+    #[test]
+    fn an_unpaced_node_sends_the_whole_list_and_a_paced_one_its_burst() {
+        assert_eq!(replay_burst(None), usize::MAX);
+        let pace = ReplayPacing::new(3, 10);
+        assert_eq!(replay_burst(pace), 3);
+    }
+
+    #[test]
+    fn a_paced_replay_waits_the_interval_until_it_has_told_the_peer_everything() {
+        let pace = ReplayPacing::new(3, 10);
+        // Mid-replay, or cut short by a refused send: the next turn is an interval on.
+        assert_eq!(next_turn_after(pace, false, 1_000), Some(1_010));
+        // Everything told: nothing to wait for, and the session is not asked again.
+        assert_eq!(next_turn_after(pace, true, 1_000), None);
+        // Not paced: never a wait, whatever the cursor says.
+        assert_eq!(next_turn_after(None, false, 1_000), None);
+        // A clock at the end of its range does not wrap into the past and release the wait.
+        assert_eq!(next_turn_after(pace, false, u64::MAX), Some(u64::MAX));
     }
 }
 
