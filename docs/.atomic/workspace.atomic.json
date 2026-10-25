@@ -286120,6 +286120,54 @@
         "Step 6 is open: the fixed-memory host (a planner over the locator directory, a retry timer and SessionHost::dial, with a no-allocator read of a session's peer zid, since peer_zid is heap-only), the verbs on it, wz-session-lwip forwarding the feature, and the witness on the fixed-memory image; whether the in-band verbs' switchboard needs an allocator is the first thing to read. It goes into wz-session-mcu, where the declared-node session is mid-change (multicast plane) and asked to be left alone, so that crate is arranged with it first. Not paid and not this work's, each with its owner told: the declared-node session's Layers C1/C1bn, C1bf, Qzb; the multicast loopback policy's C0 axis census row; router capacity E7s and E7g. Read the first completed hosted run holding rounds 3597 to 3603."
       ]
     },
+    "Round 3605": {
+      "decision_summary": "Step S1: delivery to the session's own subscribers on the cooperative engine (local-subscriber). A put goes out on the link and then to the subscribers of the session that made it, as zenoh-pico's _z_write does: session-core's loopback fires the ones whose origin admits it, what they queued is handed out with no lock held (D8), so a callback runs inside the put; a destination of the session alone sends nothing on the link, one of peers alone reaches no subscriber of its own. The loopback's sample is one assembly in session-core (PublishOptions::loopback_sample), which the tokio runtime's loopback leg now calls instead of its own copy. A write filter or matching listener that counts the session's own entities counts its subscribers, re-evaluated after each local declaration and retraction; a plain put such a subscriber wants gives way to the general publish. Off, as pico's default build, none of it is linked. A size-gate case measures it: 898,019 bytes against 891,519.",
+      "changes_bullets": [
+        "wz-session-core: PublishOptions::loopback_sample, the one assembly of a local delivery's sample.",
+        "wz-runtime-tokio: its loopback sample builder forwards to it.",
+        "wz-capi-coop: feature local-subscriber; publish_on_wire_all is the link leg then the subscribers' leg; write filters and matching listeners keep count_local and read the session's own subscribers; subscriber declare and retract re-evaluate the matching watches; put_plain_filtered answers NotPlain for a put a local subscriber wants.",
+        "wz-capi-pico: local-subscriber selects neither engine.",
+        "scripts/lib/capability_cost_gate.py: case pico-client-coop-local (budget 916,000).",
+        "Tests: two coop tests on the router stand-in (a put by destination and by origin, with the callbacks run inside the call; a filter and a listener counting and not counting the session's own subscribers); an existing default-build test publishes for peers only so it holds with the feature on; client_only_dials_a_listener gains a publisher matching the session's own subscriber and handed a put before the call returns; Layer C1co builds with local-subscriber and counts 8 and 7.",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings with all targets in ten shapes: wz-session-core, wz-runtime-tokio (all features), wz-capi-coop (local-subscriber; local-subscriber+liveliness-get+queryable; none), wz-capi-pico with engine-coop+local-subscriber, engine-coop with every client feature, engine-tokio+local-subscriber, default and all features.",
+        "Tests: wz-capi-coop 10 passed with local-subscriber (three runs), 25 with it and liveliness-get and queryable, 8 without; wz-session-core lib, the tokio loopback tests and the wz-capi-pico suite pass. Layer C1co: 8, 7, 8 and 7 passed.",
+        "C1bz for wz-session-core, wz-runtime-tokio, wz-capi-coop and wz-capi-pico spends exactly their budgets; capability_cost_gate: 13 cases within budget, pico-client-coop 891519 of 895000, pico-client-coop-local 898019 of 916000; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next: local-queryable on the cooperative engine (a get reaching the session's own queryable, and a querier's filter and listener counting it); then the rest of section 6 of docs/capi-pico-on-coop-engine.md.",
+        "pico-client-coop is 3,481 bytes under its 895,000 budget.",
+        "The tokio engine's retraction of live liveliness entities at close (carry of 3595) is still owed its own round."
+      ],
+      "publishable_decision_summary": "Step S1: delivery to the session's own subscribers on the cooperative engine (local-subscriber). A put goes out on the link and then to the subscribers of the session that made it, as zenoh-pico's _z_write does: session-core's loopback fires the ones whose origin admits it, what they queued is handed out with no lock held (D8), so a callback runs inside the put; a destination of the session alone sends nothing on the link, one of peers alone reaches no subscriber of its own. The loopback's sample is one assembly in session-core (PublishOptions::loopback_sample), which the tokio runtime's loopback leg now calls instead of its own copy. A write filter or matching listener that counts the session's own entities counts its subscribers, re-evaluated after each local declaration and retraction; a plain put such a subscriber wants gives way to the general publish. Off, as pico's default build, none of it is linked. A size-gate case measures it: 898,019 bytes against 891,519.",
+      "publishable_changes_bullets": [
+        "wz-session-core: PublishOptions::loopback_sample, the one assembly of a local delivery's sample.",
+        "wz-runtime-tokio: its loopback sample builder forwards to it.",
+        "wz-capi-coop: feature local-subscriber; publish_on_wire_all is the link leg then the subscribers' leg; write filters and matching listeners keep count_local and read the session's own subscribers; subscriber declare and retract re-evaluate the matching watches; put_plain_filtered answers NotPlain for a put a local subscriber wants.",
+        "wz-capi-pico: local-subscriber selects neither engine.",
+        "scripts/lib/capability_cost_gate.py: case pico-client-coop-local (budget 916,000).",
+        "Tests: two coop tests on the router stand-in (a put by destination and by origin, with the callbacks run inside the call; a filter and a listener counting and not counting the session's own subscribers); an existing default-build test publishes for peers only so it holds with the feature on; client_only_dials_a_listener gains a publisher matching the session's own subscriber and handed a put before the call returns; Layer C1co builds with local-subscriber and counts 8 and 7.",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings with all targets in ten shapes: wz-session-core, wz-runtime-tokio (all features), wz-capi-coop (local-subscriber; local-subscriber+liveliness-get+queryable; none), wz-capi-pico with engine-coop+local-subscriber, engine-coop with every client feature, engine-tokio+local-subscriber, default and all features.",
+        "Tests: wz-capi-coop 10 passed with local-subscriber (three runs), 25 with it and liveliness-get and queryable, 8 without; wz-session-core lib, the tokio loopback tests and the wz-capi-pico suite pass. Layer C1co: 8, 7, 8 and 7 passed.",
+        "C1bz for wz-session-core, wz-runtime-tokio, wz-capi-coop and wz-capi-pico spends exactly their budgets; capability_cost_gate: 13 cases within budget, pico-client-coop 891519 of 895000, pico-client-coop-local 898019 of 916000; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next: local-queryable on the cooperative engine (a get reaching the session's own queryable, and a querier's filter and listener counting it); then the rest of section 6 of docs/capi-pico-on-coop-engine.md.",
+        "pico-client-coop is 3,481 bytes under its 895,000 budget.",
+        "The tokio engine's retraction of live liveliness entities at close (carry of 3595) is still owed its own round."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
