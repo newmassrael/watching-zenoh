@@ -286436,6 +286436,38 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3612": {
+      "decision_summary": "The recorded size of one typed session slot is moved to what the two admin images measure now, 36800 bytes for the MCU image and 36792 for the Zephyr one, 24 more than recorded. The cause is Round 3608: it added the no-progress window (an Option of a u64) and the keep-the-session flag to TxQueueConf, which the session parameters hold and the slot carries, and sixteen bytes for the option and eight for the flag with its alignment are the 24. That round filed the change without regenerating deploy/session_slot_bytes.json, because the gate that reads it, Layer Q's session-slot-bytes, needs the images built and is not among the gates the pre-push array runs. Another session found the red on origin/main and named the commit; the measurement here matches theirs.",
+      "changes_bullets": [
+        "deploy/session_slot_bytes.json: mcu-admin-node 36776 to 36800 and zephyr-admin-node 36768 to 36792, the numbers the gate measured on the build host."
+      ],
+      "verification_bullets": [
+        "session_slot_bytes.py --check on the build host failed before the edit with the two differences above and exits 0 after it, on the same tree.",
+        "Not run: the hosted Layer Q lane, which reads the record at the next push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "A change to the session parameters or the actions a slot holds moves this number and is filed with session_slot_bytes.py --check run on the build host, since the pre-push array does not run it; the next such change does that before its push.",
+        "Read the hosted Layer Q of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "The recorded size of one typed session slot is moved to what the two admin images measure now, 36800 bytes for the MCU image and 36792 for the Zephyr one, 24 more than recorded. The cause is Round 3608: it added the no-progress window (an Option of a u64) and the keep-the-session flag to TxQueueConf, which the session parameters hold and the slot carries, and sixteen bytes for the option and eight for the flag with its alignment are the 24. That round filed the change without regenerating deploy/session_slot_bytes.json, because the gate that reads it, Layer Q's session-slot-bytes, needs the images built and is not among the gates the pre-push array runs. Another session found the red on origin/main and named the commit; the measurement here matches theirs.",
+      "publishable_changes_bullets": [
+        "deploy/session_slot_bytes.json: mcu-admin-node 36776 to 36800 and zephyr-admin-node 36768 to 36792, the numbers the gate measured on the build host."
+      ],
+      "publishable_verification_bullets": [
+        "session_slot_bytes.py --check on the build host failed before the edit with the two differences above and exits 0 after it, on the same tree.",
+        "Not run: the hosted Layer Q lane, which reads the record at the next push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A change to the session parameters or the actions a slot holds moves this number and is filed with session_slot_bytes.py --check run on the build host, since the pre-push array does not run it; the next such change does that before its push.",
+        "Read the hosted Layer Q of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
