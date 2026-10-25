@@ -16,5 +16,6 @@
 
 pub mod advanced_cache;
 pub mod advanced_ke;
+#[cfg(feature = "advanced-publisher")]
 pub mod advanced_publisher;
 pub mod time_range;

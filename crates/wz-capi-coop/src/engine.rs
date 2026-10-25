@@ -38,8 +38,10 @@ use std::thread::{JoinHandle, ThreadId};
 
 use wz_capi_port::{
     CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink,
-    SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, Tick, TickerId, WireKey,
+    SessionClosed, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey,
 };
+#[cfg(feature = "ticker")]
+use wz_capi_port::{Tick, TickerId};
 use wz_runtime_coop::session_drive::{
     spawn_session, LinkReadiness, OpenedLink, SessionDatagramLink, SessionDriveConfig,
     SessionLinks, SessionRole,
@@ -84,7 +86,9 @@ mod query;
 mod replay;
 use replay::{Kind, OnRefusal, Replay};
 
+#[cfg(feature = "ticker")]
 mod ticker;
+#[cfg(feature = "ticker")]
 use ticker::Tickers;
 use wz_session_core::replay_pacing::ReplayPacing;
 
@@ -324,6 +328,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// Where the telling of the lists above to the link's peer stands (`replay`).
     replay: Replay,
     /// The periodic jobs the program started on the session ([`SessionEngine::start_ticker`]).
+    #[cfg(feature = "ticker")]
     tickers: Tickers,
 }
 
@@ -847,6 +852,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             None => most,
         };
         // And so is a periodic job the program started, which no input brings about either.
+        #[cfg(feature = "ticker")]
         let most = match self.tickers.next_due_ms() {
             Some(due_ms) => self.wait_until(most, due_ms),
             None => most,
@@ -939,6 +945,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             #[cfg(feature = "liveliness")]
             live_subs: Vec::new(),
             replay: Replay::new(),
+            #[cfg(feature = "ticker")]
             tickers: Tickers::default(),
         };
         #[cfg(feature = "queryable")]
@@ -1008,6 +1015,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// another finds it not yet started, and each is put back a period after its run ended. What
     /// is due is read against the time this call began, so a job that takes longer than its own
     /// period runs once per call and does not keep the caller here.
+    #[cfg(feature = "ticker")]
     fn run_due_tickers(&self) {
         let Some(started_ms) = self.live().map(|core| core.0.clock.now_us() / 1000) else {
             return;
@@ -1539,6 +1547,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         self.next_entity.fetch_add(1, Ordering::Relaxed)
     }
 
+    #[cfg(feature = "ticker")]
     fn start_ticker(&self, period_ms: u64, tick: Tick) -> Option<TickerId> {
         let mut core = self.live()?;
         let id = self.next_entity_id();
@@ -1547,6 +1556,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         Some(id)
     }
 
+    #[cfg(feature = "ticker")]
     fn stop_ticker(&self, id: TickerId) {
         if let Some(mut core) = self.live() {
             core.0.tickers.stop(id);
@@ -2444,6 +2454,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
             None => false,
         };
         self.deliver();
+        #[cfg(feature = "ticker")]
         self.run_due_tickers();
         if stepped {
             Ok(())

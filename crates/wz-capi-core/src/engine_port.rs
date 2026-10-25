@@ -369,6 +369,7 @@ impl SessionEngine for SharedSession {
         )
     }
 
+    #[cfg(feature = "advanced")]
     fn start_ticker(
         &self,
         period_ms: u64,
@@ -377,6 +378,7 @@ impl SessionEngine for SharedSession {
         Some(SharedSession::start_ticker(self, period_ms, tick))
     }
 
+    #[cfg(feature = "advanced")]
     fn stop_ticker(&self, id: wz_capi_port::TickerId) {
         SharedSession::stop_ticker(self, id);
     }

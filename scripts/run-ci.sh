@@ -12418,8 +12418,13 @@ layer_c1bf_cargo_clippy_all_features() {
     # `Config`'s `unstable` field exists with `unstable`, so a struct literal of it names the fields
     # of the build its author made. Its features are independent axes, so `--all-features` is a
     # real arm and no narrowing is needed.
+    #
+    # `wz-ext-pubsub` joined it with the advanced publisher's composite: its options carry the
+    # QoS, encoding and attachment knobs behind the features that have their setters, so a struct
+    # literal of either names the fields of the build its author made. Its features are
+    # independent axes, so `--all-features` is a real arm and no narrowing is needed.
     local covered=(wz-runtime-tokio wz-session-core wz-ap-demo wz-capi-c wz-capi-core wz-capi-pico
-        wz-zenoh-buffers wz-zenoh-protocol wz-session-mcu wz-zenoh-config)
+        wz-zenoh-buffers wz-zenoh-protocol wz-session-mcu wz-zenoh-config wz-ext-pubsub)
 
     # Drift audit: re-derive the hazard class from source. A crate qualifies when
     # a `#[cfg(feature ...)]` attribute is immediately followed by a `pub <field>:`

@@ -160,7 +160,15 @@ liveliness-get = [
 # subscription declared through the liveliness plane, and `queryable`, because the publisher's
 # cache is a queryable. And `unstable-api`, because pico declares the whole advanced API inside
 # `#ifdef Z_FEATURE_UNSTABLE_API` and its CMake forces the switch off without it.
-advanced = ["engine-tokio", "liveliness", "queryable", "unstable-api", "wz-capi-core/advanced"]
+advanced = [
+    "engine-tokio",
+    "liveliness",
+    "queryable",
+    "unstable-api",
+    "wz-capi-core/advanced",
+    # The heartbeat is a periodic job of the engine; a build without this carries none.
+    "wz-capi-coop?/ticker",
+]
 # `admin-space` (`Z_FEATURE_ADMIN_SPACE`, off as upstream's is): `zp_start_admin_space` /
 # `zp_stop_admin_space`, the queryable that answers pico's `@/<zid>/pico/**` documents, and the
 # `auto_start_admin_space` flag of the open options. Upstream refuses the switch without

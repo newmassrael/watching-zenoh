@@ -1617,7 +1617,9 @@ pub struct SharedSession {
     closed: Arc<std::sync::atomic::AtomicBool>,
     /// The periodic jobs a C ABI started on the session ([`SessionEngine::start_ticker`]), each a
     /// task of the `net` runtime that ends when its entry leaves the table. Dropped with the
-    /// session, so a job outlives neither it nor its `stop_ticker`.
+    /// session, so a job outlives neither it nor its `stop_ticker`. Only the advanced plane
+    /// starts one, so a build without it carries neither the table nor the task.
+    #[cfg(feature = "advanced")]
     tickers: StdMutex<BTreeMap<u64, wz_runtime_tokio::periodic::PeriodicTask>>,
 }
 
@@ -1904,6 +1906,7 @@ impl SharedSession {
             auth,
             policy,
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(feature = "advanced")]
             tickers: StdMutex::new(BTreeMap::new()),
         })
     }
@@ -3865,6 +3868,7 @@ impl SharedSession {
 
     /// Run `tick` every `period_ms` in a task of the `net` runtime, on the session's clock, until
     /// it answers `false` or [`Self::stop_ticker`] is called with the id returned.
+    #[cfg(feature = "advanced")]
     pub fn start_ticker(&self, period_ms: u64, tick: wz_capi_port::Tick) -> u64 {
         let id = self.next_entity_id();
         let task = wz_runtime_tokio::periodic::spawn_periodic_ms(
@@ -3880,6 +3884,7 @@ impl SharedSession {
     }
 
     /// End the periodic job `id`: its task is aborted, outside the table's lock.
+    #[cfg(feature = "advanced")]
     pub fn stop_ticker(&self, id: u64) {
         let task = self
             .tickers
@@ -5397,6 +5402,7 @@ mod matching_aggregate_tests {
     /// The port's periodic job on this engine: a task of the `net` runtime that runs every period
     /// until it is stopped, and `stop_ticker` ends it for good. The count after the stop, and
     /// again a few periods later, is what says it ended and did not merely pause.
+    #[cfg(feature = "advanced")]
     #[test]
     fn a_periodic_job_runs_until_it_is_stopped() {
         use std::sync::atomic::{AtomicUsize, Ordering};

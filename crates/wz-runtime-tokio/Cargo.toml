@@ -333,6 +333,7 @@ ext-pubsub-advanced-publisher = [
     "pubsub-source-info",
     "pubsub-timestamp",
     "liveliness-token",
+    "wz-ext-pubsub/advanced-publisher",
 ]
 
 # ext-pubsub-advanced-subscriber (§5.25) — the per-source ordering/dedup

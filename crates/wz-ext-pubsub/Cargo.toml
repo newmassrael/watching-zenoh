@@ -34,6 +34,19 @@ crate-type = ["rlib"]
 
 [features]
 default = []
+# The advanced publisher's composite (`advanced_publisher`): the four declarations, what a put
+# stamps and retains, the beacon. It stamps a source identity and a timestamp on every put, so it
+# turns on the session-core setters for them and the node's HLC; a build without it pulls in
+# neither, which is what keeps these features from reaching a runtime build that left them off
+# (the runtime's own `pubsub-timestamp` and `pubsub-source-info` are the ones that decide there).
+# The tokio runtime's `ext-pubsub-advanced-publisher` forwards here.
+advanced-publisher = [
+    "dep:wz-node-time",
+    "wz-node-time/pubsub-timestamp",
+    "wz-session-core/pubsub-put",
+    "wz-session-core/pubsub-source-info",
+    "wz-session-core/pubsub-timestamp",
+]
 # A cached sample may hold a buffer of shared memory and a recovery reply sends its descriptor
 # again (`CachedSample::shared`). The tokio runtime's feature of the same name forwards here.
 transport-shm = ["wz-session-core/transport-shm"]
@@ -53,17 +66,11 @@ ext-pubsub-sample-miss-detection = ["ext-pubsub-serde-codec"]
 [dependencies]
 # The selector-parameter dialect, the outbound key-expression gate, the vocabulary of a reply
 # (`ReplyOut`, `SourceInfo`, `QosLevel`) and the publish options the composite folds its knobs
-# into. `alloc` is the heap profile, which is the only profile the advanced plane runs on. The
-# publisher stamps a source identity and a timestamp on every put, so those two setters are
-# not optional here.
-wz-session-core = { path = "../wz-session-core", default-features = false, features = [
-    "alloc",
-    "pubsub-put",
-    "pubsub-source-info",
-    "pubsub-timestamp",
-] }
+# into. `alloc` is the heap profile, which is the only profile the advanced plane runs on. What the
+# composite stamps with is the `advanced-publisher` feature's, above.
+wz-session-core = { path = "../wz-session-core", default-features = false, features = ["alloc"] }
 # The node's time: the HLC an advanced publisher stamps from and the stamper it borrows it through.
-wz-node-time = { path = "../wz-node-time", features = ["pubsub-timestamp"] }
+wz-node-time = { path = "../wz-node-time", optional = true }
 # A reply the cache could not stage is warned about and the answer goes on, as upstream's does.
 log = "0.4"
 

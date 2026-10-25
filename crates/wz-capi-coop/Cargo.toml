@@ -96,6 +96,11 @@ wz-host-net = { path = "../wz-host-net", optional = true }
 log = { version = "0.4", optional = true }
 
 [features]
+# Periodic jobs on the session (`SessionEngine::start_ticker`): a job run from the call that steps
+# the session once its time has come, which the advanced publisher's heartbeat is. A build that
+# starts none leaves it out, so the job table, the cut to a read's wait and the run after a step
+# are not in its text (the capability-cost gate measures it).
+ticker = []
 # Active multicast scouting (`Z_FEATURE_SCOUTING`): one Scout asked of the group, the Hellos that
 # answer collected for a budget, on the host's sockets and the session's own window rules
 # (`wz_session_core::scouting_host`). A window needs no session, so this is a plane beside the

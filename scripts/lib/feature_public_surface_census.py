@@ -460,12 +460,16 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
     "wz-ext-pubsub": (
         "the rules of the advanced publisher and subscriber that no runtime owns, reached through "
         "the tokio runtime's re-exports at the paths it has always had and by the cooperative "
-        "engine; it is not a surface the analyzer's diagnostic axis probes, and the two features "
-        "that gate a public item are the tokio runtime's features of those names forwarded: "
-        "`transport-shm` (a cached sample may hold a buffer of shared memory; the chunk the "
-        "publisher puts) and `ext-pubsub-sample-miss-detection` (the options a heartbeat beacon "
-        "is sent with), both run by this crate's own tests",
-        frozenset({"transport-shm", "ext-pubsub-sample-miss-detection"}),
+        "engine; it is not a surface the analyzer's diagnostic axis probes, and the three features "
+        "that gate a public item are run by this crate's own tests: `transport-shm` (a cached "
+        "sample may hold a buffer of shared memory; the chunk the publisher puts, the tokio "
+        "runtime's feature of that name forwarded), `advanced-publisher` (the publisher's "
+        "composite and its plane, which the tokio runtime's `ext-pubsub-advanced-publisher` "
+        "turns on) and `ext-pubsub-sample-miss-detection` (the options a heartbeat beacon is "
+        "sent with, forwarded the same way)",
+        frozenset(
+            {"transport-shm", "advanced-publisher", "ext-pubsub-sample-miss-detection"}
+        ),
     ),
     "wz-node-time": (
         "the node's time (the wall clock in NTP64, the node HLC with its per-role switch, the "

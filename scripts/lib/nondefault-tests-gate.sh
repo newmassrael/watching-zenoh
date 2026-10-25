@@ -332,18 +332,22 @@ transport-link-unixpipe,transport-link-ws|"
     # and the 5 of `liveliness-get`), 5 s. Its delivery to the session's own subscribers and to
     # its own queryables is compiled only with `local-subscriber` and `local-queryable`
     # (`tests::local::`, `tests::local_query::`), and its faces, which a connectivity plane
-    # reads, only with `connectivity` (`tests::faces::`). MEASURED: 32 passed with all seven, 6 s.
-    "wz-capi-coop|hook|connectivity,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout|"
+    # reads, only with `connectivity` (`tests::faces::`), and its periodic jobs only with `ticker`
+    # (`tests::ticker::`, 7). MEASURED: 32 passed with the seven before `ticker`, 6 s.
+    "wz-capi-coop|hook|connectivity,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker|"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with
     # `locator-iface`. MEASURED: 32 passed with default features, 41 with it, under 1 s.
     "wz-host-net|hook|locator-iface|"
     # The rules of the advanced plane that no runtime owns (the `@adv` grammar, the `_time` selector,
-    # the cache ring and its answer). The one feature, `transport-shm`, makes a cached sample hold a
-    # buffer of shared memory and a recovery reply send its descriptor again; the tests the feature
-    # compiles in are the ring's own, so the leg is the crate's, with no filter.
-    "wz-ext-pubsub|hook|transport-shm|"
+    # the cache ring and its answer, the publisher's composite). `transport-shm` makes a cached
+    # sample hold a buffer of shared memory and a recovery reply send its descriptor again, and
+    # the publisher's composite, its knobs and its beacon are compiled only with
+    # `advanced-publisher` and the features the tokio runtime forwards (QoS, encoding, attachment,
+    # miss detection); the leg is the crate's, with no filter. MEASURED: 31 passed with all of them.
+    "wz-ext-pubsub|hook|transport-shm,advanced-publisher,pubsub-qos,pubsub-encoding,\
+pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # The node's time (the wall clock, the node HLC with its per-role switch, the stamper). The HLC,
     # the Push stamp and its tests are compiled only with the three features, which the tokio
     # runtime forwards; the leg is the crate's, with no filter. MEASURED: 6 passed with default
