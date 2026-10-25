@@ -29,11 +29,13 @@
 //!   declared one (`resource` on
 //!   [`RouteCache::get_or_compute`](crate::route_cache::RouteCache::get_or_compute)).
 
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::Hash;
 
 use wz_routing_graph::Zid;
+
+use crate::counter::Counter;
+use crate::sync::PlainRwLock;
 
 /// The versions of the tables a route is read from: what a cached route is
 /// fresh against. A route computed at one value is stale at any other.
@@ -63,24 +65,35 @@ struct Fresh<T, S> {
 /// `NodeId`). A client leg has no such dimension, since every source reaches
 /// the same leaf faces, and keys by `()`.
 ///
-/// Interior-mutable because the forwarders route through `&self`.
+/// Interior-mutable because the forwarders route through `&self`, and behind its own reader-writer
+/// lock, as upstream's per-resource `data_routes: RwLock<DataRoutes>` is
+/// (`zenoh/src/net/routing/dispatcher/resource.rs` @ `pub(crate) data_routes: RwLock<DataRoutes>,`):
+/// a route is read on every message and written on a miss, and the tables the router will keep
+/// behind one lock (`docs/router-task-per-face.md`, phase 3) are read, not written, by the data path.
+/// So a thread that misses fills the memo under this small lock and stays a reader of the big one.
+///
+/// What makes that sound is that the inputs a route is fresh against cannot move while a reader
+/// holds the tables: every version in [`RouteInputs`] is moved by a mutation of the tables, and a
+/// mutation takes the tables for writing. Two threads that miss the same key therefore compute the
+/// same route at the same inputs, and the second store replaces the first with an equal value.
+/// Neither runs `compute` under the memo's lock, so a route that is slow to compute holds no reader.
 #[derive(Debug)]
 pub struct RouteCache<T, S = Zid> {
-    fresh: RefCell<Fresh<T, S>>,
+    fresh: PlainRwLock<Fresh<T, S>>,
     /// How many routes were COMPUTED rather than served. The witness that
     /// separates "the cache is consulted and invalidated" from "the cache
     /// exists": a delivery assertion alone passes with the cache bypassed.
-    computes: Cell<usize>,
+    computes: Counter,
 }
 
 impl<T, S> Default for RouteCache<T, S> {
     fn default() -> Self {
         Self {
-            fresh: RefCell::new(Fresh {
+            fresh: PlainRwLock::new(Fresh {
                 inputs: None,
                 routes: HashMap::new(),
             }),
-            computes: Cell::new(0),
+            computes: Counter::new(),
         }
     }
 }
@@ -110,7 +123,7 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
         compute: impl FnOnce() -> T,
     ) -> T {
         {
-            let fresh = self.fresh.borrow();
+            let fresh = self.fresh.read();
             if fresh.inputs == Some(inputs) {
                 if let Some(route) = fresh.routes.get(keyexpr).and_then(|by| by.get(source)) {
                     return route.clone();
@@ -118,9 +131,9 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
             }
         }
         let route = compute();
-        self.computes.set(self.computes.get() + 1);
+        self.computes.bump();
         if resource() {
-            let mut fresh = self.fresh.borrow_mut();
+            let mut fresh = self.fresh.write();
             if fresh.inputs != Some(inputs) {
                 fresh.routes.clear();
                 fresh.inputs = Some(inputs);
@@ -155,7 +168,7 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
         changes: impl FnOnce(u64, &mut dyn FnMut(&str)) -> bool,
         reaches: impl Fn(&str, &str) -> bool,
     ) {
-        let mut fresh = self.fresh.borrow_mut();
+        let mut fresh = self.fresh.write();
         let Some(was) = fresh.inputs else {
             fresh.inputs = Some(inputs);
             return;
@@ -183,7 +196,7 @@ impl<T: Clone, S: Clone + Eq + Hash> RouteCache<T, S> {
 
     /// How many routes are kept, fresh or not.
     pub fn len(&self) -> usize {
-        self.fresh.borrow().routes.values().map(HashMap::len).sum()
+        self.fresh.read().routes.values().map(HashMap::len).sum()
     }
 
     /// Whether no route is kept.
@@ -201,6 +214,51 @@ mod tests {
     }
 
     const AT: RouteInputs = RouteInputs { net: 1, table: 1 };
+
+    /// The memo is what many faces' tasks read at once (`docs/router-task-per-face.md`, phase 2), so a
+    /// cache of routes that can themselves be shared is `Send + Sync`. The proof is the compile.
+    #[test]
+    fn a_cache_of_shareable_routes_can_be_shared_between_threads() {
+        fn shared<T: Send + Sync>() {}
+        shared::<RouteCache<std::sync::Arc<[Zid]>>>();
+        shared::<RouteCache<std::sync::Arc<[u64]>, ()>>();
+    }
+
+    /// Eight threads asking for the same key at the same inputs, each handed the route and none a
+    /// different one: the memo keeps one entry for it, and every thread's answer is that route
+    /// (a miss races, so more than one may compute it, and never more than the threads that asked).
+    #[test]
+    fn threads_asking_for_one_key_at_one_input_all_get_its_route_and_it_is_kept_once() {
+        const THREADS: usize = 8;
+        let cache: std::sync::Arc<RouteCache<std::sync::Arc<[Zid]>>> =
+            std::sync::Arc::new(RouteCache::new());
+        let workers: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let cache = std::sync::Arc::clone(&cache);
+                std::thread::spawn(move || {
+                    for _ in 0..1_000 {
+                        let route = cache.get_or_compute(
+                            AT,
+                            &zid(1),
+                            "demo/a",
+                            || true,
+                            || std::sync::Arc::from([zid(9)]),
+                        );
+                        assert_eq!(&*route, &[zid(9)]);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("a routing thread ends");
+        }
+        assert_eq!(cache.len(), 1);
+        assert!(
+            (1..=THREADS).contains(&cache.computes()),
+            "computed {} times by {THREADS} threads",
+            cache.computes()
+        );
+    }
 
     #[test]
     fn a_resource_route_is_computed_once_and_served_at_the_same_inputs() {

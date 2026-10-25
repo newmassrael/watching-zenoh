@@ -2386,6 +2386,12 @@ pub(crate) mod client_sub_store;
 #[cfg(feature = "routing-peer")]
 pub mod route_cache;
 
+/// The router's witnesses and the route memo's: counts that rise and are read from any thread,
+/// each an atomic with `Relaxed` ordering (`docs/router-task-per-face.md`, phase 1). Gated on
+/// `routing-peer` with the tables whose work it counts.
+#[cfg(feature = "routing-peer")]
+mod counter;
+
 /// FUTURE-mode subscriber-interest store (R311y146) —
 /// [`future_interest::FutureInterestStore`]: which CLIENT faces declared a FUTURE
 /// (`f()`) subscriber `Interest`, and which `DeclareSubscriber`s wz has pushed back

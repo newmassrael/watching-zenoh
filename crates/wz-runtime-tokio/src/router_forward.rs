@@ -441,14 +441,13 @@ use wz_session_core::request_routing_context::{
 };
 use wz_session_core::wire::{PushOwned, PushOwnedVariant, RequestOwned, ResponseOwned};
 
-mod counter;
 mod egress;
 #[cfg(test)]
 mod egress_tests;
 mod shed;
 #[cfg(test)]
 mod shed_tests;
-use counter::Counter;
+use crate::counter::Counter;
 pub use egress::{EgressBudget, EgressView};
 pub use shed::{ShedBatch, ShedRegistry};
 
@@ -1293,8 +1292,8 @@ fn elect_router<'a>(
 /// wz keeps the legs apart because a mesh leg is sent along a tree and a client
 /// leg to a face, and applies the same target to both.
 struct QueryRoute {
-    mesh: Vec<Rc<[QueryCandidate]>>,
-    clients: Vec<Rc<[ClientQueryable]>>,
+    mesh: Vec<Arc<[QueryCandidate]>>,
+    clients: Vec<Arc<[ClientQueryable]>>,
 }
 
 /// One mesh tier's query-route parameters, resolved by
@@ -7548,7 +7547,7 @@ impl RouterForwarder {
         block: &MeshQueryBlock,
         keyexpr: &str,
         wire: bool,
-    ) -> Rc<[QueryCandidate]> {
+    ) -> Arc<[QueryCandidate]> {
         let names = |k: &str| self.names_a_resource(k);
         match self.mesh_hat(block.tier) {
             Some(hat) => query_candidates(
@@ -7562,7 +7561,7 @@ impl RouterForwarder {
                 keyexpr,
                 wire,
             ),
-            None => Rc::from([]),
+            None => Arc::from([]),
         }
     }
 
@@ -7664,7 +7663,10 @@ impl RouterForwarder {
     ///
     /// R2911 — read off the client legs [`client_query_legs`](Self::client_query_legs)
     /// served for this query rather than off the stores.
-    fn first_complete_client(inbound: FaceId, clients: &[Rc<[ClientQueryable]>]) -> Option<FaceId> {
+    fn first_complete_client(
+        inbound: FaceId,
+        clients: &[Arc<[ClientQueryable]>],
+    ) -> Option<FaceId> {
         clients
             .iter()
             .flat_map(|leg| leg.iter())
@@ -7676,7 +7678,7 @@ impl RouterForwarder {
     /// R2911 — the client leg of this query's route, one per broker hat in
     /// [`broker_regions`](Self::broker_regions) order, each served from that
     /// hat's [`ClientQueryRoutes`] ([`client_query_route`]).
-    fn client_query_legs(&self, keyexpr: &str, wire: bool) -> Vec<Rc<[ClientQueryable]>> {
+    fn client_query_legs(&self, keyexpr: &str, wire: bool) -> Vec<Arc<[ClientQueryable]>> {
         let names = |k: &str| self.names_a_resource(k);
         self.broker_regions()
             .map(|(_, hat)| {
@@ -7797,7 +7799,7 @@ impl RouterForwarder {
     #[allow(clippy::too_many_arguments)]
     fn forward_request_to_clients(
         &self,
-        clients: &[Rc<[ClientQueryable]>],
+        clients: &[Arc<[ClientQueryable]>],
         complete_only: bool,
         reliable: bool,
         inbound: FaceId,

@@ -112,7 +112,25 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
    multicast governance flag, the dirty flags of the hats) are state, not counts, and move with the tables in
    phase 3; the forwarder is therefore still not `Sync` after this phase. Every `--lib router_forward` guard
    moved by the three counter tests (229 231 252 234 237 276 229 231) and `node_clock::` by one (15).
-2. **The memo.** `data_routes` and `client_routes` get their own `RwLock`, as upstream's `data_routes` does.
+2. **The memo (done, round 3627).** `RouteCache` (`route_cache.rs`), the one type behind the four route
+   memos of the forwarders (`DataRoutes`, `ClientRoutes`, `ClientQueryRoutes`, `QueryRoutes`; `data_routes` and
+   `client_routes` of a hat are two of them), is behind its own reader-writer lock, `PlainRwLock` (`sync.rs`,
+   `parking_lot`'s, the counterpart of the crate's `PlainMutex`: not poisoned, and a read guard is one atomic
+   add), and counts what it computed with a `Counter`. A hit takes the read lock, clones the route out and lets
+   go; a miss computes OUTSIDE the lock and stores under the write lock, so a route that is slow to compute
+   holds no reader. The soundness argument is written on the type: every version a route is fresh against is
+   moved by a mutation of the tables, and a mutation takes the tables for writing (phase 3), so the inputs
+   cannot move while a reader holds the tables; two threads that miss the same key compute the same route at the
+   same inputs and the second store replaces the first with an equal value. What a route is made of had to
+   change with it: `Rc<[T]>` of the four route types is `Arc<[T]>` (the allocation is the same, the count is
+   atomic), because a cache of `Rc`s is not `Sync`. `Counter` moved from the forwarder to the crate
+   (`counter.rs`) since the memo uses it too. Two tests: a cache of shareable routes is `Send + Sync`, and eight
+   threads asking for one key all get its route and it is kept once. Bytes and allocations per forward did not
+   move (569, 708, 7454, 8718; 9, 11, 69, 86). Time per forward (least of 25 repetitions of 20000, two runs,
+   ns; the phase 1 runs in brackets): one subscriber drop 494, 485 (442, 456), block 576, 575 (529, 553);
+   sixteen drop 3860, 3846 (3898, 3971), block 4594, 4463 (4386, 4604). The one-subscriber drop reads about 40
+   above phase 1 and equal to the figure before phase 1 (498); the spread between runs of one tree on this
+   host is that large (442 to 498), so this is not read as a cost and not as a gain.
 3. **Tables behind `RwLock`.** `Rc<RefCell<..>>` becomes `Arc<RwLock<..>>`; the forwarder is `Send + Sync`. Held
    queues and the credit move with it (`Cell` to atomic; the held queue to a `Mutex` per destination, so that
    two faces feeding one destination do not meet on the tables lock).

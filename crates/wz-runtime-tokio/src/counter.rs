@@ -7,7 +7,9 @@
 //! the moment two do: a `Cell` is not `Sync`, so the forwarder that holds one cannot be shared, and
 //! `x.set(x.get() + 1)` from two threads loses an increment (read, read, write, write). The counters
 //! are the first thing the data path writes that cannot live under a read lock, so each is its own
-//! atomic (`docs/router-task-per-face.md`, phase 1).
+//! atomic (`docs/router-task-per-face.md`, phase 1). The route memo's count of what it computed
+//! (`route_cache`) is the same kind of witness and uses the same type, which is why this is a module
+//! of the crate and not of the forwarder.
 //!
 //! `Relaxed` throughout, and that is the whole of the memory-ordering argument: a counter publishes
 //! nothing. No other data is made visible by reading it, no decision is taken on its value that
@@ -19,32 +21,33 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A count that rises, shared between threads without a lock.
 #[derive(Debug, Default)]
-pub(super) struct Counter(AtomicUsize);
+pub(crate) struct Counter(AtomicUsize);
 
 impl Counter {
     /// A counter at zero.
-    pub(super) const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self(AtomicUsize::new(0))
     }
 
     /// The count now.
-    pub(super) fn get(&self) -> usize {
+    pub(crate) fn get(&self) -> usize {
         self.0.load(Ordering::Relaxed)
     }
 
     /// One more.
-    pub(super) fn bump(&self) {
+    pub(crate) fn bump(&self) {
         self.0.fetch_add(1, Ordering::Relaxed);
     }
 
     /// `n` more.
-    pub(super) fn add(&self, n: usize) {
+    #[cfg_attr(not(feature = "routing-router-hat"), allow(dead_code))]
+    pub(crate) fn add(&self, n: usize) {
         self.0.fetch_add(n, Ordering::Relaxed);
     }
 
     /// At least `n`: a peak, which is the one reading that is not a sum.
     #[cfg_attr(not(feature = "router-multicast-faces"), allow(dead_code))]
-    pub(super) fn raise_to(&self, n: usize) {
+    pub(crate) fn raise_to(&self, n: usize) {
         self.0.fetch_max(n, Ordering::Relaxed);
     }
 }

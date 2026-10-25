@@ -6832,11 +6832,11 @@ pub(crate) fn resolve_source_zid_in(
 /// R2908 — the data-route cache of one (graph, subscription table) pair: per
 /// keyexpr and source, this node's tree children toward the remote
 /// subscribers. Each forwarder keeps one per mesh it routes over.
-pub(crate) type DataRoutes = RouteCache<Rc<[Zid]>>;
+pub(crate) type DataRoutes = RouteCache<Arc<[Zid]>>;
 
 /// A data forward: the carrier to send and the tree children to send it to,
 /// the second a route [`DataRoutes`] may be serving.
-pub(crate) type DataForward = (PushOwned, Rc<[Zid]>);
+pub(crate) type DataForward = (PushOwned, Arc<[Zid]>);
 
 /// R2910 — a route cache together with the node's test of whether a keyexpr
 /// names a routing resource: what every cached route is asked through.
@@ -6872,7 +6872,7 @@ fn data_route(
     source: &Zid,
     keyexpr: &str,
     wire: bool,
-) -> Rc<[Zid]> {
+) -> Arc<[Zid]> {
     let subs = subs.borrow();
     let inputs = RouteInputs {
         net: net.route_version(),
@@ -6900,7 +6900,7 @@ pub(crate) use crate::client_sub_store::ClientSubStore;
 /// because every source reaches the same leaf faces; the inbound face is
 /// excluded at send time, as upstream excludes the source face when it walks
 /// a route rather than when it computes one.
-pub(crate) type ClientRoutes = RouteCache<Rc<[FaceId]>, ()>;
+pub(crate) type ClientRoutes = RouteCache<Arc<[FaceId]>, ()>;
 
 /// R2909 — the client leg of the data route for `keyexpr`: every held client
 /// face with a subscriber whose keyexpr intersects it, in face order, served
@@ -6916,12 +6916,12 @@ pub(crate) fn client_route(
     cached: Cached<'_, ClientRoutes>,
     keyexpr: &str,
     wire: bool,
-) -> Rc<[FaceId]> {
+) -> Arc<[FaceId]> {
     let store = store.borrow();
     // A store holding no client has no client leg; a router keeps one per
     // leaf region, most of them empty, and none of those is worth a route.
     if store.is_empty() {
-        return Rc::from([]);
+        return Arc::from([]);
     }
     let inputs = RouteInputs {
         net: 0,
@@ -6967,7 +6967,7 @@ pub(crate) struct ClientQueryable {
 
 /// R2911 — the client-leg query-route cache of one [`ClientQablStore`], per
 /// keyexpr, keyed by `()` for the reason [`ClientRoutes`] is.
-pub(crate) type ClientQueryRoutes = RouteCache<Rc<[ClientQueryable]>, ()>;
+pub(crate) type ClientQueryRoutes = RouteCache<Arc<[ClientQueryable]>, ()>;
 
 /// R2911 — the client faces able to answer a query for `keyexpr`: every held
 /// client with a queryable intersecting it, in face order, served while the
@@ -6979,10 +6979,10 @@ pub(crate) fn client_query_route(
     cached: Cached<'_, ClientQueryRoutes>,
     keyexpr: &str,
     wire: bool,
-) -> Rc<[ClientQueryable]> {
+) -> Arc<[ClientQueryable]> {
     let store = store.borrow();
     if store.is_empty() {
-        return Rc::from([]);
+        return Arc::from([]);
     }
     let inputs = RouteInputs {
         net: 0,
@@ -7292,7 +7292,7 @@ pub(crate) struct QueryCandidate {
 /// keyexpr and source, the [`QueryCandidate`]s, in peer order. The target is
 /// applied per query to what this serves, as upstream caches a
 /// `QueryTargetQablSet` and runs `compute_final_route` on it each time.
-pub(crate) type QueryRoutes = RouteCache<Rc<[QueryCandidate]>>;
+pub(crate) type QueryRoutes = RouteCache<Arc<[QueryCandidate]>>;
 
 /// R2910 — the mesh queryables a query from `source` for `keyexpr` can reach,
 /// served from `routes` while neither table changed (upstream's
@@ -7308,7 +7308,7 @@ pub(crate) fn query_candidates(
     source: &Zid,
     keyexpr: &str,
     wire: bool,
-) -> Rc<[QueryCandidate]> {
+) -> Arc<[QueryCandidate]> {
     let qabls = qabls.borrow();
     let inputs = RouteInputs {
         net: net.route_version(),

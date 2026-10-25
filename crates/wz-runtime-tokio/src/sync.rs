@@ -143,3 +143,47 @@ impl<T> core::fmt::Debug for PlainMutex<T> {
 /// future call sites; existing `std::sync::RwLock<T>` references are
 /// progressively replaced in R311z+ rounds.
 pub type RwLock<T> = std::sync::RwLock<T>;
+
+/// The reader-writer lock a table that many threads read and few write sits behind: [`PlainMutex`]'s
+/// counterpart, `parking_lot`'s, not poisoned by a panic in a holder.
+///
+/// Its first user is the router's route memo (`docs/router-task-per-face.md`, phase 2), which is read
+/// on every message and written on a miss: a read guard is one atomic add to take and one to release,
+/// where `std`'s also reads the process's panic count on both. A holder that panics leaves the value
+/// as it was, which is what every caller of the `std` lock here recovered to.
+pub struct PlainRwLock<T>(parking_lot::RwLock<T>);
+
+impl<T> PlainRwLock<T> {
+    /// A lock over `value`.
+    pub const fn new(value: T) -> Self {
+        Self(parking_lot::const_rwlock(value))
+    }
+
+    /// The value for reading, waiting for a writer to finish. Any number of readers hold it at once.
+    pub fn read(&self) -> PlainReadGuard<'_, T> {
+        self.0.read()
+    }
+
+    /// The value for writing, waiting for every reader and writer to finish.
+    pub fn write(&self) -> PlainWriteGuard<'_, T> {
+        self.0.write()
+    }
+}
+
+/// What [`PlainRwLock::read`] holds the lock with.
+pub type PlainReadGuard<'a, T> = parking_lot::RwLockReadGuard<'a, T>;
+
+/// What [`PlainRwLock::write`] holds the lock with.
+pub type PlainWriteGuard<'a, T> = parking_lot::RwLockWriteGuard<'a, T>;
+
+impl<T: Default> Default for PlainRwLock<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T> core::fmt::Debug for PlainRwLock<T> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("PlainRwLock")
+    }
+}
