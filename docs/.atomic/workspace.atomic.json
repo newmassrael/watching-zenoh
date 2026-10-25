@@ -288204,6 +288204,38 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3655": {
+      "decision_summary": "Step 6, sixth part (6.2b-4, first half): the two fixed-memory admin images (lwIP bare-metal and Zephyr) bind the open verb. The opener is no longer typed by the dialer: what the dialer can do (does it hold a session to the node it dials for, which locators can it dial) is written into the peer store by the manager when it is made, so NodeOpener and ControlledOpener are const and an image declares its opener in a static beside the store, before any manager exists; until there is one it says Unverifiable. The opener is a static of its own, not a member of the table of statics: it holds references, and a table that does not start as zero bytes moves from .bss to .data and takes a copy into flash (131 KB once, on Zephyr), which is also why the store keeps the classification as an Option. At the default MAX_PEER_NODES of zero the images answer refused for want of room, by name. The lwIP image builds and the no-allocator link gate holds it; the Zephyr image is read on the hosted run.",
+      "changes_bullets": [
+        "wz-session-mcu connect_manager: NodeOpener and ControlledOpener are not generic (the dialer's VERIFIES_NODES and classify are written into the store by ConnectManager::in_store, as a bool and an Option of a function), NodeOpener::in_store and ControlledOpener::new are const, first_dialable takes the classification as a function; a test for an opener made from the store before its manager. admin_fixed: serve_open is out of line.",
+        "deploy/mcu-admin-node (fixed.rs) and deploy/zephyr-admin-node (fixed_node.rs): a static OPEN of ControlledOpener over the store and the control, handed to host_admin_queryable_fixed_with_open. run-ci.sh: C1m mcu counts 29 to 30, 20 to 21 and 39 to 40. docs/session-lifecycle-intent.md: 6.2b-4 and what is next."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): the manager tests pass at the default limit and at two node rows; the slot-profile open test passes; the guarded legs printed 30, 21 and 40, equal to the constants; clippy of wz-session-mcu in the slot, adminspace-write (both limits) and all-features shapes is clean; the fixed-memory lwIP image builds for thumbv7m and the no-allocator link gate holds it (mcu-admin-node-fixed); rustfmt holds the two image files.",
+        "Not built or run: the Zephyr image (west and the SDK are hosted-only), and Layer Qa (it needs a stock zenohd the host does not have), so the lane's reading of an image that now answers session/verbs is the hosted run's. Not witnessed on an image: an open that holds a node, which needs a build with room for one, a hint and a step of the lane."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the first completed hosted run holding rounds 3646 to this one: Qza and Qa (does the lane still read the images the same with session/verbs answered), the Qzb stack rows and flash of zephyr-fixed (the opener is a static of its own; Statics must still be .bss), the C1bz budget. Step 6.2b-5: the sources of hints (a build's declared ones, a Hello), wz-session-lwip forwarding the feature, and the witness on the image (a lane step; the grammar is shared with the board, so the lane owner agrees it). The heap UDP dialer does not yet verify nodes. Then D7."
+      ],
+      "publishable_decision_summary": "Step 6, sixth part (6.2b-4, first half): the two fixed-memory admin images (lwIP bare-metal and Zephyr) bind the open verb. The opener is no longer typed by the dialer: what the dialer can do (does it hold a session to the node it dials for, which locators can it dial) is written into the peer store by the manager when it is made, so NodeOpener and ControlledOpener are const and an image declares its opener in a static beside the store, before any manager exists; until there is one it says Unverifiable. The opener is a static of its own, not a member of the table of statics: it holds references, and a table that does not start as zero bytes moves from .bss to .data and takes a copy into flash (131 KB once, on Zephyr), which is also why the store keeps the classification as an Option. At the default MAX_PEER_NODES of zero the images answer refused for want of room, by name. The lwIP image builds and the no-allocator link gate holds it; the Zephyr image is read on the hosted run.",
+      "publishable_changes_bullets": [
+        "wz-session-mcu connect_manager: NodeOpener and ControlledOpener are not generic (the dialer's VERIFIES_NODES and classify are written into the store by ConnectManager::in_store, as a bool and an Option of a function), NodeOpener::in_store and ControlledOpener::new are const, first_dialable takes the classification as a function; a test for an opener made from the store before its manager. admin_fixed: serve_open is out of line.",
+        "deploy/mcu-admin-node (fixed.rs) and deploy/zephyr-admin-node (fixed_node.rs): a static OPEN of ControlledOpener over the store and the control, handed to host_admin_queryable_fixed_with_open. run-ci.sh: C1m mcu counts 29 to 30, 20 to 21 and 39 to 40. docs/session-lifecycle-intent.md: 6.2b-4 and what is next."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): the manager tests pass at the default limit and at two node rows; the slot-profile open test passes; the guarded legs printed 30, 21 and 40, equal to the constants; clippy of wz-session-mcu in the slot, adminspace-write (both limits) and all-features shapes is clean; the fixed-memory lwIP image builds for thumbv7m and the no-allocator link gate holds it (mcu-admin-node-fixed); rustfmt holds the two image files.",
+        "Not built or run: the Zephyr image (west and the SDK are hosted-only), and Layer Qa (it needs a stock zenohd the host does not have), so the lane's reading of an image that now answers session/verbs is the hosted run's. Not witnessed on an image: an open that holds a node, which needs a build with room for one, a hint and a step of the lane."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the first completed hosted run holding rounds 3646 to this one: Qza and Qa (does the lane still read the images the same with session/verbs answered), the Qzb stack rows and flash of zephyr-fixed (the opener is a static of its own; Statics must still be .bss), the C1bz budget. Step 6.2b-5: the sources of hints (a build's declared ones, a Hello), wz-session-lwip forwarding the feature, and the witness on the image (a lane step; the grammar is shared with the board, so the lane owner agrees it). The heap UDP dialer does not yet verify nodes. Then D7."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
