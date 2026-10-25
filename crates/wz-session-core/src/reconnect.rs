@@ -352,6 +352,126 @@ impl core::fmt::Display for ReplayDeclarationsError {
 
 impl core::error::Error for ReplayDeclarationsError {}
 
+/// The declaration cache of a session and the replay that is walking it, if one is.
+///
+/// This is the heap runtime's host of [`ReplayCursor`] (`docs/declaration-sync-pacing.md`): the
+/// cache is the ordered sequence the cursor is a place in, and every change to it that a live
+/// caller makes goes through [`Self::record`] or [`Self::retract`], which ask the cursor what to do
+/// about the peer. They are kept together in one value so that the entry and the cursor change
+/// under one lock and a declaration made between two turns of a replay cannot be missed.
+///
+/// With no replay running (`replay` is `None`, which is always so when pacing is off) it is the
+/// plain ordered list it was: [`Self::record`] answers [`Insertion::EmitNow`] and [`Self::retract`]
+/// answers [`Removal::Retract`], so the caller does what it did before the cursor existed.
+#[derive(Debug, Default)]
+pub struct DeclarationCache {
+    entries: alloc::vec::Vec<CachedDeclaration>,
+    replay: Option<crate::replay_cursor::ReplayCursor>,
+}
+
+impl DeclarationCache {
+    /// An empty cache with no replay running.
+    pub const fn new() -> Self {
+        Self {
+            entries: alloc::vec::Vec::new(),
+            replay: None,
+        }
+    }
+
+    /// The recorded declarations in replay order.
+    pub fn entries(&self) -> &[CachedDeclaration] {
+        &self.entries
+    }
+
+    /// Whether a paced replay is walking the cache now.
+    pub fn replaying(&self) -> bool {
+        self.replay.is_some()
+    }
+
+    /// How many entries the running replay still owes the peer; zero when none runs.
+    pub fn owed(&self) -> usize {
+        self.replay.map_or(0, |cursor| cursor.owed())
+    }
+
+    /// Record a live declaration at the end of the cache and say what its caller does about the
+    /// peer: [`Insertion::Owed`] while a replay is running (the replay reaches the entry, in order,
+    /// after everything it depends on) and [`Insertion::EmitNow`] otherwise.
+    pub fn record(&mut self, entry: CachedDeclaration) -> crate::replay_cursor::Insertion {
+        let place = self.entries.len();
+        self.entries.push(entry);
+        match &mut self.replay {
+            Some(cursor) => {
+                let insertion = cursor.inserted(place);
+                self.settle();
+                insertion
+            }
+            None => crate::replay_cursor::Insertion::EmitNow,
+        }
+    }
+
+    /// Remove the FIRST entry `pred` matches, as pico's prune does (one undeclare retracts one
+    /// declare, so a re-declared id keeps its later entries), and say what the caller does about the
+    /// peer: [`Removal::Retract`] when the peer holds the entry, [`Removal::Silent`] when a running
+    /// replay had not reached it. No entry matching is [`Removal::Retract`], as it always was: the
+    /// caller sends the retraction it was asked to send.
+    pub fn retract(
+        &mut self,
+        pred: impl Fn(&CachedDeclaration) -> bool,
+    ) -> crate::replay_cursor::Removal {
+        let Some(place) = self.entries.iter().position(pred) else {
+            return crate::replay_cursor::Removal::Retract;
+        };
+        self.entries.remove(place);
+        match &mut self.replay {
+            Some(cursor) => {
+                let removal = cursor.removed(place);
+                self.settle();
+                removal
+            }
+            None => crate::replay_cursor::Removal::Retract,
+        }
+    }
+
+    /// Start a paced replay from the beginning, discarding any replay already running (a session
+    /// that closed or reconnected mid-replay has a peer that holds nothing). An empty cache has
+    /// nothing to replay and no replay is left running.
+    pub fn begin_replay(&mut self) {
+        self.replay = Some(crate::replay_cursor::ReplayCursor::begin(
+            self.entries.len(),
+        ));
+        self.settle();
+    }
+
+    /// Stop any replay: the session ended, and the next one begins its own.
+    pub fn abandon_replay(&mut self) {
+        self.replay = None;
+    }
+
+    /// The places the next turn emits, at most `burst` of them, taken from the running replay; the
+    /// cursor moves past them. Empty when no replay runs.
+    pub fn turn(&mut self, burst: usize) -> core::ops::Range<usize> {
+        match &mut self.replay {
+            Some(cursor) => cursor.turn(burst),
+            None => 0..0,
+        }
+    }
+
+    /// The send of the entry at `place` was refused: the next turn starts there.
+    pub fn refused(&mut self, place: usize) {
+        if let Some(cursor) = &mut self.replay {
+            cursor.refused(place);
+        }
+    }
+
+    /// Drop the replay when it has told the peer everything, so a declaration made after that is
+    /// emitted by its caller as before.
+    pub fn settle(&mut self) {
+        if self.replay.is_some_and(|cursor| cursor.finished()) {
+            self.replay = None;
+        }
+    }
+}
+
 /// The outbound slots a swap seam has had lent THROUGH it and not yet settled,
 /// by the number the seam gave the session (ARCHITECTURE section 9.1).
 ///
@@ -917,5 +1037,207 @@ mod reconnect_locator_tests {
             ReconnectLocator::try_from(any),
             Err(NotReconnectable::Vsock)
         );
+    }
+}
+
+#[cfg(test)]
+mod declaration_cache_tests {
+    use super::*;
+    use crate::replay_cursor::{Insertion, Removal};
+    use alloc::string::ToString;
+    use alloc::vec::Vec;
+
+    fn keyexpr(id: u64) -> CachedDeclaration {
+        CachedDeclaration::Keyexpr {
+            mapping_id: id,
+            suffix: "k".to_string(),
+        }
+    }
+
+    fn is_keyexpr(id: u64) -> impl Fn(&CachedDeclaration) -> bool {
+        move |entry| matches!(entry, CachedDeclaration::Keyexpr { mapping_id, .. } if *mapping_id == id)
+    }
+
+    fn id_of(entry: &CachedDeclaration) -> u64 {
+        match entry {
+            CachedDeclaration::Keyexpr { mapping_id, .. } => *mapping_id,
+            other => unreachable!("only key expressions are cached here: {other:?}"),
+        }
+    }
+
+    fn filled(count: u64) -> DeclarationCache {
+        let mut cache = DeclarationCache::new();
+        for id in 1..=count {
+            assert_eq!(cache.record(keyexpr(id)), Insertion::EmitNow);
+        }
+        cache
+    }
+
+    #[test]
+    fn with_no_replay_running_it_is_the_plain_list_it_was() {
+        let mut cache = filled(3);
+        assert!(!cache.replaying());
+        assert_eq!(cache.entries().len(), 3);
+        assert_eq!(cache.retract(is_keyexpr(2)), Removal::Retract);
+        assert_eq!(cache.entries(), [keyexpr(1), keyexpr(3)]);
+        assert_eq!(
+            cache.retract(is_keyexpr(9)),
+            Removal::Retract,
+            "an entry that is not cached is still retracted, as before"
+        );
+    }
+
+    #[test]
+    fn a_retraction_removes_only_the_first_match() {
+        let mut cache = filled(1);
+        assert_eq!(cache.record(keyexpr(1)), Insertion::EmitNow);
+        assert_eq!(cache.retract(is_keyexpr(1)), Removal::Retract);
+        assert_eq!(cache.entries(), [keyexpr(1)]);
+    }
+
+    #[test]
+    fn a_declaration_made_during_a_replay_is_owed_and_comes_in_a_later_turn() {
+        let mut cache = filled(3);
+        cache.begin_replay();
+        assert!(cache.replaying());
+        assert_eq!(cache.turn(2), 0..2);
+        assert_eq!(cache.record(keyexpr(4)), Insertion::Owed);
+        assert_eq!(cache.owed(), 2);
+        assert_eq!(
+            cache.turn(5),
+            2..4,
+            "the new entry is replayed after what it depends on"
+        );
+        cache.settle();
+        assert!(
+            !cache.replaying(),
+            "the replay is dropped once it has told everything"
+        );
+        assert_eq!(cache.record(keyexpr(5)), Insertion::EmitNow);
+    }
+
+    #[test]
+    fn a_retraction_of_an_entry_not_yet_replayed_is_silent_and_the_entry_is_gone() {
+        let mut cache = filled(4);
+        cache.begin_replay();
+        assert_eq!(cache.turn(2), 0..2);
+        assert_eq!(cache.retract(is_keyexpr(4)), Removal::Silent);
+        assert_eq!(cache.entries().len(), 3);
+        assert_eq!(cache.turn(5), 2..3, "the removed entry is not replayed");
+    }
+
+    #[test]
+    fn a_retraction_of_an_entry_already_replayed_is_sent() {
+        let mut cache = filled(4);
+        cache.begin_replay();
+        assert_eq!(cache.turn(3), 0..3);
+        assert_eq!(cache.retract(is_keyexpr(2)), Removal::Retract);
+        assert_eq!(
+            cache.turn(5),
+            2..3,
+            "only the entry never told remains, once"
+        );
+    }
+
+    #[test]
+    fn a_replay_of_an_empty_cache_is_not_left_running() {
+        let mut cache = DeclarationCache::new();
+        cache.begin_replay();
+        assert!(!cache.replaying());
+        assert_eq!(cache.turn(4), 0..0);
+    }
+
+    #[test]
+    fn retracting_the_last_owed_entry_ends_the_replay() {
+        let mut cache = filled(2);
+        cache.begin_replay();
+        assert_eq!(cache.turn(1), 0..1);
+        assert_eq!(cache.retract(is_keyexpr(2)), Removal::Silent);
+        assert!(!cache.replaying());
+    }
+
+    #[test]
+    fn a_refused_send_resumes_at_its_entry_and_a_new_replay_starts_over() {
+        let mut cache = filled(5);
+        cache.begin_replay();
+        assert_eq!(cache.turn(4), 0..4);
+        cache.refused(2);
+        assert_eq!(cache.turn(4), 2..5, "resumed where it failed, not at zero");
+        cache.begin_replay();
+        assert_eq!(cache.turn(9), 0..5, "a reconnect starts over");
+        cache.begin_replay();
+        cache.abandon_replay();
+        assert!(
+            !cache.replaying(),
+            "a closed session leaves no replay behind"
+        );
+    }
+
+    /// Whatever the order of turns, live declarations and live retractions, the peer ends holding
+    /// exactly what the cache holds, each entry told once while it is declared: the cursor's model
+    /// test, through the cache that hosts it.
+    #[test]
+    fn whatever_the_interleaving_the_peer_ends_holding_what_the_cache_holds() {
+        for seed in 1u32..=200 {
+            let mut state = seed.wrapping_mul(2_246_822_519).max(1);
+            let mut rng = move || {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state
+            };
+            let mut cache = DeclarationCache::new();
+            let mut next_id = 1u64;
+            for _ in 0..(rng() % 8) {
+                assert_eq!(cache.record(keyexpr(next_id)), Insertion::EmitNow);
+                next_id += 1;
+            }
+            // How many times the peer was told each id, net of retractions.
+            let mut peer: Vec<i32> = alloc::vec![0; 512];
+            cache.begin_replay();
+            let burst = 1 + (rng() % 3) as usize;
+            for _ in 0..150 {
+                match rng() % 4 {
+                    0 | 1 => {
+                        for place in cache.turn(burst) {
+                            peer[id_of(&cache.entries()[place]) as usize] += 1;
+                        }
+                        cache.settle();
+                    }
+                    2 => {
+                        let id = next_id;
+                        next_id += 1;
+                        if cache.record(keyexpr(id)) == Insertion::EmitNow {
+                            peer[id as usize] += 1;
+                        }
+                    }
+                    _ if !cache.entries().is_empty() => {
+                        let pick = (rng() as usize) % cache.entries().len();
+                        let id = id_of(&cache.entries()[pick]);
+                        if cache.retract(is_keyexpr(id)) == Removal::Retract {
+                            peer[id as usize] -= 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            loop {
+                let range = cache.turn(burst);
+                if range.is_empty() {
+                    break;
+                }
+                for place in range {
+                    peer[id_of(&cache.entries()[place]) as usize] += 1;
+                }
+            }
+            for id in 1..next_id {
+                let held = cache.entries().iter().any(is_keyexpr(id));
+                assert_eq!(
+                    peer[id as usize],
+                    i32::from(held),
+                    "seed {seed}: id {id} held={held}"
+                );
+            }
+        }
     }
 }
