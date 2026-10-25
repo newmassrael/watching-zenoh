@@ -107,6 +107,21 @@ VERDICTS: dict[str, tuple[str, str | None, str]] = {
         "needs no routed hop; that is only needed to observe REACH, which the "
         "key does not control. ONE-ENDED: zenohd and one wz node, not two wz nodes.",
     ),
+    # The `multicast-loopback` policy (docs/build-configuration.md, section 5): whether a
+    # datagram a socket sends to its group is also delivered to a member on the SAME host.
+    # It is the sender's socket option, set on the send-only socket and on the joined one.
+    "loopback": (
+        "one",
+        "a_sender_whose_loopback_is_off_is_not_heard_by_a_member_on_its_host",
+        "Real delivery A/B with a control: a send-only socket whose loopback is `off` is "
+        "not heard by a group member on the same host, while a sender with `on` is, and "
+        "the member's hearing the control is what shows it could have heard the first. "
+        "ONE-ENDED, as `iface` is: it drives two drivers on one host, not two wz NODES. "
+        "It is witnessed on Linux only: sender-side IP_MULTICAST_LOOP is not measured on "
+        "macOS or Windows, so the hosted Platform lane does not run it there. Every "
+        "scouting construction takes the build's value (upstream's `os-default` unless the "
+        "build says otherwise), so the same-host scouting tests name `on` themselves.",
+    ),
     "extra_joins": (
         "both",
         "a_responder_answers_on_an_extra_joined_group_and_only_because_it_joined_it",
