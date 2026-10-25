@@ -287510,6 +287510,62 @@
         "An answered scouting window on the cooperative pico build wants a leg with a router on a multicast group; read the hosted runs of the earlier pushes at the start of the next round."
       ]
     },
+    "Round 3638": {
+      "decision_summary": "A session reports whether its declarations are synced, and a caller can wait for them to hold still. declarations_synced is true when no paced replay is owed and every interest the node sent that asks for what exists now (a liveliness subscriber with history, a liveliness get, a matching interest with current) has had the Declare(DeclFinal) that carries its id, or has waited DECLARATION_SYNC_FINAL_TIMEOUT_MS. The peer's own initial final is not required, since a router never sends one to a client. wait_declarations_stable(timeout) is true once the session is synced and the cache generation has not moved for one DECLARATION_SYNC_INTERVAL_MS, so a declaration made or withdrawn during the wait restarts it. The query is always on: the timeout limit is read whether or not declaration-sync-pacing is on. The bookkeeping is a pure value that reads no clock.",
+      "changes_bullets": [
+        "crates/wz-session-core declaration_sync.rs (new): DeclarationSync, the interests awaited with the time each was sent (interest_sent, final_seen, forget, clear, outstanding, timed_out, is_synced), and finals_in_event, which reads the interest id of each Declare(DeclFinal) in a delivered frame; nine tests, and a compile-time refusal of a zero timeout.",
+        "deploy/wz-config.toml declares the limit DECLARATION_SYNC_FINAL_TIMEOUT_MS (1000, not gated by the policy); caps.rs binds it and the generated files and Kconfig follow.",
+        "crates/wz-session-core reconnect.rs: DeclarationCache keeps a generation that moves when a declaration is recorded or a retraction removes one, and not on a replay turn; one test.",
+        "crates/wz-session-core session_actions.rs: an interest answered by a final is noted when it is sent, by a live declaration or by a replay turn, and forgotten when it is withdrawn, when a one-shot get ends, or when the session is reset; new note_declare_final, note_declare_finals_in, declarations_synced, declarations_synced_at and declaration_generation, all signature-stable without session-reconnect.",
+        "crates/wz-runtime-tokio: the inbound dispatch hands every event to note_declare_finals_in; Session gains declarations_synced and wait_declarations_stable; seven actions-level tests and three session-level tests, one of them over a declaration made during the wait.",
+        "scripts/lib/wz_config.py: the rust-limits layout follows rustfmt's call width, because the new limit's name made the arguments of limit(..) wider than rustfmt keeps a call and the generated file disagreed with cargo fmt; the selftest covers the wide and the short layout.",
+        "docs/declaration-sync-pacing.md: the timeout is declared and not policy-gated, the wait and the bookkeeping are described, phase 3 is marked done for the interests the node sent, and the open item on the queryable and token planes is restated; the two session-close-ingress pin rows moved."
+      ],
+      "verification_bullets": [
+        "On the build host, rebased onto the slot node's pacing change that moved ReplayPacing into wz-session-core, the whole wz-runtime-tokio lib suite (2327 passed, 4 ignored) and the wz-session-core lib suite (2653 passed) pass with all features, including the nine DeclarationSync tests, the generation test, ten actions-level and session-level tests of the sync, and the wait tests.",
+        "Red first: with the inbound hand-off removed, the session-level dispatch test fails; with the forget on withdrawal removed, the withdrawn-interest test fails; with the generation not moved by a retraction, the actions-level generation test fails; with the timeout made unreachable, the given-up test fails (it first passed because the fixture clock sent at zero, so it now reads a time of half the range). Each was reverted and a grep found no trace.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-session-core and wz-runtime-tokio; wz_config --check and --selftest pass (188 arms); session_slot_bytes --check passes; cargo doc counts 494 for wz-session-core and 466 for wz-runtime-tokio, both exactly their budgets; the count-guard lint, the citation form gate and feature_gate_diagnostic pass.",
+        "The pre-push round-fed array, 113 gates, exits 0 on the rebased tree. Its first run failed on wz_config --check: the generated limits file disagreed with cargo fmt for the new limit's long name, which the generator fix in this push removes.",
+        "Not run: the hosted run, Layer C1bz and the other lanes as lanes, a wait against a real peer over a link (the tests drive the inbound dispatch directly), and the guarded routing-peer subset test after the last rebase."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "declarations_synced says nothing of whether a peer finished declaring its own queryables and tokens to the node: it waits only for the finals of interests the node sent. Adding the peer's initial final needs a measurement against upstream of which planes send it.",
+        "Only the heap profile's owned frames are read for finals; the slot profile reads records where the frame lies and has its own host (session ef), and the cooperative engine (session 11) has none yet.",
+        "wait_declarations_stable polls once per DECLARATION_SYNC_INTERVAL_MS; a push-style notification is possible later if a caller needs one.",
+        "The cooperative engine's redeclare (session 11) is still to take the cursor; tell sessions 11 and ef that phase 3 landed.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "A session reports whether its declarations are synced, and a caller can wait for them to hold still. declarations_synced is true when no paced replay is owed and every interest the node sent that asks for what exists now (a liveliness subscriber with history, a liveliness get, a matching interest with current) has had the Declare(DeclFinal) that carries its id, or has waited DECLARATION_SYNC_FINAL_TIMEOUT_MS. The peer's own initial final is not required, since a router never sends one to a client. wait_declarations_stable(timeout) is true once the session is synced and the cache generation has not moved for one DECLARATION_SYNC_INTERVAL_MS, so a declaration made or withdrawn during the wait restarts it. The query is always on: the timeout limit is read whether or not declaration-sync-pacing is on. The bookkeeping is a pure value that reads no clock.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-core declaration_sync.rs (new): DeclarationSync, the interests awaited with the time each was sent (interest_sent, final_seen, forget, clear, outstanding, timed_out, is_synced), and finals_in_event, which reads the interest id of each Declare(DeclFinal) in a delivered frame; nine tests, and a compile-time refusal of a zero timeout.",
+        "deploy/wz-config.toml declares the limit DECLARATION_SYNC_FINAL_TIMEOUT_MS (1000, not gated by the policy); caps.rs binds it and the generated files and Kconfig follow.",
+        "crates/wz-session-core reconnect.rs: DeclarationCache keeps a generation that moves when a declaration is recorded or a retraction removes one, and not on a replay turn; one test.",
+        "crates/wz-session-core session_actions.rs: an interest answered by a final is noted when it is sent, by a live declaration or by a replay turn, and forgotten when it is withdrawn, when a one-shot get ends, or when the session is reset; new note_declare_final, note_declare_finals_in, declarations_synced, declarations_synced_at and declaration_generation, all signature-stable without session-reconnect.",
+        "crates/wz-runtime-tokio: the inbound dispatch hands every event to note_declare_finals_in; Session gains declarations_synced and wait_declarations_stable; seven actions-level tests and three session-level tests, one of them over a declaration made during the wait.",
+        "scripts/lib/wz_config.py: the rust-limits layout follows rustfmt's call width, because the new limit's name made the arguments of limit(..) wider than rustfmt keeps a call and the generated file disagreed with cargo fmt; the selftest covers the wide and the short layout.",
+        "docs/declaration-sync-pacing.md: the timeout is declared and not policy-gated, the wait and the bookkeeping are described, phase 3 is marked done for the interests the node sent, and the open item on the queryable and token planes is restated; the two session-close-ingress pin rows moved."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, rebased onto the slot node's pacing change that moved ReplayPacing into wz-session-core, the whole wz-runtime-tokio lib suite (2327 passed, 4 ignored) and the wz-session-core lib suite (2653 passed) pass with all features, including the nine DeclarationSync tests, the generation test, ten actions-level and session-level tests of the sync, and the wait tests.",
+        "Red first: with the inbound hand-off removed, the session-level dispatch test fails; with the forget on withdrawal removed, the withdrawn-interest test fails; with the generation not moved by a retraction, the actions-level generation test fails; with the timeout made unreachable, the given-up test fails (it first passed because the fixture clock sent at zero, so it now reads a time of half the range). Each was reverted and a grep found no trace.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-session-core and wz-runtime-tokio; wz_config --check and --selftest pass (188 arms); session_slot_bytes --check passes; cargo doc counts 494 for wz-session-core and 466 for wz-runtime-tokio, both exactly their budgets; the count-guard lint, the citation form gate and feature_gate_diagnostic pass.",
+        "The pre-push round-fed array, 113 gates, exits 0 on the rebased tree. Its first run failed on wz_config --check: the generated limits file disagreed with cargo fmt for the new limit's long name, which the generator fix in this push removes.",
+        "Not run: the hosted run, Layer C1bz and the other lanes as lanes, a wait against a real peer over a link (the tests drive the inbound dispatch directly), and the guarded routing-peer subset test after the last rebase."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "declarations_synced says nothing of whether a peer finished declaring its own queryables and tokens to the node: it waits only for the finals of interests the node sent. Adding the peer's initial final needs a measurement against upstream of which planes send it.",
+        "Only the heap profile's owned frames are read for finals; the slot profile reads records where the frame lies and has its own host (session ef), and the cooperative engine (session 11) has none yet.",
+        "wait_declarations_stable polls once per DECLARATION_SYNC_INTERVAL_MS; a push-style notification is possible later if a caller needs one.",
+        "The cooperative engine's redeclare (session 11) is still to take the cursor; tell sessions 11 and ef that phase 3 landed.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
