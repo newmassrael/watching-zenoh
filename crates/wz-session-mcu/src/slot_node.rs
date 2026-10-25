@@ -1170,6 +1170,22 @@ mod tests {
     }
 
     #[test]
+    fn a_session_a_peer_opened_is_met_as_a_peer_and_is_otherwise_the_same() {
+        let identity = NodeIdentity::new(&[1, 2, 3, 4], [9u8; SIGNING_KEY_BYTES]).unwrap();
+        let dialled = identity.params(1472);
+        let accepted = identity.accepted_params(1472);
+        // A stock client refuses another client, so the mode is the one thing that differs.
+        assert_eq!(accepted.whatami, WhatAmI::Peer);
+        assert_eq!(dialled.whatami, WhatAmI::Client);
+        assert_eq!(accepted.zid, dialled.zid);
+        assert_eq!(accepted.batch_size, dialled.batch_size);
+        assert_eq!(accepted.lease_ms, dialled.lease_ms);
+        assert_eq!(accepted.seq_num_res, dialled.seq_num_res);
+        assert_eq!(accepted.req_id_res, dialled.req_id_res);
+        assert_eq!(accepted.initial_sn, dialled.initial_sn);
+    }
+
+    #[test]
     fn the_zid_hex_is_zenoh_s_form() {
         let identity = NodeIdentity::new(&[0x01, 0xab], [0u8; SIGNING_KEY_BYTES]).unwrap();
         let mut expected: FixedText<33> = FixedText::new();

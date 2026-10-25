@@ -130,6 +130,10 @@ client-node = ["alloc", "client-core"]
 # The client on the slot profile: the same node over the tables its image declared, with no
 # allocator (`slot_client`). Beside `session-slot`, which the image names itself.
 client-slot = ["client-core", "session-slot"]
+# The client on the slot profile that also TAKES the sessions a peer opens to it (`Listening`): the
+# accept side of the handshake, which a client does not carry. Without it a node cannot be given an
+# acceptor, because one it was given would read an InitSyn and never answer it.
+listen = ["client-slot", "wz-session-core/session-unicast-accept"]
 adminspace-write = [
     "dial",
     "wz-session-core/adminspace-write",

@@ -76,8 +76,11 @@ pub struct Listening<X, const N: usize> {
     acceptor: X,
 }
 
+#[cfg(feature = "listen")]
 impl<X, const N: usize> Listening<X, N> {
-    /// Take the connections `acceptor` yields, holding up to `N` sessions of them.
+    /// Take the connections `acceptor` yields, holding up to `N` sessions of them. Only in a build
+    /// with the `listen` feature, which carries the accept side of the handshake: an acceptor given
+    /// to a node without it would read each InitSyn and answer none.
     pub const fn new(acceptor: X) -> Self {
         Self { acceptor }
     }
@@ -85,7 +88,7 @@ impl<X, const N: usize> Listening<X, N> {
 
 impl Listening<NoAccept, 0> {
     /// A node that listens on nothing.
-    pub const NONE: Self = Self::new(NoAccept);
+    pub const NONE: Self = Self { acceptor: NoAccept };
 }
 
 /// A client node on the slot profile over the stack `T`, binding its sockets with `B` and taking
