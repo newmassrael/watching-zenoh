@@ -285292,6 +285292,68 @@
         "The last read of the hosted runs of this family (CI 40128010267) showed no red in the zenoh-codec lanes; the runs of the pushes since were cancelled by later pushes, so the first run to be read per job is the one of this push."
       ]
     },
+    "Round 3587": {
+      "decision_summary": "The build configuration declares policies: behaviour wz has that upstream does not, each defaulting to upstream's behaviour (decision C2 of docs/build-configuration.md). A [[policy]] row names its kind (bool or choice), its values, the upstream behaviour it departs from and its help; the generator emits deploy/Kconfig.policies and wz-session-core's policy_generated.rs, whose SessionPolicy has one typed field per policy and a Default that reads WZ_POLICY_<NAME> from the build's environment. --check refuses a crate that reads a WZ_POLICY_* itself, and each upstream original's defconfig must resolve every policy to upstream's behaviour. The first policy is multicast-loopback (os-default, on, off). Upstream sets IP_MULTICAST_LOOP nowhere, read in the pinned zenoh and in zenoh-pico; wz set it on every joined socket. A build now leaves the system's setting alone unless it says on or off, on the joined and on the send-only socket.",
+      "changes_bullets": [
+        "scripts/lib/wz_config.py: the [[policy]] reader and validator (kind, values, default is upstream's, the upstream behaviour stated, since, help), emit_kconfig_policies and emit_rust_policies, check_policy_reads, resolved_policy_env (also printed by --resolve-env), the original defconfig check that no policy departs from upstream, and selftest arms for each refusal and for the interpreter reading a policy tree.",
+        "crates/wz-session-core: policy.rs (policy_bool, policy_choice, six tests) and the generated policy_generated.rs (an enum per choice policy with Default, and the non-exhaustive SessionPolicy); deploy/Kconfig.policies and the root Kconfig source it.",
+        "deploy/wz-config.toml: the policy multicast-loopback (os-default, on, off; default os-default; since 2) and its help for a deployer.",
+        "crates/wz-runtime-tokio: McastSocketConfig and McastGroupOptions carry loopback, McastPlan::loop_back applies it on the joined socket and on the send-only socket, and os-default sets nothing; wz_session_core::policy is re-exported.",
+        "crates/wz-runtime-tokio/tests/multicast_host_roundtrip.rs: the pair, on reaches a member on the same host and, on Linux only, a sender whose policy is off is not heard while a control sender with on is; scripts/run-ci.sh: the M host multicast roundtrip guard expects 2; five other same-host multicast test files name on through a loopback_on helper; two netns tests in wz-integration-tests name on.",
+        "crates/wz-capi-core, wz-ap-demo, wz-runtime-tokio scouting_fanout: the literals that name every field take loopback from the default.",
+        "docs/build-configuration.md: the first policy is recorded as landed with what upstream does."
+      ],
+      "verification_bullets": [
+        "wz_config --selftest passes 201 arms with kconfiglib provisioned, including the interpreter reading a tree with a choice and a bool policy; --check (12 generated files current, one policy), --check-presets and --check-equivalence pass.",
+        "On the build host, before the last rebase onto origin: the six policy tests of wz-session-core pass, and the 27 ignored end-to-end tests of the six multicast test binaries of wz-runtime-tokio pass with all features, one thread.",
+        "Red first: with the quiet sender's policy withheld (os-default), the off witness fails with \"was heard by a member on its own host\" while the control still arrives; with off it passes.",
+        "Clippy -D warnings over all targets exits 0 for wz-runtime-tokio (all features), wz-capi-core (all features), wz-ap-demo (all features) and wz-integration-tests; rustfmt clean; the multicast address collision gate is OK for the new port.",
+        "The pre-push round-fed array, 113 gates, exits 0 on the rebased tree, 0 failed; each of wz_config, reason_review_pin_gate, store_reasons_resolve and python_floor_lint printed its own verdict.",
+        "The doc budgets hold: wz-session-core 495 and wz-runtime-tokio 466 rustdoc errors, after one unresolved link in policy.rs was given its full path.",
+        "The first push was refused by gate 2c2 (the count guard of run-ci expected 1 and the binary defines 2); the guard now says 2, the number its exact command prints (2 passed), and the count-guard lint passes.",
+        "Not run: Layer C1bz and the other lanes as lanes, the hosted run, the two netns tests (compiled, not run), the off witness on macOS and Windows (it is Linux only, so the hosted Platform lane does not gate them on it), and a Zephyr image."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "scripts/lib/wz_package.py's profile view and the target manifest do not carry a policy: a registered profile that sets one would be built without it and recorded without it. The packaging work owns that file and its manifest schema, so it is asked first; then PROFILE_KEYS, the environment merge and the schema take policies.",
+        "The next policies in the plan's order are querier-quota, reply-auto-timestamp with entity-timestamp-visibility, tx-no-progress-deadline, datagram-fragment-pacing and remote-declaration-watch, each in its own change with its pair of tests.",
+        "A Zephyr image's Kconfig does not source Kconfig.policies; when a policy applies to an image it does, and the CMake bridge forwards CONFIG_WZ_POLICY_* beside CONFIG_WZ_LIMIT_*.",
+        "The two netns tests of wz-integration-tests that now name on were compiled and not run. The off witness is measured on Linux only: on macOS (over lo0) and on Windows the meaning of IP_MULTICAST_LOOP on a sending socket is not measured, and the policy's help promises nothing there until it is.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "The build configuration declares policies: behaviour wz has that upstream does not, each defaulting to upstream's behaviour (decision C2 of docs/build-configuration.md). A [[policy]] row names its kind (bool or choice), its values, the upstream behaviour it departs from and its help; the generator emits deploy/Kconfig.policies and wz-session-core's policy_generated.rs, whose SessionPolicy has one typed field per policy and a Default that reads WZ_POLICY_<NAME> from the build's environment. --check refuses a crate that reads a WZ_POLICY_* itself, and each upstream original's defconfig must resolve every policy to upstream's behaviour. The first policy is multicast-loopback (os-default, on, off). Upstream sets IP_MULTICAST_LOOP nowhere, read in the pinned zenoh and in zenoh-pico; wz set it on every joined socket. A build now leaves the system's setting alone unless it says on or off, on the joined and on the send-only socket.",
+      "publishable_changes_bullets": [
+        "scripts/lib/wz_config.py: the [[policy]] reader and validator (kind, values, default is upstream's, the upstream behaviour stated, since, help), emit_kconfig_policies and emit_rust_policies, check_policy_reads, resolved_policy_env (also printed by --resolve-env), the original defconfig check that no policy departs from upstream, and selftest arms for each refusal and for the interpreter reading a policy tree.",
+        "crates/wz-session-core: policy.rs (policy_bool, policy_choice, six tests) and the generated policy_generated.rs (an enum per choice policy with Default, and the non-exhaustive SessionPolicy); deploy/Kconfig.policies and the root Kconfig source it.",
+        "deploy/wz-config.toml: the policy multicast-loopback (os-default, on, off; default os-default; since 2) and its help for a deployer.",
+        "crates/wz-runtime-tokio: McastSocketConfig and McastGroupOptions carry loopback, McastPlan::loop_back applies it on the joined socket and on the send-only socket, and os-default sets nothing; wz_session_core::policy is re-exported.",
+        "crates/wz-runtime-tokio/tests/multicast_host_roundtrip.rs: the pair, on reaches a member on the same host and, on Linux only, a sender whose policy is off is not heard while a control sender with on is; scripts/run-ci.sh: the M host multicast roundtrip guard expects 2; five other same-host multicast test files name on through a loopback_on helper; two netns tests in wz-integration-tests name on.",
+        "crates/wz-capi-core, wz-ap-demo, wz-runtime-tokio scouting_fanout: the literals that name every field take loopback from the default.",
+        "docs/build-configuration.md: the first policy is recorded as landed with what upstream does."
+      ],
+      "publishable_verification_bullets": [
+        "wz_config --selftest passes 201 arms with kconfiglib provisioned, including the interpreter reading a tree with a choice and a bool policy; --check (12 generated files current, one policy), --check-presets and --check-equivalence pass.",
+        "On the build host, before the last rebase onto origin: the six policy tests of wz-session-core pass, and the 27 ignored end-to-end tests of the six multicast test binaries of wz-runtime-tokio pass with all features, one thread.",
+        "Red first: with the quiet sender's policy withheld (os-default), the off witness fails with \"was heard by a member on its own host\" while the control still arrives; with off it passes.",
+        "Clippy -D warnings over all targets exits 0 for wz-runtime-tokio (all features), wz-capi-core (all features), wz-ap-demo (all features) and wz-integration-tests; rustfmt clean; the multicast address collision gate is OK for the new port.",
+        "The pre-push round-fed array, 113 gates, exits 0 on the rebased tree, 0 failed; each of wz_config, reason_review_pin_gate, store_reasons_resolve and python_floor_lint printed its own verdict.",
+        "The doc budgets hold: wz-session-core 495 and wz-runtime-tokio 466 rustdoc errors, after one unresolved link in policy.rs was given its full path.",
+        "The first push was refused by gate 2c2 (the count guard of run-ci expected 1 and the binary defines 2); the guard now says 2, the number its exact command prints (2 passed), and the count-guard lint passes.",
+        "Not run: Layer C1bz and the other lanes as lanes, the hosted run, the two netns tests (compiled, not run), the off witness on macOS and Windows (it is Linux only, so the hosted Platform lane does not gate them on it), and a Zephyr image."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "scripts/lib/wz_package.py's profile view and the target manifest do not carry a policy: a registered profile that sets one would be built without it and recorded without it. The packaging work owns that file and its manifest schema, so it is asked first; then PROFILE_KEYS, the environment merge and the schema take policies.",
+        "The next policies in the plan's order are querier-quota, reply-auto-timestamp with entity-timestamp-visibility, tx-no-progress-deadline, datagram-fragment-pacing and remote-declaration-watch, each in its own change with its pair of tests.",
+        "A Zephyr image's Kconfig does not source Kconfig.policies; when a policy applies to an image it does, and the CMake bridge forwards CONFIG_WZ_POLICY_* beside CONFIG_WZ_LIMIT_*.",
+        "The two netns tests of wz-integration-tests that now name on were compiled and not run. The off witness is measured on Linux only: on macOS (over lo0) and on Windows the meaning of IP_MULTICAST_LOOP on a sending socket is not measured, and the policy's help promises nothing there until it is.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
