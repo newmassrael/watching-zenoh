@@ -19,6 +19,9 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --emit kconfig-capabilities   print deploy/Kconfig.capabilities
     --emit kconfig-limits         print deploy/Kconfig.limits
     --emit rust-limits            print crates/wz-session-core/src/caps_generated.rs
+    --emit kconfig-policies       print deploy/Kconfig.policies (written only while the declaration
+                                  has a policy)
+    --emit rust-policies          print crates/wz-session-core/src/policy_generated.rs
     --emit defconfig:ORIGINAL     print configs/<ORIGINAL>_defconfig, an upstream original's own
                                   default build in wz's switches (zenoh, zenoh-c, zenoh-pico)
     --emit image-kconfig:IMAGE    print the axes of a declared image as Kconfig choices
@@ -98,6 +101,7 @@ limit and binds the name the code uses to the generated value.
 Usage:
     wz_config.py --check | --selftest | --write | --check-presets
     wz_config.py --emit kconfig-root | kconfig-capabilities | kconfig-limits | rust-limits
+                         | kconfig-policies | rust-policies
     wz_config.py --resolve-features pico|c|core PRESET...
     wz_config.py --resolve-env PRESET...
     wz_config.py --features pico|c|core CONFIG
@@ -117,6 +121,7 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DECL = ROOT / "deploy" / "wz-config.toml"
@@ -133,7 +138,9 @@ KCONFIG_REQUIRED = os.environ.get("WZ_KCONFIG_REQUIRE") == "1"
 BASE_ABI = {"zenoh-pico": "pico", "zenoh-c": "c", "zenoh": "core"}
 KCONFIG_LIMITS = ROOT / "deploy" / "Kconfig.limits"
 RUST_LIMITS = ROOT / "crates" / "wz-session-core" / "src" / "caps_generated.rs"
-CAPS_RS = ROOT / "crates" / "wz-session-core" / "src" / "caps.rs"
+KCONFIG_POLICIES = ROOT / "deploy" / "Kconfig.policies"
+RUST_POLICIES = ROOT / "crates" / "wz-session-core" / "src" / "policy_generated.rs"
+CAPS_RS =ROOT / "crates" / "wz-session-core" / "src" / "caps.rs"
 MANIFESTS = {
     "core": ROOT / "crates" / "wz-capi-core" / "Cargo.toml",
     "pico": ROOT / "crates" / "wz-capi-pico" / "Cargo.toml",
@@ -143,6 +150,8 @@ ABIS = ("core", "pico", "c")
 SCHEMA_VERSION = 1
 # rustfmt's default `max_width`; the crates carry no rustfmt.toml.
 RUST_MAX_WIDTH = 100
+# rustfmt's default `struct_lit_width`: a struct literal whose body is longer goes one field a line.
+RUST_STRUCT_LIT_WIDTH = 18
 
 SPDX = (
     "SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR "
@@ -236,6 +245,7 @@ def decl_of(data: dict) -> dict:
         "caps": caps,
         "order": [c["id"] for c in data["capability"]],
         "limits": list(data["limit"]),
+        "policies": list(data.get("policy", [])),
         "images": [i["id"] for i in data.get("image", [])],
         "image_dirs": {i["id"]: i["dir"] for i in data.get("image", [])},
         "axes": list(data.get("axis", [])),
@@ -270,9 +280,12 @@ def validate_decl(data: dict) -> list[str]:
     out += validate_platforms(data)
     out += validate_artifacts(data)
     out += validate_limits(data["limit"])
+    out += validate_policies(data.get("policy", []), data["catalog_version"])
     out += validate_images(data)
     out += validate_switches(data)
     symbols = [c["kconfig"] for c in data["capability"]] + [l["kconfig"] for l in data["limit"]]
+    for pol in data.get("policy", []):
+        symbols += policy_symbols(pol)
     symbols += [a["kconfig"] for a in data.get("axis", [])]
     symbols += [o["kconfig"] for o in data.get("axis_option", [])]
     if len(symbols) != len(set(symbols)):
@@ -968,6 +981,86 @@ def validate_limits(limits: list[dict]) -> list[str]:
     return out
 
 
+POLICY_KINDS = ("bool", "choice")
+POLICY_ID_RE = re.compile(r"[a-z][a-z0-9]*(-[a-z0-9]+)*")
+POLICY_KEYS = {"id", "kind", "kconfig", "choices", "default", "upstream", "since", "help"}
+
+
+def snake(name: str) -> str:
+    return name.replace("-", "_")
+
+
+def camel(name: str) -> str:
+    return "".join(part.capitalize() for part in name.split("-"))
+
+
+def policy_symbols(pol: dict) -> list[str]:
+    """The Kconfig symbols a policy declares: its own for a bool, and for a choice the choice and
+    one option per value."""
+    kconfig = pol.get("kconfig")
+    if pol.get("kind") == "choice":
+        return [kconfig] + [f"{kconfig}_{snake(c).upper()}" for c in pol.get("choices", [])]
+    return [kconfig]
+
+
+def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
+    """A policy is behaviour upstream does not have (docs/build-configuration.md, C2 and
+    section 5): it is declared with the upstream behaviour it departs from, and it defaults to that
+    behaviour, so a bool defaults off and a choice defaults to the value that is upstream's."""
+    out: list[str] = []
+    ids = [p.get("id") for p in policies]
+    if len(ids) != len(set(ids)):
+        out.append("a policy id is declared twice")
+    for pol in policies:
+        pid = pol.get("id", "?")
+        for key in sorted(set(pol) - POLICY_KEYS):
+            out.append(f"policy `{pid}`: `{key}` is not a key a policy has")
+        if not POLICY_ID_RE.fullmatch(str(pid)):
+            out.append(f"policy `{pid}`: an id is lowercase words joined by `-`")
+            continue
+        kind = pol.get("kind")
+        if kind not in POLICY_KINDS:
+            out.append(f"policy `{pid}`: kind is {kind!r}, one of {', '.join(POLICY_KINDS)}")
+            continue
+        if pol.get("kconfig") != f"WZ_POLICY_{snake(pid).upper()}":
+            out.append(f"policy `{pid}`: its Kconfig symbol is `{pol.get('kconfig')}`, not "
+                       f"WZ_POLICY_{snake(pid).upper()}")
+        if kind == "bool":
+            if "choices" in pol:
+                out.append(f"policy `{pid}`: a bool has no `choices`")
+            if pol.get("default") != "off":
+                out.append(f"policy `{pid}`: a bool policy defaults to `off`, which is upstream's "
+                           f"behaviour (C2); it says {pol.get('default')!r}")
+        else:
+            choices = pol.get("choices")
+            if not isinstance(choices, list) or len(choices) < 2:
+                out.append(f"policy `{pid}`: a choice has two or more `choices`")
+            else:
+                if len(choices) != len(set(choices)):
+                    out.append(f"policy `{pid}`: a value is listed twice in `choices`")
+                for c in choices:
+                    if not POLICY_ID_RE.fullmatch(str(c)):
+                        out.append(f"policy `{pid}`: the value `{c}` is lowercase words joined by `-`")
+                if len({camel(str(c)) for c in choices}) != len(choices):
+                    out.append(f"policy `{pid}`: two values name the same Rust variant")
+                if pol.get("default") not in choices:
+                    out.append(f"policy `{pid}`: default {pol.get('default')!r} is not one of "
+                               f"its choices")
+        if not isinstance(pol.get("upstream"), str) or not pol["upstream"].strip():
+            out.append(f"policy `{pid}`: it does not say what upstream does; a behaviour that "
+                       "departs from no upstream behaviour is a capability or a defect, not a policy")
+        if not isinstance(pol.get("since"), int) or not 1 <= pol["since"] <= catalog_version:
+            out.append(f"policy `{pid}`: `since` is the catalogue version that introduced it, an "
+                       f"integer from 1 to {catalog_version}")
+        if not isinstance(pol.get("help"), str) or not pol["help"].strip():
+            out.append(f"policy `{pid}`: it has no help")
+        elif "\n\n" in pol["help"].strip():
+            out.append(f"policy `{pid}`: its help is more than one paragraph")
+        elif re.search(r"\[`|crate::", pol["help"]):
+            out.append(f"policy `{pid}`: its help names Rust items; it is written for a deployer")
+    return out
+
+
 # ---------------------------------------------------------------------------------------------
 # the capability graph
 # ---------------------------------------------------------------------------------------------
@@ -1241,6 +1334,110 @@ def emit_rust_limits(decl: dict) -> str:
     return "\n".join(out) + "\n"
 
 
+def emit_kconfig_policies(decl: dict) -> str:
+    """A bool policy is a `bool` symbol that defaults to `n`; a choice is a Kconfig `choice` with
+    one option per value, the default being upstream's. Each help ends with what upstream does."""
+    out = generated_header("#", "kconfig-policies") + [
+        "",
+        'menu "wz policies"',
+        "",
+        'comment "Each policy is behaviour beyond upstream; the default of every one is upstream\'s."',
+        "",
+    ]
+    for pol in decl["policies"]:
+        help_text = pol["help"].strip().splitlines() + [f"Upstream: {pol['upstream'].strip()}"]
+        if pol["kind"] == "bool":
+            out += [f"config {pol['kconfig']}", f'\tbool "{pol["id"]}"', "\tdefault n", "\thelp"]
+            out += help_lines("\n".join(help_text))
+            out.append("")
+            continue
+        default = f"{pol['kconfig']}_{snake(pol['default']).upper()}"
+        out += [f"choice {pol['kconfig']}", f'\tprompt "{pol["id"]}"', f"\tdefault {default}", "\thelp"]
+        out += help_lines("\n".join(help_text))
+        for value in pol["choices"]:
+            out += ["", f"config {pol['kconfig']}_{snake(value).upper()}", f'\tbool "{value}"']
+        out += ["", "endchoice", ""]
+    out.append("endmenu")
+    return "\n".join(out) + "\n"
+
+
+def rust_doc(text: str, indent: str) -> list[str]:
+    return textwrap.wrap(text, width=92, initial_indent=f"{indent}/// ",
+                         subsequent_indent=f"{indent}/// ")
+
+
+def emit_rust_policies(decl: dict) -> str:
+    """The module `policy.rs` includes: one enum per choice policy, and `SessionPolicy`, whose
+    fields are the policies of the build and whose `Default` is what the build's environment
+    (`WZ_POLICY_<NAME>`) states, or upstream's behaviour when it states nothing. Laid out so
+    rustfmt leaves it alone: every call fits on a line, and a struct literal is one line only
+    when rustfmt would make it one."""
+    pols = decl["policies"]
+    choices = [p for p in pols if p["kind"] == "choice"]
+    bools = [p for p in pols if p["kind"] == "bool"]
+    out = generated_header("//", "rust-policies") + [
+        "",
+        "//! The policies of a build as the code reads them: each is a field of [`SessionPolicy`], whose",
+        "//! `Default` is the value the build's environment states as `WZ_POLICY_<NAME>`, or upstream's",
+        "//! behaviour when it states none. A test names the other value by setting the field.",
+        "",
+    ]
+    helpers = (["policy_bool"] if bools else []) + (["policy_choice"] if choices else [])
+    if len(helpers) == 1:
+        out += [f"use super::{helpers[0]};", ""]
+    elif helpers:
+        out += ["use super::{policy_bool, policy_choice};", ""]
+    for pol in choices:
+        name = camel(pol["id"])
+        values = pol["choices"]
+        out += rust_doc(f"`{pol['id']}`: {pol['help'].strip()}".replace("\n", " "), "")
+        out += rust_doc(f"Upstream: {pol['upstream'].strip()}", "")
+        out += ["#[derive(Clone, Copy, Debug, PartialEq, Eq)]", f"pub enum {name} {{"]
+        for value in values:
+            out += [f"    /// `{value}`.", f"    {camel(value)},"]
+        out += ["}", "", f"impl {name} {{"]
+        out += ["    /// The value as the declaration, the Kconfig and the environment spell it.",
+                "    pub const fn id(self) -> &'static str {", "        match self {"]
+        out += [f'            Self::{camel(v)} => "{v}",' for v in values]
+        out += ["        }", "    }", ""]
+        ids = ", ".join(f'"{v}"' for v in values)
+        variants = ", ".join(f"Self::{camel(v)}" for v in values)
+        out += [f"    const CHOICES: [&'static str; {len(values)}] = [{ids}];",
+                f"    const ALL: [Self; {len(values)}] = [{variants}];", "",
+                "    const fn stated() -> Self {",
+                f'        let stated = option_env!("{pol["kconfig"]}");',
+                f"        let index = policy_choice(stated, &Self::CHOICES, {values.index(pol['default'])});",
+                "        Self::ALL[index]", "    }", "}", "",
+                f"impl Default for {name} {{", "    fn default() -> Self {", "        Self::stated()", "    }", "}", ""]
+    out += ["/// What this build decided beyond upstream's behaviour.",
+            "#[derive(Clone, Copy, Debug, PartialEq, Eq)]", "#[non_exhaustive]"]
+    if pols:
+        out.append("pub struct SessionPolicy {")
+        for pol in pols:
+            out += rust_doc(f"`{pol['id']}`. Upstream: {pol['upstream'].strip()}", "    ")
+            out.append(f"    pub {snake(pol['id'])}: {camel(pol['id']) if pol['kind'] == 'choice' else 'bool'},")
+        out.append("}")
+    else:
+        out.append("pub struct SessionPolicy {}")
+    out += ["", "impl SessionPolicy {",
+            "    /// The policy this build states: its environment's values, else upstream's.",
+            "    pub const fn from_build() -> Self {"]
+    for pol in pols:
+        field = snake(pol["id"])
+        if pol["kind"] == "choice":
+            out.append(f"        let {field} = {camel(pol['id'])}::stated();")
+        else:
+            out.append(f'        let {field} = policy_bool(option_env!("{pol["kconfig"]}"));')
+    fields = ", ".join(snake(p["id"]) for p in pols)
+    if len(fields) <= RUST_STRUCT_LIT_WIDTH:
+        out.append(f"        Self {{ {fields} }}" if fields else "        Self {}")
+    else:
+        out += ["        Self {"] + [f"            {snake(p['id'])}," for p in pols] + ["        }"]
+    out += ["    }", "}", "", "impl Default for SessionPolicy {", "    fn default() -> Self {",
+            "        Self::from_build()", "    }", "}"]
+    return "\n".join(out) + "\n"
+
+
 def global_axes(decl: dict) -> list[dict]:
     return [a for a in decl["axes"] if is_global(a)]
 
@@ -1258,6 +1455,8 @@ def emit_kconfig_root(decl: dict) -> str:
         'rsource "Kconfig.capabilities"',
         'rsource "Kconfig.limits"',
     ]
+    if decl["policies"]:
+        out.append('rsource "Kconfig.policies"')
     return "\n".join(out) + "\n"
 
 
@@ -1366,6 +1565,7 @@ GENERATED = {
     "kconfig-capabilities": (KCONFIG_CAPS, emit_kconfig_capabilities),
     "kconfig-limits": (KCONFIG_LIMITS, emit_kconfig_limits),
     "rust-limits": (RUST_LIMITS, emit_rust_limits),
+    "rust-policies": (RUST_POLICIES, emit_rust_policies),
 }
 
 
@@ -1375,6 +1575,8 @@ def generated_files(decl: dict) -> dict[str, tuple[pathlib.Path, str]]:
     out = {kind: (path, emit(decl)) for kind, (path, emit) in GENERATED.items()}
     if global_axes(decl):
         out["kconfig-axes"] = (KCONFIG_AXES, emit_kconfig_axes(decl))
+    if decl["policies"]:
+        out["kconfig-policies"] = (KCONFIG_POLICIES, emit_kconfig_policies(decl))
     for original in BASE_ABI:
         out[f"defconfig:{original}"] = (defconfig_path(original), emit_defconfig(decl, original))
     for image in decl["images"]:
@@ -1429,6 +1631,28 @@ def check_caps_rs(decl: dict, text: str) -> list[str]:
     code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
     if STATED_RE.search(code):
         out.append("caps.rs reads a WZ_LIMIT_* itself; a limit's value comes from the generated module")
+    return out
+
+
+CRATES_ROOT = ROOT / "crates"
+POLICY_READ_RE = re.compile(r'\b(?:option_env|env)!\s*\(\s*"WZ_POLICY_')
+
+
+def check_policy_reads(crates: pathlib.Path) -> list[str]:
+    """A policy's value is read in one place, the generated module. A crate that reads a
+    `WZ_POLICY_*` itself would decide a policy where the declaration cannot see it."""
+    out: list[str] = []
+    generated = RUST_POLICIES.name
+    for base, dirs, files in os.walk(crates):
+        dirs[:] = [d for d in dirs if d not in ("target", ".git", "node_modules")]
+        for name in files:
+            if not name.endswith(".rs") or name == generated:
+                continue
+            path = pathlib.Path(base) / name
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if not line.lstrip().startswith("//") and POLICY_READ_RE.search(line):
+                    out.append(f"{path.relative_to(crates.parent)}:{number} reads a WZ_POLICY_* "
+                               f"itself; a policy's value comes from {generated}")
     return out
 
 
@@ -1639,6 +1863,27 @@ def resolved_limit_env(decl: dict, kconf) -> list[str]:
     return out
 
 
+def resolved_policy(kconf, pol: dict) -> str:
+    """The value a configuration gives a policy: `on` or `off` for a bool, the chosen value's id
+    for a choice."""
+    if pol["kind"] == "bool":
+        return "on" if kconf.syms[pol["kconfig"]].tri_value == 2 else "off"
+    for value in pol["choices"]:
+        if kconf.syms[f"{pol['kconfig']}_{snake(value).upper()}"].tri_value == 2:
+            return value
+    raise PresetError(f"policy {pol['id']} has no value chosen")
+
+
+def resolved_policy_env(decl: dict, kconf) -> list[str]:
+    """`WZ_POLICY_<NAME>=<value>` for every policy the configuration sets off upstream's."""
+    out: list[str] = []
+    for pol in decl["policies"]:
+        value = resolved_policy(kconf, pol)
+        if value != pol["default"]:
+            out.append(f"{pol['kconfig']}={value}")
+    return out
+
+
 def cmd_check_presets() -> int:
     """Every registered profile resolves, strictly, on the pinned interpreter.
 
@@ -1700,6 +1945,12 @@ def original_differences(decl: dict, original: str, kconf) -> list[str]:
     for option in original_choices(decl, original):
         if kconf.syms[option["kconfig"]].tri_value != 2:
             out.append(f"{option['kconfig']} is not the choice taken, and it is {original}'s")
+    # C2: an original's own build departs from itself nowhere, so no policy is on in it.
+    for pol in decl["policies"]:
+        value = resolved_policy(kconf, pol)
+        if value != pol["default"]:
+            out.append(f"policy {pol['id']} resolves {value}, and {original}'s own build has "
+                       f"upstream's behaviour, {pol['default']}")
     return out
 
 
@@ -1780,6 +2031,10 @@ def cmd_check() -> int:
     if "kconfig-axes" not in files and KCONFIG_AXES.exists():
         findings.append(f"{KCONFIG_AXES.relative_to(ROOT)} exists, but the declaration has no "
                         "global axis: remove it")
+    if "kconfig-policies" not in files and KCONFIG_POLICIES.exists():
+        findings.append(f"{KCONFIG_POLICIES.relative_to(ROOT)} exists, but the declaration has no "
+                        "policy: remove it")
+    findings += check_policy_reads(CRATES_ROOT)
     for image in decl["images"]:
         kconfig = ROOT / decl["image_dirs"][image] / "Kconfig"
         if kconfig.is_file():
@@ -1817,7 +2072,7 @@ def cmd_check() -> int:
     n_global = len(global_axes(decl))
     unassessed = [p["id"] for p in decl["platforms"] if "os_provides" not in p]
     print(f"  wz-config: {len(decl['order'])} capabilities, {len(decl['limits'])} limits, "
-          f"{n_global} global and {len(decl['axes']) - n_global} image axes, {len(files)} "
+          f"{len(decl['policies'])} policies, {n_global} global and {len(decl['axes']) - n_global} image axes, {len(files)} "
           f"generated files current, caps.rs bound, {len(MANIFESTS)} manifests agree, "
           f"{len(decl['platforms'])} platforms agree with rustc")
     if unassessed:
@@ -1970,6 +2225,33 @@ implies = ["b"]
 image = "img"
 when = ["WZ_MODE_P", "WZ_SIDE_L"]
 features = ["peer-left"]
+"""
+
+
+POLICY_SAMPLE = """\
+
+[[policy]]
+id = "wire-mode"
+kind = "choice"
+kconfig = "WZ_POLICY_WIRE_MODE"
+choices = ["os-default", "on", "off"]
+default = "os-default"
+upstream = "Leaves the operating system's own setting."
+since = 3
+help = '''
+How the wire is set.
+'''
+
+[[policy]]
+id = "eager-flush"
+kind = "bool"
+kconfig = "WZ_POLICY_EAGER_FLUSH"
+default = "off"
+upstream = "Flushes on the batch boundary."
+since = 3
+help = '''
+Flush early.
+'''
 """
 
 
@@ -2137,6 +2419,71 @@ def cmd_selftest() -> int:
                sdecl, "pub const MAX_A: usize = generated::MAX_B;\n")))
     expect("a bare literal is a finding",
            any("bare literal" in f for f in check_caps_rs(sdecl, bound + "pub const MAX_D: usize = 3;\n")))
+    # The policies and their derivations.
+    with_policy = SAMPLE + POLICY_SAMPLE
+    expect("a sample policy declaration validates", validate_decl(read_decl_toml(with_policy)) == [])
+    pdecl = decl_of(read_decl_toml(with_policy))
+
+    def policy_refused(old: str, new: str, words: str) -> bool:
+        return any(words in p for p in validate_decl(read_decl_toml(with_policy.replace(old, new))))
+
+    expect("a bool policy that defaults on is refused",
+           policy_refused('default = "off"', 'default = "on"', "defaults to `off`"))
+    expect("a choice whose default is not a choice is refused",
+           policy_refused('default = "os-default"', 'default = "other"', "not one of its choices"))
+    expect("a policy whose Kconfig symbol is not derived from its id is refused",
+           policy_refused('kconfig = "WZ_POLICY_EAGER_FLUSH"', 'kconfig = "WZ_POLICY_X"', "not WZ_POLICY_EAGER_FLUSH"))
+    expect("a policy that says nothing of upstream is refused",
+           policy_refused('upstream = "Flushes on the batch boundary."', 'upstream = " "',
+                          "does not say what upstream does"))
+    expect("a policy id that is not lowercase words is refused",
+           policy_refused('id = "eager-flush"', 'id = "Eager_Flush"', "lowercase words"))
+    expect("a key a policy does not have is refused",
+           policy_refused('since = 3\nhelp = \'\'\'\nFlush early.', 'since = 3\nspare = 1\nhelp = \'\'\'\nFlush early.',
+                          "`spare` is not a key"))
+    expect("a `since` past the catalogue is refused",
+           policy_refused('since = 3\nhelp = \'\'\'\nFlush early.', 'since = 9\nhelp = \'\'\'\nFlush early.',
+                          "`since`"))
+    expect("a choice listing a value twice is refused",
+           policy_refused('["os-default", "on", "off"]', '["os-default", "on", "on"]', "listed twice"))
+    expect("a policy declared twice is refused",
+           any("declared twice" in p for p in validate_decl(read_decl_toml(with_policy + POLICY_SAMPLE))))
+    kpolicies = emit_kconfig_policies(pdecl)
+    expect("a choice policy is a Kconfig choice that defaults to upstream's value",
+           "choice WZ_POLICY_WIRE_MODE\n\tprompt \"wire-mode\"\n\tdefault WZ_POLICY_WIRE_MODE_OS_DEFAULT" in kpolicies
+           and "config WZ_POLICY_WIRE_MODE_OFF\n\tbool \"off\"" in kpolicies)
+    expect("a bool policy defaults to n, and its help ends with what upstream does",
+           "config WZ_POLICY_EAGER_FLUSH\n\tbool \"eager-flush\"\n\tdefault n" in kpolicies
+           and "\t  Upstream: Flushes on the batch boundary.\n" in kpolicies)
+    rpolicies = emit_rust_policies(pdecl)
+    expect("a choice policy is an enum whose default index is upstream's",
+           "pub enum WireMode {" in rpolicies and "policy_choice(stated, &Self::CHOICES, 0)" in rpolicies)
+    expect("a choice enum's Default is the build's value, so a config struct can derive Default",
+           "impl Default for WireMode {\n    fn default() -> Self {\n        Self::stated()\n" in rpolicies)
+    expect("a bool policy reads its environment and nothing else",
+           'let eager_flush = policy_bool(option_env!("WZ_POLICY_EAGER_FLUSH"));' in rpolicies
+           and "use super::{policy_bool, policy_choice};" in rpolicies)
+    expect("a literal past rustfmt's width goes one field a line",
+           "        Self {\n            wire_mode,\n            eager_flush,\n        }\n" in rpolicies)
+    nothing = emit_rust_policies({"policies": []})
+    expect("no policy is an empty struct and no import",
+           "pub struct SessionPolicy {}\n" in nothing and "        Self {}\n" in nothing
+           and "use super::" not in nothing)
+    one = emit_rust_policies({"policies": [p for p in pdecl["policies"] if p["kind"] == "bool"]})
+    expect("a literal rustfmt would make one line is one line",
+           "        Self { eager_flush }\n" in one and "use super::policy_bool;" in one)
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as reads_tmp:
+        reads = pathlib.Path(reads_tmp) / "crates"
+        reads.mkdir()
+        (reads / "a.rs").write_text('const A: bool = policy_bool(option_env!("WZ_POLICY_X"));\n', encoding="utf-8")
+        (reads / "b.rs").write_text('// option_env!("WZ_POLICY_X") is how it is read\n', encoding="utf-8")
+        (reads / RUST_POLICIES.name).write_text('const A: Option<&str> = option_env!("WZ_POLICY_X");\n',
+                                                encoding="utf-8")
+        found = check_policy_reads(reads)
+        expect("a crate that reads a policy itself is a finding; a comment and the generated module are not",
+               len(found) == 1 and found[0].startswith("crates/a.rs:1"))
     expect("a row that reads WZ_LIMIT_* itself is a finding",
            any("itself" in f for f in check_caps_rs(
                sdecl, bound + 'const X: usize = limit(option_env!("WZ_LIMIT_X"), 1);\n')))
@@ -2587,6 +2934,33 @@ def cmd_selftest() -> int:
             expect("the interpreter reads the global axes, and an option turns on what it implies",
                    off_by_default and kconf.syms["WZ_CAP_B"].tri_value == 2
                    and kconf.warnings == [])
+            # The same tree with the two sample policies: each resolves to upstream's behaviour
+            # until a fragment says otherwise, and only a departure reaches the environment.
+            wpdecl = decl_of(read_decl_toml(with_global + POLICY_SAMPLE))
+            ptree = d / "ptree"
+            ptree.mkdir()
+            for name, emit in (("Kconfig", emit_kconfig_root), ("Kconfig.axes", emit_kconfig_axes),
+                               ("Kconfig.capabilities", emit_kconfig_capabilities),
+                               ("Kconfig.limits", emit_kconfig_limits),
+                               ("Kconfig.policies", emit_kconfig_policies)):
+                (ptree / name).write_text(emit(wpdecl), encoding="utf-8")
+
+            def policy_tree(*assigned: str):
+                frag = d / "policy.conf"
+                frag.write_text("".join(f"{a}\n" for a in assigned), encoding="utf-8")
+                tree_conf = kconfiglib_module().Kconfig(str(ptree / "Kconfig"), warn_to_stderr=False)
+                tree_conf.load_config(str(frag), replace=False)
+                return tree_conf
+
+            expect("a policy no fragment names resolves to upstream's behaviour",
+                   [resolved_policy(policy_tree(), p) for p in wpdecl["policies"]] == ["os-default", "off"]
+                   and resolved_policy_env(wpdecl, policy_tree()) == [])
+            departed = policy_tree("CONFIG_WZ_POLICY_WIRE_MODE_OFF=y", "CONFIG_WZ_POLICY_EAGER_FLUSH=y")
+            expect("a policy set off upstream's behaviour reaches the environment",
+                   resolved_policy_env(wpdecl, departed)
+                   == ["WZ_POLICY_WIRE_MODE=off", "WZ_POLICY_EAGER_FLUSH=on"])
+            expect("an original's build with a policy on is not that original's",
+                   any("policy eager-flush" in x for x in original_differences(wpdecl, "zenoh-c", departed)))
     print(f"  wz-config selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
@@ -2651,7 +3025,7 @@ def main(argv: list[str]) -> int:
         except PresetError as exc:
             print(f"  wz-config FAIL: {exc}", file=sys.stderr)
             return 1
-        for line in resolved_limit_env(decl, kconf):
+        for line in resolved_limit_env(decl, kconf) + resolved_policy_env(decl, kconf):
             print(line)
         return 0
     print(__doc__, file=sys.stderr)

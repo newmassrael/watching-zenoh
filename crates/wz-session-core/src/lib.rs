@@ -158,6 +158,11 @@ pub mod byte_cells;
 /// const-vs-type-parameter rationale.
 pub mod caps;
 
+/// The policies of a build: behaviour beyond upstream's, each a typed field of
+/// [`policy::SessionPolicy`] whose default is upstream's behaviour unless the
+/// build states otherwise. Unconditional, no_std and no_alloc, like [`caps`].
+pub mod policy;
+
 /// Fixed-memory step S9b — where hand-written text goes: the [`text_out::TextOut`]
 /// seam the admin writers emit through, `String` on the growable profile and
 /// [`text_out::FixedText`] (inline bytes that refuse and count what does not fit,
