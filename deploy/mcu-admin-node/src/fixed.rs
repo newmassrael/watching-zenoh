@@ -145,7 +145,7 @@ struct Statics {
 
 /// The registrations the node's observer holds, all closed types: the config-write
 /// subscriber and the admin queryable.
-type Sinks = AdminSinks<1024, SESSIONS>;
+type Sinks = AdminSinks<1024, SESSIONS, ControlledOpener>;
 
 // SAFETY: the profile's rule, stated on the type: the node is driven by one cooperative
 // loop on one core, which is the only thing that reaches these tables; each member is
@@ -282,7 +282,7 @@ pub fn run() -> ! {
             &NODE.admin,
             Some(&NODE.control),
             Some(&NODE.control),
-            Some(&OPEN),
+            &OPEN,
         )
         .is_err()
         {

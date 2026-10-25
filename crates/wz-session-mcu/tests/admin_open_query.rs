@@ -33,7 +33,7 @@ use wz_session_core::query::{QueryReply, QueryableRegistry, ReplyBody};
 use wz_session_core::request_build::RequestQueryBuilder;
 use wz_session_mcu::admin_fixed::{
     host_admin_queryable_fixed_with_open, AdminHost, AdminQuerySink, FixedNodeIdentity,
-    FixedNodeStatus, NodeOpening,
+    FixedNodeStatus, NoOpening, NodeOpening,
 };
 use wz_session_mcu::admin_host::ConnectControl;
 
@@ -168,14 +168,14 @@ fn peer(first: u8) -> [u8; 16] {
 
 /// Ask `key` of a node that binds `opener`, and what its session was told, with the heap
 /// counted over the dispatch.
-fn ask(
-    opener: Option<&'static (dyn NodeOpening + Sync)>,
+fn ask<O: NodeOpening + Sync + 'static>(
+    opener: &'static O,
     key: &str,
 ) -> (Vec<(String, String)>, usize) {
     static STATUS: FixedNodeStatus<3> = FixedNodeStatus::new(true);
     static HOST: AdminHost<1024> = AdminHost::new();
     static CONTROL: ConnectControl = ConnectControl::new(true);
-    let mut registry: QueryableRegistry<AdminQuerySink<1024, 3>> =
+    let mut registry: QueryableRegistry<AdminQuerySink<1024, 3, O>> =
         QueryableRegistry::with_sink_backing();
     host_admin_queryable_fixed_with_open(
         &mut registry,
@@ -206,7 +206,7 @@ const OPEN_KEY: &str = "@/a1b2/peer/session/open/1f";
 #[test]
 fn an_open_is_answered_in_the_words_of_the_heap_profile_with_nothing_allocated() {
     static OPENER: Recording = Recording::new(true);
-    let (replies, allocations) = ask(Some(&OPENER), OPEN_KEY);
+    let (replies, allocations) = ask(&OPENER, OPEN_KEY);
     assert_eq!(allocations, 0, "heap allocations of the GET");
     assert_eq!(
         replies,
@@ -232,7 +232,7 @@ fn an_open_is_answered_in_the_words_of_the_heap_profile_with_nothing_allocated()
         (OpenOutcome::Unverifiable, RefusedReason::Unverifiable),
     ] {
         OPENER.answer(outcome);
-        let (replies, allocations) = ask(Some(&OPENER), OPEN_KEY);
+        let (replies, allocations) = ask(&OPENER, OPEN_KEY);
         assert_eq!(allocations, 0);
         assert_eq!(
             replies,
@@ -257,7 +257,7 @@ fn a_pattern_is_not_a_target_and_a_key_that_is_no_zid_is_refused_as_such() {
         "@/a1b2/peer/session/open/$*",
         "@/a1b2/peer/session/**",
     ] {
-        let (replies, _) = ask(Some(&OPENER), pattern);
+        let (replies, _) = ask(&OPENER, pattern);
         assert!(
             replies
                 .iter()
@@ -268,7 +268,7 @@ fn a_pattern_is_not_a_target_and_a_key_that_is_no_zid_is_refused_as_such() {
     assert_eq!(OPENER.asked(), 0, "a pattern opens nothing");
 
     let bad = "@/a1b2/peer/session/open/01";
-    let (replies, _) = ask(Some(&OPENER), bad);
+    let (replies, _) = ask(&OPENER, bad);
     assert_eq!(
         replies,
         vec![(
@@ -285,7 +285,7 @@ fn a_pattern_is_not_a_target_and_a_key_that_is_no_zid_is_refused_as_such() {
 #[test]
 fn a_node_that_does_not_permit_it_refuses_and_opens_nothing() {
     static OPENER: Recording = Recording::new(false);
-    let (replies, _) = ask(Some(&OPENER), OPEN_KEY);
+    let (replies, _) = ask(&OPENER, OPEN_KEY);
     assert_eq!(
         replies,
         vec![(
@@ -303,7 +303,7 @@ fn a_node_that_does_not_permit_it_refuses_and_opens_nothing() {
 fn the_capability_document_lists_the_one_verb_this_profile_binds() {
     static OPENER: Recording = Recording::new(true);
     let key = "@/a1b2/peer/session/verbs";
-    let (replies, allocations) = ask(Some(&OPENER), key);
+    let (replies, allocations) = ask(&OPENER, key);
     assert_eq!(allocations, 0);
     assert_eq!(
         replies,
@@ -314,8 +314,9 @@ fn the_capability_document_lists_the_one_verb_this_profile_binds() {
 
 #[test]
 fn a_node_with_no_opener_answers_none_of_it() {
+    static NONE: NoOpening = NoOpening;
     for key in [OPEN_KEY, "@/a1b2/peer/session/verbs"] {
-        let (replies, _) = ask(None, key);
+        let (replies, _) = ask(&NONE, key);
         assert!(
             replies.iter().all(|(reply_key, _)| reply_key != key),
             "{key}: {replies:?}"

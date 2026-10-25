@@ -79,7 +79,16 @@ type LocatorText = FixedText<{ caps::MAX_LOCATOR_LEN }>;
 /// A port, for the reason the heap profile's `PeerOpener` is one: the machines that hold a peer
 /// live with the loop that ticks them, and the query is served beside it. The node's own
 /// implementation is `crate::connect_manager::ControlledOpener`.
+///
+/// It is also the strategy of decision D7: whether the node serves the in-band verbs is the type
+/// its admin queryable is made with, so a build whose peers are declared when it is built names
+/// [`NoOpening`] and its answer holds no code of the open query, which `BOUND` removes where the
+/// answer is compiled (`docs/build-configuration.md` C3: a choice that changes the shape of the
+/// code is a type parameter, not a feature).
 pub trait NodeOpening {
+    /// Whether the node binds the in-band verbs at all. `false` only for [`NoOpening`].
+    const BOUND: bool = true;
+
     /// Whether this node lets a query open a session: the node's write permit, which is what
     /// the config write is gated by too. A node that does not permit it answers a refusal that
     /// says so, and opens nothing.
@@ -92,6 +101,32 @@ pub trait NodeOpening {
         zid: &[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES],
     ) -> OpenOutcome;
 }
+
+/// The opener of a node that binds no in-band verb: the third value of decision D7, where the
+/// peers a node holds are the ones it was built with and the machines only reconnect them. Its
+/// admin answer lists no `open` and serves no `session/open` key.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoOpening;
+
+impl NodeOpening for NoOpening {
+    const BOUND: bool = false;
+
+    fn permitted(&self) -> bool {
+        false
+    }
+
+    fn open(
+        &self,
+        _zid: &[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES],
+    ) -> OpenOutcome {
+        // Not reached: the answer never asks an opener that is not `BOUND`. Were it reached, a
+        // node that binds no verb takes no peer by request, which is `NoRoom`'s meaning.
+        OpenOutcome::NoRoom
+    }
+}
+
+/// The one [`NoOpening`] a node without verbs hands its queryable.
+static NO_OPENING: NoOpening = NoOpening;
 
 /// `s` in a fixed text of `N` bytes, or `None` if it does not fit.
 fn fixed<const N: usize>(s: &str) -> Option<FixedText<N>> {
@@ -425,7 +460,15 @@ pub fn host_admin_queryable_fixed<const BODY: usize, const SESSIONS: usize>(
     config: Option<&'static (dyn ConfigView + Sync)>,
     connect: Option<&'static (dyn ConnectStatusSource + Sync)>,
 ) -> Result<(), RegisterError> {
-    host_admin_queryable_fixed_with_open(queryables, identity, status, host, config, connect, None)
+    host_admin_queryable_fixed_with_open(
+        queryables,
+        identity,
+        status,
+        host,
+        config,
+        connect,
+        &NO_OPENING,
+    )
 }
 
 /// [`host_admin_queryable_fixed`], and with an `open` the node's lifecycle open query too:
@@ -435,16 +478,21 @@ pub fn host_admin_queryable_fixed<const BODY: usize, const SESSIONS: usize>(
 ///
 /// The open query is answered only for a literal key that names this node, its role and one
 /// peer: a pattern is never a target. Nothing else of the lifecycle is bound on this profile,
-/// so the capability document lists `open` and no other verb.
+/// so the capability document lists `open` and no other verb. The opener's type is the node's
+/// transport (decision D7): [`NoOpening`] binds none, any other binds the in-band verbs.
 #[allow(clippy::too_many_arguments)]
-pub fn host_admin_queryable_fixed_with_open<const BODY: usize, const SESSIONS: usize>(
-    queryables: &mut QueryableRegistry<AdminQuerySink<BODY, SESSIONS>>,
+pub fn host_admin_queryable_fixed_with_open<
+    const BODY: usize,
+    const SESSIONS: usize,
+    O: NodeOpening + Sync + 'static,
+>(
+    queryables: &mut QueryableRegistry<AdminQuerySink<BODY, SESSIONS, O>>,
     identity: FixedNodeIdentity,
     status: &'static FixedNodeStatus<SESSIONS>,
     host: &'static AdminHost<BODY>,
     config: Option<&'static (dyn ConfigView + Sync)>,
     connect: Option<&'static (dyn ConnectStatusSource + Sync)>,
-    open: Option<&'static (dyn NodeOpening + Sync)>,
+    open: &'static O,
 ) -> Result<(), RegisterError> {
     let mut pattern: FixedText<{ caps::MAX_KEYEXPR_BYTES }> = FixedText::new();
     write_admin_queryable_key(&mut pattern, identity.zid_hex.prefix(), identity.whatami);
@@ -460,7 +508,7 @@ pub fn host_admin_queryable_fixed_with_open<const BODY: usize, const SESSIONS: u
             connect,
             open,
         },
-        answer_admin_query::<BODY, SESSIONS>,
+        answer_admin_query::<BODY, SESSIONS, O>,
     );
     queryables
         .register_sink(pattern, Locality::Any, false, answer)
@@ -468,19 +516,24 @@ pub fn host_admin_queryable_fixed_with_open<const BODY: usize, const SESSIONS: u
 }
 
 /// What the node's admin queryable holds: its identity and the statics it answers from.
-pub struct AdminQueryState<const BODY: usize, const SESSIONS: usize> {
+pub struct AdminQueryState<
+    const BODY: usize,
+    const SESSIONS: usize,
+    O: NodeOpening + Sync + 'static = NoOpening,
+> {
     identity: FixedNodeIdentity,
     status: &'static FixedNodeStatus<SESSIONS>,
     host: &'static AdminHost<BODY>,
     config: Option<&'static (dyn ConfigView + Sync)>,
     connect: Option<&'static (dyn ConnectStatusSource + Sync)>,
-    open: Option<&'static (dyn NodeOpening + Sync)>,
+    open: &'static O,
 }
 
 /// The sink of the node's admin queryable ([`host_admin_queryable_fixed`]): a closed
-/// type, so the registry is typed by it and the registration allocates nothing.
-pub type AdminQuerySink<const BODY: usize, const SESSIONS: usize> =
-    FnQuerySink<AdminQueryState<BODY, SESSIONS>>;
+/// type, so the registry is typed by it and the registration allocates nothing. The opener
+/// it is typed with defaults to [`NoOpening`], the node with no in-band verb.
+pub type AdminQuerySink<const BODY: usize, const SESSIONS: usize, O = NoOpening> =
+    FnQuerySink<AdminQueryState<BODY, SESSIONS, O>>;
 
 /// The registrations of the admin node, as the sinks its observer is typed with
 /// ([`wz_session_core::slot_observer::SlotObserverOf`]): the config-write subscriber
@@ -489,14 +542,20 @@ pub type AdminQuerySink<const BODY: usize, const SESSIONS: usize> =
 /// A node built without `adminspace-write` answers admin GETs and takes no config
 /// write, as upstream's admin space does with its write permission off, so its
 /// subscriber slot is [`NoSink`].
-pub struct AdminSinks<const BODY: usize, const SESSIONS: usize>;
+pub struct AdminSinks<
+    const BODY: usize,
+    const SESSIONS: usize,
+    O: NodeOpening + Sync + 'static = NoOpening,
+>(core::marker::PhantomData<O>);
 
-impl<const BODY: usize, const SESSIONS: usize> ObserverSinks for AdminSinks<BODY, SESSIONS> {
+impl<const BODY: usize, const SESSIONS: usize, O: NodeOpening + Sync + 'static> ObserverSinks
+    for AdminSinks<BODY, SESSIONS, O>
+{
     #[cfg(feature = "adminspace-write")]
     type Subscriber = crate::admin_host::ConnectWriteSink;
     #[cfg(not(feature = "adminspace-write"))]
     type Subscriber = NoSink;
-    type Queryable = AdminQuerySink<BODY, SESSIONS>;
+    type Queryable = AdminQuerySink<BODY, SESSIONS, O>;
     type Declared = NoSink;
     type Undeclared = NoSink;
 }
@@ -508,13 +567,13 @@ impl<const BODY: usize, const SESSIONS: usize> ObserverSinks for AdminSinks<BODY
 /// Out of line: it runs inside the admin answer, which is under every receive of the node, and a
 /// node that binds no opener should not carry its frame there.
 #[inline(never)]
-fn serve_open<const BODY: usize>(
+fn serve_open<const BODY: usize, O: NodeOpening>(
     arena: &mut AdminReplyArena<BODY>,
     query: &dyn QueryView,
     out: &mut dyn ReplyOut,
     zid_hex: &str,
     whatami: &str,
-    opener: &(dyn NodeOpening + Sync),
+    opener: &O,
 ) {
     // The capability document says what the node KNOWS, not whether this caller may use it.
     let _ = arena.serve_leg(
@@ -560,8 +619,8 @@ fn serve_open<const BODY: usize>(
 const VERBS_TAIL: &str = "session/verbs";
 
 /// One admin GET, answered from the node's status in the host's arena.
-fn answer_admin_query<const BODY: usize, const SESSIONS: usize>(
-    held: &mut AdminQueryState<BODY, SESSIONS>,
+fn answer_admin_query<const BODY: usize, const SESSIONS: usize, O: NodeOpening + Sync + 'static>(
+    held: &mut AdminQueryState<BODY, SESSIONS, O>,
     query: &dyn QueryView,
     out: &mut dyn ReplyOut,
 ) {
@@ -600,8 +659,9 @@ fn answer_admin_query<const BODY: usize, const SESSIONS: usize>(
                 );
             }
         }
-        if let Some(opener) = open {
-            serve_open(&mut arena, query, out, zid_hex, identity.whatami, opener);
+        // A constant of the type: for `NoOpening` the branch and the call are not compiled.
+        if O::BOUND {
+            serve_open(&mut arena, query, out, zid_hex, identity.whatami, open);
         }
         let facts = AdminNodeFacts {
             zid_hex,

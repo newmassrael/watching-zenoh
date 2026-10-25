@@ -970,6 +970,38 @@ Each step lands with its own done-when; sizes are not estimated here.
      the status documents: the heap profile has a status verb for it, the
      fixed profile has none, and the sessions row is what an operator reads.
 7. **D7** transports 2 and 3 as values of the build configuration axis.
+   - **The structure (decision; the owner delegated the choice on
+     2026-10-26 with "cost ignored, the most correct long-term, textbook,
+     ultimate"; steps 7a to 7d are not done).**
+     - The contract is the port the fixed profile already has,
+       `NodeOpening` (open a peer by its zid, answered with an outcome and
+       not a bool). The three transports differ only in what feeds the
+       port, so no transport owns a copy of the semantics.
+     - By `docs/build-configuration.md` C2 and C3 a switch that adds code is
+       a capability, an additive cargo feature, and a choice is an axis.
+       Transports 1 and 2 add code, so each is a capability:
+       `lifecycle-open-query` (in-band: the `session/open` leg and the
+       `session/verbs` document of `admin_fixed`) and `lifecycle-control`
+       (out-of-band: a control port that maps an agent's commands onto
+       `NodeOpening`, idempotent because the port is). Transport 3 is the
+       absence of both. The axis, `lifecycle-transport` with the options
+       `in-band`, `out-of-band` and `declared`, is what an image selects, and
+       each option's `cargo_rule` adds its capability. An axis holds one
+       value, so an image has one transport; a host that tests every
+       transport builds the capabilities it needs.
+     - The declared intent is a node declaration's, since D6 puts the
+       intent's baseline in the build: `[[endpoint]]` with `role = "peer"`,
+       a zid and the locators it may be found at, checked as the other
+       endpoints are (a count above `MAX_PEER_NODES` is refused by name).
+       The node confirms each into its directory as `Declared` and holds it
+       by its machine, which is all transport 3 does.
+     - Steps. 7a: gate the in-band leg behind its capability in
+       `wz-session-mcu` and forward it through `wz-session-lwip` and the
+       images, with the gates that census a feature fed in the same commit;
+       the `declared` value then carries no `serve_open`. 7b: the axis in
+       `deploy/wz-config.toml` and its generated Kconfig. 7c: the declared
+       peers in `wz_node.py`. 7d: the control port, and its agent in the
+       host that hosts the node.
 
 ## 5. Open
 
