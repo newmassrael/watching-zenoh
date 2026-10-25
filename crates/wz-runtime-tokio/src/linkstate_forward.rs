@@ -1735,16 +1735,28 @@ pub struct LinkstateSessionDirectory {
 }
 
 #[cfg(feature = "session-close-ingress")]
-impl wz_session_core::lifecycle_query::SessionDirectory for LinkstateSessionDirectory {
-    fn order_close(&self, peer_zid: &[u8]) -> wz_session_core::lifecycle_query::CloseOrder {
+impl LinkstateSessionDirectory {
+    /// Every link this peer holds, primaries and joined links, handed to `f`: the
+    /// one enumeration the close and the status read share.
+    fn with_links<R>(&self, f: impl FnOnce(Vec<&SessionLinkActions>) -> R) -> R {
         let faces = self.faces.borrow();
         let joined = self.joined.borrow();
-        let links: Vec<&SessionLinkActions> = faces
+        f(faces
             .values()
             .map(|face| &*face.actions)
             .chain(joined.values().map(|link| &*link.actions))
-            .collect();
-        wz_session_core::lifecycle_query::order_close_over(links, peer_zid)
+            .collect())
+    }
+}
+
+#[cfg(feature = "session-close-ingress")]
+impl wz_session_core::lifecycle_query::SessionDirectory for LinkstateSessionDirectory {
+    fn order_close(&self, peer_zid: &[u8]) -> wz_session_core::lifecycle_query::CloseOrder {
+        self.with_links(|links| wz_session_core::lifecycle_query::order_close_over(links, peer_zid))
+    }
+
+    fn links(&self, peer_zid: &[u8]) -> wz_session_core::lifecycle_query::SessionLinks {
+        self.with_links(|links| wz_session_core::lifecycle_query::count_links_over(links, peer_zid))
     }
 }
 

@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The session lifecycle as a QUERY: close a session and be told what happened,
-//! and ask a node which lifecycle verbs it has.
+//! read what a node holds for a peer, and ask a node which lifecycle verbs it has.
 //!
 //! The close verb has always been a Push on a switchboard row
 //! (`@/<zid>/<whatami>/session/close/<peer-zid>`, [`crate::drive::LifecycleKey`]):
@@ -11,7 +11,7 @@
 //! Push has no reply path, so a caller could not tell a close that ran from one
 //! that was refused or aimed at nobody. This is the same verb asked as a GET, which has one.
 //!
-//! # The three queries
+//! # The four queries
 //!
 //! * `GET @/<zid>/<whatami>/session/close/<peer-zid>` takes the peer out of the
 //!   node's intent, orders EVERY session this node holds with that peer closed
@@ -25,7 +25,15 @@
 //!   taken answers `{"verdict":"duplicate","generation":G}` and closes nothing;
 //!   otherwise `resetting` with `links`, `already_closed`, `not_found` or
 //!   `refused`.
-//! * `GET @/<zid>/<whatami>/session/verbs` answers `{"verbs":["close","reset"]}`:
+//! * `GET @/<zid>/<whatami>/session/status/<peer-zid>` reads what the node holds
+//!   for the peer, so the outcome of a verb that has no reply (a Push) is
+//!   observable (decision D6): the links of its sessions, whether the peer is in
+//!   the intent, and the state of each machine that works to hold it,
+//!   `{"verdict":"status","links":{"open":N,"closing":M},"intent":true,"machines":[..]}`.
+//!   A machine is `{"state":"established"}`, with `"cause"` beside a `refused`
+//!   state and `"endpoint"` on a configured endpoint's machine. A refusal answers
+//!   `{"verdict":"refused","reason":"..."}`.
+//! * `GET @/<zid>/<whatami>/session/verbs` answers `{"verbs":["close","reset","status"]}`:
 //!   the verbs this node has bound. It says what the node KNOWS, not whether this
 //!   caller may use it; permission is judged by `refused` on each verb's query.
 //!
@@ -48,15 +56,16 @@
 //! many this call ordered. A close that finds the peer's links all already ordered
 //! answers `already_closed`.
 //!
-//! # Why the close and reset queries are exact-key only
+//! # Why the close, reset and status queries are exact-key only
 //!
 //! A GET may carry a wildcard, and a wildcard close is "close everything that
 //! matches". The close query is answered only for a literal key that names this
 //! node, this role, the `close` verb and one peer, and the reset query only for
 //! one that also names one generation. A wildcard that merely
 //! intersects it gets no reply, so a destructive verb is never reached by a pattern
-//! the caller did not mean as a target. The capability query has no such risk, so
-//! it answers any key that intersects it.
+//! the caller did not mean as a target. The status query reads one peer the same
+//! way: its reply is about the peer its key names, and a pattern names none. The
+//! capability query has no target, so it answers any key that intersects it.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -99,12 +108,76 @@ pub trait SessionDirectory {
     /// trailing zero bytes) closed, and say how many it ordered and how many had
     /// been ordered already. An unknown peer is the default: both zero.
     fn order_close(&self, peer_zid: &[u8]) -> CloseOrder;
+
+    /// The links of the sessions this node has with the peer whose zid is
+    /// `peer_zid`, read without changing them: the status query's account of the
+    /// sessions (decision D6's status, apart from the intent).
+    fn links(&self, peer_zid: &[u8]) -> SessionLinks;
 }
 
 impl<D: SessionDirectory + ?Sized> SessionDirectory for &D {
     fn order_close(&self, peer_zid: &[u8]) -> CloseOrder {
         (**self).order_close(peer_zid)
     }
+
+    fn links(&self, peer_zid: &[u8]) -> SessionLinks {
+        (**self).links(peer_zid)
+    }
+}
+
+/// The links a node holds to a peer, by whether a close was ordered for each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SessionLinks {
+    /// Links no close has been ordered for.
+    pub open: u32,
+    /// Links a close has been ordered for and that are still held.
+    pub closing: u32,
+}
+
+/// One machine a node works to hold a peer by, as the status query shows it.
+///
+/// The state is in words ([`crate::peer_table::StateWords`], read off the machine
+/// by the host), because the host that keeps the machines may publish them to the
+/// answerer as plain data: the face loop of AP does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MachineReport<'a> {
+    /// The configured endpoint the machine dials, as the host names it, or
+    /// `None` for the machine of the node itself (an `open` by its zid).
+    pub endpoint: Option<&'a str>,
+    /// The state's word.
+    pub state: &'a str,
+    /// For a refusal, its cause.
+    pub cause: Option<&'a str>,
+    /// Whether the machine holds the peer in the node's intent
+    /// ([`crate::peer_connection::PeerConnectionState::in_intent`]).
+    pub in_intent: bool,
+}
+
+/// The machines a node works to hold its peers by (decision D5), as the status
+/// query reads them: each one that holds the peer a key names.
+///
+/// A port for the reason [`SessionDirectory`] is one: the machines live with the
+/// host that drives them (the face loop of AP), which this crate cannot name.
+pub trait PeerMachines {
+    /// Call `each` for every machine that holds the peer whose zid is `peer_zid`
+    /// (wire bytes, any trailing zero bytes): the node's own machine, and each
+    /// configured endpoint's whose last session reached that peer.
+    fn each_machine(&self, peer_zid: &[u8], each: &mut dyn FnMut(&MachineReport<'_>));
+}
+
+impl<M: PeerMachines + ?Sized> PeerMachines for &M {
+    fn each_machine(&self, peer_zid: &[u8], each: &mut dyn FnMut(&MachineReport<'_>)) {
+        (**self).each_machine(peer_zid, each)
+    }
+}
+
+/// The machines of a host that holds no peer by a machine: the status query then
+/// reports the sessions alone, and no peer is in the intent.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoMachines;
+
+impl PeerMachines for NoMachines {
+    fn each_machine(&self, _peer_zid: &[u8], _each: &mut dyn FnMut(&MachineReport<'_>)) {}
 }
 
 /// The node's intent, as the close query changes it (decision D6 of
@@ -152,15 +225,18 @@ pub enum RefusedReason {
     ResetNotPermitted,
     /// A reset key's generation chunk is not a decimal number.
     GenerationNotANumber,
+    /// The node's authority does not admit reading the status this key names.
+    StatusNotPermitted,
 }
 
 impl RefusedReason {
     /// Every reason this module can give, for the declared set to be held to.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::NotPermitted,
         Self::PeerNotAZid,
         Self::ResetNotPermitted,
         Self::GenerationNotANumber,
+        Self::StatusNotPermitted,
     ];
 
     /// The sentence a querier is shown. Plain ASCII with no quote or backslash, so
@@ -173,6 +249,9 @@ impl RefusedReason {
                 "this node does not permit resetting the session with that peer"
             }
             Self::GenerationNotANumber => "the generation chunk of the key is not a number",
+            Self::StatusNotPermitted => {
+                "this node does not permit reading the status of the session with that peer"
+            }
         }
     }
 }
@@ -316,11 +395,44 @@ impl ResetVerdict {
     ];
 }
 
+/// The answer to a status query (decision D6), as [`Answered`] reports it: the
+/// reply itself also lists each machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusVerdict {
+    /// What the node holds for the peer.
+    Status {
+        /// The links of the node's sessions with the peer.
+        links: SessionLinks,
+        /// Whether a machine holds the peer in the node's intent.
+        intent: bool,
+        /// How many machines work to hold the peer.
+        machines: u32,
+    },
+    /// The status was not read.
+    Refused(RefusedReason),
+}
+
+impl StatusVerdict {
+    /// The `verdict` word, for a declared set to be held to.
+    pub const fn word(&self) -> &'static str {
+        match self {
+            Self::Status { .. } => "status",
+            Self::Refused(_) => "refused",
+        }
+    }
+
+    /// Every `verdict` word, for a declared set to be held to.
+    pub const WORDS: [&'static str; 2] = ["status", "refused"];
+}
+
+/// The verb the status query carries in its key.
+const STATUS_VERB: &str = "status";
+
 /// The lifecycle verbs a node has bound, in the order the capability query lists
 /// them.
-pub const VERBS: [&str; 2] = [CLOSE_VERB, RESET_VERB];
+pub const VERBS: [&str; 3] = [CLOSE_VERB, RESET_VERB, STATUS_VERB];
 
-/// Write the capability document `{"verbs":["close","reset"]}`.
+/// Write the capability document `{"verbs":["close","reset","status"]}`.
 pub fn write_verbs_json<W: TextOut + ?Sized>(out: &mut W) {
     out.push_str("{\"verbs\":[");
     for (i, verb) in VERBS.iter().enumerate() {
@@ -336,12 +448,14 @@ pub fn write_verbs_json<W: TextOut + ?Sized>(out: &mut W) {
 
 /// The queryables a node hosts to serve the lifecycle queries, as the key
 /// patterns to register them on: the close query for any peer, the reset query
-/// for any generation and peer, and the capability query.
-pub fn query_patterns(zid_hex: &str, whatami: &str) -> [String; 3] {
+/// for any generation and peer, the status query for any peer, and the
+/// capability query.
+pub fn query_patterns(zid_hex: &str, whatami: &str) -> [String; 4] {
     let root = alloc::format!("@/{zid_hex}/{whatami}/session");
     [
         alloc::format!("{root}/{CLOSE_VERB}/*"),
         alloc::format!("{root}/{RESET_VERB}/*/*"),
+        alloc::format!("{root}/{STATUS_VERB}/*"),
         alloc::format!("{root}/verbs"),
     ]
 }
@@ -349,18 +463,20 @@ pub fn query_patterns(zid_hex: &str, whatami: &str) -> [String; 3] {
 /// Answers the lifecycle queries of one node.
 ///
 /// Holds nothing it does not borrow from the host but one record: the node's
-/// identity, the authority that says who may close or reset, the directory that
-/// holds the sessions and the intent a close withdraws the peer from. The record
+/// identity, the authority that says who may close, reset or read, the directory
+/// that holds the sessions, the intent a close withdraws the peer from and the
+/// machines the status query reads. The record
 /// is the latest reset generation taken per peer, the duplicate suppression of
 /// at-most-once calls (decision D6; Birrell and Nelson, 1984), and it lives here
 /// because this is where a reset is taken. [`Self::answer`] is the body of the
 /// queryable handler the host registers on [`query_patterns`].
-pub struct LifecycleQueries<A, D, I = NoIntent> {
+pub struct LifecycleQueries<A, D, I = NoIntent, M = NoMachines> {
     zid_hex: String,
     whatami: String,
     authority: A,
     directory: D,
     intent: I,
+    machines: M,
     /// The latest reset generation taken, by the peer's zid in its canonical
     /// form. Volatile, as every runtime edit of D6 is.
     resets: RefCell<BTreeMap<Vec<u8>, u64>>,
@@ -373,17 +489,19 @@ pub enum Answered {
     Close(CloseVerdict),
     /// A reply was staged: the reset query's verdict.
     Reset(ResetVerdict),
+    /// A reply was staged: the status query's verdict.
+    Status(StatusVerdict),
     /// A reply was staged: the capability document.
     Verbs,
-    /// The query is no lifecycle query this node serves, or is a close or reset
-    /// query that is not an exact key; nothing was replied.
+    /// The query is no lifecycle query this node serves, or is a close, reset or
+    /// status query that is not an exact key; nothing was replied.
     Unserved,
 }
 
-impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D, NoIntent> {
+impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D> {
     /// The queries of the node `zid_hex` (zenoh's spelling) of role `whatami`,
-    /// for a host that holds no peer by intent ([`Self::with_intent`] says it
-    /// does).
+    /// for a host that holds no peer by intent or by a machine
+    /// ([`Self::with_intent`] and [`Self::with_machines`] say it does).
     pub fn new(zid_hex: &str, whatami: &str, authority: A, directory: D) -> Self {
         Self {
             zid_hex: String::from(zid_hex),
@@ -391,27 +509,49 @@ impl<A: SessionLifecycleAuthority, D: SessionDirectory> LifecycleQueries<A, D, N
             authority,
             directory,
             intent: NoIntent,
+            machines: NoMachines,
             resets: RefCell::new(BTreeMap::new()),
         }
     }
 }
 
-impl<A: SessionLifecycleAuthority, D: SessionDirectory, I: PeerIntent> LifecycleQueries<A, D, I> {
+impl<A, D, I, M> LifecycleQueries<A, D, I, M>
+where
+    A: SessionLifecycleAuthority,
+    D: SessionDirectory,
+    I: PeerIntent,
+    M: PeerMachines,
+{
     /// These queries for a host that holds its peers by `intent`: a close also
     /// withdraws the peer from it, so no machine dials the peer again.
-    pub fn with_intent<J: PeerIntent>(self, intent: J) -> LifecycleQueries<A, D, J> {
+    pub fn with_intent<J: PeerIntent>(self, intent: J) -> LifecycleQueries<A, D, J, M> {
         LifecycleQueries {
             zid_hex: self.zid_hex,
             whatami: self.whatami,
             authority: self.authority,
             directory: self.directory,
             intent,
+            machines: self.machines,
+            resets: self.resets,
+        }
+    }
+
+    /// These queries for a host that holds its peers by `machines`: the status
+    /// query reports each one that holds the peer it names.
+    pub fn with_machines<N: PeerMachines>(self, machines: N) -> LifecycleQueries<A, D, I, N> {
+        LifecycleQueries {
+            zid_hex: self.zid_hex,
+            whatami: self.whatami,
+            authority: self.authority,
+            directory: self.directory,
+            intent: self.intent,
+            machines,
             resets: self.resets,
         }
     }
 
     /// The patterns to register this on.
-    pub fn patterns(&self) -> [String; 3] {
+    pub fn patterns(&self) -> [String; 4] {
         query_patterns(&self.zid_hex, &self.whatami)
     }
 
@@ -419,8 +559,9 @@ impl<A: SessionLifecycleAuthority, D: SessionDirectory, I: PeerIntent> Lifecycle
         alloc::format!("@/{}/{}/session/verbs", self.zid_hex, self.whatami)
     }
 
-    /// Answer one query: the close or reset query with its verdict, the
-    /// capability query with the verb list, or nothing.
+    /// Answer one query: the close or reset query with its verdict, the status
+    /// query with what the node holds for the peer, the capability query with the
+    /// verb list, or nothing.
     pub fn answer(&self, view: &dyn QueryView, out: &mut dyn ReplyOut) -> Answered {
         let key = view.keyexpr();
 
@@ -435,8 +576,9 @@ impl<A: SessionLifecycleAuthority, D: SessionDirectory, I: PeerIntent> Lifecycle
             };
         }
 
-        // The close and reset queries: an exact key naming this node and one peer.
-        // A pattern is never a target (module docs), the generation included.
+        // The close, reset and status queries: an exact key naming this node and
+        // one peer. A pattern is never a target (module docs), the generation
+        // included.
         let Some(parsed) = LifecycleKey::parse(key) else {
             return Answered::Unserved;
         };
@@ -446,6 +588,16 @@ impl<A: SessionLifecycleAuthority, D: SessionDirectory, I: PeerIntent> Lifecycle
             || parsed.argument.is_some_and(|a| a.contains(['*', '$']))
         {
             return Answered::Unserved;
+        }
+        if parsed.verb == STATUS_VERB {
+            // Its own body: the machines are a list, so the reply has no bound
+            // this module could size a fixed buffer to.
+            let mut body = String::new();
+            let verdict = self.status(&parsed, &mut body);
+            // A reply the stage refused was still a read: the verdict says what
+            // the node holds, and the host's reply-stage counters say the rest.
+            let _ = reply_json(out, key, &body);
+            return Answered::Status(verdict);
         }
         let mut body: FixedText<192> = FixedText::new();
         let answered = match parsed.verb {
@@ -512,6 +664,57 @@ impl<A: SessionLifecycleAuthority, D: SessionDirectory, I: PeerIntent> Lifecycle
             resets.insert(canonical, generation);
         }
         ResetVerdict::of(self.directory.order_close(&peer))
+    }
+
+    /// Status: the links of the sessions with the peer, and each machine that
+    /// works to hold it, written into `body`. Reads only: nothing here changes a
+    /// session, a machine or the intent.
+    fn status(&self, key: &LifecycleKey<'_>, body: &mut String) -> StatusVerdict {
+        use core::fmt::Write as _;
+        let refused = |reason: RefusedReason, body: &mut String| {
+            body.push_str("{\"verdict\":\"refused\",\"reason\":\"");
+            body.push_str(reason.words());
+            body.push_str("\"}");
+            StatusVerdict::Refused(reason)
+        };
+        if !self.authority.admits_status(key) {
+            return refused(RefusedReason::StatusNotPermitted, body);
+        }
+        let Some(peer) = zenoh_hex_to_zid(key.peer_zid) else {
+            return refused(RefusedReason::PeerNotAZid, body);
+        };
+        let links = self.directory.links(&peer);
+        let mut rows = String::new();
+        let mut machines = 0u32;
+        let mut intent = false;
+        self.machines.each_machine(&peer, &mut |machine| {
+            if machines > 0 {
+                rows.push(',');
+            }
+            machines = machines.saturating_add(1);
+            intent |= machine.in_intent;
+            rows.push_str("{\"state\":");
+            crate::json::escape_into(machine.state, &mut rows);
+            if let Some(cause) = machine.cause {
+                rows.push_str(",\"cause\":");
+                crate::json::escape_into(cause, &mut rows);
+            }
+            if let Some(endpoint) = machine.endpoint {
+                rows.push_str(",\"endpoint\":");
+                crate::json::escape_into(endpoint, &mut rows);
+            }
+            rows.push('}');
+        });
+        let _ = write!(
+            body,
+            "{{\"verdict\":\"status\",\"links\":{{\"open\":{},\"closing\":{}}},\"intent\":{intent},\"machines\":[{rows}]}}",
+            links.open, links.closing
+        );
+        StatusVerdict::Status {
+            links,
+            intent,
+            machines,
+        }
     }
 }
 
@@ -586,9 +789,35 @@ where
     order
 }
 
+/// The links of `sessions` that are with `peer_zid`, by whether a close was
+/// ordered for each: the read [`order_close_over`] makes before it orders, so a
+/// host's [`SessionDirectory::links`] is the same enumeration of its face table.
+pub fn count_links_over<'a, S, I>(sessions: I, peer_zid: &[u8]) -> SessionLinks
+where
+    S: SessionTarget + ?Sized + 'a,
+    I: IntoIterator<Item = &'a S>,
+{
+    let mut links = SessionLinks::default();
+    for session in sessions {
+        let Some(zid) = session.peer_zid() else {
+            continue;
+        };
+        if !same_zid(&zid, peer_zid) {
+            continue;
+        }
+        if session.close_ordered() {
+            links.closing = links.closing.saturating_add(1);
+        } else {
+            links.open = links.open.saturating_add(1);
+        }
+    }
+    links
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer_connection::PeerConnectionState;
     use crate::query_sink::BorrowedQuery;
     use crate::sample::{EncodingHint, QosLevel};
     use alloc::vec;
@@ -660,6 +889,11 @@ mod tests {
             self.asked.set(self.asked.get() + 1);
             self.admits
         }
+
+        fn admits_status(&self, _key: &LifecycleKey<'_>) -> bool {
+            self.asked.set(self.asked.get() + 1);
+            self.admits
+        }
     }
 
     /// Sessions that remember being ordered closed.
@@ -686,6 +920,10 @@ mod tests {
         fn order_close(&self, peer_zid: &[u8]) -> CloseOrder {
             order_close_over(self.0.borrow().iter(), peer_zid)
         }
+
+        fn links(&self, peer_zid: &[u8]) -> SessionLinks {
+            count_links_over(self.0.borrow().iter(), peer_zid)
+        }
     }
 
     fn fake(zid: &str) -> Fake {
@@ -707,8 +945,8 @@ mod tests {
         )
     }
 
-    fn ask<I: PeerIntent>(
-        node: &LifecycleQueries<Authority, Table, I>,
+    fn ask<I: PeerIntent, M: PeerMachines>(
+        node: &LifecycleQueries<Authority, Table, I, M>,
         key: &str,
     ) -> (Answered, Vec<(String, String)>) {
         let mut out = Recorder::default();
@@ -908,7 +1146,7 @@ mod tests {
                     replies,
                     vec![(
                         verbs.clone(),
-                        String::from("{\"verbs\":[\"close\",\"reset\"]}")
+                        String::from("{\"verbs\":[\"close\",\"reset\",\"status\"]}")
                     )],
                     "{asked}"
                 );
@@ -923,13 +1161,161 @@ mod tests {
         );
     }
 
-    /// The patterns a host registers are the three keys the queries are asked on.
+    /// The patterns a host registers are the four keys the queries are asked on.
     #[test]
-    fn the_registered_patterns_cover_exactly_the_three_queries() {
-        let [close, reset, verbs] = query_patterns(ME, "peer");
+    fn the_registered_patterns_cover_exactly_the_four_queries() {
+        let [close, reset, status, verbs] = query_patterns(ME, "peer");
         assert_eq!(close, "@/a1b2/peer/session/close/*");
         assert_eq!(reset, "@/a1b2/peer/session/reset/*/*");
+        assert_eq!(status, "@/a1b2/peer/session/status/*");
         assert_eq!(verbs, "@/a1b2/peer/session/verbs");
+    }
+
+    /// The machines of a host, each with the zid of the peer it holds.
+    struct Machines(Vec<(Vec<u8>, Option<&'static str>, PeerConnectionState)>);
+
+    impl PeerMachines for Machines {
+        fn each_machine(&self, peer_zid: &[u8], each: &mut dyn FnMut(&MachineReport<'_>)) {
+            for (zid, endpoint, state) in &self.0 {
+                if same_zid(zid, peer_zid) {
+                    let words = state.words();
+                    each(&MachineReport {
+                        endpoint: *endpoint,
+                        state: words.state,
+                        cause: words.cause,
+                        in_intent: state.in_intent(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Decision D6 — the status of a peer is read, not changed: the links of its
+    /// sessions by whether a close was ordered, and each machine that holds it,
+    /// a refusal with its cause and an endpoint's machine with its endpoint.
+    #[test]
+    fn a_status_reads_the_links_and_every_machine_that_holds_the_peer() {
+        let a = zenoh_hex_to_zid(PEER_A).expect("a zid");
+        let b = zenoh_hex_to_zid(PEER_B).expect("a zid");
+        let node = node(true, vec![fake(PEER_A), fake(PEER_A), fake(PEER_B)]).with_machines(
+            Machines(vec![
+                (a.clone(), None, PeerConnectionState::Established),
+                (
+                    a.clone(),
+                    Some("127.0.0.1:7447"),
+                    PeerConnectionState::NoSlot,
+                ),
+                (b.clone(), None, PeerConnectionState::Idle),
+            ]),
+        );
+        node.directory.0.borrow()[1].ordered.set(true);
+        let key = alloc::format!("@/{ME}/peer/session/status/{PEER_A}");
+
+        let (answered, replies) = ask(&node, &key);
+        assert_eq!(
+            answered,
+            Answered::Status(StatusVerdict::Status {
+                links: SessionLinks {
+                    open: 1,
+                    closing: 1
+                },
+                intent: true,
+                machines: 2,
+            })
+        );
+        assert_eq!(
+            replies,
+            vec![(
+                key,
+                String::from(
+                    "{\"verdict\":\"status\",\"links\":{\"open\":1,\"closing\":1},\"intent\":true,\
+                     \"machines\":[{\"state\":\"established\"},{\"state\":\"refused\",\
+                     \"cause\":\"no_slot\",\"endpoint\":\"127.0.0.1:7447\"}]}"
+                )
+            )]
+        );
+        assert_eq!(
+            node.directory
+                .0
+                .borrow()
+                .iter()
+                .filter(|s| s.ordered.get())
+                .count(),
+            1,
+            "a status orders no close"
+        );
+
+        // A peer whose only machine was closed is out of the intent.
+        let (answered, replies) = ask(
+            &node,
+            &alloc::format!("@/{ME}/peer/session/status/{PEER_B}"),
+        );
+        assert_eq!(
+            answered,
+            Answered::Status(StatusVerdict::Status {
+                links: SessionLinks {
+                    open: 1,
+                    closing: 0
+                },
+                intent: false,
+                machines: 1,
+            })
+        );
+        assert!(
+            replies[0].1.contains("\"intent\":false"),
+            "{}",
+            replies[0].1
+        );
+    }
+
+    /// A host with no machines reads the sessions alone; a status the authority
+    /// does not admit reads nothing; a pattern is no target.
+    #[test]
+    fn a_status_is_refused_unserved_or_read_from_the_sessions_alone() {
+        let bare = node(true, vec![fake(PEER_A)]);
+        let (answered, replies) = ask(
+            &bare,
+            &alloc::format!("@/{ME}/peer/session/status/{PEER_A}"),
+        );
+        assert_eq!(
+            answered,
+            Answered::Status(StatusVerdict::Status {
+                links: SessionLinks {
+                    open: 1,
+                    closing: 0
+                },
+                intent: false,
+                machines: 0,
+            })
+        );
+        assert_eq!(
+            replies[0].1,
+            "{\"verdict\":\"status\",\"links\":{\"open\":1,\"closing\":0},\"intent\":false,\"machines\":[]}"
+        );
+
+        let refused = node(false, vec![fake(PEER_A)]);
+        let (answered, replies) = ask(
+            &refused,
+            &alloc::format!("@/{ME}/peer/session/status/{PEER_A}"),
+        );
+        assert_eq!(
+            answered,
+            Answered::Status(StatusVerdict::Refused(RefusedReason::StatusNotPermitted))
+        );
+        assert_eq!(
+            replies[0].1,
+            alloc::format!(
+                "{{\"verdict\":\"refused\",\"reason\":\"{}\"}}",
+                RefusedReason::StatusNotPermitted.words()
+            )
+        );
+
+        for key in [
+            alloc::format!("@/{ME}/peer/session/status/*"),
+            alloc::format!("@/{ME}/peer/session/status/**"),
+        ] {
+            assert_eq!(ask(&bare, &key).0, Answered::Unserved, "{key}");
+        }
     }
 
     /// The intent of a host that records each peer a close withdraws.
@@ -1120,5 +1506,15 @@ mod tests {
                 "{doc}"
             );
         }
+        let all = [
+            StatusVerdict::Status {
+                links: SessionLinks::default(),
+                intent: false,
+                machines: 0,
+            },
+            StatusVerdict::Refused(RefusedReason::StatusNotPermitted),
+        ];
+        let words: Vec<&str> = all.iter().map(StatusVerdict::word).collect();
+        assert_eq!(words, StatusVerdict::WORDS);
     }
 }

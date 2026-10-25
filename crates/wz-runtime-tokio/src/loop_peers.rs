@@ -343,6 +343,38 @@ impl LoopPeers {
         self.table.state(key)
     }
 
+    /// Every machine, as the loop publishes it for the status query (decision
+    /// D6): by the zid it is read by, a node's own and an endpoint's last
+    /// session's, the node's machine first and then its endpoints in order. An
+    /// endpoint that has not reached a node has no zid to be read by and is left
+    /// out.
+    #[cfg(feature = "session-close-ingress")]
+    pub fn board_rows(&self) -> crate::peer_board::BoardRows {
+        let mut rows = crate::peer_board::BoardRows::new();
+        for (key, state) in self.table.peers() {
+            let (zid, endpoint) = match key {
+                PeerKey::Node(zid) => (*zid, None),
+                PeerKey::Endpoint(endpoint) => match self.remotes.get(key) {
+                    Some(zid) => (*zid, Some(endpoint.to_string())),
+                    None => continue,
+                },
+            };
+            let words = state.words();
+            rows.entry(zid)
+                .or_default()
+                .push(crate::peer_board::BoardRow {
+                    endpoint,
+                    state: words.state,
+                    cause: words.cause,
+                    in_intent: state.in_intent(),
+                });
+        }
+        for machines in rows.values_mut() {
+            machines.sort_by(|a, b| a.endpoint.cmp(&b.endpoint));
+        }
+        rows
+    }
+
     /// Keep the zid `key`'s session named, for a later `close` to name it by.
     fn learn_remote(&mut self, key: &PeerKey, remote: Option<DirectoryZid>) {
         if let Some(remote) = remote {
@@ -935,5 +967,76 @@ mod tests {
         );
         the_dial(&peers.set_endpoints(vec![plan], false, &cx, &mut next_id));
         assert_eq!(peers.state(&key), Some(S::Connecting));
+    }
+
+    /// Decision D6 — what the status query reads: every machine that holds a
+    /// node, by the node's zid, the node's own first; an endpoint not yet at a
+    /// node is read by nobody; a withdrawal leaves the machines `idle` and the
+    /// node out of the intent.
+    #[cfg(feature = "session-close-ingress")]
+    #[test]
+    fn the_board_reads_each_machine_by_the_node_it_holds() {
+        let directory = directory_with(&["tcp/127.0.0.1:7216"]);
+        let cx = PeerContext {
+            directory: &directory,
+            now_ms: 0,
+        };
+        let mut peers = LoopPeers::new(RetryPolicy::constant(500));
+        let mut next_id = 0;
+        let reached = endpoint("tcp/127.0.0.1:7217");
+        let unreached = endpoint("tcp/127.0.0.1:7218");
+        let (node_dial, _) = the_dial(&peers.open_node(A, &cx, &mut next_id));
+        peers.dial_ended(
+            node_dial,
+            DialEnd::Established { remote: Some(A) },
+            &cx,
+            &mut next_id,
+        );
+        let actions =
+            peers.set_endpoints(vec![reached.clone(), unreached], false, &cx, &mut next_id);
+        let PeerAction::Dial {
+            id: reached_dial, ..
+        } = &actions[0]
+        else {
+            panic!("expected the reached endpoint's dial, got {actions:?}");
+        };
+        peers.dial_ended(
+            *reached_dial,
+            DialEnd::AlreadyHeld {
+                held: node_dial,
+                remote: Some(A),
+            },
+            &cx,
+            &mut next_id,
+        );
+
+        let board = peers.board_rows();
+        assert_eq!(
+            board.len(),
+            1,
+            "the unreached endpoint names no node: {board:?}"
+        );
+        let established = |endpoint: Option<String>| crate::peer_board::BoardRow {
+            endpoint,
+            state: "established",
+            cause: None,
+            in_intent: true,
+        };
+        assert_eq!(
+            board[&A],
+            vec![
+                established(None),
+                established(Some(reached.key.to_string()))
+            ]
+        );
+
+        peers.withdraw(&A, &cx, &mut next_id);
+        let board = peers.board_rows();
+        assert!(
+            board[&A]
+                .iter()
+                .all(|row| row.state == "idle" && !row.in_intent),
+            "{board:?}"
+        );
     }
 }

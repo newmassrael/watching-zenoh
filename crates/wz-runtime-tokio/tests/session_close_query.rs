@@ -33,8 +33,8 @@ use wz_runtime_tokio::session_glue::{
 use wz_runtime_tokio_test_support::{fixture_session_init_params, NoopOutboundDriver};
 use wz_session_core::drive::{check_requested_close, LifecycleKey, SessionLifecycleAuthority};
 use wz_session_core::lifecycle_query::{
-    order_close_over, Answered, CloseOrder, CloseVerdict, LifecycleQueries, RefusedReason,
-    SessionDirectory, SessionTarget,
+    count_links_over, order_close_over, Answered, CloseOrder, CloseVerdict, LifecycleQueries,
+    RefusedReason, SessionDirectory, SessionLinks, SessionTarget, StatusVerdict,
 };
 use wz_session_core::query_sink::{BorrowedQuery, QueryView, ReplyError, ReplyOut};
 use wz_session_core::sample::{EncodingHint, QosLevel};
@@ -88,12 +88,20 @@ impl SessionDirectory for Table {
     fn order_close(&self, peer_zid: &[u8]) -> CloseOrder {
         order_close_over(self.0.iter(), peer_zid)
     }
+
+    fn links(&self, peer_zid: &[u8]) -> SessionLinks {
+        count_links_over(self.0.iter(), peer_zid)
+    }
 }
 
 struct Authority(bool);
 
 impl SessionLifecycleAuthority for Authority {
     fn admits_close(&self, _key: &LifecycleKey<'_>) -> bool {
+        self.0
+    }
+
+    fn admits_status(&self, _key: &LifecycleKey<'_>) -> bool {
         self.0
     }
 }
@@ -258,6 +266,51 @@ fn a_close_query_that_is_refused_or_aimed_at_nobody_leaves_the_session_running()
     );
 }
 
+/// Decision D6 — the status query reads a running session's link without touching
+/// it, and after a close reads that link as closing: the observation a caller of
+/// the reply-less Push form has of what its close did.
+#[test]
+fn a_status_query_reads_the_session_and_what_a_close_did_to_it() {
+    let (actions, mut engine) = established_session();
+    let node = node(true, &actions);
+    let status_key = format!("@/{NODE}/peer/session/status/{PEER}");
+
+    let (answered, bodies) = ask(&node, &status_key);
+    assert_eq!(
+        answered,
+        Answered::Status(StatusVerdict::Status {
+            links: SessionLinks {
+                open: 1,
+                closing: 0
+            },
+            intent: false,
+            machines: 0,
+        })
+    );
+    assert_eq!(
+        bodies,
+        vec![r#"{"verdict":"status","links":{"open":1,"closing":0},"intent":false,"machines":[]}"#]
+    );
+    assert!(
+        !check_requested_close(&actions, &mut engine),
+        "a status orders nothing"
+    );
+
+    ask(&node, &close_key(PEER));
+    let (answered, _) = ask(&node, &status_key);
+    assert_eq!(
+        answered,
+        Answered::Status(StatusVerdict::Status {
+            links: SessionLinks {
+                open: 0,
+                closing: 1
+            },
+            intent: false,
+            machines: 0,
+        })
+    );
+}
+
 /// The capability query answers the same whatever the authority says, because it
 /// is about the node's verbs and not the caller's permission.
 #[test]
@@ -267,6 +320,6 @@ fn the_capability_query_lists_close_whatever_the_authority_says() {
         let node = node(permit, &actions);
         let (answered, bodies) = ask(&node, &format!("@/{NODE}/peer/session/verbs"));
         assert_eq!(answered, Answered::Verbs);
-        assert_eq!(bodies, vec![r#"{"verbs":["close","reset"]}"#]);
+        assert_eq!(bodies, vec![r#"{"verbs":["close","reset","status"]}"#]);
     }
 }

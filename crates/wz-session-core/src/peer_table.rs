@@ -95,6 +95,47 @@ pub enum PeerTableRefusal {
     Full,
 }
 
+/// A machine's state as a reader is shown it (decision D6: each peer's machine
+/// state is readable): the state's word and, for a refusal, the cause its child
+/// state names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StateWords {
+    /// `idle`, `resolving`, `connecting`, `established`, `backoff` or `refused`.
+    pub state: &'static str,
+    /// For `refused`, why: `no_locator`, `no_slot`, `identity_mismatch` or
+    /// `authority_refused`.
+    pub cause: Option<&'static str>,
+}
+
+impl PeerConnectionState {
+    /// The words a reader is shown for this state. The one place the machine's
+    /// states are spelled for a reader, matched without a wildcard, so a state the
+    /// machine gains is a build error here rather than a reply that lacks it.
+    pub const fn words(self) -> StateWords {
+        let (state, cause) = match self {
+            Self::Idle => ("idle", None),
+            Self::Resolving => ("resolving", None),
+            Self::Connecting => ("connecting", None),
+            Self::Established => ("established", None),
+            Self::Backoff => ("backoff", None),
+            Self::Refused => ("refused", None),
+            Self::NoLocator => ("refused", Some("no_locator")),
+            Self::NoSlot => ("refused", Some("no_slot")),
+            Self::IdentityMismatch => ("refused", Some("identity_mismatch")),
+            Self::AuthorityRefused => ("refused", Some("authority_refused")),
+        };
+        StateWords { state, cause }
+    }
+
+    /// Whether a machine in this state holds a peer the node is told to hold (its
+    /// intent, decision D6): every state but `Idle`, which is where `close` leaves
+    /// a machine and the one a full table reuses. A refusal is held until the next
+    /// `open`, so it is in the intent too.
+    pub const fn in_intent(self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+}
+
 /// The host binding of one machine: each action body records its duty.
 #[derive(Default)]
 struct PeerBinding {
@@ -275,7 +316,7 @@ impl<K: PartialEq, const N: usize> PeerTable<K, N> {
         match self
             .entries
             .iter()
-            .position(|entry| entry.state() == PeerConnectionState::Idle)
+            .position(|entry| !entry.state().in_intent())
         {
             Some(at) => {
                 self.entries[at] = PeerEntry::new(key);
@@ -430,5 +471,37 @@ mod tests {
             "a forgotten peer is not dialled again when it drops"
         );
         assert_eq!(table.forget(&"tcp/10.0.0.1:7447"), None);
+    }
+
+    /// Decision D6 — what a reader is shown, read off a machine driven there: a
+    /// refusal names its cause, a held peer is in the intent, and only the state
+    /// `close` leaves is out of it.
+    #[test]
+    fn a_state_is_shown_by_its_word_and_a_refusal_by_its_cause() {
+        let mut table = PeerTable::<DirectoryZid, 2>::new();
+        table.open(A, true).unwrap();
+        table.report(&A, E::ResolveEmpty);
+        let refused = table.state(&A).unwrap();
+        assert_eq!(
+            refused.words(),
+            StateWords {
+                state: "refused",
+                cause: Some("no_locator")
+            }
+        );
+        assert!(refused.in_intent(), "a refusal holds until the next open");
+
+        table.open(B, true).unwrap();
+        table.report(&B, E::ResolveFound);
+        table.report(&B, E::DialEstablished);
+        let held = table.state(&B).unwrap();
+        assert_eq!(held.words().state, "established");
+        assert_eq!(held.words().cause, None);
+        assert!(held.in_intent());
+
+        table.close(&B);
+        let closed = table.state(&B).unwrap();
+        assert_eq!(closed.words().state, "idle");
+        assert!(!closed.in_intent(), "a closed peer is out of the intent");
     }
 }

@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The session lifecycle as a QUERY, over the wire between real nodes: a GET
-//! closes the session with a peer and is answered with a verdict, and a second GET
-//! lists the verbs the node has.
+//! closes the session with a peer and is answered with a verdict, a GET reads the
+//! session's links before it, and a GET lists the verbs the node has.
 //!
 //! `wz-session-core`'s `lifecycle_query` and `wz-runtime-tokio`'s
 //! `session_close_query` witness the answerer and the order it places on a session
@@ -164,8 +164,21 @@ fn wz_peer_session_lifecycle_close_query_closes_the_session_and_answers() {
     // CAPABILITY: the node says which verbs it has.
     let verbs = ask(&addr_a, &verbs_key, &mut a);
     assert!(
-        verbs.contains(r#"\"verbs\":[\"close\",\"reset\"]"#),
-        "the capability query did not list the close and reset verbs:\n{verbs}"
+        verbs.contains(r#"\"verbs\":[\"close\",\"reset\",\"status\"]"#),
+        "the capability query did not list the close, reset and status verbs:\n{verbs}"
+    );
+
+    // STATUS (decision D6): the session with D read over the wire, one link and no
+    // close ordered; a peer holds nobody by a machine, so no machine is listed.
+    let status = ask(
+        &addr_a,
+        &format!("@/{A_ZID}/peer/session/status/{D_ZID}"),
+        &mut a,
+    );
+    assert!(
+        status.contains(r#"\"links\":{\"open\":1,\"closing\":0}"#)
+            && status.contains(r#"\"machines\":[]"#),
+        "the status of a held session must read one open link:\n{status}"
     );
 
     // CLOSE: the verdict, then the effect.
@@ -204,7 +217,7 @@ fn wz_peer_session_lifecycle_close_without_the_permit_is_refused_with_a_reason()
     // The node knows the verb whether or not it permits it...
     let verbs = ask(&addr_a, &verbs_key, &mut a);
     assert!(
-        verbs.contains(r#"\"verbs\":[\"close\",\"reset\"]"#),
+        verbs.contains(r#"\"verbs\":[\"close\",\"reset\",\"status\"]"#),
         "the capability query is about the node's verbs, not the permit:\n{verbs}"
     );
     // ...and refuses to run it, saying why, before it reads any session.

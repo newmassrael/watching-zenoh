@@ -98,6 +98,7 @@ fn sources(
         // acquire it by default, or its subject changes silently.
         max_sessions: usize::MAX,
         ceiling: None,
+        peer_board: None,
         offer: SessionOffer::universal(),
         retry: RetryPolicy::ZENOH_DEFAULT,
         stats: None,

@@ -265,6 +265,7 @@ async fn readd_dialed_link_auto_reconnects_onto_surviving_session() {
             // R2758 — unbounded: this test's subject is per-link re-add.
             max_sessions: usize::MAX,
             ceiling: None,
+            peer_board: None,
         },
         fixture_params_with_zid(0x0A),
         TokioTime::new(),

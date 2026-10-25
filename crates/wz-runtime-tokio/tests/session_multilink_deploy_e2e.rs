@@ -284,6 +284,7 @@ async fn deploy_active_two_links_aggregate_segregate_reject_survive() {
             // an aggregated peer is ONE session however many links it brings.
             max_sessions: usize::MAX,
             ceiling: None,
+            peer_board: None,
         },
         fixture_params_with_zid(0x0B),
         TokioTime::new(),
@@ -501,6 +502,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             // an aggregated peer is ONE session however many links it brings.
             max_sessions: usize::MAX,
             ceiling: None,
+            peer_board: None,
         },
         fixture_params_with_zid(0x0B),
         TokioTime::new(),
@@ -541,6 +543,7 @@ async fn deploy_active_dial_side_aggregates_through_the_loop() {
             // an aggregated peer is ONE session however many links it brings.
             max_sessions: usize::MAX,
             ceiling: None,
+            peer_board: None,
         },
         fixture_params_with_zid(0x0A),
         TokioTime::new(),
@@ -654,6 +657,7 @@ async fn deploy_active_qos_priority_segregates_across_links() {
             // an aggregated peer is ONE session however many links it brings.
             max_sessions: usize::MAX,
             ceiling: None,
+            peer_board: None,
         },
         fixture_params_with_zid(0x0B),
         TokioTime::new(),

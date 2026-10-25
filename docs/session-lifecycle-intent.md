@@ -696,6 +696,38 @@ Each step lands with its own done-when; sizes are not estimated here.
      `node_peer_open_e2e`'s withdrawn node: one face, closed by the
      withdrawal, and none after it, where the retry wait is a tenth of the
      run.
+   - **6b, the status GET (Round 3592).**
+     `@/<zid>/<whatami>/session/status/<peer-zid>` is the fourth lifecycle
+     query, and it only reads.
+     - The reply holds the links of the node's sessions with the peer, open
+       or with a close ordered (`SessionDirectory::links`, the enumeration the
+       close uses), whether the peer is in the intent, and the state of each
+       machine that holds it. A refusal state carries its cause, and an
+       endpoint's machine carries its endpoint.
+     - A machine's state is spelled in one place,
+       `PeerConnectionState::words`, matched without a wildcard. The intent is
+       `PeerConnectionState::in_intent`: every state but `Idle`, the state a
+       full table already treated as free.
+     - The machines are a port, `PeerMachines`. On AP the face loop owns them
+       and changes them on every dial, loss and timer, so it publishes. After
+       each planner call it replaces a `PeerBoard`, which the host made and
+       handed to the loop (`FaceSources::peer_board`, the shape of the session
+       ceiling), and the query reads the board. An endpoint is read by the zid
+       its last session named, and one that never reached a node is on no
+       board.
+     - The authority gains `admits_status`, refused by default. A host with no
+       machines (the peer host) answers from its sessions alone, with no
+       machine and the peer out of the intent. The capability document lists
+       `status`.
+     Witness: the status tests of `lifecycle_query` and of
+     `session_close_query` (a real session's link read open, then closing
+     after a close), the planner's board test, the table's state-words test,
+     `node_peer_open_e2e`, whose four runs read the board the real loop
+     published (held, withdrawn to `idle`, refused with
+     `identity_mismatch`, waiting to dial again), and Layer E6's status GET
+     between two `wz-ap-demo` peers.
+   - Open as a query is 6c. Its open must reach the link-state graph from the
+     router host, as the in-band opener does from the switchboard.
 6. **The MCU opener** over `SessionHost`, `wz-session-lwip` forwarding the
    feature, and a witness on the fixed-memory image.
 7. **D7** transports 2 and 3 as values of the build configuration axis.

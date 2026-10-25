@@ -18,6 +18,10 @@
 //! - the far node's zid, withdrawn once its face is up (a lifecycle `close`,
 //!   decision D6): the machine closes the session, and the node is not dialled
 //!   again although the retry wait is far shorter than the run.
+//!
+//! Each run also reads the board the loop publishes its machines to (decision
+//! D6's status), and the board says the same thing the events do: held, out of
+//! the intent, refused for the mismatch, waiting to dial again.
 
 #![cfg(all(
     feature = "router-connect-reconcile",
@@ -37,6 +41,7 @@ use wz_runtime_tokio::accept_loop::{
 };
 use wz_runtime_tokio::link_pipeline::bind_tcp;
 use wz_runtime_tokio::link_socket::LinkSocket;
+use wz_runtime_tokio::peer_board::{BoardRow, PeerBoard};
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_open::{
@@ -58,6 +63,7 @@ fn sources(
     listeners: Vec<BoundListener>,
     reconcile: Option<tokio::sync::mpsc::UnboundedReceiver<ConnectReconcile>>,
     retry: RetryPolicy,
+    peer_board: Option<PeerBoard>,
 ) -> FaceSources {
     FaceSources {
         listeners,
@@ -72,6 +78,7 @@ fn sources(
         max_links: 1,
         max_sessions: usize::MAX,
         ceiling: None,
+        peer_board,
         offer: SessionOffer::universal(),
         retry,
         stats: None,
@@ -96,15 +103,16 @@ enum Seen {
 }
 
 /// Run the node under test, told to hold `zid` at `target`, beside a far node
-/// listening as `FAR`, for `window`; return what its loop reported. With
-/// `withdraw_on_up`, the node is withdrawn from the intent the moment a face
-/// comes up, as a lifecycle `close` withdraws it.
+/// listening as `FAR`, for `window`; return what its loop reported, and the rows
+/// its board holds for `zid` at the end. With `withdraw_on_up`, the node is
+/// withdrawn from the intent the moment a face comes up, as a lifecycle `close`
+/// withdraws it.
 async fn hold(
     zid: [u8; 4],
     target: Option<SocketAddr>,
     window: Duration,
     withdraw_on_up: bool,
-) -> Vec<Seen> {
+) -> (Vec<Seen>, Vec<BoardRow>) {
     let far_listener = BoundListener::Tcp(
         bind_tcp(
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
@@ -120,7 +128,7 @@ async fn hold(
     let mut far_params = fixture_session_init_params();
     far_params.zid = FAR.to_vec();
     let far = peer_loop(
-        sources(vec![far_listener], None, RetryPolicy::constant(1000)),
+        sources(vec![far_listener], None, RetryPolicy::constant(1000), None),
         far_params,
         TokioTime::new(),
         DEFAULT_OPEN_TICK_MS,
@@ -140,8 +148,14 @@ async fn hold(
     let withdraw = tx.clone();
     let mut near_params = fixture_session_init_params();
     near_params.zid = NEAR.to_vec();
+    let board = PeerBoard::new();
     let near = peer_loop(
-        sources(Vec::new(), Some(rx), RetryPolicy::constant(150)),
+        sources(
+            Vec::new(),
+            Some(rx),
+            RetryPolicy::constant(150),
+            Some(board.clone()),
+        ),
         near_params,
         TokioTime::new(),
         DEFAULT_OPEN_TICK_MS,
@@ -178,16 +192,27 @@ async fn hold(
     .expect("both loops stop when told");
     drop(tx);
     let seen = seen.lock().expect("seen").clone();
-    seen
+    (seen, board.rows(&sixteen(zid)))
+}
+
+/// The node's own machine, as the board shows it.
+fn machine(state: &'static str, cause: Option<&'static str>, in_intent: bool) -> BoardRow {
+    BoardRow {
+        endpoint: None,
+        state,
+        cause,
+        in_intent,
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_node_opened_by_its_own_zid_is_held() {
-    let seen = hold(FAR, None, Duration::from_millis(1500), false).await;
+    let (seen, board) = hold(FAR, None, Duration::from_millis(1500), false).await;
     assert!(
         matches!(seen.as_slice(), [Seen::Up(Some(zid))] if zid.as_slice() == FAR),
         "one face, to the far node: {seen:?}"
     );
+    assert_eq!(board, vec![machine("established", None, true)]);
 }
 
 /// Decision D6 — a withdrawn node's session is closed by its machine, and the
@@ -195,16 +220,21 @@ async fn a_node_opened_by_its_own_zid_is_held() {
 /// machine that still held the node would have brought a second face up.
 #[tokio::test(flavor = "current_thread")]
 async fn a_withdrawn_node_is_closed_and_not_dialled_again() {
-    let seen = hold(FAR, None, Duration::from_millis(1500), true).await;
+    let (seen, board) = hold(FAR, None, Duration::from_millis(1500), true).await;
     assert!(
         matches!(seen.as_slice(), [Seen::Up(Some(zid)), Seen::Down] if zid.as_slice() == FAR),
         "one face, closed by the withdrawal, and no second: {seen:?}"
+    );
+    assert_eq!(
+        board,
+        vec![machine("idle", None, false)],
+        "out of the intent"
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn a_node_another_answers_for_is_refused_and_not_dialled_again() {
-    let seen = hold(
+    let (seen, board) = hold(
         [0xb0, 0xb1, 0xb2, 0xb3],
         None,
         Duration::from_millis(1500),
@@ -215,12 +245,17 @@ async fn a_node_another_answers_for_is_refused_and_not_dialled_again() {
         matches!(seen.as_slice(), [Seen::Failed { mismatch: true }]),
         "one dial, closed at the InitAck, and no retry of a refused node: {seen:?}"
     );
+    assert_eq!(
+        board,
+        vec![machine("refused", Some("identity_mismatch"), true)],
+        "the refusal holds until the next open, and says why"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
 async fn an_unreachable_node_is_dialled_again_on_the_retry_schedule() {
     let refusing = wz_runtime_tokio_test_support::refusing_port();
-    let seen = hold(
+    let (seen, board) = hold(
         FAR,
         Some(refusing.addr()),
         Duration::from_millis(1500),
@@ -233,5 +268,11 @@ async fn an_unreachable_node_is_dialled_again_on_the_retry_schedule() {
                 .iter()
                 .all(|s| matches!(s, Seen::Failed { mismatch: false })),
         "a node that is not reached is dialled again and again: {seen:?}"
+    );
+    // Stopped between two attempts or inside one: either way still held.
+    assert!(
+        matches!(board.as_slice(), [row] if row.in_intent
+            && (row.state == "backoff" || row.state == "connecting")),
+        "{board:?}"
     );
 }

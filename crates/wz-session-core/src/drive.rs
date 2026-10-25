@@ -2448,6 +2448,18 @@ pub trait SessionLifecycleAuthority {
     fn admits_reset(&self, _key: &LifecycleKey<'_>) -> bool {
         false
     }
+
+    /// Decision D6 — whether the STATUS of the session this key names may be
+    /// read: the sessions this node has with the peer and what its machines are
+    /// doing for it.
+    ///
+    /// A read, and still refused by default for the reason [`Self::admits_open`]
+    /// is: an authority written before the query existed never said who may learn
+    /// which peers this node holds. A fourth method because reading a peer's state
+    /// and changing it are permissions a policy can mean to grant apart.
+    fn admits_status(&self, _key: &LifecycleKey<'_>) -> bool {
+        false
+    }
 }
 
 #[cfg(feature = "session-close-ingress")]
@@ -2462,6 +2474,10 @@ impl<A: SessionLifecycleAuthority + ?Sized> SessionLifecycleAuthority for &A {
 
     fn admits_reset(&self, key: &LifecycleKey<'_>) -> bool {
         (**self).admits_reset(key)
+    }
+
+    fn admits_status(&self, key: &LifecycleKey<'_>) -> bool {
+        (**self).admits_status(key)
     }
 }
 

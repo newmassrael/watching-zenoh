@@ -82,6 +82,7 @@ fn sources(listeners: Vec<BoundListener>, dial_targets: Vec<AnyLocator>) -> Face
         max_links: 1,
         max_sessions: usize::MAX,
         ceiling: None,
+        peer_board: None,
         offer: SessionOffer::universal(),
         retry: RetryPolicy::ZENOH_DEFAULT,
         stats: None,

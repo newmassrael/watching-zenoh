@@ -2251,6 +2251,11 @@ pub mod accept_loop;
 /// Gated as the connect reconcile that feeds it is.
 #[cfg(all(feature = "routing-accept", feature = "router-connect-reconcile"))]
 pub mod loop_peers;
+/// Decision D6 of `docs/session-lifecycle-intent.md` — the board a face loop
+/// publishes its peer machines' states to, and the lifecycle status query reads.
+/// Gated as the accept loop that carries it is.
+#[cfg(feature = "routing-accept")]
+pub mod peer_board;
 /// R2864 (open-debt item 751) — the pin's region-keyed routing structure
 /// (`RegionMap`, the `Auto` region set, the hat per region), ported before any
 /// forwarder routes on it. Gated on `routing-accept`, the lowest routing atom,

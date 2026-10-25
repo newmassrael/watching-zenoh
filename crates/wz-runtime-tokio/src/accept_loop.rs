@@ -2540,6 +2540,14 @@ pub struct FaceSources {
     /// the first sessions of the process produce, so the bound a burst meets is the calibrated
     /// one once the first few of it are up.
     pub ceiling: Option<SessionCeiling>,
+    /// Decision D6 of `docs/session-lifecycle-intent.md` — the board this loop
+    /// publishes its peer machines to after each change, for the lifecycle status
+    /// query to read ([`crate::peer_board`]), or `None` for a host that hosts no
+    /// such query. Only a loop that holds its peers by machines (the connect
+    /// reconcile with the lifecycle verbs) has anything to publish; any other
+    /// leaves the board as it was given, empty. Ungated, as [`Self::ceiling`] is,
+    /// so no construction site carries a cfg.
+    pub peer_board: Option<crate::peer_board::PeerBoard>,
     /// R2095 (open-debt item 513) — the capability SET every face this loop
     /// opens OFFERS at its handshake, dialed and accepted alike.
     ///
@@ -2646,10 +2654,17 @@ where
         max_links,
         max_sessions,
         ceiling,
+        peer_board,
         offer,
         retry,
         stats,
     } = sources;
+    // Only the loop that holds its peers by machines publishes them (decision D6).
+    #[cfg(not(all(
+        feature = "router-connect-reconcile",
+        feature = "session-close-ingress"
+    )))]
+    let _ = peer_board;
     tokio::pin!(shutdown);
     // Item 751 — every face below is opened from this one template, so each
     // session announces from the partition the forwarder places it by.
@@ -2777,10 +2792,12 @@ where
         };
     }
     // Take what the loop's peers asked for; the value is how many dials it opened.
+    // Every call into the planner ends here, so this is where its machines, as
+    // they now are, are published for the status query (decision D6).
     #[cfg(feature = "router-connect-reconcile")]
     macro_rules! take_peer_actions {
-        ($actions:expr) => {
-            PeerHost {
+        ($actions:expr) => {{
+            let dials = PeerHost {
                 opening: &mut opening,
                 retries: &mut peer_retries,
                 #[cfg(feature = "session-close-ingress")]
@@ -2795,8 +2812,13 @@ where
                 clock,
                 tick_interval_ms,
             }
-            .take($actions)
-        };
+            .take($actions);
+            #[cfg(feature = "session-close-ingress")]
+            if let Some(board) = &peer_board {
+                board.publish(peers.board_rows());
+            }
+            dials
+        }};
     }
     // Report how a peer's dial ended and take what its machine asks next; the
     // value is whether the loop is to hold the face (`true` for a face that is
@@ -4096,6 +4118,7 @@ fn accept_only_sources(listener: BoundListener, offer: SessionOffer) -> FaceSour
         // reaches `peer_loop`, which takes the configured `FaceSources`.
         max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
         ceiling: None,
+        peer_board: None,
         // The caller's: [`accept_loop`] passes the zero offer, an accept-only
         // node with a configuration of its own passes that configuration's.
         // A mesh node reaches `peer_loop`, which is where R2095 threads the
@@ -5444,6 +5467,7 @@ mod tests {
                 // THE SUBJECT.
                 max_sessions: 1,
                 ceiling: None,
+                peer_board: None,
                 offer: SessionOffer::universal(),
                 retry: RetryPolicy::ZENOH_DEFAULT,
                 stats: None,
@@ -5530,6 +5554,7 @@ mod tests {
                 max_sessions: usize::MAX,
                 // THE SUBJECT.
                 ceiling: Some(live.clone()),
+                peer_board: None,
                 offer: SessionOffer::universal(),
                 retry: RetryPolicy::ZENOH_DEFAULT,
                 stats: None,
@@ -5632,6 +5657,7 @@ mod tests {
                 max_links: 1,
                 max_sessions: crate::config::DEFAULT_MAX_SESSIONS,
                 ceiling: None,
+                peer_board: None,
                 offer: SessionOffer::universal(),
                 retry: RetryPolicy::ZENOH_DEFAULT,
                 // THE SUBJECT.
@@ -6655,6 +6681,7 @@ mod tests {
                 // R2758 — unbounded, so these fixtures keep the subject they had.
                 max_sessions: usize::MAX,
                 ceiling: None,
+                peer_board: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -6790,6 +6817,7 @@ mod tests {
                 // R2758 — unbounded, so these fixtures keep the subject they had.
                 max_sessions: usize::MAX,
                 ceiling: None,
+                peer_board: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -6893,6 +6921,7 @@ mod tests {
                 // R2758 — unbounded, so these fixtures keep the subject they had.
                 max_sessions: usize::MAX,
                 ceiling: None,
+                peer_board: None,
             },
             peer_params(),
             TokioTime::new(),
@@ -6996,6 +7025,7 @@ mod tests {
                 // R2758 — unbounded, so these fixtures keep the subject they had.
                 max_sessions: usize::MAX,
                 ceiling: None,
+                peer_board: None,
             },
             peer_params(),
             TokioTime::new(),

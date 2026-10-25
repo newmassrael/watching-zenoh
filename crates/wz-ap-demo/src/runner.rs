@@ -4087,24 +4087,32 @@ impl wz::runtime_tokio::lifecycle_query::SessionLifecycleAuthority for ClosePerm
     fn admits_reset(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
         self.0
     }
+
+    /// Reading what the node holds for a peer is under the same permit: the demo
+    /// has no policy that separates a reader of the lifecycle from a user of it.
+    fn admits_status(&self, _key: &wz::runtime_tokio::lifecycle_query::LifecycleKey<'_>) -> bool {
+        self.0
+    }
 }
 
-/// Host the session lifecycle queries -- the close, reset and capability queries
-/// (`wz_session_core::lifecycle_query`) -- on a forwarder.
+/// Host the session lifecycle queries -- the close, reset, status and capability
+/// queries (`wz_session_core::lifecycle_query`) -- on a forwarder.
 ///
 /// `register` is the forwarder's `register_local_queryable`, passed in because the
 /// peer and the router are two types with one method of that shape. One answerer
 /// serves every pattern, so the queries cannot disagree about who this node is or
 /// what it permits. `intent` is what a close withdraws the peer from (decision D6):
 /// the face loop's reconcile channel on a host that has one, `NoIntent` on one
-/// that dials nobody again.
+/// that dials nobody again. `machines` is what the status query reads them from:
+/// the board the face loop publishes its machines to, or `NoMachines`.
 #[cfg(feature = "session-close-ingress")]
-fn host_session_lifecycle<D, I, E>(
+fn host_session_lifecycle<D, I, M, E>(
     zid_hex: &str,
     whatami: &str,
     permit: bool,
     directory: D,
     intent: I,
+    machines: M,
     mut register: impl FnMut(
         &str,
         Box<
@@ -4117,12 +4125,15 @@ fn host_session_lifecycle<D, I, E>(
 ) where
     D: wz::runtime_tokio::lifecycle_query::SessionDirectory + 'static,
     I: wz::runtime_tokio::lifecycle_query::PeerIntent + 'static,
+    M: wz::runtime_tokio::lifecycle_query::PeerMachines + 'static,
     E: std::fmt::Debug,
 {
     use wz::runtime_tokio::lifecycle_query::LifecycleQueries;
     use wz::runtime_tokio::query_sink::{QueryView, ReplyOut};
     let queries = std::rc::Rc::new(
-        LifecycleQueries::new(zid_hex, whatami, ClosePermit(permit), directory).with_intent(intent),
+        LifecycleQueries::new(zid_hex, whatami, ClosePermit(permit), directory)
+            .with_intent(intent)
+            .with_machines(machines),
     );
     for pattern in queries.patterns() {
         let answerer = std::rc::Rc::clone(&queries);
@@ -4141,7 +4152,7 @@ fn host_session_lifecycle<D, I, E>(
         }
     }
     log::info!(
-        "wz-ap-demo {whatami}: session close and reset {}",
+        "wz-ap-demo {whatami}: session close, reset and status {}",
         if permit {
             "PERMITTED (--session-close-permit)"
         } else {
@@ -5064,8 +5075,10 @@ async fn run_peer_until(
             session_close_permit,
             forwarder.lifecycle_directory(),
             // The peer's loop holds no intent it is told of at run time: it dials
-            // its static connect list and the peers gossip names.
+            // its static connect list and the peers gossip names, by no machine,
+            // so the status query reads its sessions alone.
             wz::runtime_tokio::lifecycle_query::NoIntent,
+            wz::runtime_tokio::lifecycle_query::NoMachines,
             |pattern, handler| forwarder.register_local_queryable(pattern, true, handler),
         );
     }
@@ -5339,6 +5352,7 @@ async fn run_peer_until(
             // about how many peers this node will hold.
             max_sessions: wz_config.borrow().effective_max_sessions().limit,
             ceiling: None,
+            peer_board: None,
             // R2095 (open-debt item 513) — the capability offer every face this
             // peer opens carries, dialed and accepted alike (upstream builds
             // `StateOpen` and `StateAccept` from the same manager config; see
@@ -6667,6 +6681,24 @@ async fn run_router_hat_until(
     #[cfg(feature = "router-connect-reconcile")]
     let (reconcile_tx, reconcile_rx) =
         tokio::sync::mpsc::unbounded_channel::<wz::runtime_tokio::accept_loop::ConnectReconcile>();
+    // Decision D6 — the board the loop publishes its peer machines to, for the
+    // lifecycle status query to read. Handed to the loop only when that query is
+    // hosted, so a router that serves no lifecycle publishes nothing.
+    #[cfg(all(
+        feature = "router-connect-reconcile",
+        feature = "session-close-ingress"
+    ))]
+    let peer_board = wz::runtime_tokio::peer_board::PeerBoard::new();
+    #[cfg(all(
+        feature = "router-connect-reconcile",
+        feature = "session-close-ingress"
+    ))]
+    let loop_board = session_lifecycle.then(|| peer_board.clone());
+    #[cfg(not(all(
+        feature = "router-connect-reconcile",
+        feature = "session-close-ingress"
+    )))]
+    let loop_board = None;
     #[cfg(feature = "router-connect-reconcile")]
     let reconcile_schedule: Option<(
         tokio::time::Instant,
@@ -7036,12 +7068,19 @@ async fn run_router_hat_until(
         let intent = wz::runtime_tokio::accept_loop::LoopIntent(reconcile_tx.clone());
         #[cfg(not(feature = "router-connect-reconcile"))]
         let intent = wz::runtime_tokio::lifecycle_query::NoIntent;
+        // The machines the status query reads: the board the loop publishes them
+        // to, the same one handed to the loop below.
+        #[cfg(feature = "router-connect-reconcile")]
+        let machines = peer_board.clone();
+        #[cfg(not(feature = "router-connect-reconcile"))]
+        let machines = wz::runtime_tokio::lifecycle_query::NoMachines;
         host_session_lifecycle(
             &wz::runtime_tokio::zid_hex::zid_to_zenoh_hex(&params.zid),
             params.whatami.to_str(),
             session_close_permit,
             forwarder.lifecycle_directory(),
             intent,
+            machines,
             |pattern, handler| {
                 forwarder.register_local_queryable(pattern, true, handler);
                 Ok::<usize, std::convert::Infallible>(0)
@@ -7323,6 +7362,7 @@ async fn run_router_hat_until(
             // two", which is the rule the `host_cfg` comment states.
             max_sessions: host_cfg.borrow().effective_max_sessions().limit,
             ceiling: Some(session_ceiling.clone()),
+            peer_board: loop_board,
             // R2095 (open-debt item 513) — the capability offer every face this
             // router-hat opens carries, built by `mesh_offer` from the SAME argv
             // words the `--peer` mesh mode reads. The item named both run-modes

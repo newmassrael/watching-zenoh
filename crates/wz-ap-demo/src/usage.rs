@@ -314,12 +314,15 @@ pub(crate) fn print_usage() {
     eprintln!("                             again. A GET on .../session/reset/<generation>/");
     eprintln!("                             <peer-zid> closes those sessions once per");
     eprintln!("                             generation (a repeat answers duplicate) and the");
-    eprintln!("                             peer is dialled again. A GET on");
+    eprintln!("                             peer is dialled again. A GET on .../session/status/");
+    eprintln!("                             <peer-zid> reads the links to that peer and, on a");
+    eprintln!("                             router with router-connect-reconcile, the state of");
+    eprintln!("                             each machine that holds it. A GET on");
     eprintln!("                             @/<zid>/<role>/session/verbs lists the verbs bound.");
     eprintln!("                             Requires --peer or --router-hat.");
-    eprintln!("    --session-close-permit   let a close or reset run. Without it each is");
-    eprintln!("                             answered `refused`; the verbs query still lists");
-    eprintln!("                             them, because the node knows them. Requires");
+    eprintln!("    --session-close-permit   let a close, reset or status read run. Without it");
+    eprintln!("                             each is answered `refused`; the verbs query still");
+    eprintln!("                             lists them, because the node knows them. Requires");
     eprintln!("                             --session-lifecycle.");
     eprintln!("    --router-link-weight <zid>=<weight>");
     eprintln!(
