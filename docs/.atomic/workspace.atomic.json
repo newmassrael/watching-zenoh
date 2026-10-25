@@ -288666,6 +288666,48 @@
         "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener. The Orin's group join needs the owner's word before anything multicast is sent on that board's network."
       ]
     },
+    "Round 3667": {
+      "decision_summary": "Step 2 of the advanced plane: the subscriber's vocabulary, stated from its code in docs/advanced-pubsub-on-a-neutral-core.md. Reading the production lines of advanced_subscriber.rs (1 to 4,462) corrected the survey of round 3652, which had said the subscriber's decisions were written against the heap session's internals. They are one pure struct, State, with its per-source states and helpers (about 1,500 lines): it takes a sample or an event, calls the sample callback and the miss listeners it holds, and returns what the host must then do (a RecoveryRequest, or a bool for \"issue a get\") so the get is issued with the lock released. The wiring (about 2,900 lines) is the host's: issuing the gets, the in-flight set that cancels them, two timers, four declarations. So the machine moves as it is, with one edit: its three Instant::now() reads become a millisecond reading the host passes. The note lists the events, the plan a request becomes, the host's seam and the beacon.",
+      "changes_bullets": [
+        "docs/advanced-pubsub-on-a-neutral-core.md: fact 3 corrected; step 2 marked surveyed and step 4 reworded (the machine moves, it is not rewritten); a new section \"The subscriber's vocabulary\" (events in, the one command out, the plan, the host's seam, the clock, the beacon, the tests).",
+        "docs/capi-pico-on-coop-engine.md: the advanced-plane entry states that step 1 is done and what step 2 found."
+      ],
+      "verification_bullets": [
+        "Documentation only. The production lines of advanced_subscriber.rs (State, SourceState, TimestampedState, the recovery and history helpers, PendingGets, the late-publisher and periodic paths, the parser of an @adv token) were read in full; the counts (60 tests, three Instant::now() reads) were taken with grep.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed.",
+        "Not done: the host-side wiring (lines 3,190 to 4,460 of the file: the constructor, the declarations, the teardown) was read for what it declares and not line by line; step 4 reads it in full before moving anything."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Step 3: AdvancedPublisherOn and its plane trait move to wz-ext-pubsub (the trait's node_hlc and the stamper name wz-node-time), the tokio host and the pico plane adapt, and the cooperative engine gets a plane and the port declarations it needs; the beacon's tick joins the plane.",
+        "Step 4 (the subscriber): count the 60 tests into those that drive State directly and those that need a session before moving anything, and read the host wiring in full.",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings, as that session welcomed.",
+        "Hosted: read the interop legs of the advanced plane after the pushes of 3661 and 3665. C1bz of wz-tls-mbedtls is not mine.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ],
+      "publishable_decision_summary": "Step 2 of the advanced plane: the subscriber's vocabulary, stated from its code in docs/advanced-pubsub-on-a-neutral-core.md. Reading the production lines of advanced_subscriber.rs (1 to 4,462) corrected the survey of round 3652, which had said the subscriber's decisions were written against the heap session's internals. They are one pure struct, State, with its per-source states and helpers (about 1,500 lines): it takes a sample or an event, calls the sample callback and the miss listeners it holds, and returns what the host must then do (a RecoveryRequest, or a bool for \"issue a get\") so the get is issued with the lock released. The wiring (about 2,900 lines) is the host's: issuing the gets, the in-flight set that cancels them, two timers, four declarations. So the machine moves as it is, with one edit: its three Instant::now() reads become a millisecond reading the host passes. The note lists the events, the plan a request becomes, the host's seam and the beacon.",
+      "publishable_changes_bullets": [
+        "docs/advanced-pubsub-on-a-neutral-core.md: fact 3 corrected; step 2 marked surveyed and step 4 reworded (the machine moves, it is not rewritten); a new section \"The subscriber's vocabulary\" (events in, the one command out, the plan, the host's seam, the clock, the beacon, the tests).",
+        "docs/capi-pico-on-coop-engine.md: the advanced-plane entry states that step 1 is done and what step 2 found."
+      ],
+      "publishable_verification_bullets": [
+        "Documentation only. The production lines of advanced_subscriber.rs (State, SourceState, TimestampedState, the recovery and history helpers, PendingGets, the late-publisher and periodic paths, the parser of an @adv token) were read in full; the counts (60 tests, three Instant::now() reads) were taken with grep.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed.",
+        "Not done: the host-side wiring (lines 3,190 to 4,460 of the file: the constructor, the declarations, the teardown) was read for what it declares and not line by line; step 4 reads it in full before moving anything."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 3: AdvancedPublisherOn and its plane trait move to wz-ext-pubsub (the trait's node_hlc and the stamper name wz-node-time), the tokio host and the pico plane adapt, and the cooperative engine gets a plane and the port declarations it needs; the beacon's tick joins the plane.",
+        "Step 4 (the subscriber): count the 60 tests into those that drive State directly and those that need a session before moving anything, and read the host wiring in full.",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings, as that session welcomed.",
+        "Hosted: read the interop legs of the advanced plane after the pushes of 3661 and 3665. C1bz of wz-tls-mbedtls is not mine.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
