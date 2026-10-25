@@ -87,10 +87,11 @@ callbacks are slow and leaves the rest inline.
 - **The lane is a pure value** in `wz-session-core` (`delivery_lane.rs`), the way `ReplayCursor` and
   `DeclarationSync` are: it holds the bounds and the counters, reads no clock and starts no task.
   `reserve(bytes)` returns a slot (event index, byte offset, charge) or a refusal; `publish(slot,
-  callbacks)` charges the callbacks; `next()` returns the head when it is published; `complete(slot)`
-  returns the charges; `stop()`, `stats()`. Its storage is the `Storage` parameter the registries
-  already use, so the heap profile grows a ring and the fixed-memory profile is a static one, with one
-  set of rules and one test suite.
+  callbacks)` charges the callbacks; `front()` returns the head when it is published; `complete(slot)`
+  returns the charges; `stop()`, `stats()`. The lane holds counts and places only: its event slots
+  are a const-generic array (`DeliveryLane<EVENTS>`), and the BYTES are the host's, in a `Vec` on the
+  heap profile and a static array on the fixed-memory one. So there is one set of rules and one test
+  suite, and the lane itself needs no allocator.
 - **A host drives it.** The tokio host spawns the consumer as a task woken by a notification at each
   publish; the cooperative engine runs the consumer in its poll step; the slot node in its loop. The
   core says "one event is ready", the host decides where the callback runs.
@@ -107,8 +108,9 @@ callbacks are slow and leaves the rest inline.
 1. This document.
 2. `DeliveryLane` in `wz-session-core`, pure, with a unit test per refusal reason, one for the
    oversized-sample rule, one for the ring's wrap charge, and a model test over many interleavings of
-   reserve, publish, next, complete and stop (the shape that tested `ReplayCursor`). The limits are
-   declared in the same change as the first code that reads them.
+   reserve, publish, front, complete and stop (the shape that tested `ReplayCursor`). DONE. The lane
+   takes its bounds as arguments, so it reads no limit: the three limits are declared in phase 3,
+   with the first code that reads them (a switch no code reads is not landed).
 3. The tokio host: `SubscribeOptions::offloaded()`, the consumer task, the policy `subscriber-overload`
    and the capability, with a pair of tests (a slow callback does not stop the receive path under
    `reject`, and does under `block`) and the reliability split.

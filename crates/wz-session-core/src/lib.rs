@@ -175,6 +175,13 @@ pub mod quota;
 /// Unconditional, no_std and no_alloc.
 pub mod replay_cursor;
 
+/// The bookkeeping of a bounded lane between the receive path and the task that runs a
+/// subscriber's callbacks: [`delivery_lane::DeliveryLane`] (`docs/rx-delivery-lane.md`). It counts
+/// events, bytes and callbacks against three bounds and says where a sample's bytes go; the bytes
+/// are the host's. It reads no clock, starts no task and allocates nothing, so every host uses the
+/// one set of rules. Unconditional, no_std and no_alloc.
+pub mod delivery_lane;
+
 /// The pace of a paced declaration replay: [`replay_pacing::ReplayPacing`], the burst and the
 /// interval between turns, and the pace a build states through the `declaration-sync-pacing`
 /// policy. A value and not a clock, so the heap runtime and the slot node hold the same type.
