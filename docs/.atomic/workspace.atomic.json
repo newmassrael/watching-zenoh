@@ -289052,6 +289052,46 @@
         "Still open: wait_declarations_stable and a synced query on the cooperative engine."
       ]
     },
+    "Round 3676": {
+      "decision_summary": "The declared nodes were run across the real networks of the four lab boards against stock peers, which the loopback runs could not show. The stock zenohd and stock examples (x86_64) ran on the lab server, bound to the one address it has on each board's own network, and on each board the five node kinds that talk to a router or a client (dialled tokens, subscriber, publisher, querier, listener) ran against them. The nodes were built from the same constants with only the address they dial, or the one the listener binds, changed in a scratch copy that is not committed. Every leg passed on every board: the aarch64 Linux board, the QNX 7.1 boards on io-sock and io-pkt, and the Android 16 tablet. That closes the stock-peer gap for QNX and Android. Nothing of the run was left on a board, on the server or on the build hosts. The group against a stock multicast peer and the paced replay's timing on a board are still not run.",
+      "changes_bullets": [
+        "docs/target-build-contract.md: the paragraph on the board runs says a third set crossed the boards' networks against a stock router and examples on the lab server, what was built for it, that every leg passed, and what is still not run.",
+        "deploy/wz-config.toml: the aarch64 Linux, Android and both QNX platform rows say the nodes ran on loopback and across the board's network against stock peers."
+      ],
+      "verification_bullets": [
+        "Each board in turn: the five nodes were put on the board, the stock router and examples were started on the server's address on that board's network, and the legs ran: tokens appear, are listed and drop (watcher and a liveliness get), a stock publisher's sample is kept and a stock client gets it back through the router, the node's puts reach a stock subscriber, the node's queries reach a stock queryable and a reply is counted, and a stock client gets the listener's two documents and nothing for an unserved key. All eleven checks were green on the aarch64 Linux board, the QNX io-sock board, the QNX io-pkt board and the tablet; each node's own line shows the server's address as its router, so the traffic was not loopback.",
+        "The tablet's first run did not finish: the lab's adb helper puts a directory change in front of a command, so the ampersand backgrounded that whole list and the kill reached the wrapper and not the node. The run's own processes were ended by pid on both sides, the command was put in a brace group, and the second run was green.",
+        "Afterwards, on each board no file and no process of the run was left; on the server the run's directory and listeners are gone; the staging on the build host and the node outputs on the SDK machine were removed; the wz_config check and the round-fed array pass on this change.",
+        "Not run: the group against a stock multicast peer on a board, the paced replay's timing on a board, and the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of the pushes of this work per job, compared by head sha; none has completed so far because each push cancelled the run before it.",
+        "The group node over a board's real network against a stock multicast peer is the last board gap: the peer on the server must be pinned to the interface it has on the board's network, and the node joins the interface the board's stack picks, which on the Orin board (about a dozen interfaces) is not known.",
+        "The QNX build workspace on the SDK machine (toolchain, synced source, release cache, about 5 GB) is still there; removing it is the owner's decision."
+      ],
+      "publishable_decision_summary": "The declared nodes were run across the real networks of the four lab boards against stock peers, which the loopback runs could not show. The stock zenohd and stock examples (x86_64) ran on the lab server, bound to the one address it has on each board's own network, and on each board the five node kinds that talk to a router or a client (dialled tokens, subscriber, publisher, querier, listener) ran against them. The nodes were built from the same constants with only the address they dial, or the one the listener binds, changed in a scratch copy that is not committed. Every leg passed on every board: the aarch64 Linux board, the QNX 7.1 boards on io-sock and io-pkt, and the Android 16 tablet. That closes the stock-peer gap for QNX and Android. Nothing of the run was left on a board, on the server or on the build hosts. The group against a stock multicast peer and the paced replay's timing on a board are still not run.",
+      "publishable_changes_bullets": [
+        "docs/target-build-contract.md: the paragraph on the board runs says a third set crossed the boards' networks against a stock router and examples on the lab server, what was built for it, that every leg passed, and what is still not run.",
+        "deploy/wz-config.toml: the aarch64 Linux, Android and both QNX platform rows say the nodes ran on loopback and across the board's network against stock peers."
+      ],
+      "publishable_verification_bullets": [
+        "Each board in turn: the five nodes were put on the board, the stock router and examples were started on the server's address on that board's network, and the legs ran: tokens appear, are listed and drop (watcher and a liveliness get), a stock publisher's sample is kept and a stock client gets it back through the router, the node's puts reach a stock subscriber, the node's queries reach a stock queryable and a reply is counted, and a stock client gets the listener's two documents and nothing for an unserved key. All eleven checks were green on the aarch64 Linux board, the QNX io-sock board, the QNX io-pkt board and the tablet; each node's own line shows the server's address as its router, so the traffic was not loopback.",
+        "The tablet's first run did not finish: the lab's adb helper puts a directory change in front of a command, so the ampersand backgrounded that whole list and the kill reached the wrapper and not the node. The run's own processes were ended by pid on both sides, the command was put in a brace group, and the second run was green.",
+        "Afterwards, on each board no file and no process of the run was left; on the server the run's directory and listeners are gone; the staging on the build host and the node outputs on the SDK machine were removed; the wz_config check and the round-fed array pass on this change.",
+        "Not run: the group against a stock multicast peer on a board, the paced replay's timing on a board, and the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of the pushes of this work per job, compared by head sha; none has completed so far because each push cancelled the run before it.",
+        "The group node over a board's real network against a stock multicast peer is the last board gap: the peer on the server must be pinned to the interface it has on the board's network, and the node joins the interface the board's stack picks, which on the Orin board (about a dozen interfaces) is not known.",
+        "The QNX build workspace on the SDK machine (toolchain, synced source, release cache, about 5 GB) is still there; removing it is the owner's decision."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
