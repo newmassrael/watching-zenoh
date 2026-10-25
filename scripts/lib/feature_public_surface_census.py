@@ -425,6 +425,14 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "one feature, gating a Linux-only capture path",
         frozenset({"tap"}),
     ),
+    "wz-host-net": (
+        "the host's network facts and the multicast sockets built from them, reached through "
+        "the tokio runtime's `link-interfaces` and `locator-iface` (which forward here) and by "
+        "the cooperative host; it is not a surface the analyzer's diagnostic axis probes, and "
+        "its one feature, `locator-iface`, is run by this crate's own tests on the host's "
+        "interface table",
+        frozenset({"locator-iface"}),
+    ),
     "wz-rest": (
         "the REST bridge: the facade re-exports the whole crate as `wz::rest` "
         "and is its ONLY workspace consumer, so the path a Rust caller names "
@@ -1190,7 +1198,12 @@ FAMILY_DIFFERENTIAL_MANIFEST = ROOT / "conformance" / "differential" / "Cargo.to
 # `ABI_CONTRACT`", which `wz-capi-pico` does not yet have a row for.
 # R3416 -- `wz-capi-pico` has that row now, so both workspace consumers of `wz-capi-core` are
 # held to `ABI_CONTRACT`; what is left is writing the predicate, not waiting for a row.
-PROSE_ONLY: frozenset[str] = frozenset({"wz-capi-core"})
+#
+# `wz-host-net` lands here for the same reason `wz-capi-core` did: its row's reason is a claim
+# about who consumes the crate (the tokio runtime, whose `link-interfaces` and `locator-iface`
+# forward to it, and the cooperative host), and no predicate above holds a row to that. Its one
+# feature, `locator-iface`, is run by the crate's own tests.
+PROSE_ONLY: frozenset[str] = frozenset({"wz-capi-core", "wz-host-net"})
 
 
 class Dep(typing.NamedTuple):

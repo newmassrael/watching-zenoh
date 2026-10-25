@@ -915,7 +915,7 @@ transport-link-udp = ["link-interfaces"]
 # a warn-noop off-platform). Pulls `socket2` for the syscall. The PARSE of
 # `#iface=` is always-on (foundational, in wz-session-core::locator); only the
 # BIND honor is this gated atom (reserved-INERT -> active).
-locator-iface = ["dep:socket2"]
+locator-iface = ["dep:socket2", "wz-host-net?/locator-iface"]
 # R311nv — host tty backend for the SERIAL link. Forwards the
 # wz-session-core `transport-link-serial` gate (the R311nt
 # transport-agnostic `serial_link` framing/handshake/locator logic +
@@ -1236,7 +1236,10 @@ router-multicast-faces = [
 # rule field. `libc` is already in the tree (unixpipe's `mkfifo`), so this adds
 # no third-party surface — unlike zenoh, which reaches the same data through
 # `pnet_datalink`.
-link-interfaces = ["dep:libc", "dep:windows-sys"]
+#
+# The reading of the interface table itself is `wz-host-net`'s (the cooperative host reads the
+# same table the same way); `link_interfaces` re-exports it at its old path.
+link-interfaces = ["dep:libc", "dep:windows-sys", "dep:wz-host-net"]
 # R2702 — `routing-peer` DROPPED from this line and the two below it, and the
 # codec knobs the enforcers actually read are named instead. The implication was
 # what made `access-acl`'s residual true: upstream installs its interceptors with
@@ -2040,6 +2043,10 @@ sce-rust-runtime = { path = "../../vendor/sce/backends/rust/runtime" }
 # `LuaEngine` remains in the graph. This completes the runtime-schism
 # resolution begun for scouting in R311ik.
 log = "0.4"
+# What a hosted OS tells a node about its network (the interface table and what is read from it),
+# which this crate re-exports rather than owns: the cooperative host reads the same table. Pulled
+# by `link-interfaces`, so every other build is byte-identical.
+wz-host-net = { path = "../wz-host-net", optional = true }
 # R311ei — the HMAC-SHA256 cookie primitive (hmac + sha2) moved to
 # wz-session-core::signing_key (runtime-agnostic, MCU-cross-compiled).
 # This crate keeps only the OS-entropy constructor (a free fn), so it

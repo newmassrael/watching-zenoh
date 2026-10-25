@@ -962,6 +962,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-host-net"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "socket2",
+ "windows-sys",
+]
+
+[[package]]
 name = "wz-link-lwip"
 version = "0.1.0"
 dependencies = [
@@ -1026,6 +1036,7 @@ dependencies = [
  "tokio",
  "windows-sys",
  "wz-codecs",
+ "wz-host-net",
  "wz-runtime-core",
  "wz-session-core",
  "zeroize",

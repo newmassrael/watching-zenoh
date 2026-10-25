@@ -406,6 +406,28 @@ it behaves as pico behaves in both of pico's threading arms.
   its config and the interface facts under it, now in the tokio crate) into a runtime-neutral
   crate both hosts use (Sc2), a blocking window over it for the cooperative build (Sc3), and the
   pico `scout` feature without the tokio engine (Sc4).
+- 2026-10-25: scouting, step Sc2 of four: the host's network facts and the multicast sockets
+  leave the tokio runtime. A new crate, `wz-host-net`, holds what a hosted operating system tells
+  a node about its network and the sockets built from it, with no runtime in it (`std`,
+  `socket2`, `libc` or `windows-sys`). `link_interfaces` moved whole, with its tests: which
+  interfaces exist and can carry multicast, which index an address selects, what an `#iface=`
+  names, what an unspecified listener stands for. `multicast` is the plan under a multicast
+  socket, which was private to `UdpDriver`: which interface an `#iface=` names, what an unpinned
+  link joins and sends on, whether a refused membership ends the bind, the loopback policy, the
+  hop limit. `bind_joined` and `bind_sender` answer a bound, non-blocking `socket2::Socket` and the
+  group address its datagrams go to. The tokio runtime keeps every public path
+  (`link_interfaces` is re-exported, `McastSocketConfig` stays and converts to the neutral one at
+  the socket), adopts the socket with `UdpSocket::from_std` and sets `#dscp=` through its own
+  socket type, which is the one thing it does not hand over. Behaviour is unchanged: the 13
+  multicast-config tests of the tokio crate pass over the neutral builders, the moved tests pass
+  in the new crate (32, and 41 with `locator-iface`), and the builders gained tests of their own
+  (the hop limit and the default read back from the kernel, the group bind on unix, the link's
+  default interface against a scout's, a membership the kernel refuses, a `#join=` of the other
+  family). The crate joins the platform workflow's trigger paths, the feature-surface census
+  (`locator-iface`, prose, as `wz-capi-core`'s row is) and the non-default test legs.
+  `PosixGroupTransport` of `wz-runtime-posix`, which joins a group by raw `libc` for the slot
+  profile, is not touched. Next: a blocking scouting window over these sockets for the
+  cooperative build (Sc3), and the pico `scout` feature without the tokio engine (Sc4).
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected

@@ -63,6 +63,7 @@ on:
       - "crates/wz-replay/**"
       - "crates/wz-analyze/**"
       - "crates/wz-packet-socket/**"
+      - "crates/wz-host-net/**"
       - "crates/wz-tls-record/**"
       - "crates/wz-capture/**"
       - "crates/wz-cdylib-build/**"

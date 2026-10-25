@@ -132,7 +132,6 @@ BASELINE: dict[str, int] = {
     "crates/wz-integration-tests/tests/pubkey_zenohd_interop.rs::TODO": 1,
     "crates/wz-runtime-tokio/src/accept_loop.rs::not wired": 3,
     "crates/wz-runtime-tokio/src/lib.rs::not built": 1,
-    "crates/wz-runtime-tokio/src/link_interfaces.rs::not built": 1,
     "crates/wz-session-core/src/declare/liveliness_get.rs::not built": 1,
 }
 # NOT baselined, and worth saying why: the first pass carried three `HACK`

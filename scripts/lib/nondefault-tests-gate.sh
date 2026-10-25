@@ -334,6 +334,11 @@ transport-link-unixpipe,transport-link-ws|"
     # (`tests::local::`, `tests::local_query::`), and its faces, which a connectivity plane
     # reads, only with `connectivity` (`tests::faces::`). MEASURED: 32 passed with all seven, 6 s.
     "wz-capi-coop|hook|connectivity,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable|"
+    # What a hosted OS tells a node about its network, and the multicast sockets built from it,
+    # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
+    # v6 interface selectors and the tests that read them off the loopback) is compiled only with
+    # `locator-iface`. MEASURED: 32 passed with default features, 41 with it, under 1 s.
+    "wz-host-net|hook|locator-iface|"
     # Open-debt item 913 -- the in-memory group every group test of the workspace runs over
     # (`multicast_bus`) holds a member's place while a send half of its link lives, as a socket
     # does, which the departure test of the group face depends on. The module exists only with

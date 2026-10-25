@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# wz-host-net — what a hosted operating system tells a node about its own network, and the
+# multicast sockets built from it, for every runtime that holds a socket.
+#
+# Two runtimes open the same sockets: the tokio runtime (the AP engine, the zenoh-c ABI) and the
+# cooperative host (the pico C ABI's engine, a node run as a Linux process). A multicast socket
+# is made of policy that is not a runtime's: which interfaces can carry multicast, which address
+# an `#iface=` names, what an unpinned link joins and sends on, which loopback a group gets. Kept
+# in one runtime's crate, the other would copy it, and a copy is where `R2611`'s every-interface
+# Scout or `R3335`'s default interface gets forgotten. So it lives here, with no runtime in it:
+# `std`, `socket2`, the platform's own calls (`libc` on unix, `windows-sys` on Windows), and
+# nothing of tokio or of any executor.
+#
+# `rlib` only: a Rust-internal seam, not an artifact anyone links from C.
+
+[package]
+name = "wz-host-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "What a hosted OS tells a node about its network (interfaces, addresses) and the multicast sockets built from it, independent of any runtime."
+publish = false
+
+[lib]
+name = "wz_host_net"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = []
+# Honour the `#iface=<name-or-address>` tail of a multicast locator: resolve it to the interface
+# the membership and the egress are pinned to. Off, the key is read and ignored with a warning,
+# as the tokio runtime's feature of the same name has always done; the tokio feature forwards
+# here.
+locator-iface = []
+
+[dependencies]
+log = "0.4"
+# The multicast socket: the options that must be set before the bind (`SO_REUSE*`), the egress
+# interface, the memberships and the hop limit are the platform's own calls, which `std` does not
+# expose. The same crate and version as the tokio runtime's, so the graph gains nothing.
+socket2 = { version = "0.6", features = ["all"] }
+
+# `getifaddrs`, `if_nametoindex` and the interface flags are POSIX, not Linux-only, so the
+# interface facts hold on macOS and the BSDs as well.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The Windows adapter table (`GetAdaptersAddresses`), the one place the Windows reading touches
+# the system. Each namespace below is one the reading calls into, and nothing else is enabled.
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+]
+
+[lints]
+workspace = true

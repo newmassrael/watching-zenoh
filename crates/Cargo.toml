@@ -94,6 +94,10 @@ members = [
     # unreachable from a passive reader. Neither the async runtime's nor the
     # `no_std` dissector's — the third place both refuse.
     "wz-packet-socket",
+    # What a hosted OS tells a node about its network, and (as it lands) the multicast sockets
+    # built from it: the one reading both the tokio runtime and the cooperative host use, so the
+    # policy under a multicast socket is written once.
+    "wz-host-net",
     "wz-capi-dissect",
     # Round 2441 (open-debt item 693) — the C ABI over `wz-replay`'s PLAN half.
     # Its own crate rather than a door in `wz-capi-dissect` for the reason that

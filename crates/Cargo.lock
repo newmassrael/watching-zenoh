@@ -3525,6 +3525,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-host-net"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "log",
+ "socket2",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "wz-integration-tests"
 version = "0.1.0"
 dependencies = [
@@ -3759,6 +3769,7 @@ dependencies = [
  "wz-capture",
  "wz-codecs",
  "wz-codecs-test-support",
+ "wz-host-net",
  "wz-packet-socket",
  "wz-plugin-abi",
  "wz-routing-graph",
