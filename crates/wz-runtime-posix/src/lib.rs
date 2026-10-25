@@ -163,6 +163,17 @@ macro_rules! posix_image_no_heap {
         fn wz_posix_panic(_info: &core::panic::PanicInfo) -> ! {
             $crate::glue::abort_after_panic()
         }
+
+        // The toolchain's prebuilt `core` names a personality routine in its unwind tables. A
+        // release link with LTO drops the tables with the code that uses them; a debug link keeps
+        // them and so keeps the name, which `std` would have supplied and an image that links no
+        // `std` must. The image is built `panic = "abort"`, so nothing unwinds and nothing calls
+        // this: it is the name satisfied, and if it were ever reached the answer is the panic
+        // handler's.
+        #[unsafe(no_mangle)]
+        extern "C" fn rust_eh_personality() -> ! {
+            $crate::glue::abort_after_panic()
+        }
     };
 }
 
