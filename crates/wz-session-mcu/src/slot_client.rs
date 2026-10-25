@@ -24,9 +24,12 @@
 
 use core::cell::RefCell;
 
-use wz_runtime_coop::session_drive::SlotStack;
+use wz_runtime_coop::session_drive::{
+    Accept, NoAccept, SessionDriveConfig, SessionRole, SlotStack,
+};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::ClockSource;
+use wz_session_core::bounded::{BoundedVec, CapacityFull};
 use wz_session_core::encoding::PACKED_APPLICATION_JSON;
 use wz_session_core::locality::Locality;
 use wz_session_core::pubsub::SubscriberTable;
@@ -39,7 +42,7 @@ use wz_session_core::slot_observer::{NoSink, ObserverSinks};
 
 use crate::connect_manager::{ConnectManager, EndpointSource};
 use crate::latest::{LatestRef, LatestSink};
-use crate::slot_dial::{Bind, SessionFactory, SlotDialer, SlotSession};
+use crate::slot_dial::{events_of, Bind, SessionFactory, SlotDialer, SlotSession};
 use crate::slot_host::SessionHost;
 
 /// What a declaration announces to the router.
@@ -65,31 +68,69 @@ pub struct Declaration {
     pub key: &'static str,
 }
 
-/// A client node on the slot profile over the stack `T`, binding its sockets with `B`.
-pub struct SlotClientNode<'a, C, T, B, F, const S: usize, const P: usize>
+/// The port a node takes connections on and how many sessions of them it holds at once: the
+/// acceptor `X` and the size `N` of the table those sessions live in, stated together because the
+/// second is a type-level number the first has no way to name. A node that listens on nothing
+/// states [`Listening::NONE`].
+pub struct Listening<X, const N: usize> {
+    acceptor: X,
+}
+
+impl<X, const N: usize> Listening<X, N> {
+    /// Take the connections `acceptor` yields, holding up to `N` sessions of them.
+    pub const fn new(acceptor: X) -> Self {
+        Self { acceptor }
+    }
+}
+
+impl Listening<NoAccept, 0> {
+    /// A node that listens on nothing.
+    pub const NONE: Self = Self::new(NoAccept);
+}
+
+/// A client node on the slot profile over the stack `T`, binding its sockets with `B` and taking
+/// the connections that arrive through the acceptor `X`, up to `A` sessions of them at once.
+///
+/// The sessions it holds are of two kinds that differ only in who opened the link: the ones it
+/// dials (the connect manager keeps one for each endpoint it is given, and dials it again when it
+/// drops) and the ones a peer opened to it (the table of `A` rows, whose row is free again when
+/// its session ends). Everything the node does to a session (declaring on it, answering on it,
+/// reporting it) is done to both alike.
+pub struct SlotClientNode<'a, C, T, B, F, X, const S: usize, const P: usize, const A: usize>
 where
     C: ClockSource + 'static,
     T: SlotStack,
     B: Bind<T::Driver>,
     F: SessionFactory<C>,
+    X: Accept<T::Driver>,
 {
     manager: ConnectManager<SlotDialer<'a, C, T, B, F, S, P>>,
     declarations: &'static [Declaration],
+    host: &'a SessionHost<C, T, F::Entropy, S, P>,
+    factory: &'a RefCell<F>,
+    timeouts: SessionTimeouts,
+    acceptor: X,
+    accepted: BoundedVec<SlotSession<C>, A>,
+    over_capacity: u32,
 }
 
-impl<'a, C, T, B, F, const S: usize, const P: usize> SlotClientNode<'a, C, T, B, F, S, P>
+impl<'a, C, T, B, F, X, const S: usize, const P: usize, const A: usize>
+    SlotClientNode<'a, C, T, B, F, X, S, P, A>
 where
     C: ClockSource + 'static,
     T: SlotStack,
     B: Bind<T::Driver>,
     F: SessionFactory<C>,
+    X: Accept<T::Driver>,
 {
     /// A node that dials `endpoints` through `host` (sockets from `bind`, sessions made by
-    /// `factory` with the handshake deadlines `timeouts`) and declares `declarations` on each
-    /// session as it establishes.
+    /// `factory` with the handshake deadlines `timeouts`), takes the connections `acceptor`
+    /// yields, and declares `declarations` on each session as it establishes.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         host: &'a SessionHost<C, T, F::Entropy, S, P>,
         bind: B,
+        listening: Listening<X, A>,
         factory: &'a RefCell<F>,
         endpoints: &'static dyn EndpointSource,
         timeouts: SessionTimeouts,
@@ -98,21 +139,45 @@ where
         Self {
             manager: ConnectManager::new(endpoints, SlotDialer::new(host, bind, factory, timeouts)),
             declarations,
+            host,
+            factory,
+            timeouts,
+            acceptor: listening.acceptor,
+            accepted: BoundedVec::new(),
+            over_capacity: 0,
         }
+    }
+
+    /// Every session the node holds, accepted and dialled.
+    fn live(&self) -> impl Iterator<Item = &SlotSession<C>> + use<'_, 'a, C, T, B, F, X, S, P, A> {
+        self.accepted
+            .iter()
+            .chain(self.manager.sessions().map(|(_, session)| session))
+    }
+
+    /// How many sessions a peer opened to this node it holds now.
+    pub fn accepted_sessions(&self) -> usize {
+        self.accepted.len()
+    }
+
+    /// How many connections the node took off its port and closed at once because its table of
+    /// accepted sessions was full: a peer that finds the connection closed knows the node is at
+    /// its limit, as one refused at a full table of a router would.
+    pub const fn refused_over_capacity(&self) -> u32 {
+        self.over_capacity
     }
 
     /// Whether some session is established.
     pub fn is_established(&self) -> bool {
-        self.manager
-            .sessions()
-            .any(|(_, session)| session.actions().is_established())
+        self.live()
+            .any(|session| session.actions().is_established())
     }
 
     /// Whether some established session's peer is verified: the zid it claimed is the zid the
     /// key it proved inside a secure channel names (decisions D1 and D9 of
     /// `docs/session-lifecycle-intent.md`). `false` over a link that is no secure channel.
     pub fn peer_verified(&self) -> bool {
-        self.manager.sessions().any(|(_, session)| {
+        self.live().any(|session| {
             let actions = session.actions();
             actions.is_established() && actions.peer_identity_verified()
         })
@@ -128,28 +193,83 @@ where
     /// deadline this sets would stay and the loop would never sleep.
     #[cfg(feature = "query-get")]
     pub fn wake(&self) {
-        for (_, session) in self.manager.sessions() {
+        for session in self.live() {
             session.actions().set_app_wake_deadline_ms(Some(0));
         }
     }
 
     /// Whether the node holds a session, established or still opening. A node that holds none has
     /// no socket either, so its loop sleeps rather than spin above the network stack's threads.
+    /// (A node that listens holds its port all the while; the sleep is the interval at which it
+    /// looks for a connection on it.)
     pub fn holds_session(&self) -> bool {
-        self.manager.sessions().next().is_some()
+        self.live().next().is_some()
     }
 
-    /// Advance the node to `now_ms`: keep the sessions in step with the endpoints, and send the
-    /// declarations on every established session that has not had them.
+    /// Advance the node to `now_ms`: let go of the accepted sessions that have ended, take the
+    /// connections that wait on the port, keep the dialled sessions in step with the endpoints,
+    /// and send the declarations on every established session that has not had them.
     pub fn tick(&mut self, now_ms: u64) {
+        self.admit();
         self.manager.tick(now_ms);
-        for (_, session) in self.manager.sessions() {
+        for session in self.live() {
             if session.actions().is_established()
                 && !session.declared()
                 && declare_all(session, self.declarations)
             {
                 session.mark_declared();
             }
+        }
+    }
+
+    /// One accept pass: free the rows of the sessions that ended, then take what waits on the
+    /// port, at most one connection more than the table has rows so that a pass is bounded and
+    /// the overflow is seen. A connection that finds the table full is closed here, before any
+    /// table is claimed for it; one the acceptor refused or the host had no room for was already
+    /// counted by whoever refused it, and its peer sees the same close.
+    fn admit(&mut self) {
+        self.accepted.retain(|session| !session.is_finished());
+        for _ in 0..=A {
+            // Nothing waits, or the acceptor could not take what did (it counted that itself):
+            // the next tick asks again.
+            let Ok(Some(driver)) = self.acceptor.accept() else {
+                return;
+            };
+            if self.accepted.free_slots() == 0 {
+                self.over_capacity = self.over_capacity.saturating_add(1);
+                continue;
+            }
+            self.open_accepted(driver);
+        }
+    }
+
+    // Not inlined into the pass above, for the reason `SlotDialer::dial` is not: the driver and
+    // the session's parameters are held by value on the way into the slot, and that frame should
+    // exist for the length of one accept, not beneath the loop for the node's whole life.
+    #[inline(never)]
+    fn open_accepted(&mut self, driver: T::Driver) {
+        let entropy = self.factory.borrow_mut().entropy();
+        let params = self.factory.borrow_mut().accepted_params();
+        let factory = self.factory;
+        let Ok(opened) = self.host.open(
+            driver,
+            None,
+            entropy,
+            params,
+            SessionDriveConfig {
+                timeouts: self.timeouts,
+                role: SessionRole::Acceptor,
+                max_iters: None,
+            },
+            |handle| events_of(factory, handle),
+        ) else {
+            // A table had no room: it counted the refusal and the driver went back with it.
+            return;
+        };
+        // `admit` checked for a free row, so the push cannot refuse; a session that found none
+        // would be one nothing declares on or reports, so end it rather than hold it.
+        if let Err(CapacityFull(refused)) = self.accepted.push(SlotSession::new(opened)) {
+            refused.abort();
         }
     }
 }

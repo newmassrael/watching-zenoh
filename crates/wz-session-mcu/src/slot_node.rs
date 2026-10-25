@@ -46,7 +46,7 @@ use core::fmt;
 use core::mem::MaybeUninit;
 use core::ops::ControlFlow;
 
-use wz_runtime_coop::session_drive::{Bind, PumpSlots, SlotStack};
+use wz_runtime_coop::session_drive::{Accept, Bind, PumpSlots, SlotStack};
 use wz_runtime_coop::session_runtime::SessionHandle;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz_session_core::byte_cells::ByteCells;
@@ -68,7 +68,7 @@ use crate::connect_manager::EndpointSource;
 use crate::latest::{LatestRef, LatestSink};
 use crate::slot_client::{
     register_answer, register_document, register_latest, Answer, Declaration, DeclarationKind,
-    DocumentSinks, SlotClientNode,
+    DocumentSinks, Listening, SlotClientNode,
 };
 use crate::slot_dial::SessionFactory;
 use crate::slot_host::SessionHost;
@@ -577,8 +577,18 @@ impl NodeIdentity {
 
     /// zenoh 1.x's handshake shape as a client, with a batch the receive slot holds whole.
     pub fn params(&self, batch_size: u16) -> SessionInitParams {
+        self.params_as(WhatAmI::Client, batch_size)
+    }
+
+    /// The same shape presented as a peer: what a node that accepts connections says to the
+    /// side that opened one, since a stock client refuses another client.
+    pub fn accepted_params(&self, batch_size: u16) -> SessionInitParams {
+        self.params_as(WhatAmI::Peer, batch_size)
+    }
+
+    fn params_as(&self, whatami: WhatAmI, batch_size: u16) -> SessionInitParams {
         SessionInitParams {
-            whatami: WhatAmI::Client,
+            whatami,
             zid: zid_bytes(self.zid()),
             seq_num_res: 2,
             req_id_res: 2,
@@ -654,6 +664,10 @@ where
 
     fn params(&mut self) -> SessionInitParams {
         self.identity.params(self.batch_size)
+    }
+
+    fn accepted_params(&mut self) -> SessionInitParams {
+        self.identity.accepted_params(self.batch_size)
     }
 
     fn events(&mut self, handle: &SessionHandle<C>) -> Self::Events {
@@ -789,12 +803,14 @@ pub trait NodeHandle {
     fn wake(&self);
 }
 
-impl<C, T, B, F, const S: usize, const P: usize> NodeHandle for SlotClientNode<'_, C, T, B, F, S, P>
+impl<C, T, B, F, X, const S: usize, const P: usize, const A: usize> NodeHandle
+    for SlotClientNode<'_, C, T, B, F, X, S, P, A>
 where
     C: ClockSource + 'static,
     T: SlotStack,
     B: Bind<T::Driver>,
     F: SessionFactory<C>,
+    X: Accept<T::Driver>,
 {
     fn is_established(&self) -> bool {
         SlotClientNode::is_established(self)
@@ -835,14 +851,17 @@ pub const EXIT_OBSERVER: i32 = 3;
 /// A client node: everything the loop needs to run, handed over by the platform once.
 ///
 /// The type parameters are the platform's: the clock `C`, the stack `T`, the entropy `E` a
-/// session owns, and the layer `L` its iterations are reported to; the numbers are
-/// [`NodeStorage`]'s, and `DOCS` is [`Declared`]'s.
+/// session owns, the layer `L` its iterations are reported to, and the acceptor `X` of the
+/// connections that arrive; the numbers are [`NodeStorage`]'s, `DOCS` is [`Declared`]'s, and
+/// `ACCEPTS` is how many sessions a peer opened the node holds at once (0 for a node that listens
+/// on nothing).
 pub struct ClientNode<
     'a,
     C,
     T,
     E,
     L,
+    X,
     const TASKS: usize,
     const TASK_BYTES: usize,
     const TIMERS: usize,
@@ -850,11 +869,13 @@ pub struct ClientNode<
     const RX: usize,
     const TX: usize,
     const DOCS: usize,
+    const ACCEPTS: usize,
 > where
     C: ClockSource + Copy + 'static,
     T: SlotStack + Bind<T::Driver> + Copy,
     E: EntropySource + Send + 'static,
     L: SessionLayer<C>,
+    X: Accept<T::Driver>,
 {
     /// The tables.
     pub storage: &'static NodeStorage<C, T, E, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX>,
@@ -864,6 +885,10 @@ pub struct ClientNode<
     pub clock: C,
     /// The stack, built over `storage.rx` and `storage.tx`.
     pub stack: T,
+    /// The port it takes connections on, whose links claim their buffers from the same tables
+    /// as the stack's, and how many sessions of them it holds ([`Listening::NONE`] for a node
+    /// that listens on nothing).
+    pub listening: Listening<X, ACCEPTS>,
     /// Who the node is.
     pub identity: NodeIdentity,
     /// The batch the node advertises.
@@ -890,6 +915,7 @@ impl<
         T,
         E,
         L,
+        X,
         const TASKS: usize,
         const TASK_BYTES: usize,
         const TIMERS: usize,
@@ -897,12 +923,14 @@ impl<
         const RX: usize,
         const TX: usize,
         const DOCS: usize,
-    > ClientNode<'_, C, T, E, L, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, DOCS>
+        const ACCEPTS: usize,
+    > ClientNode<'_, C, T, E, L, X, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, DOCS, ACCEPTS>
 where
     C: ClockSource + Copy + 'static,
     T: SlotStack + Bind<T::Driver> + Copy,
     E: EntropySource + Send + 'static,
     L: SessionLayer<C>,
+    X: Accept<T::Driver>,
 {
     /// Set the node up and run it. Returns only when it cannot start or when the application ends
     /// the run; the value is the process's exit code.
@@ -920,6 +948,7 @@ where
             declared,
             clock,
             stack,
+            listening,
             identity,
             batch_size,
             entropy,
@@ -965,6 +994,7 @@ where
         let mut node = SlotClientNode::new(
             &host,
             stack,
+            listening,
             &factory,
             endpoints,
             SessionTimeouts::spec_defaults(),

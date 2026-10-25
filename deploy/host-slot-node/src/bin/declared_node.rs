@@ -41,6 +41,7 @@ use wz_session_core::sample_kind::SampleKind;
 use wz_session_mcu::connect_manager::StaticEndpoints;
 use wz_session_mcu::latest::{Latest, LatestCells, LatestRef, LatestWatch};
 use wz_session_mcu::slot_active::Active;
+use wz_session_mcu::slot_client::Listening;
 use wz_session_mcu::slot_node::{
     documents_of, BodyPool, ClientNode, Declared, Entities, Mirror, NodeApp, NodeHandle,
     NodeIdentity, NodePort, NodeStorage, Subscription,
@@ -412,6 +413,7 @@ fn run() -> i32 {
         #[cfg(feature = "tls")]
         stack: tls::stack([0; 4], &NODE.rx, &NODE.tx, channel_identity)
             .with_idle_wait_ms(IDLE_WAIT_MS),
+        listening: Listening::NONE,
         identity,
         batch_size: BATCH_SIZE,
         entropy: || PosixEntropy,

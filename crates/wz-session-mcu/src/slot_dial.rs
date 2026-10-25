@@ -48,6 +48,15 @@ pub trait SessionFactory<C: ClockSource + 'static> {
     /// The handshake parameters of one session: its zid, resolutions, signing key.
     fn params(&mut self) -> SessionInitParams;
 
+    /// The handshake parameters of one session a peer opened. They differ from a dialled
+    /// session's in one respect a node with a listener must state: the mode it presents to
+    /// whoever connects to it. A stock client refuses a client, so the node that accepts presents
+    /// itself as a peer there, while toward the routers it dials it stays what it is. A node that
+    /// accepts nothing never asks, so the default is the dialled parameters.
+    fn accepted_params(&mut self) -> SessionInitParams {
+        self.params()
+    }
+
     /// The application layer of the session whose handle this is, made after the session's slot
     /// is claimed and before its pump is
     /// ([`SessionHost::open`](crate::slot_host::SessionHost::open)).
