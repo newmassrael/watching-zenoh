@@ -13,7 +13,7 @@
 //! # Where the values come from
 //!
 //! Every policy is declared in `deploy/wz-config.toml` (`[[policy]]`: its kind, its values, the
-//! upstream behaviour it departs from, its help). The generated [`SessionPolicy`] holds one typed
+//! upstream behaviour it departs from, its help). The generated [`crate::policy::SessionPolicy`] holds one typed
 //! field for each, and its `Default` reads `WZ_POLICY_<NAME>` from the build's environment, or
 //! takes upstream's behaviour when the build states none. For a Zephyr image the environment is
 //! made from Kconfig; for a host build it is the resolved preset (`wz_config.py --resolve-env`).
