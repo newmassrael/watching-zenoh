@@ -924,10 +924,30 @@ Each step lands with its own done-when; sizes are not estimated here.
      the status document is a list of machines, and none of them is what the
      question was. The Push form of a verb (the in-band switchboard) is not
      bound here either.
-   - Next in step 6 (6.2b-4): a node image that binds it (an image with
-     `MAX_PEER_NODES` above zero, handing `ControlledOpener` to the
-     registration), the sources of hints (a build's declared ones, a Hello),
-     `wz-session-lwip` forwarding the feature, and the witness on the image.
+   - 6.2b-4 (landed, first half): the two fixed-memory admin images bind the
+     verb (the lwIP bare-metal one and the Zephyr one). The opener is no longer
+     typed by the dialer: what the dialer can do (whether it holds a session to
+     the node it dials for, which locators it can dial) is written into the
+     peer store by the manager when it is made, so `NodeOpener::in_store` and
+     `ControlledOpener::new` are `const` and an image declares its opener in a
+     `static` beside the store and the control, before any manager exists; until
+     there is one the opener says `Unverifiable`. Each image declares it as a
+     `static` of its own and not a member of its table of statics, because the
+     opener holds references: a table whose initial value is not all zero
+     bytes moves from `.bss` into `.data` and takes a copy into flash (the
+     Zephyr image's `Statics` says what that cost once, 131 KB), and for the
+     same reason the store's classification is an `Option` of a function and
+     not a function. At the default `MAX_PEER_NODES` of zero the images answer
+     the open `refused` for want of room, by name, which is the honest answer
+     of a node that was built to hold none; a build that states more, and has
+     hints, holds the node. The lwIP image builds, and the no-allocator link
+     gate holds it; the Zephyr image is read on the hosted run.
+   - Next in step 6 (6.2b-5): the sources of hints (a build's declared ones, a
+     Hello), `wz-session-lwip` forwarding the feature, and the witness on the
+     image, which is a step of the lane (a node image built with room for one
+     node, a hint for a peer the lane runs, an open by its zid and the status
+     read after it). The lane's grammar is shared with the board, so the step
+     is the lane owner's to agree.
 7. **D7** transports 2 and 3 as values of the build configuration axis.
 
 ## 5. Open

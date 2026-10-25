@@ -504,6 +504,10 @@ impl<const BODY: usize, const SESSIONS: usize> ObserverSinks for AdminSinks<BODY
 /// The lifecycle legs of a node that binds the open verb: the capability document, which any
 /// key that reaches it is answered, and the open query, which only a literal key that names
 /// this node, its role and one peer is.
+///
+/// Out of line: it runs inside the admin answer, which is under every receive of the node, and a
+/// node that binds no opener should not carry its frame there.
+#[inline(never)]
 fn serve_open<const BODY: usize>(
     arena: &mut AdminReplyArena<BODY>,
     query: &dyn QueryView,

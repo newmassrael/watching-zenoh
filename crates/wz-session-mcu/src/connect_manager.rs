@@ -285,29 +285,30 @@ pub enum NodeRefusal {
 /// kept for the manager's next tick, which holds the node. Accepted and not completed, as the
 /// port's contract says: how the dial ends is read in [`ConnectManager::node_states`].
 ///
-/// It asks the dialer type (`D`) and holds no dialer, which the manager owns. It is a reference to
-/// the store the image declared, so it is `Copy`.
-pub struct NodeOpener<D: Dialer> {
+/// It holds no dialer, which the manager owns, and is not typed by one: what the dialer can do
+/// (whether it holds a session to the node it dials for, which locators it can dial) is written
+/// into the store by the manager when it is made, so an image can declare its opener beside its
+/// store, in a `static`, before there is a manager. Until there is one the opener says
+/// `Unverifiable`, which is what a node that dials nothing is. It is a reference to the store, so
+/// it is `Copy`.
+#[derive(Clone, Copy)]
+pub struct NodeOpener {
     store: &'static PeerStore,
-    dialer: core::marker::PhantomData<fn() -> D>,
 }
 
-impl<D: Dialer> Clone for NodeOpener<D> {
-    fn clone(&self) -> Self {
-        *self
+impl NodeOpener {
+    /// The opener of the nodes held in `store`. `const`, so a `static` can be one.
+    pub const fn in_store(store: &'static PeerStore) -> Self {
+        Self { store }
     }
-}
 
-impl<D: Dialer> Copy for NodeOpener<D> {}
-
-impl<D: Dialer> NodeOpener<D> {
     /// Ask the manager to hold the node `zid`. A node already held, or already asked for, is
     /// unchanged, and says the same.
     pub fn open(&self, zid: &DirectoryZid) -> Result<(), NodeRefusal> {
-        if !D::VERIFIES_NODES {
-            return Err(NodeRefusal::Unverifiable);
-        }
         self.store.with(|t| {
+            if !t.verifies_nodes {
+                return Err(NodeRefusal::Unverifiable);
+            }
             if t.held.contains(zid) || t.requests.contains(zid) {
                 return Ok(());
             }
@@ -318,7 +319,8 @@ impl<D: Dialer> NodeOpener<D> {
             if t.directory.candidates(zid, t.now_ms).next().is_none() {
                 return Err(NodeRefusal::NoLocator);
             }
-            if first_dialable::<D>(&t.directory, zid, t.now_ms).is_none() {
+            let classify = t.classify.unwrap_or(|_| Ok(()));
+            if first_dialable(&t.directory, zid, t.now_ms, classify).is_none() {
                 return Err(NodeRefusal::NoDialableLocator);
             }
             t.requests.push(*zid).map_err(|_| NodeRefusal::NoRoom)
@@ -340,30 +342,31 @@ impl From<NodeRefusal> for OpenOutcome {
     }
 }
 
-impl<D: Dialer> NodeOpener<D> {
-    /// This opener as the node's lifecycle open query asks it, permitted as `permit` says (the
-    /// node's write permit, which gates the config write too).
-    #[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
-    pub fn controlled(
-        self,
+/// A [`NodeOpener`] under a permit: what a node binds to answer `session/open/<peer>`, as the
+/// node's write permit says (which gates the config write too).
+#[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
+pub struct ControlledOpener {
+    opener: NodeOpener,
+    permit: &'static (dyn crate::admin_status::ConnectStatusSource + Sync),
+}
+
+#[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
+impl ControlledOpener {
+    /// The opener of the nodes held in `store`, permitted as `permit` says. `const`, so the
+    /// image declares it in a `static` beside the store and the control it is made of.
+    pub const fn new(
+        store: &'static PeerStore,
         permit: &'static (dyn crate::admin_status::ConnectStatusSource + Sync),
-    ) -> ControlledOpener<D> {
-        ControlledOpener {
-            opener: self,
+    ) -> Self {
+        Self {
+            opener: NodeOpener::in_store(store),
             permit,
         }
     }
 }
 
-/// A [`NodeOpener`] under a permit: what a node binds to answer `session/open/<peer>`.
 #[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
-pub struct ControlledOpener<D: Dialer> {
-    opener: NodeOpener<D>,
-    permit: &'static (dyn crate::admin_status::ConnectStatusSource + Sync),
-}
-
-#[cfg(all(feature = "adminspace-fixed", feature = "session-slot"))]
-impl<D: Dialer> crate::admin_fixed::NodeOpening for ControlledOpener<D> {
+impl crate::admin_fixed::NodeOpening for ControlledOpener {
     fn permitted(&self) -> bool {
         self.permit.write_permit()
     }
@@ -419,7 +422,21 @@ struct Tables {
     /// The nodes an opener accepted and the manager has not taken yet, in the order they were
     /// asked for. The manager takes them at its next tick, in the loop that owns its rows.
     requests: FixedVec<DirectoryZid, MAX_PEER_NODES>,
+    /// Whether the manager's dialer holds a session to the node it dials for
+    /// ([`Dialer::VERIFIES_NODES`]), written when the manager is made. `false` before: a store
+    /// nobody dials from holds no node.
+    verifies_nodes: bool,
+    /// What the manager's dialer can dial ([`Dialer::classify`]), written when the manager is
+    /// made, so an opener answers it without the dialer's type. `None` before: nothing is
+    /// dialled from the store, so anything is dialable. An `Option` and not a function pointer
+    /// from the start because a store whose initial value is all zero bytes lives in `.bss`, and
+    /// one non-zero byte (a function's address is one) moves the whole of the image's tables
+    /// into `.data`, and a copy of them into flash.
+    classify: Option<Classify>,
 }
+
+/// What a build can dial, as a dialer answers it ([`Dialer::classify`]).
+type Classify = fn(&str) -> Result<(), DialRefused>;
 
 /// The machines of a manager's peers and the locators of its nodes, in a table of their own.
 ///
@@ -450,6 +467,8 @@ impl PeerStore {
                 now_ms: 0,
                 held: FixedVec::new(),
                 requests: FixedVec::new(),
+                verifies_nodes: false,
+                classify: None,
             })),
         }
     }
@@ -591,7 +610,7 @@ impl<D: Dialer> PeerPorts<Key> for Ports<'_, D> {
                 if !D::VERIFIES_NODES {
                     return None;
                 }
-                first_dialable::<D>(self.directory, zid, self.now_ms).map(|_| ())
+                first_dialable(self.directory, zid, self.now_ms, D::classify).map(|_| ())
             }
             // An endpoint's row always holds its text.
             (Key::Endpoint(_), None) => None,
@@ -615,17 +634,18 @@ impl<D: Dialer> PeerPorts<Key> for Ports<'_, D> {
     }
 }
 
-/// The first live hint of `zid` that the dialer type `D` can dial, in the order the directory
+/// The first live hint of `zid` that `classify` says can be dialled, in the order the directory
 /// gives them.
-fn first_dialable<'a, D: Dialer>(
+fn first_dialable<'a>(
     directory: &'a LocatorDirectory<DIRECTORY_ROWS>,
     zid: &'a DirectoryZid,
     now_ms: u64,
+    classify: Classify,
 ) -> Option<&'a str> {
     directory
         .candidates(zid, now_ms)
         .map(|row| row.locator())
-        .find(|locator| D::classify(locator).is_ok())
+        .find(|locator| classify(locator).is_ok())
 }
 
 /// Keeps a node's sessions in step with its [`EndpointSource`], and holds the nodes it is asked
@@ -678,6 +698,11 @@ impl<D: Dialer> ConnectManager<D> {
         store: StoreRef,
         policy: RetryPolicy,
     ) -> Self {
+        // What this dialer can do is the store's to say to an opener, which has no dialer.
+        store.get().with(|t| {
+            t.verifies_nodes = D::VERIFIES_NODES;
+            t.classify = Some(D::classify);
+        });
         Self {
             control,
             dialer,
@@ -785,12 +810,9 @@ impl<D: Dialer> ConnectManager<D> {
     /// its zid (a lifecycle `open`), which runs where the manager does not. `None` when the
     /// manager's store is not a `static`: an opener outlives any one borrow of the manager, and
     /// only the slot profile's store is declared where one can be held.
-    pub fn node_opener(&self) -> Option<NodeOpener<D>> {
+    pub fn node_opener(&self) -> Option<NodeOpener> {
         match &self.store {
-            StoreRef::Static(store) => Some(NodeOpener {
-                store,
-                dialer: core::marker::PhantomData,
-            }),
+            StoreRef::Static(store) => Some(NodeOpener::in_store(store)),
             #[cfg(not(feature = "session-slot"))]
             StoreRef::Boxed(_) => None,
         }
@@ -864,7 +886,7 @@ impl<D: Dialer> ConnectManager<D> {
             let dialable = self
                 .store
                 .get()
-                .with(|t| first_dialable::<D>(&t.directory, &zid, now_ms).is_some());
+                .with(|t| first_dialable(&t.directory, &zid, now_ms, D::classify).is_some());
             if !dialable {
                 return Err(NodeRefusal::NoDialableLocator);
             }
@@ -1031,7 +1053,7 @@ impl<D: Dialer> ConnectManager<D> {
             Key::Node(zid) => {
                 // Read out of the critical section: a dial is not made inside one.
                 let locator: Option<EndpointText> = self.store.get().with(|t| {
-                    first_dialable::<D>(&t.directory, zid, now_ms)
+                    first_dialable(&t.directory, zid, now_ms, D::classify)
                         .and_then(|locator| EndpointText::try_from(locator).ok())
                 });
                 let locator = locator.ok_or(DialFailed::Unreachable)?;
@@ -1874,6 +1896,27 @@ mod tests {
         for (refusal, outcome) in words {
             std::assert_eq!(OpenOutcome::from(refusal), outcome);
         }
+    }
+
+    /// An opener is made from the store alone, so an image declares it in a `static` beside the
+    /// store before any manager exists. Until a manager is made over the store it says
+    /// `Unverifiable`, and once there is one it answers for that manager's dialer.
+    #[test]
+    fn an_opener_made_from_the_store_alone_answers_for_the_manager_made_after_it() {
+        static CONTROL: ConnectControl = ConnectControl::new(true);
+        static STORE: PeerStore = PeerStore::new();
+        static OPENER: NodeOpener = NodeOpener::in_store(&STORE);
+        std::assert_eq!(OPENER.open(&NODE_A), Err(NodeRefusal::Unverifiable));
+        let mut m = ConnectManager::in_static_store(&CONTROL, FakeDialer::default(), &STORE);
+        if !nodes_asked_for() {
+            std::assert_eq!(OPENER.open(&NODE_A), Err(NodeRefusal::NoRoom));
+            return;
+        }
+        std::assert_eq!(OPENER.open(&NODE_A), Err(NodeRefusal::NoLocator));
+        declare(&mut m, NODE_A, "udp/10.0.0.9:7447");
+        std::assert_eq!(OPENER.open(&NODE_A), Ok(()));
+        m.tick(1);
+        std::assert_eq!(m.node_states().count(), 1);
     }
 
     /// A dialer that cannot hold a session to the node it dials for has an opener that says so,

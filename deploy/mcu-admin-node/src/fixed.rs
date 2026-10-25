@@ -28,11 +28,11 @@ use wz::runtime_coop::session_drive::PumpSlots;
 use wz::runtime_coop::session_runtime::SessionHandle;
 use wz::runtime_coop::{CoopLocalSet, CoopRuntime, CoopTime, RuntimeCell};
 use wz::session_lwip::admin_fixed::{
-    host_admin_queryable_fixed, AdminHost, AdminSinks, FixedNodeIdentity, FixedNodeStatus,
+    host_admin_queryable_fixed_with_open, AdminHost, AdminSinks, FixedNodeIdentity, FixedNodeStatus,
 };
 use wz::session_lwip::admin_host::{host_connect_writes_fixed, ConnectControl};
 use wz::session_lwip::app_layer::{NoReplies, SlotApp, SlotDispatch};
-use wz::session_lwip::connect_manager::PeerStore;
+use wz::session_lwip::connect_manager::{ControlledOpener, PeerStore};
 use wz::session_lwip::driver::LwipUdpDriver;
 use wz::session_lwip::listener::SessionListener;
 use wz::session_lwip::session_host::SessionHost;
@@ -170,6 +170,12 @@ impl Statics {
 }
 
 static NODE: Statics = Statics::new();
+/// What answers `GET @/<zid>/peer/session/open/<peer-zid>`: the node's opener of the nodes it holds
+/// by their zid, under the node's write permit. A `static` of its own, because it holds
+/// references and so does not start as zero bytes, which is what keeps [`Statics`] in `.bss`.
+/// With `MAX_PEER_NODES` at its default of zero the node has no room for one, and the query
+/// answers `refused` for that, by name.
+static OPEN: ControlledOpener = ControlledOpener::new(&NODE.peers, &NODE.control);
 /// The Ethernet interface's cell: the MAC and its frame buffer.
 static ETH0: EthernetPool<Lan9118, 1> = EthernetPool::new();
 
@@ -269,13 +275,14 @@ pub fn run() -> ! {
         {
             fail("the config subscriber was refused");
         }
-        if host_admin_queryable_fixed(
+        if host_admin_queryable_fixed_with_open(
             &mut observer.queryables,
             identity,
             &NODE.status,
             &NODE.admin,
             Some(&NODE.control),
             Some(&NODE.control),
+            Some(&OPEN),
         )
         .is_err()
         {
