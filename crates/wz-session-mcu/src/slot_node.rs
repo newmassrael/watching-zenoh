@@ -396,14 +396,17 @@ pub struct Mirror {
     pub cell: LatestRef,
 }
 
-/// The entities a node declares beside its documents: what it subscribes to, and what it answers
-/// from those subscriptions.
+/// The entities a node declares beside its documents: what it subscribes to, what it answers from
+/// those subscriptions, and the liveliness tokens that say it is alive.
 #[derive(Clone, Copy)]
 pub struct Entities<'a> {
     /// The subscriptions.
     pub subscriptions: &'a [Subscription],
     /// The queryables that answer from them.
     pub mirrors: &'a [Mirror],
+    /// The keys of the liveliness tokens it declares on every session. A token holds nothing the
+    /// node keeps: the router has it for as long as the session lasts.
+    pub tokens: &'a [&'static str],
 }
 
 impl Entities<'static> {
@@ -411,6 +414,7 @@ impl Entities<'static> {
     pub const NONE: Self = Self {
         subscriptions: &[],
         mirrors: &[],
+        tokens: &[],
     };
 }
 
@@ -422,6 +426,9 @@ pub enum InstallRefused {
     Registry,
     /// The subscriber table refused a subscription (it is full, or the key does not fit).
     Subscriptions,
+    /// A liveliness token was asked for by a node built without `declare-token`, which cannot send
+    /// it: it would run, and no router would ever hear it.
+    Tokens,
     /// More documents than the node can declare.
     TooManyDeclarations,
     /// The observer was built before.
@@ -434,6 +441,7 @@ impl InstallRefused {
         match self {
             Self::Registry => "wz: FAIL - the node's observer refused a queryable",
             Self::Subscriptions => "wz: FAIL - the node's observer refused a subscription",
+            Self::Tokens => "wz: FAIL - a liveliness token, and this node cannot declare one",
             Self::TooManyDeclarations => "wz: FAIL - more documents than declarations",
             Self::Twice => "wz: FAIL - the observer was installed twice",
         }
@@ -454,8 +462,9 @@ pub fn install_documents<const N: usize>(
     install_entities(app, documents, &Entities::NONE, declared)
 }
 
-/// [`install_documents`], and the subscriptions and the queryables that answer from them. The
-/// declarations are recorded in this order: the documents, the mirrors, the subscriptions.
+/// [`install_documents`], and the subscriptions, the queryables that answer from them and the
+/// liveliness tokens. The declarations are recorded in this order: the documents, the mirrors, the
+/// subscriptions, the tokens.
 #[inline(never)]
 pub fn install_entities<const N: usize>(
     app: &'static SlotApp<DocumentSinks>,
@@ -499,6 +508,20 @@ pub fn install_entities<const N: usize>(
             if !declared.push(Declaration {
                 kind: DeclarationKind::Subscriber,
                 key: subscription.key,
+            }) {
+                return Err(InstallRefused::TooManyDeclarations);
+            }
+        }
+        // A token is only a declaration: nothing is registered on the observer for it.
+        #[cfg(not(feature = "declare-token"))]
+        if !entities.tokens.is_empty() {
+            return Err(InstallRefused::Tokens);
+        }
+        #[cfg(feature = "declare-token")]
+        for key in entities.tokens {
+            if !declared.push(Declaration {
+                kind: DeclarationKind::Token,
+                key,
             }) {
                 return Err(InstallRefused::TooManyDeclarations);
             }
@@ -1173,7 +1196,7 @@ mod tests {
     }
 
     #[test]
-    fn documents_then_mirrors_then_subscriptions_are_declared_in_that_order() {
+    fn documents_then_mirrors_then_subscriptions_then_tokens_are_declared_in_that_order() {
         // A build whose limits are below what this test declares cannot compile it.
         const { assert!(MAX_QUERYABLES >= 2 && MAX_SUBSCRIPTIONS >= 1) };
         let slots = cells::<1, 8>();
@@ -1186,26 +1209,78 @@ mod tests {
             key: "demo/doc",
             body: "{}",
         }];
-        let declared = declared::<3>();
+        let declared = declared::<4>();
         install_entities(
             app(),
             &documents,
             &Entities {
                 subscriptions: &subscriptions,
                 mirrors: &mirrors,
+                tokens: TOKENS,
             },
             declared,
         )
         .unwrap();
         let all = declared.all();
         let seen: alloc::vec::Vec<_> = all.iter().map(|d| (d.kind, d.key)).collect();
+        let mut want = alloc::vec![
+            (DeclarationKind::Queryable, "demo/doc"),
+            (DeclarationKind::Queryable, "demo/in"),
+            (DeclarationKind::Subscriber, "demo/in"),
+        ];
+        if cfg!(feature = "declare-token") {
+            want.push((DeclarationKind::Token, "demo/alive"));
+        }
+        assert_eq!(seen, want);
+    }
+
+    /// The tokens a test declares, when the build can send one.
+    const TOKENS: &[&str] = if cfg!(feature = "declare-token") {
+        &["demo/alive"]
+    } else {
+        &[]
+    };
+
+    #[test]
+    fn a_token_is_declared_after_everything_else_and_refused_by_a_node_that_cannot_send_it() {
+        let declared = declared::<1>();
+        let result = install_entities(
+            app(),
+            &[],
+            &Entities {
+                tokens: &["demo/alive"],
+                ..Entities::NONE
+            },
+            declared,
+        );
+        if cfg!(feature = "declare-token") {
+            result.unwrap();
+            assert_eq!(declared.all().len(), 1);
+            assert_eq!(declared.all()[0].kind, DeclarationKind::Token);
+            assert_eq!(declared.all()[0].key, "demo/alive");
+        } else {
+            assert_eq!(result.err(), Some(InstallRefused::Tokens));
+            assert!(declared.all().is_empty(), "nothing was declared for it");
+        }
+    }
+
+    #[test]
+    fn more_tokens_than_declarations_stops_the_node() {
+        if !cfg!(feature = "declare-token") {
+            return;
+        }
         assert_eq!(
-            seen,
-            [
-                (DeclarationKind::Queryable, "demo/doc"),
-                (DeclarationKind::Queryable, "demo/in"),
-                (DeclarationKind::Subscriber, "demo/in"),
-            ]
+            install_entities(
+                app(),
+                &[],
+                &Entities {
+                    tokens: &["demo/a", "demo/b"],
+                    ..Entities::NONE
+                },
+                declared::<1>(),
+            )
+            .err(),
+            Some(InstallRefused::TooManyDeclarations)
         );
     }
 
@@ -1220,7 +1295,7 @@ mod tests {
             &[],
             &Entities {
                 subscriptions: &subscriptions,
-                mirrors: &[],
+                ..Entities::NONE
             },
             declared::<1>(),
         )
@@ -1261,7 +1336,7 @@ mod tests {
                 &[],
                 &Entities {
                     subscriptions: &subscriptions,
-                    mirrors: &[],
+                    ..Entities::NONE
                 },
                 declared::<{ MAX_SUBSCRIPTIONS + 1 }>(),
             )
@@ -1281,7 +1356,7 @@ mod tests {
                 &[],
                 &Entities {
                     subscriptions: &subscriptions,
-                    mirrors: &[],
+                    ..Entities::NONE
                 },
                 declared::<0>(),
             )
@@ -1347,6 +1422,7 @@ mod tests {
         let all = [
             InstallRefused::Registry,
             InstallRefused::Subscriptions,
+            InstallRefused::Tokens,
             InstallRefused::TooManyDeclarations,
             InstallRefused::Twice,
         ];

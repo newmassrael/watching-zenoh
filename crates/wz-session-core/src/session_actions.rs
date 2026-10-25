@@ -10987,6 +10987,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         any(
             feature = "declare-subscriber",
             feature = "declare-queryable",
+            feature = "declare-token",
             feature = "liveliness-token"
         )
     ))]
@@ -11993,7 +11994,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         keyexpr_mapping_id: u64,
         keyexpr_suffix: Option<&str>,
     ) -> Result<(), SendDeclareError> {
-        #[cfg(feature = "declare-token")]
+        // See `send_declare_subscriber`: with no allocator the declaration is written from the
+        // caller's own text through the borrowed writer of `lent_control`, straight into the
+        // lent slot, and there is no reconnect cache to copy the keyexpr into.
+        #[cfg(all(feature = "declare-token", not(feature = "alloc")))]
+        {
+            Self::check_outbound_declared_keyexpr(keyexpr_mapping_id, keyexpr_suffix)?;
+            self.dispatch_declare_lent(|sink| {
+                crate::lent_control::declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)
+                    .encode(sink)
+            })
+            .map_err(SendDeclareError::from)
+        }
+        #[cfg(all(feature = "declare-token", feature = "alloc"))]
         {
             let declare =
                 self.prepare_declare_token(token_id, keyexpr_mapping_id, keyexpr_suffix)?;
@@ -12023,7 +12036,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// pico-safety gate stays SSOT here — both the seam-routed
     /// `Session::declare_token` and the `send_declare_token` wrapper call this,
     /// so the validation is authored exactly once.
-    #[cfg(feature = "declare-token")]
+    #[cfg(all(feature = "declare-token", feature = "alloc"))]
     pub fn prepare_declare_token(
         &self,
         token_id: u64,
@@ -12084,7 +12097,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R311mu). Signature-stable: a no-op without `session-reconnect` (no cache
     /// storage exists) per R311g1, mirroring
     /// [`Self::prune_liveliness_get_interest`].
-    #[cfg(feature = "declare-token")]
+    #[cfg(all(feature = "declare-token", feature = "alloc"))]
     pub fn cache_token_declaration(
         &self,
         token_id: u64,
@@ -12438,7 +12451,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// answer the owned form gives for an empty table.
     #[cfg(all(
         not(feature = "alloc"),
-        any(feature = "declare-subscriber", feature = "declare-queryable")
+        any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token"
+        )
     ))]
     fn check_outbound_declared_keyexpr(
         mapping_id: u64,

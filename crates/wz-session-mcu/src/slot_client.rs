@@ -49,6 +49,10 @@ pub enum DeclarationKind {
     Queryable,
     /// A subscriber: the router forwards a PUT on the key to this node.
     Subscriber,
+    /// A liveliness token: the router tells whoever watches the key that this node is alive, for as
+    /// long as this session lasts. A node built without `declare-token` cannot send it, and
+    /// refuses to start with one ([`InstallRefused::Tokens`](crate::slot_node::InstallRefused)).
+    Token,
 }
 
 /// One declaration the node sends on every session as it establishes. Its id on the wire is its
@@ -176,6 +180,9 @@ fn declare<C: ClockSource + 'static>(
             .is_ok(),
         DeclarationKind::Subscriber => actions
             .send_declare_subscriber(id, 0, Some(declaration.key))
+            .is_ok(),
+        DeclarationKind::Token => actions
+            .send_declare_token(id, 0, Some(declaration.key))
             .is_ok(),
     }
 }

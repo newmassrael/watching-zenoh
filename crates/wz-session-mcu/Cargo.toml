@@ -85,6 +85,10 @@ codec-push = ["wz-session-core/codec-push"]
 codec-response = ["wz-session-core/codec-response"]
 codec-response-final = ["wz-session-core/codec-response-final"]
 liveliness-token = ["wz-session-core/liveliness-token"]
+# A node that DECLARES a liveliness token to its router and nothing more: the `Declare(DeclToken)`
+# the session sends as it establishes, which the router drops with the session. Not
+# `liveliness-token`, which is the registry that answers a peer's interest in tokens.
+declare-token = ["wz-session-core/declare-token"]
 query-queryable = ["wz-session-core/query-queryable"]
 # A node that ASKS: the request it writes, the replies and the final it is answered with, and the
 # selector parameters it can state. `SlotDispatch::get` on the slot profile.
