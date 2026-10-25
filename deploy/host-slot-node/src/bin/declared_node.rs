@@ -28,6 +28,8 @@ use host_slot_node_glue::tls;
 use host_slot_node_glue::tuning::{
     BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RX, TASK_BYTES_ACTIVE, TIMERS, TX,
 };
+#[cfg(feature = "multicast")]
+use host_slot_node_glue::group::{HostGroupTransport, PosixGroupBind};
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
 use wz_runtime_posix::glue::{log, log_args};
 #[cfg(not(feature = "tls"))]
@@ -41,8 +43,14 @@ use wz_session_core::caps::{MAX_QUERYABLES, MAX_REPLY_PAYLOAD_BYTES, MAX_SUBSCRI
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_mcu::connect_manager::StaticEndpoints;
 use wz_session_mcu::latest::{Latest, LatestCells, LatestRef, LatestWatch};
+#[cfg(feature = "multicast")]
+use wz_session_mcu::group_drive::MulticastSlots;
+#[cfg(feature = "multicast")]
+use wz_session_mcu::slot_group::{GroupState, GroupTiming, SlotGroup};
 use wz_session_mcu::slot_active::Active;
 use wz_session_mcu::slot_client::Listening;
+#[cfg(not(feature = "multicast"))]
+use wz_session_mcu::slot_node::NoPlane;
 use wz_session_mcu::slot_node::{
     documents_of, BodyPool, ClientNode, Declared, Entities, Mirror, NodeApp, NodeHandle,
     NodeIdentity, NodePort, NodeStorage, Subscription,
@@ -62,16 +70,18 @@ mod declared {
 #[cfg(feature = "get")]
 use declared::QUERIED;
 use declared::{
-    ACCEPTS, CELLS, DECLARATION_SHA256, DIALED, DOCS, DOCUMENTS, LISTEN, LISTENS, MIRRORED,
+    ACCEPTS, CELLS, DECLARATION_SHA256, DIALED, DOCS, DOCUMENTS, GROUPS, LISTEN, LISTENS, MIRRORED,
     MIRRORS, NODE_ID, PUBLISHED, PUBLISHERS, QUERIERS, SAMPLE_MAX, SESSIONS, SUBSCRIBERS,
     SUBSCRIPTIONS, TLS, TOKENS, TOKEN_KEYS,
 };
+#[cfg(feature = "multicast")]
+use declared::{GROUP, GROUP_ADDR, GROUP_PORT, GROUP_TTL, MEMBERS};
 #[cfg(feature = "listen")]
 use declared::{LISTEN_ADDR, LISTEN_PORT};
 
-/// The runtime's task table: a pump task per session, the dialled and the accepted, and nothing
-/// else runs as a task.
-const TASKS: usize = SESSIONS;
+/// The runtime's task table: a pump task per session, the dialled and the accepted, and one for the
+/// group the node is a member of; nothing else runs as a task.
+const TASKS: usize = SESSIONS + GROUPS;
 
 /// The declarations the node sends on a session: its documents, the queryables that answer from a
 /// cell, the subscriptions and the liveliness tokens.
@@ -198,6 +208,10 @@ const _: () = assert!(
     LISTENS == (ACCEPTS > 0),
     "a node listens exactly when it holds sessions a peer opened"
 );
+const _: () = assert!(
+    (GROUPS == 1) == cfg!(feature = "multicast"),
+    "the declaration has a multicast endpoint exactly when the node is built with the `multicast` feature"
+);
 const _: () = {
     let mut at = 0;
     while at < DOCS {
@@ -231,6 +245,13 @@ static ENDPOINTS: StaticEndpoints = StaticEndpoints::new(&DIALED);
 
 /// The declarations the node sends on each session, in the order of their registrations.
 static DECLARED: Declared<DECLS> = Declared::new();
+
+/// The cell the group's session lives in, the one the node's group takes, and what the group keeps
+/// for the loop: the peer tables its pump dispatches against and the members it has.
+#[cfg(feature = "multicast")]
+static GROUP_CELLS: MulticastSlots<Clock, HostGroupTransport, MEMBERS, 1> = MulticastSlots::new();
+#[cfg(feature = "multicast")]
+static GROUP_STATE: GroupState = GroupState::new();
 
 /// The latest of each cell, in the cells the declaration sized: the subscriptions' samples and then
 /// the queriers' replies.
@@ -317,10 +338,31 @@ struct Report {
     published: PublishWatch<PUBLISHERS>,
     #[cfg(feature = "get")]
     queried: QueryWatch<QUERIERS>,
+    /// The group's joins, join refusals and members when they were last said.
+    #[cfg(feature = "multicast")]
+    group: (u32, u32, u32),
 }
 
 impl NodeApp for Report {
     fn after_tick(&mut self, _now_ms: u64, _node: &dyn NodeHandle) -> ControlFlow<i32> {
+        // The group, said once for each round that found it changed: `HOST-WZ-GROUP <locator>
+        // joins=<n> refused=<n> members=<n>`. A lab waits for `members=1` to know the node has
+        // admitted a peer's JOIN, and for `joins=1` to know the group is joined at all.
+        #[cfg(feature = "multicast")]
+        {
+            let now = (
+                GROUP_STATE.joins(),
+                GROUP_STATE.join_refused(),
+                GROUP_STATE.members(),
+            );
+            if now != self.group {
+                self.group = now;
+                log_args(format_args!(
+                    "HOST-WZ-GROUP {} joins={} refused={} members={}",
+                    GROUP, now.0, now.1, now.2
+                ));
+            }
+        }
         self.published.poll(&COUNTS, |at, sent, refused| {
             log_args(format_args!(
                 "HOST-WZ-PUBLISHED {} sent={} refused={}",
@@ -439,12 +481,29 @@ fn run() -> i32 {
     };
     #[cfg(not(feature = "listen"))]
     let listening = Listening::NONE;
+    // The group is joined by the node's first round, and the line a lab waits for says when.
+    #[cfg(feature = "multicast")]
+    let plane = SlotGroup {
+        slots: &GROUP_CELLS,
+        state: &GROUP_STATE,
+        bind: PosixGroupBind {
+            group: GROUP_ADDR,
+            port: GROUP_PORT,
+            ttl: GROUP_TTL,
+        },
+        publications: publications(),
+        counts: &COUNTS,
+        timing: GroupTiming::ZENOH,
+    };
+    #[cfg(not(feature = "multicast"))]
+    let plane = NoPlane;
     let node = ClientNode {
         storage: &NODE,
         declared: &DECLARED,
         clock: Clock::default(),
         stack,
         listening,
+        plane,
         identity,
         batch_size: BATCH_SIZE,
         entropy: || PosixEntropy,
@@ -476,6 +535,8 @@ fn run() -> i32 {
         published: PublishWatch::new(),
         #[cfg(feature = "get")]
         queried: QueryWatch::new(),
+        #[cfg(feature = "multicast")]
+        group: (0, 0, 0),
     };
     node.run(
         &mut HostPort::<Console>::new(),

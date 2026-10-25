@@ -72,6 +72,8 @@ use crate::slot_client::{
 };
 use crate::slot_dial::SessionFactory;
 use crate::slot_host::SessionHost;
+pub use crate::slot_plane::NoPlane;
+use crate::slot_plane::{Plane, PlaneContext, PlaneRunning};
 
 /// The longest zenoh id: 16 bytes.
 pub const ZID_MAX: usize = 16;
@@ -862,6 +864,7 @@ pub struct ClientNode<
     E,
     L,
     X,
+    W,
     const TASKS: usize,
     const TASK_BYTES: usize,
     const TIMERS: usize,
@@ -876,6 +879,7 @@ pub struct ClientNode<
     E: EntropySource + Send + 'static,
     L: SessionLayer<C>,
     X: Accept<T::Driver>,
+    W: Plane<C>,
 {
     /// The tables.
     pub storage: &'static NodeStorage<C, T, E, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX>,
@@ -889,6 +893,9 @@ pub struct ClientNode<
     /// as the stack's, and how many sessions of them it holds ([`Listening::NONE`] for a node
     /// that listens on nothing).
     pub listening: Listening<X, ACCEPTS>,
+    /// What the node takes part in beside its sessions: the multicast group
+    /// ([`SlotGroup`](crate::slot_group::SlotGroup)), or [`NoPlane`] for a node that has none.
+    pub plane: W,
     /// Who the node is.
     pub identity: NodeIdentity,
     /// The batch the node advertises.
@@ -916,6 +923,7 @@ impl<
         E,
         L,
         X,
+        W,
         const TASKS: usize,
         const TASK_BYTES: usize,
         const TIMERS: usize,
@@ -924,13 +932,14 @@ impl<
         const TX: usize,
         const DOCS: usize,
         const ACCEPTS: usize,
-    > ClientNode<'_, C, T, E, L, X, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, DOCS, ACCEPTS>
+    > ClientNode<'_, C, T, E, L, X, W, TASKS, TASK_BYTES, TIMERS, SESSIONS, RX, TX, DOCS, ACCEPTS>
 where
     C: ClockSource + Copy + 'static,
     T: SlotStack + Bind<T::Driver> + Copy,
     E: EntropySource + Send + 'static,
     L: SessionLayer<C>,
     X: Accept<T::Driver>,
+    W: Plane<C>,
 {
     /// Set the node up and run it. Returns only when it cannot start or when the application ends
     /// the run; the value is the process's exit code.
@@ -949,6 +958,7 @@ where
             clock,
             stack,
             listening,
+            plane,
             identity,
             batch_size,
             entropy,
@@ -966,6 +976,10 @@ where
         };
         let local = CoopLocalSet::new(&runtime);
         let zid_text = identity.zid_hex();
+        // The plane advertises the node's zid, which the factory is about to take with the identity.
+        let mut zid = [0u8; ZID_MAX];
+        let zid_len = identity.zid().len();
+        zid[..zid_len].copy_from_slice(identity.zid());
 
         // The application's registrations, on the observer the session dispatches to. A node
         // whose registrations were refused would declare what nothing answers: stop instead,
@@ -1000,6 +1014,11 @@ where
             SessionTimeouts::spec_defaults(),
             declared.all(),
         );
+        let mut plane = plane.start(PlaneContext {
+            runtime: runtime.clone(),
+            observer,
+            zid: &zid[..zid_len],
+        });
         ready(port, zid_text.prefix());
 
         let counters = || (runtime.task_refusals(), runtime.timer_refusals());
@@ -1008,6 +1027,7 @@ where
             local.run_until_idle();
             let now_ms = clock.now_us() / 1000;
             node.tick(now_ms);
+            plane.tick(now_ms);
             if let ControlFlow::Break(code) = app.after_tick(now_ms, &node) {
                 return code;
             }

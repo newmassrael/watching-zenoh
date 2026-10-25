@@ -135,6 +135,46 @@ pub fn fresh_signing_key() -> Result<[u8; SIGNING_KEY_BYTES], &'static str> {
     Ok(key)
 }
 
+/// How a node joins its multicast group on the host.
+#[cfg(feature = "multicast")]
+pub mod group {
+    use wz_runtime_coop::session_drive::LinkOpenError;
+    pub use wz_runtime_posix::group::PosixGroupTransport;
+    use wz_runtime_posix::net::PosixNetError;
+    use wz_session_mcu::slot_group::{GroupBind, GROUP_BATCH_BYTES};
+
+    use super::tuning::RX_SLACK;
+
+    /// The receive buffer of the group's receiver: a batch the group's members agree on, and the
+    /// slack a datagram carries beyond it.
+    pub const GROUP_RX: usize = GROUP_BATCH_BYTES as usize + RX_SLACK;
+
+    /// The transport of the group, as the host opens it.
+    pub type HostGroupTransport = PosixGroupTransport<GROUP_RX>;
+
+    /// Joins `group` on `port` through the interface the kernel's routing picks, sending with `ttl`.
+    #[derive(Debug, Clone, Copy)]
+    pub struct PosixGroupBind {
+        /// The group's address.
+        pub group: [u8; 4],
+        /// The group's port.
+        pub port: u16,
+        /// The hop limit of what the node sends.
+        pub ttl: u8,
+    }
+
+    impl GroupBind<HostGroupTransport> for PosixGroupBind {
+        fn bind(&mut self) -> Result<HostGroupTransport, LinkOpenError> {
+            PosixGroupTransport::join(self.group, self.port, [0; 4], self.ttl).map_err(|e| match e {
+                // The process has no descriptor left: worth a later try.
+                PosixNetError::Socket(_) => LinkOpenError::Exhausted,
+                // The kernel would not bind the port or join the group.
+                _ => LinkOpenError::Refused,
+            })
+        }
+    }
+}
+
 /// A random zenoh id. Over the secure channel the node's id is the one its key names and this is not
 /// asked for (`tls::identity`), so a build with `tls` does not call it.
 pub fn fresh_zid() -> Result<[u8; ZID_MAX], &'static str> {

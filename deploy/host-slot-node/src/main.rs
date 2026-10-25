@@ -67,7 +67,7 @@ use wz_session_core::caps::MAX_QUERYABLES;
 use wz_session_mcu::dial::parse_locator;
 #[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_client::Listening;
-use wz_session_mcu::slot_node::Answering;
+use wz_session_mcu::slot_node::{Answering, NoPlane};
 use wz_session_mcu::slot_node::{
     documents_of, BodyPool, ClientNode, Declared, Entities, NodeIdentity, NodePort, NodeStorage,
     SingleEndpoint,
@@ -336,6 +336,7 @@ fn run(args: Args) -> i32 {
         stack: tls::stack(args.local, &NODE.rx, &NODE.tx, channel_identity)
             .with_idle_wait_ms(IDLE_WAIT_MS),
         listening: Listening::NONE,
+        plane: NoPlane,
         identity,
         batch_size: BATCH_SIZE,
         entropy: || PosixEntropy,

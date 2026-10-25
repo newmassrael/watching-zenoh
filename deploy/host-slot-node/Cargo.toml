@@ -62,6 +62,11 @@ batching = ["wz-runtime-coop/transport-batching", "wz-session-core/transport-bat
 # `listen` endpoint (`scripts/lib/wz_node.py` names the features of a node), and the node's own
 # `const` assertion holds the two to each other.
 listen = ["wz-session-mcu/listen"]
+# The node is a member of a multicast group (`wz_session_mcu::slot_group`, over `PosixGroupTransport`):
+# it publishes on the group and keeps the latest sample of what its members put. Built exactly when a
+# node declaration has a `multicast` endpoint, and the node's own `const` assertion holds the two to
+# each other.
+multicast = ["wz-session-mcu/group"]
 # The node can ASK: `--get KEY --count N` issues N queries one after another and reports the round
 # trips (`src/getter.rs`). Off, the node only answers, as the kit's client does.
 get = ["wz-session-mcu/query-get"]

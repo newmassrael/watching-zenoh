@@ -44,7 +44,7 @@ use wz_session_core::entropy::EntropySource;
 use wz_session_core::session_slot::SessionSlots;
 #[cfg(not(feature = "get"))]
 use wz_session_mcu::slot_client::Listening;
-use wz_session_mcu::slot_node::Answering;
+use wz_session_mcu::slot_node::{Answering, NoPlane};
 use wz_session_mcu::slot_node::{
     ClientNode, Declared, Document, Entities, NodeIdentity, NodePort, NodeStorage,
     SIGNING_KEY_BYTES,
@@ -307,6 +307,7 @@ pub fn run() -> i32 {
         clock: Clock::default(),
         stack,
         listening: Listening::NONE,
+        plane: NoPlane,
         identity,
         batch_size: BATCH_SIZE,
         entropy: || ZephyrEntropy,

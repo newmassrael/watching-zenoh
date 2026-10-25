@@ -134,6 +134,11 @@ client-slot = ["client-core", "session-slot"]
 # accept side of the handshake, which a client does not carry. Without it a node cannot be given an
 # acceptor, because one it was given would read an InitSyn and never answer it.
 listen = ["client-slot", "wz-session-core/session-unicast-accept"]
+# The client on the slot profile that is also a MEMBER of a multicast group (`slot_group`): the group's
+# JOIN beacons and datagrams, the node's subscriptions fed from what the members put and its publishers
+# putting on the group. The literal Put is the whole of the group's outbound vocabulary with no
+# allocator, so a node with a group carries publishers and subscriptions and no more.
+group = ["client-slot", "transport-multicast", "codec-push"]
 adminspace-write = [
     "dial",
     "wz-session-core/adminspace-write",

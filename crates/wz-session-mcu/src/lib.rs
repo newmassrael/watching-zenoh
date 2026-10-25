@@ -92,6 +92,19 @@ pub mod latest;
 // application layer.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
 pub mod slot_publisher;
+// What the client node knows of a plane it holds beside its sessions (a group, today): two traits and
+// the plane of a node that has none.
+#[cfg(all(feature = "session-slot", feature = "client-core"))]
+pub mod slot_plane;
+// A multicast group the client node is a member of, beside its sessions: the group's pump in a cell of
+// a table the image declared, its events fanned to the node's observer, its publishers put on it.
+#[cfg(all(
+    feature = "session-slot",
+    feature = "client-core",
+    feature = "transport-multicast",
+    feature = "codec-push"
+))]
+pub mod slot_group;
 // When a node's periodic behaviours are due: the one schedule a publisher's puts and a querier's gets
 // are both kept on.
 #[cfg(all(feature = "session-slot", feature = "client-core"))]
