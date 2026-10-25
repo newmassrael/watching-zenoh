@@ -69,9 +69,9 @@ Three structures were weighed.
 repository (a replacement of zenoh): A is the structure it replaces, and the behaviour a peer observes (a
 declaration made before a Push is applied before it, across faces) is upstream's by construction, which B
 weakens to per-face read-your-writes. Whether A's read lock is a cost is a measurement and not an opinion, and
-the instrument is Step 6 of the plan (an instruction count of the hot path per commit, not built yet and to be
-built before phase 3) together with Layer E7s's microseconds per message; B is the answer only if those say
-the lock is what is being paid for.
+the instrument is Step 6 of the plan, built in round 3607 as a count of heap allocations and bytes per forward
+(`crates/wz-runtime-tokio/tests/router_hot_path_cost.rs`, section 6), together with Layer E7s's microseconds
+per message; B is the answer only if those say the lock is what is being paid for.
 
 ## 5. Phases
 
@@ -96,7 +96,37 @@ Each phase ends with the tree green and the numbers of Layer E7s (microseconds p
 6. **Chains.** The conduit's lock becomes async so that a chain waits as a task and not as a thread; the
    chain fix of 3578 (send waiting, one message) then stops one face.
 
-## 6. What is not decided, and what could make this wrong
+## 6. The instrument (Step 6), and what it first read
+
+An instruction count was the plan, and the build hosts forbid it: `perf_event_paranoid` is 4 on the
+development machine and on the build host, and the build host has no `valgrind`. A wall clock cannot stand in
+(the host swings by a third between runs). What can is a count of heap allocations and the bytes they ask for,
+read by a counting global allocator around the forwards of a Put: it is EXACT, the same number in debug and in
+release and on every host (read both on the build host, identical), it moves when the path gains or loses an
+allocation, and an allocation is what a lock or a shared structure changes. It does not see a loop that got
+longer; `perf stat` over the same test (the module doc gives the two lines) does, where a host allows it.
+
+The test is a gate (Layer C1AY, a guarded step of exactly one test): each of four cases asserts its exact
+figures against `BUDGET`. A deliberate `push.clone()` at the head of `route_push` turned all four red, naming
+the new figures (two to three allocations and 24 to 88 bytes more a forward); it was removed.
+
+The uncongested path as of this round, per forward of one Put:
+
+| Case | Allocations | Bytes |
+|---|---|---|
+| droppable, 1 subscriber | 9 | 2 939 |
+| blocking, 1 subscriber | 11 | 3 067 |
+| droppable, 16 subscribers | 69 | 45 374 |
+| blocking, 16 subscribers | 86 | 46 462 |
+
+The reading worth keeping: each further delivered copy costs about 2.8 KiB and four allocations (69 minus 9
+over fifteen more subscribers; the first copy costs 2.9 KiB), for a Put whose payload is eighteen bytes. Where
+the bytes go has not been read: the re-literalised carrier is built once and cloned per target
+(`deliver_to_client_subscribers`), and a frame buffer sized for the batch is the other candidate. It is the
+figure phase 3's lock will be paid against: the lock has to cost less than the allocator it sits beside, and
+a gain here is a gain the next phases do not have to find.
+
+## 7. What is not decided, and what could make this wrong
 
 - **Whether a fan-out holds the read lock while it sends.** Upstream computes the route under `read` and
   sends after; wz's fan-out calls `send_one_to_face` per target, each a non-blocking enqueue (the probe) or a

@@ -6371,6 +6371,14 @@ layer_c1ay_cargo_test_router_hat() {
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY router_forward 228" 228 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
+    # The router's uncongested data path in heap allocations and bytes a forward
+    # (docs/router-task-per-face.md, Step 6): the same number on every host and in
+    # debug and release, so it is a per-commit gate where a wall clock is not. A change that
+    # adds a `clone` or a `Vec` to the path reads as red with the new figure named; record
+    # it in BUDGET of the test in the same commit. Exactly one test, so that a rename or a
+    # dropped `#[test]` reddens.
+    _runci_guarded_test "C1AY hot path allocations" 1 \
+        cargo test -p wz-runtime-tokio --features routing-router-hat --test router_hot_path_cost --quiet || return 1
     # R2734 — THE EIGHTH ARM, and it exists because the seven above cannot see
     # this round's third test. `a_group_query_reaches_a_client_hosted_queryable`
     # is `router-multicast-faces`-gated, because the method it drives
