@@ -501,12 +501,12 @@ is stated after the structure).
 What landed: a declaration file per node (`[node]`, `[[endpoint]]`, `[[entity]]`, `[limits]`),
 validated against the target's own table (`TARGETS`), with `--emit` printing the `declared.rs` the
 node's code includes and `--env` printing the `WZ_LIMIT_*` budgets. The vocabulary is wider than
-the slot target builds (a listening or multicast endpoint, a publisher, a subscriber, a token, a
-querier): a word the target does not build is REFUSED with its reason, never dropped, so a
-declaration that asks for a subscriber cannot produce a node that quietly has none. What the slot
-target builds today is what its node does: one dialled endpoint (`tcp`, `udp` or `tls`),
-queryables that answer from documents, and subscriptions that keep the latest sample (below). The registered node, `slot-answerer`, is the existing
-`deploy/host-slot-node` stated as data.
+the slot target builds (a multicast endpoint, a listener over UDP or TLS, a publisher, a subscriber,
+a token, a querier): a word the target does not build is REFUSED with its reason, never dropped,
+so a declaration that asks for a subscriber cannot produce a node that quietly has none. What the
+slot target builds today is what its node does: one dialled endpoint (`tcp`, `udp` or `tls`), one
+TCP listener, queryables that answer from documents, and the entities below. The registered node,
+`slot-answerer`, is the existing `deploy/host-slot-node` stated as data.
 
 **The structure (owner, 2026-10-25: cost ignored, the textbook one): ports and adapters.** The
 mechanism is written once (`wz_session_mcu::slot_node`: the storage, the factory, the loop). A
@@ -532,7 +532,8 @@ document, too many documents and a normal start is byte for byte what it was, an
 "node"` and names its own manifest and binary, because the package is not a member of the crates
 workspace. Before anything is built the entry resolves the declaration (it validates for its
 target and its generated file is current), then builds the binary in the package's own directory
-with the declaration's features (`declared`, and `tls` exactly when the endpoint is `tls/`), the
+with the declaration's features (`declared`, `tls` exactly when a dialled endpoint is `tls/`, `get`, `token` and
+`listen` as its entities and endpoints ask), the
 generated constants named in `WZ_DECLARED_RS` and the declaration's budgets as `WZ_LIMIT_*`. The
 package's own cargo config states the image's budgets, and the generator reads the same file as
 the baseline of what the declaration may say, so the generator and the build cannot disagree about
@@ -628,10 +629,47 @@ declared, and a restarted node declares them again
 (`wz_declared_token_zenohd_interop.rs`). The two examples are provisioned beside the others by
 `scripts/build-zenohd.sh`, which changes the key of the hosted zenohd cache.
 
-Not written: the entities the slot profile does not build yet (a listening endpoint, multicast),
-each of which is a change to the profile before it is a word the declaration accepts; a port of the declared node for QNX or Android; and the budgets that are
-still tuning constants of the library (the task cells, the receive and send storage), which the
-declaration cannot state.
+**Listen (landed, TCP).** `[[endpoint]] role = "listen"`, `locator = "tcp/<a.b.c.d>:<port>"` and
+`accepts = N` (1 to 4): the node binds that port and takes the connections that arrive, holding at
+most `accepts` sessions of them beside the one it dials, if it dials one (a node may only listen:
+`DIALS` is then 0 and its table is the `accepts` sessions). The structure is the dial's mirrored,
+and the mechanism is written once. In the coop runtime `StreamListen` is the listening half of
+`StreamDial` and `Accept` of `Bind`: the stack's acceptor (`IpStack::acceptor`) yields the same
+`IpDriver` a dial does, over the stream the listener accepted, claiming its two buffers from the
+tables the image declared; a connection that finds none is closed at once and counted
+(`IpAcceptor::refused`), and a poll that finds no connection claims nothing. The posix port is
+`PosixTcpListener` (non-blocking, `SO_REUSEADDR`, `accept4`), which yields the `PosixTcpSocket` a
+dial does. In `slot_client` the node holds the accepted sessions in a table of `accepts` rows
+(`Listening<X, N>` names the acceptor and the size together, `Listening::NONE` is a node that
+listens on nothing): a pass of its tick frees the rows of sessions that ended, takes what waits on
+the port and, if every row is taken, closes the connection before any table is claimed for it
+(`refused_over_capacity`); the sessions a node holds are then dialled and accepted alike to
+everything it does (declaring, answering, reporting). The identity differs in one respect, and
+upstream says which: a client refuses a client (`zenoh/src/net/runtime/region.rs` @ `North-north
+client-client configuration (invalid)`), so a session a peer opened is met as a PEER while the
+routers the node dials still meet a client. A node built to listen carries the accept side of the
+handshake, which a client does not (`wz-session-mcu/listen`, forwarded by the image's `listen`
+feature): an acceptor given to a node without it would read each InitSyn and answer none, so the
+constructor of a `Listening` exists only in a build with the feature, and the declaration decides
+the feature. The generator emits `DIALED`, `LISTEN`, `LISTEN_ADDR`, `LISTEN_PORT`, `ACCEPTS` and
+`SESSIONS = DIALS + ACCEPTS`, which is the size of the node's session and task tables; the node's
+`const` assertions hold the declaration's `listen` endpoint to the feature and to `accepts`. A
+UDP listener (it answers the sender of an InitSyn, and the accept loop of the slot node is a
+stream's) and a secure listener (the channel of the slot node is one it dials) are refused with
+those reasons. A node that holds a session says `session established` when it first holds one and
+`session lost` when it holds none, not once for each. The witness has no router in it: upstream's
+`z_get` and `z_pub` are clients of the node (`wz_declared_server_zenohd_interop.rs`). It answers
+each document byte for byte and nothing for a key it does not serve; two stock clients hold the
+two sessions and a third is refused by a connection closed at once, a freed row serves the next
+client, and the holder that stayed is not disturbed; two connections that say nothing are closed
+at the handshake deadline and free both rows. Presenting a client to the accepted sessions fails
+all three, which is what ties the identity to the witness.
+
+Not written: multicast, which is a change to the profile before it is a word the declaration
+accepts; a UDP or a secure listener; declarations toward accepted peers that are not clients
+(they are sent as to the router today, and no peer has judged them); a port of the declared node
+for QNX or Android; and the budgets that are still tuning constants of the library (the task cells,
+the receive and send storage), which the declaration cannot state.
 
 The text below is the proposal the decision answers.
 

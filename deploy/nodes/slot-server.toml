@@ -1,0 +1,33 @@
+# A node declaration (docs/target-build-contract.md section 5b), checked by scripts/lib/wz_node.py.
+#
+# A fixed-memory node that is dialled and not dialling: it listens on one TCP port, holds up to two
+# sessions of the clients that connect to it, and answers their queries with documents, on the
+# per-session slot profile (no allocator). It dials no router, and a client of it needs none.
+#
+# The endpoint is this machine's loopback on a port of its own, because this is the node the
+# interop test builds and runs against stock clients
+# (crates/wz-integration-tests/tests/wz_declared_server_zenohd_interop.rs): the locator is part of
+# what the node IS, so the clients are told to connect there.
+
+[node]
+id = "slot-server"
+help = "A fixed-memory node that listens on a TCP port, holds two client sessions and answers their queries under two keys."
+target = "slot"
+
+[[endpoint]]
+role = "listen"
+locator = "tcp/127.0.0.1:17475"
+accepts = 2
+
+[[entity]]
+kind = "queryable"
+key = "lab/server/small"
+document_bytes = 16
+
+[[entity]]
+kind = "queryable"
+key = "lab/server/large"
+document_bytes = 256
+
+[limits]
+MAX_QUERYABLES = 2

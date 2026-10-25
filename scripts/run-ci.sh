@@ -11363,16 +11363,17 @@ layer_c1m_session_lwip() {
     _runci_guarded_test "C1m mcu adminspace read+write" 24 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
-    # with the client core): no leg above selects both, so its tests ran in none until this one. 27 =
-    # the loop's observations, the identity and the handshake, the documents and their declarations,
+    # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
+    # the loop's observations, the identity and the handshake (as a client, and as a peer to the
+    # sessions a peer opened), the documents and their declarations,
     # the body pool, the documents a front end chose, the single endpoint, the subscriptions and
     # the queryables that answer from them (their order, a sample reaching its cell, the refusals),
     # and the liveliness tokens (declared last, refused by a node that cannot send one).
-    _runci_guarded_test "C1m mcu slot node" 27 \
+    _runci_guarded_test "C1m mcu slot node" 28 \
         cargo test -p wz-session-mcu --features client-slot --lib slot_node --quiet || return 1
     # The same tests of a node built with `declare-token`: the number is the same, and what two of
     # them assert is the other half (a token is declared, and is not refused).
-    _runci_guarded_test "C1m mcu slot node with tokens" 27 \
+    _runci_guarded_test "C1m mcu slot node with tokens" 28 \
         cargo test -p wz-session-mcu --features client-slot,declare-token --lib slot_node --quiet || return 1
     # The latest sample of a subscription (`latest`, the same profile): the cell, its cut at the
     # subscription's capacity, a delete, a key cut at a character, the storage's bounds, and the
@@ -11776,6 +11777,20 @@ layer_c1m_session_lwip() {
     _runci_guarded_test "C1m coop static runtime" 16 \
         cargo test -p wz-runtime-coop --features alloc,session-slot \
         --lib static_tests:: --quiet || return 1
+    # The links of the slot profile's IP stack (`ip_stack`): a dial opens the link of the protocol it
+    # names, a refusal gives its buffers back, a secure channel is the stream link over it; and the
+    # connections a listener hands the stack are the same stream link (one that finds no buffer is
+    # closed and counted, a poll that finds none claims none, a broken listener is said as it is):
+    # 8 = what that command PRINTED, four of them the accepting side.
+    _runci_guarded_test "C1m coop ip stack links" 8 \
+        cargo test -p wz-runtime-coop --features session-slot \
+        --lib ip_stack:: --quiet || return 1
+    # The host's TCP seam (`wz_runtime_posix::stream`): the connection a dial makes and the port a
+    # listener takes them on, over loopback sockets: 15 = what that command PRINTED, eight of them
+    # the listener (both ends named, nagle off, a read that does not block, order of arrival, a
+    # connection closed before it was taken, a port already listened on, a port freed for the next).
+    _runci_guarded_test "C1m posix tcp seam" 15 \
+        cargo test -p wz-runtime-posix --lib stream:: --quiet || return 1
     # Fixed-memory step S6, the exhaustion cases of the N-session pool (R1, R2, R6):
     # a node holds at most the generated MAX_SESSIONS sessions, and every table a
     # session needs is claimed before it can speak. The acceptor's side
@@ -19943,7 +19958,7 @@ layer_z_zenohd_interop() {
     # declared size is cut, and a delete empties the answer.
     local decl_pkg decl_rc=0 decl_node
     decl_pkg="$(mktemp -d)" || return 1
-    for decl_node in slot-recorder slot-reporter slot-asker slot-beacon; do
+    for decl_node in slot-recorder slot-reporter slot-asker slot-beacon slot-server; do
         [ "$decl_rc" -eq 0 ] || break
         python3 scripts/lib/wz_package.py --platform linux-x86_64-glibc --artifact declared-node \
             --node "$decl_node" --out "$decl_pkg/$decl_node" || decl_rc=1
@@ -19973,6 +19988,14 @@ layer_z_zenohd_interop() {
     [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Ztok 2 env WZ_ZENOHD_BIN="$zenohd" \
         WZ_DECLARED_NODE_BEACON="$decl_pkg/slot-beacon/bin/declared-node" \
         cargo test -p wz-integration-tests --test wz_declared_token_zenohd_interop \
+        -- --ignored --quiet --test-threads=1 || decl_rc=1; }
+    # The listener, the same way, with no router at all: the stock `z_get` and `z_pub` are CLIENTS of
+    # the node. It answers each document byte for byte and nothing for a key it does not serve,
+    # holds the two sessions it declared and closes a third at once, serves the next client in a row
+    # a session left, and frees the rows of connections that say nothing at the handshake deadline.
+    [ "$decl_rc" -eq 0 ] && { _runci_guarded_test Zsrv 3 env \
+        WZ_DECLARED_NODE_SERVER="$decl_pkg/slot-server/bin/declared-node" \
+        cargo test -p wz-integration-tests --test wz_declared_server_zenohd_interop \
         -- --ignored --quiet --test-threads=1 || decl_rc=1; }
     rm -rf "$decl_pkg"
     [ "$decl_rc" -eq 0 ] || return 1

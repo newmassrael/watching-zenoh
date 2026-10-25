@@ -621,6 +621,22 @@ IMAGES: dict[str, Image] = {
                 ),
                 label="linux-x86_64-slot-beacon",
             ),
+            # A node that is dialled and not dialling: built with `listen` (the accept side of the
+            # handshake, the listening port and the table of accepted sessions, which is the part
+            # that had no allocator-free path on this profile), two sessions of its own and two
+            # documents, no budget of its own.
+            Build(
+                HOST,
+                None,
+                ("declared", "listen"),
+                env=(
+                    (
+                        "WZ_DECLARED_RS",
+                        str(REPO_ROOT / "deploy" / "nodes" / "generated" / "slot-server.rs"),
+                    ),
+                ),
+                label="linux-x86_64-slot-server",
+            ),
         ),
     ),
     # The wz half of the zenoh-pico comparison image: the CYT4BF MAC behind Zephyr's Ethernet

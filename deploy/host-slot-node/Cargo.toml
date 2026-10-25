@@ -57,6 +57,11 @@ token = ["wz-session-mcu/declare-token"]
 # The session coalesces the messages of one send window into one datagram (zenoh-pico's
 # `Z_FEATURE_BATCHING`): off, every message is a datagram of its own.
 batching = ["wz-runtime-coop/transport-batching", "wz-session-core/transport-batching"]
+# The node listens on a TCP port and holds the sessions a peer opens to it (`PosixTcpListener`, and
+# the accepted sessions of `wz_session_mcu::slot_client`). Built exactly when a node declaration has a
+# `listen` endpoint (`scripts/lib/wz_node.py` names the features of a node), and the node's own
+# `const` assertion holds the two to each other.
+listen = ["wz-session-mcu/listen"]
 # The node can ASK: `--get KEY --count N` issues N queries one after another and reports the round
 # trips (`src/getter.rs`). Off, the node only answers, as the kit's client does.
 get = ["wz-session-mcu/query-get"]

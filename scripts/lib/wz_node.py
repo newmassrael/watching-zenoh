@@ -22,8 +22,11 @@ not build the node.
 ## What a declaration may say
 
     [node]                     id (the file's name), help, target
-    [[endpoint]]               role = "dial", locator = "<scheme>/<a.b.c.d>:<port>"
-    [[entity]]                 kind = "queryable", key, and document_bytes (a fixed document) or
+    [[endpoint]]               role = "dial", locator = "<scheme>/<a.b.c.d>:<port>" (a router it dials);
+                               role = "listen", locator = "tcp/<a.b.c.d>:<port>" and accepts = N (the
+                               port it takes connections on, and how many sessions of them it holds
+                               at once; a node that listens presents itself to them as a peer)
+    [[entity]]               kind = "queryable", key, and document_bytes (a fixed document) or
                                from = "<subscriber key>" (the latest sample of that subscription);
                                kind = "subscriber", key, sample_bytes (the payload bytes it keeps);
                                kind = "publisher", key, period_ms, document_bytes (the document it
@@ -37,8 +40,9 @@ not build the node.
 
 ## What it refuses, and why that is an exit and not a skip
 
-The vocabulary is wider than any one target can build: a declaration may name a listening endpoint,
-a multicast group, a publisher, a subscriber, a liveliness token or a querier. A target states which
+The vocabulary is wider than any one target can build: a declaration may name a listening endpoint
+over a scheme a target has no listener for, a multicast group, a publisher, a subscriber, a
+liveliness token or a querier. A target states which
 of those it builds (`TARGETS`), and a word it does not build is REFUSED with the target's reason,
 never dropped: a node that silently lost its subscriber would run and be wrong. A word outside the
 vocabulary is refused as a typo. A budget the target cannot give, a key longer than the key limit,
@@ -54,8 +58,8 @@ image the node is built in (`image_limits`: the `WZ_LIMIT_*` of that package's c
 what it states overrides them. The digest in the generated file is the SHA-256 of the declaration's
 bytes, so any edit of the file, a comment included, makes the generated copy stale until `--write`.
 The only target is `slot`, the per-session fixed-memory profile (`wz_session_mcu::slot_node`), whose
-node holds one dialled session and answers queries from documents; the heap runtime is not a target
-here.
+node holds one dialled session and up to its `accepts` sessions a peer opened, and answers queries
+from documents; the heap runtime is not a target here.
 """
 
 from __future__ import annotations
@@ -77,7 +81,7 @@ NODES = ROOT / "deploy" / "nodes"
 ENDPOINT_ROLES = ("dial", "listen", "multicast")
 ENTITY_KINDS = ("publisher", "subscriber", "queryable", "querier", "liveliness-token")
 NODE_KEYS = {"id", "help", "target"}
-ENDPOINT_KEYS = {"role", "locator"}
+ENDPOINT_KEYS = {"role", "locator", "accepts"}
 ENTITY_KEYS = {"kind", "key", "document_bytes", "sample_bytes", "from", "period_ms", "timeout_ms", "reply_bytes"}
 TOP_KEYS = {"node", "endpoint", "entity", "limits"}
 
@@ -87,10 +91,17 @@ TARGETS = {
     "slot": {
         # The package the node is built in, whose cargo config states the budgets it holds.
         "image": "deploy/host-slot-node",
-        # The node's session table (`SESSIONS` in deploy/host-slot-node/src/main.rs).
-        "max_endpoints": 1,
-        "endpoint_roles": {"dial"},
+        # The endpoints of each role a node holds: the one router it dials (the connect manager's
+        # row, `MAX_STATIC_CONNECT`) and the one port it listens on. The sessions of the node are
+        # the dialled one and `accepts` more, which is the size of its session table.
+        "endpoint_limits": {"dial": 1, "listen": 1},
         "schemes": ("tcp", "udp", "tls"),
+        # A listener is a stream's: a `tcp/` connection is a link the moment it is accepted, with no
+        # handshake of the transport's own to read first.
+        "listen_schemes": ("tcp",),
+        # The sessions a peer opened that the node holds at once; each is a session slot, a pump
+        # cell and a task cell of the node's tables, and a pair of link buffers.
+        "max_accepts": 4,
         "entity_kinds": {"queryable", "subscriber", "publisher", "querier", "liveliness-token"},
         # `DOC_MAX` of the same file: the static every document is a prefix of.
         "document_max": 4096,
@@ -110,9 +121,14 @@ TARGETS = {
         # the five is seen by the router (`wz_declared_token_zenohd_interop.rs`).
         "max_tokens": 4,
         "refused": {
-            "listen": "the slot node holds one session that it dials; it has no accept loop",
             "multicast": "the multicast group session has a slot table but no node that joins "
             "one yet",
+        },
+        # Why a listener over this scheme is not built, by scheme.
+        "listen_refused": {
+            "udp": "a datagram listener answers the sender of an InitSyn and the slot node's "
+            "accept loop is a stream's",
+            "tls": "the secure channel of the slot node is one it dials; it has no server side yet",
         },
     },
 }
@@ -185,9 +201,8 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
 
     endpoints = data.get("endpoint", [])
     if not endpoints:
-        out.append("a node with no endpoint reaches nothing: declare one [[endpoint]]")
-    if len(endpoints) > target["max_endpoints"]:
-        out.append(f"{len(endpoints)} endpoints; the {node['target']} target holds {target['max_endpoints']}")
+        out.append("a node with no endpoint neither reaches anything nor is reached: declare one [[endpoint]]")
+    held: dict[str, int] = {}
     for n, ep in enumerate(endpoints, 1):
         who = f"endpoint {n}"
         for extra in sorted(set(ep) - ENDPOINT_KEYS):
@@ -195,14 +210,28 @@ def validate(name: str, data: dict, decl: dict) -> list[str]:
         role = ep.get("role")
         if role not in ENDPOINT_ROLES:
             out.append(f"{who}: role is {role!r}, not one of {', '.join(ENDPOINT_ROLES)}")
-        elif role not in target["endpoint_roles"]:
+        elif role not in target["endpoint_limits"]:
             out.append(f"{who}: a `{role}` endpoint is not built on {node['target']}: {target['refused'][role]}")
+        else:
+            held[role] = held.get(role, 0) + 1
+            if held[role] == target["endpoint_limits"][role] + 1:
+                out.append(f"{who}: more than {target['endpoint_limits'][role]} `{role}` endpoint(s); the "
+                           f"{node['target']} target holds {target['endpoint_limits'][role]}")
+        accepts = ep.get("accepts")
+        if role == "listen":
+            if isinstance(accepts, bool) or not isinstance(accepts, int) or not 1 <= accepts <= target["max_accepts"]:
+                out.append(f"{who}: accepts is {accepts!r}, not an integer from 1 to {target['max_accepts']}")
+        elif "accepts" in ep:
+            out.append(f"{who}: only a `listen` endpoint has `accepts`")
         match = LOCATOR_RE.fullmatch(ep.get("locator", "")) if isinstance(ep.get("locator"), str) else None
         if match is None:
             out.append(f"{who}: locator {ep.get('locator')!r} is not <scheme>/<a.b.c.d>:<port>")
         else:
             if match["scheme"] not in target["schemes"]:
                 out.append(f"{who}: scheme `{match['scheme']}` is not one of {', '.join(target['schemes'])}")
+            elif role == "listen" and match["scheme"] not in target["listen_schemes"]:
+                out.append(f"{who}: a `{match['scheme']}` listener is not built on {node['target']}: "
+                           f"{target['listen_refused'][match['scheme']]}")
             if any(int(match[o]) > 255 for o in "abcd") or not 1 <= int(match["port"]) <= 65535:
                 out.append(f"{who}: locator {ep['locator']!r} has an octet above 255 or a port outside 1..65535")
 
@@ -376,7 +405,14 @@ def digest(name: str, directory: pathlib.Path = NODES) -> str:
 
 def emit(name: str, data: dict, declaration_sha256: str) -> str:
     """The `declared.rs` the node's code includes. Valid input only: `validate` ran first."""
-    endpoint = data["endpoint"][0]["locator"]
+    dialed = [ep["locator"] for ep in data["endpoint"] if ep["role"] == "dial"]
+    dials = ", ".join(rust_string(locator) for locator in dialed)
+    listens = [ep for ep in data["endpoint"] if ep["role"] == "listen"]
+    listen_at = listens[0]["locator"] if listens else ""
+    accepts = listens[0]["accepts"] if listens else 0
+    at = LOCATOR_RE.fullmatch(listen_at) if listens else None
+    listen_addr = ", ".join(at[o] for o in "abcd") if at else "0, 0, 0, 0"
+    listen_port = int(at["port"]) if at else 0
     every = data.get("entity", [])
     entities = [(e["key"], e["document_bytes"]) for e in every if e["kind"] == "queryable" and "from" not in e]
     docs = ", ".join(f"({rust_string(k)}, {b})" for k, b in entities)
@@ -404,10 +440,20 @@ def emit(name: str, data: dict, declaration_sha256: str) -> str:
             f"pub const NODE_ID: &str = {rust_string(name)};",
             "/// The digest of the declaration file this was generated from; the node's facts note carries it.",
             f"pub const DECLARATION_SHA256: &str = {rust_string(declaration_sha256)};",
-            "/// The one endpoint the node dials, as a locator.",
-            f"pub const ROUTER: &str = {rust_string(endpoint)};",
-            "/// Whether that endpoint is `tls/`, which the node's `tls` feature must be built for.",
-            f"pub const TLS: bool = {'true' if endpoint.startswith('tls/') else 'false'};",
+            "/// The routers the node dials, as locators.",
+            f"pub const DIALS: usize = {len(dialed)};",
+            f"pub const DIALED: [&str; {len(dialed)}] = [{dials}];",
+            "/// Whether a dialled endpoint is `tls/`, which the node's `tls` feature must be built for.",
+            f"pub const TLS: bool = {'true' if any(d.startswith('tls/') for d in dialed) else 'false'};",
+            "/// Whether the node listens, the locator it listens on (empty when it does not), the address",
+            "/// and port that locator names, and how many sessions a peer opened it holds at once.",
+            f"pub const LISTENS: bool = {'true' if listens else 'false'};",
+            f"pub const LISTEN: &str = {rust_string(listen_at)};",
+            f"pub const LISTEN_ADDR: [u8; 4] = [{listen_addr}];",
+            f"pub const LISTEN_PORT: u16 = {listen_port};",
+            f"pub const ACCEPTS: usize = {accepts};",
+            "/// The sessions the node holds at most: the ones it dials and the ones a peer opened.",
+            "pub const SESSIONS: usize = DIALS + ACCEPTS;",
             "/// The queryables the node declares, and the documents they answer with: (key, bytes).",
             f"pub const DOCS: usize = {len(entities)};",
             f"pub const DOCUMENTS: [(&str, usize); {len(entities)}] = [{docs}];",
@@ -454,13 +500,16 @@ SCHEME_FACILITIES = {"tcp": "sockets-tcp", "tls": "sockets-tcp", "udp": "sockets
 
 
 def features_of(data: dict) -> list[str]:
-    """The cargo features a node is built with: `declared`, `tls` exactly when its endpoint is
-    `tls/` (which the node's own `const` assertion holds again), and `get` for a node that asks (and
-    only such a node: the layer's queries and the pending table are not in any other)."""
-    tls = any(ep["locator"].startswith("tls/") for ep in data["endpoint"])
+    """The cargo features a node is built with: `declared`, `tls` exactly when a dialled endpoint is
+    `tls/` (which the node's own `const` assertion holds again), `get` for a node that asks (and
+    only such a node: the layer's queries and the pending table are not in any other), `token` for a
+    node that declares a liveliness token and `listen` for a node that has a port to listen on."""
+    tls = any(ep["locator"].startswith("tls/") for ep in data["endpoint"] if ep["role"] == "dial")
     asks = any(e["kind"] == "querier" for e in data.get("entity", []))
     alive = any(e["kind"] == "liveliness-token" for e in data.get("entity", []))
-    return ["declared"] + (["tls"] if tls else []) + (["get"] if asks else []) + (["token"] if alive else [])
+    listens = any(ep["role"] == "listen" for ep in data["endpoint"])
+    return (["declared"] + (["tls"] if tls else []) + (["get"] if asks else [])
+            + (["token"] if alive else []) + (["listen"] if listens else []))
 
 
 def resolve(name: str, decl: dict, directory: pathlib.Path = NODES) -> dict:
@@ -582,7 +631,8 @@ def _selftest() -> int:
     data = wz_config.read_decl_toml(SAMPLE)
     sha = "0" * 64
     rs = emit("n", data, sha)
-    expect("the endpoint is the generated router", 'pub const ROUTER: &str = "tcp/10.0.0.1:7447";' in rs)
+    expect("the endpoint is the generated router",
+           'pub const DIALED: [&str; 1] = ["tcp/10.0.0.1:7447"];' in rs and "pub const DIALS: usize = 1;" in rs)
     expect("the declaration's digest is a constant of the generated file",
            f'pub const DECLARATION_SHA256: &str = "{sha}";' in rs)
     expect("a tcp endpoint is not tls", "pub const TLS: bool = false;" in rs)
@@ -629,8 +679,42 @@ def _selftest() -> int:
 
     refuses("a file named otherwise than its id", SAMPLE, "the file is named", "other")
     refuses("an unknown target", SAMPLE.replace('"slot"', '"heap"'), "target is 'heap'")
-    refuses("a listening endpoint is refused with the target's reason",
-            SAMPLE.replace('role = "dial"', 'role = "listen"'), "no accept loop")
+    # A listening endpoint: the port a node takes connections on and how many sessions of them it holds.
+    listening = SAMPLE.replace(
+        "[[entity]]", '[[endpoint]]\nrole = "listen"\nlocator = "tcp/0.0.0.0:17475"\naccepts = 2\n\n[[entity]]', 1)
+    expect("a node that dials a router and listens is valid", problems(listening) == [])
+    lrs = emit("n", wz_config.read_decl_toml(listening), sha)
+    expect("the listener is a constant of the generated file",
+           'pub const LISTENS: bool = true;' in lrs and 'pub const LISTEN: &str = "tcp/0.0.0.0:17475";' in lrs
+           and "pub const LISTEN_ADDR: [u8; 4] = [0, 0, 0, 0];" in lrs and "pub const LISTEN_PORT: u16 = 17475;" in lrs
+           and "pub const ACCEPTS: usize = 2;" in lrs)
+    expect("its sessions are the dialled one and the accepted ones",
+           'pub const DIALED: [&str; 1] = ["tcp/10.0.0.1:7447"];' in lrs and "pub const SESSIONS: usize = DIALS + ACCEPTS;" in lrs)
+    expect("a node that listens on nothing accepts nothing",
+           "pub const LISTENS: bool = false;" in rs and "pub const ACCEPTS: usize = 0;" in rs
+           and 'pub const LISTEN: &str = "";' in rs)
+    expect("a listener is a feature of the build, and the others are unchanged",
+           features_of(wz_config.read_decl_toml(listening)) == ["declared", "listen"]
+           and features_of(data) == ["declared"])
+    listen_only = listening.replace('[[endpoint]]\nrole = "dial"\nlocator = "tcp/10.0.0.1:7447"\n\n', "")
+    expect("a node that only listens is valid, and dials nothing",
+           problems(listen_only) == [] and 'pub const DIALED: [&str; 0] = [];' in emit(
+               "n", wz_config.read_decl_toml(listen_only), sha))
+    expect("a tls endpoint it dials is not the listener's scheme",
+           features_of(wz_config.read_decl_toml(listening.replace("tcp/10.0.0.1", "tls/10.0.0.1"))) ==
+           ["declared", "tls", "listen"])
+    refuses("a listener with no accepts", listening.replace("accepts = 2\n", ""), "accepts is None")
+    refuses("a listener that accepts none", listening.replace("accepts = 2", "accepts = 0"), "accepts is 0")
+    refuses("a listener that accepts more than the node holds",
+            listening.replace("accepts = 2", "accepts = 5"), "from 1 to 4")
+    refuses("accepts on a dialled endpoint", SAMPLE.replace('role = "dial"', 'role = "dial"\naccepts = 1'),
+            "only a `listen` endpoint has `accepts`")
+    refuses("a second listener", listening + '\n[[endpoint]]\nrole = "listen"\nlocator = "tcp/0.0.0.0:17476"\n'
+            "accepts = 1\n", "more than 1 `listen`")
+    refuses("a datagram listener is refused with the target's reason",
+            listening.replace("tcp/0.0.0.0", "udp/0.0.0.0"), "a `udp` listener is not built on slot")
+    refuses("a secure listener is refused with the target's reason",
+            listening.replace("tcp/0.0.0.0", "tls/0.0.0.0"), "a `tls` listener is not built on slot")
     refuses("a multicast endpoint", SAMPLE.replace('role = "dial"', 'role = "multicast"'), "not built on slot")
     refuses("a role outside the vocabulary", SAMPLE.replace('role = "dial"', 'role = "dail"'), "not one of dial")
     # A kind a target does not build is refused with the target's own words, or with a default when it
@@ -793,7 +877,7 @@ def _selftest() -> int:
     refuses("an octet above 255", SAMPLE.replace("10.0.0.1", "10.0.0.256"), "octet above 255")
     refuses("port zero", SAMPLE.replace(":7447", ":0"), "port outside")
     refuses("a second endpoint", SAMPLE + '\n[[endpoint]]\nrole = "dial"\nlocator = "tcp/10.0.0.2:7447"\n',
-            "the slot target holds 1")
+            "more than 1 `dial`")
     refuses("no endpoint", SAMPLE.replace('[[endpoint]]\nrole = "dial"\nlocator = "tcp/10.0.0.1:7447"\n', ""),
             "no endpoint")
     refuses("a key with an empty chunk", SAMPLE.replace("lab/doc/a", "lab//a"), "empty chunk")

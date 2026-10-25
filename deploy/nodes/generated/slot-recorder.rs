@@ -7,10 +7,20 @@
 pub const NODE_ID: &str = "slot-recorder";
 /// The digest of the declaration file this was generated from; the node's facts note carries it.
 pub const DECLARATION_SHA256: &str = "45e4cb1ebd02eb33fa65a290536518f8e4bde270e085cec4bcf45b734342fb70";
-/// The one endpoint the node dials, as a locator.
-pub const ROUTER: &str = "tcp/127.0.0.1:17471";
-/// Whether that endpoint is `tls/`, which the node's `tls` feature must be built for.
+/// The routers the node dials, as locators.
+pub const DIALS: usize = 1;
+pub const DIALED: [&str; 1] = ["tcp/127.0.0.1:17471"];
+/// Whether a dialled endpoint is `tls/`, which the node's `tls` feature must be built for.
 pub const TLS: bool = false;
+/// Whether the node listens, the locator it listens on (empty when it does not), the address
+/// and port that locator names, and how many sessions a peer opened it holds at once.
+pub const LISTENS: bool = false;
+pub const LISTEN: &str = "";
+pub const LISTEN_ADDR: [u8; 4] = [0, 0, 0, 0];
+pub const LISTEN_PORT: u16 = 0;
+pub const ACCEPTS: usize = 0;
+/// The sessions the node holds at most: the ones it dials and the ones a peer opened.
+pub const SESSIONS: usize = DIALS + ACCEPTS;
 /// The queryables the node declares, and the documents they answer with: (key, bytes).
 pub const DOCS: usize = 0;
 pub const DOCUMENTS: [(&str, usize); 0] = [];

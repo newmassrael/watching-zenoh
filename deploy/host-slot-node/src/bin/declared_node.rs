@@ -26,8 +26,7 @@ use host_slot_node_glue::fresh_zid;
 #[cfg(feature = "tls")]
 use host_slot_node_glue::tls;
 use host_slot_node_glue::tuning::{
-    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RX, SESSIONS, TASKS, TASK_BYTES_ACTIVE,
-    TIMERS, TX,
+    BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RX, TASK_BYTES_ACTIVE, TIMERS, TX,
 };
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
 use wz_runtime_posix::glue::{log, log_args};
@@ -35,6 +34,8 @@ use wz_runtime_posix::glue::{log, log_args};
 use wz_runtime_posix::slot::PosixStack;
 #[cfg(not(feature = "tls"))]
 use wz_runtime_posix::stream::PosixTcpDial;
+#[cfg(feature = "listen")]
+use wz_runtime_posix::stream::PosixTcpListener;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps::{MAX_QUERYABLES, MAX_REPLY_PAYLOAD_BYTES, MAX_SUBSCRIPTIONS};
 use wz_session_core::sample_kind::SampleKind;
@@ -52,7 +53,8 @@ use wz_session_mcu::slot_querier::{Query, QueryState, QueryWatch};
 
 wz_runtime_posix::posix_image_no_heap!();
 
-/// What the declaration states, generated: `NODE_ID`, `ROUTER`, `TLS`, `DOCS` and `DOCUMENTS`.
+/// What the declaration states, generated: `NODE_ID`, `DIALED`, `LISTEN`, `TLS`, `DOCS` and
+/// `DOCUMENTS`, and the rest of the constants of `scripts/lib/wz_node.py --emit`.
 mod declared {
     include!(env!("WZ_DECLARED_RS"));
 }
@@ -60,9 +62,16 @@ mod declared {
 #[cfg(feature = "get")]
 use declared::QUERIED;
 use declared::{
-    CELLS, DECLARATION_SHA256, DOCS, DOCUMENTS, MIRRORED, MIRRORS, NODE_ID, PUBLISHED, PUBLISHERS,
-    QUERIERS, ROUTER, SAMPLE_MAX, SUBSCRIBERS, SUBSCRIPTIONS, TLS, TOKENS, TOKEN_KEYS,
+    ACCEPTS, CELLS, DECLARATION_SHA256, DIALED, DOCS, DOCUMENTS, LISTEN, LISTENS, MIRRORED,
+    MIRRORS, NODE_ID, PUBLISHED, PUBLISHERS, QUERIERS, SAMPLE_MAX, SESSIONS, SUBSCRIBERS,
+    SUBSCRIPTIONS, TLS, TOKENS, TOKEN_KEYS,
 };
+#[cfg(feature = "listen")]
+use declared::{LISTEN_ADDR, LISTEN_PORT};
+
+/// The runtime's task table: a pump task per session, the dialled and the accepted, and nothing
+/// else runs as a task.
+const TASKS: usize = SESSIONS;
 
 /// The declarations the node sends on a session: its documents, the queryables that answer from a
 /// cell, the subscriptions and the liveliness tokens.
@@ -181,6 +190,14 @@ const _: () = assert!(
     TLS == cfg!(feature = "tls"),
     "the declaration's endpoint is `tls/` exactly when the node is built with the `tls` feature"
 );
+const _: () = assert!(
+    LISTENS == cfg!(feature = "listen"),
+    "the declaration has a listening endpoint exactly when the node is built with the `listen` feature"
+);
+const _: () = assert!(
+    LISTENS == (ACCEPTS > 0),
+    "a node listens exactly when it holds sessions a peer opened"
+);
 const _: () = {
     let mut at = 0;
     while at < DOCS {
@@ -208,8 +225,9 @@ static NODE: Storage = Storage::new();
 /// The bytes every document is made of.
 static BODY: BodyPool<DOC_MAX> = BodyPool::new();
 
-/// The endpoint the node dials: the declaration's, checked against a locator row when this is built.
-static ENDPOINTS: StaticEndpoints = StaticEndpoints::new(&[ROUTER]);
+/// The endpoints the node dials: the declaration's, checked against a locator row when this is
+/// built. A node that only listens dials none.
+static ENDPOINTS: StaticEndpoints = StaticEndpoints::new(&DIALED);
 
 /// The declarations the node sends on each session, in the order of their registrations.
 static DECLARED: Declared<DECLS> = Declared::new();
@@ -404,16 +422,29 @@ fn run() -> i32 {
     };
 
     let (subscribed, mirrored) = (subscriptions(), mirrors());
+    #[cfg(not(feature = "tls"))]
+    let stack = Stack::new([0; 4], &NODE.rx, &NODE.tx, PosixTcpDial).with_idle_wait_ms(IDLE_WAIT_MS);
+    #[cfg(feature = "tls")]
+    let stack = tls::stack([0; 4], &NODE.rx, &NODE.tx, channel_identity)
+        .with_idle_wait_ms(IDLE_WAIT_MS);
+    // The port is bound before the node is built, so the line a lab waits for is said only once a
+    // connection to it would be taken.
+    #[cfg(feature = "listen")]
+    let listening = match PosixTcpListener::bind(LISTEN_ADDR, LISTEN_PORT) {
+        Ok(listener) => Listening::<_, ACCEPTS>::new(stack.acceptor(listener)),
+        Err(why) => {
+            log_args(format_args!("wz: FAIL - cannot listen on {LISTEN}: {why:?}"));
+            return 3;
+        }
+    };
+    #[cfg(not(feature = "listen"))]
+    let listening = Listening::NONE;
     let node = ClientNode {
         storage: &NODE,
         declared: &DECLARED,
         clock: Clock::default(),
-        #[cfg(not(feature = "tls"))]
-        stack: Stack::new([0; 4], &NODE.rx, &NODE.tx, PosixTcpDial).with_idle_wait_ms(IDLE_WAIT_MS),
-        #[cfg(feature = "tls")]
-        stack: tls::stack([0; 4], &NODE.rx, &NODE.tx, channel_identity)
-            .with_idle_wait_ms(IDLE_WAIT_MS),
-        listening: Listening::NONE,
+        stack,
+        listening,
         identity,
         batch_size: BATCH_SIZE,
         entropy: || PosixEntropy,
@@ -450,7 +481,14 @@ fn run() -> i32 {
         &mut HostPort::<Console>::new(),
         &mut report,
         |port, zid_hex| {
-            port.log(format_args!("HOST-WZ-CLIENT READY {zid_hex} {ROUTER}"));
+            // The router it dials, or `-` for a node that dials none.
+            port.log(format_args!(
+                "HOST-WZ-CLIENT READY {zid_hex} {}",
+                DIALED.first().copied().unwrap_or("-")
+            ));
+            if LISTENS {
+                port.log(format_args!("HOST-WZ-LISTEN {LISTEN}"));
+            }
         },
     )
 }
