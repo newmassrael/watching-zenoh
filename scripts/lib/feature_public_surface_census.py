@@ -348,7 +348,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "rather than to this sentence",
         frozenset({"test"}),
     ),
-    # R3623 -- the sixth family member with a feature of its own.
+    # R3625 -- the sixth family member with a feature of its own.
     "zenoh-util": (
         "a crate of the zenoh compatibility family: `test` is an arm of upstream's own public "
         "surface that `scripts/lib/rust_api_surface.py` emits the wz crate with and holds it to "
