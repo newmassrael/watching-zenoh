@@ -287856,6 +287856,40 @@
         "The hosted runs of this family's pushes are still to be read per job."
       ]
     },
+    "Round 3646": {
+      "decision_summary": "Open-debt item 924, D10: the per-row bytes a consumer measured in a handle (about 92: 46 in the index entries, 38 in the TCP run map, 8 in the field walk's digests; report keys lists.rows, streams.runs and fields.row_digests) are paid down in the first two. Both are kept as packed columns by frame of reference (a new log in wz-session-core): a chunk of up to 1024 rows keeps each column as a distance from the chunk's first, as wide as the chunk's largest value needs (none, 1, 2, 4 or 8 bytes); a column widens for the chunk when a value needs more, and a rising value below the base begins a chunk, so no value is one the log cannot hold. The entry type stays the value a reader works with. A TCP row on the memory matrix is 44 bytes, from 101, and 82 from 152 on the C gate's fixture after the reads; the report still equals the allocator to the byte. The digests are unchanged: not holding them needs a door in the C ABI, which the consumer is to ask for.",
+      "changes_bullets": [
+        "wz-session-core column_log (new): ColumnLog, a log of rows of 64-bit columns by frame of reference with per-chunk widths; get, column, set, pop_front, iter_from, partition_point_by_column, a position hint. heap_account: vec_deque_bytes. passive_messages: UnitRows keeps an index's entries in it (UnitRow stays the value type), push_held repeats the rising columns, Heads::nth_back.",
+        "wz-capture tcp: RunMap over four columns replaces the run list (length and overlap derived, the overlaps kept apart by offset), with the lookup by the column and a position hint. memory_matrix ceilings lowered to the new measurements, with a width allowance for the sweep; handle_memory_gate ceilings lowered. docs/dissect-row-index.md D10."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): wz-session-core all-features lib, wz-capture lib with dissect, fixtures and network-codecs, and wz-capi-dissect (the C gate among them) pass; the memory matrix reports equal to the allocator for every kind and under the new ceilings; clippy of the three crates is clean in the default, all-features and dissect shapes and the no-default shape of session-core. Counted on a clean origin/main worktree and this tree with the same probe: TCP 101 to 44 bytes a row (handed), 90 to 35 (lent); C gate after reads tcp 152 to 82 and 112 to 48, udp 96 to 60 and 63 to 29. Time at 300,000 TCP rows: fields 2.12 to 1.95 s, selection 1.15 to 1.12 s, one-row windows 726 to 4 ms.",
+        "Not measured: the consumer's own 60,000 and 240,000 row figures, which the consumer reads at the pin."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "Tell the consumer that asked (the claim of 92 bytes a row) to read its figures at this pin, and ask whether a handle that does not keep the field walk's digests is wanted: that is the 8 bytes left, and a door in the C ABI. Read the first completed hosted run holding this round."
+      ],
+      "publishable_decision_summary": "Open-debt item 924, D10: the per-row bytes a consumer measured in a handle (about 92: 46 in the index entries, 38 in the TCP run map, 8 in the field walk's digests; report keys lists.rows, streams.runs and fields.row_digests) are paid down in the first two. Both are kept as packed columns by frame of reference (a new log in wz-session-core): a chunk of up to 1024 rows keeps each column as a distance from the chunk's first, as wide as the chunk's largest value needs (none, 1, 2, 4 or 8 bytes); a column widens for the chunk when a value needs more, and a rising value below the base begins a chunk, so no value is one the log cannot hold. The entry type stays the value a reader works with. A TCP row on the memory matrix is 44 bytes, from 101, and 82 from 152 on the C gate's fixture after the reads; the report still equals the allocator to the byte. The digests are unchanged: not holding them needs a door in the C ABI, which the consumer is to ask for.",
+      "publishable_changes_bullets": [
+        "wz-session-core column_log (new): ColumnLog, a log of rows of 64-bit columns by frame of reference with per-chunk widths; get, column, set, pop_front, iter_from, partition_point_by_column, a position hint. heap_account: vec_deque_bytes. passive_messages: UnitRows keeps an index's entries in it (UnitRow stays the value type), push_held repeats the rising columns, Heads::nth_back.",
+        "wz-capture tcp: RunMap over four columns replaces the run list (length and overlap derived, the overlaps kept apart by offset), with the lookup by the column and a position hint. memory_matrix ceilings lowered to the new measurements, with a width allowance for the sweep; handle_memory_gate ceilings lowered. docs/dissect-row-index.md D10."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): wz-session-core all-features lib, wz-capture lib with dissect, fixtures and network-codecs, and wz-capi-dissect (the C gate among them) pass; the memory matrix reports equal to the allocator for every kind and under the new ceilings; clippy of the three crates is clean in the default, all-features and dissect shapes and the no-default shape of session-core. Counted on a clean origin/main worktree and this tree with the same probe: TCP 101 to 44 bytes a row (handed), 90 to 35 (lent); C gate after reads tcp 152 to 82 and 112 to 48, udp 96 to 60 and 63 to 29. Time at 300,000 TCP rows: fields 2.12 to 1.95 s, selection 1.15 to 1.12 s, one-row windows 726 to 4 ms.",
+        "Not measured: the consumer's own 60,000 and 240,000 row figures, which the consumer reads at the pin."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-12-codec",
+        "watching-zenoh/local-ci-gates"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Tell the consumer that asked (the claim of 92 bytes a row) to read its figures at this pin, and ask whether a handle that does not keep the field walk's digests is wanted: that is the 8 bytes left, and a door in the C ABI. Read the first completed hosted run holding this round."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
