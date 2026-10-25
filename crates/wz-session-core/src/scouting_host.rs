@@ -353,6 +353,56 @@ pub fn new_scouting_engine<R: Runtime>(actions: &Arc<ScoutingActions<R>>) -> Sco
 /// met.
 const SCOUTING_SESSION_ID: &str = "wz-scouting";
 
+/// zenoh's default scouting multicast locator.
+pub const MULTICAST_LOCATOR_DEFAULT: &str = "udp/224.0.0.224:7446";
+
+/// The default scouting budget, in milliseconds (pico `Z_CONFIG_SCOUTING_TIMEOUT_DEFAULT`).
+pub const SCOUTING_TIMEOUT_DEFAULT_MS: u64 = 1000;
+
+/// The default `what` mask (pico `Z_CONFIG_SCOUTING_WHAT_DEFAULT`): router and peer.
+pub const SCOUTING_WHAT_DEFAULT: u8 = 0x03;
+
+/// The tick a host that polls its sockets paces its window by, in milliseconds.
+pub const SCOUT_TICK_MS: u64 = 50;
+
+/// Parse a `udp/ADDR:PORT` multicast locator. An IPv6 group is bracketed, as a socket address
+/// writes it (`udp/[ff05::231]:7446`).
+///
+/// `None` for anything a UDP scouting window cannot bind, so an unsupported locator FAILS the
+/// scout rather than silently falling back to the default group: a scout that searches somewhere
+/// the caller did not ask about is worse than an error.
+pub fn parse_multicast_locator(locator: &str) -> Option<(core::net::IpAddr, u16)> {
+    let rest = locator.strip_prefix("udp/")?;
+    let addr: core::net::SocketAddr = rest.parse().ok()?;
+    Some((addr.ip(), addr.port()))
+}
+
+/// Hand the window's peers to `on_hello` in UPSTREAM'S DELIVERY ORDER, which is the REVERSE of
+/// arrival, and return how many were delivered.
+///
+/// This is not a detail: it is observable through both C ABIs. `_z_scout_inner` accumulates with
+/// `_z_hello_slist_push_empty`, which PREPENDS (`vendor/zenoh-pico/src/collections/list.c` @
+/// `_z_list_t *_z_list_push(`), and `_z_scout` then drains from the head
+/// (`vendor/zenoh-pico/src/net/primitives.c` @ `_z_hello_slist_t *hellos = _z_scout_inner(`). So
+/// a pico program's closure sees the LAST responder first. The window records in arrival order,
+/// the useful order for everything else, so the reversal lives here, at the one seam where
+/// upstream's contract is imitated, and not in the accumulator where it would be a strange rule
+/// with no reason attached.
+///
+/// Delivery happens AFTER the window for the same reason: upstream's callback is not called from
+/// inside the scouting loop. `_z_scout_inner` returns a list and only then is it drained, so a
+/// pico program prints nothing for the whole budget and then everything at once. Firing per-Hello
+/// would be a divergence in this implementation's favour, which is still a divergence.
+pub fn deliver_in_upstream_order(
+    hellos: &[ScoutedHello],
+    mut on_hello: impl FnMut(&ScoutedHello),
+) -> usize {
+    for hello in hellos.iter().rev() {
+        on_hello(hello);
+    }
+    hellos.len()
+}
+
 /// How a scouting window ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScoutOutcome {
@@ -534,3 +584,6 @@ impl<R: Runtime> ScoutWindow<R> {
         window_outcome(&self.actions)
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -89,7 +89,27 @@ wz-session-mcu = { path = "../wz-session-mcu", default-features = false, feature
     "reassembly",
 ] }
 
+# The host's network: the interface table and the multicast sockets a scouting window opens
+# (`scout` below). Optional, so a build that does not scout links none of it.
+wz-host-net = { path = "../wz-host-net", optional = true }
+# The window says which sockets it asks on and which it lost, as the host crate beneath it does.
+log = { version = "0.4", optional = true }
+
 [features]
+# Active multicast scouting (`Z_FEATURE_SCOUTING`): one Scout asked of the group, the Hellos that
+# answer collected for a budget, on the host's sockets and the session's own window rules
+# (`wz_session_core::scouting_host`). A window needs no session, so this is a plane beside the
+# engine and not a method of its port. The `#iface=` honor is named because the window pins one
+# ask socket to each interface that can carry multicast, which an unhonoured key would leave to
+# the kernel (one socket on the default route, which asks no other interface).
+scout = [
+    "dep:wz-host-net",
+    "dep:log",
+    "wz-host-net/locator-iface",
+    "wz-session-core/scouting-active",
+    "wz-session-core/codec-scout",
+    "wz-session-core/codec-hello",
+]
 # The answering end of a query: a queryable, its replies (with their source info, encoding and
 # attachment, and the error reply) and a query a C program keeps past its callback. What
 # `wz-capi-core`'s `queryable` names on its runtime, named on session-core.

@@ -428,6 +428,24 @@ it behaves as pico behaves in both of pico's threading arms.
   `PosixGroupTransport` of `wz-runtime-posix`, which joins a group by raw `libc` for the slot
   profile, is not touched. Next: a blocking scouting window over these sockets for the
   cooperative build (Sc3), and the pico `scout` feature without the tokio engine (Sc4).
+- 2026-10-25: scouting, step Sc3 of four: the blocking window of the cooperative build. A new
+  feature `scout` of `wz-capi-coop` adds the module `scout`, a window a program runs on its own
+  thread: the group socket is joined as an extra receive member, one ask socket is pinned to each
+  interface that can carry multicast, one Scout leaves by them, and the loop reads every socket,
+  pumps `ScoutWindow` and reads the host's clock until the machine resolves. It sleeps two
+  milliseconds when nothing arrived and drops a member whose read fails, so one interface going
+  down does not end a window the others can still answer. It is generic over the engine's
+  `ClockSource`, as the engine is, and it opens no session: `z_scout` needs none, so scouting is
+  a plane beside the engine and not a method of its port. The rules the window shares with the
+  tokio one are no longer copies: the locator grammar, the defaults, the tick and the order the
+  peers are handed over (after the window, last responder first) moved into
+  `wz_session_core::scouting_host`, with their tests, and `wz-capi-core::scouting` re-exports
+  them. The window's tests run over loopback sockets with a responder thread standing in for the
+  group, so they need no multicast host: a survey runs its whole budget and collects every
+  answer, a lookup ends at the first, a window nobody answers ends empty at its deadline, our own
+  Scout and a Hello that does not decode or advertises no address are named and passed over, a
+  dead ask socket does not end the window, and the group socket asks when no other can. Next: the
+  pico `scout` feature and the open-time lookup without the tokio engine (Sc4).
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected

@@ -26,6 +26,8 @@
 //! requesting end of a query, liveliness and the advanced plane.
 
 mod engine;
+#[cfg(feature = "scout")]
+pub mod scout;
 #[cfg(test)]
 mod tests;
 

@@ -366,6 +366,13 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "subscriber",
         frozenset({"transport-shm"}),
     ),
+    "wz-capi-coop": (
+        "the cooperative engine behind a wz C ABI: a workspace-internal rlib the C ABI crate "
+        "selects as its engine, with no path a C program names; its one feature that gates a "
+        "public item, `scout`, is the blocking scouting window and is run by this crate's own "
+        "tests over loopback sockets",
+        frozenset({"scout"}),
+    ),
     "wz-capi-c": (
         "a C ABI crate: its public contract is the SYMBOL SET a C program "
         "links against, not a Rust path a consumer names, and that contract "
@@ -1203,7 +1210,10 @@ FAMILY_DIFFERENTIAL_MANIFEST = ROOT / "conformance" / "differential" / "Cargo.to
 # about who consumes the crate (the tokio runtime, whose `link-interfaces` and `locator-iface`
 # forward to it, and the cooperative host), and no predicate above holds a row to that. Its one
 # feature, `locator-iface`, is run by the crate's own tests.
-PROSE_ONLY: frozenset[str] = frozenset({"wz-capi-core", "wz-host-net"})
+#
+# `wz-capi-coop` lands here for the same reason: its row's reason is a claim about who consumes
+# the crate (the C ABI crate that selects the engine) and no predicate above holds a row to that.
+PROSE_ONLY: frozenset[str] = frozenset({"wz-capi-core", "wz-capi-coop", "wz-host-net"})
 
 
 class Dep(typing.NamedTuple):

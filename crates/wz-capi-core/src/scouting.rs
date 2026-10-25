@@ -33,39 +33,28 @@
 //! ## When and in what order the closure is called
 //!
 //! Both are upstream's, and both are easy to get wrong in wz's favour — see
-//! `deliver_in_upstream_order` (private; a code span, not an intra-doc link,
-//! because the target does not exist in the public rustdoc). Upstream calls
+//! `deliver_in_upstream_order` (the session's, re-exported below). Upstream calls
 //! the closure AFTER the window
 //! (`_z_scout_inner` returns a list; only then is it drained) and in REVERSE
 //! arrival order (the list is built by prepending). A per-Hello, arrival-order
 //! delivery would be nicer and would still be a divergence.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 
 use wz_runtime_tokio::scouting_glue::ScoutedHello;
 
-/// zenoh's default scouting multicast locator.
-pub const MULTICAST_LOCATOR_DEFAULT: &str = "udp/224.0.0.224:7446";
-/// The default scouting budget, in milliseconds (pico
-/// `Z_CONFIG_SCOUTING_TIMEOUT_DEFAULT`, `config.h.in:141`).
-pub const SCOUTING_TIMEOUT_DEFAULT_MS: u64 = 1000;
-/// The default `what` mask (pico `Z_CONFIG_SCOUTING_WHAT_DEFAULT`,
-/// `config.h.in:149`) = ROUTER|PEER.
-pub const SCOUTING_WHAT_DEFAULT: u8 = 0x03;
+// The locator grammar, the defaults and the delivery order of a scouting window are the session's
+// (`wz_session_core::scouting_host`): the cooperative host reads the same ones. Re-exported here
+// so the paths of the two C ABIs stay.
+pub use wz_session_core::scouting_host::{
+    deliver_in_upstream_order, parse_multicast_locator, MULTICAST_LOCATOR_DEFAULT,
+    SCOUTING_TIMEOUT_DEFAULT_MS, SCOUTING_WHAT_DEFAULT, SCOUT_TICK_MS,
+};
+
 /// One discovery cycle, for a caller that wants a FIRST-ANSWER lookup rather
 /// than a survey and re-enters until it gets one (the `wz-ap-demo` `--scout`
 /// path). `z_scout` does not use it: its window is the caller's whole budget.
 pub const SCOUT_CYCLE_MS: u64 = 1000;
-/// The scouting drive-loop tick.
-pub const SCOUT_TICK_MS: u64 = 50;
-
-/// Parse a `udp/ADDR:PORT` multicast locator. An IPv6 group is bracketed, as a socket address
-/// writes it (`udp/[ff05::231]:7446`).
-pub fn parse_multicast_locator(locator: &str) -> Option<(IpAddr, u16)> {
-    let rest = locator.strip_prefix("udp/")?;
-    let addr: SocketAddr = rest.parse().ok()?;
-    Some((addr.ip(), addr.port()))
-}
 
 /// A fresh random zid for a scout that has none configured.
 ///
@@ -80,33 +69,6 @@ pub fn fresh_scout_zid() -> Vec<u8> {
         zid = [0xA5; 16];
     }
     zid.to_vec()
-}
-
-/// Hand the window's peers to `on_hello` in UPSTREAM'S DELIVERY ORDER, which is
-/// the REVERSE of arrival, and return how many were delivered.
-///
-/// This is not a detail — it is observable through both ABIs. `_z_scout_inner`
-/// accumulates with `_z_hello_slist_push_empty`, which PREPENDS
-/// (`collections/list.c:287-295`), and `_z_scout` then drains from the head
-/// (`net/primitives.c:81-90`). So a pico program's closure sees the LAST
-/// responder first. wz's accumulator is a `Vec` in arrival order — the useful
-/// order for everything else in this tree — so the reversal lives here, at the
-/// one seam where upstream's contract is being imitated, rather than in the
-/// accumulator where it would be a strange rule with no reason attached.
-///
-/// Delivery happens AFTER the window for the same reason: upstream's callback
-/// is not called from inside the scouting loop. `_z_scout_inner` returns a list
-/// and only then is it drained, so a pico program prints nothing for the whole
-/// budget and then everything at once. Firing per-Hello would be a divergence
-/// in wz's favour, which is still a divergence.
-fn deliver_in_upstream_order(
-    hellos: &[ScoutedHello],
-    mut on_hello: impl FnMut(&ScoutedHello),
-) -> usize {
-    for hello in hellos.iter().rev() {
-        on_hello(hello);
-    }
-    hellos.len()
 }
 
 /// Drive scouting for `budget_ms`, then invoke `on_hello` once per peer that
@@ -235,26 +197,6 @@ fn scout_window(
 mod tests {
     use super::*;
 
-    /// The locator grammar, including the two shapes that must be REJECTED
-    /// rather than silently defaulted — a scout onto a mis-parsed group finds
-    /// nothing and looks like a network problem.
-    #[test]
-    fn the_multicast_locator_grammar_is_exact() {
-        assert_eq!(
-            parse_multicast_locator(MULTICAST_LOCATOR_DEFAULT),
-            Some((IpAddr::from([224, 0, 0, 224]), 7446))
-        );
-        assert!(parse_multicast_locator("tcp/224.0.0.224:7446").is_none());
-        assert!(parse_multicast_locator("udp/224.0.0.224").is_none());
-        assert!(parse_multicast_locator("").is_none());
-        // An IPv6 group is bracketed, and an unbracketed one is not a socket address.
-        assert_eq!(
-            parse_multicast_locator("udp/[ff05::231]:7446"),
-            Some((IpAddr::from([0xff05, 0, 0, 0, 0, 0, 0, 0x231]), 7446))
-        );
-        assert!(parse_multicast_locator("udp/ff05::231:7446").is_none());
-    }
-
     /// A scout with no configured id announces a fresh sixteen-byte one. Reading
     /// a configured id is [`crate::drive::ConfiguredZid`]'s, and the reading
     /// that used to sit here (per byte, in written order, even length only) was
@@ -262,45 +204,5 @@ mod tests {
     #[test]
     fn a_fresh_scout_zid_is_sixteen_bytes() {
         assert_eq!(fresh_scout_zid().len(), 16);
-    }
-
-    fn hello(zid: u8) -> ScoutedHello {
-        ScoutedHello {
-            version: 0x09,
-            whatami: None,
-            zid: vec![zid],
-            locators: Vec::new(),
-        }
-    }
-
-    /// Both ABIs' `z_scout` hands its closure the LAST responder first, because
-    /// upstream's accumulator is built by PREPENDING
-    /// (`_z_hello_slist_push_empty`, `collections/list.c:287-295`) and `_z_scout`
-    /// drains from the head (`net/primitives.c:81-90`).
-    ///
-    /// wz records in arrival order, so this seam is the only place the two
-    /// orders meet. Three peers, not two: a two-element reversal is also a swap,
-    /// a rotation, and a sort — three tells them apart.
-    #[test]
-    fn the_closure_sees_the_last_responder_first() {
-        let recorded = [hello(0xA1), hello(0xB2), hello(0xC3)];
-        let mut seen = Vec::new();
-        let n = deliver_in_upstream_order(&recorded, |h| seen.push(h.zid[0]));
-        assert_eq!(n, 3, "every recorded peer is delivered");
-        assert_eq!(
-            seen,
-            vec![0xC3, 0xB2, 0xA1],
-            "reverse arrival order — upstream's slist is newest-first"
-        );
-    }
-
-    /// The empty window delivers nothing and says so, which is the count both
-    /// ABIs' `z_scout` uses to decide between upstream's "Did not find any zenoh
-    /// process." and "Dropping scout results." lines.
-    #[test]
-    fn an_empty_window_delivers_nothing() {
-        let mut seen = 0usize;
-        assert_eq!(deliver_in_upstream_order(&[], |_| seen += 1), 0);
-        assert_eq!(seen, 0);
     }
 }
