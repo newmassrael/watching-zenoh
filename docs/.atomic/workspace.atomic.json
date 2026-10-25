@@ -286754,6 +286754,46 @@
         "The wider hot path reading stays open: where the remaining 460 bytes of a delivered copy go."
       ]
     },
+    "Round 3620": {
+      "decision_summary": "Step Sc1 of scouting on the cooperative engine: the active-scouting window moves out of the tokio runtime. Its rules (what a Scout says, the Hello decode, which datagrams a window takes as an answer and which it names and drops, when it is over) were in wz-runtime-tokio's scouting_glue under a tokio driver and timer. They are now wz_session_core::scouting_host: ScoutingActions and ScoutActionsBinding generic over the runtime's locks, decode_scouted_hello, new_scouting_engine, and a pump of free functions (open_window, window_sent, window_datagram, window_tick, window_resolved, window_outcome) with ScoutWindow holding them as one value, so a host with any socket and clock can drive it. The tokio drive loop is a shell over the pump; ScoutingActions and ScoutActionsBinding stay nameable from the runtime as aliases, so no caller moved. No behaviour changes: the 15 scouting_glue tests pass over the pump.",
+      "changes_bullets": [
+        "wz-session-core: module scouting_host (feature scouting-active with codec-scout and codec-hello), registered in lib.rs; constant_session_id is also built under scouting-active.",
+        "wz-runtime-tokio: scouting_glue re-exports the hello types and outcome from it, aliases ScoutingActions and ScoutActionsBinding over the tokio runtime, and drive_scouting_until_resolved calls the pump.",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-session-core (all features, and with scouting-active alone), wz-runtime-tokio (all features, and with scouting-active), wz-capi-core, wz-capi-c, wz-capi-pico, wz-ap-demo.",
+        "Tests: wz-runtime-tokio scouting_glue 15 passed, wz-capi-core scouting 13 passed; the multicast scouting loopback tests are ignored without a multicast host, as before.",
+        "C1bz for wz-session-core, wz-runtime-tokio, wz-capi-core and wz-capi-pico spends exactly their budgets; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next, scouting step Sc2: the multicast socket construction (McastPlan, McastSocketConfig, MulticastLoopback and the interface facts of link_interfaces) into a runtime-neutral crate both the tokio runtime and the cooperative host use; wz-runtime-posix's PosixGroupTransport keeps its public API (its owner asked).",
+        "Then Sc3, a blocking scouting window over that crate for the cooperative build, and Sc4, the pico scout feature without the tokio engine; then the advanced plane and the listening role.",
+        "Read the hosted runs of the earlier pushes at the start of the next round."
+      ],
+      "publishable_decision_summary": "Step Sc1 of scouting on the cooperative engine: the active-scouting window moves out of the tokio runtime. Its rules (what a Scout says, the Hello decode, which datagrams a window takes as an answer and which it names and drops, when it is over) were in wz-runtime-tokio's scouting_glue under a tokio driver and timer. They are now wz_session_core::scouting_host: ScoutingActions and ScoutActionsBinding generic over the runtime's locks, decode_scouted_hello, new_scouting_engine, and a pump of free functions (open_window, window_sent, window_datagram, window_tick, window_resolved, window_outcome) with ScoutWindow holding them as one value, so a host with any socket and clock can drive it. The tokio drive loop is a shell over the pump; ScoutingActions and ScoutActionsBinding stay nameable from the runtime as aliases, so no caller moved. No behaviour changes: the 15 scouting_glue tests pass over the pump.",
+      "publishable_changes_bullets": [
+        "wz-session-core: module scouting_host (feature scouting-active with codec-scout and codec-hello), registered in lib.rs; constant_session_id is also built under scouting-active.",
+        "wz-runtime-tokio: scouting_glue re-exports the hello types and outcome from it, aliases ScoutingActions and ScoutActionsBinding over the tokio runtime, and drive_scouting_until_resolved calls the pump.",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-session-core (all features, and with scouting-active alone), wz-runtime-tokio (all features, and with scouting-active), wz-capi-core, wz-capi-c, wz-capi-pico, wz-ap-demo.",
+        "Tests: wz-runtime-tokio scouting_glue 15 passed, wz-capi-core scouting 13 passed; the multicast scouting loopback tests are ignored without a multicast host, as before.",
+        "C1bz for wz-session-core, wz-runtime-tokio, wz-capi-core and wz-capi-pico spends exactly their budgets; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next, scouting step Sc2: the multicast socket construction (McastPlan, McastSocketConfig, MulticastLoopback and the interface facts of link_interfaces) into a runtime-neutral crate both the tokio runtime and the cooperative host use; wz-runtime-posix's PosixGroupTransport keeps its public API (its owner asked).",
+        "Then Sc3, a blocking scouting window over that crate for the cooperative build, and Sc4, the pico scout feature without the tokio engine; then the advanced plane and the listening role.",
+        "Read the hosted runs of the earlier pushes at the start of the next round."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
