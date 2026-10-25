@@ -37,6 +37,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use wz_integration_tests::bounded::BoundedOutput as _;
 use wz_integration_tests::common::{
     graceful_terminate, read_captured, wait_for_substring, wait_for_tcp_accept_alive,
     zenoh_core_example_binary, ChildGuard,
@@ -109,7 +110,7 @@ fn ask(key: &str) -> Asked {
         .args(["-s", key, "-o", "3000", "-m", "client", "-e"])
         .arg(endpoint())
         .arg("--no-multicast-scouting")
-        .output()
+        .output_bounded()
         .expect("run z_get");
     let took = began.elapsed();
     let text = format!(

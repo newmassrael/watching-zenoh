@@ -262,7 +262,7 @@ impl Fixture {
         panic!("the REST plugin never listened\n{}", self.report());
     }
 
-    fn output(&self) -> String {
+    fn node_output(&self) -> String {
         read_captured(&mut self.node_out.try_clone().expect("dup"))
     }
 
@@ -270,7 +270,7 @@ impl Fixture {
         let mut router = self.router_out.try_clone().expect("dup");
         format!(
             "--- node ---\n{}\n--- zenohd ---\n{}",
-            self.output(),
+            self.node_output(),
             read_captured(&mut router)
         )
     }
@@ -327,9 +327,9 @@ fn zenohd_asker_keeps_a_reply_and_answers_from_it_when_the_responder_is_gone() {
     // The responder goes: the node keeps asking, each query ends with its final and no reply, and
     // the cell is as it was.
     graceful_terminate(responder.child_mut(), Duration::from_secs(5));
-    let (_, replies, finals) = last_asked(&fx.output()).expect("an asked line");
+    let (_, replies, finals) = last_asked(&fx.node_output()).expect("an asked line");
     std::thread::sleep(Duration::from_millis(2_500));
-    let (_, replies_later, finals_later) = last_asked(&fx.output()).expect("an asked line");
+    let (_, replies_later, finals_later) = last_asked(&fx.node_output()).expect("an asked line");
     assert!(
         finals_later >= finals + 3,
         "the node did not keep asking: {finals} finals, then {finals_later}\n{}",
@@ -386,7 +386,7 @@ fn zenohd_restarted_the_asker_asks_again_with_the_next_session() {
         "the node did not notice its router had gone\n{}",
         fx.report()
     );
-    let (asked_before, _, _) = last_asked(&fx.output()).expect("an asked line");
+    let (asked_before, _, _) = last_asked(&fx.node_output()).expect("an asked line");
 
     // A router comes up where the node dials, with a responder of another value: the node dials it
     // and asks again, and hears it.
@@ -399,14 +399,14 @@ fn zenohd_restarted_the_asker_asks_again_with_the_next_session() {
         .expect("an address");
     let mut second = start_responder(SECOND);
     fx.wait_for_reply(SECOND);
-    let (asked_after, _, _) = last_asked(&fx.output()).expect("an asked line");
+    let (asked_after, _, _) = last_asked(&fx.node_output()).expect("an asked line");
     assert!(
         asked_after > asked_before,
         "the node asked no more after the router came back: {asked_before}, then {asked_after}\n{}",
         fx.report()
     );
     assert!(
-        fx.output().matches(ESTABLISHED).count() >= 2,
+        fx.node_output().matches(ESTABLISHED).count() >= 2,
         "the node never established a second session\n{}",
         fx.report()
     );
