@@ -235,7 +235,6 @@ ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "dispatcher": 10,
     "establishment": 20,
     "ext": 4,
-    "net": 29,
     "router": 1,
     "storages_mgt": 7,
     "unicast": 11,
@@ -260,7 +259,7 @@ def rootless_undeclared_budget() -> int:
 #: The conservation check, as in the source gate: line + bare + residue. A
 #: declaration moves an occurrence between the three and leaves this alone; a
 #: new citation raises it whatever the others were set to.
-ROOTLESS_TOTAL_BUDGET = 206
+ROOTLESS_TOTAL_BUDGET = 177
 
 
 def live_reasons(root: pathlib.Path | None = None) -> dict[str, str]:

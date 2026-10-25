@@ -28,6 +28,17 @@ fn zenoh_util::lib_search_dirs::LibSearchDirs::from_specs<T: core::convert::AsRe
 fn zenoh_util::log::init_log_from_env_or<S>(S) where S: core::convert::AsRef<str>
 fn zenoh_util::log::init_log_with_callback(impl 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(&tracing_core::metadata::Metadata<'_>) -> bool, impl 'static + core::marker::Send + core::marker::Sync + core::ops::function::Fn(zenoh_util::log::LogRecord))
 fn zenoh_util::log::try_init_log_from_env()
+fn zenoh_util::net::get_index_of_interface(core::net::ip_addr::IpAddr) -> zenoh_result::ZResult<u32>
+fn zenoh_util::net::get_interface(&str) -> zenoh_result::ZResult<core::option::Option<core::net::ip_addr::IpAddr>>
+fn zenoh_util::net::get_interface_names_by_addr(core::net::ip_addr::IpAddr) -> zenoh_result::ZResult<alloc::vec::Vec<alloc::string::String>>
+fn zenoh_util::net::get_ipv4_ipaddrs(core::option::Option<&str>, bool) -> alloc::vec::Vec<core::net::ip_addr::IpAddr>
+fn zenoh_util::net::get_ipv6_ipaddrs(core::option::Option<&str>, bool) -> alloc::vec::Vec<core::net::ip_addr::IpAddr>
+fn zenoh_util::net::get_local_addresses(core::option::Option<&str>) -> zenoh_result::ZResult<alloc::vec::Vec<core::net::ip_addr::IpAddr>>
+fn zenoh_util::net::get_multicast_interfaces() -> alloc::vec::Vec<core::net::ip_addr::IpAddr>
+fn zenoh_util::net::get_unicast_addresses_of_interface(&str) -> zenoh_result::ZResult<alloc::vec::Vec<core::net::ip_addr::IpAddr>>
+fn zenoh_util::net::get_unicast_addresses_of_multicast_interfaces() -> alloc::vec::Vec<core::net::ip_addr::IpAddr>
+fn zenoh_util::net::set_bind_to_device_tcp_socket(&tokio::net::tcp::socket::TcpSocket, &str) -> zenoh_result::ZResult<()>
+fn zenoh_util::net::set_bind_to_device_udp_socket(&tokio::net::udp::UdpSocket, &str) -> zenoh_result::ZResult<()>
 fn zenoh_util::time_range::TimeBound::resolve_at(Self, std::time::SystemTime) -> zenoh_util::time_range::TimeBound<std::time::SystemTime> ; in impl zenoh_util::time_range::TimeBound<zenoh_util::time_range::TimeExpr>
 fn zenoh_util::time_range::TimeExpr::checked_add(&Self, f64) -> core::option::Option<Self> ; in impl zenoh_util::time_range::TimeExpr
 fn zenoh_util::time_range::TimeExpr::checked_resolve_at(&Self, std::time::SystemTime) -> core::option::Option<std::time::SystemTime> ; in impl zenoh_util::time_range::TimeExpr
@@ -136,6 +147,7 @@ macro zenoh_util::concat_enabled_features
 mod zenoh_util::ffi
 mod zenoh_util::lib_search_dirs
 mod zenoh_util::log
+mod zenoh_util::net
 mod zenoh_util::time_range
 struct zenoh_util::IntoIter
 struct zenoh_util::InvalidLibSearchDir

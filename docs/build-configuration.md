@@ -153,15 +153,16 @@ original reproduced by naming it. Three things follow from it:
   each crate's descriptors, read each crate's buffers and read what each crate's provider
   allocated with the other; the codec of a pointer into shared memory is `zenoh-codec`'s
   `shared-memory` arm),
-  `zenoh-util` (second slice of four: the time range language of a selector, the logging setup and
+  `zenoh-util` (third slice of four: the time range language of a selector, the logging setup and
   its callback layer, the zenoh home, the macro that lists the enabled features, the library loader
-  with its search directories and the ffi helpers, 151 of 195 default lines and 153 of 197 with
-  `test`, the network interfaces and the timer to come; held to upstream's by generated and drawn
-  strings, by scenarios that each run in a process of their own, since the home and the logging
-  subscriber are process-global, and by a loader that loads real shared libraries from a tree of
-  fixtures; the time range parser refuses a duration that is a lone unit or that an instant cannot
-  hold, and the loader skips a file name that is its prefix and its suffix at once, where upstream
-  panics)
+  with its search directories, the ffi helpers and the network interface functions, 163 of 195
+  default lines and 165 of 197 with `test`, the timer to come; held to upstream's by generated and
+  drawn strings, by scenarios that each run in a process of their own, since the home and the
+  logging subscriber are process-global, by a loader that loads real shared libraries from a tree
+  of fixtures, and by the interface functions asked of the interfaces of the machine; the time
+  range parser refuses a duration that is a lone unit or that an instant cannot hold, the loader
+  skips a file name that is its prefix and its suffix at once, where upstream panics, and the
+  Windows adapter filter moves on to the next adapter, where upstream asks the first for ever)
   and `zenoh` (`crates/wz-zenoh`, empty: 709 of 709
   default lines missing, named `wz-zenoh` until the slice that makes it patchable renames it).
   Behaviour is held beside the surface by Layer E18 (`conformance/`): a differential test of each

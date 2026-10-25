@@ -25,6 +25,7 @@ use lazy_static::lazy_static;
 pub mod ffi;
 mod lib_loader;
 pub mod lib_search_dirs;
+pub mod net;
 pub mod time_range;
 
 pub use lib_loader::*;

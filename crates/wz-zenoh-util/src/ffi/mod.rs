@@ -51,9 +51,12 @@ pub unsafe fn pstr_to_string(ptr: *mut i8) -> String {
     String::from_utf8_lossy(array).to_string()
 }
 
+// NOTE (debt-910): the sentence below is upstream's, kept as it is, since the documentation of a
+// type that derives `JsonSchema` is the description of its schema and a changed word is a changed
+// schema.
 /// Struct used to safely exchange data in json format in plugins.
 /// It is not entirely abi stable due to using String, but should do
-/// for now (debt-910) since we require plugins to use the same version of rustc and
+/// for now since we require plugins to use the same version of rustc and
 /// same version of zenoh.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 #[serde(from = "serde_json::Value")]
@@ -106,9 +109,10 @@ impl JsonValue {
     }
 }
 
+// NOTE (debt-910): upstream's sentence, kept as it is, like the one of `JsonValue`.
 /// Struct used to safely exchange data in json format in plugins.
 /// It is not entirely abi stable due to using String, but should do
-/// for now (debt-910) since we require plugins to use the same version of rustc and
+/// for now since we require plugins to use the same version of rustc and
 /// same version of zenoh.
 #[derive(Debug, Clone)]
 pub struct JsonKeyValueMap(String);

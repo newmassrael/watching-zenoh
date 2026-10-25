@@ -27,7 +27,7 @@ anyhow = { version = "1", default-features = false, features = ["std"] }
 # multi-threaded scheduler the tests run on (`ZRuntime::block_in_place` refuses a current-thread one).
 up_runtime = { package = "zenoh-runtime", version = "=1.10.1" }
 wz_runtime = { package = "zenoh-runtime", path = "../../crates/wz-zenoh-runtime" }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 # `zenoh-core`: the pair again. Each crate's own `zenoh-runtime` is the same pair's (upstream's from
 # the registry, wz's by path), so the two pools stay apart and neither crate is measured on the
 # other's. `tracing` is what `zparse!` expands to in the caller.

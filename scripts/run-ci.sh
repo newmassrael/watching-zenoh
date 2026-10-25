@@ -23710,6 +23710,9 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh-util loader)" 11 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_util_loader || return 1
+    _runci_guarded_test "Layer E18 (differential, zenoh-util net)" 7 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_util_net || return 1
     # The shared-memory arm of zenoh-codec is its own package (`conformance/differential-shm`): with
     # the feature a Put has an ext_shm field and a ZSlice a kind, so it cannot share a build with the
     # tests of the arm every build has.

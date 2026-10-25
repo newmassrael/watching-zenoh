@@ -660,7 +660,6 @@ ROOTLESS_RESIDUE_BY_SEGMENT: dict[str, int] = {
     "ext": 15,
     "lowlatency": 4,
     "memory_backend": 11,
-    "net": 123,
     "protocol": 8,
     "replication": 4,
     "routing": 2,
@@ -776,7 +775,7 @@ def rootless_undeclared_budget() -> int:
 # R3538 — 725 -> 677, the `core` and `transport` occurrences (48) that now resolve to the
 # `zenoh-protocol` crate's own modules of those names; their rows left the table with them.
 # R3540 — 677 -> 656, the 21 `common` occurrences that resolve to that crate's `common` module.
-ROOTLESS_TOTAL_BUDGET = 627
+ROOTLESS_TOTAL_BUDGET = 504
 
 #: A LIVE invocation of the RESOLUTION arm. R2242 split this gate in two and,
 #: in doing so, made `--resolve` a flag someone can simply stop passing: delete
