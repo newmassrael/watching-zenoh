@@ -392,6 +392,20 @@ it behaves as pico behaves in both of pico's threading arms.
   `client_only_dials_a_listener` (a transport listed with its streamed link, a listener with
   history told of it and of its departure, the admin space answering the listener's get and
   silent once stopped; Layer C1co, now 11 a leg with the answering end and 8 without).
+- 2026-10-25: scouting, step Sc1 of four: the window as a value a host pumps. `z_scout` and the
+  open-time lookup run an active-scouting window: one Scout out, Hellos back, a budget. Its rules
+  were in the tokio runtime's `scouting_glue` under a tokio link driver and a tokio timer, though
+  nothing in them is tokio's. They are now `wz_session_core::scouting_host`: the actions and the
+  Hello decode, the generated machine's builder, and a pump of free functions (`open_window`,
+  `window_sent`, `window_datagram`, `window_tick`, `window_resolved`, `window_outcome`) that a host
+  calls with the datagrams it received and the time it read; `ScoutWindow` holds them as one
+  value. The tokio drive loop is now a shell over the pump (a `select!` between its driver and its
+  timer), and `ScoutingActions` and `ScoutActionsBinding` stay nameable from the runtime as
+  aliases over the session's types, so no caller moved. The behaviour is unchanged: the 15 tests
+  of `scouting_glue` pass over the pump. Next: the multicast socket construction (`McastPlan`,
+  its config and the interface facts under it, now in the tokio crate) into a runtime-neutral
+  crate both hosts use (Sc2), a blocking window over it for the cooperative build (Sc3), and the
+  pico `scout` feature without the tokio engine (Sc4).
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected

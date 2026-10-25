@@ -57,20 +57,17 @@
 //! never advances). The FSM therefore arms no timer; it owns only the
 //! `scout.timer.elapsed` transition. This loop owns the clock: it measures
 //! the [`ScoutParams::timeout_ms`] window against the runtime's monotonic
-//! clock and raises [`ScoutingEvent::ScoutTimerElapsed`] when it elapses.
+//! clock and raises `ScoutingEvent::ScoutTimerElapsed` when it elapses.
 //! Mirrors the reassembly dispatcher's deadline-sweep split (FSM owns the
 //! transition, runtime owns the clock; the value stays spec-sourced).
 
 use std::sync::Arc;
 
-use sce_forge_runtime::codec::SceCursor;
 use sce_rust_runtime::Engine;
 
-use wz_codecs::hello::Hello;
-use wz_codecs::scout::Scout;
-use wz_codecs::whatami::WhatAmI;
+#[cfg(test)]
 use wz_codecs::wire_const;
-use wz_session_core::link::{LinkEvent, LostCause, TxFrame};
+use wz_session_core::link::{LinkEvent, TxFrame};
 use wz_session_core::reliability::Reliability;
 // R311y428 — `pub` (was a private `use`): re-exported alongside the
 // `ScoutingActions::new` it parameterises, mirroring `session_glue`'s
@@ -84,429 +81,50 @@ use wz_session_core::reliability::Reliability;
 // this module's READ surface: `ScoutingActions::ignored_datagrams` returns it,
 // so a caller must be able to name it without depending on the core crate.
 // R2610 — `hello_advances_window` joins them for the same reason: it is the
-// rule the drive loop below applies to decide whether an observed Hello ends
-// the cycle, and a caller reading `ignored_datagrams` cannot interpret a
+// rule the window applies to decide whether an observed Hello ends the cycle,
+// and a caller reading `ignored_datagrams` cannot interpret a
 // `LocatorlessHello` entry without being able to name it.
 pub use wz_session_core::scout_initiator::{
     classify_ignored_scout_rx, hello_advances_window, ScoutRxIgnored,
 };
 pub use wz_session_core::scout_params::ScoutParams;
-use wz_session_core::scout_trace::ScoutTrace;
-// The generated engine-free action trait. Aliased so the trait name does
-// not shadow the host-side [`ScoutingActions`] state struct below (the
-// struct holds the shared staging slots the caller reads; the trait is
-// what the generated policy dispatches through).
-use wz_session_core::scouting::ScoutingActions as ScoutingActionsTrait;
+// The window itself (the actions, the hello decode, the machine and its pump) is the session's
+// (`wz_session_core::scouting_host`): it names no socket and no executor, so the cooperative
+// host pumps the same value. What stays here is this runtime's half, the drive loop that owns a
+// tokio link driver and a tokio timer.
+#[cfg(test)]
+use wz_codecs::{scout::Scout, whatami::WhatAmI};
+use wz_session_core::scouting::ScoutingPolicy;
+#[cfg(test)]
 use wz_session_core::scouting::{
-    ScoutingEvent, ScoutingHelloReceivedPayload, ScoutingInject, ScoutingPolicy, ScoutingState,
+    ScoutingEvent, ScoutingHelloReceivedPayload, ScoutingInject, ScoutingState,
+};
+pub use wz_session_core::scouting_host::{decode_scouted_hello, ScoutOutcome, ScoutedHello};
+use wz_session_core::scouting_host::{
+    open_window, window_datagram, window_outcome, window_resolved, window_sent, window_tick,
 };
 
-use wz_runtime_core::{Runtime, TimeSource};
+use wz_runtime_core::TimeSource;
 
 use crate::runtime_impl::TokioRuntime;
 use crate::LinkDriver;
 
-/// Shared host state for one active-scouting cycle.
-///
-/// Distinct from [`crate::session_glue::SessionLinkActions`] (the session
-/// handshake bundle): scouting is a pre-session, untrusted-link
-/// subsystem, so its parameters / trace / staging slots are not folded
-/// into the session bundle. Generic over the runtime `R` to match the
-/// crate's `R::Mutex` convention; the AP profile (`TokioRuntime`, the
-/// only one that compiles `scouting-active` today since it implies
-/// `transport-link-udp`) is constructed via [`ScoutingActions::new`].
-///
-/// The caller holds this behind an `Arc`; [`new_scouting_engine`] wraps a
-/// clone of that `Arc` in a [`ScoutActionsBinding`] for the policy to own,
-/// so the caller can still read [`ScoutingActions::discovered_locator`] /
-/// [`ScoutingActions::trace_snapshot`] after the policy takes the binding.
-pub struct ScoutingActions<R: Runtime = TokioRuntime> {
-    /// Inputs for the outbound Scout frame + the scouting deadline
-    /// (what / zid / timeout_ms).
-    pub params: ScoutParams,
-    /// Script-action dispatch counters, read in tests via
-    /// [`ScoutingActions::trace_snapshot`].
-    pub trace: R::Mutex<ScoutTrace>,
-    /// Set by `scout_emit`: the fully-framed Scout datagram
-    /// (`[S_MID_SCOUT][version][cbyte][zid]`) awaiting transmission. The
-    /// drive loop takes it, sends it on the multicast link, and clears
-    /// the slot.
-    pub pending_scout: R::Mutex<Option<Vec<u8>>>,
-    /// Set by the drive loop before it feeds `HelloReceived`: the DECODED
-    /// inbound Hello. `record_hello_and_emit` takes it and records it.
-    ///
-    /// The decode sits in the loop, not in the action, because that is
-    /// where zenoh-pico puts it: `__z_scout_loop` runs
-    /// `_z_scouting_message_decode` and `continue`s on failure
-    /// (`src/session/scout.c:71-76`) — a datagram that does not decode
-    /// never reaches the MID switch, so it can neither be recorded nor end
-    /// an `exit_on_first` window. Staging raw bytes here and decoding
-    /// inside the action put that verdict AFTER the transition had already
-    /// been taken, which on the exit-on-first arm let one malformed
-    /// datagram from anywhere on the untrusted multicast group close the
-    /// scouting window with nothing discovered.
-    pub pending_hello: R::Mutex<Option<ScoutedHello>>,
-    /// The discovered peer locator string (e.g. `"udp/127.0.0.1:7447"`),
-    /// extracted by `record_hello_and_emit` from the first Hello locator.
-    /// `None` until a Hello with a locator arrives.
-    ///
-    /// FIRST-WINS across the cycle: once a locator is captured a later
-    /// responder does not re-point it. Under [`ScoutParams::exit_on_first`]
-    /// there is one Hello per cycle so the rule is invisible; under the
-    /// survey arm it is what stops the LAST peer to answer from silently
-    /// replacing a dial target the caller may already have acted on. A
-    /// locator-less Hello never sets it (a peer that advertised no address is
-    /// in [`Self::hellos`], but there is nothing to dial).
-    ///
-    /// R311y520 — kept EXACTLY as it was. It is the pre-existing consumer
-    /// surface (`ScoutOutcome::Discovered`, `open_session_at`), and the
-    /// complete record now lives beside it in [`Self::hellos`]; widening this
-    /// field would have been a signature change for every caller that only
-    /// ever wanted a dial target.
-    pub discovered: R::Mutex<Option<String>>,
-    /// R311y520 — every Hello decoded in the window, in ARRIVAL order.
-    ///
-    /// The clause this replaces said "as zenoh-pico's `_z_hello_slist_t`
-    /// carries them", and that comparison is FALSE: `_z_hello_slist_push_empty`
-    /// prepends (`collections/list.c:287-295`), so pico's list is newest-first
-    /// and its `_z_scout` drain hands the user callback the LAST responder
-    /// first (`net/primitives.c:81-90`). Arrival order is this accumulator's
-    /// own choice; a consumer that must match upstream's delivery order
-    /// reverses on the way out, which is what `wz-capi-core`'s `run_scout`
-    /// does and tests.
-    ///
-    /// The pre-R311y520 code decoded a Hello, took `locators[0]`, and dropped
-    /// the rest on the floor: version, whatami and zid never reached the
-    /// caller, a multi-locator Hello lost every locator but the first, and a
-    /// LOCATOR-LESS Hello was indistinguishable from no discovery at all —
-    /// where pico pushes it to the list with an empty locator vector
-    /// (`src/session/scout.c:104-110`). A consumer cannot choose a peer by
-    /// role or identity if it never sees either, so this is the field that
-    /// makes the decoded Hello usable rather than merely sufficient to dial.
-    ///
-    /// Holds ONE entry per cycle when [`ScoutParams::exit_on_first`] is set
-    /// (the session-open implicit scout leaves `AwaitingHello` on the first
-    /// Hello), and every responder in the window when it is clear — pico's
-    /// `exit_on_first == false` survey arm, which the statechart's
-    /// self-transition carries since the round that split those two
-    /// `hello.received` transitions.
-    pub hellos: R::Mutex<Vec<ScoutedHello>>,
-    /// R2334 — every datagram the window OBSERVED and did not take as a Hello,
-    /// with the reason, in arrival order.
-    ///
-    /// This is the accumulator half of the `scouting-active` residual "wz drops
-    /// a non-Hello scouting datagram silently at the MID filter where pico logs
-    /// `_Z_ERR_MESSAGE_UNEXPECTED`". The residual asked for OBSERVABILITY, and
-    /// a log line alone is the wrong instrument for it: a log needle dies two
-    /// ways (the level is filtered, or the wording drifts) and a test that
-    /// greps for one is asserting on prose. So the verdict is recorded here,
-    /// where it is a value, and logged BESIDE this rather than instead of it.
-    ///
-    /// Together with [`Self::hellos`] this makes the loop's handling of inbound
-    /// datagrams CONSERVATIVE: every datagram the window receives lands in
-    /// exactly one of the two, so a future silent drop is not a missing log
-    /// line but a broken count. That conservation is what
-    /// `every_observed_datagram_lands_in_exactly_one_accumulator` asserts, and
-    /// it is the check that generalises past the two drops this round found.
-    pub ignored: R::Mutex<Vec<ScoutRxIgnored>>,
-}
+/// Shared host state for one active-scouting cycle, over the tokio runtime's locks unless a
+/// runtime is named: the session's own type (`wz_session_core::scouting_host::ScoutingActions`).
+pub type ScoutingActions<R = TokioRuntime> = wz_session_core::scouting_host::ScoutingActions<R>;
 
-/// One decoded Hello, carrying what zenoh-pico's `_z_hello_t` carries:
-/// protocol version, the peer's role, its zid, and ALL of its locators.
-///
-/// Mirrors `_z_hello_t` (`include/zenoh-pico/api/types.h`) field for field;
-/// pico builds it in `_z_scout_inner`'s HELLO arm (`src/session/scout.c:88-110`),
-/// including the `else` branch that clears the locator vector rather than
-/// dropping the hello.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScoutedHello {
-    /// Protocol version byte, verbatim from the wire.
-    pub version: u8,
-    /// The peer's role, decoded from the low 2 bits of the Hello `cbyte`.
-    /// `None` when those bits carry a value no role maps to — kept DISTINCT
-    /// from a role rather than defaulted, so "the peer said something we do
-    /// not understand" cannot read as "the peer said peer".
-    ///
-    /// The layout is verified against both references rather than assumed:
-    /// pico decodes `_whatami = _z_whatami_from_uint8(cbyte)` with
-    /// `1 << (b & 0x03)` (`src/protocol/codec/{message.c:675,transport.c:35-37}`),
-    /// and wz's own [`WhatAmI::from_wire`] masks the same two bits.
-    pub whatami: Option<WhatAmI>,
-    /// The peer's zid, verbatim. Its length rides the `cbyte` high nibble
-    /// (`zidlen = ((cbyte & 0xF0) >> 4) + 1`, pico `message.c:676`); the codec
-    /// has already applied that, so this is the id bytes alone.
-    pub zid: Vec<u8>,
-    /// EVERY locator the Hello advertised, in wire order. Empty for a
-    /// locator-less Hello — which is a real peer that simply advertised no
-    /// address, not an absence of discovery.
-    pub locators: Vec<String>,
-}
+/// The generated policy's owner of the shared state, over the tokio runtime unless a runtime is
+/// named.
+pub type ScoutActionsBinding<R = TokioRuntime> =
+    wz_session_core::scouting_host::ScoutActionsBinding<R>;
 
-/// Decode one inbound scouting datagram into a [`ScoutedHello`], or `None`
-/// when it is not a well-formed Hello.
-///
-/// This is zenoh-pico's `_z_scouting_message_decode` position in
-/// `__z_scout_loop` (`src/session/scout.c:71-76`): a datagram that fails to
-/// decode is `continue`d — it never reaches the MID switch, is never
-/// recorded, and never ends the window. Keeping the decode here rather than
-/// inside `record_hello_and_emit` is what lets the drive loop honour that,
-/// because a transition action runs AFTER its guard has already chosen the
-/// target state.
-///
-/// `bytes` is the whole datagram: the header byte carries the MID in its low
-/// 5 bits and the locators-present flag in bit 5, which the Hello body codec
-/// wants projected to its 1-bit `l`. The caller has already matched the MID.
-pub fn decode_scouted_hello(bytes: &[u8]) -> Option<ScoutedHello> {
-    let (&header, body) = bytes.split_first()?;
-    let l = (header >> 5) & 1;
-    let mut cursor = SceCursor::new(body);
-    let hello = Hello::decode(&mut cursor, l).ok()?;
-    Some(ScoutedHello {
-        version: hello.version,
-        // Low 2 bits of the cbyte; `None` when they name no role, rather
-        // than defaulting to one.
-        whatami: WhatAmI::from_wire(hello.cbyte),
-        zid: hello.zid.to_vec(),
-        // EVERY locator, in wire order. `None` (the L flag clear) and an
-        // empty list both mean "advertised no address" and both keep the
-        // hello.
-        locators: hello
-            .locators
-            .as_ref()
-            .map(|locs| locs.iter().map(|l| l.locator.to_string()).collect())
-            .unwrap_or_default(),
-    })
-}
-
-impl ScoutingActions<TokioRuntime> {
-    /// Construct an active-scouting state bundle for one discovery cycle.
-    /// `params` are captured by value; the staging slots start empty.
-    pub fn new(params: ScoutParams) -> Arc<Self> {
-        Arc::new(Self {
-            params,
-            trace: TokioRuntime::new_mutex(ScoutTrace::default()),
-            pending_scout: TokioRuntime::new_mutex(None),
-            pending_hello: TokioRuntime::new_mutex(None),
-            discovered: TokioRuntime::new_mutex(None),
-            hellos: TokioRuntime::new_mutex(Vec::new()),
-            ignored: TokioRuntime::new_mutex(Vec::new()),
-        })
-    }
-
-    /// Field-by-field `Copy` snapshot of the dispatch counters, lifted
-    /// out from under the runtime mutex.
-    pub fn trace_snapshot(&self) -> ScoutTrace {
-        self.trace.lock().unwrap().clone_via_copy()
-    }
-
-    /// The discovered locator, if a Hello locator was captured.
-    pub fn discovered_locator(&self) -> Option<String> {
-        self.discovered.lock().unwrap().clone()
-    }
-
-    /// R311y520 — every Hello decoded in this scouting cycle, in arrival
-    /// order, complete with role / zid / all locators. The pico-shaped read;
-    /// [`Self::discovered_locator`] stays the dial-target read.
-    ///
-    /// A non-empty result with an EMPTY `locators` is meaningful: a peer
-    /// answered and advertised no address. Before R311y520 that was
-    /// indistinguishable from silence.
-    pub fn scouted_hellos(&self) -> Vec<ScoutedHello> {
-        self.hellos.lock().unwrap().clone()
-    }
-
-    /// R2334 — every datagram this window observed and did not take as a
-    /// Hello, with the reason, in arrival order. The companion read to
-    /// [`Self::scouted_hellos`]; see [`Self::ignored`] for why the record is a
-    /// value rather than only a log line.
-    pub fn ignored_datagrams(&self) -> Vec<ScoutRxIgnored> {
-        self.ignored.lock().unwrap().clone()
-    }
-
-    /// Record one non-Hello observation and say so at a severity that matches
-    /// what the verdict MEANS here, which is not always what it means upstream.
-    ///
-    /// `Undecodable` and `UnknownMid` are upstream's two `_Z_ERROR` arms and
-    /// are anomalous here too. The other two are not: wz's scouting socket asks
-    /// for `IP_MULTICAST_LOOP` so its own Scout always comes back, and a second
-    /// node scouting the same group is ordinary. Logging either at pico's
-    /// severity would put a warning on wz's own traffic once per cycle — see
-    /// [`wz_session_core::scout_initiator`] for why wz can tell those two apart
-    /// at all when pico's `default:` arm cannot.
-    fn record_ignored(&self, why: ScoutRxIgnored) {
-        match &why {
-            ScoutRxIgnored::Undecodable => {
-                log::warn!("scouting window: received malformed message; ignored")
-            }
-            ScoutRxIgnored::UnknownMid { mid } => {
-                log::warn!("scouting window: received unexpected message (mid {mid:#04x}); ignored")
-            }
-            ScoutRxIgnored::SelfEcho => {
-                log::debug!("scouting window: our own Scout, looped back; ignored")
-            }
-            ScoutRxIgnored::ForeignScout => {
-                log::debug!("scouting window: another node's Scout; ignored")
-            }
-            // R2610 — zenoh's own severity for the same observation: at
-            // `zenoh/src/net/runtime/orchestrator.rs` @ `if !hello.locators.is_empty() {`
-            // the other branch is a `tracing::debug!`. A peer answering
-            // without an address is a peer,
-            // not an anomaly; what would be anomalous is the window ENDING
-            // there, which is the behaviour this verdict exists to record the
-            // absence of.
-            ScoutRxIgnored::LocatorlessHello => {
-                log::debug!("scouting window: a Hello advertising no locator; still searching")
-            }
-        }
-        self.ignored.lock().unwrap().push(why);
-    }
-}
-
-/// Thin newtype that carries the generated [`ScoutingActionsTrait`] impl
-/// for the policy to own by value. Wraps a clone of the caller's
-/// `Arc<`[`ScoutingActions`]`>` so the four native actions mutate the same
-/// shared staging slots the caller reads back (the orphan rule forbids
-/// impl'ing the foreign trait on `Arc<ScoutingActions>` directly).
-pub struct ScoutActionsBinding<R: Runtime = TokioRuntime> {
-    inner: Arc<ScoutingActions<R>>,
-}
-
-// Concrete `TokioRuntime` impl: the actions reach through the runtime
-// `R::Mutex` staging slots, and only `TokioRuntime`'s `Mutex` (std
-// `std::sync::Mutex`) exposes `.lock()` here — `scouting-active` is an
-// AP-only feature (it implies `transport-link-udp`), so the single
-// concrete impl matches `ScoutingActions<TokioRuntime>`'s inherent impl.
-impl ScoutingActionsTrait for ScoutActionsBinding<TokioRuntime> {
-    // docs/adr/0038: this host performs the machine's duties. `scout_emit`
-    // stages the datagram the drive loop sends and `record_hello_and_emit`
-    // writes the staging slots the caller reads back. `emit_scout_timeout` and
-    // `diag_scout_tx_failed` are notices that only count: a window that ends
-    // with no Hello leaves `discovered` unset whether or not they run.
-    const REALIZATION: ::sce_rust_runtime::ActionRealization =
-        ::sce_rust_runtime::ActionRealization::Performs;
-
-    /// Idle -> Sending entering transition — encode one Scout frame and
-    /// stage the datagram for the drive loop to transmit. Pure: no socket
-    /// access. Mirrors zenoh-pico scout.c:57 `_z_link_send_wbuf`, except
-    /// the send itself is the loop's job (see module doc).
-    fn scout_emit(&mut self) {
-        let a = &self.inner;
-        a.trace.lock().unwrap().scout_emit += 1;
-        let zid = &a.params.zid;
-        let mut scout = Scout::new();
-        scout.version = wz_codecs::wire_const::PROTOCOL_VERSION;
-        scout.set_what(a.params.what);
-        if !zid.is_empty() {
-            // I=1 + zid_len_m1 packed into cbyte, then the id bytes
-            // (scout.scxml present-if gate, zenoh-pico message.c:611-616).
-            scout.set_i(true);
-            scout.set_zid_len_m1((zid.len() - 1) as u8);
-            scout.zid = Some(zid);
-        }
-        let body = scout.encode_to_vec();
-        let mut datagram = Vec::with_capacity(1 + body.len());
-        // Scouting-message envelope: prepend the MID header byte the body
-        // codec omits (mirror of session_glue prepending T_MID_*).
-        datagram.push(wire_const::S_MID_SCOUT);
-        datagram.extend_from_slice(&body);
-        *a.pending_scout.lock().unwrap() = Some(datagram);
-    }
-
-    /// `hello.received` — record the staged Hello whole.
-    ///
-    /// This is pico's `_Z_MID_HELLO` arm and nothing else: push the decoded
-    /// hello onto the list (`src/session/scout.c:86-111`). The DECODE that
-    /// used to live here moved to the drive loop, where pico keeps it —
-    /// see [`ScoutingActions::pending_hello`] for why that position is
-    /// load-bearing rather than cosmetic.
-    ///
-    /// Runs on BOTH `hello.received` arms. pico pushes before it consults
-    /// `exit_on_first` (`:121`), so the mode decides whether the window
-    /// keeps running, never whether the peer is recorded.
-    ///
-    /// R311y520 — the record is the complete [`ScoutedHello`] (version /
-    /// whatami / zid / every locator), not a projection down to
-    /// `locators[0]`. `discovered` keeps its exact former meaning: the first
-    /// locator, for callers that only want a dial target. A Hello that
-    /// carries NO locator is recorded too — pico's `else` branch clears the
-    /// locator vector and keeps the hello (`scout.c:104-110`); dropping it
-    /// made a peer that answered indistinguishable from a window that timed
-    /// out.
-    fn record_hello_and_emit(&mut self) {
-        let a = &self.inner;
-        a.trace.lock().unwrap().record_hello += 1;
-        let Some(scouted) = a.pending_hello.lock().unwrap().take() else {
-            return;
-        };
-        // FIRST-WINS, and the survey arm is what made that a decision rather
-        // than a tautology. `discovered` is the DIAL TARGET read
-        // (`ScoutOutcome::Discovered`, `open_session_at`), and with
-        // exit_on_first there is one Hello per cycle so first and last are the
-        // same value. Under the survey arm a plain assignment would let the
-        // LAST peer to answer silently re-point a target the caller may
-        // already have acted on, and a locator-less late answer would not even
-        // clear it — the read would name a peer that is not the one it
-        // describes. Keeping the first captured locator also keeps the field's
-        // documented meaning intact.
-        {
-            let mut discovered = a.discovered.lock().unwrap();
-            if discovered.is_none() {
-                if let Some(first) = scouted.locators.first() {
-                    *discovered = Some(first.clone());
-                }
-            }
-        }
-        a.hellos.lock().unwrap().push(scouted);
-    }
-
-    /// AwaitingHello -> Idle on scout.timer.elapsed — the window expired
-    /// with no Hello. Observability only; `discovered` stays None.
-    fn emit_scout_timeout(&mut self) {
-        self.inner.trace.lock().unwrap().scout_timeout += 1;
-    }
-
-    /// Sending -> Idle on link.tx_failed — the multicast Scout transmit
-    /// errored. Fed by the drive loop when `driver.send` returns Err.
-    fn diag_scout_tx_failed(&mut self) {
-        self.inner.trace.lock().unwrap().tx_failed += 1;
-    }
-}
-
-/// Build a production scouting engine: an [`Engine`] over the generated
-/// engine-free [`ScoutingPolicy`], parameterised over a
-/// [`ScoutActionsBinding`] wrapping a clone of `actions`. The caller
-/// retains `actions` and drives the engine with
-/// [`drive_scouting_until_resolved`].
+/// Build a production scouting engine: an [`Engine`] over the generated engine-free
+/// [`ScoutingPolicy`], parameterised over a [`ScoutActionsBinding`] wrapping a clone of `actions`.
+/// The caller retains `actions` and drives the engine with [`drive_scouting_until_resolved`].
 pub fn new_scouting_engine(
     actions: &Arc<ScoutingActions>,
 ) -> Engine<ScoutingPolicy<ScoutActionsBinding>> {
-    let binding = ScoutActionsBinding {
-        inner: actions.clone(),
-    };
-    Engine::new(
-        wz_session_core::constant_session_id::built_under_constant_id(
-            ScoutingPolicy::new_with_session_id(SCOUTING_SESSION_ID, binding),
-            "the scouting session id",
-        ),
-    )
-}
-
-/// The id the scouting machine is built under (SCE ADR 0045: the host gives a machine its id,
-/// and the generated constructor refuses a text that is not an XML Nmtoken). A constant, so that
-/// refusal is never met.
-const SCOUTING_SESSION_ID: &str = "wz-scouting";
-
-/// Outcome of one active-scouting cycle.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ScoutOutcome {
-    /// A Hello arrived and a locator was captured.
-    Discovered(String),
-    /// The scouting window elapsed with no usable Hello.
-    TimedOut,
-    /// The scouting link was lost before resolution.
-    LinkLost(LostCause),
-    /// The bounded iteration budget was exhausted (test guard).
-    IterationLimit,
+    wz_session_core::scouting_host::new_scouting_engine(actions)
 }
 
 /// Drive one active-scouting cycle to resolution: emit a Scout on the
@@ -516,7 +134,7 @@ pub enum ScoutOutcome {
 /// The engine-free FSM arms no timer of its own (engine-free no_std binds
 /// `NoOpHal`, so a `<send delay>` would never fire), so this loop owns the
 /// clock: it records a monotonic start instant on entry and raises
-/// [`ScoutingEvent::ScoutTimerElapsed`] once `timeout_ms` has elapsed with
+/// `ScoutingEvent::ScoutTimerElapsed` once `timeout_ms` has elapsed with
 /// no Hello (driving the FSM's `AwaitingHello -> Idle` timeout). A Hello
 /// datagram races the `tick_interval_ms` cadence via `poll_event`, so the
 /// common case resolves as soon as the peer replies. The window duration
@@ -542,35 +160,26 @@ where
     D: LinkDriver,
     T: TimeSource,
 {
-    engine.initialize();
-    // Idle -> Sending: scout_emit fires on the entering transition and
-    // stages the datagram.
-    engine.process_event(ScoutingEvent::SessionOpenRequested);
-    // Transmit the staged Scout; the send result drives the
-    // Sending -> AwaitingHello (tx.done) vs Sending -> Idle (tx_failed)
-    // branch.
-    let staged = actions.pending_scout.lock().unwrap().take();
-    match staged {
+    // Idle -> Sending: the machine stages the Scout, and this loop transmits it. The send result
+    // drives the Sending -> AwaitingHello (tx.done) vs Sending -> Idle (tx_failed) branch; a
+    // Scout that was not staged (which should not happen) counts as a failed send, so the
+    // machine returns to Idle deterministically.
+    let sent = match open_window(actions, engine) {
         Some(datagram) => {
             let frame = TxFrame { bytes: &datagram };
-            match driver.send(&frame, Reliability::BestEffort).await {
-                Ok(()) => engine.process_event(ScoutingEvent::ScoutTxDone),
-                Err(_) => engine.process_event(ScoutingEvent::LinkTxFailed),
-            }
+            driver.send(&frame, Reliability::BestEffort).await.is_ok()
         }
-        // scout_emit failed to stage (should not happen) — treat as a
-        // transmit failure so the FSM returns to Idle deterministically.
-        None => engine.process_event(ScoutingEvent::LinkTxFailed),
-    }
+        None => false,
+    };
+    window_sent(engine, sent);
 
-    // The host owns the scout deadline (see module doc). Measure the
-    // spec-sourced window against the runtime monotonic clock.
-    let deadline_ms = actions.params.timeout_ms;
+    // The host owns the scout deadline (see module doc). Measure the spec-sourced window
+    // against the runtime monotonic clock.
     let start_ms = clock.now_monotonic_ms();
 
     let mut iter: usize = 0;
     loop {
-        if engine.get_current_state() == ScoutingState::Idle {
+        if window_resolved(engine) {
             break;
         }
         if let Some(limit) = max_iters {
@@ -581,91 +190,23 @@ where
         }
         tokio::select! {
             event = driver.poll_event() => match event {
-                LinkEvent::Rx(rx) => {
-                    // Only Hello datagrams advance the FSM. With
-                    // set_multicast_loop_v4(true) our own Scout echoes
-                    // back (MID 0x01); the MID filter drops it. A datagram
-                    // that carries the Hello MID but does not DECODE is
-                    // dropped here too — pico `continue`s on a failed
-                    // `_z_scouting_message_decode` (scout.c:71-76), so it
-                    // never reaches the FSM and cannot end an
-                    // exit-on-first window with nothing discovered.
-                    //
-                    // R2334 — both of those drops used to be SILENT, which is
-                    // the residual this closes. The verdict is computed at ONE
-                    // place on purpose: an `advanced` flag rather than a
-                    // record call per drop site, so a future arm added to this
-                    // match cannot forget to account for its datagram. Every
-                    // datagram the window observes now lands in exactly one of
-                    // `hellos` / `ignored`.
-                    //
-                    // R2610 — a THIRD datagram does not advance the cycle, and
-                    // it is the one a stranger can send on purpose: a
-                    // well-formed Hello advertising no address. Both upstreams
-                    // keep searching past it and wz used to stop, so an
-                    // exit-on-first window — the SESSION-OPEN scout — could be
-                    // closed with nothing discovered by one empty answer from
-                    // anywhere on the group. The rule lives in
-                    // [`hello_advances_window`]; the `advanced` flag it feeds
-                    // is unchanged, so the accounting above still holds.
-                    let advanced = if rx.bytes.first().map(|h| h & 0x1f)
-                        == Some(wire_const::S_MID_HELLO)
-                    {
-                        match decode_scouted_hello(&rx.bytes) {
-                            Some(hello)
-                                if hello_advances_window(
-                                    actions.params.exit_on_first,
-                                    hello.locators.len(),
-                                ) =>
-                            {
-                                *actions.pending_hello.lock().unwrap() = Some(hello);
-                                // The cycle's mode rides the event: the
-                                // engine-free statechart has no datamodel, so
-                                // its two `hello.received` arms guard on this
-                                // typed field (scouting.scxml + the
-                                // hello_received_schema EventSchema).
-                                engine.raise_hello_received(ScoutingHelloReceivedPayload {
-                                    exit_on_first: u8::from(actions.params.exit_on_first),
-                                });
-                                engine.step();
-                                true
-                            }
-                            // Undecodable, or decodable and declined by the
-                            // rule above — both land in `ignored`, each under
-                            // its own verdict.
-                            _ => false,
-                        }
-                    } else {
-                        false
-                    };
-                    if !advanced {
-                        actions.record_ignored(classify_ignored_scout_rx(
-                            &actions.params.zid,
-                            &rx.bytes,
-                        ));
-                    }
-                }
+                // What the window takes as an answer and what it names and drops is the
+                // session's (`window_datagram`), the same for every host.
+                LinkEvent::Rx(rx) => window_datagram(actions, engine, &rx.bytes),
                 LinkEvent::Lost { cause } => return ScoutOutcome::LinkLost(cause),
                 LinkEvent::Ready => {}
             },
             _ = clock.sleep(tick_interval_ms) => {
-                // Raise the timeout once the spec-sourced window has
-                // elapsed with no Hello (-> emit_scout_timeout -> Idle).
-                // Only AwaitingHello handles the event; firing it in any
-                // other state is a no-op transition in the generated FSM.
-                if clock.now_monotonic_ms().saturating_sub(start_ms) >= deadline_ms
-                    && engine.get_current_state() == ScoutingState::AwaitingHello
-                {
-                    engine.process_event(ScoutingEvent::ScoutTimerElapsed);
-                }
+                window_tick(
+                    actions,
+                    engine,
+                    clock.now_monotonic_ms().saturating_sub(start_ms),
+                );
             }
         }
     }
 
-    match actions.discovered_locator() {
-        Some(locator) => ScoutOutcome::Discovered(locator),
-        None => ScoutOutcome::TimedOut,
-    }
+    window_outcome(actions)
 }
 
 #[cfg(test)]

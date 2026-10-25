@@ -208,6 +208,7 @@ pub mod registry_error;
 /// the ones whose modules build such a machine.
 #[cfg(any(
     feature = "reassembly",
+    feature = "scouting-active",
     feature = "session-unicast",
     feature = "session-multicast"
 ))]
@@ -654,6 +655,18 @@ pub mod scout_responder;
 /// give rather than half of one.
 #[cfg(all(feature = "alloc", feature = "codec-scout", feature = "codec-hello"))]
 pub mod scout_initiator;
+
+// The active-scouting window as a value a host pumps (no socket, no executor). Its documentation
+// is the module's own `//!`: a `///` here beside it makes rustdoc read the module's links in this
+// scope, where its items are not named.
+#[cfg(all(
+    feature = "scouting-active",
+    feature = "alloc",
+    feature = "codec-scout",
+    feature = "codec-hello",
+    target_has_atomic = "ptr"
+))]
+pub mod scouting_host;
 
 /// R311ky — deferred callback firing (the F-6 structural fix): the
 /// staging queue + per-listener take-call-restore cell that let
