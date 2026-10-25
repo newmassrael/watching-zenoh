@@ -595,6 +595,14 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # names no feature for a compound one: the word that is true is this
                 # one.
                 "declare-queryable",
+                # `declare-token` MOVED HERE from the method-only list below, as
+                # `declare-queryable` did, for the same reason: the slot node's token
+                # needed `send_declare_token` to write from the caller's text with no
+                # allocator, so the owned form (`prepare_declare_token`, and the reconnect
+                # cache `cache_token_declaration`) is `all(declare-token, alloc)` now, and
+                # every public site the feature gates is under a compound cfg
+                # (`session_actions.rs`).
+                "declare-token",
                 # R3291 -- `declare-undeclare` LEFT this list: S9a moved
                 # `mark_aggregate_announced` into an `impl` under a bare
                 # `#[cfg(feature = "declare-undeclare")]` (`pubsub.rs`), a site
@@ -654,7 +662,6 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # `admin_session`), so no `module::name` path is left for it to gate.
                 "adminspace-core",
                 "declare-interest",
-                "declare-token",
                 "declare-undeclare",
                 "multicast-declarations",
                 # The five metadata features of a publish join: `PublishOptions` moved here
