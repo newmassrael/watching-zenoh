@@ -289478,6 +289478,40 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3686": {
+      "decision_summary": "Step 7d of decision D7 (one contract, three transports): the out-of-band transport, a node told which peer to hold on a channel its host owns. The three transports now share one function: node_opening holds NodeOpening and NoOpening (moved out of admin_fixed) and open_verdict, which turns a request into a verdict (the permit, the zid as a key spells it, the outcome and its words), and the in-band session/open leg calls it, so no transport owns a copy of the semantics. control_port reads one line, open <peer>, and answers one JSON object: the verdict session/open answers, or an error word for a line that is no command. wz_runtime_posix::control reads standard input without blocking; host-slot-node's control feature wraps the node's application in WithControl on both binaries. out-of-band is not a value of the axis lifecycle-transport: the axis is the Zephyr image's, which has no agent channel, so an option it cannot build is not declared.",
+      "changes_bullets": [
+        "crates/wz-session-mcu: the modules node_opening and control_port (ten unit tests, which moved every leg that runs the crate's own tests by ten: C1m mcu default 14, unicast app layer 15, adminspace-write 41, adminspace-core 18, read+write 51); admin_fixed re-exports NodeOpening and NoOpening and answers session/open through open_verdict.",
+        "crates/wz-runtime-posix: the module control (Lines, reply; four tests) and its leg C1m posix control channel. deploy/host-slot-node: the control feature (WithControl, HostOpener) in both binaries, and tests/control_channel.rs, the node started as a process, with the leg C1m host node control channel (2).",
+        "docs/session-lifecycle-intent.md: 7d landed, and why out-of-band is a feature of the host and not a value of the axis."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): the ten unit tests of the two modules, the four of the posix seam and the two of the process test pass; the in-band admin_open_query test still passes (5); each of the five moved legs was run and printed its new count (14, 15, 41, 18, 51); clippy with warnings denied is clean for wz-session-mcu, wz-runtime-posix, host-slot-node (lib, bins and the process test) and declared-node apart from findings that were there before in lines this round did not touch; rustfmt is clean. The node answers each line in the words of the in-band verb, the same answer to a repeated request, and an error word for a line that is no command.",
+        "Not run here: an out-of-band open that succeeds (it needs a build with room for a node and the secure channel, D4), the hosted run of these legs, and the Zephyr images, which do not carry the control feature."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "D7 is landed in its four steps. Read the first finished hosted run that holds rounds 3674, 3678, 3679 and this one: the C1m legs (the five moved counts and the two new ones), Qzb and the no-allocator rows. Open: an out-of-band open and a declared peer that succeed over a real secure channel (two nodes with a key each, and a lane step the lane owner agrees), the text the declared value saves (not measured), the Hello hint source, the image witness, the heap UDP dialer verifying nodes, the Qzb chain fall and the C1cn shard 1 time budget."
+      ],
+      "publishable_decision_summary": "Step 7d of decision D7 (one contract, three transports): the out-of-band transport, a node told which peer to hold on a channel its host owns. The three transports now share one function: node_opening holds NodeOpening and NoOpening (moved out of admin_fixed) and open_verdict, which turns a request into a verdict (the permit, the zid as a key spells it, the outcome and its words), and the in-band session/open leg calls it, so no transport owns a copy of the semantics. control_port reads one line, open <peer>, and answers one JSON object: the verdict session/open answers, or an error word for a line that is no command. wz_runtime_posix::control reads standard input without blocking; host-slot-node's control feature wraps the node's application in WithControl on both binaries. out-of-band is not a value of the axis lifecycle-transport: the axis is the Zephyr image's, which has no agent channel, so an option it cannot build is not declared.",
+      "publishable_changes_bullets": [
+        "crates/wz-session-mcu: the modules node_opening and control_port (ten unit tests, which moved every leg that runs the crate's own tests by ten: C1m mcu default 14, unicast app layer 15, adminspace-write 41, adminspace-core 18, read+write 51); admin_fixed re-exports NodeOpening and NoOpening and answers session/open through open_verdict.",
+        "crates/wz-runtime-posix: the module control (Lines, reply; four tests) and its leg C1m posix control channel. deploy/host-slot-node: the control feature (WithControl, HostOpener) in both binaries, and tests/control_channel.rs, the node started as a process, with the leg C1m host node control channel (2).",
+        "docs/session-lifecycle-intent.md: 7d landed, and why out-of-band is a feature of the host and not a value of the axis."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): the ten unit tests of the two modules, the four of the posix seam and the two of the process test pass; the in-band admin_open_query test still passes (5); each of the five moved legs was run and printed its new count (14, 15, 41, 18, 51); clippy with warnings denied is clean for wz-session-mcu, wz-runtime-posix, host-slot-node (lib, bins and the process test) and declared-node apart from findings that were there before in lines this round did not touch; rustfmt is clean. The node answers each line in the words of the in-band verb, the same answer to a repeated request, and an error word for a line that is no command.",
+        "Not run here: an out-of-band open that succeeds (it needs a build with room for a node and the secure channel, D4), the hosted run of these legs, and the Zephyr images, which do not carry the control feature."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "D7 is landed in its four steps. Read the first finished hosted run that holds rounds 3674, 3678, 3679 and this one: the C1m legs (the five moved counts and the two new ones), Qzb and the no-allocator rows. Open: an out-of-band open and a declared peer that succeed over a real secure channel (two nodes with a key each, and a lane step the lane owner agrees), the text the declared value saves (not measured), the Hello hint source, the image witness, the heap UDP dialer verifying nodes, the Qzb chain fall and the C1cn shard 1 time budget."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
