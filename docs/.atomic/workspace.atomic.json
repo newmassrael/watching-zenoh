@@ -287566,6 +287566,38 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3639": {
+      "decision_summary": "The reduced-features lane (Layer C1cf) was red on one crate of mine: the group witness built its payload with std::iter::repeat_n, which is stable since Rust 1.82, and the workspace states 1.81 as its minimum, so clippy with warnings denied refused the test under --no-default-features. The value is now built with str::repeat, which every supported compiler has. The hosted run that showed it (headSha 4b60f87e5) had ten other red jobs, read one by one: the Zephyr kit's worst stack chain after the connect manager's key change is 7,540 bytes over 15 frames against 7,128 committed and a 9,216-byte stack, and two admin node lanes and the zephyr-fixed stack row moved too; those belong to the author of that change and were sent to them with the figures. The rest are in the tokio runtime, the router's capacity report and the C ABI's size budget; no commit of this session touched those crates in the range the run covers.",
+      "changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_declared_group_pico_interop.rs: the payload of put_once is fill.to_string().repeat(bytes), in place of an iterator adapter newer than the minimum compiler."
+      ],
+      "verification_bullets": [
+        "The gate's own command, clippy over wz-integration-tests with no default features, every target and warnings denied, failed before the change on exactly that line (the incompatible-msrv lint) and passes after it, run on the build host.",
+        "Not run: the other ten jobs of that run were read, not reproduced; the all-features clippy lane over the same test file was not run again (the line compiles under both, the change is a std call), and the hosted run of this push was not read."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha. The reds that are not this session's and were found in run 40180823025: the tokio runtime (a lib test that does not compile for a missing reply-registry method, the datagram transmit pool and the multicast fragmentation tests, a count of 14 for the multicast configuration tests, a mesh accept test), the router's capacity report in the adminspace lane, the C ABI size of the cooperative pico client (895,715 text bytes against 895,000), and the releases-behind lane; each belongs to the session that last changed its files, and none was told by this session.",
+        "The Zephyr kit's stack chain figure (7,540) and the admin node lanes went to the author of the connect manager change; the budget row moves when they commit the figure with its reason."
+      ],
+      "publishable_decision_summary": "The reduced-features lane (Layer C1cf) was red on one crate of mine: the group witness built its payload with std::iter::repeat_n, which is stable since Rust 1.82, and the workspace states 1.81 as its minimum, so clippy with warnings denied refused the test under --no-default-features. The value is now built with str::repeat, which every supported compiler has. The hosted run that showed it (headSha 4b60f87e5) had ten other red jobs, read one by one: the Zephyr kit's worst stack chain after the connect manager's key change is 7,540 bytes over 15 frames against 7,128 committed and a 9,216-byte stack, and two admin node lanes and the zephyr-fixed stack row moved too; those belong to the author of that change and were sent to them with the figures. The rest are in the tokio runtime, the router's capacity report and the C ABI's size budget; no commit of this session touched those crates in the range the run covers.",
+      "publishable_changes_bullets": [
+        "crates/wz-integration-tests/tests/wz_declared_group_pico_interop.rs: the payload of put_once is fill.to_string().repeat(bytes), in place of an iterator adapter newer than the minimum compiler."
+      ],
+      "publishable_verification_bullets": [
+        "The gate's own command, clippy over wz-integration-tests with no default features, every target and warnings denied, failed before the change on exactly that line (the incompatible-msrv lint) and passes after it, run on the build host.",
+        "Not run: the other ten jobs of that run were read, not reproduced; the all-features clippy lane over the same test file was not run again (the line compiles under both, the change is a std call), and the hosted run of this push was not read."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha. The reds that are not this session's and were found in run 40180823025: the tokio runtime (a lib test that does not compile for a missing reply-registry method, the datagram transmit pool and the multicast fragmentation tests, a count of 14 for the multicast configuration tests, a mesh accept test), the router's capacity report in the adminspace lane, the C ABI size of the cooperative pico client (895,715 text bytes against 895,000), and the releases-behind lane; each belongs to the session that last changed its files, and none was told by this session.",
+        "The Zephyr kit's stack chain figure (7,540) and the admin node lanes went to the author of the connect manager change; the budget row moves when they commit the figure with its reason."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
