@@ -9,13 +9,13 @@
 //! A timestamp rides on a sample whether or not the entity that receives it cares. Upstream hands
 //! it to every subscriber and every querier. An image that cares about the work a callback does
 //! may want the opposite: the entity sees a timestamp only if it was declared to. That is a
-//! decision of the declaration, so each entity states it ([`default_exposed`] is what an entity
+//! decision of the declaration, so each entity states it ([`crate::timestamp_visibility::default_exposed`] is what an entity
 //! that states nothing gets), and the rule is applied at one place per engine: the point where a
 //! sample or a reply is handed to the entity's callback.
 //!
 //! # What hiding means
 //!
-//! [`HiddenTimestamp`] is a [`SampleView`] over another one that answers the same to every
+//! [`crate::timestamp_visibility::HiddenTimestamp`] is a [`crate::sink::SampleView`] over another one that answers the same to every
 //! question but the timestamp's, which it answers as a sample with none. It is a view and not a
 //! copy: nothing is allocated, and the payload and every other field are the inner view's.
 //!
@@ -23,7 +23,7 @@
 //!
 //! The other half of the policy is on the sending side: a caller gives a publisher one time
 //! value and the publisher supplies its node's identity, so a caller cannot sign a sample as
-//! another node. [`ntp64_from_unix_ms`] is the conversion for a caller whose clock counts
+//! another node. [`crate::timestamp_visibility::ntp64_from_unix_ms`] is the conversion for a caller whose clock counts
 //! milliseconds.
 
 use crate::sink::SampleView;
