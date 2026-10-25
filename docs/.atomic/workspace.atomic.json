@@ -285812,6 +285812,52 @@
         "The witness is the first completed hosted run holding this push: Layer C1cn green in both shards. Not paid and not this work's: Layer 0, C1st and Qzb (the declared-node session's), E7s and E7g (router capacity). The census does not derive the feature-only tests of a lib-only member, wz-tls-mbedtls today; a way to list them under a named feature set would close that. Next in the lifecycle work: step 6, the MCU opener over SessionHost, and D7's transports 2 and 3; read the hosted runs of rounds 3585 to 3598 per job."
       ]
     },
+    "Round 3599": {
+      "decision_summary": "Liveliness step L2: the liveliness get on both engines. SessionEngine::liveliness_get_on_wire asks which tokens are alive on a key with get_on_wire's contract: one reply callback minted per leg, whose drop is that leg's end, each leg's undo recorded with the get's cancellation fan; 0 is the platform default timeout, never none, as pico rewrites it. The tokio engine keeps its per-face fan behind it. The cooperative engine registers one leg with the observer's liveliness gets under its Interest id and sends the Interest; the entry's sink is the query get's, queuing owned replies and saying the leg's end from a guard it owns (D8). A pending leg names its registry, and every step sweeps both registries' deadlines. An expired snapshot delivers zenoh's timeout reply before its end; a cancelled token and a lost link end the leg as a query's do. pico's z_liveliness_get is the port's and shares its fan with z_get.",
+      "changes_bullets": [
+        "wz-capi-port: SessionEngine::liveliness_get_on_wire.",
+        "wz-capi-core: the tokio engine implements it over its faces (the loop pico had, behind the port).",
+        "wz-capi-coop: feature liveliness-get; liveliness_get_on_wire; PendingGet kinds, both registries swept per step and bounding the idle wait.",
+        "wz-capi-pico: z_liveliness_get through the port; fan_get shared with z_get; liveliness-get selects neither engine.",
+        "Tests: five coop tests on the router stand-in (tokens alive and not the one beside, the final alone, a deadline, a cancel with no step, a lost link; the stand-in gains MuteInterests and a held-token count, which also repairs a race in the L1 history test); client_only_dials_a_listener asks the listener which tokens are alive, on both engines (Layer C1co counts 6 and 5); hold_a_listener declares tokens on request.",
+        "scripts/lib/nondefault-tests-gate.sh: the coop row names liveliness-get; docs/capi-pico-on-coop-engine.md."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings with all targets in thirteen shapes: wz-capi-port, wz-capi-core (default; liveliness-get alone), wz-capi-coop (liveliness-get; liveliness-get+queryable; liveliness), wz-capi-pico default, all features, and engine-coop and engine-tokio with link-udp+liveliness-get (and query+queryable, and liveliness alone), wz-capi-c.",
+        "Tests: wz-capi-coop 8 / 12 / 23 passed (none / liveliness / all four; 23 in each of three runs); wz-capi-port, core lib, c lib and the wz-capi-pico suite pass. Layer C1co: 6, 5, 6 and 5 passed.",
+        "C1bz for the six touched crates spends exactly their budgets; capability_cost_gate 11 cases within budget, pico-client-coop 891491 of 895000 (the port's three methods more, each a default the cooperative engine instantiates); the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed; reason pins and the unwired-lane lint pass on the rebased tree."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "pico-client-coop is 3,509 bytes under its 895,000 budget and each port method the cooperative engine instantiates costs some of it; the next one needs its price read before it lands.",
+        "The tokio engine's retraction of live liveliness entities at close (carry of 3595) is still owed its own round.",
+        "Next on this track: the rest of section 6 of docs/capi-pico-on-coop-engine.md (the listening role, scouting, the advanced plane, the connectivity plane)."
+      ],
+      "publishable_decision_summary": "Liveliness step L2: the liveliness get on both engines. SessionEngine::liveliness_get_on_wire asks which tokens are alive on a key with get_on_wire's contract: one reply callback minted per leg, whose drop is that leg's end, each leg's undo recorded with the get's cancellation fan; 0 is the platform default timeout, never none, as pico rewrites it. The tokio engine keeps its per-face fan behind it. The cooperative engine registers one leg with the observer's liveliness gets under its Interest id and sends the Interest; the entry's sink is the query get's, queuing owned replies and saying the leg's end from a guard it owns (D8). A pending leg names its registry, and every step sweeps both registries' deadlines. An expired snapshot delivers zenoh's timeout reply before its end; a cancelled token and a lost link end the leg as a query's do. pico's z_liveliness_get is the port's and shares its fan with z_get.",
+      "publishable_changes_bullets": [
+        "wz-capi-port: SessionEngine::liveliness_get_on_wire.",
+        "wz-capi-core: the tokio engine implements it over its faces (the loop pico had, behind the port).",
+        "wz-capi-coop: feature liveliness-get; liveliness_get_on_wire; PendingGet kinds, both registries swept per step and bounding the idle wait.",
+        "wz-capi-pico: z_liveliness_get through the port; fan_get shared with z_get; liveliness-get selects neither engine.",
+        "Tests: five coop tests on the router stand-in (tokens alive and not the one beside, the final alone, a deadline, a cancel with no step, a lost link; the stand-in gains MuteInterests and a held-token count, which also repairs a race in the L1 history test); client_only_dials_a_listener asks the listener which tokens are alive, on both engines (Layer C1co counts 6 and 5); hold_a_listener declares tokens on request.",
+        "scripts/lib/nondefault-tests-gate.sh: the coop row names liveliness-get; docs/capi-pico-on-coop-engine.md."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings with all targets in thirteen shapes: wz-capi-port, wz-capi-core (default; liveliness-get alone), wz-capi-coop (liveliness-get; liveliness-get+queryable; liveliness), wz-capi-pico default, all features, and engine-coop and engine-tokio with link-udp+liveliness-get (and query+queryable, and liveliness alone), wz-capi-c.",
+        "Tests: wz-capi-coop 8 / 12 / 23 passed (none / liveliness / all four; 23 in each of three runs); wz-capi-port, core lib, c lib and the wz-capi-pico suite pass. Layer C1co: 6, 5, 6 and 5 passed.",
+        "C1bz for the six touched crates spends exactly their budgets; capability_cost_gate 11 cases within budget, pico-client-coop 891491 of 895000 (the port's three methods more, each a default the cooperative engine instantiates); the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed; reason pins and the unwired-lane lint pass on the rebased tree."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "pico-client-coop is 3,509 bytes under its 895,000 budget and each port method the cooperative engine instantiates costs some of it; the next one needs its price read before it lands.",
+        "The tokio engine's retraction of live liveliness entities at close (carry of 3595) is still owed its own round.",
+        "Next on this track: the rest of section 6 of docs/capi-pico-on-coop-engine.md (the listening role, scouting, the advanced plane, the connectivity plane)."
+      ]
+    },
     "Round 36": {
       "decision_summary": "Payload-layer child-codec layer lands — sources/codecs/{timestamp,encoding,ext_unit,ext_zint,ext_zbuf}.scxml. 5 leaf codecs needed by msg_put/msg_del/msg_err. All use existing B5 primitives; no new primitive frontier. Sets up R37 to author the variant-dispatching ext_entry + the realistic msg_put/msg_del payload bodies.",
       "changes_bullets": [
