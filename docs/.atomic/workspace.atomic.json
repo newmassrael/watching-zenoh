@@ -288628,6 +288628,44 @@
         "Still open: wait_declarations_stable and a synced query on the cooperative engine."
       ]
     },
+    "Round 3666": {
+      "decision_summary": "The declared nodes were run on four lab boards, with the owner's permission, each in one directory of its own that was removed afterwards. On a Raspberry Pi 4 on aarch64 Linux they ran against a stock zenohd and stock examples cross-built for it: the listener, the tokens, the subscriber, the publisher, the querier and the group. On a Raspberry Pi 4 on QNX 7.1 (io-sock), an NVIDIA Orin board on QNX 7.1 (io-pkt) and an Android 16 tablet they ran against wz's own peer, because no stock zenoh peer builds for QNX; the Orin board ran only legs on its own loopback, so nothing was put on its network, and its group join is not run. Every leg passed on every board, and the group join found its only defect on the first board (fixed in the previous round). The platform rows and the contract no longer say that nothing was run on a board; they say what ran and what did not: no stock peer on QNX or Android, no group against a stock multicast peer, no paced-replay timing on a board.",
+      "changes_bullets": [
+        "deploy/wz-config.toml: the help of the aarch64 Linux, Android and both QNX platform rows says which board each ran on, against which peer, and that the library artifacts were not run.",
+        "docs/target-build-contract.md: the paragraph on the lane says the nodes were run on four boards, with what each ran against, what a board run found, and what is still not run."
+      ],
+      "verification_bullets": [
+        "On the Linux board the second full run had every check green (six legs); on each of the two QNX boards and the Android tablet the same eleven checks of the board script were green with wz's own peer (the Orin without its group check). The script was first run on the workstation with host builds, where it was green, before any board; its first run on QNX stopped on the board shell's predefined alias for a function name, which is the script's, not the nodes'.",
+        "After the runs each board's directory was removed and checked: no file of the run and no process of the run was left on any of the four, and the staging directories on the lab server and on the build host were removed too. The wz_config check, the entry's selftest and the round-fed array (113) pass on this change.",
+        "Not run: a stock peer on QNX or Android, the Orin's group join, the group against a stock multicast peer, the paced replay's timing on a board, and the hosted run of this push."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha.",
+        "The QNX build workspace on the SDK machine still holds the toolchain, the synced source and the release build cache (about 5 GB) for the QNX lane; whether to remove it as well is the owner's decision.",
+        "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener. The Orin's group join needs the owner's word before anything multicast is sent on that board's network."
+      ],
+      "publishable_decision_summary": "The declared nodes were run on four lab boards, with the owner's permission, each in one directory of its own that was removed afterwards. On a Raspberry Pi 4 on aarch64 Linux they ran against a stock zenohd and stock examples cross-built for it: the listener, the tokens, the subscriber, the publisher, the querier and the group. On a Raspberry Pi 4 on QNX 7.1 (io-sock), an NVIDIA Orin board on QNX 7.1 (io-pkt) and an Android 16 tablet they ran against wz's own peer, because no stock zenoh peer builds for QNX; the Orin board ran only legs on its own loopback, so nothing was put on its network, and its group join is not run. Every leg passed on every board, and the group join found its only defect on the first board (fixed in the previous round). The platform rows and the contract no longer say that nothing was run on a board; they say what ran and what did not: no stock peer on QNX or Android, no group against a stock multicast peer, no paced-replay timing on a board.",
+      "publishable_changes_bullets": [
+        "deploy/wz-config.toml: the help of the aarch64 Linux, Android and both QNX platform rows says which board each ran on, against which peer, and that the library artifacts were not run.",
+        "docs/target-build-contract.md: the paragraph on the lane says the nodes were run on four boards, with what each ran against, what a board run found, and what is still not run."
+      ],
+      "publishable_verification_bullets": [
+        "On the Linux board the second full run had every check green (six legs); on each of the two QNX boards and the Android tablet the same eleven checks of the board script were green with wz's own peer (the Orin without its group check). The script was first run on the workstation with host builds, where it was green, before any board; its first run on QNX stopped on the board shell's predefined alias for a function name, which is the script's, not the nodes'.",
+        "After the runs each board's directory was removed and checked: no file of the run and no process of the run was left on any of the four, and the staging directories on the lab server and on the build host were removed too. The wz_config check, the entry's selftest and the round-fed array (113) pass on this change.",
+        "Not run: a stock peer on QNX or Android, the Orin's group join, the group against a stock multicast peer, the paced replay's timing on a board, and the hosted run of this push."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run of this push per job, compared by head sha.",
+        "The QNX build workspace on the SDK machine still holds the toolchain, the synced source and the release build cache (about 5 GB) for the QNX lane; whether to remove it as well is the owner's decision.",
+        "Next in the vocabulary, none of it with a stock witness today: the group's queryable, querier and token; peer tables of each member; a UDP or secure listener. The Orin's group join needs the owner's word before anything multicast is sent on that board's network."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
