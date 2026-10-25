@@ -286686,6 +286686,34 @@
         "Layer C1bz is red on main for wz-session-core (four links from the timestamp-policy commit, reported by another session), for wz-tls-mbedtls in a worktree, and was red for wz-session-mcu earlier."
       ]
     },
+    "Round 3618": {
+      "decision_summary": "Repair of round 3613. Its rebuild put the planner's tables inside the connect manager, and on the Zephyr image the manager is a local of the node's run function: about 14 KB of peer tables and machines on a 9216 B main-thread stack. The tables now live in PeerStore, a static each image owns beside its node storage, and the manager holds a reference to it (in_static_store); only the heap build boxes its own. The peer machine declares sce:capacity 2, since the host raises one event at a time and nothing in the machine raises or sends, so its queue is 16 B. A test holds the bound: store over 8 KiB, manager under 4 KiB.",
+      "changes_bullets": [
+        "wz-session-mcu: connect_manager gains PeerStore and StoreRef; ConnectManager::new boxes its store only without session-slot, in_static_store borrows one; SlotClientNode and NodeStorage carry the store; wz-session-lwip SlotAdminNode takes it and its test supplies one; the two deploy images hold it in their statics. sources/session/peer_connection.scxml declares sce:capacity 2 and out/ is regenerated. run-ci.sh: the two C1m mcu counts, 17 to 18 and 27 to 28. The design document's repair note."
+      ],
+      "verification_bullets": [
+        "On pc2 (bx): wz-session-core whole suite and wz-session-mcu all-features suite passed, with the size-bound test; the heap legs passed (18 and 28 tests); wz-session-lwip admin_node_slot and the admin read+write leg passed; clippy -D warnings over mcu (all features, heap adminspace-write, heap client-node), lwIP slot shape and session-core all features. Layer Q passed (rc 0). guarded_count_gate over the range passed after the two counts moved to what the runs printed. C1bz on session-core, runtime-tokio, session-mcu and session-lwip passed; the census passed in both shards. cargo fmt, shellcheck, reason_review_pin_gate, store_reason_citation_gate, audit-catalog-status and prose_named_identifier_gate OK. Measured: PeerStore is 11,712 B in .bss; the peer engine is 928 B on thumbv7m."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Not witnessed: the Zephyr image stack figure under this repair (hosted only; the Zephyr node edit cannot be built here). Step 6 continues with 6.2b: nodes held by zid beside the endpoints in the same manager (Key as an enum, a separate peer cap, a fail-closed dial_for), then the verbs on the fixed-memory profile, wz-session-lwip forwarding the feature, and the image witness. Read the first completed hosted run holding rounds 3584 to 3615 per job."
+      ],
+      "publishable_decision_summary": "Repair of round 3613. Its rebuild put the planner's tables inside the connect manager, and on the Zephyr image the manager is a local of the node's run function: about 14 KB of peer tables and machines on a 9216 B main-thread stack. The tables now live in PeerStore, a static each image owns beside its node storage, and the manager holds a reference to it (in_static_store); only the heap build boxes its own. The peer machine declares sce:capacity 2, since the host raises one event at a time and nothing in the machine raises or sends, so its queue is 16 B. A test holds the bound: store over 8 KiB, manager under 4 KiB.",
+      "publishable_changes_bullets": [
+        "wz-session-mcu: connect_manager gains PeerStore and StoreRef; ConnectManager::new boxes its store only without session-slot, in_static_store borrows one; SlotClientNode and NodeStorage carry the store; wz-session-lwip SlotAdminNode takes it and its test supplies one; the two deploy images hold it in their statics. sources/session/peer_connection.scxml declares sce:capacity 2 and out/ is regenerated. run-ci.sh: the two C1m mcu counts, 17 to 18 and 27 to 28. The design document's repair note."
+      ],
+      "publishable_verification_bullets": [
+        "On pc2 (bx): wz-session-core whole suite and wz-session-mcu all-features suite passed, with the size-bound test; the heap legs passed (18 and 28 tests); wz-session-lwip admin_node_slot and the admin read+write leg passed; clippy -D warnings over mcu (all features, heap adminspace-write, heap client-node), lwIP slot shape and session-core all features. Layer Q passed (rc 0). guarded_count_gate over the range passed after the two counts moved to what the runs printed. C1bz on session-core, runtime-tokio, session-mcu and session-lwip passed; the census passed in both shards. cargo fmt, shellcheck, reason_review_pin_gate, store_reason_citation_gate, audit-catalog-status and prose_named_identifier_gate OK. Measured: PeerStore is 11,712 B in .bss; the peer engine is 928 B on thumbv7m."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Not witnessed: the Zephyr image stack figure under this repair (hosted only; the Zephyr node edit cannot be built here). Step 6 continues with 6.2b: nodes held by zid beside the endpoints in the same manager (Key as an enum, a separate peer cap, a fail-closed dial_for), then the verbs on the fixed-memory profile, wz-session-lwip forwarding the feature, and the image witness. Read the first completed hosted run holding rounds 3584 to 3615 per job."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
