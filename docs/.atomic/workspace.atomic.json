@@ -288998,6 +288998,60 @@
         "Read the first finished hosted run holding this round for Qzb (the Zephyr client chain, which the type change may move; budget row and stack row move together). Next is 7b: the axis lifecycle-transport with in-band, out-of-band and declared in deploy/wz-config.toml, its cargo_rule, and the image sources naming the type by the axis; then 7c, 7d. Still open from before: the Hello hint source, the image witness (the lane owner agrees), the heap UDP dialer verifying nodes, the Qzb chain fall and the C1cn shard 1 time budget."
       ]
     },
+    "Round 3675": {
+      "decision_summary": "Step 3a of the advanced plane: the publisher's composite moves to wz-ext-pubsub. AdvancedPublisherOn (the four declarations in the reference order, what a put stamps, retains and sends, the beacon's decision), AdvancedPublisherPlane, the options, the errors and the shared-memory chunk trait (ShmChunk) are there; the tokio runtime re-exports them at their old paths and keeps SessionPlane, the beacon's timer and AdvancedPublisher, a handle over the composite. The composite cannot spawn or read a clock, so the plane trait lost its clock: a plane starts the beacon's timer from a tick the composite hands it, which answers false once the publisher is gone. The pico plane adapts to the same trait and shares the tokio timer. The cooperative plane and the engine port's declarations are step 3b.",
+      "changes_bullets": [
+        "crates/wz-ext-pubsub: advanced_publisher.rs (the composite, the plane trait, ShmChunk, PlaneError) and its tests against a recording plane (31 with shared memory, QoS, encoding, attachment and miss detection), plus the features that gate its public items.",
+        "crates/wz-runtime-tokio: advanced_publisher.rs reduced to SessionPlane, BeaconTimer and spawn_beacon_timer, the ShmChunk impl for the mapped chunk and the AdvancedPublisher handle (Deref over the composite); the 15 session-bound tests stay in advanced_publisher/tests.rs; features forwarded to wz-ext-pubsub.",
+        "crates/wz-capi-pico: PicoPlane drops its clock and starts the beacon timer through the tokio helper.",
+        "Gates: census row for wz-ext-pubsub names ext-pubsub-sample-miss-detection; nine reasons that cited advanced_publisher.rs by bare name are re-anchored as path @ needle; C1bz budget of wz-runtime-tokio 438 to 433; seven deploy locks gain the wz-ext-pubsub to wz-node-time edge.",
+        "docs/advanced-pubsub-on-a-neutral-core.md: step 3 records what is done and what is left."
+      ],
+      "verification_bullets": [
+        "wz-ext-pubsub: 31 tests passed with the five features; clippy with -D warnings clean in the default and the full shape.",
+        "wz-runtime-tokio: the 16 tests of the advanced publisher (15) and the composed publisher-to-subscriber leg pass with all features after the rebase; clippy clean with all features and in three narrower feature shapes (publisher alone, miss detection alone, publisher with shared memory, QoS, encoding and attachment). wz-capi-pico, wz-capi-core, wz-capi-c and wz-ap-demo: clippy clean with all features, and the pico advanced tests pass.",
+        "Doc budgets counted on the lane's command: wz-runtime-tokio 433, wz-capi-pico 40, wz-capi-c 40, wz-capi-core 7, wz-ap-demo 25 (each equal to its budget), wz-ext-pubsub 0.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed.",
+        "Not done: the interop legs (zenoh-ext and pico) were not run here; they are read from the hosted run. Clippy of wz-runtime-tokio, wz-ext-pubsub and wz-capi-pico in one command fails in wz-capi-coop (send_plain_put_qos not found), which the three crates do not do one by one; a feature-unification fact of that crate's, not touched here."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "carry_forward_bullets": [
+        "Step 3b: a cooperative AdvancedPublisherPlane (the timer is a tick run from the step that moves the session) and the engine port declarations the publisher needs (publisher, cache queryable, token, beacon publisher).",
+        "Step 4 (the subscriber): count the 60 tests into those that drive State directly and those that need a session before moving anything, and read the host wiring in full.",
+        "wz-capi-coop does not build when wz-capi-pico and wz-runtime-tokio are checked in one cargo command (send_plain_put_qos is not found); find which feature the unification drops before the cooperative plane relies on it.",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings, as that session welcomed.",
+        "Hosted: read the interop legs of the advanced plane after the pushes of 3661, 3665 and this round. C1bz of wz-tls-mbedtls is not mine.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ],
+      "publishable_decision_summary": "Step 3a of the advanced plane: the publisher's composite moves to wz-ext-pubsub. AdvancedPublisherOn (the four declarations in the reference order, what a put stamps, retains and sends, the beacon's decision), AdvancedPublisherPlane, the options, the errors and the shared-memory chunk trait (ShmChunk) are there; the tokio runtime re-exports them at their old paths and keeps SessionPlane, the beacon's timer and AdvancedPublisher, a handle over the composite. The composite cannot spawn or read a clock, so the plane trait lost its clock: a plane starts the beacon's timer from a tick the composite hands it, which answers false once the publisher is gone. The pico plane adapts to the same trait and shares the tokio timer. The cooperative plane and the engine port's declarations are step 3b.",
+      "publishable_changes_bullets": [
+        "crates/wz-ext-pubsub: advanced_publisher.rs (the composite, the plane trait, ShmChunk, PlaneError) and its tests against a recording plane (31 with shared memory, QoS, encoding, attachment and miss detection), plus the features that gate its public items.",
+        "crates/wz-runtime-tokio: advanced_publisher.rs reduced to SessionPlane, BeaconTimer and spawn_beacon_timer, the ShmChunk impl for the mapped chunk and the AdvancedPublisher handle (Deref over the composite); the 15 session-bound tests stay in advanced_publisher/tests.rs; features forwarded to wz-ext-pubsub.",
+        "crates/wz-capi-pico: PicoPlane drops its clock and starts the beacon timer through the tokio helper.",
+        "Gates: census row for wz-ext-pubsub names ext-pubsub-sample-miss-detection; nine reasons that cited advanced_publisher.rs by bare name are re-anchored as path @ needle; C1bz budget of wz-runtime-tokio 438 to 433; seven deploy locks gain the wz-ext-pubsub to wz-node-time edge.",
+        "docs/advanced-pubsub-on-a-neutral-core.md: step 3 records what is done and what is left."
+      ],
+      "publishable_verification_bullets": [
+        "wz-ext-pubsub: 31 tests passed with the five features; clippy with -D warnings clean in the default and the full shape.",
+        "wz-runtime-tokio: the 16 tests of the advanced publisher (15) and the composed publisher-to-subscriber leg pass with all features after the rebase; clippy clean with all features and in three narrower feature shapes (publisher alone, miss detection alone, publisher with shared memory, QoS, encoding and attachment). wz-capi-pico, wz-capi-core, wz-capi-c and wz-ap-demo: clippy clean with all features, and the pico advanced tests pass.",
+        "Doc budgets counted on the lane's command: wz-runtime-tokio 433, wz-capi-pico 40, wz-capi-c 40, wz-capi-core 7, wz-ap-demo 25 (each equal to its budget), wz-ext-pubsub 0.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed.",
+        "Not done: the interop legs (zenoh-ext and pico) were not run here; they are read from the hosted run. Clippy of wz-runtime-tokio, wz-ext-pubsub and wz-capi-pico in one command fails in wz-capi-coop (send_plain_put_qos not found), which the three crates do not do one by one; a feature-unification fact of that crate's, not touched here."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-25-ext-pubsub"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 3b: a cooperative AdvancedPublisherPlane (the timer is a tick run from the step that moves the session) and the engine port declarations the publisher needs (publisher, cache queryable, token, beacon publisher).",
+        "Step 4 (the subscriber): count the 60 tests into those that drive State directly and those that need a session before moving anything, and read the host wiring in full.",
+        "wz-capi-coop does not build when wz-capi-pico and wz-runtime-tokio are checked in one cargo command (send_plain_put_qos is not found); find which feature the unification drops before the cooperative plane relies on it.",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings, as that session welcomed.",
+        "Hosted: read the interop legs of the advanced plane after the pushes of 3661, 3665 and this round. C1bz of wz-tls-mbedtls is not mine.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
