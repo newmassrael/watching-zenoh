@@ -1205,6 +1205,31 @@ pub trait Bind<D> {
     fn bind(&mut self, to: Locator) -> Result<D, LinkOpenError>;
 }
 
+/// How a stack takes the link of a session the other end opened: the listening half of [`Bind`].
+/// An acceptor is a value the node holds and polls from its loop; it owns the listening port, and
+/// what it yields is the driver of a link whose peer is already connected, so a session opened
+/// over it takes the acceptor's role at the handshake and nothing else differs from a dial.
+#[cfg(feature = "session-slot")]
+pub trait Accept<D> {
+    /// The link of the connection waiting on the port, `Ok(None)` when none waits. A stack with
+    /// no buffer free for it is [`LinkOpenError::Exhausted`], and the connection is closed, which
+    /// is how its peer learns the node is full (a connection left queued would hold the peer in a
+    /// handshake that never starts).
+    fn accept(&mut self) -> Result<Option<D>, LinkOpenError>;
+}
+
+/// The acceptor of a node that listens on nothing: no connection ever waits.
+#[cfg(feature = "session-slot")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoAccept;
+
+#[cfg(feature = "session-slot")]
+impl<D> Accept<D> for NoAccept {
+    fn accept(&mut self) -> Result<Option<D>, LinkOpenError> {
+        Ok(None)
+    }
+}
+
 /// The pump of a stack whose driver is itself the datagram link: the drive loop's calls go to
 /// the driver in the slot, through the handle that keeps the slot for as long as the loop
 /// reads. What a stack with no input path of its own to advance (Zephyr's sockets: the kernel's

@@ -127,6 +127,26 @@ pub trait StreamDial {
     const CARRIED: bool = true;
 }
 
+/// How a stack takes the connections that arrive on a port it listens on: the other half of
+/// [`StreamDial`], and for the same reason a value the stack holds. What it yields is a
+/// [`StreamSocket`] like a dial's, because a connection is the same thing from either end: the
+/// [`StreamDriver`] over it has no binding to make, since "the peer is the other end of the
+/// connection", so nothing above the socket knows which end opened it.
+pub trait StreamListen {
+    /// The stream an accept yields.
+    type Stream: StreamSocket;
+
+    /// The `(address, port)` the listener is bound to.
+    fn local(&self) -> ([u8; 4], u16);
+
+    /// The connection waiting on the listener, taken without blocking: `Ok(None)` when none waits
+    /// (or when the one that did gave up before it was taken, which leaves nothing to take).
+    /// [`LinkOpenError::Exhausted`] when the platform had no descriptor to give it: the
+    /// connection stays queued and the next call tries again. [`LinkOpenError::Unsupported`]
+    /// when the listener itself is broken, which no later call mends.
+    fn accept(&self) -> Result<Option<Self::Stream>, LinkOpenError>;
+}
+
 /// The dial of a stream protocol a stack does not carry: an image with no secure channel names
 /// it for `tls/`, and every dial is [`LinkOpenError::Unsupported`].
 #[derive(Debug, Clone, Copy, Default)]

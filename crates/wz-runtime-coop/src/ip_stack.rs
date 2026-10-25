@@ -40,7 +40,7 @@ use crate::link_storage::TxStore;
 use crate::session_drive::LinkReadiness;
 use crate::session_drive::SessionDatagramLink;
 #[cfg(feature = "session-slot")]
-use crate::session_drive::{Bind, DriverPump, SlotStack};
+use crate::session_drive::{Accept, Bind, DriverPump, SlotStack};
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::session_drive::{LinkOpenError, LinkProto, Locator};
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -49,6 +49,8 @@ use crate::session_drive::{OpenedLink, SessionLinks};
 use crate::stream_link::NoDial;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::StreamDial;
+#[cfg(feature = "session-slot")]
+use crate::stream_link::StreamListen;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 use crate::stream_link::STREAM_RX_CAPACITY;
 use crate::stream_link::{NoStream, StreamDriver, StreamSocket};
@@ -506,6 +508,84 @@ where
     }
 }
 
+/// The listening half of an [`IpStack`]: the port a node accepts `tcp/` connections on, and the
+/// tables each accepted link takes its buffers from. It is made by [`IpStack::acceptor`] and
+/// yields the same [`IpDriver`] a dial does, over the stream the listener accepted.
+#[cfg(feature = "session-slot")]
+pub struct IpAcceptor<A, U, L = NoStream> {
+    listener: A,
+    rx: &'static dyn ByteSource,
+    tx: &'static dyn ByteSource,
+    refused: u32,
+    stack: core::marker::PhantomData<fn() -> (U, L)>,
+}
+
+#[cfg(feature = "session-slot")]
+impl<A, U, L> IpAcceptor<A, U, L> {
+    /// Connections taken off the port and closed at once because the tables had no buffer left
+    /// for a link: the node was full.
+    pub const fn refused(&self) -> u32 {
+        self.refused
+    }
+
+    /// The `(address, port)` the listener is bound to.
+    pub fn local(&self) -> ([u8; 4], u16)
+    where
+        A: StreamListen,
+    {
+        self.listener.local()
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<A, U, L> Accept<IpDriver<U, A::Stream, L>> for IpAcceptor<A, U, L>
+where
+    A: StreamListen,
+    A::Stream: 'static,
+    U: DatagramSocket + 'static,
+    L: StreamSocket + 'static,
+{
+    fn accept(&mut self) -> Result<Option<IpDriver<U, A::Stream, L>>, LinkOpenError> {
+        // The connection comes off the port before the buffers are claimed, so a node with a full
+        // table closes it rather than leave it queued: its peer sees the close, not a handshake
+        // that never starts, and a poll that finds no connection claims nothing.
+        let Some(stream) = self.listener.accept()? else {
+            return Ok(None);
+        };
+        let (Some(rx), Some(tx)) = (self.rx.claim(), self.tx.claim()) else {
+            self.refused = self.refused.saturating_add(1);
+            return Err(LinkOpenError::Exhausted);
+        };
+        Ok(Some(IpDriver::Tcp(StreamDriver::over(stream, rx, tx))))
+    }
+}
+
+#[cfg(feature = "session-slot")]
+impl<U, D, L> IpStack<U, D, L>
+where
+    U: DatagramSocket + 'static,
+    D: StreamDial,
+    D::Stream: 'static,
+    L: StreamDial,
+    L::Stream: 'static,
+{
+    /// The acceptor of the connections `listener` takes, whose links claim their buffers from the
+    /// tables of this stack. The stream a listener yields is the stream a dial does, so a link
+    /// over it is the one a dial opens and the session host runs it unchanged.
+    pub fn acceptor<A>(&self, listener: A) -> IpAcceptor<A, U, L::Stream>
+    where
+        A: StreamListen<Stream = D::Stream>,
+    {
+        IpAcceptor {
+            listener,
+            rx: self.rx,
+            tx: self.tx,
+            refused: 0,
+            stack: core::marker::PhantomData,
+        }
+    }
+}
+
 #[cfg(feature = "session-slot")]
 impl<U, D, L> SlotStack for IpStack<U, D, L>
 where
@@ -772,6 +852,140 @@ mod tests {
             Err(LinkOpenError::Exhausted)
         ));
         drop(open);
+    }
+
+    /// A listener with `waiting` connections queued, each from `peer`, or one that is broken.
+    #[cfg(feature = "session-slot")]
+    struct Listener {
+        waiting: core::cell::Cell<u8>,
+        peer: ([u8; 4], u16),
+        broken: bool,
+    }
+
+    #[cfg(feature = "session-slot")]
+    impl Listener {
+        fn with_waiting(waiting: u8) -> Self {
+            Self {
+                waiting: core::cell::Cell::new(waiting),
+                peer: ([10, 0, 0, 7], 52_000),
+                broken: false,
+            }
+        }
+    }
+
+    #[cfg(feature = "session-slot")]
+    impl StreamListen for Listener {
+        type Stream = Stream;
+        fn local(&self) -> ([u8; 4], u16) {
+            ([10, 0, 0, 2], 7447)
+        }
+        fn accept(&self) -> Result<Option<Stream>, LinkOpenError> {
+            if self.broken {
+                return Err(LinkOpenError::Unsupported);
+            }
+            match self.waiting.get() {
+                0 => Ok(None),
+                left => {
+                    self.waiting.set(left - 1);
+                    Ok(Some(Stream(self.peer.0, self.peer.1)))
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "session-slot")]
+    static ACCEPT_RX: ByteCells<66, 1> = ByteCells::new();
+    #[cfg(feature = "session-slot")]
+    static ACCEPT_TX: ByteCells<34, 1> = ByteCells::new();
+
+    #[cfg(feature = "session-slot")]
+    #[test]
+    fn an_accepted_connection_is_the_stream_link_a_dial_opens() {
+        let stack = IpStack::<Datagrams, Dial>::new([10, 0, 0, 2], &ACCEPT_RX, &ACCEPT_TX, Dial);
+        let mut acceptor = stack.acceptor(Listener::with_waiting(1));
+        assert_eq!(acceptor.local(), ([10, 0, 0, 2], 7447));
+        let link: IpDriver<Datagrams, Stream, NoStream> = acceptor
+            .accept()
+            .expect("the port is sound")
+            .expect("a connection waited");
+        assert!(matches!(link, IpDriver::Tcp(_)));
+        assert!(link.batch_length_prefixed(), "a stream frames its batches");
+        let ends = link.link_endpoints().expect("a connection knows both ends");
+        assert_eq!(ends.dst.as_str(), "tcp/10.0.0.7:52000");
+        assert_eq!(ends.src.as_str(), "tcp/10.0.0.2:40002");
+        assert_eq!(link.link_rx_capacity(), 66);
+        assert_eq!(acceptor.refused(), 0);
+    }
+
+    #[cfg(feature = "session-slot")]
+    static IDLE_RX: ByteCells<66, 1> = ByteCells::new();
+    #[cfg(feature = "session-slot")]
+    static IDLE_TX: ByteCells<34, 1> = ByteCells::new();
+
+    #[cfg(feature = "session-slot")]
+    #[test]
+    fn a_poll_that_finds_no_connection_claims_no_buffer() {
+        let mut stack = IpStack::<Datagrams, Dial>::new([10, 0, 0, 2], &IDLE_RX, &IDLE_TX, Dial);
+        let mut acceptor = stack.acceptor(Listener::with_waiting(0));
+        for _ in 0..3 {
+            let none: Result<Option<IpDriver<Datagrams, Stream, NoStream>>, _> = acceptor.accept();
+            assert!(matches!(none, Ok(None)));
+        }
+        let open = stack
+            .bind(Locator::tcp(ROUTER))
+            .expect("the polls left both buffers in the tables");
+        drop(open);
+    }
+
+    #[cfg(feature = "session-slot")]
+    static FULL_RX: ByteCells<66, 1> = ByteCells::new();
+    #[cfg(feature = "session-slot")]
+    static FULL_TX: ByteCells<34, 1> = ByteCells::new();
+
+    #[cfg(feature = "session-slot")]
+    #[test]
+    fn a_connection_with_no_buffer_for_it_is_taken_off_the_port_and_counted() {
+        let stack = IpStack::<Datagrams, Dial>::new([10, 0, 0, 2], &FULL_RX, &FULL_TX, Dial);
+        let mut acceptor = stack.acceptor(Listener::with_waiting(3));
+        let held: IpDriver<Datagrams, Stream, NoStream> = acceptor
+            .accept()
+            .expect("a free table")
+            .expect("a connection waited");
+        let second: Result<Option<IpDriver<Datagrams, Stream, NoStream>>, _> = acceptor.accept();
+        assert!(
+            matches!(second, Err(LinkOpenError::Exhausted)),
+            "the table is full"
+        );
+        assert_eq!(acceptor.refused(), 1);
+        drop(held);
+        let third: IpDriver<Datagrams, Stream, NoStream> = acceptor
+            .accept()
+            .expect("the buffers came back")
+            .expect("the third connection still waited, the second was not left queued");
+        assert!(matches!(third, IpDriver::Tcp(_)));
+        assert_eq!(
+            acceptor.refused(),
+            1,
+            "an accepted connection is not a refusal"
+        );
+    }
+
+    #[cfg(feature = "session-slot")]
+    static BROKEN_RX: ByteCells<66, 1> = ByteCells::new();
+    #[cfg(feature = "session-slot")]
+    static BROKEN_TX: ByteCells<34, 1> = ByteCells::new();
+
+    #[cfg(feature = "session-slot")]
+    #[test]
+    fn a_broken_listener_is_reported_as_it_is() {
+        let stack = IpStack::<Datagrams, Dial>::new([10, 0, 0, 2], &BROKEN_RX, &BROKEN_TX, Dial);
+        let mut acceptor = stack.acceptor(Listener {
+            broken: true,
+            ..Listener::with_waiting(1)
+        });
+        let broken: Result<Option<IpDriver<Datagrams, Stream, NoStream>>, _> = acceptor.accept();
+        assert!(matches!(broken, Err(LinkOpenError::Unsupported)));
+        assert_eq!(acceptor.refused(), 0);
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
