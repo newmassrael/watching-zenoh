@@ -289394,6 +289394,46 @@
         "Next, in order: Z0c onward of docs/zenoh-api-on-the-engine.md, each part landing when its closure exists: config, handlers with the channels, then key_expr and selector, then sample and the quality-of-service types; then Z1. The top crate has not been run on the Windows host."
       ]
     },
+    "Round 3684": {
+      "decision_summary": "Two reds that no session claimed were paid, each by finding what it measured. The repository-captures test in wz-capture asserted the tallies of a reader with the compression feature off, so a build that unifies the feature on (the workspace, all features) read five units of 289 bytes and one undecoded unit of 37 bytes where the test expected four of 26 and two of 74; both sets are now asserted, chosen by the feature. The router's hot-path allocation budget was recorded for a build with the router hat alone, and the crate's wide leg also builds time-hlc, which stamps every forwarded put and costs six more allocations and 76 more bytes a forward to one subscriber (21 and 676 to sixteen). Building the test with the wide leg's features in groups showed only time-hlc moves the figure, and the wide figures equal the hosted ones; a bisect over the commits since the budget was recorded found no code change that moved it. The budget now holds one record per build.",
+      "changes_bullets": [
+        "crates/wz-capture/src/session_table_tests.rs: the repository-captures test asserts the compression-off tallies and the compression-on tallies by cfg, and its doc says what the feature changes.",
+        "crates/wz-runtime-tokio/tests/router_hot_path_cost.rs: BUDGET is two records chosen by time-hlc, with the measured difference in its doc."
+      ],
+      "verification_bullets": [
+        "The captures test failed on a build host with all features, as it did on the hosted run; after the change it passed with the feature off and with it on (one test ran in each).",
+        "The hot-path test printed the hosted figures (15 and 645, 18 and 848, 90 and 8130, 108 and 9458) with the wide leg's features; no code commit between the budget's commit and the first red moved the figure on a build host with the router hat alone. Twelve groups of the wide leg's features, built beside the router hat, held the old budget; the two groups that held time-hlc did not. After the change the test passed with the router hat alone, with time-hlc and with the whole wide set.",
+        "Not run: the hosted run of this push. A third finding is left to its owners: the router with zenoh-config or a routing feature and no access feature does not compile (a non-exhaustive match on the interceptor compile error and an unneeded mut), which no lane builds."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "carry_forward_bullets": [
+        "Read the hosted run that holds this push per job against its head sha: the captures test and the hot-path test should be green in the workspace test, the non-default test legs and the hot-path leg.",
+        "The router with zenoh-config (or routing-routes, routing-token-tables, routing-gossip) and none of the access features does not compile: InterceptorCompileError is matched with no arm for the empty case and a let mut is unneeded. Give that subset a lane or make the module's cfg match the features that use it.",
+        "The remaining reds of the hosted run of f4f260375 belong to the sessions that claimed them: the zenoh-config citation gate, the pubsub extension's feature leak with the multicast item match it causes, the ticker's size growth, the shm lock limit."
+      ],
+      "publishable_decision_summary": "Two reds that no session claimed were paid, each by finding what it measured. The repository-captures test in wz-capture asserted the tallies of a reader with the compression feature off, so a build that unifies the feature on (the workspace, all features) read five units of 289 bytes and one undecoded unit of 37 bytes where the test expected four of 26 and two of 74; both sets are now asserted, chosen by the feature. The router's hot-path allocation budget was recorded for a build with the router hat alone, and the crate's wide leg also builds time-hlc, which stamps every forwarded put and costs six more allocations and 76 more bytes a forward to one subscriber (21 and 676 to sixteen). Building the test with the wide leg's features in groups showed only time-hlc moves the figure, and the wide figures equal the hosted ones; a bisect over the commits since the budget was recorded found no code change that moved it. The budget now holds one record per build.",
+      "publishable_changes_bullets": [
+        "crates/wz-capture/src/session_table_tests.rs: the repository-captures test asserts the compression-off tallies and the compression-on tallies by cfg, and its doc says what the feature changes.",
+        "crates/wz-runtime-tokio/tests/router_hot_path_cost.rs: BUDGET is two records chosen by time-hlc, with the measured difference in its doc."
+      ],
+      "publishable_verification_bullets": [
+        "The captures test failed on a build host with all features, as it did on the hosted run; after the change it passed with the feature off and with it on (one test ran in each).",
+        "The hot-path test printed the hosted figures (15 and 645, 18 and 848, 90 and 8130, 108 and 9458) with the wide leg's features; no code commit between the budget's commit and the first red moved the figure on a build host with the router hat alone. Twelve groups of the wide leg's features, built beside the router hat, held the old budget; the two groups that held time-hlc did not. After the change the test passed with the router hat alone, with time-hlc and with the whole wide set.",
+        "Not run: the hosted run of this push. A third finding is left to its owners: the router with zenoh-config or a routing feature and no access feature does not compile (a non-exhaustive match on the interceptor compile error and an unneeded mut), which no lane builds."
+      ],
+      "publishable_impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-21-router"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Read the hosted run that holds this push per job against its head sha: the captures test and the hot-path test should be green in the workspace test, the non-default test legs and the hot-path leg.",
+        "The router with zenoh-config (or routing-routes, routing-token-tables, routing-gossip) and none of the access features does not compile: InterceptorCompileError is matched with no arm for the empty case and a let mut is unneeded. Give that subset a lane or make the module's cfg match the features that use it.",
+        "The remaining reds of the hosted run of f4f260375 belong to the sessions that claimed them: the zenoh-config citation gate, the pubsub extension's feature leak with the multicast item match it causes, the ticker's size growth, the shm lock limit."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
