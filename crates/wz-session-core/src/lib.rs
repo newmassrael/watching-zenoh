@@ -182,6 +182,13 @@ pub mod replay_cursor;
 /// one set of rules. Unconditional, no_std and no_alloc.
 pub mod delivery_lane;
 
+/// The read-only table of a closed key set: [`key_catalogue::KeyCatalogue`], every key an image
+/// handles numbered, and for each key and entity kind the entities a message on it reaches
+/// (`docs/closed-key-set.md`). The arrays are generated and static; the table counts and
+/// indexes only, and a bad one stops the build that contains it. No host reads it yet.
+/// Unconditional, no_std and no_alloc.
+pub mod key_catalogue;
+
 /// The pace of a paced declaration replay: [`replay_pacing::ReplayPacing`], the burst and the
 /// interval between turns, and the pace a build states through the `declaration-sync-pacing`
 /// policy. A value and not a clock, so the heap runtime and the slot node hold the same type.

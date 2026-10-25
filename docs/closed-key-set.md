@@ -1,7 +1,8 @@
 # Closed key set
 
-Status: design, not built. Written 2026-10-26 so that what a deployment asks of "every key is known at
-build time" is decided once, against what the host session already does, and not rebuilt beside it.
+Status: design; phase 1 (the pure table, the generator and the model test) is built and no host reads
+it yet. Written 2026-10-26 so that what a deployment asks of "every key is known at build time" is
+decided once, against what the host session already does, and not rebuilt beside it.
 
 ## What it is
 
@@ -102,6 +103,37 @@ approximates, so `MATCH_MEMO_SLOTS` does nothing in a closed image and the memo 
 4. **Per-peer allowance** (D6).
 5. **The cooperative engine, the slot node and the C ABIs** (sessions 11 and ef own the first two; a C
    ABI door is the third), once phase 3 shows the receive path.
+
+## Phase 1, as built
+
+- **The table.** `crates/wz-session-core/src/key_catalogue.rs`: `KeyCatalogue` over five static arrays
+  (key text, key ends, selection offsets, selection members, entity rows), `no_std`, no allocation, no
+  `unsafe`. `KeyCatalogue::new` is a `const fn` that checks every property of the table (sorted unique
+  non-empty keys that end on a character, offsets that cover the members, a selection that holds one
+  kind's entities once each in order), so a table the generator wrote wrongly stops the build.
+- **The selection is per entity kind.** A key's row has one cell for each of publisher, subscriber,
+  queryable, querier and token: the entities of that kind whose pattern intersects the key. The caller
+  picks the cell its message needs (a put reads the subscriber cell, a query the queryable cell).
+- **A pattern is a key of the table.** The keys are the distinct texts of the declared entities,
+  wildcards included, because a declaration of a subscriber on `a/**` has to resolve by its own text.
+  Under D4 a wildcard is still expanded only over the other declared keys: `a/b`, undeclared, is not
+  found even though `a/**` covers it, and it is refused.
+- **The declaration** has the shape of a node's entities (`kind` and `key`), so the key set of a node
+  is what the node already declares. `scripts/lib/wz_key_set.py` refuses a key that is not a key, a
+  publisher or a token on a wildcard, the same entity twice, a wildcard no concrete key meets, and a
+  set past what `u16` numbers. Entities are numbered by kind and then key, and keys by bytes, so the
+  order of declaration changes nothing.
+- **The oracle is two-sided, because the generator holds a port of the matcher.** Python has no
+  matcher, so the generator ports `keyexpr_intersects_text`. `wz_key_set.py --write` also writes every
+  pair of 399 keys over `a b @v * ** a$* $*b` up to three chunks deep with the port's answer, and
+  `crates/wz-session-core/tests/key_catalogue_model.rs` compares each with the real matcher in both
+  orders, compares every selection of the fixture (18 keys, 21 entities, every kind) with the matcher,
+  and compares the subscriber cells with what the real `SubscriberTable` delivers to a local publish
+  on each key. The test was run against a port with the rule that `**` does not cross an `@` chunk
+  removed, and three of its five tests failed; with the rule back it passes.
+- **Not done in phase 1.** No host, node image or generated `declared.rs` carries a catalogue, there is
+  no `key-set` policy, and nothing is measured. The table's ROM size for a real node is a phase 3
+  question, with the alias row.
 
 ## What is not decided
 

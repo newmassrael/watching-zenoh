@@ -1,0 +1,91 @@
+# The key set the model test of the key catalogue runs on (docs/closed-key-set.md, decision D3).
+#
+# It is a declaration in the shape of a node's entities, written to exercise the matcher and not to
+# be a node: every kind, a key two kinds share, and wildcards of every sort over the concrete keys
+# beside them (a single chunk, any depth, a substring chunk, a verbatim chunk the `**` must not
+# cross). `scripts/lib/wz_key_set.py --write` derives fixture.rs and corpus.rs from it, and
+# `--check` fails when either is stale.
+
+[[entity]]
+kind = "publisher"
+key = "lab/sensor/temp"
+
+[[entity]]
+kind = "publisher"
+key = "lab/sensor/hum"
+
+[[entity]]
+kind = "publisher"
+key = "lab/ctl/set"
+
+[[entity]]
+kind = "publisher"
+key = "lab/ctl/get"
+
+[[entity]]
+kind = "publisher"
+key = "@/lab/adv"
+
+[[entity]]
+kind = "subscriber"
+key = "lab/sensor/*"
+
+[[entity]]
+kind = "subscriber"
+key = "lab/**"
+
+[[entity]]
+kind = "subscriber"
+key = "lab/ctl/set"
+
+[[entity]]
+kind = "subscriber"
+key = "lab/sensor/t$*"
+
+[[entity]]
+kind = "subscriber"
+key = "**/temp"
+
+[[entity]]
+kind = "subscriber"
+key = "lab/*/hum"
+
+[[entity]]
+kind = "subscriber"
+key = "@/lab/*"
+
+[[entity]]
+kind = "subscriber"
+key = "**"
+
+[[entity]]
+kind = "queryable"
+key = "lab/ctl/**"
+
+[[entity]]
+kind = "queryable"
+key = "lab/doc/small"
+
+[[entity]]
+kind = "queryable"
+key = "lab/doc/large"
+
+[[entity]]
+kind = "queryable"
+key = "lab/**"
+
+[[entity]]
+kind = "querier"
+key = "lab/doc/*"
+
+[[entity]]
+kind = "querier"
+key = "lab/sensor/temp"
+
+[[entity]]
+kind = "liveliness-token"
+key = "lab/alive/node1"
+
+[[entity]]
+kind = "liveliness-token"
+key = "lab/alive/node2"
