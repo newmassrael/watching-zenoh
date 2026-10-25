@@ -120,6 +120,7 @@
         "ci.yml:dissect",
         "ci.yml:feature-gates",
         "ci.yml:feature-gates-peel",
+        "ci.yml:pico-client-only",
         "ci.yml:routing-adminspace",
         "ci.yml:transport-modes"
       ],

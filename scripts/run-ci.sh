@@ -10673,6 +10673,36 @@ layer_c1cs_capability_cost() {
     python3 scripts/lib/capability_cost_gate.py --check || return 1
 }
 
+# ─── Layer C1co — the pico client-only build dials a listener ──────────
+#
+# The pico build without `peer` opens a client session to a node that listens: it publishes to
+# it and hears from it, answers its queries, and asks it queries through `z_get` and through a
+# querier whose write filter and matching listener count the listener's queryable
+# (`crates/wz-capi-pico/tests/client_only_dials_a_listener.rs`). Such a build cannot listen, so
+# the node is the FULL build's `hold_a_listener` example, run as a process. A feature set is one
+# per build, so this takes two invocations, which no row of the non-default test table (built
+# on the default features) can spell.
+#
+# Four legs: either engine, with the answering end and without it. The legs without it are
+# not a repeat: a querier still has to hear the listener's queryable there, and the tokio
+# engine's requesting end did not until the round that added this lane. The count is exact
+# per leg, so a test the build stops compiling is a failure and not a smaller pass.
+layer_c1co_pico_client_dials_a_listener() {
+    (cd crates && cargo build -p wz-capi-pico --example hold_a_listener) || return 1
+    local listener="$PWD/crates/target/debug/examples/hold_a_listener"
+    local engine answering expect
+    for engine in engine-coop engine-tokio; do
+        for answering in ",queryable" ""; do
+            if [[ -n "$answering" ]]; then expect=4; else expect=3; fi
+            _runci_guarded_test "C1co ${engine}${answering}" "$expect" \
+                env WZ_PICO_LISTENER_BIN="$listener" \
+                cargo test -p wz-capi-pico --no-default-features \
+                --features "${engine},link-udp,query${answering}" \
+                --test client_only_dials_a_listener || return 1
+        done
+    done
+}
+
 # ─── Layer C1cn — every crate LINTS CLEAN behind its non-default ────
 #                 features
 #
@@ -24089,6 +24119,7 @@ run_layer C1cg layer_c1cg_cargo_test_runtime_partition || overall=1
 run_layer C1ch layer_c1ch_capi_c_config_surface || overall=1
 run_layer C1cf layer_c1cf_reduced_features || overall=1
 run_layer C1cs layer_c1cs_capability_cost || overall=1
+run_layer C1co layer_c1co_pico_client_dials_a_listener || overall=1
 run_layer C1cn layer_c1cn_nondefault_features || overall=1
 run_layer C1i layer_c1i_cargo_test_scouting || overall=1
 run_layer C1k layer_c1k_cargo_test_scouting_static || overall=1

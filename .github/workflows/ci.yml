@@ -1985,6 +1985,44 @@ jobs:
         if: always()
         run: bash scripts/lib/job-budget-margin.sh "$RUNNER_TEMP/wz_job_start" 1200 90 20 '${{ job.status }}'
 
+  # Layer C1co, in a job of its own: the pico build without `peer`, on each engine, dials the
+  # full build's listener (`hold_a_listener`) and publishes, answers and asks through it. It is
+  # five builds of `wz-capi-pico` (the example, and the client test with and without the
+  # answering end on each engine), and the job beside each candidate home was measured near its
+  # ceiling: `nondefault-legs` spent 1332s of its 1800s on Layer C1bnl alone.
+  #
+  # NO apt step: `cargo tree -e normal,build,dev -i` names no `bindgen`, `cmake`, `pkg-config`,
+  # `openssl-sys` or `libz-sys` in the package's graph, so the runner's own C compiler (for
+  # `ring`) is all it builds with.
+  #
+  # NO BUDGET GATE YET, on the precedent of `e2e-router-scale`: a margin gate's floor and alarm
+  # are derived from measured runs and this job has none. The first hosted run is the
+  # measurement; `timeout-minutes` is a ceiling until then.
+  pico-client-only:
+    name: pico client-only build against a listener (Layer C1co)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: bash scripts/lib/rust-toolchain-pinned.sh
+
+      - name: Cache Cargo registry + build artifacts
+        # A READER of the `ci` job's entry (class `rust-ci`); see there.
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci
+          add-job-id-key: "false"
+          save-if: "false"
+          workspaces: crates -> target
+
+      - name: Layer C1co — the pico client-only build dials a listener
+        run: bash scripts/run-ci.sh --layer C1co
+
   # ─────────────────────────────────────────────────────────────────
   # R2165 — the PASSIVE-DISSECTION job, peeled off `feature-gates` when that
   # job's margin step fired at 97% of 2700s on run 33087340444.
