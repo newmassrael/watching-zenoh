@@ -1050,8 +1050,8 @@ def validate_policies(policies: list[dict], catalog_version: int) -> list[str]:
             out.append(f"policy `{pid}`: it does not say what upstream does; a behaviour that "
                        "departs from no upstream behaviour is a capability or a defect, not a policy")
         if not isinstance(pol.get("since"), int) or not 1 <= pol["since"] <= catalog_version:
-            out.append(f"policy `{pid}`: `since` is the catalogue version that introduced it, an "
-                       f"integer from 1 to {catalog_version}")
+            out.append(f"policy `{pid}`: `since` is the catalogue version in force when it was "
+                       f"added, an integer from 1 to {catalog_version}")
         if not isinstance(pol.get("help"), str) or not pol["help"].strip():
             out.append(f"policy `{pid}`: it has no help")
         elif "\n\n" in pol["help"].strip():
@@ -1345,7 +1345,8 @@ def emit_kconfig_policies(decl: dict) -> str:
         "",
     ]
     for pol in decl["policies"]:
-        help_text = pol["help"].strip().splitlines() + [f"Upstream: {pol['upstream'].strip()}"]
+        help_text = pol["help"].strip().splitlines() + textwrap.wrap(
+            f"Upstream: {pol['upstream'].strip()}", width=78)
         if pol["kind"] == "bool":
             out += [f"config {pol['kconfig']}", f'\tbool "{pol["id"]}"', "\tdefault n", "\thelp"]
             out += help_lines("\n".join(help_text))
@@ -1402,7 +1403,7 @@ def emit_rust_policies(decl: dict) -> str:
         out += ["        }", "    }", ""]
         ids = ", ".join(f'"{v}"' for v in values)
         variants = ", ".join(f"Self::{camel(v)}" for v in values)
-        out += [f"    const CHOICES: [&'static str; {len(values)}] = [{ids}];",
+        out += [f"    const CHOICES: [&str; {len(values)}] = [{ids}];",
                 f"    const ALL: [Self; {len(values)}] = [{variants}];", "",
                 "    const fn stated() -> Self {",
                 f'        let stated = option_env!("{pol["kconfig"]}");',

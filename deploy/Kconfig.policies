@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# GENERATED from deploy/wz-config.toml by scripts/lib/wz_config.py --emit kconfig-policies.
+# Do not edit: `wz_config.py --check` fails when this file is stale.
+
+menu "wz policies"
+
+comment "Each policy is behaviour beyond upstream; the default of every one is upstream's."
+
+choice WZ_POLICY_MULTICAST_LOOPBACK
+	prompt "multicast-loopback"
+	default WZ_POLICY_MULTICAST_LOOPBACK_OS_DEFAULT
+	help
+	  Whether a datagram a node sends to a multicast group is also delivered to
+	  members of that group on the same host. `os-default` leaves the operating
+	  system's setting alone. `on` and `off` set it on every multicast socket the
+	  node opens: `on` is for nodes that share a host and must hear one another,
+	  `off` for a node that must not hear its own host's traffic.
+	  Upstream: Never sets IP_MULTICAST_LOOP on a multicast socket, so each sending
+	  socket keeps the operating system's setting.
+
+config WZ_POLICY_MULTICAST_LOOPBACK_OS_DEFAULT
+	bool "os-default"
+
+config WZ_POLICY_MULTICAST_LOOPBACK_ON
+	bool "on"
+
+config WZ_POLICY_MULTICAST_LOOPBACK_OFF
+	bool "off"
+
+endchoice
+
+endmenu

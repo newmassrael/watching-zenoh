@@ -87,6 +87,9 @@ async fn a_group_link_whose_interface_is_removed_is_lost_at_its_next_write() {
             extra_joins: &[],
             bind: None,
             dscp: None,
+            // The datagram must loop back to the member that sent it, wherever the
+            // operating system's own setting would not.
+            loopback: wz_runtime_tokio::policy::MulticastLoopback::On,
         },
     )
     .await

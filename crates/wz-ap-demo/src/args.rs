@@ -8323,6 +8323,7 @@ impl ScoutSocketArgs {
             extra_joins: &[],
             bind: None,
             dscp: None,
+            loopback: Default::default(),
         }
     }
 }

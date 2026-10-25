@@ -93,6 +93,7 @@ async fn the_fan_out_reaches_an_interface_the_default_route_does_not() {
             extra_joins: &[],
             bind: None,
             dscp: None,
+            loopback: wz_runtime_tokio::policy::MulticastLoopback::On,
         },
     )
     .await

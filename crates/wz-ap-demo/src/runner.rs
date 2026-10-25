@@ -6561,6 +6561,7 @@ async fn run_router_hat_until(
                         joins: p.mcast_join,
                         bind: p.socket.as_ref().and_then(|s| s.bind.clone()),
                         dscp: p.socket.as_ref().and_then(|s| s.dscp),
+                        loopback: Default::default(),
                     },
                 ),
                 Err(e) => {

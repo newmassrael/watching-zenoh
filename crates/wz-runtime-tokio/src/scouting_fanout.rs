@@ -139,6 +139,7 @@ pub async fn bind_scout_sockets(
             extra_joins: &[],
             bind: None,
             dscp: None,
+            loopback: Default::default(),
         };
         match UdpDriver::bind_multicast_tx(group, port, cfg).await {
             Ok(driver) => bound.push(driver),

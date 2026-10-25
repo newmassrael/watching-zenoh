@@ -3546,6 +3546,7 @@ impl ResolvedGroup {
                 joins: parsed.mcast_join,
                 bind: parsed.socket.as_ref().and_then(|s| s.bind.clone()),
                 dscp: parsed.socket.as_ref().and_then(|s| s.dscp),
+                loopback: Default::default(),
             },
         })
     }

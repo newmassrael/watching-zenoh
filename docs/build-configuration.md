@@ -292,11 +292,15 @@ default is upstream's behaviour (C2), and it lands with the pair of behaviour te
 of C8. A policy that cannot state the upstream behaviour it departs from is not a
 policy but a capability or a defect.
 
-**One departure exists already.** wz turns multicast loopback on for every socket it
-binds (`wz-runtime-tokio/src/lib.rs`, `McastPlan::loop_back`) where upstream leaves
-the operating system's default; the same-host tests and the self-echo gate rely on
-it. It becomes the first policy, `multicast-loopback` (`os-default` / `on` /
-`off`), defaulting to upstream, and those tests name `on`.
+**One departure existed already, and it is the first policy.** wz turned multicast
+loopback on for every socket it bound (`wz-runtime-tokio/src/lib.rs`,
+`McastPlan::loop_back`) where upstream, which sets `IP_MULTICAST_LOOP` nowhere (read in
+the pinned zenoh and in zenoh-pico), leaves the operating system's setting. It is now
+`multicast-loopback` (`os-default` / `on` / `off`), defaulting to upstream. It is the
+`loopback` field of `McastSocketConfig`, read from `SessionPolicy`, and applies to the
+joined and the send-only socket alike; the same-host tests name `on`, and
+`multicast_host_roundtrip.rs` holds the pair: a sender with `off` is not heard by a
+member on its host while a control sender with `on` is.
 
 ## 6. Upstream originals, profiles, presets
 

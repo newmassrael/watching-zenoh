@@ -1649,6 +1649,28 @@ The locators a node is told to connect to. A list longer than this stops
 at the limit; a fixed deployment names a few peers.
 '''
 
+# A policy is behaviour upstream does not have; it is declared with what upstream does and
+# defaults to that, so a build that states nothing is the original's (docs/build-configuration.md,
+# C2). `kind` is `bool` (default `off`) or `choice` (`choices`, one of them the default). Each is a
+# field of `SessionPolicy` (crates/wz-session-core/src/policy_generated.rs, generated) and a Kconfig
+# symbol; a build states it as `WZ_POLICY_<NAME>`. A policy enters in its own change, with a pair
+# of tests that name each of its values.
+[[policy]]
+id = "multicast-loopback"
+kind = "choice"
+kconfig = "WZ_POLICY_MULTICAST_LOOPBACK"
+choices = ["os-default", "on", "off"]
+default = "os-default"
+upstream = "Never sets IP_MULTICAST_LOOP on a multicast socket, so each sending socket keeps the operating system's setting."
+since = 2
+help = '''
+Whether a datagram a node sends to a multicast group is also delivered to
+members of that group on the same host. `os-default` leaves the operating
+system's setting alone. `on` and `off` set it on every multicast socket the
+node opens: `on` is for nodes that share a host and must hear one another,
+`off` for a node that must not hear its own host's traffic.
+'''
+
 # The role of a node in a zenoh network: upstream's `mode`. A global axis (it names no image),
 # so that every tree that sources the capabilities can state it, and each option selects the
 # capabilities it needs: the role pulls what it requires, and nothing else. What an image also

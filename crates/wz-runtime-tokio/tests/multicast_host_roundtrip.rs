@@ -46,6 +46,7 @@
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use wz_runtime_tokio::policy::MulticastLoopback;
 use wz_runtime_tokio::{LinkDriver, LinkEvent, McastSocketConfig, Reliability, TxFrame, UdpDriver};
 
 const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
@@ -56,6 +57,11 @@ const GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 224);
 // it refused the first choice here (7453, already the qos test's).
 const PORT: u16 = 17490;
 const PAYLOAD: &[u8] = b"wz-multicast-host-roundtrip";
+// The `multicast-loopback` policy's `off` witness has its own (group, port) for the same
+// reason: it must not read the datagrams of the test above, nor they its own.
+const PORT_LOOPBACK_OFF: u16 = 17491;
+const QUIET_PAYLOAD: &[u8] = b"wz-multicast-host-loopback-off";
+const CONTROL_PAYLOAD: &[u8] = b"wz-multicast-host-loopback-control";
 
 /// The interface this host's witness uses; see the module doc for the measurement
 /// behind each arm.
@@ -70,8 +76,12 @@ fn host_iface() -> Option<&'static str> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "multicast loopback e2e; opt-in like Layer M, run by the Platform lane"]
 async fn a_datagram_sent_to_the_group_reaches_a_member_on_the_same_host() {
+    // The `multicast-loopback` policy named `on`: the witness is that a member of the
+    // group on the sender's own host hears it, which is the operating system's setting
+    // on most hosts and is not on every one.
     let cfg = McastSocketConfig {
         iface: host_iface(),
+        loopback: MulticastLoopback::On,
         ..McastSocketConfig::default()
     };
 
@@ -115,5 +125,87 @@ async fn a_datagram_sent_to_the_group_reaches_a_member_on_the_same_host() {
     assert!(
         arrived.is_ok(),
         "the datagram a member's own host sent to the group did not come back to it"
+    );
+}
+
+/// The `multicast-loopback` policy named `off`, against the control that makes the
+/// absence mean something. Two senders on this host send to one group, a member of it
+/// listens: the sender whose loopback is `off` is not heard, and the one whose loopback is
+/// `on` is. The member hearing the control is what shows it was able to hear the first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "multicast loopback e2e; opt-in like Layer M, run by the Platform lane"]
+async fn a_sender_whose_loopback_is_off_is_not_heard_by_a_member_on_its_host() {
+    let member_cfg = McastSocketConfig {
+        iface: host_iface(),
+        loopback: MulticastLoopback::On,
+        ..McastSocketConfig::default()
+    };
+    let mut member = UdpDriver::bind_multicast(GROUP, PORT_LOOPBACK_OFF, member_cfg)
+        .await
+        .expect("a group member binds and joins on this host");
+    let mut quiet = UdpDriver::bind_multicast_tx(
+        GROUP,
+        PORT_LOOPBACK_OFF,
+        McastSocketConfig {
+            loopback: MulticastLoopback::Off,
+            ..member_cfg
+        },
+    )
+    .await
+    .expect("a send-only group socket with loopback off binds on this host");
+    let mut loud = UdpDriver::bind_multicast_tx(GROUP, PORT_LOOPBACK_OFF, member_cfg)
+        .await
+        .expect("a send-only group socket with loopback on binds on this host");
+
+    // The quiet sender goes first, so a datagram it did deliver would be read before the
+    // control behind it on the same host.
+    quiet
+        .send(
+            &TxFrame {
+                bytes: QUIET_PAYLOAD,
+            },
+            Reliability::BestEffort,
+        )
+        .await
+        .expect("a send to the group leaves this host's interface");
+    loud.send(
+        &TxFrame {
+            bytes: CONTROL_PAYLOAD,
+        },
+        Reliability::BestEffort,
+    )
+    .await
+    .expect("a send to the group leaves this host's interface");
+
+    let mut heard_the_quiet_one = false;
+    let control = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let LinkEvent::Rx(frame) = member.poll_event().await {
+                if frame.bytes.as_slice() == QUIET_PAYLOAD {
+                    heard_the_quiet_one = true;
+                } else if frame.bytes.as_slice() == CONTROL_PAYLOAD {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        control.is_ok(),
+        "the control datagram, sent with loopback on, did not reach the member: the host \
+         cannot witness the policy"
+    );
+    // A datagram still in flight after the control would be as much a delivery.
+    let _ = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            if let LinkEvent::Rx(frame) = member.poll_event().await {
+                heard_the_quiet_one |= frame.bytes.as_slice() == QUIET_PAYLOAD;
+            }
+        }
+    })
+    .await;
+    assert!(
+        !heard_the_quiet_one,
+        "a sender whose multicast-loopback policy is off was heard by a member on its own host"
     );
 }

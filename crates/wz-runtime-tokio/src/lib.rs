@@ -510,6 +510,17 @@ pub use wz_session_core::capacity;
 /// used on every build), and a `pub use` never warns unused.
 pub use wz_session_core::qos;
 
+/// The policies of a build (behaviour beyond upstream, each defaulting to upstream's), so a
+/// caller names the value it wants, for example `policy::MulticastLoopback::On` in
+/// [`McastSocketConfig::loopback`]. Ungated, like the re-exports above.
+pub use wz_session_core::policy;
+#[cfg(any(
+    feature = "scouting-active",
+    feature = "scouting-responder",
+    feature = "transport-multicast"
+))]
+use wz_session_core::policy::MulticastLoopback;
+
 /// session-extqos (R311y506) — the `init::ext::QoSLink` establishment codec:
 /// [`extqos::QosLinkState`] (the priority band + reliability a link declares),
 /// its z64 packing, and [`extqos::QosLinkError`], which
@@ -3408,7 +3419,7 @@ impl UdpDriver {
         // hop limit nor the v6 egress interface, so doing every step here keeps
         // the two families on one code path.
         plan.join_groups(&raw, rx_bind.skips_a_refused_v4_join())?;
-        plan.loop_back(&raw)?;
+        plan.loop_back(&raw, cfg.loopback)?;
         // R311y832 — the hop limit. Set on THIS socket because this
         // constructor's socket is the one that sends as well as receives (see
         // the doc above); zenoh splits the roles and sets it on its `ucast_sock`
@@ -3447,12 +3458,13 @@ impl UdpDriver {
     /// `UdpSocket::bind` — there is now a setsockopt between the bind and the
     /// driver, and one SSOT is better than the same three lines at each sender.
     ///
-    /// No join: a sender needs no group membership. So this deliberately does NOT
-    /// set `IP_MULTICAST_LOOP` either — a send-only socket never reads back its
-    /// own traffic. (The bidirectional [`Self::bind_multicast`] does set it,
-    /// and that IS a divergence from upstream, which sets `IP_MULTICAST_LOOP`
-    /// nowhere; it is load-bearing for wz's same-host tests, where the ZID
-    /// self-echo gate is what keeps a node from admitting its own JOIN.)
+    /// No join: a sender needs no group membership. `IP_MULTICAST_LOOP` is set only
+    /// as the `multicast-loopback` policy says (`McastSocketConfig::loopback`); under
+    /// its default, `os-default`, nothing is set, which is upstream's behaviour
+    /// (upstream sets `IP_MULTICAST_LOOP` nowhere). wz's same-host tests name `on`, which
+    /// is what lets a node on the same host hear another's traffic wherever the operating
+    /// system's own setting would not; the ZID self-echo gate is what keeps a node from
+    /// admitting its own JOIN.
     #[cfg(any(
         feature = "scouting-active",
         feature = "scouting-responder",
@@ -3502,6 +3514,9 @@ impl UdpDriver {
         // R2791 — `#bind=`. This is the socket upstream binds to it, and the
         // fallback is the wildcard this line used to pass unconditionally.
         raw.bind(&plan.egress_local_addr(cfg.bind, cfg.iface, port)?.into())?;
+        // `IP_MULTICAST_LOOP` is a property of the SENDING socket, so the policy belongs
+        // here as much as on the joined socket; `os-default` sets nothing on either.
+        plan.loop_back(&raw, cfg.loopback)?;
         // R311y832 — this is the SEND-only half, so the hop limit belongs here
         // most directly; it is zenoh's `ucast_sock`, the socket
         // `multicast.rs:363` sets the TTL on.
@@ -4294,6 +4309,10 @@ pub struct McastSocketConfig<'a> {
     /// `IPV6_TCLASS` on whichever socket SENDS, keyed to the group's family as
     /// upstream keys it.
     pub dscp: Option<u32>,
+    /// The `multicast-loopback` policy: whether `IP_MULTICAST_LOOP` is set on the sockets
+    /// this config opens, and to what. `Default` is the build's value, which is upstream's
+    /// (the operating system's setting, left alone) unless the build states another.
+    pub loopback: MulticastLoopback,
 }
 
 #[cfg(any(
@@ -4777,11 +4796,18 @@ impl McastPlan {
         Ok(())
     }
 
-    /// Let a same-host peer (and the loopback tests) observe the traffic.
-    fn loop_back(&self, raw: &socket2::Socket) -> io::Result<()> {
+    /// The `multicast-loopback` policy on this socket: whether a same-host member of the
+    /// group observes what it sends. `OsDefault` sets nothing, which is what upstream does
+    /// (it sets `IP_MULTICAST_LOOP` nowhere).
+    fn loop_back(&self, raw: &socket2::Socket, policy: MulticastLoopback) -> io::Result<()> {
+        let on = match policy {
+            MulticastLoopback::OsDefault => return Ok(()),
+            MulticastLoopback::On => true,
+            MulticastLoopback::Off => false,
+        };
         match self {
-            Self::V4 { .. } => raw.set_multicast_loop_v4(true),
-            Self::V6 { .. } => raw.set_multicast_loop_v6(true),
+            Self::V4 { .. } => raw.set_multicast_loop_v4(on),
+            Self::V6 { .. } => raw.set_multicast_loop_v6(on),
         }
     }
 
@@ -4817,6 +4843,8 @@ pub struct McastGroupOptions {
     pub bind: Option<String>,
     /// R2791 — `#dscp=<value>`, the sending socket's traffic class.
     pub dscp: Option<u32>,
+    /// The `multicast-loopback` policy, as [`McastSocketConfig::loopback`].
+    pub loopback: MulticastLoopback,
 }
 
 #[cfg(any(
@@ -4833,6 +4861,7 @@ impl McastGroupOptions {
             extra_joins: &self.joins,
             bind: self.bind.as_deref(),
             dscp: self.dscp,
+            loopback: self.loopback,
         }
     }
 }
