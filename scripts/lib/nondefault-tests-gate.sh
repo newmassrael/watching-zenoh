@@ -801,9 +801,13 @@ transport-link-unixpipe,transport-link-ws|"
     # (`slot_node`): its round watch, its identity and handshake, and the
     # registration of its documents. The module needs `client-core` beside
     # `session-slot`, which no row above names; `query-get` compiles the wake an
-    # application that asks gives the node, so the tests run over that build too.
+    # application that asks gives the node, so the tests run over that build too. `group` is the
+    # node as a member of a multicast group (`slot_group`: what a publisher offers each period and the
+    # members the pump reports); it implies `client-slot` and names `transport-multicast` and
+    # `codec-push`, which no row above selects together with the slot profile.
     "wz-session-mcu|hook|\
         client-slot,\
+        group,\
         query-get\
         |"
     # S9d: the receive path of the slot profile lends the control records (a
