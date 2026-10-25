@@ -820,7 +820,7 @@ impl Hat {
 /// filter reads them: a mesh hat answers from its net's gateway bits (R2878),
 /// and a broker hat has no view, as the pin's broker hat answers `None`
 /// (`zenoh/src/net/routing/hat/broker/mod.rs` @ `fn gateways_of(&self, _tables: &TablesData, _zid: &ZenohIdProto) -> Option<Vec<ZenohIdProto>> {`).
-impl GatewayView<Zid> for RouterForwarder {
+impl<T: std::ops::Deref<Target = Tables>> GatewayView<Zid> for OnTables<'_, T> {
     fn gateways_of(&self, region: Region, zid: &Zid) -> Option<Vec<Zid>> {
         self.tables
             .hats
@@ -925,7 +925,11 @@ trait DeclPlane {
     type Value: Copy + PartialEq;
     /// The fold of every holder outside `target` for the EXACT `keyexpr`,
     /// `None` when none holds it: the pin's `other_info`.
-    fn fold_outside(fwd: &RouterForwarder, target: Region, keyexpr: &str) -> Option<Self::Value>;
+    fn fold_outside<T: std::ops::Deref<Target = Tables>>(
+        fwd: &OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+    ) -> Option<Self::Value>;
     /// The self-sourced declaration carrying `value`.
     fn declare(keyexpr: &str, value: Self::Value) -> Result<DeclareOwned, CodecError>;
     /// The self-sourced retraction.
@@ -937,7 +941,11 @@ struct SubPlane;
 
 impl DeclPlane for SubPlane {
     type Value = ();
-    fn fold_outside(fwd: &RouterForwarder, target: Region, keyexpr: &str) -> Option<()> {
+    fn fold_outside<T: std::ops::Deref<Target = Tables>>(
+        fwd: &OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+    ) -> Option<()> {
         fwd.self_advertises_sub_into(target, keyexpr).then_some(())
     }
     fn declare(keyexpr: &str, (): ()) -> Result<DeclareOwned, CodecError> {
@@ -954,7 +962,11 @@ struct QablPlane;
 
 impl DeclPlane for QablPlane {
     type Value = QueryableInfo;
-    fn fold_outside(fwd: &RouterForwarder, target: Region, keyexpr: &str) -> Option<QueryableInfo> {
+    fn fold_outside<T: std::ops::Deref<Target = Tables>>(
+        fwd: &OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+    ) -> Option<QueryableInfo> {
         fwd.derived_cross_tier_qabl_info(target, keyexpr)
     }
     fn declare(keyexpr: &str, info: QueryableInfo) -> Result<DeclareOwned, CodecError> {
@@ -972,7 +984,11 @@ struct TokenPlane;
 #[cfg(feature = "routing-token-tables")]
 impl DeclPlane for TokenPlane {
     type Value = ();
-    fn fold_outside(fwd: &RouterForwarder, target: Region, keyexpr: &str) -> Option<()> {
+    fn fold_outside<T: std::ops::Deref<Target = Tables>>(
+        fwd: &OnTables<'_, T>,
+        target: Region,
+        keyexpr: &str,
+    ) -> Option<()> {
         fwd.self_advertises_token_into(target, keyexpr)
             .then_some(())
     }
@@ -1869,7 +1885,7 @@ impl RouterDeclarationsView {
 /// chains and their caches, and the counters. The data path WRITES those (a query allocates an
 /// entry, a Push fills a cache, every message counts), so under a read lock each needs a lock or an
 /// atomic of its own, which is a later phase's decision and not a grouping's.
-struct Tables {
+pub(crate) struct Tables {
     /// R2867 (open-debt item 751, step 3a) — one hat per region, keyed as the
     /// pin keys its hats
     /// (`zenoh/src/net/routing/dispatcher/tables.rs` @ `pub hats: RegionMap<Box<dyn HatTrait + Send + Sync>>,`).
@@ -2298,6 +2314,144 @@ pub struct RouterForwarder {
     node_hlc: crate::node_clock::NodeHlc,
 }
 
+/// The router with its [`Tables`] held for the length of one operation: the forwarder, and the
+/// tables as the caller holds them (`T` is a reference or a lock guard, anything that derefs to
+/// `Tables`).
+///
+/// Every method that reads or writes a table is a method of this type and not of
+/// [`RouterForwarder`], so a table cannot be reached without the lock being held, and the lock is
+/// taken ONCE by the caller (`docs/router-task-per-face.md`, phase 3e) and not once per use. A
+/// method that reads is available whenever `T` derefs to `Tables`; one that writes says
+/// `where T: DerefMut` and takes `&mut self`, so a writer can call every reader and a reader can
+/// call no writer: the rule that a method holding the write guard must not take the read guard is
+/// a type error and not a deadlock. The forwarder's other state (counters, the credit stage, the
+/// memos, the interceptor chains) is reached through `Deref`.
+pub(crate) struct OnTables<'a, T> {
+    fwd: &'a RouterForwarder,
+    tables: T,
+}
+
+impl<T> std::ops::Deref for OnTables<'_, T> {
+    type Target = RouterForwarder;
+
+    fn deref(&self) -> &RouterForwarder {
+        self.fwd
+    }
+}
+
+impl RouterForwarder {
+    /// The forwarder with its tables as they are held now.
+    fn on_tables(&self) -> OnTables<'_, &Tables> {
+        OnTables {
+            fwd: self,
+            tables: &self.tables,
+        }
+    }
+}
+
+/// The router's public methods, each taking its tables once and handing them to the method of the
+/// same name on [`OnTables`]: what a host, a test or the accept loop calls, and where the lock is
+/// taken. A method that takes no table is delegated all the same, so that the public surface of the
+/// router is one list.
+macro_rules! router_entry_points {
+    ($($(#[$attr:meta])* fn $name:ident(&self $(, $arg:ident: $ty:ty)* $(,)?) $(-> $ret:ty)?;)*) => {
+        impl RouterForwarder {
+            $(
+                $(#[$attr])*
+                #[doc = concat!("The router's `", stringify!($name), "`, with its tables taken once.")]
+                pub fn $name(&self $(, $arg: $ty)*) $(-> $ret)? {
+                    self.on_tables().$name($($arg),*)
+                }
+            )*
+        }
+    };
+}
+
+router_entry_points! {
+    fn enable_autoconnect(&self, policy: AutoConnect) -> DialIntentReceiver;
+    fn enable_autoconnect_into(&self, policy: AutoConnect, tx: DialIntentSender);
+    fn set_gossip_multihop(&self, enabled: bool);
+    fn set_peer_region_full_linkstate(&self, enabled: bool);
+    fn set_query_timeout(&self, timeout: Duration);
+    fn update_router_link_weights(&self, link_weights: HashMap<Zid, LinkEdgeWeight>) -> bool;
+    #[cfg(feature = "adminspace-core")]
+    fn admin_sessions(&self) -> Vec<wz_session_core::adminspace::AdminSession>;
+    #[cfg(feature = "session-close-ingress")]
+    fn lifecycle_directory(&self) -> RouterSessionDirectory;
+    #[cfg(all(
+        feature = "session-close-ingress",
+        feature = "routing-accept",
+        feature = "router-connect-reconcile"
+    ))]
+    fn node_locators(&self) -> crate::session_lifecycle_open::NodeLocators;
+    #[cfg(feature = "adminspace-core")]
+    fn sessions_view(&self) -> RouterSessionsView;
+    fn router_links_info(&self) -> HashMap<Zid, LinkInfo>;
+    fn routers_net_node_count(&self) -> usize;
+    fn linkstatepeers_net_node_count(&self) -> usize;
+    fn ingested(&self) -> usize;
+    fn data_seen(&self) -> usize;
+    fn shed_registry(&self) -> Arc<ShedRegistry>;
+    fn data_sent(&self) -> usize;
+    #[cfg(feature = "transport-shm")]
+    fn shm_unnegotiated_dropped(&self) -> usize;
+    #[cfg(feature = "transport-shm")]
+    fn shm_relay_dropped(&self) -> usize;
+    fn deferred_client_delivery_seen(&self) -> usize;
+    fn fan_out_face_visits(&self) -> usize;
+    #[cfg(feature = "router-multicast-faces")]
+    fn mcast_ingress_federated(&self) -> usize;
+    #[cfg(feature = "router-multicast-faces")]
+    fn mcast_ingress_suppressed(&self) -> usize;
+    #[cfg(feature = "router-multicast-faces")]
+    fn mcast_member_peak(&self) -> usize;
+    #[cfg(feature = "router-multicast-faces")]
+    fn group_subs_advertised_peak(&self) -> usize;
+    fn queries_seen(&self) -> usize;
+    fn future_pushes_seen(&self) -> usize;
+    fn face_up_replays_seen(&self) -> usize;
+    fn future_qabl_pushes_seen(&self) -> usize;
+    #[cfg(feature = "routing-token-tables")]
+    fn future_token_pushes_seen(&self) -> usize;
+    fn queryables_seen(&self) -> usize;
+    fn client_subs_seen(&self) -> usize;
+    fn mesh_subs_seen(&self) -> usize;
+    fn set_interceptors(&self, config: InterceptorConfig);
+    #[cfg(all(feature = "router-multicast-faces", feature = "access-acl-multicast"))]
+    fn set_mcast_group_link(&self, subject: wz_session_core::link::LinkSubject);
+    fn interceptor_dropped(&self) -> usize;
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    fn interceptor_cache_recomputes(&self) -> usize;
+    fn data_route_computes(&self) -> usize;
+    fn client_route_computes(&self) -> usize;
+    fn query_route_computes(&self) -> usize;
+    fn client_query_route_computes(&self) -> usize;
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    fn egress_interceptor_cache_recomputes(&self) -> usize;
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    fn interceptor_cache_len(&self) -> usize;
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    fn egress_interceptor_cache_len(&self) -> usize;
+    #[cfg(feature = "routing-interceptor-hotreload")]
+    fn interceptor_cache_entries_for(&self, id: FaceId) -> (usize, usize);
+    #[cfg(feature = "router-multicast-faces")]
+    fn attach_mcast_group(&self, tx: crate::multicast_pipeline::MulticastTxProducer);
+    fn register_local_queryable(&self, keyexpr: &str, complete: bool, handler: LocalQueryHandler);
+    fn register_local_subscriber(&self, keyexpr: &str, handler: LocalSubscriberHandler);
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn declarations_view(&self) -> RouterDeclarationsView;
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn admin_subscribers(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)>;
+    #[cfg(feature = "adminspace-introspection-handlers")]
+    fn admin_queryables(&self) -> Vec<(String, wz_session_core::adminspace::AdminSources)>;
+    #[cfg(feature = "adminspace-router-linkstate")]
+    fn routers_net_view(&self) -> LinkstateNetView;
+    #[cfg(feature = "adminspace-router-linkstate")]
+    fn peers_net_view(&self) -> LinkstateNetView;
+    fn pending_len(&self) -> usize;
+    fn pending_timed_out(&self) -> usize;
+}
+
 impl RouterForwarder {
     /// The SPF-throttle coalescing window — the SAME default the single-net
     /// [`LinkstateForwarder`](crate::linkstate_forward::LinkstateForwarder)
@@ -2378,7 +2532,7 @@ impl RouterForwarder {
             self.tables.faces.read().is_empty(),
             "a router's south is partitioned before any face registers"
         );
-        let self_zid = *self.routers_net().read().self_zid();
+        let self_zid = *self.on_tables().routers_net().read().self_zid();
         self.tables.hats = regions_of(WhatAmI::Router, &partition)
             .into_iter()
             .map(|region| (region, Hat::for_region(region, self_zid)))
@@ -2386,7 +2540,9 @@ impl RouterForwarder {
         self.tables.partition = partition;
         self
     }
+}
 
+impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// The region the rules put the remote behind `actions` in and the remote's
     /// bound, or why they cannot: the pin's `compute_region_of` over the remote's
     /// zid, role, region name and the interfaces of its link, and the bound it
@@ -2423,7 +2579,9 @@ impl RouterForwarder {
             remote_bound,
         )
     }
+}
 
+impl RouterForwarder {
     /// As [`new`](Self::new), but with an INJECTED monotonic clock — the dependency
     /// injection a deterministic pending-query-timeout test uses to advance "now"
     /// across a deadline (the router twin of
@@ -2535,7 +2693,9 @@ impl RouterForwarder {
             clock,
         }
     }
+}
 
+impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// R2639 — enable gossip autoconnect on this ROUTER: install `policy` and
     /// return the receiving end of the dial-intent channel. From then on, every
     /// node either tier's topology ingest DISCOVERS (a `changes.new` node that
@@ -3452,7 +3612,7 @@ impl RouterForwarder {
     /// One table out of every mesh hat, keyed by its region — the shape the
     /// admin declarations view holds.
     #[cfg(feature = "adminspace-introspection-handlers")]
-    fn mesh_tables<T>(&self, table: impl Fn(&MeshHat) -> T) -> RegionMap<T> {
+    fn mesh_tables<V>(&self, table: impl Fn(&MeshHat) -> V) -> RegionMap<V> {
         self.tables
             .hats
             .iter()
@@ -3462,7 +3622,7 @@ impl RouterForwarder {
 
     /// The [`mesh_tables`](Self::mesh_tables) twin over the broker hats.
     #[cfg(feature = "adminspace-introspection-handlers")]
-    fn broker_tables<T>(&self, table: impl Fn(&BrokerHat) -> T) -> RegionMap<T> {
+    fn broker_tables<V>(&self, table: impl Fn(&BrokerHat) -> V) -> RegionMap<V> {
         self.broker_regions()
             .map(|(region, hat)| (region, table(hat)))
             .collect()
@@ -8173,7 +8333,10 @@ impl RouterForwarder {
     }
 }
 
-impl FaceForwarder for RouterForwarder {
+/// What the accept loop calls, as methods of the router with its tables held. The
+/// [`FaceForwarder`] impl below is the lock-taking entry: each call takes the tables once and hands
+/// the held router to the method of the same name here.
+impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
         // Classify the face by its handshake role (zenoh's
         // `new_transport_unicast_face` whatami branch): a Router/Peer face with
@@ -8422,14 +8585,6 @@ impl FaceForwarder for RouterForwarder {
         dirty.set(true);
     }
 
-    /// `Some(self.trees_delay)`: the router DOES tick — it flushes the coalesced
-    /// per-net spanning-tree recomputes (D2c). Without this override the trait
-    /// default `None` would never arm the timer and [`tick`](Self::tick) would
-    /// be dead.
-    fn tick_period(&self) -> Option<Duration> {
-        Some(self.trees_delay)
-    }
-
     fn tick(&self) {
         // Flush each net's coalesced recompute, if one accumulated, and
         // re-advertise that tier's NATIVE interest to whatever new tree children
@@ -8458,30 +8613,6 @@ impl FaceForwarder for RouterForwarder {
         // that long would have closed it.
         self.drain_egress();
         self.sweep_egress();
-    }
-
-    fn read_gate(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
-        self.gate_of(id)
-    }
-
-    fn wake_signal(&self) -> Option<Arc<tokio::sync::Notify>> {
-        Some(self.wake_signal_of())
-    }
-
-    /// A link the router holds messages for has room: offer it what is held now, in order.
-    fn woken(&self) {
-        self.drain_egress();
-    }
-
-    /// `true`: both meshes key the self-edge on the peer zid (a
-    /// [`LinkstateNetwork`] property), so the router must hold AT MOST ONE face
-    /// per zid — two faces to one peer would give a net two links for one zid,
-    /// and either teardown's `remove_link` (keyed on zid) would prune the
-    /// still-live peer. The loop enforces it by dropping a redundant second
-    /// face at establishment (zenoh's one-transport-per-zid). A Client face
-    /// without a surfaced zid is simply never deduped — consistent.
-    fn dedups_faces_by_zid(&self) -> bool {
-        true
     }
 
     /// A joined link of a peer's session: remembered so a lifecycle close reaches
@@ -8887,6 +9018,113 @@ impl FaceForwarder for RouterForwarder {
     }
 }
 
+impl FaceForwarder for RouterForwarder {
+    fn register(&self, id: FaceId, actions: &Arc<SessionLinkActions>) {
+        self.on_tables().register(id, actions)
+    }
+
+    fn deregister(&self, id: FaceId) {
+        self.on_tables().deregister(id)
+    }
+
+    /// `Some(self.trees_delay)`: the router DOES tick — it flushes the coalesced
+    /// per-net spanning-tree recomputes (D2c). Without this override the trait
+    /// default `None` would never arm the timer and [`tick`](Self::tick) would
+    /// be dead.
+    fn tick_period(&self) -> Option<Duration> {
+        Some(self.trees_delay)
+    }
+
+    fn tick(&self) {
+        self.on_tables().tick()
+    }
+
+    fn read_gate(&self, id: FaceId) -> Option<Arc<tokio::sync::Notify>> {
+        self.on_tables().gate_of(id)
+    }
+
+    fn wake_signal(&self) -> Option<Arc<tokio::sync::Notify>> {
+        Some(self.wake_signal_of())
+    }
+
+    /// A link the router holds messages for has room: offer it what is held now, in order.
+    fn woken(&self) {
+        self.on_tables().drain_egress();
+    }
+
+    /// `true`: both meshes key the self-edge on the peer zid (a
+    /// [`LinkstateNetwork`] property), so the router must hold AT MOST ONE face
+    /// per zid — two faces to one peer would give a net two links for one zid,
+    /// and either teardown's `remove_link` (keyed on zid) would prune the
+    /// still-live peer. The loop enforces it by dropping a redundant second
+    /// face at establishment (zenoh's one-transport-per-zid). A Client face
+    /// without a surfaced zid is simply never deduped — consistent.
+    fn dedups_faces_by_zid(&self) -> bool {
+        true
+    }
+
+    #[cfg(feature = "session-close-ingress")]
+    fn register_joined(
+        &self,
+        joined_id: FaceId,
+        primary_id: FaceId,
+        actions: &Arc<SessionLinkActions>,
+    ) {
+        self.on_tables()
+            .register_joined(joined_id, primary_id, actions)
+    }
+
+    #[cfg(feature = "session-close-ingress")]
+    fn deregister_joined(&self, joined_id: FaceId) {
+        self.on_tables().deregister_joined(joined_id)
+    }
+
+    fn refuses_face(&self, actions: &Arc<SessionLinkActions>) -> Option<String> {
+        self.on_tables().refuses_face(actions)
+    }
+
+    fn south_partition(&self) -> SouthPartition {
+        self.on_tables().south_partition()
+    }
+
+    #[cfg(feature = "router-multicast-faces")]
+    fn route_mcast_ingress(
+        &self,
+        priority: Priority,
+        reliable: bool,
+        push: &PushOwned,
+        from: Option<&MulticastPeerId>,
+    ) {
+        self.on_tables()
+            .route_mcast_ingress(priority, reliable, push, from)
+    }
+
+    #[cfg(feature = "router-multicast-faces")]
+    fn route_mcast_ingress_request(
+        &self,
+        reliable: bool,
+        request: &RequestOwned,
+        from: Option<&MulticastPeerId>,
+    ) {
+        self.on_tables()
+            .route_mcast_ingress_request(reliable, request, from)
+    }
+
+    #[cfg(feature = "router-multicast-faces")]
+    fn set_mcast_group_members(&self, members: &[Vec<u8>]) {
+        self.on_tables().set_mcast_group_members(members)
+    }
+
+    #[cfg(feature = "router-multicast-faces")]
+    fn set_mcast_group_subs(&self, subs: &[String]) {
+        self.on_tables().set_mcast_group_subs(subs)
+    }
+
+    fn forward(&self, id: FaceId, event: IterationEvent<'_>) {
+        self.on_tables().forward(id, event)
+    }
+}
+
 /// The per-message [`InterceptorContext`] for one router face — the router twin of
 /// [`LinkstateForwarder`](crate::linkstate_forward)'s `FaceContext`. Borrows the
 /// face's state so an enforcer reads the subject (the peer's routing zid) and
@@ -8929,7 +9167,7 @@ impl InterceptorContext for RouterFaceContext<'_> {
 /// inherent [`set_interceptors`](RouterForwarder::set_interceptors).
 impl crate::interceptor::InterceptorSink for RouterForwarder {
     fn set_interceptors(&self, config: crate::interceptor::InterceptorConfig) {
-        RouterForwarder::set_interceptors(self, config)
+        self.on_tables().set_interceptors(config)
     }
 }
 
@@ -8960,7 +9198,7 @@ pub trait RouterLinkWeightSink {
 /// the same shape the `InterceptorSink` impl above takes.
 impl RouterLinkWeightSink for RouterForwarder {
     fn set_router_link_weights(&self, weights: HashMap<Zid, LinkEdgeWeight>) -> bool {
-        RouterForwarder::update_router_link_weights(self, weights)
+        self.on_tables().update_router_link_weights(weights)
     }
 }
 
@@ -9076,11 +9314,15 @@ mod tests {
         assert_eq!(built, want);
         for region in regions {
             assert_eq!(
-                fwd.broker_hat(region).is_some(),
+                fwd.on_tables().broker_hat(region).is_some(),
                 is_leaf(region),
                 "{region}"
             );
-            assert_eq!(fwd.mesh_hat(region).is_some(), !is_leaf(region), "{region}");
+            assert_eq!(
+                fwd.on_tables().mesh_hat(region).is_some(),
+                !is_leaf(region),
+                "{region}"
+            );
         }
     }
 
@@ -9322,9 +9564,14 @@ mod tests {
         let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
         // self + 0xAA in routers_net; only self in linkstatepeers_net.
-        assert_eq!(fwd.routers_net().read().node_count(), 2);
-        assert!(fwd.routers_net().read().get_node(&zid(0xAA)).is_some());
-        assert_eq!(fwd.linkstatepeers_net().read().node_count(), 1);
+        assert_eq!(fwd.on_tables().routers_net().read().node_count(), 2);
+        assert!(fwd
+            .on_tables()
+            .routers_net()
+            .read()
+            .get_node(&zid(0xAA))
+            .is_some());
+        assert_eq!(fwd.on_tables().linkstatepeers_net().read().node_count(), 1);
         assert_eq!(fwd.tables.faces.read()[&FaceId(0)].tier, ROUTERS_REGION);
     }
 
@@ -9338,13 +9585,14 @@ mod tests {
         // its own announcement (`zenoh/src/net/protocol/network.rs` @ `if self.full_linkstate || self.gossip_multihop {`).
         // The link alone already makes it self's next hop.
         assert!(fwd.tables.faces.read()[&FaceId(0)].link.is_some());
-        let peers = fwd.linkstatepeers_net();
+        let on = fwd.on_tables();
+        let peers = on.linkstatepeers_net();
         assert_eq!(peers.read().node_count(), 1, "no node before it announces");
         assert_eq!(
             peers.read().next_hop(&zid(0x01), &zid(0xBB)),
             Some(zid(0xBB))
         );
-        assert_eq!(fwd.routers_net().read().node_count(), 1);
+        assert_eq!(fwd.on_tables().routers_net().read().node_count(), 1);
         assert_eq!(fwd.tables.faces.read()[&FaceId(0)].tier, PEERS_REGION);
     }
 
@@ -9357,8 +9605,8 @@ mod tests {
         assert!(fwd.tables.faces.read().contains_key(&FaceId(0)));
         assert_eq!(fwd.tables.faces.read()[&FaceId(0)].tier, CLIENTS_REGION);
         assert_eq!(fwd.tables.faces.read()[&FaceId(0)].link, None);
-        assert_eq!(fwd.routers_net().read().node_count(), 1);
-        assert_eq!(fwd.linkstatepeers_net().read().node_count(), 1);
+        assert_eq!(fwd.on_tables().routers_net().read().node_count(), 1);
+        assert_eq!(fwd.on_tables().linkstatepeers_net().read().node_count(), 1);
     }
 
     #[test]
@@ -9372,7 +9620,7 @@ mod tests {
         assert_eq!(fwd.tables.faces.read()[&FaceId(0)].tier, ROUTERS_REGION);
         assert_eq!(fwd.tables.faces.read()[&FaceId(0)].link, None);
         assert_eq!(
-            fwd.routers_net().read().node_count(),
+            fwd.on_tables().routers_net().read().node_count(),
             1,
             "no neighbour added"
         );
@@ -9383,17 +9631,17 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
-        assert_eq!(fwd.routers_net().read().node_count(), 2); // self + 0xAA
-                                                              // A flood on the ROUTER face discovers 0xDD into the routers tier only.
+        assert_eq!(fwd.on_tables().routers_net().read().node_count(), 2); // self + 0xAA
+                                                                          // A flood on the ROUTER face discovers 0xDD into the routers tier only.
         discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0xDD, 3, 5);
         assert_eq!(fwd.ingested.get(), 1, "the OAM was ingested");
         assert_eq!(
-            fwd.routers_net().read().node_count(),
+            fwd.on_tables().routers_net().read().node_count(),
             3,
             "0xDD discovered in the routers tier (self + 0xAA + 0xDD)"
         );
         assert_eq!(
-            fwd.linkstatepeers_net().read().node_count(),
+            fwd.on_tables().linkstatepeers_net().read().node_count(),
             1,
             "the peers tier is untouched by a routers-tier flood"
         );
@@ -9438,13 +9686,13 @@ mod tests {
             0,
             "register only SCHEDULES, never recomputes inline"
         );
-        assert!(fwd.mesh(ROUTERS_REGION).trees_dirty.get());
-        assert!(fwd.mesh(PEERS_REGION).trees_dirty.get());
+        assert!(fwd.on_tables().mesh(ROUTERS_REGION).trees_dirty.get());
+        assert!(fwd.on_tables().mesh(PEERS_REGION).trees_dirty.get());
         fwd.tick();
         // Both nets had a pending change -> one recompute each, flags cleared.
         assert_eq!(fwd.recomputes.get(), 2);
-        assert!(!fwd.mesh(ROUTERS_REGION).trees_dirty.get());
-        assert!(!fwd.mesh(PEERS_REGION).trees_dirty.get());
+        assert!(!fwd.on_tables().mesh(ROUTERS_REGION).trees_dirty.get());
+        assert!(!fwd.on_tables().mesh(PEERS_REGION).trees_dirty.get());
         // An idle tick is a no-op poll.
         fwd.tick();
         assert_eq!(fwd.recomputes.get(), 2, "an idle window adds no recompute");
@@ -9549,8 +9797,11 @@ mod tests {
             to_router.iter().all(|e| !e.g()),
             "no self entry flooded into the north router region carries G"
         );
-        assert_eq!(fwd.linkstatepeers_net().read().gateways(), vec![zid(0x01)]);
-        assert!(fwd.routers_net().read().gateways().is_empty());
+        assert_eq!(
+            fwd.on_tables().linkstatepeers_net().read().gateways(),
+            vec![zid(0x01)]
+        );
+        assert!(fwd.on_tables().routers_net().read().gateways().is_empty());
     }
 
     /// A weight configured before a Router face registers is the weight its
@@ -9566,7 +9817,7 @@ mod tests {
             "no live link moved"
         );
         assert!(
-            !fwd.mesh(ROUTERS_REGION).trees_dirty.get(),
+            !fwd.on_tables().mesh(ROUTERS_REGION).trees_dirty.get(),
             "nothing to recompute"
         );
         let (a_r, _s1) = face(zid(0xAA), WIRE_ROUTER);
@@ -9574,14 +9825,15 @@ mod tests {
         fwd.register(FaceId(0), &a_r);
         fwd.register(FaceId(1), &b_p);
         assert_eq!(
-            self_link_weight(fwd.routers_net(), 0xAA),
+            self_link_weight(fwd.on_tables().routers_net(), 0xAA),
             LinkEdgeWeight::from_raw(250)
         );
         // R2896 (751 rules 8d+8e) — the peers tier holds no self link to weigh
         // at all: a single-hop gossip `Network` writes none, so no router
         // weight can ride it.
         assert!(
-            !fwd.linkstatepeers_net()
+            !fwd.on_tables()
+                .linkstatepeers_net()
                 .read()
                 .get_node(&zid(0x01))
                 .expect("self")
@@ -9612,6 +9864,7 @@ mod tests {
         assert!(fwd.update_router_link_weights(link_weights(&[(0xAA, 300)])));
         assert_eq!(sink_b.frame_count(), 0, "no Peer face is flooded");
         let psid_a = fwd
+            .on_tables()
             .routers_net()
             .read()
             .local_psid_of(&zid(0xAA))
@@ -9629,8 +9882,8 @@ mod tests {
             let weights = states[0].weights.as_ref().expect("a set weight rides");
             assert_eq!(weights[slot].weight, 300, "Router face {name} sees 300");
         }
-        assert!(fwd.mesh(ROUTERS_REGION).trees_dirty.get());
-        assert!(!fwd.mesh(PEERS_REGION).trees_dirty.get());
+        assert!(fwd.on_tables().mesh(ROUTERS_REGION).trees_dirty.get());
+        assert!(!fwd.on_tables().mesh(PEERS_REGION).trees_dirty.get());
         fwd.tick();
         assert_eq!(
             fwd.recomputes.get(),
@@ -9642,7 +9895,7 @@ mod tests {
         sink_c.reset();
         assert!(!fwd.update_router_link_weights(link_weights(&[(0xAA, 300)])));
         assert_eq!(sink_a.frame_count() + sink_c.frame_count(), 0);
-        assert!(!fwd.mesh(ROUTERS_REGION).trees_dirty.get());
+        assert!(!fwd.on_tables().mesh(ROUTERS_REGION).trees_dirty.get());
     }
 
     /// R2636 (open-debt item 748) — the router reports its transports. Before
@@ -10059,21 +10312,35 @@ mod tests {
     fn gossip_multihop_reaches_both_of_the_routers_graphs() {
         let fwd = RouterForwarder::new(zid(0x01));
         assert!(
-            !fwd.routers_net().read().gossip_multihop(),
+            !fwd.on_tables().routers_net().read().gossip_multihop(),
             "off by default, as zenoh's config default is"
         );
-        assert!(!fwd.linkstatepeers_net().read().gossip_multihop());
+        assert!(!fwd
+            .on_tables()
+            .linkstatepeers_net()
+            .read()
+            .gossip_multihop());
 
         fwd.set_gossip_multihop(true);
-        assert!(fwd.routers_net().read().gossip_multihop(), "routers tier");
         assert!(
-            fwd.linkstatepeers_net().read().gossip_multihop(),
+            fwd.on_tables().routers_net().read().gossip_multihop(),
+            "routers tier"
+        );
+        assert!(
+            fwd.on_tables()
+                .linkstatepeers_net()
+                .read()
+                .gossip_multihop(),
             "peers tier too — one config value, both graphs"
         );
 
         fwd.set_gossip_multihop(false);
-        assert!(!fwd.routers_net().read().gossip_multihop());
-        assert!(!fwd.linkstatepeers_net().read().gossip_multihop());
+        assert!(!fwd.on_tables().routers_net().read().gossip_multihop());
+        assert!(!fwd
+            .on_tables()
+            .linkstatepeers_net()
+            .read()
+            .gossip_multihop());
     }
 
     /// R2637 — the weight reaches the WIRE record, end to end: a configured
@@ -10165,7 +10432,7 @@ mod tests {
         fwd.register(FaceId(0), &a_r);
         fwd.tick();
         assert_eq!(
-            self_link_weight(fwd.routers_net(), 0xAA),
+            self_link_weight(fwd.on_tables().routers_net(), 0xAA),
             LinkEdgeWeight::from_raw(250),
             "the first flood already carries the configured weight"
         );
@@ -10181,12 +10448,13 @@ mod tests {
         {
             assert!(moved, "a live link moved");
             assert_eq!(
-                self_link_weight(fwd.routers_net(), 0xAA),
+                self_link_weight(fwd.on_tables().routers_net(), 0xAA),
                 LinkEdgeWeight::from_raw(400)
             );
             assert_eq!(sink_a.frame_count(), 1, "the Router face is re-flooded");
             let states = flooded_link_states(&sink_a.frame_bytes(0));
             let psid_a = fwd
+                .on_tables()
                 .routers_net()
                 .read()
                 .local_psid_of(&zid(0xAA))
@@ -10201,7 +10469,7 @@ mod tests {
                 weights[slot].weight, 400,
                 "the RELOADED weight is on the wire"
             );
-            assert!(fwd.mesh(ROUTERS_REGION).trees_dirty.get());
+            assert!(fwd.on_tables().mesh(ROUTERS_REGION).trees_dirty.get());
             fwd.tick();
             assert_eq!(
                 fwd.recomputes.get(),
@@ -10213,12 +10481,12 @@ mod tests {
         {
             assert!(!moved, "the inert mirror moves nothing");
             assert_eq!(
-                self_link_weight(fwd.routers_net(), 0xAA),
+                self_link_weight(fwd.on_tables().routers_net(), 0xAA),
                 LinkEdgeWeight::from_raw(250),
                 "the graph keeps the installed weight"
             );
             assert_eq!(sink_a.frame_count(), 0, "nothing is re-flooded");
-            assert!(!fwd.mesh(ROUTERS_REGION).trees_dirty.get());
+            assert!(!fwd.on_tables().mesh(ROUTERS_REGION).trees_dirty.get());
             let _ = recomputes;
         }
 
@@ -10330,7 +10598,8 @@ mod tests {
         // Before registering anything, the router advertises no interest in the
         // pattern — so the assertion after registration is a CHANGE, not a constant.
         assert!(
-            !fwd.self_advertises_sub_into(PEERS_REGION, "demo/host/**"),
+            !fwd.on_tables()
+                .self_advertises_sub_into(PEERS_REGION, "demo/host/**"),
             "a router with no host subscriber must not advertise interest"
         );
 
@@ -10354,11 +10623,13 @@ mod tests {
         // as the pin propagates); a remote publisher's route to a concrete key
         // under it is the mesh table's intersection, not a second advertisement.
         assert!(
-            fwd.self_advertises_sub_into(PEERS_REGION, "demo/host/**"),
+            fwd.on_tables()
+                .self_advertises_sub_into(PEERS_REGION, "demo/host/**"),
             "a host subscriber must make the router advertise into the peer mesh"
         );
         assert!(
-            fwd.self_advertises_sub_into(ROUTERS_REGION, "demo/host/**"),
+            fwd.on_tables()
+                .self_advertises_sub_into(ROUTERS_REGION, "demo/host/**"),
             "and into the router mesh — a host sub is not tier-scoped"
         );
 
@@ -10485,7 +10756,8 @@ mod tests {
         // Before registration the set omits it — so the assertion after is a CHANGE.
         for tier in [ROUTERS_REGION, PEERS_REGION] {
             assert!(
-                !fwd.derived_cross_tier_subs_into(tier)
+                !fwd.on_tables()
+                    .derived_cross_tier_subs_into(tier)
                     .contains(&ke.to_string()),
                 "a router with no host subscriber must not re-advertise {ke} into {tier:?}"
             );
@@ -10496,7 +10768,8 @@ mod tests {
         // The set now carries it, in BOTH meshes — this is what a late joiner reads.
         for tier in [ROUTERS_REGION, PEERS_REGION] {
             assert!(
-                fwd.derived_cross_tier_subs_into(tier)
+                fwd.on_tables()
+                    .derived_cross_tier_subs_into(tier)
                     .contains(&ke.to_string()),
                 "a host subscriber must be in the tick re-advertise set for {tier:?}; \
                  without it a child that joins AFTER registration never learns the \
@@ -10505,9 +10778,10 @@ mod tests {
             // And the set agrees with the predicate, which is the `iff` the set's own
             // doc asserts and the invariant R2393 broke by updating only one side.
             assert_eq!(
-                fwd.derived_cross_tier_subs_into(tier)
+                fwd.on_tables()
+                    .derived_cross_tier_subs_into(tier)
                     .contains(&ke.to_string()),
-                fwd.self_advertises_sub_into(tier, ke),
+                fwd.on_tables().self_advertises_sub_into(tier, ke),
                 "the re-advertise SET and the advertise PREDICATE must agree about a \
                  host subscription in {tier:?} — they are two spellings of one fact"
             );
@@ -11573,7 +11847,11 @@ mod tests {
         fwd.tick();
         forward_one(&fwd, FaceId(0), declare_sub("demo/late")); // A subscribes; no C yet
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).subs.read().interested("demo/late"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .subs
+                .read()
+                .interested("demo/late"),
             vec![zid(0xAA)],
             "self learned A's interest before C joined"
         );
@@ -11604,7 +11882,11 @@ mod tests {
         fwd.tick();
         forward_one(&fwd, FaceId(0), declare_sub("demo/late"));
         assert_eq!(
-            fwd.mesh(PEERS_REGION).subs.read().interested("demo/late"),
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
+                .subs
+                .read()
+                .interested("demo/late"),
             vec![zid(0xAA)],
             "the router registers A's subscription"
         );
@@ -11635,7 +11917,11 @@ mod tests {
         fwd.tick();
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true)); // A declares; no C
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).qabls.read().interested("demo/q"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .qabls
+                .read()
+                .interested("demo/q"),
             vec![zid(0xAA)],
             "self learned A's queryable before C joined"
         );
@@ -11665,7 +11951,7 @@ mod tests {
             "but with no graph link (self-connect guarded)"
         );
         assert_eq!(
-            fwd.linkstatepeers_net().read().node_count(),
+            fwd.on_tables().linkstatepeers_net().read().node_count(),
             1,
             "no self-loop neighbour added to the peer net (only self)"
         );
@@ -12164,6 +12450,7 @@ mod tests {
         let asked = RefCell::new(Vec::new());
         let before = fwd.fan_out_face_visits();
         let sent = fwd
+            .on_tables()
             .fan_out_to_faces_qos(
                 client_tier,
                 &[FaceId(2), FaceId(0), FaceId(99)],
@@ -12466,13 +12753,14 @@ mod tests {
         assert_eq!(fwd.tables.faces.read()[&FaceId(0)].tier, SUB0_ROUTERS);
         assert_eq!(fwd.tables.faces.read()[&FaceId(1)].tier, Region::North);
 
-        let hat = fwd.mesh_hat(SUB0_ROUTERS).expect("a router hat serves it");
+        let on = fwd.on_tables();
+        let hat = on.mesh_hat(SUB0_ROUTERS).expect("a router hat serves it");
         assert!(
             hat.net.read().full_linkstate(),
             "a router hat's net is full link-state wherever its region lies"
         );
         assert_eq!(hat.net.read().gateways(), vec![zid(0x05)]);
-        assert!(fwd.routers_net().read().gateways().is_empty());
+        assert!(fwd.on_tables().routers_net().read().gateways().is_empty());
 
         let own = |sink: &RecordingLinkDriver| -> Vec<LinkstateOwned> {
             received_link_states(sink)
@@ -12563,13 +12851,14 @@ mod tests {
         fwd.register(FaceId(0), &south);
         fwd.register(FaceId(1), &north);
         assert!(fwd.update_router_link_weights(link_weights(&[(0xAA, 250), (0x09, 300)])));
-        let hat = fwd.mesh_hat(SUB0_ROUTERS).expect("a router hat serves it");
+        let on = fwd.on_tables();
+        let hat = on.mesh_hat(SUB0_ROUTERS).expect("a router hat serves it");
         assert_eq!(
             self_link_weight(&hat.net, 0xAA),
             LinkEdgeWeight::from_raw(250)
         );
         assert_eq!(
-            self_link_weight(fwd.routers_net(), 0x09),
+            self_link_weight(fwd.on_tables().routers_net(), 0x09),
             LinkEdgeWeight::from_raw(300)
         );
         // A link is reported once its far end advertises it back.
@@ -12806,7 +13095,11 @@ mod tests {
         // declare (zenohd, the direct neighbour, IS the source).
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).subs.read().interested("demo/data"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .subs
+                .read()
+                .interested("demo/data"),
             vec![zid(0xAA)],
             "the foreign router's client sub registers the peer in router_subs"
         );
@@ -12859,7 +13152,11 @@ mod tests {
             )),
         );
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).subs.read().interested("demo/**"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .subs
+                .read()
+                .interested("demo/**"),
             vec![zid(0xAA)],
             "the compound aliased (prefix 'demo' + suffix '/**') sub registers 'demo/**'"
         );
@@ -13044,7 +13341,8 @@ mod tests {
                 build_declare_token(0, 0, Some("live/k")).expect("token")
             };
             forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(declare)));
-            let tokens = fwd.mesh(region).tokens.read();
+            let on = fwd.on_tables();
+            let tokens = on.mesh(region).tokens.read();
             !tokens.interested("live/k").is_empty()
         };
         assert!(
@@ -13074,7 +13372,11 @@ mod tests {
         fwd.register(FaceId(1), &client);
         forward_one(&fwd, FaceId(0), declare_sub("demo/**")); // zenohd's sub -> router_subs
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).subs.read().interested("demo/**"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .subs
+                .read()
+                .interested("demo/**"),
             vec![zid(0xAA)]
         );
         sink_c.reset();
@@ -14287,12 +14589,12 @@ mod tests {
             "removed on deregister"
         );
         assert_eq!(
-            fwd.routers_net().read().node_count(),
+            fwd.on_tables().routers_net().read().node_count(),
             1,
             "routers_net untouched (only self)"
         );
         assert_eq!(
-            fwd.linkstatepeers_net().read().node_count(),
+            fwd.on_tables().linkstatepeers_net().read().node_count(),
             1,
             "peers_net untouched (only self)"
         );
@@ -14326,7 +14628,8 @@ mod tests {
             "self advertised its cross-tier interest to the peer child P"
         );
         assert!(
-            fwd.mesh(PEERS_REGION)
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
                 .subs
                 .read()
                 .interested("demo/data")
@@ -14405,7 +14708,8 @@ mod tests {
              different declaration and does not keep it advertised"
         );
         assert!(
-            fwd.self_advertises_sub_into(PEERS_REGION, "demo/host/**"),
+            fwd.on_tables()
+                .self_advertises_sub_into(PEERS_REGION, "demo/host/**"),
             "the hosted pattern stays advertised"
         );
     }
@@ -14468,7 +14772,8 @@ mod tests {
             "the client face-down withdrew its advertisement"
         );
         assert!(
-            fwd.owner_broker(CLIENTS_REGION)
+            fwd.on_tables()
+                .owner_broker(CLIENTS_REGION)
                 .subs
                 .read()
                 .get(&FaceId(0))
@@ -15344,7 +15649,11 @@ mod tests {
         set_declare_source(&mut decl, 7);
         forward_one(&fwd, FaceId(1), NetworkMessage::Declare(Box::new(decl)));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).subs.read().interested("demo/data"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .subs
+                .read()
+                .interested("demo/data"),
             vec![zid(0xDD)],
             "the distant node 0xDD's interest is registered (2 hops away)"
         );
@@ -15392,14 +15701,18 @@ mod tests {
         let fwd = RouterForwarder::new(zid(0x01));
         let (a, _sink) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
-        assert_eq!(fwd.routers_net().read().node_count(), 2);
+        assert_eq!(fwd.on_tables().routers_net().read().node_count(), 2);
         fwd.deregister(FaceId(0));
         assert!(
             !fwd.tables.faces.read().contains_key(&FaceId(0)),
             "face dropped"
         );
         assert!(
-            fwd.routers_net().read().get_node(&zid(0xAA)).is_none(),
+            fwd.on_tables()
+                .routers_net()
+                .read()
+                .get_node(&zid(0xAA))
+                .is_none(),
             "the departed neighbour's link is removed from routers_net"
         );
     }
@@ -15471,16 +15784,16 @@ mod tests {
         fwd.register(FaceId(0), &p);
         // R2896 (751 rules 8d+8e) — self alone: the single-hop gossip `Network`
         // learns 0xBB from 0xBB's own announcement, not from the link.
-        assert_eq!(fwd.linkstatepeers_net().read().node_count(), 1);
+        assert_eq!(fwd.on_tables().linkstatepeers_net().read().node_count(), 1);
         discover_via(&fwd, FaceId(0), 0x01, 0xBB, 0xEE, 3, 5);
         assert_eq!(fwd.ingested.get(), 1);
         assert_eq!(
-            fwd.linkstatepeers_net().read().node_count(),
+            fwd.on_tables().linkstatepeers_net().read().node_count(),
             3,
             "0xEE discovered in the peers tier (self + 0xBB + 0xEE)"
         );
         assert_eq!(
-            fwd.routers_net().read().node_count(),
+            fwd.on_tables().routers_net().read().node_count(),
             1,
             "the routers tier is untouched by a peers-tier flood"
         );
@@ -15522,11 +15835,11 @@ mod tests {
         let (a, _sa) = face(zid(0xAA), WIRE_ROUTER);
         fwd.register(FaceId(0), &a);
         discover_via(&fwd, FaceId(0), 0x01, 0xAA, 0xDD, 3, 5);
-        assert_eq!(fwd.routers_net().read().node_count(), 3); // self + AA + DD (via OAM)
+        assert_eq!(fwd.on_tables().routers_net().read().node_count(), 3); // self + AA + DD (via OAM)
         let (d, sink_d) = face(zid(0xDD), WIRE_ROUTER);
         fwd.register(FaceId(1), &d);
         assert_eq!(
-            fwd.routers_net().read().node_count(),
+            fwd.on_tables().routers_net().read().node_count(),
             3,
             "0xDD was already a graph node via OAM; the direct link adds no node"
         );
@@ -15545,12 +15858,17 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).subs.read().interested("demo/data"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .subs
+                .read()
+                .interested("demo/data"),
             vec![zid(0xAA)],
             "the router-face source is registered in router_subs"
         );
         assert!(
-            fwd.mesh(PEERS_REGION)
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
                 .subs
                 .read()
                 .interested("demo/data")
@@ -15566,10 +15884,15 @@ mod tests {
         fwd.register(FaceId(0), &b);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
         assert_eq!(
-            fwd.mesh(PEERS_REGION).subs.read().interested("demo/data"),
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
+                .subs
+                .read()
+                .interested("demo/data"),
             vec![zid(0xBB)],
         );
         assert!(fwd
+            .on_tables()
             .mesh(ROUTERS_REGION)
             .subs
             .read()
@@ -15600,7 +15923,8 @@ mod tests {
             "a router-native sub advertised self's cross-tier interest to the peer mesh"
         );
         assert!(
-            fwd.mesh(PEERS_REGION)
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
                 .subs
                 .read()
                 .interested("demo/data")
@@ -15698,7 +16022,11 @@ mod tests {
         set_declare_source(&mut decl, 7);
         forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(decl)));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).subs.read().interested("demo/data"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .subs
+                .read()
+                .interested("demo/data"),
             vec![zid(0xBB)],
             "the router-native is sourced from the distant router Rd"
         );
@@ -15752,12 +16080,14 @@ mod tests {
         fwd.register(FaceId(0), &c);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
         assert!(fwd
+            .on_tables()
             .mesh(ROUTERS_REGION)
             .subs
             .read()
             .interested("demo/data")
             .is_empty());
         assert!(fwd
+            .on_tables()
             .mesh(PEERS_REGION)
             .subs
             .read()
@@ -15772,7 +16102,11 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).subs.read().interested("demo/data"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .subs
+                .read()
+                .interested("demo/data"),
             vec![zid(0xAA)]
         );
         let undecl = NetworkMessage::Declare(Box::new(
@@ -15780,7 +16114,8 @@ mod tests {
         ));
         forward_one(&fwd, FaceId(0), undecl);
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .subs
                 .read()
                 .interested("demo/data")
@@ -15796,12 +16131,17 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_sub("demo/data"));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).subs.read().interested("demo/data"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .subs
+                .read()
+                .interested("demo/data"),
             vec![zid(0xAA)]
         );
         fwd.deregister(FaceId(0));
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .subs
                 .read()
                 .interested("demo/data")
@@ -15829,7 +16169,8 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data"),
@@ -15837,7 +16178,8 @@ mod tests {
             "the router-face token source is registered in router_tokens"
         );
         assert!(
-            fwd.mesh(PEERS_REGION)
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data")
@@ -15854,10 +16196,15 @@ mod tests {
         fwd.register(FaceId(0), &b);
         forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
         assert_eq!(
-            fwd.mesh(PEERS_REGION).tokens.read().interested("live/data"),
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
+                .tokens
+                .read()
+                .interested("live/data"),
             vec![zid(0xBB)],
         );
         assert!(fwd
+            .on_tables()
             .mesh(ROUTERS_REGION)
             .tokens
             .read()
@@ -15877,12 +16224,14 @@ mod tests {
         fwd.register(FaceId(0), &c);
         forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data")
                 .is_empty()
                 && fwd
+                    .on_tables()
                     .mesh(PEERS_REGION)
                     .tokens
                     .read()
@@ -15914,7 +16263,8 @@ mod tests {
         sink_p.reset();
         forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data"),
@@ -15964,7 +16314,8 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data"),
@@ -15972,7 +16323,8 @@ mod tests {
         );
         fwd.deregister(FaceId(0));
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data")
@@ -16002,7 +16354,8 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_token_msg("live/data"));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data"),
@@ -16010,7 +16363,8 @@ mod tests {
         );
         forward_one(&fwd, FaceId(0), undeclare_token_msg("live/data"));
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data")
@@ -16039,7 +16393,8 @@ mod tests {
         sink_c.reset();
         forward_one(&fwd, FaceId(0), undeclare_token_msg("live/data"));
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data")
@@ -16078,7 +16433,8 @@ mod tests {
             "a router-native token advertised self's cross-tier interest to the peer mesh"
         );
         assert!(
-            fwd.mesh(PEERS_REGION)
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data")
@@ -16106,7 +16462,8 @@ mod tests {
             "a peer-native token advertised into the router mesh"
         );
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data")
@@ -16191,7 +16548,7 @@ mod tests {
             "self is the only gateway AA links to, so self advertises"
         );
         assert_eq!(
-            fwd.token_forwarder(PEERS_REGION, &zid(0xAA)),
+            fwd.on_tables().token_forwarder(PEERS_REGION, &zid(0xAA)),
             Some(zid(0xAA)),
             "because AA's declarations reach self over their direct link"
         );
@@ -16321,16 +16678,20 @@ mod tests {
         fwd.register(FaceId(0), &c);
         forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/data"));
         assert!(
-            fwd.token_contributions(Holder::Hat(CLIENTS_REGION), "live/data") > 0,
+            fwd.on_tables()
+                .token_contributions(Holder::Hat(CLIENTS_REGION), "live/data")
+                > 0,
             "the client-face token is registered in client_tokens"
         );
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data")
                 .is_empty()
                 && fwd
+                    .on_tables()
                     .mesh(PEERS_REGION)
                     .tokens
                     .read()
@@ -16370,12 +16731,14 @@ mod tests {
             "the client token advertised self's cross-tier interest into the router mesh"
         );
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .tokens
                 .read()
                 .interested("live/data")
                 .is_empty()
                 && fwd
+                    .on_tables()
                     .mesh(PEERS_REGION)
                     .tokens
                     .read()
@@ -16406,7 +16769,9 @@ mod tests {
         sink_p.reset();
         forward_one(&fwd, FaceId(0), undeclare_client_token_msg(7)); // id-keyed, no ext
         assert!(
-            fwd.token_contributions(Holder::Hat(CLIENTS_REGION), "live/data") == 0,
+            fwd.on_tables()
+                .token_contributions(Holder::Hat(CLIENTS_REGION), "live/data")
+                == 0,
             "the id-keyed client undeclare removed the token from client_tokens (by id)"
         );
         assert_eq!(
@@ -16433,7 +16798,9 @@ mod tests {
         sink_p.reset();
         fwd.deregister(FaceId(0)); // client down
         assert!(
-            fwd.token_contributions(Holder::Hat(CLIENTS_REGION), "live/data") == 0,
+            fwd.on_tables()
+                .token_contributions(Holder::Hat(CLIENTS_REGION), "live/data")
+                == 0,
             "the client token store was purged on face-down"
         );
         assert_eq!(
@@ -16944,11 +17311,15 @@ mod tests {
         sink_p.reset();
         forward_one(&fwd, FaceId(0), declare_client_token_msg(7, "live/b")); // id 7 REUSED -> live/b
         assert!(
-            fwd.token_contributions(Holder::Hat(CLIENTS_REGION), "live/a") == 0,
+            fwd.on_tables()
+                .token_contributions(Holder::Hat(CLIENTS_REGION), "live/a")
+                == 0,
             "the displaced old keyexpr is no longer held"
         );
         assert!(
-            fwd.token_contributions(Holder::Hat(CLIENTS_REGION), "live/b") > 0,
+            fwd.on_tables()
+                .token_contributions(Holder::Hat(CLIENTS_REGION), "live/b")
+                > 0,
             "the new keyexpr under the reused id is held"
         );
         assert_eq!(
@@ -17171,12 +17542,17 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).qabls.read().interested("demo/q"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .qabls
+                .read()
+                .interested("demo/q"),
             vec![zid(0xAA)],
             "the router-face source is registered in router_qabls"
         );
         assert!(
-            fwd.mesh(PEERS_REGION)
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
                 .qabls
                 .read()
                 .interested("demo/q")
@@ -17185,6 +17561,7 @@ mod tests {
         );
         // The subscription plane is untouched by a queryable declare.
         assert!(fwd
+            .on_tables()
             .mesh(ROUTERS_REGION)
             .subs
             .read()
@@ -17199,10 +17576,15 @@ mod tests {
         fwd.register(FaceId(0), &b);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", false));
         assert_eq!(
-            fwd.mesh(PEERS_REGION).qabls.read().interested("demo/q"),
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
+                .qabls
+                .read()
+                .interested("demo/q"),
             vec![zid(0xBB)]
         );
         assert!(fwd
+            .on_tables()
             .mesh(ROUTERS_REGION)
             .qabls
             .read()
@@ -17236,7 +17618,8 @@ mod tests {
             "the cross-tier advertisement carries the native's complete=true"
         );
         assert!(
-            fwd.mesh(PEERS_REGION)
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
                 .qabls
                 .read()
                 .interested("demo/q")
@@ -17269,7 +17652,8 @@ mod tests {
             )),
         );
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .qabls
                 .read()
                 .interested("demo/q")
@@ -17369,12 +17753,14 @@ mod tests {
             "both meshes carry the client's complete=true"
         );
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .qabls
                 .read()
                 .interested("demo/q")
                 .is_empty()
                 && fwd
+                    .on_tables()
                     .mesh(PEERS_REGION)
                     .qabls
                     .read()
@@ -17516,12 +17902,17 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).qabls.read().interested("demo/q"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .qabls
+                .read()
+                .interested("demo/q"),
             vec![zid(0xAA)]
         );
         fwd.deregister(FaceId(0));
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .qabls
                 .read()
                 .interested("demo/q")
@@ -17540,7 +17931,8 @@ mod tests {
         fwd.register(FaceId(0), &c);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .qabls
                 .read()
                 .interested("demo/q")
@@ -17548,14 +17940,16 @@ mod tests {
             "not in the router tier"
         );
         assert!(
-            fwd.mesh(PEERS_REGION)
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
                 .qabls
                 .read()
                 .interested("demo/q")
                 .is_empty(),
             "not in the peer tier"
         );
-        let store = fwd.owner_broker(CLIENTS_REGION).qabls.read();
+        let on = fwd.on_tables();
+        let store = on.owner_broker(CLIENTS_REGION).qabls.read();
         let hosted = store
             .get(&FaceId(0))
             .expect("the client's queryable is stored");
@@ -17648,7 +18042,11 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).qabls.read().interested("demo/q"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .qabls
+                .read()
+                .interested("demo/q"),
             vec![zid(0xAA)]
         );
         forward_one(
@@ -17659,7 +18057,11 @@ mod tests {
             )),
         );
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).qabls.read().interested("demo/q"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .qabls
+                .read()
+                .interested("demo/q"),
             vec![zid(0xAA)],
             "an id-only UndeclareQueryable carries no keyexpr — the interest survives"
         );
@@ -17676,7 +18078,11 @@ mod tests {
         fwd.register(FaceId(0), &a);
         forward_one(&fwd, FaceId(0), declare_qabl("demo/q", true));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).qabls.read().interested("demo/q"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .qabls
+                .read()
+                .interested("demo/q"),
             vec![zid(0xAA)]
         );
         let undecl = NetworkMessage::Declare(Box::new(
@@ -17684,7 +18090,8 @@ mod tests {
         ));
         forward_one(&fwd, FaceId(0), undecl);
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .qabls
                 .read()
                 .interested("demo/q")
@@ -17713,7 +18120,11 @@ mod tests {
         sink_p.reset();
         forward_one(&fwd, FaceId(0), declare_sub("demo/sub"));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).subs.read().interested("demo/sub"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .subs
+                .read()
+                .interested("demo/sub"),
             vec![zid(0xAA)],
             "self learned A is interested"
         );
@@ -17782,7 +18193,8 @@ mod tests {
         ));
         forward_one(&fwd, FaceId(0), aliased);
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .subs
                 .read()
                 .interested("demo/aliased"),
@@ -17940,7 +18352,11 @@ mod tests {
         set_declare_source(&mut decl, 7); // node_id 7 = A's psid for B
         forward_one(&fwd, FaceId(0), NetworkMessage::Declare(Box::new(decl)));
         assert_eq!(
-            fwd.mesh(ROUTERS_REGION).subs.read().interested("demo/sub"),
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
+                .subs
+                .read()
+                .interested("demo/sub"),
             vec![zid(0xBB)],
             "keyed on the resolved transit source B, not the inbound neighbour A"
         );
@@ -17967,7 +18383,8 @@ mod tests {
         ));
         forward_one(&fwd, FaceId(0), undecl);
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .subs
                 .read()
                 .interested("demo/sub")
@@ -18008,7 +18425,11 @@ mod tests {
         sink_r.reset();
         forward_one(&fwd, FaceId(0), declare_sub("demo/sub"));
         assert_eq!(
-            fwd.mesh(PEERS_REGION).subs.read().interested("demo/sub"),
+            fwd.on_tables()
+                .mesh(PEERS_REGION)
+                .subs
+                .read()
+                .interested("demo/sub"),
             vec![zid(0xAA)]
         );
         assert_eq!(
@@ -18032,6 +18453,7 @@ mod tests {
         ));
         forward_one(&fwd, FaceId(0), undecl);
         assert!(fwd
+            .on_tables()
             .mesh(ROUTERS_REGION)
             .subs
             .read()
@@ -18069,7 +18491,8 @@ mod tests {
             )),
         );
         assert!(
-            fwd.mesh(ROUTERS_REGION)
+            fwd.on_tables()
+                .mesh(ROUTERS_REGION)
                 .subs
                 .read()
                 .interested("demo/aliased")
@@ -18366,7 +18789,7 @@ mod tests {
             unreachable!("request_best builds a Request")
         };
         assert!(
-            !fwd.send_to_face(MCAST_INGRESS_FACE, true, || {
+            !fwd.on_tables().send_to_face(MCAST_INGRESS_FACE, true, || {
                 NetworkMessage::Request(request.clone())
             }),
             "nothing can be sent to the group ingress face -- wz's DummyPrimitives"
@@ -18812,7 +19235,8 @@ mod tests {
             "a pending entry keyed by the client face"
         );
         assert!(
-            fwd.owner_broker(CLIENTS_REGION)
+            fwd.on_tables()
+                .owner_broker(CLIENTS_REGION)
                 .qabls
                 .read()
                 .contains_key(&FaceId(0)),
@@ -18821,7 +19245,8 @@ mod tests {
         sink_p.reset();
         fwd.deregister(FaceId(0)); // the client face goes down (linkless)
         assert!(
-            !fwd.owner_broker(CLIENTS_REGION)
+            !fwd.on_tables()
+                .owner_broker(CLIENTS_REGION)
                 .qabls
                 .read()
                 .contains_key(&FaceId(0)),
@@ -19754,12 +20179,26 @@ mod tests {
 
         // A Put whose source is NOT a multicast face broadcasts to the group,
         // UNCONDITIONALLY (no matching sub is registered on this forwarder).
-        fwd.broadcast_to_mcast_groups(true, Priority::DEFAULT, &push, "demo/data", false, false);
+        fwd.on_tables().broadcast_to_mcast_groups(
+            true,
+            Priority::DEFAULT,
+            &push,
+            "demo/data",
+            false,
+            false,
+        );
         let (_, reliable) = group_push(&mut rx).expect("the routed Put reached the group");
         assert!(reliable, "broadcast on the reliable channel");
 
         // Echo guard: a Push whose source IS a multicast face is not re-broadcast.
-        fwd.broadcast_to_mcast_groups(true, Priority::DEFAULT, &push, "demo/data", true, false);
+        fwd.on_tables().broadcast_to_mcast_groups(
+            true,
+            Priority::DEFAULT,
+            &push,
+            "demo/data",
+            true,
+            false,
+        );
         assert!(
             group_push(&mut rx).is_none(),
             "a multicast-sourced Push must not echo back to a group"
@@ -20021,20 +20460,25 @@ mod tests {
     #[test]
     fn mcast_group_sub_folds_into_self_advertise_derive() {
         let fwd = RouterForwarder::new(zid(0x01));
-        assert!(!fwd.self_advertises_sub_into(PEERS_REGION, "demo/k"));
+        assert!(!fwd
+            .on_tables()
+            .self_advertises_sub_into(PEERS_REGION, "demo/k"));
         fwd.set_mcast_group_subs(&["demo/k".to_string()]);
         assert!(
-            fwd.self_advertises_sub_into(PEERS_REGION, "demo/k"),
+            fwd.on_tables()
+                .self_advertises_sub_into(PEERS_REGION, "demo/k"),
             "a group sub makes self advertise interest (the third contributor)"
         );
         assert!(
-            fwd.derived_cross_tier_subs_into(PEERS_REGION)
+            fwd.on_tables()
+                .derived_cross_tier_subs_into(PEERS_REGION)
                 .contains(&"demo/k".to_string()),
             "the tick re-advertise SSOT includes the group sub (late-joiner convergence)"
         );
         fwd.set_mcast_group_subs(&[]);
         assert!(
-            !fwd.self_advertises_sub_into(PEERS_REGION, "demo/k"),
+            !fwd.on_tables()
+                .self_advertises_sub_into(PEERS_REGION, "demo/k"),
             "removing the group sub clears the derive (no client / native holds it)"
         );
     }
@@ -20055,9 +20499,13 @@ mod tests {
         // Before registration: neither the derive set nor the merged info holds it.
         for tier in [ROUTERS_REGION, PEERS_REGION] {
             assert!(!fwd
+                .on_tables()
                 .derived_cross_tier_qabls_into(tier)
                 .contains(&key.to_string()));
-            assert!(fwd.derived_cross_tier_qabl_info(tier, key).is_none());
+            assert!(fwd
+                .on_tables()
+                .derived_cross_tier_qabl_info(tier, key)
+                .is_none());
         }
         let handler: LocalQueryHandler = Box::new(|_v: &dyn QueryView, _o: &mut dyn ReplyOut| {});
         fwd.register_local_queryable(key, true, handler);
@@ -20066,12 +20514,15 @@ mod tests {
         // late joiner).
         for tier in [ROUTERS_REGION, PEERS_REGION] {
             assert!(
-                fwd.derived_cross_tier_qabls_into(tier)
+                fwd.on_tables()
+                    .derived_cross_tier_qabls_into(tier)
                     .contains(&key.to_string()),
                 "the self-hosted admin qabl folds into the {tier:?} re-advertise SSOT"
             );
             assert!(
-                fwd.derived_cross_tier_qabl_info(tier, key).is_some(),
+                fwd.on_tables()
+                    .derived_cross_tier_qabl_info(tier, key)
+                    .is_some(),
                 "the {tier:?} derived merged info includes the self-hosted qabl"
             );
         }
@@ -20089,13 +20540,15 @@ mod tests {
         fwd.register(FaceId(0), &cli);
         forward_one(&fwd, FaceId(0), declare_sub("demo/k")); // a local client sub
         assert_eq!(
-            fwd.sub_contributions(Holder::Hat(CLIENTS_REGION), "demo/k"),
+            fwd.on_tables()
+                .sub_contributions(Holder::Hat(CLIENTS_REGION), "demo/k"),
             1
         );
         fwd.set_mcast_group_subs(&["demo/k".to_string()]);
         fwd.set_mcast_group_subs(&[]); // group sub leaves; client still holds it
         assert!(
-            fwd.self_advertises_sub_into(PEERS_REGION, "demo/k"),
+            fwd.on_tables()
+                .self_advertises_sub_into(PEERS_REGION, "demo/k"),
             "a client sub keeps the advertisement after the group sub leaves (no black-hole)"
         );
     }
@@ -20263,7 +20716,14 @@ mod tests {
         key: &str,
     ) -> bool {
         let push = wz_session_core::push_build::build_push_literal(key, b"x").expect("push");
-        fwd.broadcast_to_mcast_groups(true, Priority::DEFAULT, &push, key, false, false);
+        fwd.on_tables().broadcast_to_mcast_groups(
+            true,
+            Priority::DEFAULT,
+            &push,
+            key,
+            false,
+            false,
+        );
         group_push(rx).is_some()
     }
 

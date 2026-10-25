@@ -267,7 +267,7 @@ fn a_blocking_put_that_finds_no_room_is_held_and_leaves_when_there_is_room() {
     );
 
     rig.link.set_full(false);
-    rig.fwd.drain_egress();
+    rig.fwd.on_tables().drain_egress();
     assert_eq!(
         rig.link.sent(),
         rig.baseline + 1,
@@ -303,7 +303,7 @@ fn the_egress_view_reads_what_the_router_holds_as_it_holds_and_releases() {
     assert_eq!(held.released, 0);
 
     rig.link.set_full(false);
-    rig.fwd.drain_egress();
+    rig.fwd.on_tables().drain_egress();
     let after = view.counts();
     assert_eq!((after.held, after.held_bytes), (0, 0));
     assert_eq!(after.released, 1);
@@ -328,7 +328,7 @@ fn held_messages_leave_in_the_order_they_arrived_and_a_later_one_waits_behind_th
     rig.link.set_full(false);
     // Room has come back, but nothing has drained yet: the next message must not pass the two.
     forward_frame(&rig.fwd, SOURCE, vec![blocking_put(b"CCCC-3")]);
-    rig.fwd.drain_egress();
+    rig.fwd.on_tables().drain_egress();
     assert_eq!(rig.fwd.egress_held(), 0);
 
     let bytes = rig.link.bytes();
@@ -694,7 +694,7 @@ fn a_destination_asks_its_link_for_room_while_it_holds_and_not_after() {
     );
 
     rig.link.set_full(false);
-    rig.fwd.drain_egress();
+    rig.fwd.on_tables().drain_egress();
     assert_eq!(rig.fwd.egress_held(), 0);
     assert!(
         !rig.link.is_watched(),

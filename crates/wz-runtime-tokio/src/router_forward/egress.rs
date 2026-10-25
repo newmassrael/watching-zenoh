@@ -69,7 +69,7 @@ use wz_session_core::network_message::NetworkMessage;
 use wz_session_core::qos::{CongestionControl, Priority};
 use wz_session_core::session_actions::Unsent;
 
-use super::{RouterFaceState, RouterForwarder};
+use super::{OnTables, RouterFaceState, RouterForwarder, Tables};
 use crate::accept_loop::FaceId;
 use crate::counter::{Counter, Gauge};
 use crate::sync::PlainMutex;
@@ -375,7 +375,9 @@ impl RouterForwarder {
         wz_session_core::declare_ext_qos::read_push_qos(push).congestion()
             != CongestionControl::Drop
     }
+}
 
+impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Send `msg` to destination `dest` without waiting, or hold it for when there is room.
     pub(super) fn credited_send(
         &self,
@@ -414,7 +416,9 @@ impl RouterForwarder {
             Err(Unsent::Failed(_)) => Credited::Refused,
         }
     }
+}
 
+impl RouterForwarder {
     fn hold(
         &self,
         dest: FaceId,
@@ -472,7 +476,9 @@ impl RouterForwarder {
             gated.entry(source).or_default().insert(GateOn::Pool);
         }
     }
+}
 
+impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// Offer every destination that holds messages the room it may have now, in order, and
     /// release the faces whose destinations have drained.
     pub(super) fn drain_egress(&self) {
@@ -655,7 +661,9 @@ impl RouterForwarder {
             None
         }
     }
+}
 
+impl RouterForwarder {
     /// The signal a link's room raises on the loop ([`FaceForwarder::wake_signal`]).
     pub(super) fn wake_signal_of(&self) -> Arc<tokio::sync::Notify> {
         Arc::clone(&self.credit.loop_wake)
