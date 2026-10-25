@@ -23,7 +23,7 @@ use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::session_drive::LinkReadiness;
 use wz_runtime_coop::stream_link::{StreamDial, StreamListen, StreamSocket};
 
-use crate::net::{errno, sockaddr, PosixNetError};
+use crate::net::{errno, set_flag, sockaddr, PosixNetError};
 
 /// The most parts one write gathers: a length and its batch, with room to spare.
 const MAX_PARTS: usize = 4;
@@ -51,27 +51,6 @@ fn name_of(
         name.sin_addr.s_addr.to_ne_bytes(),
         u16::from_be(name.sin_port),
     ))
-}
-
-/// Switch the boolean socket option `name` of `level` on for `fd`: the `errno` when the kernel
-/// refuses.
-fn set_flag(fd: c_int, level: c_int, name: c_int) -> Result<(), c_int> {
-    let one: c_int = 1;
-    // SAFETY: `one` is a live `c_int` and the length passed is its size.
-    let rc = unsafe {
-        libc::setsockopt(
-            fd,
-            level,
-            name,
-            (&one as *const c_int).cast(),
-            size_of::<c_int>() as libc::socklen_t,
-        )
-    };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(errno())
-    }
 }
 
 impl PosixTcpSocket {

@@ -33,6 +33,14 @@ pub enum PosixNetError {
     Bind(c_int),
     /// `setsockopt(SO_REUSEADDR)` failed with this `errno`.
     ReuseAddr(c_int),
+    /// `setsockopt(SO_REUSEPORT)` failed with this `errno`.
+    ReusePort(c_int),
+    /// `setsockopt(IP_ADD_MEMBERSHIP)` failed with this `errno`: the group could not be joined on
+    /// the interface asked for.
+    Membership(c_int),
+    /// `setsockopt` of a multicast egress option (`IP_MULTICAST_IF`, `IP_MULTICAST_TTL`) failed
+    /// with this `errno`.
+    MulticastOption(c_int),
     /// `listen` failed with this `errno`.
     Listen(c_int),
     /// `getsockname` failed with this `errno` reading back the port a bind on port 0 was given.
@@ -131,6 +139,30 @@ fn set_receive_timeout_ms(fd: c_int, ms: c_int) -> Result<(), c_int> {
     }
 }
 
+/// Set the socket option `name` of `level` on `fd` to `value`: the `errno` when the kernel refuses.
+pub(crate) fn set_option<T>(fd: c_int, level: c_int, name: c_int, value: &T) -> Result<(), c_int> {
+    // SAFETY: `value` is a live `T` and the length passed is its size.
+    let rc = unsafe {
+        libc::setsockopt(
+            fd,
+            level,
+            name,
+            (value as *const T).cast(),
+            size_of::<T>() as libc::socklen_t,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(errno())
+    }
+}
+
+/// Switch the boolean socket option `name` of `level` on for `fd`.
+pub(crate) fn set_flag(fd: c_int, level: c_int, name: c_int) -> Result<(), c_int> {
+    set_option(fd, level, name, &(1 as c_int))
+}
+
 pub(crate) fn sockaddr(addr: [u8; 4], port: u16) -> libc::sockaddr_in {
     libc::sockaddr_in {
         sin_family: libc::AF_INET as libc::sa_family_t,
@@ -150,6 +182,97 @@ pub struct PosixUdpSocket {
 }
 
 impl PosixUdpSocket {
+    /// A socket bound to `addr:port`; `shared` sets `SO_REUSEADDR` and `SO_REUSEPORT` first, which
+    /// is what lets a group's receiver bind the port another member on this host already holds.
+    fn open(addr: [u8; 4], port: u16, shared: bool) -> Result<Self, PosixNetError> {
+        // SAFETY: plain system call with value arguments.
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
+        if fd < 0 {
+            return Err(PosixNetError::Socket(errno()));
+        }
+        // Owned from here, so an early return closes it.
+        let mut this = Self {
+            fd,
+            local: (addr, port),
+        };
+        if let Err(e) = set_receive_timeout_ms(fd, SERVICE_WAIT_MS) {
+            return Err(PosixNetError::ReceiveTimeout(e));
+        }
+        if shared {
+            set_flag(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR).map_err(PosixNetError::ReuseAddr)?;
+            set_flag(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT).map_err(PosixNetError::ReusePort)?;
+        }
+        let local = sockaddr(addr, port);
+        // SAFETY: `local` is a live `sockaddr_in` of the length passed.
+        let rc = unsafe {
+            libc::bind(
+                fd,
+                (&local as *const libc::sockaddr_in).cast(),
+                size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            return Err(PosixNetError::Bind(errno()));
+        }
+        if port == 0 {
+            // The locators the link reports and the source every reply comes from name this
+            // port; keeping the 0 that was asked for would render `udp/<ip>:0` for a link that
+            // has a real one.
+            this.local.1 = this.chosen_port()?;
+        }
+        Ok(this)
+    }
+
+    /// The descriptor, for a test that reads an option back.
+    #[cfg(test)]
+    pub(crate) fn fd(&self) -> c_int {
+        self.fd
+    }
+
+    /// A socket bound to `addr:port` that other sockets of this host may bind too, as every member
+    /// of a multicast group does (zenoh-pico sets both options on its group listener
+    /// unconditionally).
+    pub fn bind_shared(addr: [u8; 4], port: u16) -> Result<Self, PosixNetError> {
+        Self::open(addr, port, true)
+    }
+
+    /// Join `group` on the interface that holds `interface` (the unspecified address: the one the
+    /// kernel's routing picks for the group).
+    pub fn join_group(&self, group: [u8; 4], interface: [u8; 4]) -> Result<(), PosixNetError> {
+        let request = libc::ip_mreqn {
+            imr_multiaddr: libc::in_addr {
+                s_addr: u32::from_ne_bytes(group),
+            },
+            imr_address: libc::in_addr {
+                s_addr: u32::from_ne_bytes(interface),
+            },
+            imr_ifindex: 0,
+        };
+        set_option(self.fd, libc::IPPROTO_IP, libc::IP_ADD_MEMBERSHIP, &request)
+            .map_err(PosixNetError::Membership)
+    }
+
+    /// Send multicast datagrams out of the interface that holds `interface`.
+    pub fn set_multicast_interface(&self, interface: [u8; 4]) -> Result<(), PosixNetError> {
+        let address = libc::in_addr {
+            s_addr: u32::from_ne_bytes(interface),
+        };
+        set_option(self.fd, libc::IPPROTO_IP, libc::IP_MULTICAST_IF, &address)
+            .map_err(PosixNetError::MulticastOption)
+    }
+
+    /// The hop limit of the multicast datagrams this socket sends (the kernel's default is 1: one
+    /// subnet).
+    pub fn set_multicast_ttl(&self, ttl: u8) -> Result<(), PosixNetError> {
+        set_option(
+            self.fd,
+            libc::IPPROTO_IP,
+            libc::IP_MULTICAST_TTL,
+            &c_int::from(ttl),
+        )
+        .map_err(PosixNetError::MulticastOption)
+    }
+
     /// The port the kernel bound this socket to.
     fn chosen_port(&self) -> Result<u16, PosixNetError> {
         let mut name: libc::sockaddr_in = sockaddr([0; 4], 0);
@@ -206,38 +329,7 @@ impl DatagramSocket for PosixUdpSocket {
     type Error = PosixNetError;
 
     fn bind(addr: [u8; 4], port: u16) -> Result<Self, PosixNetError> {
-        // SAFETY: plain system call with value arguments.
-        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
-        if fd < 0 {
-            return Err(PosixNetError::Socket(errno()));
-        }
-        // Owned from here, so an early return closes it.
-        let mut this = Self {
-            fd,
-            local: (addr, port),
-        };
-        if let Err(e) = set_receive_timeout_ms(fd, SERVICE_WAIT_MS) {
-            return Err(PosixNetError::ReceiveTimeout(e));
-        }
-        let local = sockaddr(addr, port);
-        // SAFETY: `local` is a live `sockaddr_in` of the length passed.
-        let rc = unsafe {
-            libc::bind(
-                fd,
-                (&local as *const libc::sockaddr_in).cast(),
-                size_of::<libc::sockaddr_in>() as libc::socklen_t,
-            )
-        };
-        if rc != 0 {
-            return Err(PosixNetError::Bind(errno()));
-        }
-        if port == 0 {
-            // The locators the link reports and the source every reply comes from name this
-            // port; keeping the 0 that was asked for would render `udp/<ip>:0` for a link that
-            // has a real one.
-            this.local.1 = this.chosen_port()?;
-        }
-        Ok(this)
+        Self::open(addr, port, false)
     }
 
     fn local(&self) -> ([u8; 4], u16) {
