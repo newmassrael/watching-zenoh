@@ -354,4 +354,8 @@ pub const MAX_STATIC_CONNECT: usize = generated::MAX_STATIC_CONNECT;
 /// quota and not a table capacity, so `0` is not a table of no rows. It sizes no
 /// memory: a querier is not a row of a registry, it is a handle that holds a reference
 /// on the session's queryable interest.
+///
+/// Today the tokio `Session::declare_querier` holds to it. The queriers of the C ABIs
+/// are `QuerierState` boxes on the face set, which neither a `Session` nor this count
+/// sees, so they are not bounded yet; the cooperative engine's are not either.
 pub const MAX_QUERIERS: usize = generated::MAX_QUERIERS;

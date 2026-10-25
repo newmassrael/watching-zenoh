@@ -317,6 +317,76 @@ impl From<SendWireError> for QueryAliasError {
     }
 }
 
+/// A session declined a querier: it already holds as many live as its bound
+/// (`MAX_QUERIERS`) allows. Nothing was declared, no interest was asked for, and a
+/// place that comes back (the last handle of a declared querier dropping) lets the
+/// next declaration through.
+///
+/// `#[non_exhaustive]` so a later reason a declaration can fail is a new variant, not a
+/// break. Upstream's `declare_querier` is fallible too (`ZResult`), so the signature
+/// carries no more than a caller of the original already handles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeclareQuerierError {
+    /// The session's querier quota is full; `limit` is the bound that was reached.
+    QuotaExceeded {
+        /// The bound that was reached.
+        limit: usize,
+    },
+}
+
+impl std::fmt::Display for DeclareQuerierError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeclareQuerierError::QuotaExceeded { limit } => write!(
+                f,
+                "DeclareQuerierError: the session already holds {limit} live querier(s), its bound"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DeclareQuerierError {}
+
+/// One place of the session's querier quota, held for as long as the declared querier
+/// has a handle. The place goes back when the LAST handle (a [`Querier`] or a
+/// [`QuerierAliased`] and every clone of it) drops, which is why the handles share this
+/// behind an `Arc` and do not each carry one: a clone is another handle to the same
+/// declaration, not another querier. The interest count of [`Querier`] is the other way
+/// round (a clone is a reference on the keyexpr's interest), and the two are kept apart
+/// on purpose.
+pub(crate) struct QuerierPermit {
+    quota: Arc<std::sync::Mutex<wz_session_core::quota::Quota>>,
+}
+
+impl QuerierPermit {
+    /// Take a place, or say the bound is reached.
+    pub(crate) fn acquire(
+        quota: &Arc<std::sync::Mutex<wz_session_core::quota::Quota>>,
+    ) -> Result<Arc<Self>, DeclareQuerierError> {
+        let mut held = match quota.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        held.try_acquire()
+            .map_err(|full| DeclareQuerierError::QuotaExceeded { limit: full.limit })?;
+        drop(held);
+        Ok(Arc::new(Self {
+            quota: quota.clone(),
+        }))
+    }
+}
+
+impl Drop for QuerierPermit {
+    fn drop(&mut self) {
+        let mut held = match self.quota.lock() {
+            Ok(held) => held,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        held.release();
+    }
+}
+
 /// R242 — reusable query target with pre-set keyexpr + options.
 /// Mirror of zenoh-pico's `z_querier_t`
 /// (`vendor/zenoh-pico/include/zenoh-pico/api/types.h:266`): a
@@ -357,6 +427,11 @@ pub struct Querier<R: SessionRuntime = TokioRuntime, T: TimeSource = TokioTime> 
     pub(super) session: Session<R, T, Unicast>,
     pub(super) keyexpr: String,
     pub(super) options: QueryOptions,
+    /// This declaration's place in the session's querier quota, shared by every clone.
+    /// `None` for the handle the runtime makes for its own use
+    /// ([`Session::querier_for_matching`]): that is not a declaration of the application
+    /// and takes no place, so it can neither fill the bound nor be refused by it.
+    pub(super) permit: Option<Arc<QuerierPermit>>,
 }
 
 impl<R: SessionRuntime, T: TimeSource> Clone for Querier<R, T> {
@@ -371,6 +446,7 @@ impl<R: SessionRuntime, T: TimeSource> Clone for Querier<R, T> {
             session: self.session.clone(),
             keyexpr: self.keyexpr.clone(),
             options: self.options.clone(),
+            permit: self.permit.clone(),
         }
     }
 }
@@ -752,6 +828,8 @@ pub struct QuerierAliased<R: SessionRuntime = TokioRuntime, T: TimeSource = Toki
     pub(super) mapping_id: u64,
     pub(super) inline_suffix: Option<String>,
     pub(super) options: QueryOptions,
+    /// This declaration's place in the session's querier quota, shared by every clone.
+    pub(super) permit: Arc<QuerierPermit>,
 }
 
 impl<R: SessionRuntime, T: TimeSource> Clone for QuerierAliased<R, T> {
@@ -761,6 +839,7 @@ impl<R: SessionRuntime, T: TimeSource> Clone for QuerierAliased<R, T> {
             mapping_id: self.mapping_id,
             inline_suffix: self.inline_suffix.clone(),
             options: self.options.clone(),
+            permit: self.permit.clone(),
         }
     }
 }

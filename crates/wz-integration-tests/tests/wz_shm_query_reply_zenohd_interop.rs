@@ -146,13 +146,13 @@ async fn ask(
             let mut held = ShmBackedPayload::alloc(text.len()).expect("alloc a value buffer");
             held.write(text.as_bytes());
             let sent = match value {
-                GetterValue::QuerierShm(_) => {
-                    session
-                        .declare_querier(key, options)
-                        .get_shm(&held, on_reply, |_| {})
-                }
+                GetterValue::QuerierShm(_) => session
+                    .declare_querier(key, options)
+                    .expect("declare the querier")
+                    .get_shm(&held, on_reply, |_| {}),
                 GetterValue::AliasedQuerierShm(_) => session
                     .declare_querier_aliased(QUERY_MAPPING_ID, None, options)
+                    .expect("declare the aliased querier")
                     .get_shm(&held, on_reply, |_| {}),
                 _ => session.query_shm(key, options, &held, on_reply, |_| {}),
             };

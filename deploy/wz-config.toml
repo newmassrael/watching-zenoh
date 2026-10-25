@@ -1656,7 +1656,8 @@ default = 0
 help = '''
 The queriers a session holds at once; declaring one more is refused until
 one is dropped. 0 is no bound, which is upstream's behaviour. Unlike the
-other limits this one sizes no table: it only refuses the one more.
+other limits this one sizes no table: it only refuses the one more. The
+Rust session API holds to it; the C ABIs do not apply it yet.
 '''
 
 # A policy is behaviour upstream does not have; it is declared with what upstream does and

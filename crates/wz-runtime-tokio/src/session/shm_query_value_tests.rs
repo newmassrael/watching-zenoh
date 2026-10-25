@@ -90,7 +90,9 @@ fn send(
             last_frame(call, driver)
         }
         Call::Querier => {
-            let querier = session.declare_querier(KEY, options);
+            let querier = session
+                .declare_querier(KEY, options)
+                .expect("declare the querier");
             querier
                 .get_shm(held, |_| {}, |_| {})
                 .expect("Querier::get_shm sends");
@@ -101,7 +103,9 @@ fn send(
                 .actions()
                 .send_declare_keyexpr(MAPPING_ID, KEY)
                 .expect("declare the mapping");
-            let querier = session.declare_querier_aliased(MAPPING_ID, None, options);
+            let querier = session
+                .declare_querier_aliased(MAPPING_ID, None, options)
+                .expect("declare the aliased querier");
             querier
                 .get_shm(held, |_| {}, |_| {})
                 .expect("QuerierAliased::get_shm sends");

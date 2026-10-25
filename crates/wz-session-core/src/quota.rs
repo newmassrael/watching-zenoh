@@ -63,6 +63,13 @@ impl Quota {
         self.live
     }
 
+    /// Change the bound. Places already taken stay taken: lowering the bound below `live`
+    /// refuses every acquire until enough are given back, and raising it grants at once.
+    /// This is how a test names a bound the build does not state, in one binary.
+    pub fn set_limit(&mut self, limit: usize) {
+        self.limit = limit;
+    }
+
     /// Take one place, or say the bound is reached. A refusal changes nothing.
     pub fn try_acquire(&mut self) -> Result<(), QuotaExceeded> {
         if self.limit != 0 && self.live >= self.limit {
@@ -118,6 +125,31 @@ mod tests {
         }
         assert_eq!(quota.live(), 10_000);
         assert_eq!(quota.limit(), 0);
+    }
+
+    #[test]
+    fn a_bound_changed_under_live_places_leaves_them_taken() {
+        let mut quota = Quota::new(3);
+        for _ in 0..3 {
+            quota.try_acquire().unwrap();
+        }
+        quota.set_limit(1);
+        assert_eq!(quota.live(), 3, "lowering the bound takes nothing back");
+        assert_eq!(quota.try_acquire(), Err(QuotaExceeded { limit: 1 }));
+        quota.release();
+        quota.release();
+        assert!(
+            quota.try_acquire().is_err(),
+            "one place is still over a bound of one"
+        );
+        quota.release();
+        assert_eq!(quota.try_acquire(), Ok(()));
+        quota.set_limit(0);
+        assert_eq!(
+            quota.try_acquire(),
+            Ok(()),
+            "raising the bound to none grants at once"
+        );
     }
 
     #[test]

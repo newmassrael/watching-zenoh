@@ -2101,38 +2101,49 @@ fn install_session_handles(
     // MATCHING ..."), not a shared prefix: a fixture that greps `MATCHING STATUS`
     // must not be satisfiable by the other plane's transition, or a run proving
     // one would read as proving both.
-    let (querier, querier_matching_listener) =
-        match declare_spec.querier_matching_log_keyexpr.as_deref() {
-            Some(keyexpr) => {
-                let querier = session.declare_querier(keyexpr, QueryOptions::default());
-                let keyexpr_for_log = keyexpr.to_string();
-                match querier.declare_matching_listener(move |status| {
-                    log::info!(
+    let (querier, querier_matching_listener) = match declare_spec
+        .querier_matching_log_keyexpr
+        .as_deref()
+    {
+        Some(keyexpr) => 'declare: {
+            let querier = match session.declare_querier(keyexpr, QueryOptions::default()) {
+                Ok(querier) => querier,
+                // Loud, like the listener's own rejection below: a fixture must be
+                // able to tell "the session refused the declaration" from "the
+                // transition never happened".
+                Err(e) => {
+                    log::warn!("wz-ap-demo: QUERIER declare refused for keyexpr='{keyexpr}': {e}");
+                    break 'declare (None, None);
+                }
+            };
+            let keyexpr_for_log = keyexpr.to_string();
+            match querier.declare_matching_listener(move |status| {
+                log::info!(
                     "wz-ap-demo: QUERIER MATCHING STATUS keyexpr='{keyexpr_for_log}' matching={}",
                     status.matching,
                 );
-                }) {
-                    Ok(listener) => {
-                        log::info!(
-                            "wz-ap-demo: DECLARED QUERIER MATCHING LISTENER keyexpr='{keyexpr}' \
+            }) {
+                Ok(listener) => {
+                    log::info!(
+                        "wz-ap-demo: DECLARED QUERIER MATCHING LISTENER keyexpr='{keyexpr}' \
                          (transition-only; a remote Decl/UndeclQueryable drives each edge)"
-                        );
-                        (Some(querier), Some(listener))
-                    }
-                    // The anti-vacuity arm, loud for the same reason as the publisher
-                    // side: a fixture must be able to tell "the feature is off" from
-                    // "the transition never happened".
-                    Err(e) => {
-                        log::warn!(
-                            "wz-ap-demo: QUERIER MATCHING LISTENER declare rejected for \
+                    );
+                    (Some(querier), Some(listener))
+                }
+                // The anti-vacuity arm, loud for the same reason as the publisher
+                // side: a fixture must be able to tell "the feature is off" from
+                // "the transition never happened".
+                Err(e) => {
+                    log::warn!(
+                        "wz-ap-demo: QUERIER MATCHING LISTENER declare rejected for \
                          keyexpr='{keyexpr}': {e:?}"
-                        );
-                        (Some(querier), None)
-                    }
+                    );
+                    (Some(querier), None)
                 }
             }
-            None => (None, None),
-        };
+        }
+        None => (None, None),
+    };
 
     // R311y798 — `--querier-matching-all-complete`, the AllComplete TWIN of the
     // block above. Same keyexpr, same session, same instant; the ONLY thing that
@@ -2154,11 +2165,20 @@ fn install_session_handles(
         .as_deref()
         .filter(|_| declare_spec.querier_matching_all_complete)
     {
-        Some(keyexpr) => {
-            let querier = session.declare_querier(
+        Some(keyexpr) => 'declare: {
+            let querier = match session.declare_querier(
                 keyexpr,
                 QueryOptions::default().with_target(QueryTarget::AllComplete),
-            );
+            ) {
+                Ok(querier) => querier,
+                Err(e) => {
+                    log::warn!(
+                        "wz-ap-demo: QUERIER ALLCOMPLETE declare refused for \
+                         keyexpr='{keyexpr}': {e}"
+                    );
+                    break 'declare (None, None);
+                }
+            };
             let keyexpr_for_log = keyexpr.to_string();
             match querier.declare_matching_listener(move |status| {
                 log::info!(

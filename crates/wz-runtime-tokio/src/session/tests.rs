@@ -5937,6 +5937,159 @@ fn query_alias_error_display_message_hints_remediation() {
     );
 }
 
+// ── The querier quota (`MAX_QUERIERS`): live declarations, refused at the bound ──
+
+/// The bound is on declarations: fill to N, the N+1st is refused, and a refusal takes no
+/// place. An aliased querier is a querier, so it is counted by the same quota.
+#[test]
+fn a_session_declares_queriers_up_to_its_bound_and_refuses_the_next() {
+    let (session, _driver) = build_session();
+    session.set_querier_limit(2);
+    let first = session
+        .declare_querier("quota/1", QueryOptions::get())
+        .expect("the first place");
+    let second = session
+        .declare_querier_aliased(7, None, QueryOptions::get())
+        .expect("the second place, taken by an aliased querier");
+    assert_eq!(session.live_queriers(), 2);
+
+    let full = DeclareQuerierError::QuotaExceeded { limit: 2 };
+    assert_eq!(
+        session
+            .declare_querier("quota/3", QueryOptions::get())
+            .err(),
+        Some(full)
+    );
+    assert_eq!(
+        session
+            .declare_querier_aliased(8, None, QueryOptions::get())
+            .err(),
+        Some(full)
+    );
+    assert_eq!(session.live_queriers(), 2, "a refusal takes no place");
+    drop((first, second));
+}
+
+/// A clone is another handle to one declaration, not another querier: the place is the
+/// declaration's, and it goes back with the LAST handle, whichever kind of querier it was.
+#[test]
+fn a_querier_keeps_its_place_until_the_last_handle_drops() {
+    let (session, _driver) = build_session();
+    session.set_querier_limit(1);
+
+    let original = session
+        .declare_querier("quota/1", QueryOptions::get())
+        .expect("the place");
+    let clone = original.clone();
+    assert_eq!(session.live_queriers(), 1, "a clone takes no second place");
+    assert!(session
+        .declare_querier("quota/2", QueryOptions::get())
+        .is_err());
+    drop(original);
+    assert_eq!(session.live_queriers(), 1, "a clone still holds the place");
+    assert!(session
+        .declare_querier("quota/2", QueryOptions::get())
+        .is_err());
+    drop(clone);
+    assert_eq!(session.live_queriers(), 0);
+
+    let aliased = session
+        .declare_querier_aliased(7, None, QueryOptions::get())
+        .expect("the place came back");
+    let aliased_clone = aliased.clone();
+    drop(aliased);
+    assert_eq!(session.live_queriers(), 1);
+    drop(aliased_clone);
+    assert_eq!(session.live_queriers(), 0);
+    assert!(session
+        .declare_querier("quota/3", QueryOptions::get())
+        .is_ok());
+}
+
+/// `0` is no bound, which is upstream's behaviour and the default of the limit.
+#[test]
+fn a_bound_of_zero_refuses_no_querier() {
+    let (session, _driver) = build_session();
+    session.set_querier_limit(0);
+    let held: Vec<_> = (0..64)
+        .map(|n| {
+            session
+                .declare_querier(format!("quota/{n}"), QueryOptions::get())
+                .expect("no bound refuses nothing")
+        })
+        .collect();
+    assert_eq!(session.live_queriers(), 64);
+    drop(held);
+    assert_eq!(session.live_queriers(), 0);
+}
+
+/// The count is the SESSION's: a fork (a clone of the session) is the same session, so a
+/// fork cannot hold a second bound's worth.
+#[test]
+fn a_fork_of_a_session_shares_its_querier_bound() {
+    let (session, _driver) = build_session();
+    session.set_querier_limit(1);
+    let fork = session.clone();
+    let held = session
+        .declare_querier("quota/1", QueryOptions::get())
+        .expect("the place");
+    assert!(fork
+        .declare_querier("quota/2", QueryOptions::get())
+        .is_err());
+    drop(held);
+    assert!(fork.declare_querier("quota/2", QueryOptions::get()).is_ok());
+}
+
+/// The handle the runtime makes to read a matching verdict is not an application's
+/// declaration: it takes no place, so a full session still answers, and it cannot starve a
+/// declaration the application is owed.
+#[test]
+fn the_runtimes_own_matching_querier_takes_no_place() {
+    let (session, _driver) = build_session();
+    session.set_querier_limit(1);
+    let declared = session
+        .declare_querier("quota/1", QueryOptions::get())
+        .expect("the place");
+    let probe = session.querier_for_matching("quota/2", QueryOptions::get());
+    assert_eq!(session.live_queriers(), 1, "a probe takes no place");
+    drop(probe);
+    assert_eq!(session.live_queriers(), 1, "and gives none back");
+    drop(declared);
+    assert_eq!(session.live_queriers(), 0);
+}
+
+/// A refusal declares NOTHING: the place is taken before the Interest is asked for, so a
+/// full session puts no frame on the wire and leaves no reference in its interest table.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-interest",
+    feature = "codec-declare"
+))]
+#[test]
+fn a_refused_querier_asks_for_no_interest() {
+    let (session, driver) = build_session();
+    session.set_querier_limit(1);
+    let _held = session
+        .declare_querier("quota/1", QueryOptions::get())
+        .expect("the place");
+    assert_eq!(driver.frame_count(), 1, "the declared querier asked once");
+
+    assert!(session
+        .declare_querier("quota/2", QueryOptions::get())
+        .is_err());
+    assert_eq!(
+        driver.frame_count(),
+        1,
+        "the refused declaration put nothing on the wire"
+    );
+    assert!(
+        session
+            .matching_interest_id(crate::session::MatchingPlane::Queryables, "quota/2")
+            .is_none(),
+        "and left no reference in the interest table"
+    );
+}
+
 // ── R242 Querier (z_querier_t mirror) ──
 
 #[test]
@@ -5946,7 +6099,9 @@ fn declare_querier_returns_handle_with_keyexpr_and_options() {
         .with_target(QueryTarget::All)
         .with_consolidation(ConsolidationMode::Latest)
         .with_timeout_ms(5_000);
-    let querier = session.declare_querier("home/temp", opts.clone());
+    let querier = session
+        .declare_querier("home/temp", opts.clone())
+        .expect("declare");
     assert_eq!(querier.keyexpr(), "home/temp");
     assert_eq!(querier.options().target, opts.target);
     assert_eq!(querier.options().consolidation, opts.consolidation);
@@ -5972,7 +6127,9 @@ fn declare_querier_asks_the_peer_for_matching_queryable_declarations() {
     use wz_session_core::interest_build::{build_interest_queryables, build_interest_subscribers};
 
     let (session, driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     assert_eq!(
         driver.frame_count(),
         1,
@@ -6032,7 +6189,9 @@ fn declare_querier_asks_the_peer_for_matching_queryable_declarations() {
 fn the_two_matching_planes_do_not_share_a_reference_on_one_keyexpr() {
     let (session, _driver) = build_session();
     let pubr = session.declare_publisher("home/temp", PublishOptions::put());
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
 
     let sub_id = session
         .matching_interest_id(crate::session::MatchingPlane::Subscribers, "home/temp")
@@ -6214,10 +6373,12 @@ fn querier_get_fires_loopback_through_session_query_session_local() {
             responder.reply(b"22.5");
         });
 
-    let querier = session.declare_querier(
-        "home/temp",
-        QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-    );
+    let querier = session
+        .declare_querier(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+        )
+        .expect("declare");
     // R2577 — counted from AFTER the declare: declaring a querier now asks the
     // neighbour which queryables answer this keyexpr. The subject here is that
     // a SessionLocal `get` puts nothing on the wire, so the count must start
@@ -6249,10 +6410,12 @@ fn querier_get_fires_loopback_through_session_query_session_local() {
 #[test]
 fn querier_get_called_twice_allocates_independent_rids() {
     let (session, _driver) = build_session();
-    let querier = session.declare_querier(
-        "home/temp",
-        QueryOptions::get().with_allowed_destination(Locality::Remote),
-    );
+    let querier = session
+        .declare_querier(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+        )
+        .expect("declare");
     let h0 = querier
         .get(|_| {}, |_| {})
         .expect("query-get feature is ON in this test build");
@@ -6287,12 +6450,14 @@ fn querier_get_threads_target_option_into_wire() {
     // does thread its declare-time options through to
     // Session::query and onward to the wire".)
     let (session, driver) = build_session();
-    let querier = session.declare_querier(
-        "home/temp",
-        QueryOptions::get()
-            .with_allowed_destination(Locality::Remote)
-            .with_target(QueryTarget::All),
-    );
+    let querier = session
+        .declare_querier(
+            "home/temp",
+            QueryOptions::get()
+                .with_allowed_destination(Locality::Remote)
+                .with_target(QueryTarget::All),
+        )
+        .expect("declare");
     // R2577 — the declare emits its own Interest now, so the frame this test
     // reads is the one the `get` wrote, not frame 0.
     let after_declare = driver.frame_count();
@@ -6321,7 +6486,9 @@ fn querier_get_threads_target_option_into_wire() {
 #[test]
 fn querier_clone_shares_session_and_options() {
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     let clone = querier.clone();
     assert_eq!(clone.keyexpr(), querier.keyexpr());
     assert_eq!(
@@ -6389,7 +6556,9 @@ fn make_undecl_queryable(id: u64) -> wz_codecs::declare::DeclareOwnedVariant {
 #[test]
 fn querier_get_matching_status_false_on_fresh_session_with_no_peers() {
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     assert_eq!(
         querier.get_matching_status(),
         MatchingStatus { matching: false },
@@ -6402,7 +6571,9 @@ fn querier_get_matching_status_false_on_fresh_session_with_no_peers() {
 fn querier_get_matching_status_true_after_peer_decl_with_matching_keyexpr() {
     use hashbrown::HashMap;
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     // Drive a DeclQueryable into the registry directly (no FSM
     // dispatch needed for this assertion — the registry's
     // dispatch_declare is the contract surface).
@@ -6424,7 +6595,9 @@ fn querier_get_matching_status_true_after_peer_decl_with_matching_keyexpr() {
 fn querier_get_matching_status_true_when_peer_pattern_covers_querier_literal() {
     use hashbrown::HashMap;
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     session
         .observer()
         .lock()
@@ -6443,7 +6616,9 @@ fn querier_get_matching_status_true_when_peer_pattern_covers_querier_literal() {
 fn querier_get_matching_status_true_when_querier_pattern_covers_peer_literal() {
     use hashbrown::HashMap;
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/**", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/**", QueryOptions::get())
+        .expect("declare");
     session
         .observer()
         .lock()
@@ -6462,7 +6637,9 @@ fn querier_get_matching_status_true_when_querier_pattern_covers_peer_literal() {
 fn querier_get_matching_status_false_after_peer_undeclare() {
     use hashbrown::HashMap;
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     session
         .observer()
         .lock()
@@ -6492,7 +6669,9 @@ fn querier_get_matching_status_false_after_peer_undeclare() {
 fn querier_get_matching_status_false_with_non_matching_peer_keyexpr() {
     use hashbrown::HashMap;
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     session
         .observer()
         .lock()
@@ -6511,7 +6690,9 @@ fn querier_get_matching_status_false_with_non_matching_peer_keyexpr() {
 fn querier_get_matching_status_true_when_any_of_many_peer_decls_matches() {
     use hashbrown::HashMap;
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     let mut obs = session.observer().lock().unwrap();
     obs.remote_queryables
         .dispatch_declare(&make_decl_queryable(50, "other/foo"), &HashMap::new());
@@ -6533,7 +6714,9 @@ fn querier_get_matching_status_true_when_any_of_many_peer_decls_matches() {
 fn querier_clone_shares_matching_status_view() {
     use hashbrown::HashMap;
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     let querier_clone = querier.clone();
     assert_eq!(
         querier.get_matching_status(),
@@ -6566,7 +6749,9 @@ fn querier_clone_shares_matching_status_view() {
 fn declare_querier_aliased_returns_handle_with_mapping_id_and_options() {
     let (session, _driver) = build_session();
     let opts = QueryOptions::get().with_target(QueryTarget::All);
-    let qa = session.declare_querier_aliased(7, Some("/kitchen"), opts.clone());
+    let qa = session
+        .declare_querier_aliased(7, Some("/kitchen"), opts.clone())
+        .expect("declare");
     assert_eq!(qa.mapping_id(), 7);
     assert_eq!(qa.inline_suffix(), Some("/kitchen"));
     assert_eq!(qa.options().target, opts.target);
@@ -6575,7 +6760,9 @@ fn declare_querier_aliased_returns_handle_with_mapping_id_and_options() {
 #[test]
 fn declare_querier_aliased_does_not_emit_wire_frame() {
     let (session, driver) = build_session();
-    let _qa = session.declare_querier_aliased(7, None, QueryOptions::get());
+    let _qa = session
+        .declare_querier_aliased(7, None, QueryOptions::get())
+        .expect("declare");
     assert_eq!(
         driver.frame_count(),
         0,
@@ -6608,11 +6795,13 @@ fn querier_aliased_get_resolves_loopback_through_outbound_mapping_table() {
             responder.reply(b"22.5");
         });
 
-    let qa = session.declare_querier_aliased(
-        7,
-        None,
-        QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-    );
+    let qa = session
+        .declare_querier_aliased(
+            7,
+            None,
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+        )
+        .expect("declare");
     let handle = qa
         .get(
             move |reply| {
@@ -6647,7 +6836,9 @@ fn querier_aliased_get_unknown_mapping_returns_err_and_skips_both_branches() {
             fired_cb.fetch_add(1, Ordering::SeqCst);
         });
 
-    let qa = session.declare_querier_aliased(99, None, QueryOptions::get());
+    let qa = session
+        .declare_querier_aliased(99, None, QueryOptions::get())
+        .expect("declare");
     let err = qa.get(|_| {}, |_| {});
     assert_eq!(err, Err(QueryAliasError::UnknownMapping(99)));
     assert_eq!(fired.load(Ordering::SeqCst), 0);
@@ -6679,11 +6870,13 @@ fn querier_aliased_get_threads_inline_suffix_into_composite_literal() {
             responder.reply(b"21.0");
         });
 
-    let qa = session.declare_querier_aliased(
-        7,
-        Some("/kitchen"),
-        QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-    );
+    let qa = session
+        .declare_querier_aliased(
+            7,
+            Some("/kitchen"),
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+        )
+        .expect("declare");
     qa.get(
         move |reply| {
             *cap_cb.lock().unwrap() = Some(InboundReply::from_view(reply));
@@ -6712,11 +6905,13 @@ fn querier_aliased_get_twice_allocates_independent_rids() {
         .actions()
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
-    let qa = session.declare_querier_aliased(
-        7,
-        None,
-        QueryOptions::get().with_allowed_destination(Locality::Remote),
-    );
+    let qa = session
+        .declare_querier_aliased(
+            7,
+            None,
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+        )
+        .expect("declare");
     let h0 = qa.get(|_| {}, |_| {}).unwrap();
     let h1 = qa.get(|_| {}, |_| {}).unwrap();
     assert_eq!(h0.rid(), 0);
@@ -6735,11 +6930,13 @@ fn querier_aliased_clone_shares_session_and_options() {
         .actions()
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
-    let qa = session.declare_querier_aliased(
-        7,
-        None,
-        QueryOptions::get().with_allowed_destination(Locality::Remote),
-    );
+    let qa = session
+        .declare_querier_aliased(
+            7,
+            None,
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+        )
+        .expect("declare");
     let clone = qa.clone();
     assert_eq!(clone.mapping_id(), qa.mapping_id());
     assert_eq!(clone.inline_suffix(), qa.inline_suffix());
@@ -6755,7 +6952,9 @@ fn querier_aliased_clone_shares_session_and_options() {
 fn querier_aliased_get_matching_status_returns_err_on_unknown_mapping() {
     let (session, _driver) = build_session();
     // No send_declare_keyexpr for id=88 — mapping is unknown.
-    let qa = session.declare_querier_aliased(88, None, QueryOptions::get());
+    let qa = session
+        .declare_querier_aliased(88, None, QueryOptions::get())
+        .expect("declare");
     assert_eq!(
         qa.get_matching_status(),
         Err(QueryAliasError::UnknownMapping(88)),
@@ -6775,7 +6974,9 @@ fn querier_aliased_get_matching_status_false_after_declare_with_no_peer() {
         .actions()
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
-    let qa = session.declare_querier_aliased(7, None, QueryOptions::get());
+    let qa = session
+        .declare_querier_aliased(7, None, QueryOptions::get())
+        .expect("declare");
     assert_eq!(
         qa.get_matching_status(),
         Ok(MatchingStatus { matching: false }),
@@ -6796,7 +6997,9 @@ fn querier_aliased_get_matching_status_true_when_peer_decl_matches_base_literal(
         .actions()
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
-    let qa = session.declare_querier_aliased(7, None, QueryOptions::get());
+    let qa = session
+        .declare_querier_aliased(7, None, QueryOptions::get())
+        .expect("declare");
     session
         .observer()
         .lock()
@@ -6827,7 +7030,9 @@ fn querier_aliased_get_matching_status_threads_inline_suffix_into_consult() {
     // keyexpr "home/temp/kitchen"; peer DeclQueryable on
     // "home/**" should match via the peer-pattern asymmetric
     // arm.
-    let qa = session.declare_querier_aliased(7, Some("/kitchen"), QueryOptions::get());
+    let qa = session
+        .declare_querier_aliased(7, Some("/kitchen"), QueryOptions::get())
+        .expect("declare");
     session
         .observer()
         .lock()
@@ -6879,7 +7084,9 @@ fn querier_aliased_get_matching_status_false_after_undeclared_mapping_drop() {
         .actions()
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
-    let qa = session.declare_querier_aliased(7, None, QueryOptions::get());
+    let qa = session
+        .declare_querier_aliased(7, None, QueryOptions::get())
+        .expect("declare");
     session
         .observer()
         .lock()
@@ -7669,7 +7876,9 @@ fn publisher_get_matching_status_false_with_non_matching_peer_keyexpr() {
 #[test]
 fn querier_get_matching_status_true_for_a_session_local_queryable() {
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     assert_eq!(
         querier.get_matching_status(),
         MatchingStatus { matching: false },
@@ -7689,7 +7898,9 @@ fn querier_get_matching_status_true_for_a_session_local_queryable() {
 #[test]
 fn querier_get_matching_status_false_again_after_the_local_queryable_drops() {
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     {
         let _q = session
             .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
@@ -7714,10 +7925,12 @@ fn querier_get_matching_status_ignores_local_when_destination_is_remote() {
     // never be answered locally.
     use wz_session_core::locality::Locality;
     let (session, _driver) = build_session();
-    let querier = session.declare_querier(
-        "home/temp",
-        QueryOptions::get().with_allowed_destination(Locality::Remote),
-    );
+    let querier = session
+        .declare_querier(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::Remote),
+        )
+        .expect("declare");
     let _q = session
         .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
         .expect("query-queryable is on in this lane");
@@ -7736,7 +7949,9 @@ fn querier_get_matching_status_ignores_a_remote_only_local_queryable() {
     // though the keyexprs are identical.
     use wz_session_core::locality::Locality;
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     let _q = session
         .declare_queryable(
             "home/temp",
@@ -7760,11 +7975,15 @@ fn querier_get_matching_status_ignores_a_peer_when_destination_is_session_local(
     use hashbrown::HashMap;
     use wz_session_core::locality::Locality;
     let (session, _driver) = build_session();
-    let local_only = session.declare_querier(
-        "home/temp",
-        QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
-    );
-    let anywhere = session.declare_querier("home/temp", QueryOptions::get());
+    let local_only = session
+        .declare_querier(
+            "home/temp",
+            QueryOptions::get().with_allowed_destination(Locality::SessionLocal),
+        )
+        .expect("declare");
+    let anywhere = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     session
         .observer()
         .lock()
@@ -7793,10 +8012,12 @@ fn querier_get_matching_status_ignores_a_peer_when_destination_is_session_local(
 fn querier_get_matching_status_under_all_complete_needs_a_complete_local_queryable() {
     use wz_session_core::query_mode::QueryTarget;
     let (session, _driver) = build_session();
-    let querier = session.declare_querier(
-        "home/temp",
-        QueryOptions::get().with_target(QueryTarget::AllComplete),
-    );
+    let querier = session
+        .declare_querier(
+            "home/temp",
+            QueryOptions::get().with_target(QueryTarget::AllComplete),
+        )
+        .expect("declare");
     let incomplete = session
         .declare_queryable(
             "home/temp",
@@ -7846,11 +8067,15 @@ fn querier_get_matching_status_under_all_complete_demands_inclusion() {
         )
         .expect("query-queryable is on in this lane");
 
-    let best_matching = session.declare_querier("home/**", QueryOptions::get());
-    let all_complete = session.declare_querier(
-        "home/**",
-        QueryOptions::get().with_target(QueryTarget::AllComplete),
-    );
+    let best_matching = session
+        .declare_querier("home/**", QueryOptions::get())
+        .expect("declare");
+    let all_complete = session
+        .declare_querier(
+            "home/**",
+            QueryOptions::get().with_target(QueryTarget::AllComplete),
+        )
+        .expect("declare");
     assert_eq!(
         best_matching.get_matching_status(),
         MatchingStatus { matching: true },
@@ -10951,7 +11176,9 @@ fn querier_matching_listener_delivers_true_at_registration_when_already_matching
         .dispatch_declare(&make_decl_queryable(9, "home/**"), &HashMap::new());
     session.drain_deferred_fires();
 
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     assert_eq!(
         querier.get_matching_status(),
         MatchingStatus { matching: true },
@@ -10979,7 +11206,9 @@ fn querier_matching_listener_fires_on_remote_queryable_transitions() {
     use std::sync::{Arc, Mutex};
 
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
     let log_cb = log.clone();
     let listener = querier
@@ -11023,7 +11252,9 @@ fn querier_matching_listener_fires_when_a_local_queryable_is_declared() {
     use std::sync::{Arc, Mutex};
 
     let (session, _driver) = build_session();
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
     let log_cb = log.clone();
     let listener = querier
@@ -11069,7 +11300,9 @@ fn querier_matching_listener_registration_seeds_from_the_local_half_too() {
     let _q = session
         .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
         .expect("query-queryable is on in this lane");
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     assert_eq!(
         querier.get_matching_status(),
         MatchingStatus { matching: true },
@@ -11106,10 +11339,12 @@ fn querier_matching_listener_keeps_applying_the_all_complete_target() {
     use wz_session_core::query_mode::QueryTarget;
 
     let (session, _driver) = build_session();
-    let querier = session.declare_querier(
-        "home/temp",
-        QueryOptions::get().with_target(QueryTarget::AllComplete),
-    );
+    let querier = session
+        .declare_querier(
+            "home/temp",
+            QueryOptions::get().with_target(QueryTarget::AllComplete),
+        )
+        .expect("declare");
     let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
     let log_cb = log.clone();
     let listener = querier
@@ -11169,7 +11404,9 @@ fn an_inbound_peer_undeclare_does_not_flip_a_watch_a_local_queryable_holds() {
     let _local = session
         .declare_queryable("home/temp", QueryableOptions::default(), |_q, _r| {})
         .expect("query-queryable is on in this lane");
-    let querier = session.declare_querier("home/temp", QueryOptions::get());
+    let querier = session
+        .declare_querier("home/temp", QueryOptions::get())
+        .expect("declare");
     let log: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
     let log_cb = log.clone();
     let listener = querier
@@ -11413,7 +11650,9 @@ fn a_querier_matching_listener_asks_the_peer_for_queryable_declarations() {
 
     // R2577 — the DECLARE emits a QUERYABLES Interest of its own now, so the
     // baseline is taken after it; this test's subject is the LISTENER's ask.
-    let querier = session.declare_querier("demo/**", QueryOptions::default());
+    let querier = session
+        .declare_querier("demo/**", QueryOptions::default())
+        .expect("declare");
     let baseline = driver.frame_count();
     let listener = querier
         .declare_matching_listener(|_| {})
@@ -11517,7 +11756,9 @@ fn two_matching_listeners_take_two_interest_ids_and_retract_their_own() {
     let first = pubr
         .declare_matching_listener(|_| {})
         .expect("declare-interest is on in this lane");
-    let querier = session.declare_querier("demo/**", QueryOptions::default());
+    let querier = session
+        .declare_querier("demo/**", QueryOptions::default())
+        .expect("declare");
     let second = querier
         .declare_matching_listener(|_| {})
         .expect("declare-interest is on in this lane");
