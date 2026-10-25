@@ -164,7 +164,7 @@ admin-space = ["engine-tokio", "queryable", "unstable-api", "wz-capi-core/admin-
 # structs gain the `allowed_origin` / `allowed_destination` fields those switches add, so a
 # program compiled with them links a build that has them; a publisher's and a querier's write
 # filter and matching status count the session's own entities.
-local-subscriber = ["engine-tokio", "wz-capi-core/local-subscriber"]
+local-subscriber = ["wz-capi-core?/local-subscriber", "wz-capi-coop?/local-subscriber"]
 local-queryable = ["engine-tokio", "wz-capi-core/local-queryable"]
 # `unstable-api` (`Z_FEATURE_UNSTABLE_API`, on in the reference build and off in upstream's
 # default): the entity ids (`z_session_id`, `z_publisher_id`, ...), the sample's reliability and

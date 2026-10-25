@@ -1077,3 +1077,131 @@ mod unstable {
         }
     }
 }
+
+/// Delivery to the session's own subscribers in the build that cannot listen: with no peer
+/// subscribing to the key, a publisher matches while the session has a subscriber of its own,
+/// and a put reaches that subscriber before the call returns; once it is gone the publisher
+/// matches nothing and the put reaches nobody.
+#[cfg(feature = "local-subscriber")]
+mod local {
+    use super::*;
+    use wz_capi_pico::matching::{z_matching_status_t, z_publisher_get_matching_status};
+    use wz_capi_pico::{
+        z_declare_publisher, z_owned_publisher_t, z_publisher_loan, z_publisher_move,
+        z_publisher_put, z_undeclare_publisher,
+    };
+
+    unsafe extern "C" fn on_sample_count(_sample: *const z_loaned_sample_t, ctx: *mut c_void) {
+        let count = &*(ctx as *const std::sync::atomic::AtomicUsize);
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether `publisher` matches.
+    unsafe fn matches(publisher: &z_owned_publisher_t) -> bool {
+        let mut status = z_matching_status_t { matching: false };
+        assert_eq!(
+            z_publisher_get_matching_status(z_publisher_loan(publisher), &mut status),
+            Z_OK
+        );
+        status.matching
+    }
+
+    #[test]
+    fn a_client_only_build_delivers_a_put_to_its_own_subscriber() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let port = free_port();
+        let _listener = Listener::start(port);
+        let count: &'static AtomicUsize = Box::leak(Box::default());
+        // SAFETY: a fresh config and session, released before the function returns; the counter
+        // is leaked, so it outlives every callback.
+        unsafe {
+            let mut session = open_to(port);
+            // A key the listener does not subscribe to: nothing remote matches it.
+            let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut ke, c"local/only/x".as_ptr()),
+                Z_OK
+            );
+            let mut publisher: z_owned_publisher_t = std::mem::zeroed();
+            assert_eq!(
+                z_declare_publisher(
+                    z_session_loan(&session),
+                    &mut publisher,
+                    z_view_keyexpr_loan(&ke),
+                    std::ptr::null_mut()
+                ),
+                Z_OK
+            );
+            assert!(
+                !matches(&publisher),
+                "CONTROL: nothing subscribes to the key yet"
+            );
+
+            let mut closure = std::mem::zeroed();
+            assert_eq!(
+                z_closure_sample(
+                    &mut closure,
+                    Some(on_sample_count),
+                    None,
+                    count as *const AtomicUsize as *mut c_void
+                ),
+                Z_OK
+            );
+            let mut own: z_view_keyexpr_t = std::mem::zeroed();
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut own, c"local/only/**".as_ptr()),
+                Z_OK
+            );
+            let mut sub: z_owned_subscriber_t = std::mem::zeroed();
+            assert_eq!(
+                z_declare_subscriber(
+                    z_session_loan(&session),
+                    &mut sub,
+                    z_view_keyexpr_loan(&own),
+                    z_closure_sample_move(&mut closure),
+                    std::ptr::null(),
+                ),
+                Z_OK
+            );
+            assert!(matches(&publisher), "the session's own subscriber matches");
+
+            let mut payload = std::mem::zeroed();
+            assert_eq!(z_bytes_copy_from_str(&mut payload, c"v".as_ptr()), Z_OK);
+            assert_eq!(
+                z_publisher_put(
+                    z_publisher_loan(&publisher),
+                    z_bytes_move(&mut payload),
+                    std::ptr::null()
+                ),
+                Z_OK
+            );
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                1,
+                "the subscriber was handed the put before the call returned"
+            );
+            put(&session, c"local/only/y", c"w");
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                2,
+                "a session put does the same"
+            );
+
+            assert_eq!(z_undeclare_subscriber(z_subscriber_move(&mut sub)), Z_OK);
+            assert!(!matches(&publisher), "and matches no more once it is gone");
+            put(&session, c"local/only/z", c"x");
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                2,
+                "a retracted subscriber hears nothing"
+            );
+
+            assert_eq!(
+                z_undeclare_publisher(z_publisher_move(&mut publisher)),
+                Z_OK
+            );
+            z_close(z_session_loan_mut(&mut session), std::ptr::null());
+            z_session_drop(z_session_move(&mut session));
+        }
+    }
+}

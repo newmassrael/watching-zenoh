@@ -420,6 +420,8 @@ struct FilterEntry {
     plane: FilterPlane,
     keyexpr: String,
     asked: bool,
+    /// Whether the session's own entities count toward the filter (`local-subscriber`).
+    count_local: bool,
 }
 
 /// One Interest the session holds open, and how many hold it.
@@ -452,6 +454,16 @@ struct MatchEntry {
     plane: FilterPlane,
     watch: u64,
     keyexpr: String,
+}
+
+/// The locality a matching criterion carries: what the entity counts. The session's own
+/// entities count (`Any`) only for one that asked them to and in a build that delivers locally.
+fn counted(count_local: bool) -> Locality {
+    if cfg!(feature = "local-subscriber") && count_local {
+        Locality::Any
+    } else {
+        Locality::Remote
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -993,6 +1005,92 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
+    /// A publish's leg to the peer the link reaches, when its destination admits the wire. A link
+    /// that is down skips it, as a send over it would.
+    fn publish_to_link(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> Result<usize, FanoutError> {
+        if !opts.allowed_destination.allows_remote() {
+            return Ok(0);
+        }
+        let Some(core) = self.live() else {
+            return Ok(0);
+        };
+        let Some(actions) = core.0.up() else {
+            return Ok(0);
+        };
+        let meta = opts.push_metadata();
+        let reliable = opts.reliable_bool();
+        let express = meta.is_express();
+        let priority = opts.priority_band();
+        let suffix = wire.suffix.as_deref();
+        // A plain Put is sent from the borrowed bytes, as the tokio engine sends it.
+        if opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos() {
+            let (mapping_id, suffix) = if wire.is_literal() {
+                (0, Some(keyexpr))
+            } else {
+                (wire.mapping_id, suffix)
+            };
+            return leg(actions.send_plain_put_qos(
+                mapping_id, suffix, payload, meta.qos, reliable, express, priority,
+            ));
+        }
+        let push = match (opts.kind, wire.mapping_id) {
+            (SampleKind::Put, 0) => {
+                push_build::build_push_literal_with_meta(keyexpr, payload, &meta)
+            }
+            (SampleKind::Del, 0) => push_build::build_push_del_literal_with_meta(keyexpr, &meta),
+            (SampleKind::Put, mapping_id) => {
+                push_build::build_push_aliased_with_meta(mapping_id, suffix, payload, &meta)
+            }
+            (SampleKind::Del, mapping_id) => {
+                push_build::build_push_del_aliased_with_meta(mapping_id, suffix, &meta)
+            }
+        };
+        let Ok(push) = push else {
+            return Err(FanoutError::ExceedsCapacity);
+        };
+        leg(actions.send_network_message_qos(
+            NetworkMessage::Push(Box::new(push)),
+            reliable,
+            express,
+            priority,
+        ))
+    }
+
+    /// A publish's leg to the session's own subscribers, when its destination admits them: the
+    /// sample goes through the registry's loopback, which fires the subscribers whose origin
+    /// admits it, and what they queued is handed out here with no lock held, so a callback runs
+    /// inside the put as zenoh-pico's does. The number of subscribers it reached.
+    #[cfg(feature = "local-subscriber")]
+    fn publish_to_subscribers(
+        &self,
+        keyexpr: &str,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> usize {
+        if !opts.allowed_destination.allows_local() {
+            return 0;
+        }
+        let Some(core) = self.live() else {
+            return 0;
+        };
+        let sample = opts.loopback_sample(keyexpr, payload);
+        let reached = core
+            .0
+            .observer
+            .borrow_mut()
+            .subscribers
+            .local_publish(&sample);
+        drop(core);
+        self.deliver();
+        reached
+    }
+
     /// Tell `fan`, when the get can be cancelled, how to undo leg `leg`: a token cancelled while
     /// the leg is issued undoes it at once (`record` runs it).
     #[cfg(feature = "query")]
@@ -1148,6 +1246,50 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
+    /// Whether the session's own entities of `plane`'s kind match `keyexpr`: a subscriber of its
+    /// own that a local put reaches (`local-subscriber`). The session answers nothing else
+    /// locally, as zenoh-pico's default build does not.
+    fn local_matches(core: &Core<L, C>, plane: FilterPlane, keyexpr: &str) -> bool {
+        #[cfg(feature = "local-subscriber")]
+        if matches!(plane, FilterPlane::Subscribers) {
+            return core
+                .observer
+                .borrow()
+                .subscribers
+                .has_local_matching(keyexpr);
+        }
+        let _ = (core, plane, keyexpr);
+        false
+    }
+
+    /// What a write filter or a matching listener on `plane` reads: a peer's declaration, or with
+    /// `count_local` one of the session's own.
+    fn plane_matches(
+        core: &Core<L, C>,
+        plane: FilterPlane,
+        keyexpr: &str,
+        count_local: bool,
+    ) -> bool {
+        Self::peer_matches(core, plane, keyexpr)
+            || (count_local && Self::local_matches(core, plane, keyexpr))
+    }
+
+    /// Tell every matching listener on the subscribers' plane that counts the session's own
+    /// subscribers whether it now matches, after one was declared or retracted here: the
+    /// registry reads the remote half off its own membership and asks this for the local half.
+    #[cfg(feature = "local-subscriber")]
+    fn reevaluate_subscriber_matching(core: &Core<L, C>) {
+        let mut observer = core.observer.borrow_mut();
+        let ApplicationLayerObserver {
+            subscribers,
+            remote_subscribers,
+            ..
+        } = &mut *observer;
+        remote_subscribers.reevaluate_matching(&|criterion| {
+            criterion.locality.allows_local() && subscribers.has_local_matching(&criterion.keyexpr)
+        });
+    }
+
     /// Stop the read task, from a thread that is not it.
     fn stop_reader(&self) -> Result<(), CalledFromReadTask> {
         let task = {
@@ -1211,53 +1353,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         payload: &[u8],
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
-        if !opts.allowed_destination.allows_remote() {
-            return Ok(0);
-        }
-        let Some(core) = self.live() else {
-            return Ok(0);
-        };
-        // A link that is down skips the publish, as a send over it would.
-        let Some(actions) = core.0.up() else {
-            return Ok(0);
-        };
-        let meta = opts.push_metadata();
-        let reliable = opts.reliable_bool();
-        let express = meta.is_express();
-        let priority = opts.priority_band();
-        let suffix = wire.suffix.as_deref();
-        // A plain Put is sent from the borrowed bytes, as the tokio engine sends it.
-        if opts.kind == SampleKind::Put && meta.is_plain_apart_from_qos() {
-            let (mapping_id, suffix) = if wire.is_literal() {
-                (0, Some(keyexpr))
-            } else {
-                (wire.mapping_id, suffix)
-            };
-            return leg(actions.send_plain_put_qos(
-                mapping_id, suffix, payload, meta.qos, reliable, express, priority,
-            ));
-        }
-        let push = match (opts.kind, wire.mapping_id) {
-            (SampleKind::Put, 0) => {
-                push_build::build_push_literal_with_meta(keyexpr, payload, &meta)
-            }
-            (SampleKind::Del, 0) => push_build::build_push_del_literal_with_meta(keyexpr, &meta),
-            (SampleKind::Put, mapping_id) => {
-                push_build::build_push_aliased_with_meta(mapping_id, suffix, payload, &meta)
-            }
-            (SampleKind::Del, mapping_id) => {
-                push_build::build_push_del_aliased_with_meta(mapping_id, suffix, &meta)
-            }
-        };
-        let Ok(push) = push else {
-            return Err(FanoutError::ExceedsCapacity);
-        };
-        leg(actions.send_network_message_qos(
-            NetworkMessage::Push(Box::new(push)),
-            reliable,
-            express,
-            priority,
-        ))
+        // The link first, then the session's own subscribers, as zenoh-pico's `_z_write` does,
+        // and nothing local when the link refused it.
+        let sent = self.publish_to_link(keyexpr, wire, payload, opts)?;
+        #[cfg(feature = "local-subscriber")]
+        let sent = sent + self.publish_to_subscribers(keyexpr, payload, opts);
+        Ok(sent)
     }
 
     fn declare_subscriber_on_wire(
@@ -1269,10 +1370,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         sink: SubscriberSink,
     ) -> SubId {
         let id = self.next_entity_id();
-        let Some(mut core) = self.live() else {
+        let Some(mut guard) = self.live() else {
             return id;
         };
-        let core = &mut core.0;
+        let core = &mut guard.0;
         let queue = self.samples.clone();
         let registration = core.observer.borrow_mut().subscribers.register_sink(
             &keyexpr,
@@ -1296,6 +1397,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             entry.declare(actions);
         }
         core.subscribers.push(entry);
+        // A matching listener that counts the session's own subscribers may now match: it is
+        // told, outside the lock.
+        #[cfg(feature = "local-subscriber")]
+        {
+            Self::reevaluate_subscriber_matching(core);
+            drop(guard);
+            self.deliver();
+        }
         id
     }
 
@@ -1337,10 +1446,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 (Some(actions), None) => actions.send_undeclare_subscriber(id),
                 (None, _) => {}
             }
+            // One that counted it may now match no more.
+            #[cfg(feature = "local-subscriber")]
+            Self::reevaluate_subscriber_matching(core);
             Some(entry)
         });
         let callback = self.take_target(id);
         drop((entry, callback));
+        #[cfg(feature = "local-subscriber")]
+        self.deliver();
     }
 
     fn acquire_keyexpr(&self, keyexpr: String) -> Option<u64> {
@@ -1399,10 +1513,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         plane: FilterPlane,
         keyexpr: String,
         sink: MatchingSink,
-        // The session's own subscribers and queryables never match: this engine delivers
-        // nothing locally, as zenoh-pico's default build (`Z_FEATURE_LOCAL_SUBSCRIBER` and
-        // `Z_FEATURE_LOCAL_QUERYABLE` 0) does not.
-        _count_local: bool,
+        // The session's own subscribers count with `local-subscriber`, and nothing of its own
+        // does otherwise: zenoh-pico's default build (`Z_FEATURE_LOCAL_SUBSCRIBER` and
+        // `Z_FEATURE_LOCAL_QUERYABLE` 0) delivers nothing locally.
+        count_local: bool,
     ) -> MatchId {
         let Some(mut guard) = self.live() else {
             return 0;
@@ -1420,27 +1534,28 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 aggregate: false,
             },
         );
-        let now = Self::peer_matches(core, plane, &keyexpr);
+        let local = count_local && Self::local_matches(core, plane, &keyexpr);
+        let now = Self::peer_matches(core, plane, &keyexpr) || local;
         let queue = self.matching.clone();
         let report = BoxedMatchingSink::new(move |matching| {
             lock(&queue).push_back((id, matching));
         });
         // The watch is in the registry of what `plane` counts, with the criterion its write
-        // filter reads ([`Self::peer_matches`]), so the listener and the filter cannot differ.
+        // filter reads ([`Self::plane_matches`]), so the listener and the filter cannot differ.
         let watch = {
             let mut observer = core.observer.borrow_mut();
             match plane {
                 FilterPlane::Subscribers => observer
                     .remote_subscribers
                     .declare_matching_listener_seeded(
-                        PublisherCriterion::new(&keyexpr, Locality::Remote),
-                        false,
+                        PublisherCriterion::new(&keyexpr, counted(count_local)),
+                        local,
                         report,
                     ),
                 FilterPlane::Queryables { complete_required } => {
                     observer.remote_queryables.declare_matching_listener_seeded(
-                        QuerierCriterion::new(&keyexpr, Locality::Remote, complete_required),
-                        false,
+                        QuerierCriterion::new(&keyexpr, counted(count_local), complete_required),
+                        local,
                         report,
                     )
                 }
@@ -1491,8 +1606,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         keyexpr: String,
         _wire: &WireKey,
         ask: Option<InterestForm>,
-        // See `declare_matching_listener`: no entity of this session matches.
-        _count_local: bool,
+        // See `declare_matching_listener`: the session's own subscribers count with
+        // `local-subscriber`.
+        count_local: bool,
     ) -> FilterId {
         let Some(mut core) = self.live() else {
             return 0;
@@ -1512,6 +1628,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             plane,
             keyexpr,
             asked: ask.is_some(),
+            count_local,
         });
         id
     }
@@ -1521,12 +1638,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return false;
         };
         let core = &core.0;
-        // A filter is created suppressing, until a peer declares what it counts
-        // (`vendor/zenoh-pico/src/net/filtering.c` @ `ctx->state = WRITE_FILTER_ACTIVE`).
+        // A filter is created suppressing, until a peer declares what it counts, or the session
+        // itself does when it counts its own (`vendor/zenoh-pico/src/net/filtering.c` @
+        // `ctx->state = WRITE_FILTER_ACTIVE`).
         core.filters
             .iter()
             .find(|f| f.id == id)
-            .is_some_and(|f| !Self::peer_matches(core, f.plane, &f.keyexpr))
+            .is_some_and(|f| !Self::plane_matches(core, f.plane, &f.keyexpr, f.count_local))
     }
 
     fn write_filter_holds_back(&self, id: FilterId) -> bool {
@@ -1558,6 +1676,21 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
     ) -> FilteredPut {
         if self.write_filter_holds_back(filter) {
             return FilteredPut::Suppressed;
+        }
+        // A put one of the session's own subscribers wants is not plain: the general publish
+        // sends it and delivers it there.
+        #[cfg(feature = "local-subscriber")]
+        if params.destination.allows_local() {
+            let wanted = self.live().is_some_and(|core| {
+                core.0
+                    .observer
+                    .borrow()
+                    .subscribers
+                    .has_local_matching(keyexpr)
+            });
+            if wanted {
+                return FilteredPut::NotPlain;
+            }
         }
         if !params.destination.allows_remote() {
             return FilteredPut::Sent(Ok(0));

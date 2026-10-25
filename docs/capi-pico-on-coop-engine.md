@@ -323,6 +323,24 @@ it behaves as pico behaves in both of pico's threading arms.
   with a global id that names its session and is not the session's own, a get that refuses a
   token already cancelled (nothing sent, its closure dropped) and one that carries a token
   nobody cancels (Layer C1co, now 7 and 6 a leg).
+- 2026-10-25: delivery to the session's own subscribers on the cooperative engine (step S1,
+  `local-subscriber`). A put goes out on the link and then to the subscribers of the session that
+  made it, as zenoh-pico's `_z_write` does: session-core's loopback fires the ones whose origin
+  admits it, what they queued is handed out with no lock held (D8), so a callback runs inside the
+  put, and a destination of the session alone sends nothing on the link while one of peers alone
+  reaches no subscriber of its own. The loopback's sample is one assembly in session-core
+  (`PublishOptions::loopback_sample`), which the tokio runtime's loopback leg now calls in place of
+  its own copy. A write filter or a matching listener that counts the session's own entities counts
+  its subscribers too, so a publisher matches while the session has a subscriber of its own and
+  stops when it is retracted (the registry asks for the local half and is told after each local
+  declaration); a plain put that such a subscriber wants gives way to the general publish. Off,
+  which is pico's default build, none of it is linked. Local delivery to queryables (a get reaching
+  the session's own queryable) is the next step. A new size-gate case measures it:
+  pico-client-coop-local is 898,019 bytes of text (891,519 without it), 2.22 times the same pico.
+  Tests: the engine against a router stand-in (a put by destination and by origin, the filter and
+  the listener counting and not counting) and `client_only_dials_a_listener` (a publisher matching
+  the session's own subscriber and handed a put before the call returns; Layer C1co, now 8 and 7
+  a leg).
 - Next: the rest of section 6, one step each.
 - Earlier plan note: the engine port proper. A `SessionEngine` trait holds what the single-threaded client
   calls on a session; the tokio engine implements it first, `session_state` returns the selected

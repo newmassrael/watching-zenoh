@@ -36,10 +36,10 @@
 
 pub use wz_session_core::publish_options::{PlainPutParams, PublishError, PublishOptions};
 
-// `build_loopback_sample` is the sole `Sample` / `SampleKind` consumer here, so
-// the imports follow its `pubsub-allow-loop` gate (the loopback leg).
+// `build_loopback_sample` is the sole `Sample` consumer here, so the import follows its
+// `pubsub-allow-loop` gate (the loopback leg).
 #[cfg(feature = "pubsub-allow-loop")]
-use crate::sample::{Sample, SampleKind};
+use crate::sample::Sample;
 
 /// R232 — shared loopback Sample assembly for
 /// [`Session::publish`](super::Session::publish) and
@@ -68,31 +68,7 @@ pub(super) fn build_loopback_sample(
     payload: &[u8],
     opts: &PublishOptions,
 ) -> Sample {
-    let mut sample = match opts.kind {
-        SampleKind::Put => Sample::new_put(keyexpr, payload.to_vec()),
-        SampleKind::Del => Sample::new_del(keyexpr),
-    };
-    sample = sample.with_reliability(opts.reliability);
-    let meta = opts.push_metadata();
-    if let Some(ts) = meta.timestamp {
-        sample = sample.with_timestamp(ts);
-    }
-    // Encoding is Put-only on the wire; mirror the constraint on
-    // loopback so a caller mis-attaching encoding to a Del kind sees
-    // the same "encoding=None" the wire path would project.
-    if opts.kind == SampleKind::Put {
-        if let Some(enc) = meta.encoding {
-            sample = sample.with_encoding(enc);
-        }
-    }
-    if let Some(si) = meta.source_info {
-        sample = sample.with_source_info(si);
-    }
-    if let Some(att) = meta.attachment {
-        sample = sample.with_attachment(att);
-    }
-    if let Some(qos) = meta.qos {
-        sample = sample.with_qos(qos);
-    }
-    sample
+    // The assembly is session-core's (`PublishOptions::loopback_sample`), shared with the other
+    // engines' loopback legs; this engine's own part is the leg that delivers it.
+    opts.loopback_sample(keyexpr, payload)
 }

@@ -166,6 +166,16 @@ CASES: tuple[Case, ...] = (
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          note="the pico-client-coop build with the unstable API: 894,893 measured against its "
               "891,491, 2.21 times the same pico (404,880), and 448 exports against its 441"),
+    # The cooperative client that delivers a put to its own subscribers
+    # (`Z_FEATURE_LOCAL_SUBSCRIBER`), which the reference pico of the test lanes is not built with
+    # but a program that publishes and subscribes on one session needs.
+    Case("pico-client-coop-local", "wz-capi-pico", "libwz_capi_pico.so",
+         "engine-coop,link-udp,local-subscriber", 916_000,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
+                 MULTICAST, TOKIO_ENGINE),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         note="the pico-client-coop build that delivers a put to its own subscribers: 898,019 "
+              "measured against its 891,519, 2.22 times the same pico (405,414)"),
     Case("pico-peer", "wz-capi-pico", "libwz_capi_pico.so", PICO_BASE + ",peer", 2_946_000,
          forbid=(GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY, MULTICAST),
          require=(ACCEPT, RESPONDER, SCOUTING, UDP, SINGLE_THREADED),

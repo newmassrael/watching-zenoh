@@ -105,6 +105,12 @@ queryable = [
     "wz-session-core/codec-response",
     "wz-session-core/codec-response-final",
 ]
+# Delivery to the session's own subscribers (zenoh-pico's `Z_FEATURE_LOCAL_SUBSCRIBER`): a put
+# reaches the subscribers of the session that made it, after it has gone out on the link, and a
+# write filter or a matching listener that counts the session's own entities counts them. Off,
+# which is pico's default build, the session delivers nothing locally. It needs nothing of
+# session-core that the engine does not already have.
+local-subscriber = []
 # The liveliness token and subscriber: the token's declaration and its retraction, the tokens the
 # session holds to answer a peer that asks for them, and the subscriber that hears the peer's.
 # What `wz-capi-core`'s `liveliness` names on its runtime, named on session-core.

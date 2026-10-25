@@ -352,6 +352,45 @@ impl PublishOptions {
         }
     }
 
+    /// The sample a publish on `keyexpr` of `payload` delivers to the session's OWN subscribers
+    /// (`vendor/zenoh-pico/src/session/loopback.c` @ `_z_session_deliver_push_locally`):
+    /// a Put or a Del on the key, with every metadata field the options carry. Shared by every
+    /// engine's loopback leg, so the loopback carries what the wire would compose and no
+    /// engine decides it for itself.
+    ///
+    /// Every field flows through its feature gate, read through [`Self::push_metadata`], the
+    /// bundle the wire leg reads, so the two legs cannot gate a field differently (R311y308).
+    /// Encoding is Put-only on the wire (a Del has no slot for it, as zenoh-pico's
+    /// `_z_msg_del_t` has none), so a Del's loopback sample has none either.
+    #[cfg(feature = "alloc")]
+    pub fn loopback_sample(&self, keyexpr: &str, payload: &[u8]) -> crate::sample::Sample {
+        use crate::sample::Sample;
+        let mut sample = match self.kind {
+            SampleKind::Put => Sample::new_put(keyexpr, payload.to_vec()),
+            SampleKind::Del => Sample::new_del(keyexpr),
+        };
+        sample = sample.with_reliability(self.reliability);
+        let meta = self.push_metadata();
+        if let Some(timestamp) = meta.timestamp {
+            sample = sample.with_timestamp(timestamp);
+        }
+        if self.kind == SampleKind::Put {
+            if let Some(encoding) = meta.encoding {
+                sample = sample.with_encoding(encoding);
+            }
+        }
+        if let Some(source_info) = meta.source_info {
+            sample = sample.with_source_info(source_info);
+        }
+        if let Some(attachment) = meta.attachment {
+            sample = sample.with_attachment(attachment);
+        }
+        if let Some(qos) = meta.qos {
+            sample = sample.with_qos(qos);
+        }
+        sample
+    }
+
     /// What a Put needs to be sent when it is plain apart from its QoS, worked out once: a holder
     /// of options that stay the same for a stream of messages (a declared publisher) keeps the
     /// answer and sends each message with the engine's plain declared publish, without cloning

@@ -470,7 +470,9 @@ fn a_stepped_client_session_declares_receives_and_publishes() {
             "demo/b",
             &WireKey::literal(),
             b"world",
-            &PublishOptions::put(),
+            // For peers only: with `local-subscriber` the session's own subscriber (the one above,
+            // which expects what the router pushed) would be handed it too.
+            &PublishOptions::put().with_locality(Locality::Remote),
         )
         .expect("a put the link carries");
     until(&engine, "the router to receive the put", || {
@@ -857,6 +859,8 @@ fn a_session_that_redials_none_ends_with_its_link() {
 mod get;
 #[cfg(feature = "liveliness")]
 mod liveliness;
+#[cfg(feature = "local-subscriber")]
+mod local;
 #[cfg(feature = "queryable")]
 mod queryable;
 #[cfg(feature = "liveliness-get")]

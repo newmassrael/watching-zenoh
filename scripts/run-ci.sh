@@ -10698,11 +10698,11 @@ layer_c1co_pico_client_dials_a_listener() {
     local engine answering expect
     for engine in engine-coop engine-tokio; do
         for answering in ",queryable" ""; do
-            if [[ -n "$answering" ]]; then expect=7; else expect=6; fi
+            if [[ -n "$answering" ]]; then expect=8; else expect=7; fi
             _runci_guarded_test "C1co ${engine}${answering}" "$expect" \
                 env WZ_PICO_LISTENER_BIN="$listener" \
                 cargo test -p wz-capi-pico --no-default-features \
-                --features "${engine},link-udp,query${answering},liveliness-get,unstable-api" \
+                --features "${engine},link-udp,query${answering},liveliness-get,unstable-api,local-subscriber" \
                 --test client_only_dials_a_listener || return 1
         done
     done
