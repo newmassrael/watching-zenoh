@@ -277,6 +277,8 @@ pub struct QueryOptions {
     /// because the Request outer QoS ext is part of the Request envelope every
     /// query build emits into, not a separately composable codec vertical.
     pub qos: Option<QosLevel>,
+    /// Whether the callback sees the timestamp of the replies: see [`Self::with_expose_timestamp`].
+    expose_timestamp: crate::timestamp_visibility::ExposeTimestamp,
 }
 
 impl QueryOptions {
@@ -285,6 +287,23 @@ impl QueryOptions {
     /// in semantic intent (everything cleared / unset).
     pub fn get() -> Self {
         Self::default()
+    }
+
+    /// Whether the replies this query is answered with show their timestamp to the callback. When
+    /// they do not, each reply reads as one with no timestamp and is the same in every other way;
+    /// the consolidation of the replies still orders them by the timestamp, which is hidden only
+    /// from the callback that is handed the result.
+    ///
+    /// What a query that does not say gets is the build's `entity-timestamp-opt-in` policy: they
+    /// show it when the policy is off, which is upstream's behaviour.
+    pub fn with_expose_timestamp(mut self, expose: bool) -> Self {
+        self.expose_timestamp = crate::timestamp_visibility::ExposeTimestamp(expose);
+        self
+    }
+
+    /// See [`Self::with_expose_timestamp`].
+    pub fn expose_timestamp(&self) -> bool {
+        self.expose_timestamp.0
     }
 
     /// Pin the query-side locality predicate.

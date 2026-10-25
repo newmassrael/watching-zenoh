@@ -2747,8 +2747,20 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         &self,
         keyexpr: &str,
         options: &SubscribeOptions,
-        callback: impl FnMut(&dyn SampleView) + Send + 'static,
+        mut callback: impl FnMut(&dyn SampleView) + Send + 'static,
     ) -> (SubscriptionId, SampleCell<R>) {
+        // `entity-timestamp-opt-in`: the one place a subscriber's samples are handed to its
+        // callback, so the one place the declaration's choice about the timestamp is applied.
+        let expose_timestamp = options.expose_timestamp();
+        let callback = move |sample: &dyn SampleView| {
+            if expose_timestamp {
+                callback(sample);
+            } else {
+                callback(&wz_session_core::timestamp_visibility::HiddenTimestamp(
+                    sample,
+                ));
+            }
+        };
         let (cell, sink) = self.deferred_sample_sink(callback);
         // R311de — observer access via R::with_mutex_mut closure form.
         let id = R::with_mutex_mut(&self.observer, |observer| {
@@ -4931,6 +4943,19 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
             // consolidation, where zenoh resolves the unnamed case to LATEST
             // (`zenoh/src/api/session.rs:2247-2252`). `resolved_consolidation`
             // is that resolution, `_time` carve-out included.
+            //
+            // `entity-timestamp-opt-in`: the query's choice about the timestamp is applied to
+            // the callback the caller wrote, INSIDE the consolidating sink, so consolidation
+            // still orders the replies by the timestamp and only the result is shown without it.
+            let mut on_reply = on_reply;
+            let expose_timestamp = opts.expose_timestamp();
+            let on_reply = move |reply: &dyn ReplyView| {
+                if expose_timestamp {
+                    on_reply(reply);
+                } else {
+                    on_reply(&wz_session_core::timestamp_visibility::HiddenReplyTimestamp(reply));
+                }
+            };
             let sink = wz_session_core::reply_sink::ConsolidatingSink::new(
                 opts.resolved_consolidation(),
                 self.deferred_reply_sink(on_reply, on_final),

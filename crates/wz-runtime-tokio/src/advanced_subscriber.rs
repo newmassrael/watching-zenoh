@@ -2283,7 +2283,11 @@ fn issue_recovery_query<R, T>(
     // now resolve to the 10s platform default rather than never-expire, so the
     // pre-y326 "else pending_queries wedges the reorder buffer forever" no longer
     // holds on this build. The explicit timeout still pins the recovery bound.
+    // The recovery reads each reply's timestamp (`reply.timestamp()` becomes the sample's), and
+    // it is the runtime's own query, not an entity of the application: a build that makes
+    // timestamps opt-in (`entity-timestamp-opt-in`) must not blind it.
     let opts = QueryOptions::get()
+        .with_expose_timestamp(true)
         .with_allowed_destination(dest)
         .with_parameters(params)
         .with_timeout_ms(timeout_ms);
@@ -2458,7 +2462,11 @@ fn issue_history_query<R, T>(
     // fire `finish_history` if no `@adv` cache answers. Without it `history_pending`
     // stays set forever and EVERY live sample buffers undelivered (the subscriber
     // delivers nothing at all).
+    // The recovery reads each reply's timestamp (`reply.timestamp()` becomes the sample's), and
+    // it is the runtime's own query, not an entity of the application: a build that makes
+    // timestamps opt-in (`entity-timestamp-opt-in`) must not blind it.
     let opts = QueryOptions::get()
+        .with_expose_timestamp(true)
         .with_allowed_destination(dest)
         .with_timeout_ms(timeout_ms);
     // R311y86 `_max=N` (sample_depth) + R311y98 `_time=[now(-age)..]` (max_age)
@@ -2522,7 +2530,11 @@ fn issue_late_publisher_query<R, T>(
     // where the omission bit hardest: a publisher detected AFTER the subscriber
     // joined is reachable ONLY through this GET, so without `_anyke` a late
     // publisher's whole cache was unreachable rather than merely stale.
+    // The recovery reads each reply's timestamp (`reply.timestamp()` becomes the sample's), and
+    // it is the runtime's own query, not an entity of the application: a build that makes
+    // timestamps opt-in (`entity-timestamp-opt-in`) must not blind it.
     let opts = QueryOptions::get()
+        .with_expose_timestamp(true)
         .with_allowed_destination(dest)
         .with_timeout_ms(timeout_ms)
         .with_parameters(history_selector(sample_depth, max_age).into_bytes());
@@ -2584,7 +2596,11 @@ fn issue_timestamped_late_publisher_query<R, T>(
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
+    // The recovery reads each reply's timestamp (`reply.timestamp()` becomes the sample's), and
+    // it is the runtime's own query, not an entity of the application: a build that makes
+    // timestamps opt-in (`entity-timestamp-opt-in`) must not blind it.
     let opts = QueryOptions::get()
+        .with_expose_timestamp(true)
         .with_allowed_destination(dest)
         .with_timeout_ms(timeout_ms)
         .with_parameters(history_selector(sample_depth, max_age).into_bytes());
@@ -2642,7 +2658,11 @@ fn issue_unidentified_late_publisher_query<R, T>(
     <R as SessionRuntime>::LinkSink: Send + Sync,
     SessionLinkActions<R, T>: Send + Sync + 'static,
 {
+    // The recovery reads each reply's timestamp (`reply.timestamp()` becomes the sample's), and
+    // it is the runtime's own query, not an entity of the application: a build that makes
+    // timestamps opt-in (`entity-timestamp-opt-in`) must not blind it.
     let opts = QueryOptions::get()
+        .with_expose_timestamp(true)
         .with_allowed_destination(dest)
         .with_timeout_ms(timeout_ms)
         .with_parameters(history_selector(sample_depth, max_age).into_bytes());

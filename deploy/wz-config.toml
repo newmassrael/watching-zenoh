@@ -1726,6 +1726,24 @@ and the session stays open: a slow link costs the message and not the
 session. A multicast group never closes either way.
 '''
 
+[[policy]]
+id = "entity-timestamp-opt-in"
+kind = "bool"
+kconfig = "WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN"
+default = "off"
+upstream = "Hands every received sample's timestamp to the subscriber and every reply's to the querier, and lets any publisher attach the timestamp it is given."
+since = 2
+help = '''
+What an entity does with a timestamp when its declaration says nothing. Off,
+a subscriber and a querier see the timestamp of what they receive, and any
+publisher attaches the timestamp it is given. On, an entity takes part only
+if it was declared to: a subscriber or a querier sees no timestamp unless it
+asks to, and a publisher refuses a timestamped put unless it was declared to
+stamp. Each declaration can still state its own choice either way; this sets
+the default for the ones that do not. A publisher given a time supplies its
+own node identity, so a caller cannot sign a sample as another node.
+'''
+
 # The role of a node in a zenoh network: upstream's `mode`. A global axis (it names no image),
 # so that every tree that sources the capabilities can state it, and each option selects the
 # capabilities it needs: the role pulls what it requires, and nothing else. What an image also

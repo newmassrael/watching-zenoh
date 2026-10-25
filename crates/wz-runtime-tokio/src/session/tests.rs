@@ -2143,6 +2143,128 @@ fn publish_loopback_propagates_timestamp_to_sample() {
     assert_eq!(ts.zid, vec![1, 2, 3]);
 }
 
+/// `entity-timestamp-opt-in`, the sending side: a publisher declared to stamp takes one time value
+/// and supplies this node's identity itself.
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
+#[test]
+fn a_stamping_publisher_stamps_the_given_time_with_its_own_nodes_identity() {
+    let (session, _driver) = build_session();
+    let captured = record_loopback_samples(&session, "home/temp");
+    let publisher = session.declare_publisher(
+        "home/temp",
+        PublishOptions::put()
+            .with_locality(Locality::SessionLocal)
+            .with_stamp_timestamp(true),
+    );
+    publisher.put_at(0xABCD, b"22.5").unwrap();
+    let samples = captured.lock().unwrap();
+    let stamp = samples[0].timestamp.as_ref().expect("the put is stamped");
+    assert_eq!(stamp.time, 0xABCD);
+    assert_eq!(
+        stamp.zid,
+        session.zid(),
+        "the identity is the session's, which the caller had no way to name"
+    );
+}
+
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
+#[test]
+fn a_stamping_publisher_stamps_a_delete_too() {
+    let (session, _driver) = build_session();
+    let captured = record_loopback_samples(&session, "home/temp");
+    let publisher = session.declare_publisher(
+        "home/temp",
+        PublishOptions::put()
+            .with_locality(Locality::SessionLocal)
+            .with_stamp_timestamp(true),
+    );
+    publisher.delete_at(7).unwrap();
+    let samples = captured.lock().unwrap();
+    assert_eq!(samples[0].kind, SampleKind::Del);
+    assert_eq!(samples[0].timestamp.as_ref().map(|t| t.time), Some(7));
+}
+
+/// The pair: a publisher declared not to stamp refuses the timestamped put and sends nothing,
+/// where a plain `put` on it still works.
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
+#[test]
+fn a_publisher_declared_not_to_stamp_refuses_a_timestamped_put_and_sends_nothing() {
+    let (session, _driver) = build_session();
+    let captured = record_loopback_samples(&session, "home/temp");
+    let publisher = session.declare_publisher(
+        "home/temp",
+        PublishOptions::put()
+            .with_locality(Locality::SessionLocal)
+            .with_stamp_timestamp(false),
+    );
+    assert_eq!(publisher.put_at(1, b"x"), Err(StampedPutError::NotStamping));
+    assert_eq!(publisher.delete_at(1), Err(StampedPutError::NotStamping));
+    assert!(captured.lock().unwrap().is_empty(), "nothing was sent");
+    publisher.put(b"plain").expect("a plain put is untouched");
+    let samples = captured.lock().unwrap();
+    assert_eq!(samples.len(), 1);
+    assert!(samples[0].timestamp.is_none());
+}
+
+#[cfg(feature = "pubsub-timestamp")]
+#[test]
+fn a_publisher_that_says_nothing_gets_the_builds_default() {
+    assert_eq!(
+        PublishOptions::put().stamp_timestamp(),
+        wz_session_core::timestamp_visibility::default_exposed()
+    );
+}
+
+/// What a subscriber declared with `options` sees of the timestamp of one stamped sample, and of
+/// the sample's payload: the pair shows that hiding the timestamp hides nothing else.
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
+fn timestamp_seen_by(options: SubscribeOptions) -> (Option<u64>, Vec<u8>) {
+    let (session, _driver) = build_session();
+    let seen = Arc::new(std::sync::Mutex::new((None, Vec::new())));
+    let writer = seen.clone();
+    let _subscriber = session.declare_subscriber("home/temp", options, move |s| {
+        *writer.lock().unwrap() = (s.timestamp().map(|t| t.time), s.payload().to_vec());
+    });
+    let opts = PublishOptions::put()
+        .with_locality(Locality::SessionLocal)
+        .with_timestamp(TimestampHint {
+            time: 0xDEAD_BEEF,
+            zid: vec![1, 2, 3],
+        });
+    session.publish("home/temp", b"22.5", opts).unwrap();
+    let seen = seen.lock().unwrap();
+    seen.clone()
+}
+
+/// `entity-timestamp-opt-in`: a subscriber declared to expose the timestamp sees it, and its
+/// pair below does not, with the payload the same either way.
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
+#[test]
+fn a_subscriber_declared_to_expose_the_timestamp_sees_it() {
+    let (time, payload) = timestamp_seen_by(SubscribeOptions::new().with_expose_timestamp(true));
+    assert_eq!(time, Some(0xDEAD_BEEF));
+    assert_eq!(payload, b"22.5");
+}
+
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
+#[test]
+fn a_subscriber_declared_not_to_expose_the_timestamp_sees_none_and_the_rest_unchanged() {
+    let (time, payload) = timestamp_seen_by(SubscribeOptions::new().with_expose_timestamp(false));
+    assert_eq!(time, None, "the callback sees a sample with no timestamp");
+    assert_eq!(payload, b"22.5", "and the payload is the sample's own");
+}
+
+/// A declaration that says nothing gets the build's default: upstream's, to see it, unless the
+/// build makes taking part opt-in.
+#[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-timestamp"))]
+#[test]
+fn a_subscriber_that_says_nothing_gets_the_builds_default() {
+    let (time, _payload) = timestamp_seen_by(SubscribeOptions::new());
+    let build_exposes = wz_session_core::timestamp_visibility::default_exposed();
+    assert_eq!(time.is_some(), build_exposes);
+    assert_eq!(SubscribeOptions::new().expose_timestamp(), build_exposes);
+}
+
 #[cfg(all(feature = "pubsub-allow-loop", feature = "pubsub-encoding"))]
 #[test]
 fn publish_loopback_propagates_encoding_to_put_sample() {
@@ -6721,6 +6843,112 @@ fn querier_aliased_get_twice_allocates_independent_rids() {
     let h1 = qa.get(|_| {}, |_| {}).unwrap();
     assert_eq!(h0.rid(), 0);
     assert_eq!(h1.rid(), 1);
+}
+
+/// What a query asked with `options` shows of the timestamp of the replies of one stamped queryable,
+/// and of the replies' payloads. `versions` are (payload, time) pairs the queryable answers, each
+/// stamped, in order.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp"
+))]
+fn reply_timestamps_seen_by(
+    options: QueryOptions,
+    versions: &'static [(&'static [u8], u64)],
+) -> Vec<(Option<u64>, Vec<u8>)> {
+    let (session, _driver) = build_session();
+    session
+        .observer()
+        .lock()
+        .unwrap()
+        .queryables
+        .register("home/temp", move |_q, responder| {
+            for (payload, time) in versions {
+                let stamp = TimestampHint {
+                    time: *time,
+                    zid: vec![1, 2, 3],
+                };
+                responder
+                    .reply_keyed_stamped("home/temp", payload, None, &stamp)
+                    .unwrap();
+            }
+        });
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = seen.clone();
+    session
+        .query(
+            "home/temp",
+            options.with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                writer
+                    .lock()
+                    .unwrap()
+                    .push((reply.timestamp().map(|t| t.time), reply.payload().to_vec()));
+            },
+            |_| {},
+        )
+        .expect("query-get is on");
+    let seen = seen.lock().unwrap();
+    seen.clone()
+}
+
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp"
+))]
+#[test]
+fn a_query_asked_to_expose_the_timestamp_shows_it_on_the_reply() {
+    let seen = reply_timestamps_seen_by(
+        get_opts_in_arrival_order().with_expose_timestamp(true),
+        &[(b"v1", 10)],
+    );
+    assert_eq!(seen, [(Some(10), b"v1".to_vec())]);
+}
+
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp"
+))]
+#[test]
+fn a_query_asked_not_to_expose_the_timestamp_shows_none_and_the_payload_unchanged() {
+    let seen = reply_timestamps_seen_by(
+        get_opts_in_arrival_order().with_expose_timestamp(false),
+        &[(b"v1", 10)],
+    );
+    assert_eq!(seen, [(None, b"v1".to_vec())]);
+}
+
+/// Hiding the timestamp is done after consolidation, not before it: a `Latest` query over two
+/// versions still keeps the newer by the timestamp it does not show.
+#[cfg(all(
+    feature = "query-get",
+    feature = "query-queryable",
+    feature = "pubsub-timestamp"
+))]
+#[test]
+fn consolidation_still_orders_by_the_timestamp_the_callback_is_not_shown() {
+    use wz_session_core::query_mode::ConsolidationMode;
+    let mut options = QueryOptions::get().with_expose_timestamp(false);
+    options.consolidation = Some(ConsolidationMode::Latest);
+    let seen = reply_timestamps_seen_by(options, &[(b"new", 20), (b"old", 10)]);
+    assert_eq!(
+        seen,
+        [(None, b"new".to_vec())],
+        "the older version is dropped by its timestamp whatever the order it arrived in"
+    );
+}
+
+/// A query that says nothing gets the build's default.
+#[cfg(feature = "query-get")]
+#[test]
+fn a_query_that_says_nothing_gets_the_builds_default() {
+    assert_eq!(
+        QueryOptions::get().expose_timestamp(),
+        wz_session_core::timestamp_visibility::default_exposed()
+    );
 }
 
 /// A query that awaits a wire Final: `Locality::Remote`, so nothing answers it locally.

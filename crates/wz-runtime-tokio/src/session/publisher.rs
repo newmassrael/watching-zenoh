@@ -18,6 +18,43 @@
 
 use super::*;
 
+/// Why a stamped put or delete ([`Publisher::put_at`], [`Publisher::delete_at`]) was not sent.
+///
+/// `#[non_exhaustive]` so a later reason is a new variant and not a break.
+#[cfg(feature = "pubsub-timestamp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StampedPutError {
+    /// The publisher was declared not to stamp
+    /// ([`PublishOptions::with_stamp_timestamp`]). Nothing was sent.
+    NotStamping,
+    /// The publish itself failed, for the reason a plain put fails for.
+    Publish(PublishError),
+}
+
+#[cfg(feature = "pubsub-timestamp")]
+impl From<PublishError> for StampedPutError {
+    fn from(error: PublishError) -> Self {
+        Self::Publish(error)
+    }
+}
+
+#[cfg(feature = "pubsub-timestamp")]
+impl std::fmt::Display for StampedPutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotStamping => write!(
+                f,
+                "StampedPutError: the publisher was declared not to stamp; nothing was sent"
+            ),
+            Self::Publish(error) => write!(f, "StampedPutError: {error}"),
+        }
+    }
+}
+
+#[cfg(feature = "pubsub-timestamp")]
+impl std::error::Error for StampedPutError {}
+
 /// R244 — reusable publish target with pre-set keyexpr + options.
 /// Pub-side mirror of [`Querier`]. A caller declares the publisher
 /// once ([`Session::declare_publisher`]) and emits repeated
@@ -112,6 +149,44 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
         let mut opts = self.options.clone();
         opts.kind = SampleKind::Del;
         self.session.publish(&self.keyexpr, &[], opts)
+    }
+
+    /// [`Self::put`] stamped with `time`, an NTP64 word (see
+    /// [`wz_session_core::timestamp_visibility::ntp64_from_unix_ms`] for a caller whose clock counts
+    /// milliseconds). The caller gives one time value and the publisher supplies the rest of the
+    /// stamp, the identity of THIS session's node, so a caller cannot sign a message as another
+    /// node. A publisher declared not to stamp
+    /// ([`PublishOptions::with_stamp_timestamp`]) refuses, and sends nothing: a time that was
+    /// given and silently left off would read as a message nobody stamped.
+    #[cfg(feature = "pubsub-timestamp")]
+    pub fn put_at(&self, time: u64, payload: &[u8]) -> Result<usize, StampedPutError> {
+        let mut opts = self.stamped_options(time)?;
+        opts.kind = SampleKind::Put;
+        Ok(self.session.publish(&self.keyexpr, payload, opts)?)
+    }
+
+    /// [`Self::delete`] stamped with `time`, as [`Self::put_at`] stamps a put.
+    #[cfg(feature = "pubsub-timestamp")]
+    pub fn delete_at(&self, time: u64) -> Result<usize, StampedPutError> {
+        let mut opts = self.stamped_options(time)?;
+        opts.kind = SampleKind::Del;
+        Ok(self.session.publish(&self.keyexpr, &[], opts)?)
+    }
+
+    /// The declared options with the stamp of `time` and this node set, or the refusal of a
+    /// publisher that does not stamp.
+    #[cfg(feature = "pubsub-timestamp")]
+    fn stamped_options(&self, time: u64) -> Result<PublishOptions, StampedPutError> {
+        if !self.options.stamp_timestamp() {
+            return Err(StampedPutError::NotStamping);
+        }
+        Ok(self
+            .options
+            .clone()
+            .with_timestamp(wz_session_core::sample::TimestampHint {
+                time,
+                zid: self.session.zid().to_vec(),
+            }))
     }
 
     /// R290 — pub-side mirror of [`Querier::get_matching_status`].

@@ -169,6 +169,12 @@ pub mod policy;
 /// which is upstream's behaviour. Unconditional, no_std and no_alloc.
 pub mod quota;
 
+/// Who sees a sample's timestamp: the `entity-timestamp-opt-in` policy's shared half, the default
+/// an entity gets ([`timestamp_visibility::default_exposed`]), the view that hides a timestamp
+/// ([`timestamp_visibility::HiddenTimestamp`]), and the conversion of a time in milliseconds to
+/// the NTP64 word a publisher is given. Unconditional, no_std and no_alloc.
+pub mod timestamp_visibility;
+
 /// Fixed-memory step S9b — where hand-written text goes: the [`text_out::TextOut`]
 /// seam the admin writers emit through, `String` on the growable profile and
 /// [`text_out::FixedText`] (inline bytes that refuse and count what does not fit,

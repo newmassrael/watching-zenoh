@@ -18,7 +18,7 @@ use super::*;
 ///
 /// Construct via [`Self::default`] / [`Self::new`] plus optional
 /// [`Self::with_allowed_origin`].
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SubscribeOptions {
     /// Subscriber-side locality predicate. `Any` (default) fires on
@@ -30,6 +30,18 @@ pub struct SubscribeOptions {
     /// The key the retraction names, when it names one — see
     /// [`Self::with_retraction_naming`].
     retraction_key: Option<RetractionKey>,
+    /// Whether the callback sees the timestamp of a sample: see [`Self::with_expose_timestamp`].
+    expose_timestamp: bool,
+}
+
+impl Default for SubscribeOptions {
+    fn default() -> Self {
+        Self {
+            allowed_origin: Locality::default(),
+            retraction_key: None,
+            expose_timestamp: wz_session_core::timestamp_visibility::default_exposed(),
+        }
+    }
 }
 
 /// The key an entity's `Undeclare*` names beside its id, in the wire form it
@@ -67,6 +79,23 @@ impl SubscribeOptions {
     /// See [`Self::with_retraction_naming`].
     pub fn retraction_key(&self) -> Option<&RetractionKey> {
         self.retraction_key.as_ref()
+    }
+
+    /// Whether the callback sees the timestamp of the samples it is handed. When it does not,
+    /// every sample reads as one with no timestamp (`SampleView::timestamp` and
+    /// `timestamp_parts` answer `None`) and is the same in every other way.
+    ///
+    /// What a declaration that does not say gets is the build's `entity-timestamp-opt-in`
+    /// policy: the callback sees the timestamp when the policy is off, which is upstream's
+    /// behaviour, and does not when the build makes taking part opt-in.
+    pub fn with_expose_timestamp(mut self, expose: bool) -> Self {
+        self.expose_timestamp = expose;
+        self
+    }
+
+    /// See [`Self::with_expose_timestamp`].
+    pub fn expose_timestamp(&self) -> bool {
+        self.expose_timestamp
     }
 }
 

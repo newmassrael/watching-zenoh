@@ -106,9 +106,30 @@ pub struct PublishOptions {
     /// (`wz_qos_congestion_express_to_pico_zsub`, pico `z_sample_congestion_control` /
     /// `z_sample_express`). Loopback honours all three from R232.
     pub qos: Option<QosLevel>,
+    /// Whether a publisher declared with these options stamps the messages it is given a time for:
+    /// see [`Self::with_stamp_timestamp`].
+    stamp_timestamp: crate::timestamp_visibility::StampTimestamp,
 }
 
 impl PublishOptions {
+    /// Whether a publisher declared with these options takes a time per message and stamps it (the
+    /// publisher's `put_at` and `delete_at`). The publisher supplies its own node's identity beside
+    /// the caller's time, so a caller cannot sign a message as another node. When it does not stamp,
+    /// those calls are refused rather than sent without the stamp.
+    ///
+    /// What a declaration that does not say gets is the build's `entity-timestamp-opt-in` policy:
+    /// it stamps when the policy is off, which is upstream's behaviour of attaching what it is
+    /// given.
+    pub fn with_stamp_timestamp(mut self, stamp: bool) -> Self {
+        self.stamp_timestamp = crate::timestamp_visibility::StampTimestamp(stamp);
+        self
+    }
+
+    /// See [`Self::with_stamp_timestamp`].
+    pub fn stamp_timestamp(&self) -> bool {
+        self.stamp_timestamp.0
+    }
+
     /// Default Put-kind options: `allowed_destination = Any`, `reliability = Reliable`.
     pub fn put() -> Self {
         Self::default()
