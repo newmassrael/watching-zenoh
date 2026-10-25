@@ -288422,6 +288422,54 @@
         "Read the first finished hosted run holding rounds 3649 to this one (Qza, Qa and Qzb with the opener bound; the open of a node on the Zephyr image). Not done in step 6: the Hello source of hints (waits on scouting receive on the cooperative engine, another track's), and the witness on a built image (a step of admin_node_verdict.py, grammar shared with the board: the lane owner agrees it). Owed: the heap UDP dialer does not yet verify nodes. Then D7. Open and not mine: the C1an build red from 83a1ed2ce (nobody has claimed it) and the tokio, router and pico reds of run 40191687498."
       ]
     },
+    "Round 3661": {
+      "decision_summary": "Step 1b of the advanced plane: the cache ring and its answer move to wz-ext-pubsub. CachedSample, Retained, RepliesConfig, CacheConfig and CacheStore (the _sn, _max and _time filters, the Put and Del reply arms, the cache's own QoS) are the crate's advanced_cache module with their tests. The ring reads no clock: CacheStore::query_handler takes the host's NTP64 now as a function, read once per query, and the tokio runtime and the pico plane pass wall_clock_ntp64 (a new test moves the clock under one ring and watches the _time window follow). wz-runtime-tokio keeps the session-bound AdvancedCache and re-exports the rest at the old path; transport-shm forwards to the new crate. The move made six bare advanced_cache.rs citations ambiguous: wz's own lines are re-cited as anchored citations of the new home, upstream's as anchored citations of the pinned zenoh-ext. The C1bz budget of wz-runtime-tokio is 459, seven findings having left with the docs.",
+      "changes_bullets": [
+        "wz-ext-pubsub: src/advanced_cache.rs (new: the ring, the samples, the answer; query_handler takes the host's NTP64 now) and src/advanced_cache/tests.rs (the twelve tests that moved, and one new: the handler reads now from the host); Cargo.toml gains the transport-shm feature, log, and a dev-dependency on session-core with codec-request.",
+        "wz-runtime-tokio: advanced_cache.rs keeps AdvancedCache and its one session test and re-exports the ring's types; advanced_publisher.rs and wz-capi-pico's advanced_plane.rs pass wall_clock_ntp64 to query_handler; transport-shm forwards to wz-ext-pubsub.",
+        "Store reasons of ext-pubsub-advanced-cache (4), -history (1) and -recovery (1): six bare advanced_cache.rs line citations re-cited, by set-inventory-status with each atom's own status.",
+        "scripts/lib/feature_public_surface_census.py (a wz-ext-pubsub row, PROSE_ONLY), scripts/lib/nondefault-tests-gate.sh (a leg for transport-shm), scripts/run-ci.sh (C1bz wz-runtime-tokio 466 -> 459, with its reason); the seven deploy lockfiles and crates/Cargo.lock carry the crate's dependencies."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings: wz-ext-pubsub with all targets, with and without transport-shm; wz-runtime-tokio with all targets and with --all-features; wz-capi-pico with all targets.",
+        "Tests: wz-ext-pubsub 24 passed (the 12 of the first step, the 11 cache tests that moved and one new); wz-runtime-tokio with the advanced, query-target and query-get features and the filter advanced: 79 passed; wz-capi-pico advanced_subscriber_faces 2 passed.",
+        "Layer C1bz, subset of wz-ext-pubsub, wz-runtime-tokio and wz-capi-pico, on the build host: wz-ext-pubsub 0, wz-capi-pico 40, wz-runtime-tokio 459 (the budget lowered to it); a finding of wz-tls-mbedtls that is not mine was also reported.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed (after the census row, and the six re-citations that took reason_citation_gate from 108 ambiguous back to 102). The two citation gates of hook gate 2f pass.",
+        "Not run: the interop legs of the advanced plane against a stock zenoh-ext and zenoh-pico (wz_advanced_pubsub_zenoh_ext_interop, apfull_advanced_pubsub_pico_interop); hosted CI is where they run."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Step 1c: the HLC and timestamp rules (node_clock, timestamp_source) into wz-ext-pubsub or beside it; then step 2, the vocabulary of events and commands for the publisher's beacon and the subscriber, surveyed against both.",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings, as its session welcomed, when the dependency rule allows a dev-dependency edge; otherwise a table of strings its side can run.",
+        "Hosted: read the interop legs of the advanced plane after this push. C1bz of wz-tls-mbedtls (1 finding against 0) is not mine.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ],
+      "publishable_decision_summary": "Step 1b of the advanced plane: the cache ring and its answer move to wz-ext-pubsub. CachedSample, Retained, RepliesConfig, CacheConfig and CacheStore (the _sn, _max and _time filters, the Put and Del reply arms, the cache's own QoS) are the crate's advanced_cache module with their tests. The ring reads no clock: CacheStore::query_handler takes the host's NTP64 now as a function, read once per query, and the tokio runtime and the pico plane pass wall_clock_ntp64 (a new test moves the clock under one ring and watches the _time window follow). wz-runtime-tokio keeps the session-bound AdvancedCache and re-exports the rest at the old path; transport-shm forwards to the new crate. The move made six bare advanced_cache.rs citations ambiguous: wz's own lines are re-cited as anchored citations of the new home, upstream's as anchored citations of the pinned zenoh-ext. The C1bz budget of wz-runtime-tokio is 459, seven findings having left with the docs.",
+      "publishable_changes_bullets": [
+        "wz-ext-pubsub: src/advanced_cache.rs (new: the ring, the samples, the answer; query_handler takes the host's NTP64 now) and src/advanced_cache/tests.rs (the twelve tests that moved, and one new: the handler reads now from the host); Cargo.toml gains the transport-shm feature, log, and a dev-dependency on session-core with codec-request.",
+        "wz-runtime-tokio: advanced_cache.rs keeps AdvancedCache and its one session test and re-exports the ring's types; advanced_publisher.rs and wz-capi-pico's advanced_plane.rs pass wall_clock_ntp64 to query_handler; transport-shm forwards to wz-ext-pubsub.",
+        "Store reasons of ext-pubsub-advanced-cache (4), -history (1) and -recovery (1): six bare advanced_cache.rs line citations re-cited, by set-inventory-status with each atom's own status.",
+        "scripts/lib/feature_public_surface_census.py (a wz-ext-pubsub row, PROSE_ONLY), scripts/lib/nondefault-tests-gate.sh (a leg for transport-shm), scripts/run-ci.sh (C1bz wz-runtime-tokio 466 -> 459, with its reason); the seven deploy lockfiles and crates/Cargo.lock carry the crate's dependencies."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings: wz-ext-pubsub with all targets, with and without transport-shm; wz-runtime-tokio with all targets and with --all-features; wz-capi-pico with all targets.",
+        "Tests: wz-ext-pubsub 24 passed (the 12 of the first step, the 11 cache tests that moved and one new); wz-runtime-tokio with the advanced, query-target and query-get features and the filter advanced: 79 passed; wz-capi-pico advanced_subscriber_faces 2 passed.",
+        "Layer C1bz, subset of wz-ext-pubsub, wz-runtime-tokio and wz-capi-pico, on the build host: wz-ext-pubsub 0, wz-capi-pico 40, wz-runtime-tokio 459 (the budget lowered to it); a finding of wz-tls-mbedtls that is not mine was also reported.",
+        "The hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed (after the census row, and the six re-citations that took reason_citation_gate from 108 ambiguous back to 102). The two citation gates of hook gate 2f pass.",
+        "Not run: the interop legs of the advanced plane against a stock zenoh-ext and zenoh-pico (wz_advanced_pubsub_zenoh_ext_interop, apfull_advanced_pubsub_pico_interop); hosted CI is where they run."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Step 1c: the HLC and timestamp rules (node_clock, timestamp_source) into wz-ext-pubsub or beside it; then step 2, the vocabulary of events and commands for the publisher's beacon and the subscriber, surveyed against both.",
+        "A test feeding wz-ext-pubsub's time_range and the zenoh-util family's the same strings, as its session welcomed, when the dependency rule allows a dev-dependency edge; otherwise a table of strings its side can run.",
+        "Hosted: read the interop legs of the advanced plane after this push. C1bz of wz-tls-mbedtls (1 finding against 0) is not mine.",
+        "Still open: wait_declarations_stable and a synced query on the cooperative engine."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
