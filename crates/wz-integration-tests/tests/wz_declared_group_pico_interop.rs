@@ -32,8 +32,9 @@
 //! (`--test-threads=1`).
 //!
 //! Requires the packaged node (`WZ_DECLARED_NODE_GROUP`) and the pico CLI
-//! (`scripts/build-zenoh-pico-cli.sh`). The file's `zenohd` token is absent on purpose: Layer E's
-//! sweep must not run it, and `--ignored` is what keeps it off.
+//! (`scripts/build-zenoh-pico-cli.sh`). Every test fn here carries `multicast` in its name, which
+//! is the token Layer E's `--ignored` sweep skips by: a leg named without it is selected by that
+//! sweep, which has no packaged node, and fails on the missing variable (hosted run 40163531279).
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -198,7 +199,7 @@ fn pico_multicast_subscriber_hears_the_nodes_puts_and_only_on_its_key() {
 // wz-proves: none -- the same node, for the same reason: its subscription over the group has no catalog atom
 #[test]
 #[ignore = "environment-dependent multicast e2e (the packaged slot-group, which Layer M makes, + the pico CLI); runs via --ignored"]
-fn the_node_keeps_the_latest_sample_a_pico_multicast_publisher_puts() {
+fn the_multicast_node_keeps_the_latest_sample_a_pico_publisher_puts() {
     let (mut node, node_out) = start_node();
     let (mut publisher, _publisher_out) =
         start_pico("z_pub", KEPT, Some(VALUE), "Declaring publisher");
@@ -247,7 +248,7 @@ fn the_node_keeps_the_latest_sample_a_pico_multicast_publisher_puts() {
 // wz-proves: none -- the same node, for the same reason: its view of the group's members has no catalog atom
 #[test]
 #[ignore = "environment-dependent multicast e2e (the packaged slot-group, which Layer M makes, + the pico CLI); runs via --ignored"]
-fn the_node_counts_its_members_as_pico_joins_and_its_lease_runs_out() {
+fn the_multicast_node_counts_its_members_as_pico_joins_and_its_lease_runs_out() {
     let (mut node, node_out) = start_node();
     // Nobody else is on the group: the node has joined and has admitted no one.
     assert_eq!(members(&node_out), Some(0), "{}", read(&node_out));

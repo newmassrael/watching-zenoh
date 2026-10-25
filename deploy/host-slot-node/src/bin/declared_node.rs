@@ -23,13 +23,13 @@
 use core::ops::ControlFlow;
 #[cfg(not(feature = "tls"))]
 use host_slot_node_glue::fresh_zid;
+#[cfg(feature = "multicast")]
+use host_slot_node_glue::group::{HostGroupTransport, PosixGroupBind};
 #[cfg(feature = "tls")]
 use host_slot_node_glue::tls;
 use host_slot_node_glue::tuning::{
     BATCH_SIZE, DOC_MAX, IDLE_SLEEP_US, IDLE_WAIT_MS, RX, TASK_BYTES_ACTIVE, TIMERS, TX,
 };
-#[cfg(feature = "multicast")]
-use host_slot_node_glue::group::{HostGroupTransport, PosixGroupBind};
 use host_slot_node_glue::{fresh_signing_key, ConsoleName, HostPort};
 use wz_runtime_posix::glue::{log, log_args};
 #[cfg(not(feature = "tls"))]
@@ -42,13 +42,13 @@ use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::caps::{MAX_QUERYABLES, MAX_REPLY_PAYLOAD_BYTES, MAX_SUBSCRIPTIONS};
 use wz_session_core::sample_kind::SampleKind;
 use wz_session_mcu::connect_manager::StaticEndpoints;
-use wz_session_mcu::latest::{Latest, LatestCells, LatestRef, LatestWatch};
 #[cfg(feature = "multicast")]
 use wz_session_mcu::group_drive::MulticastSlots;
-#[cfg(feature = "multicast")]
-use wz_session_mcu::slot_group::{GroupState, GroupTiming, SlotGroup};
+use wz_session_mcu::latest::{Latest, LatestCells, LatestRef, LatestWatch};
 use wz_session_mcu::slot_active::Active;
 use wz_session_mcu::slot_client::Listening;
+#[cfg(feature = "multicast")]
+use wz_session_mcu::slot_group::{GroupState, GroupTiming, SlotGroup};
 #[cfg(not(feature = "multicast"))]
 use wz_session_mcu::slot_node::NoPlane;
 use wz_session_mcu::slot_node::{
@@ -465,17 +465,20 @@ fn run() -> i32 {
 
     let (subscribed, mirrored) = (subscriptions(), mirrors());
     #[cfg(not(feature = "tls"))]
-    let stack = Stack::new([0; 4], &NODE.rx, &NODE.tx, PosixTcpDial).with_idle_wait_ms(IDLE_WAIT_MS);
+    let stack =
+        Stack::new([0; 4], &NODE.rx, &NODE.tx, PosixTcpDial).with_idle_wait_ms(IDLE_WAIT_MS);
     #[cfg(feature = "tls")]
-    let stack = tls::stack([0; 4], &NODE.rx, &NODE.tx, channel_identity)
-        .with_idle_wait_ms(IDLE_WAIT_MS);
+    let stack =
+        tls::stack([0; 4], &NODE.rx, &NODE.tx, channel_identity).with_idle_wait_ms(IDLE_WAIT_MS);
     // The port is bound before the node is built, so the line a lab waits for is said only once a
     // connection to it would be taken.
     #[cfg(feature = "listen")]
     let listening = match PosixTcpListener::bind(LISTEN_ADDR, LISTEN_PORT) {
         Ok(listener) => Listening::<_, ACCEPTS>::new(stack.acceptor(listener)),
         Err(why) => {
-            log_args(format_args!("wz: FAIL - cannot listen on {LISTEN}: {why:?}"));
+            log_args(format_args!(
+                "wz: FAIL - cannot listen on {LISTEN}: {why:?}"
+            ));
             return 3;
         }
     };

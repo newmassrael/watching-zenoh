@@ -165,12 +165,14 @@ pub mod group {
 
     impl GroupBind<HostGroupTransport> for PosixGroupBind {
         fn bind(&mut self) -> Result<HostGroupTransport, LinkOpenError> {
-            PosixGroupTransport::join(self.group, self.port, [0; 4], self.ttl).map_err(|e| match e {
-                // The process has no descriptor left: worth a later try.
-                PosixNetError::Socket(_) => LinkOpenError::Exhausted,
-                // The kernel would not bind the port or join the group.
-                _ => LinkOpenError::Refused,
-            })
+            PosixGroupTransport::join(self.group, self.port, [0; 4], self.ttl).map_err(
+                |e| match e {
+                    // The process has no descriptor left: worth a later try.
+                    PosixNetError::Socket(_) => LinkOpenError::Exhausted,
+                    // The kernel would not bind the port or join the group.
+                    _ => LinkOpenError::Refused,
+                },
+            )
         }
     }
 }
