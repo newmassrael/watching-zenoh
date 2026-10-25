@@ -114,6 +114,25 @@ pub const MAX_SUBSCRIPTIONS: usize = generated::MAX_SUBSCRIPTIONS;
 /// not a table of sessions: it sizes the cache only.
 pub const MATCH_MEMO_SLOTS: usize = generated::MATCH_MEMO_SLOTS;
 
+/// How many samples one delivery lane ([`crate::delivery_lane::DeliveryLane`]) holds at once, the
+/// `EVENTS` of the lane a host builds. A sample past it is refused and counted. Must be at least
+/// `1`: a lane nothing can enter is not a smaller lane.
+pub const DELIVERY_LANE_EVENTS: usize = generated::DELIVERY_LANE_EVENTS;
+
+/// How many bytes of copied samples one delivery lane holds at once, the end of the byte area a
+/// sample skipped to stay in one piece included. Must be at least `1`.
+pub const DELIVERY_LANE_BYTES: usize = generated::DELIVERY_LANE_BYTES;
+
+/// How many callback invocations one delivery lane owes at once. A host that admits a sample once
+/// for each subscription it reaches owes one per sample, so this binds there only past
+/// [`DELIVERY_LANE_EVENTS`] and is left larger than it. Must be at least `1`.
+pub const DELIVERY_LANE_CALLBACKS: usize = generated::DELIVERY_LANE_CALLBACKS;
+
+const _: () = assert!(
+    DELIVERY_LANE_EVENTS >= 1 && DELIVERY_LANE_BYTES >= 1 && DELIVERY_LANE_CALLBACKS >= 1,
+    "the delivery lane limits must each be at least 1"
+);
+
 /// Maximum number of concurrently-registered local queryables in a
 /// [`crate::query::QueryableRegistry`]. Bounds the registry's queryable
 /// table on the no-alloc backing; a `register` past this is rejected

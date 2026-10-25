@@ -35,6 +35,33 @@ config WZ_LIMIT_MATCH_MEMO_SLOTS
 	  same subscribers in the same order, as zenoh-pico does where its
 	  Z_FEATURE_RX_CACHE is off (its default).
 
+config WZ_LIMIT_DELIVERY_LANE_EVENTS
+	int "DELIVERY_LANE_EVENTS"
+	default 64
+	help
+	  How many samples the delivery lane of an offloaded subscriber holds at once:
+	  the samples the receive path has copied in and its callback has not yet run
+	  on. A sample past this is refused and counted. It must be at least 1.
+
+config WZ_LIMIT_DELIVERY_LANE_BYTES
+	int "DELIVERY_LANE_BYTES"
+	default 65536
+	help
+	  How many bytes of copied samples a delivery lane holds at once: the key, the
+	  payload, the attachment and the encoding schema of each waiting sample, and
+	  the end of the byte area a sample skipped to stay in one piece. A sample that
+	  does not fit is refused and counted. It must be at least 1.
+
+config WZ_LIMIT_DELIVERY_LANE_CALLBACKS
+	int "DELIVERY_LANE_CALLBACKS"
+	default 256
+	help
+	  How many callback invocations a delivery lane owes at once. A host that admits
+	  a sample once for each subscription it reaches owes one callback per sample, so
+	  this binds only past the event limit and is left larger than it; a host that
+	  admits a sample once for all its subscriptions owes several. It must be at
+	  least 1.
+
 config WZ_LIMIT_MAX_QUERYABLES
 	int "MAX_QUERYABLES"
 	default 16

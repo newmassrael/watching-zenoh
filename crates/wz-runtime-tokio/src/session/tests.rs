@@ -15389,3 +15389,403 @@ async fn a_declaration_made_during_the_wait_restarts_it() {
         "a change between the check and its confirmation restarts the wait"
     );
 }
+
+/// One inbound Push on `demo/data`, as the drive loop would dispatch it.
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+fn offload_inbound(
+    payload: &[u8],
+    reliable: bool,
+    meta: Option<&wz_session_core::metadata::PushMetadata>,
+) -> wz_session_core::driver_loop::DriverLoopOutcome {
+    let push = match meta {
+        Some(meta) => {
+            wz_session_core::push_build::build_push_literal_with_meta("demo/data", payload, meta)
+        }
+        None => wz_session_core::push_build::build_push_literal("demo/data", payload),
+    }
+    .expect("fixture Push is representable");
+    wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable,
+        sn: 0,
+        messages: vec![wz_session_core::network_message::NetworkMessage::Push(
+            Box::new(push),
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    }
+}
+
+/// A callback that waits for a gate before it records, so a test decides when the consumer is slow.
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+struct OffloadGate {
+    open: std::sync::Mutex<bool>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+impl OffloadGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            open: std::sync::Mutex::new(false),
+            changed: std::sync::Condvar::new(),
+        })
+    }
+
+    fn wait(&self) {
+        let mut open = self.open.lock().unwrap();
+        while !*open {
+            open = self.changed.wait(open).unwrap();
+        }
+    }
+
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.changed.notify_all();
+    }
+
+    /// Opens the gate when the test ends, however it ends. A test whose assertion fails before
+    /// its own `release` would otherwise leave the consumer waiting on a runtime thread for ever,
+    /// and the test would HANG where it has to FAIL.
+    fn release_on_exit(self: &Arc<Self>) -> OffloadGateRelease {
+        OffloadGateRelease(self.clone())
+    }
+}
+
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+struct OffloadGateRelease(Arc<OffloadGate>);
+
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+impl Drop for OffloadGateRelease {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+/// The claim: an offloaded callback runs on a task of its own and not on the loop that dispatched
+/// the sample, and a callback that WAITS does not hold the loop up, which a callback run inline
+/// would. The control is the plain subscriber, whose callback runs on the dispatching thread: it is
+/// what makes the thread comparison mean something.
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_offloaded_callback_runs_off_the_loop_and_does_not_hold_it_up() {
+    let (session, _driver) = build_session();
+    let dispatching = std::thread::current().id();
+
+    // The control: inline, the callback is on the dispatching thread.
+    let inline_thread = Arc::new(Mutex::new(None));
+    let seen = inline_thread.clone();
+    let _inline = session
+        .declare_subscriber("demo/inline", SubscribeOptions::default(), move |_| {
+            *seen.lock().unwrap() = Some(std::thread::current().id());
+        })
+        .expect("inline subscriber declares");
+    let inline_push = wz_session_core::driver_loop::DriverLoopOutcome::FramePayload {
+        priority: wz_session_core::qos::Priority::DEFAULT,
+        reliable: true,
+        sn: 0,
+        messages: vec![wz_session_core::network_message::NetworkMessage::Push(
+            Box::new(
+                wz_session_core::push_build::build_push_literal("demo/inline", b"x")
+                    .expect("fixture Push is representable"),
+            ),
+        )],
+        has_ext: false,
+        extensions: Vec::new(),
+    };
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&inline_push));
+    assert_eq!(
+        *inline_thread.lock().unwrap(),
+        Some(dispatching),
+        "control: an inline callback runs on the thread that dispatched"
+    );
+
+    // The subject: a callback that waits for a gate, on another thread, in order.
+    let gate = OffloadGate::new();
+    let _release = gate.release_on_exit();
+    type Delivered = Vec<(std::thread::ThreadId, Vec<u8>)>;
+    let log: Arc<Mutex<Delivered>> = Arc::new(Mutex::new(Vec::new()));
+    let (gate_cb, log_cb) = (gate.clone(), log.clone());
+    let offloaded = session
+        .declare_subscriber_offloaded("demo/**", SubscribeOptions::default(), move |sample| {
+            gate_cb.wait();
+            log_cb
+                .lock()
+                .unwrap()
+                .push((std::thread::current().id(), sample.payload().to_vec()));
+        })
+        .expect("offloaded subscriber declares");
+    for i in 0..3u8 {
+        let outcome = offload_inbound(&[i], true, None);
+        session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    }
+    // Three samples were dispatched and the callback is still waiting: the loop was not held up.
+    assert!(log.lock().unwrap().is_empty());
+    assert_eq!(offloaded.stats().lane.queued_events, 3, "all three wait");
+
+    gate.release();
+    for _ in 0..200 {
+        if log.lock().unwrap().len() == 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let log = log.lock().unwrap();
+    assert_eq!(
+        log.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>(),
+        vec![vec![0u8], vec![1], vec![2]],
+        "delivered in the order dispatched"
+    );
+    assert!(
+        log.iter().all(|(thread, _)| *thread != dispatching),
+        "the callback did not run on the dispatching thread"
+    );
+}
+
+/// The claim: a full lane refuses, counts the refusal by reason, and says whether the sample
+/// had been sent reliably. The consumer is held by a gate, so the lane is provably full: its head
+/// is taken but not complete, and holds its slot.
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_full_lane_refuses_counts_by_reason_and_by_how_the_sample_was_sent() {
+    let events = wz_session_core::caps::DELIVERY_LANE_EVENTS;
+    let (session, _driver) = build_session();
+    let gate = OffloadGate::new();
+    let _release = gate.release_on_exit();
+    let delivered = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let (gate_cb, delivered_cb) = (gate.clone(), delivered.clone());
+    let offloaded = session
+        .declare_subscriber_offloaded("demo/**", SubscribeOptions::default(), move |sample| {
+            gate_cb.wait();
+            delivered_cb.lock().unwrap().push(sample.payload().to_vec());
+        })
+        .expect("offloaded subscriber declares");
+
+    for i in 0..events {
+        let outcome = offload_inbound(&[(i % 250) as u8], true, None);
+        session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    }
+    let full = offloaded.stats();
+    assert_eq!(full.lane.queued_events, events);
+    assert_eq!(full.lane.refused.total, 0);
+
+    // Past the bound: three sent reliably, two sent best-effort.
+    for reliable in [true, true, true, false, false] {
+        let outcome = offload_inbound(b"late", reliable, None);
+        session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    }
+    let refused = offloaded.stats();
+    assert_eq!(refused.lane.refused.events_full, 5);
+    assert_eq!(refused.lane.refused.total, 5);
+    assert_eq!(refused.dropped_reliable, 3, "lost although sent reliably");
+    assert_eq!(refused.dropped_best_effort, 2, "lost as best-effort allows");
+    assert_eq!(
+        refused.lane.queued_events, events,
+        "a refusal took no slot and nothing was taken from what waits"
+    );
+
+    // What was admitted is delivered, in order, and what was refused is not.
+    gate.release();
+    for _ in 0..300 {
+        if delivered.lock().unwrap().len() == events {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let delivered = delivered.lock().unwrap();
+    assert_eq!(delivered.len(), events);
+    assert!(delivered
+        .iter()
+        .enumerate()
+        .all(|(i, payload)| payload == &vec![(i % 250) as u8]));
+    assert!(!delivered.iter().any(|payload| payload == b"late"));
+}
+
+/// The claim: the byte bound refuses a sample that does not fit, by its own reason, and takes
+/// nothing for it.
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sample_larger_than_the_byte_area_is_refused_by_the_byte_bound() {
+    let (session, _driver) = build_session();
+    let offloaded = session
+        .declare_subscriber_offloaded("demo/**", SubscribeOptions::default(), |_| {})
+        .expect("offloaded subscriber declares");
+    let big = vec![7u8; wz_session_core::caps::DELIVERY_LANE_BYTES + 1];
+    let outcome = offload_inbound(&big, true, None);
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    let stats = offloaded.stats();
+    assert_eq!(stats.lane.refused.bytes_full, 1);
+    assert_eq!(stats.dropped_reliable, 1);
+    assert_eq!(
+        stats.lane.pending_bytes, 0,
+        "a refused sample charged nothing"
+    );
+}
+
+/// The claim: what the callback sees is what an inline callback sees. The attachment, the
+/// timestamp, the encoding (id and schema), the source and the QoS cross the lane with the bytes.
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push",
+    feature = "pubsub-attachment",
+    feature = "pubsub-timestamp",
+    feature = "pubsub-encoding",
+    feature = "pubsub-source-info",
+    feature = "pubsub-qos"
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_offloaded_callback_sees_what_the_inline_one_sees() {
+    use wz_session_core::sample::{EncodingHint, QosLevel, SourceInfo, TimestampHint};
+    let meta = wz_session_core::metadata::PushMetadata {
+        timestamp: Some(TimestampHint {
+            time: 0x1234_5678_9abc_def0,
+            zid: vec![1, 2, 3, 4],
+        }),
+        encoding: Some(EncodingHint {
+            packed_id: 0x2d,
+            schema: Some("text/plain".to_string()),
+        }),
+        source_info: Some(SourceInfo::new(&[9, 8, 7], 11, 12)),
+        attachment: Some(b"attached".to_vec()),
+        qos: Some(QosLevel::from_raw(0x05)),
+    };
+    type Seen = (
+        String,
+        Vec<u8>,
+        Option<Vec<u8>>,
+        Option<(u64, Vec<u8>)>,
+        Option<(u32, Option<String>)>,
+        Option<SourceInfo>,
+        Option<QosLevel>,
+    );
+    let see = |sample: &dyn wz_session_core::sink::SampleView| -> Seen {
+        (
+            sample.keyexpr().to_string(),
+            sample.payload().to_vec(),
+            sample.attachment().map(<[u8]>::to_vec),
+            sample.timestamp_parts().map(|(t, z)| (t, z.to_vec())),
+            sample
+                .encoding_parts()
+                .map(|(id, schema)| (id, schema.map(str::to_string))),
+            sample.source_info().cloned(),
+            sample.qos(),
+        )
+    };
+    let (session, _driver) = build_session();
+    let inline_seen: Arc<Mutex<Option<Seen>>> = Arc::new(Mutex::new(None));
+    let offloaded_seen: Arc<Mutex<Option<Seen>>> = Arc::new(Mutex::new(None));
+    let (inline_cb, offloaded_cb) = (inline_seen.clone(), offloaded_seen.clone());
+    let _inline = session
+        .declare_subscriber("demo/**", SubscribeOptions::default(), move |sample| {
+            *inline_cb.lock().unwrap() = Some(see(sample));
+        })
+        .expect("inline declares");
+    let _offloaded = session
+        .declare_subscriber_offloaded("demo/**", SubscribeOptions::default(), move |sample| {
+            *offloaded_cb.lock().unwrap() = Some(see(sample));
+        })
+        .expect("offloaded declares");
+    let outcome = offload_inbound(b"payload", true, Some(&meta));
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    for _ in 0..200 {
+        if offloaded_seen.lock().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let inline = inline_seen.lock().unwrap().clone().expect("inline saw it");
+    let offloaded = offloaded_seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("offloaded saw it");
+    assert_eq!(offloaded, inline);
+    assert_eq!(inline.2.as_deref(), Some(&b"attached"[..]), "not vacuous");
+    assert_eq!(inline.4, Some((0x2d, Some("text/plain".to_string()))));
+}
+
+/// Dropping the handle undeclares the subscription: nothing is delivered after it, and a sample
+/// that waits when it is dropped is not delivered either.
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_an_offloaded_subscriber_stops_its_deliveries() {
+    let (session, _driver) = build_session();
+    let gate = OffloadGate::new();
+    let _release = gate.release_on_exit();
+    let count = Arc::new(AtomicUsize::new(0));
+    let (gate_cb, count_cb) = (gate.clone(), count.clone());
+    let offloaded = session
+        .declare_subscriber_offloaded("demo/**", SubscribeOptions::default(), move |_| {
+            gate_cb.wait();
+            count_cb.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("offloaded subscriber declares");
+    for _ in 0..3 {
+        let outcome = offload_inbound(b"x", true, None);
+        session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    }
+    drop(offloaded);
+    gate.release();
+    // The sample being run when the handle dropped finishes; the two that waited behind it, and
+    // anything dispatched now, are not delivered.
+    let outcome = offload_inbound(b"after", true, None);
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert!(
+        count.load(Ordering::SeqCst) <= 1,
+        "nothing waiting behind the running sample, and nothing after the drop, was delivered"
+    );
+}
+
+/// A call made off a runtime has no task to run the consumer on, and says so rather than
+/// declaring a subscription nothing will ever deliver on.
+#[cfg(all(
+    feature = "declare-subscriber",
+    feature = "pubsub-put",
+    feature = "codec-push"
+))]
+#[test]
+fn declaring_an_offloaded_subscriber_off_a_runtime_is_refused() {
+    let (session, _driver) = build_session();
+    let refused = session
+        .declare_subscriber_offloaded("demo/**", SubscribeOptions::default(), |_| {})
+        .err();
+    assert_eq!(refused, Some(OffloadError::NoRuntime));
+}

@@ -457,6 +457,12 @@ pub use buffered::{BufferedDrainStage, BufferedRegistry};
 // replaces redundant.
 #[cfg(feature = "transport-unicast")]
 pub(crate) use buffered::BufferedWork;
+/// A subscription whose callback runs on a task of its own, over a bounded delivery lane
+/// (`docs/rx-delivery-lane.md`, phase 3a): [`Session::declare_subscriber_offloaded`].
+#[cfg(feature = "transport-unicast")]
+mod offload;
+#[cfg(feature = "transport-unicast")]
+pub use offload::{OffloadError, OffloadLane, OffloadStats, OffloadedSubscriber};
 #[cfg(feature = "transport-unicast")]
 mod decl_listener;
 #[cfg(feature = "transport-unicast")]

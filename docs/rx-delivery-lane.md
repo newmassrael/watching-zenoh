@@ -51,7 +51,7 @@ byte and callback bounds, a refusal policy other than "wait", counters, and a no
 | `subscriber-overload` | policy, choice | `block` | `block`: a full lane makes the receive path wait, as the buffered subscriber does today (upstream's blocking channel handler). `reject`: a full lane refuses the sample, counts it by reason, and answers by reliability as above. |
 | `DELIVERY_LANE_EVENTS` | limit | 64 | Samples that wait at once. Zero is refused. |
 | `DELIVERY_LANE_BYTES` | limit | 65536 | Bytes of copied samples that wait at once. Zero is refused. |
-| `DELIVERY_LANE_CALLBACKS` | limit | 256 | Callback invocations owed at once. Zero is refused. |
+| `DELIVERY_LANE_CALLBACKS` | limit | 256 | Callback invocations owed at once. Zero is refused. Larger than the event limit on a host that admits per subscription, where it never binds (see Design). |
 
 The defaults of the limits are placeholders until measured. The policy default is upstream's blocking
 behaviour; the choice `reject` is wz's own and lands with the pair of behaviour tests of C8 in
@@ -97,9 +97,28 @@ callbacks are slow and leaves the rest inline.
   core says "one event is ready", the host decides where the callback runs.
 - **Refusal by reliability** is a function of the sample's reliability and the policy, kept in one
   place, so the receive path of each host asks it and does not choose.
-- **`block` is not a new code path**: it is the buffered subscriber's wait, reached through the same
-  options, so a deployment that selects `block` pays for the lane's bounds and gets today's flow
-  control.
+- **The sample is copied, on every profile.** A received sample is a view over the link's receive
+  buffer, and holding a shared reference to that buffer holds one of the link's receive slots. A slow
+  callback would then hold the link's receive pool, which is the very thing offloading the callback
+  is for. So the producer copies the key, the payload, the attachment and the encoding schema into
+  the lane's byte area, and keeps the small fixed metadata (kind, reliability, QoS, the timestamp,
+  the encoding id, the source info) in a record beside the event slot. The receive buffer is free
+  the moment the copy is made. The consumer hands the callback a `SampleView` over that copy.
+- **Admission is per subscription, so the callback bound is degenerate on this host.** The registry
+  fires every matching sink separately with a borrowed view, and there is no point before that fan-out
+  where the number of callbacks a sample owes is known. The tokio host therefore admits one lane entry
+  per (sample, offloaded subscription) and publishes it with one callback. The callback budget then
+  never binds beyond the event count, and its limit is set larger than the event limit. It binds only
+  on a host that admits per sample (the slot node's single-slice table, where one record reaches
+  several cells), and a per-sample seam in the registry is a separate change that this design does
+  not need.
+- **`block` cannot wait where the sink runs.** The sink runs under the observer lock, and the consumer
+  runs callbacks with no framework lock so that a callback may call the session: a sink that waited
+  for room would hold the lock the consumer's callback may be waiting for. `block` therefore waits in
+  the drain step after the lock is released, as the buffered subscriber does: a sample the lane has no
+  room for is held (copied, outside the lane) until the drain admits it in order. What is held is
+  bounded by what one dispatch delivers. `reject` does not wait: it refuses at the sink. The first
+  lands as 3b, the second as 3a.
 - **Admin metrics** read the snapshot: the existing `adminspace-metrics` surface gains the lane's
   gauges and refusal counters where the capability is on.
 
@@ -111,9 +130,31 @@ callbacks are slow and leaves the rest inline.
    reserve, publish, front, complete and stop (the shape that tested `ReplayCursor`). DONE. The lane
    takes its bounds as arguments, so it reads no limit: the three limits are declared in phase 3,
    with the first code that reads them (a switch no code reads is not landed).
-3. The tokio host: `SubscribeOptions::offloaded()`, the consumer task, the policy `subscriber-overload`
-   and the capability, with a pair of tests (a slow callback does not stop the receive path under
-   `reject`, and does under `block`) and the reliability split.
+3. The tokio host, in two parts.
+   - 3a: `Session::declare_subscriber_offloaded` with the `reject` answer, the consumer task, the
+     lane's snapshot (`OffloadedSubscriber::stats`) and the three limits. DONE
+     (`crates/wz-runtime-tokio/src/session/offload.rs`). What is built differs from the plan in
+     three ways, each forced by what the code showed:
+     * **One lane per offloaded subscription**, not per session: it needs no new field on the
+       session, and each subscription has its own bounds and its own order. A lane for the whole
+       session is a later change to the session's state.
+     * **The refusal is counted, not answered.** The registry's sink returns nothing, so there is no
+       way to hand a result back up the receive path from here. `OffloadStats` counts the samples
+       lost that were sent reliably apart from those sent best-effort, by the one function
+       (`Overload::of`) every host asks. Making a refused reliable sample a recorded local failure
+       on the receive path needs a result channel from the sink seam, which is not built.
+     * **The sample is copied twice**: into the lane's byte area by the sink, and out into a buffer
+       the consumer owns before it calls the callback, because the callback must not run with the
+       lane's lock held (it may publish to a key its own subscription matches).
+     Tests: a slow callback does not hold the loop up and runs on another thread, in order (with an
+     inline control on the dispatching thread); a full lane refuses and counts by reason and by how
+     the sample was sent; the byte bound refuses a sample that does not fit; the attachment,
+     timestamp, encoding, source and QoS arrive as an inline callback sees them; dropping the handle
+     stops the deliveries; and a call off a runtime is refused. The tests found one defect of this
+     phase's own, a lock taken twice by the callback cell, which hung the dropping test.
+   - 3b: the `block` answer through the drain step, and the policy `subscriber-overload` with it (a
+     policy with one value is not a policy, so it is declared when its second value has code), and the
+     capability `rx-callback-offload` when the C ABIs' manifests are to name it.
 4. The snapshot through `adminspace-metrics`.
 5. The cooperative engine and the slot node take the lane, each written by the session that owns the
    file (session 11 and session ef).

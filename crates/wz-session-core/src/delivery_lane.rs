@@ -102,11 +102,20 @@ impl Reservation {
     pub const fn bytes(&self) -> usize {
         self.bytes
     }
+
+    /// The event slot the sample holds, below the lane's `EVENTS`: a host that keeps a record
+    /// beside each sample (its kind, its timestamp) keeps it at this index, and the consumer finds
+    /// it at [`Delivery::index`].
+    pub const fn index(&self) -> usize {
+        self.index
+    }
 }
 
 /// A published sample at the head of the lane, as the consumer reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Delivery {
+    /// The event slot it holds: [`Reservation::index`] of the reservation it was admitted by.
+    pub index: usize,
     /// Where its bytes are in the host's byte area.
     pub offset: usize,
     /// How many bytes it holds.
@@ -408,6 +417,7 @@ impl<const EVENTS: usize> DeliveryLane<EVENTS> {
                 Phase::Reserved => return Next::Waiting,
                 Phase::Ready => {
                     return Next::Ready(Delivery {
+                        index: self.head,
                         offset: entry.offset,
                         bytes: entry.bytes,
                         callbacks: entry.callbacks,
@@ -477,9 +487,10 @@ mod tests {
         callbacks: usize,
     ) -> Result<Delivery, Refusal> {
         let r = lane.reserve(bytes)?;
-        let (offset, len) = (r.offset(), r.bytes());
+        let (index, offset, len) = (r.index(), r.offset(), r.bytes());
         lane.publish(r, callbacks)?;
         Ok(Delivery {
+            index,
             offset,
             bytes: len,
             callbacks,
