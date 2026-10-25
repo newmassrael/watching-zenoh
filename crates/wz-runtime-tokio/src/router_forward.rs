@@ -10188,7 +10188,7 @@ mod tests {
             let states = flooded_link_states(&sink_a.frame_bytes(0));
             let psid_a = fwd
                 .routers_net()
-                .borrow()
+                .read()
                 .local_psid_of(&zid(0xAA))
                 .expect("A indexed");
             let slot = states[0]
