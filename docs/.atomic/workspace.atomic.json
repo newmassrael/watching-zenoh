@@ -286590,6 +286590,62 @@
         "Read the hosted run of this push per job, compared by head sha."
       ]
     },
+    "Round 3616": {
+      "decision_summary": "Step C1: the connectivity plane and the admin space on the cooperative engine. Both read what a session reports of its peers, so the model left the tokio engine: wz_session_core::face holds FaceSnapshot, LinkSnapshot, GroupLink, FaceEventKind and the sink type, and builds a snapshot from a session's own SessionLinkActions; wz-capi-core re-exports them. The port gains face_snapshots, watch_faces and unwatch_faces (provided: no faces, nobody told), and ListenerSet moved into it. The tokio engine implements them over its face registry; the cooperative engine, behind its own connectivity feature, reports its one face and queues an event when the link comes up or is lost, handed out with no lock held. Its links name their kind. The pico connectivity plane and admin space read and declare through the port, list only unicast faces in the admin documents, and select neither engine. Off, none of it is linked beyond the port's provided methods (+1.3 KB).",
+      "changes_bullets": [
+        "wz-session-core: module face (FaceSnapshot, LinkSnapshot, GroupLink, FaceEventKind, FaceEventSink; FaceSnapshot::of_actions reads a session's actions).",
+        "wz-capi-port: SessionEngine::{face_snapshots, watch_faces, unwatch_faces} with provided answers; the ListenerSet fan-in moved here, wz-capi-core re-exports it.",
+        "wz-capi-core: the face types re-exported from session-core; the tokio engine implements the three methods over SharedSession (group members after the unicast faces).",
+        "wz-runtime-coop: IpDriver answers link_subject with its link's kind.",
+        "wz-capi-coop: feature connectivity; FacePlane (watchers, events queued only while watched); a face reported when the link comes up and when it is lost; events handed out in deliver() with no lock held.",
+        "wz-capi-pico: connectivity and admin-space select neither engine; the connectivity hub and the admin space read the faces and declare through the port; the admin documents drop group members; the cooperative open sets the admin space's transport endpoint and honours auto_start_admin_space.",
+        "scripts/lib/capability_cost_gate.py: cases pico-client-coop-connectivity (budget 980,000), pico-client-coop-admin-space (1,115,000).",
+        "scripts/run-ci.sh: Layer C1co builds with connectivity, and admin-space on the legs with the answering end; counts 11 and 8.",
+        "Tests: two coop tests on the router stand-in (the face it stands on; a watcher told of the loss and of the link dialled again, with a sink that reaches back into the session); client_only_dials_a_listener gains a transport and link listing with its departure event, and the admin space answering a listener's get and silent once stopped.",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-session-core (all features), wz-capi-port, wz-runtime-coop, wz-capi-core, wz-capi-c, wz-capi-coop (default, and with connectivity, local-queryable, local-subscriber and liveliness-get, and with connectivity alone), wz-capi-pico (default; engine-coop with connectivity; engine-coop with admin-space; engine-tokio with connectivity and with admin-space; engine-coop alone).",
+        "Tests: wz-capi-coop 32 passed with every client feature and 10 with connectivity alone; wz-capi-pico lib 102 passed (112 with admin-space); wz-capi-port 6 and the wz-capi-core faces tests pass. Layer C1co: 11, 8, 11 and 8 passed.",
+        "C1bz for wz-session-core, wz-capi-port, wz-capi-core, wz-capi-coop, wz-capi-pico and wz-runtime-coop spends exactly their budgets after rebasing onto the timestamp view's link fix; before that fix wz-session-core read 499 against 495 with and without this change (four links of another session's commit, reported to that session). capability_cost_gate --check: 17 cases within budget, pico-client-coop 878835 of 895000, pico-client-coop-connectivity 950765, pico-client-coop-admin-space 1091431; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "carry_forward_bullets": [
+        "Next: the rest of section 6 of docs/capi-pico-on-coop-engine.md, one step each: scouting and the advanced publisher and subscriber on the cooperative engine, then the listening role (a face registry with an observer per face; the heap stack needs its own stream accept beside open_acceptor, reusing StreamListen), then the engine flip.",
+        "The admin space's connectivity half (queryable and events under @/<zid>/session/**) is still not served; the local arms it waited for now exist on both engines.",
+        "The tokio engine's retraction of live liveliness entities at close (carry of 3595) is still owed its own round.",
+        "Read the hosted runs of the earlier pushes (3599, 3602, 3605, 3610) and this round at the start of the next round."
+      ],
+      "publishable_decision_summary": "Step C1: the connectivity plane and the admin space on the cooperative engine. Both read what a session reports of its peers, so the model left the tokio engine: wz_session_core::face holds FaceSnapshot, LinkSnapshot, GroupLink, FaceEventKind and the sink type, and builds a snapshot from a session's own SessionLinkActions; wz-capi-core re-exports them. The port gains face_snapshots, watch_faces and unwatch_faces (provided: no faces, nobody told), and ListenerSet moved into it. The tokio engine implements them over its face registry; the cooperative engine, behind its own connectivity feature, reports its one face and queues an event when the link comes up or is lost, handed out with no lock held. Its links name their kind. The pico connectivity plane and admin space read and declare through the port, list only unicast faces in the admin documents, and select neither engine. Off, none of it is linked beyond the port's provided methods (+1.3 KB).",
+      "publishable_changes_bullets": [
+        "wz-session-core: module face (FaceSnapshot, LinkSnapshot, GroupLink, FaceEventKind, FaceEventSink; FaceSnapshot::of_actions reads a session's actions).",
+        "wz-capi-port: SessionEngine::{face_snapshots, watch_faces, unwatch_faces} with provided answers; the ListenerSet fan-in moved here, wz-capi-core re-exports it.",
+        "wz-capi-core: the face types re-exported from session-core; the tokio engine implements the three methods over SharedSession (group members after the unicast faces).",
+        "wz-runtime-coop: IpDriver answers link_subject with its link's kind.",
+        "wz-capi-coop: feature connectivity; FacePlane (watchers, events queued only while watched); a face reported when the link comes up and when it is lost; events handed out in deliver() with no lock held.",
+        "wz-capi-pico: connectivity and admin-space select neither engine; the connectivity hub and the admin space read the faces and declare through the port; the admin documents drop group members; the cooperative open sets the admin space's transport endpoint and honours auto_start_admin_space.",
+        "scripts/lib/capability_cost_gate.py: cases pico-client-coop-connectivity (budget 980,000), pico-client-coop-admin-space (1,115,000).",
+        "scripts/run-ci.sh: Layer C1co builds with connectivity, and admin-space on the legs with the answering end; counts 11 and 8.",
+        "Tests: two coop tests on the router stand-in (the face it stands on; a watcher told of the loss and of the link dialled again, with a sink that reaches back into the session); client_only_dials_a_listener gains a transport and link listing with its departure event, and the admin space answering a listener's get and silent once stopped.",
+        "docs/capi-pico-on-coop-engine.md."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, clippy -D warnings with all targets: wz-session-core (all features), wz-capi-port, wz-runtime-coop, wz-capi-core, wz-capi-c, wz-capi-coop (default, and with connectivity, local-queryable, local-subscriber and liveliness-get, and with connectivity alone), wz-capi-pico (default; engine-coop with connectivity; engine-coop with admin-space; engine-tokio with connectivity and with admin-space; engine-coop alone).",
+        "Tests: wz-capi-coop 32 passed with every client feature and 10 with connectivity alone; wz-capi-pico lib 102 passed (112 with admin-space); wz-capi-port 6 and the wz-capi-core faces tests pass. Layer C1co: 11, 8, 11 and 8 passed.",
+        "C1bz for wz-session-core, wz-capi-port, wz-capi-core, wz-capi-coop, wz-capi-pico and wz-runtime-coop spends exactly their budgets after rebasing onto the timestamp view's link fix; before that fix wz-session-core read 499 against 495 with and without this change (four links of another session's commit, reported to that session). capability_cost_gate --check: 17 cases within budget, pico-client-coop 878835 of 895000, pico-client-coop-connectivity 950765, pico-client-coop-admin-space 1091431; the hook's round_fed_gates plus the prose and surface gates: 115 run, 0 failed."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Next: the rest of section 6 of docs/capi-pico-on-coop-engine.md, one step each: scouting and the advanced publisher and subscriber on the cooperative engine, then the listening role (a face registry with an observer per face; the heap stack needs its own stream accept beside open_acceptor, reusing StreamListen), then the engine flip.",
+        "The admin space's connectivity half (queryable and events under @/<zid>/session/**) is still not served; the local arms it waited for now exist on both engines.",
+        "The tokio engine's retraction of live liveliness entities at close (carry of 3595) is still owed its own round.",
+        "Read the hosted runs of the earlier pushes (3599, 3602, 3605, 3610) and this round at the start of the next round."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
