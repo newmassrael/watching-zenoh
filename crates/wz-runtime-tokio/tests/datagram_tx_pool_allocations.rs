@@ -918,8 +918,13 @@ mod multicast {
 
     /// The allocations one fragmented push makes, as measured (5000 bytes over a
     /// 2048-byte batch: the whole frame, then the chain of three fragments).
+    ///
+    /// Five until `77df225a7`, which sizes a Push's frame buffer from the message and not from
+    /// the codec's 2456-byte hint: the 5000-byte frame then no longer grows its buffer once, so
+    /// one reallocation of the five is gone. The change that moved it is the one that is named,
+    /// bisected on the commits before and after it.
     #[cfg(feature = "transport-fragmentation")]
-    const FRAGMENTED_ALLOCATIONS: usize = 5;
+    const FRAGMENTED_ALLOCATIONS: usize = 4;
 
     /// Every datagram written, read through the pool and through the heap
     /// queue from fresh groups, is the same bytes: one envelope encoder writes
