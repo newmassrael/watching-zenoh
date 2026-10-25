@@ -286842,6 +286842,52 @@
         "The hosted runs of this family's pushes are still to be read per job; the Windows implementation of zenoh-shm and of this arm is compile-checked only, never run."
       ]
     },
+    "Round 3622": {
+      "decision_summary": "The answering side of the entity-timestamp item. A queryable declared to stamp (QueryableOptions::with_stamp_timestamp, whose default is the build's, by the policy entity-timestamp-opt-in of Round 3615) replies at a time through a NodeStamp, which only the session makes (Session::queryable_stamp): it holds the session's node identity and the declaration's choice, and NodeStamp::reply_at takes the query, the reply sink and ONE time value, replies under the query's own key as a plain reply does, and stamps it with that time and the node's identity. A callback therefore cannot name an identity of its own. A queryable declared not to stamp is refused with StampedReplyError::NotStamping and stages nothing. The shared ReplyOut trait, which the C ABIs and the fixed-memory profile implement, is not touched: a handle the session hands out carries the identity where a wrapper of that trait would have had to delegate every method and lose any a later round adds.",
+      "changes_bullets": [
+        "crates/wz-runtime-tokio session/queryable.rs: NodeStamp, StampedReplyError, and QueryableOptions::with_stamp_timestamp / stamp_timestamp, all gated on pubsub-timestamp where they use it; session/mod.rs: Session::queryable_stamp, beside Session::zid.",
+        "deploy/resource_budget.json: zephyr-client-fixed static_chain_bytes 6904 to 7128, the figure scripts/lib/stack_frame_gate.py has committed since 92a308456, which moved that one alone; the gate holds the two equal. The owner of that commit was not found among the sessions asked, and the red blocked every push, so the copy is moved here as its own commit.",
+        "crates/wz-runtime-tokio session/tests.rs: three tests (a stamping queryable stamps the given time with the session's own identity, as a querier reads it; one declared not to stamp refuses and no reply reaches the querier; the default is the build's), with a helper that runs the answer end to end through a local query."
+      ],
+      "verification_bullets": [
+        "On the build host, all features: the three new tests of wz-runtime-tokio pass.",
+        "Red first: with the refusal disabled, exactly the not-stamping test fails (2 passed, 1 failed); reverted, no trace left.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-runtime-tokio; the guarded feature-subset test (--no-default-features --features routing-peer, linkstate) exits 0, which the dead-code failure of the querier helpers taught to run; feature_gate_diagnostic --check passes; session_slot_bytes --check passes; the doc count of wz-runtime-tokio is 466, its budget, with none of the new items in it; rustfmt clean.",
+        "resource_budget_gate.py --check failed on origin/main before the row moved (6904 against 7128) and passes after it, with four images held; the pre-push round-fed array, 113 gates, then exits 0 on the rebased tree, and the count-guard lint, the citation form gate and the reason pin gate pass.",
+        "Not run: the hosted run, Layer C1bz and the other lanes as lanes."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "carry_forward_bullets": [
+        "A stamped DELETE reply and an aliased queryable are not built: reply_at stamps a put reply under the query's key, as the plain reply does; a stamped reply under another key goes through the sink's reply_keyed_stamped, which names its own key and identity.",
+        "The entity-timestamp item is otherwise complete for the Rust session API; the C ABIs and the cooperative engine do not read the policy and are asked first.",
+        "The next items of the plan are the transactional multi-route send and the pool monitor, each with its fork code read before it starts.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "The answering side of the entity-timestamp item. A queryable declared to stamp (QueryableOptions::with_stamp_timestamp, whose default is the build's, by the policy entity-timestamp-opt-in of Round 3615) replies at a time through a NodeStamp, which only the session makes (Session::queryable_stamp): it holds the session's node identity and the declaration's choice, and NodeStamp::reply_at takes the query, the reply sink and ONE time value, replies under the query's own key as a plain reply does, and stamps it with that time and the node's identity. A callback therefore cannot name an identity of its own. A queryable declared not to stamp is refused with StampedReplyError::NotStamping and stages nothing. The shared ReplyOut trait, which the C ABIs and the fixed-memory profile implement, is not touched: a handle the session hands out carries the identity where a wrapper of that trait would have had to delegate every method and lose any a later round adds.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-tokio session/queryable.rs: NodeStamp, StampedReplyError, and QueryableOptions::with_stamp_timestamp / stamp_timestamp, all gated on pubsub-timestamp where they use it; session/mod.rs: Session::queryable_stamp, beside Session::zid.",
+        "deploy/resource_budget.json: zephyr-client-fixed static_chain_bytes 6904 to 7128, the figure scripts/lib/stack_frame_gate.py has committed since 92a308456, which moved that one alone; the gate holds the two equal. The owner of that commit was not found among the sessions asked, and the red blocked every push, so the copy is moved here as its own commit.",
+        "crates/wz-runtime-tokio session/tests.rs: three tests (a stamping queryable stamps the given time with the session's own identity, as a querier reads it; one declared not to stamp refuses and no reply reaches the querier; the default is the build's), with a helper that runs the answer end to end through a local query."
+      ],
+      "publishable_verification_bullets": [
+        "On the build host, all features: the three new tests of wz-runtime-tokio pass.",
+        "Red first: with the refusal disabled, exactly the not-stamping test fails (2 passed, 1 failed); reverted, no trace left.",
+        "clippy -D warnings over all targets and all features exits 0 for wz-runtime-tokio; the guarded feature-subset test (--no-default-features --features routing-peer, linkstate) exits 0, which the dead-code failure of the querier helpers taught to run; feature_gate_diagnostic --check passes; session_slot_bytes --check passes; the doc count of wz-runtime-tokio is 466, its budget, with none of the new items in it; rustfmt clean.",
+        "resource_budget_gate.py --check failed on origin/main before the row moved (6904 against 7128) and passes after it, with four images held; the pre-push round-fed array, 113 gates, then exits 0 on the rebased tree, and the count-guard lint, the citation form gate and the reason pin gate pass.",
+        "Not run: the hosted run, Layer C1bz and the other lanes as lanes."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/7-cargo-feature-emission-mechanism"
+      ],
+      "publishable_carry_forward_bullets": [
+        "A stamped DELETE reply and an aliased queryable are not built: reply_at stamps a put reply under the query's key, as the plain reply does; a stamped reply under another key goes through the sink's reply_keyed_stamped, which names its own key and identity.",
+        "The entity-timestamp item is otherwise complete for the Rust session API; the C ABIs and the cooperative engine do not read the policy and are asked first.",
+        "The next items of the plan are the transactional multi-route send and the pool monitor, each with its fork code read before it starts.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
