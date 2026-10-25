@@ -288162,6 +288162,48 @@
         "Still open: wait_declarations_stable and a synced query on the cooperative engine; the hosted runs of earlier pushes."
       ]
     },
+    "Round 3654": {
+      "decision_summary": "The declared nodes now build for QNX Neutrino 7.1, on both network stacks, and for aarch64 Linux, through the entry. The posix runtime was empty on any OS but Linux; it now builds on Neutrino by naming what differs: errno (__get_errno_ptr), entropy (a read of /dev/urandom, since the 7.1 library has neither getrandom nor getentropy; refused, not guessed, when the service is down), non-blocking and close-on-exec by fcntl on both kernels (Neutrino has no SOCK_NONBLOCK or accept4), the group join by ip_mreq, and a socket address that carries its length. The artifact row said Linux only, so the entry refused every QNX node; it now lists linux and nto. Layer C1sp asked a provisioned machine for every artifact including a node with no name, which the entry would refuse; it now follows the entry's plan per platform: the artifacts the system supports, then each registered node, the first twice.",
+      "changes_bullets": [
+        "crates/wz-runtime-posix (lib.rs, net.rs, stream.rs): compiled for linux and nto; errno and entropy per OS; set_nonblocking and set_close_on_exec replace SOCK_NONBLOCK and accept4 on both; the group join takes ip_mreq; sockaddr sets sin_len on nto; msg_iovlen cast; two tests for the new descriptor helpers.",
+        "deploy/wz-config.toml: the declared-node artifact is built for linux and nto, with its note; the three platform rows say the lane covers the nodes.",
+        "scripts/lib/wz_package.py: lane_plan and --lane-plan, with selftest cases (no node for Android, every registered node for QNX and aarch64 Linux, a platform nobody declared refused); the selftest accepts a node for both QNX platforms.",
+        "scripts/run-ci.sh: Layer C1sp takes each platform's plan; docs/target-build-contract.md and docs/storage-policy-and-link-layer.md no longer say Linux only."
+      ],
+      "verification_bullets": [
+        "Layer C1sp, run where the toolchains are, passes: on a build machine with the glibc 2.35 Yocto SDK for aarch64 Linux (3 artifacts twice with the same manifest bytes, then 7 nodes verified, the first twice; 230 s), and on the QNX 7.1 SDP machine for both stacks, read only through the owner's account (the same, for each of io-sock and io-pkt; 337 s). The QNX nodes are aarch64 executables with the QNX loader as interpreter, 213 KB to 256 KB.",
+        "cargo check of each node for each QNX stack on the workstation passes (14 of 14) before any SDK was read; the posix runtime's tests and clippy with every feature and warnings denied pass on the build machine; wz_package selftest, wz_config check and the 113-gate array pass.",
+        "Not run: any node on a QNX board or an aarch64 Linux board, so the entropy read of /dev/urandom, the group join and the accepted-connection blocking mode are built and not exercised; the hosted run of this push, which has no SDK and reports those platforms as not provisioned."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "carry_forward_bullets": [
+        "Run a packaged node on a board: the RP4 on aarch64 Linux first (nothing about it is untried but the run), then QNX on the stack its board has. The witnesses of Layer Z and M take a binary from the environment, so they can take the aarch64 or QNX file, with the router and the stock peers reachable from the board.",
+        "QNX's os_provides has entropy resting on the random service running; a node started where it is not refuses to start. Say so in a deployment note when a board is chosen.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ],
+      "publishable_decision_summary": "The declared nodes now build for QNX Neutrino 7.1, on both network stacks, and for aarch64 Linux, through the entry. The posix runtime was empty on any OS but Linux; it now builds on Neutrino by naming what differs: errno (__get_errno_ptr), entropy (a read of /dev/urandom, since the 7.1 library has neither getrandom nor getentropy; refused, not guessed, when the service is down), non-blocking and close-on-exec by fcntl on both kernels (Neutrino has no SOCK_NONBLOCK or accept4), the group join by ip_mreq, and a socket address that carries its length. The artifact row said Linux only, so the entry refused every QNX node; it now lists linux and nto. Layer C1sp asked a provisioned machine for every artifact including a node with no name, which the entry would refuse; it now follows the entry's plan per platform: the artifacts the system supports, then each registered node, the first twice.",
+      "publishable_changes_bullets": [
+        "crates/wz-runtime-posix (lib.rs, net.rs, stream.rs): compiled for linux and nto; errno and entropy per OS; set_nonblocking and set_close_on_exec replace SOCK_NONBLOCK and accept4 on both; the group join takes ip_mreq; sockaddr sets sin_len on nto; msg_iovlen cast; two tests for the new descriptor helpers.",
+        "deploy/wz-config.toml: the declared-node artifact is built for linux and nto, with its note; the three platform rows say the lane covers the nodes.",
+        "scripts/lib/wz_package.py: lane_plan and --lane-plan, with selftest cases (no node for Android, every registered node for QNX and aarch64 Linux, a platform nobody declared refused); the selftest accepts a node for both QNX platforms.",
+        "scripts/run-ci.sh: Layer C1sp takes each platform's plan; docs/target-build-contract.md and docs/storage-policy-and-link-layer.md no longer say Linux only."
+      ],
+      "publishable_verification_bullets": [
+        "Layer C1sp, run where the toolchains are, passes: on a build machine with the glibc 2.35 Yocto SDK for aarch64 Linux (3 artifacts twice with the same manifest bytes, then 7 nodes verified, the first twice; 230 s), and on the QNX 7.1 SDP machine for both stacks, read only through the owner's account (the same, for each of io-sock and io-pkt; 337 s). The QNX nodes are aarch64 executables with the QNX loader as interpreter, 213 KB to 256 KB.",
+        "cargo check of each node for each QNX stack on the workstation passes (14 of 14) before any SDK was read; the posix runtime's tests and clippy with every feature and warnings denied pass on the build machine; wz_package selftest, wz_config check and the 113-gate array pass.",
+        "Not run: any node on a QNX board or an aarch64 Linux board, so the entropy read of /dev/urandom, the group join and the accepted-connection blocking mode are built and not exercised; the hosted run of this push, which has no SDK and reports those platforms as not provisioned."
+      ],
+      "publishable_impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-5-link"
+      ],
+      "publishable_carry_forward_bullets": [
+        "Run a packaged node on a board: the RP4 on aarch64 Linux first (nothing about it is untried but the run), then QNX on the stack its board has. The witnesses of Layer Z and M take a binary from the environment, so they can take the aarch64 or QNX file, with the router and the stock peers reachable from the board.",
+        "QNX's os_provides has entropy resting on the random service running; a node started where it is not refuses to start. Say so in a deployment note when a board is chosen.",
+        "Read the hosted run of this push per job, compared by head sha."
+      ]
+    },
     "Round 37": {
       "decision_summary": "Payload data-path codec trio lands — sources/codecs/{ext_entry,msg_put,msg_del}.scxml. Single heaviest primitive frontier expansion to date: 4 new B5 primitives (variant dispatch + embed + tlv-chain + entry-flag termination) all emit-clean across 6 backends. Phase B5 §6 payload track for Put/Del is now wire-bound; minimum communication demo unblocked at codec layer.",
       "changes_bullets": [
