@@ -355,9 +355,18 @@ fn run(args: Args) -> i32 {
         report_every_ms: 0,
     };
     #[cfg(not(feature = "get"))]
-    let mut app = ();
+    let app = ();
     #[cfg(feature = "get")]
-    let mut app = getter::app();
+    let app = getter::app();
+    // Out of band, a test agent tells the node which peer to hold (decision D7).
+    #[cfg(feature = "control")]
+    let app = host_slot_node_glue::control::WithControl::new(
+        app,
+        host_slot_node_glue::control::HostOpener::new(
+            wz_session_mcu::connect_manager::NodeOpener::in_store(&NODE.peers),
+        ),
+    );
+    let mut app = app;
     // The line a lab (or a person at the console) waits for, once the node is built: who it claims
     // to be and the router it dials.
     node.run(&mut Port::new(), &mut app, |port, zid_hex| {

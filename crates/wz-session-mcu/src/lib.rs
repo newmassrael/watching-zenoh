@@ -60,6 +60,11 @@ extern crate std;
 
 // R2827 — the application layer attached to the session drive.
 pub mod app_layer;
+// Decision D7's contract: a node is asked to hold a peer by its zid. The transports (the admin
+// query, the control port, the declared peers) differ only in what feeds it.
+pub mod node_opening;
+// Its out-of-band transport: one line of a channel the node's host owns is one command.
+pub mod control_port;
 // Where an application that is not the session's event leaves a query to be asked.
 #[cfg(feature = "query-get")]
 pub mod get_mailbox;

@@ -558,7 +558,7 @@ fn run() -> i32 {
     // The replies of the queriers are kept after the subscriptions' samples, in the same cells.
     #[cfg(feature = "get")]
     QUERY_STATE.attach(&LATEST, SUBSCRIBERS, &queries());
-    let mut report = Report {
+    let report = Report {
         watch: LatestWatch::new(),
         published: PublishWatch::new(),
         #[cfg(feature = "get")]
@@ -566,6 +566,15 @@ fn run() -> i32 {
         #[cfg(feature = "multicast")]
         group: (0, 0, 0, 0),
     };
+    // Out of band, a test agent tells the node which peer to hold (decision D7).
+    #[cfg(feature = "control")]
+    let report = host_slot_node_glue::control::WithControl::new(
+        report,
+        host_slot_node_glue::control::HostOpener::new(
+            wz_session_mcu::connect_manager::NodeOpener::in_store(&NODE.peers),
+        ),
+    );
+    let mut report = report;
     node.run(
         &mut HostPort::<Console>::new(),
         &mut report,

@@ -45,6 +45,7 @@ extern crate std;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 extern crate alloc;
 
+pub mod control;
 pub mod glue;
 pub mod group;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]

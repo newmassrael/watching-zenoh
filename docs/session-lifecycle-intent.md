@@ -972,7 +972,7 @@ Each step lands with its own done-when; sizes are not estimated here.
 7. **D7** transports 2 and 3 as values of the build configuration axis.
    - **The structure (decision; the owner delegated the choice on
      2026-10-26 with "cost ignored, the most correct long-term, textbook,
-     ultimate"; 7a, 7b and 7c are landed and 7d is not; where what landed differs from
+     ultimate"; 7a to 7d are landed; where what landed differs from
      the first draft below, the paragraph after the steps says how).**
      - The contract is the port the fixed profile already has,
        `NodeOpening` (open a peer by its zid, answered with an outcome and
@@ -1033,6 +1033,39 @@ Each step lands with its own done-when; sizes are not estimated here.
          declared list, `wz_node.py --selftest`, and the declared node
          compiling over the generated table. Not run: a declared node holding
          a declared peer over a real secure channel.
+       - **7d is a port, a line protocol and an agent, and not an axis value.**
+         The three transports share one function. `node_opening` (a module of
+         its own, no feature gates it) holds `NodeOpening`, `NoOpening` and
+         `open_verdict`: the permit, the spelling of the zid, the outcome and
+         its words, written once. The in-band `session/open` leg of
+         `admin_fixed` was changed to call it, so that no transport owns a copy
+         of the semantics, and its test (5) did not move. `control_port` is the
+         out-of-band transport over it: one line is one command, `open <peer>`
+         (the peer as a key spells it), and one command is answered with one
+         JSON object, the verdict `session/open` answers or an error word
+         (`unknown-command`, `open-takes-one-peer`, `line-too-long`) for a line
+         that is no command and so names no peer. Repeating `open` is safe
+         because the opener is idempotent. The channel is the host's:
+         `wz_runtime_posix::control` reads standard input without blocking (one
+         `poll(2)` a round) in a fixed buffer, and `host-slot-node`'s `control`
+         feature wraps the node's application in `WithControl`, whose opener
+         permits what the pipe asks, since whoever holds the pipe started the
+         node. Both host binaries take it (`host-slot-node`, `declared-node`).
+       - **`out-of-band` is not a value of the axis `lifecycle-transport`.**
+         The axis belongs to `zephyr-admin-node`, whose image has no agent
+         channel (no standard input), so the option could not be built there,
+         and an option that cannot be built is not declared. It is a feature of
+         the host that hosts the node, which a test agent builds with, as the
+         draft above said for a host that tests every transport. The axis keeps
+         its two values.
+       - Witness of 7d: the unit tests of the three modules (5 and 5 in the
+         crate, 4 in the posix seam), and `deploy/host-slot-node/tests/
+         control_channel.rs`, which starts the node as a process, writes lines
+         to it and reads the answers (2). The node there is built for no peers
+         by their zid, so a well-formed request is refused for room; the answer
+         is the in-band one, repeated. Not run: an out-of-band open that
+         succeeds, which needs a build with room and the secure channel
+         (decision D4), the same gap as 7c's.
 
 ## 5. Open
 

@@ -23,6 +23,8 @@ use wz_runtime_posix::PosixEntropy;
 use wz_session_core::entropy::EntropySource;
 use wz_session_mcu::slot_node::{NodePort, SIGNING_KEY_BYTES, ZID_MAX};
 
+#[cfg(feature = "control")]
+pub mod control;
 #[cfg(feature = "tls")]
 pub mod tls;
 

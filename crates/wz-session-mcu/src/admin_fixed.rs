@@ -47,15 +47,15 @@ use wz_session_core::adminspace::{
 };
 use wz_session_core::bounded::BoundedVec;
 use wz_session_core::caps;
-use wz_session_core::lifecycle_wire::{
-    write_verb_list, OpenKey, OpenOutcome, OpenVerdict, RefusedReason, OPEN_VERB,
-};
+use wz_session_core::lifecycle_wire::{write_verb_list, OpenKey, OPEN_VERB};
 use wz_session_core::locality::Locality;
 use wz_session_core::query::QueryableRegistry;
 use wz_session_core::query_sink::{FnQuerySink, QueryView, ReplyOut};
 use wz_session_core::registry_error::RegisterError;
 use wz_session_core::slot_observer::{NoSink, ObserverSinks};
 use wz_session_core::text_out::{FixedText, TextOut};
+
+use crate::node_opening::open_verdict;
 
 use crate::admin_status::{
     write_connect_status, ConfigView, ConnectStatusSource, DialStatus, CONNECT_STATUS_TAIL,
@@ -73,57 +73,7 @@ const VERSION_TEXT_BYTES: usize = 32;
 /// A locator or endpoint text, as wide as every other locator in the stack.
 type LocatorText = FixedText<{ caps::MAX_LOCATOR_LEN }>;
 
-/// What the open query asks of the node: whether it may be asked, and to hold a peer by its zid
-/// (decision D6, `docs/session-lifecycle-intent.md`).
-///
-/// A port, for the reason the heap profile's `PeerOpener` is one: the machines that hold a peer
-/// live with the loop that ticks them, and the query is served beside it. The node's own
-/// implementation is `crate::connect_manager::ControlledOpener`.
-///
-/// It is also the strategy of decision D7: whether the node serves the in-band verbs is the type
-/// its admin queryable is made with, so a build whose peers are declared when it is built names
-/// [`NoOpening`] and its answer holds no code of the open query, which `BOUND` removes where the
-/// answer is compiled (`docs/build-configuration.md` C3: a choice that changes the shape of the
-/// code is a type parameter, not a feature).
-pub trait NodeOpening {
-    /// Whether the node binds the in-band verbs at all. `false` only for [`NoOpening`].
-    const BOUND: bool = true;
-
-    /// Whether this node lets a query open a session: the node's write permit, which is what
-    /// the config write is gated by too. A node that does not permit it answers a refusal that
-    /// says so, and opens nothing.
-    fn permitted(&self) -> bool;
-
-    /// Ask the node to hold the peer `zid`. Accepted, not completed: how the dial ends is read
-    /// in the node's connection status.
-    fn open(
-        &self,
-        zid: &[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES],
-    ) -> OpenOutcome;
-}
-
-/// The opener of a node that binds no in-band verb: the third value of decision D7, where the
-/// peers a node holds are the ones it was built with and the machines only reconnect them. Its
-/// admin answer lists no `open` and serves no `session/open` key.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NoOpening;
-
-impl NodeOpening for NoOpening {
-    const BOUND: bool = false;
-
-    fn permitted(&self) -> bool {
-        false
-    }
-
-    fn open(
-        &self,
-        _zid: &[u8; wz_session_core::credential_identity::CREDENTIAL_ZID_BYTES],
-    ) -> OpenOutcome {
-        // Not reached: the answer never asks an opener that is not `BOUND`. Were it reached, a
-        // node that binds no verb takes no peer by request, which is `NoRoom`'s meaning.
-        OpenOutcome::NoRoom
-    }
-}
+pub use crate::node_opening::{NoOpening, NodeOpening};
 
 /// The one [`NoOpening`] a node without verbs hands its queryable.
 static NO_OPENING: NoOpening = NoOpening;
@@ -592,14 +542,7 @@ fn serve_open<const BODY: usize, O: NodeOpening>(
     if parsed.node_zid != zid_hex || parsed.whatami != whatami {
         return;
     }
-    let verdict = if !opener.permitted() {
-        OpenVerdict::Refused(RefusedReason::OpenNotPermitted)
-    } else {
-        match parsed.peer() {
-            Some(peer) => OpenVerdict::of(opener.open(&peer)),
-            None => OpenVerdict::Refused(RefusedReason::PeerNotAZid),
-        }
-    };
+    let verdict = open_verdict(opener, parsed.peer_zid);
     // The key's own tail, `session/open/<peer>`: it follows `@/<zid>/<whatami>/`, which the
     // parse has just held to name this node. A reply the arena refuses is counted there; the
     // open has happened either way, as the heap profile's reply says.

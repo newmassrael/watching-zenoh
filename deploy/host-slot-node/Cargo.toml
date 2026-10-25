@@ -76,6 +76,11 @@ get = ["wz-session-mcu/query-get"]
 # (PEM) for the router's operator to pin, and takes the zid its key names. Off, the stack refuses
 # `tls/` as unsupported.
 tls = ["dep:wz-tls-mbedtls"]
+# The node takes the peers it holds from lines on standard input and answers each on standard
+# output (`src/control.rs`): the out-of-band transport of decision D7 of
+# docs/session-lifecycle-intent.md, for a test agent that starts the process. Off, the node holds
+# only the peers it was given at start.
+control = []
 
 [dependencies]
 # The implementation of the `critical_section` the image glue names (`posix_image_no_heap!`). It

@@ -11442,21 +11442,25 @@ layer_c1m_session_lwip() {
     # another node is hung up, a close keeps the hints). A build states no node by default
     # (`MAX_PEER_NODES` is 0), so under these two legs those tests assert the refusal for want
     # of room and return; the leg after them states two and runs the same tests to their end.
-    _runci_guarded_test "C1m mcu default" 4 \
+    # Decision D7 step 7d adds TEN to every leg below that runs the crate's own tests, in two
+    # modules no feature gates: `node_opening` (the one verdict a request to hold a peer gets, five)
+    # and `control_port` (the out-of-band line protocol over it, five). 4 -> 14, 5 -> 15,
+    # 31 -> 41, 8 -> 18, 41 -> 51, the numbers each command PRINTED.
+    _runci_guarded_test "C1m mcu default" 14 \
         cargo test -p wz-session-mcu --quiet || return 1
-    _runci_guarded_test "C1m mcu unicast app layer" 5 \
+    _runci_guarded_test "C1m mcu unicast app layer" 15 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-write" 31 \
+    _runci_guarded_test "C1m mcu adminspace-write" 41 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     _runci_guarded_test "C1m mcu peer nodes" 22 \
         env WZ_LIMIT_MAX_PEER_NODES=2 \
         cargo test -p wz-session-mcu --features adminspace-write --lib connect_manager \
         --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace-core" 8 \
+    _runci_guarded_test "C1m mcu adminspace-core" 18 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
-    _runci_guarded_test "C1m mcu adminspace read+write" 41 \
+    _runci_guarded_test "C1m mcu adminspace read+write" 51 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
@@ -11903,6 +11907,20 @@ layer_c1m_session_lwip() {
     # the host and is `--ignored`, which Layer M runs.
     _runci_guarded_test "C1m posix group seam" 4 \
         cargo test -p wz-runtime-posix --lib group:: --quiet || return 1
+    # The host's control channel (`wz_runtime_posix::control`, decision D7 step 7d): the lines a test
+    # agent writes to a node's standard input, taken without blocking: an idle channel gives none,
+    # a partial line waits for its end, a line longer than the buffer is cut and says so, and the
+    # end of the stream closes the channel: 4 = what that command PRINTED.
+    _runci_guarded_test "C1m posix control channel" 4 \
+        cargo test -p wz-runtime-posix --lib control:: --quiet || return 1
+    # The out-of-band transport through a real process (`deploy/host-slot-node`, `--features
+    # control`): a line on standard input answered on standard output in the words of the in-band
+    # verb, the same answer to a repeated request, an error word for a line that is no command, and
+    # the channel read again after one: 2 = what that command PRINTED. The node is built for no
+    # peers by their zid, so a hold that succeeds over a secure channel is not run here.
+    _runci_guarded_test "C1m host node control channel" 2 \
+        cargo test --locked --manifest-path ../deploy/host-slot-node/Cargo.toml \
+        --features control --test control_channel --quiet || return 1
     # The group plane of the client node (`slot_group`, the slot profile with `group`): what a
     # publisher offers is each due put once in the order of the declaration, and again a period on; a
     # loop that was late owes one put and not the periods it missed; and the members follow the
