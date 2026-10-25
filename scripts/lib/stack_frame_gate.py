@@ -131,13 +131,20 @@ IMAGES = (
     # `wz_app_main` calls, so `start` is the frame the loop's own locals lie in (4,680 bytes
     # in the image of 2026-10-22). It was a function of its own once, and the gate named it
     # then; a name that has no frame is a gate that judged nothing, which it now says.
+    #
+    # Since the peer tables went to a static (round 3618) the hosted image names no frame for
+    # `start`: the three hosted images before it read 4,664 bytes for it, the three after it
+    # none (runs of 2026-10-25, 05:13 UTC and 06:35 UTC). What it held was the tables, which are
+    # not on the stack now, so what is left of it is inlined into `wz_app_main`, the thread's
+    # entry symbol, as the client's `run` is. The entry is that symbol, which is the frame the
+    # loop's own locals lie in whichever way `start` is compiled.
     Image(
         key="zephyr-fixed",
         elf=None,
         source="deploy/zephyr-admin-node/overlays/t2g_fixed.conf",
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
-        entry="wz_zephyr_admin_node::start",
+        entry="wz_app_main",
     ),
     # The Zephyr CLIENT on the fixed-memory profile: the same rule, over the overlay of its own.
     # Its `run` is inlined into the board's `wz_app_main`, which is the thread's entry symbol.
@@ -162,6 +169,16 @@ IMAGES = (
     # not their storage. Read off the failing run's own report, not derived: the first run to show
     # 7,064 (frame 1,688) is the one before the listener and the plane landed, and the commits in
     # between are not separated further than that.
+    #
+    # 7,540 bytes in the hosted image of run 40180823025 (head 4b60f87e5, 15 frames, 10 calls
+    # through a register not followed), 412 above the figure above. The worst chain is no longer
+    # the handshake path: it runs through the connect manager, which the node ticks from
+    # `wz_app_main` (1,856): `ConnectManager::tick` 1,824, two frames of its own beneath it (392
+    # and 120), `SlotDialer::dial` 1,216, the pump's `PumpSlots` 64 and what is under it. The
+    # manager holds its peers by the shared planner since round 3613, and by a 17-byte key since
+    # round 3629 (it was a 64-byte endpoint text in every table, action and sort, and the chain
+    # read 8,900 then, in the hosted image of 2026-10-25 07:21 UTC). It is 1,676 bytes under the
+    # stack. Read off the failing run's own report, not derived.
     Image(
         key="zephyr-client-fixed",
         elf=None,
@@ -169,7 +186,7 @@ IMAGES = (
         pattern=r"(?m)^CONFIG_MAIN_STACK_SIZE=(\d+)\s*$",
         unit=1,
         entry="wz_app_main",
-        peak=7128,
+        peak=7540,
     ),
     # The same client with the session coalescing a send window into one datagram
     # (`overlays/t2g_client_batching.conf`). The batch writer and its flush path are two more
